@@ -591,6 +591,10 @@ class SettingsWindow(QDialog):
         self.plugin_timezone_text.setPlaceholderText("local 或 UTC+8")
         self.plugin_timezone_text.editingFinished.connect(self._set_plugin_timezone_text)
         self._row(t, "自定义时区", self.plugin_timezone_text)
+        self.plugin_alarm_at = QLineEdit(str(self._setting_value("v2_alarm_at", "") or ""))
+        self.plugin_alarm_at.setPlaceholderText("2026-05-27T08:30:00+08:00")
+        self.plugin_alarm_at.editingFinished.connect(self._set_plugin_alarm_at)
+        self._row(t, "闹钟时间", self.plugin_alarm_at)
         quick_row = QHBoxLayout()
         for minutes in (5, 10, 25):
             button = QPushButton(f"{minutes} 分钟")
@@ -648,6 +652,10 @@ class SettingsWindow(QDialog):
         self.schedule_ics_input.setPlaceholderText("data/schedule.ics")
         self.schedule_ics_input.editingFinished.connect(lambda: self._set_schedule_ics_path(self.schedule_ics_input.text()))
         self._row(a, "ICS", self.schedule_ics_input)
+        self.schedule_reminder_minutes = QLineEdit(str(self._setting_value("v2_schedule_reminder_minutes", "15,30,5") or "15,30,5"))
+        self.schedule_reminder_minutes.setPlaceholderText("15,30,5")
+        self.schedule_reminder_minutes.editingFinished.connect(self._set_schedule_reminder_minutes)
+        self._row(a, "提醒阈值", self.schedule_reminder_minutes)
         self._row(a, "待做清单", QLabel("课表读取录入"))
         self._row(a, "提醒路线", QLabel("课表提醒功能"))
 
@@ -834,6 +842,9 @@ class SettingsWindow(QDialog):
         self.plugin_timezone_text.blockSignals(True)
         self.plugin_timezone_text.setText(str(self._setting_value("v2_plugin_timezone", "local") or "local"))
         self.plugin_timezone_text.blockSignals(False)
+        self.plugin_alarm_at.blockSignals(True)
+        self.plugin_alarm_at.setText(str(self._setting_value("v2_alarm_at", "") or ""))
+        self.plugin_alarm_at.blockSignals(False)
         self.weather_manual_location.blockSignals(True)
         self.weather_manual_location.setText(
             str(self._setting_value("v2_weather_manual_location", self._setting_value("v2_weather_location", "北京")) or "北京")
@@ -845,6 +856,9 @@ class SettingsWindow(QDialog):
         self.schedule_ics_input.blockSignals(True)
         self.schedule_ics_input.setText(str(self._setting_value("v2_schedule_ics_path", "") or ""))
         self.schedule_ics_input.blockSignals(False)
+        self.schedule_reminder_minutes.blockSignals(True)
+        self.schedule_reminder_minutes.setText(str(self._setting_value("v2_schedule_reminder_minutes", "15,30,5") or "15,30,5"))
+        self.schedule_reminder_minutes.blockSignals(False)
         if hasattr(self, "theme_mode"):
             self._set_combo_data(self.theme_mode, str(self._setting_value("v2_theme_mode", "system") or "system"))
         if hasattr(self, "theme_dark_start"):
@@ -1262,6 +1276,12 @@ class SettingsWindow(QDialog):
     def _set_timer_end_at(self, value: str):
         self._save("v2_timer_end_at", str(value or "").strip())
 
+    def _set_plugin_alarm_at(self):
+        value = str(self.plugin_alarm_at.text() or "").strip()
+        self.plugin_alarm_at.setText(value)
+        self._save("v2_alarm_at", value)
+        self._touch()
+
     def _start_plugin_timer(self, minutes: int):
         minutes = max(1, min(600, int(minutes)))
         now = datetime.now().astimezone()
@@ -1279,6 +1299,12 @@ class SettingsWindow(QDialog):
 
     def _set_schedule_ics_path(self, value: str):
         self._save("v2_schedule_ics_path", str(value or "").strip())
+
+    def _set_schedule_reminder_minutes(self):
+        value = str(self.schedule_reminder_minutes.text() or "").strip() or "15,30,5"
+        self.schedule_reminder_minutes.setText(value)
+        self._save("v2_schedule_reminder_minutes", value)
+        self._touch()
 
     def _set_plugin_count(self, count: int):
         self.island_widget.enabled_plugin_count = count

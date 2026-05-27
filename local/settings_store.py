@@ -69,6 +69,8 @@ DEFAULT_SETTINGS = {
     "v2_plugin_timezone": "local",
     "v2_timer_started_at": "",
     "v2_timer_end_at": "",
+    "v2_alarm_at": "",
+    "v2_schedule_reminder_minutes": "15,30,5",
     "v2_schedule_json_path": "",
     "v2_schedule_ics_path": "",
     "v2_enable_message_detection": True,

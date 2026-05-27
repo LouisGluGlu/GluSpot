@@ -71,6 +71,18 @@ class PluginProviderTests(unittest.TestCase):
         self.assertIn("清除", plugin.alert_body)
         self.assertEqual(plugin.alert_priority, 5)
 
+    def test_alarm_due_exports_alert_copy(self):
+        now = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+        provider = RealPluginProvider(lambda key, default=None: "2026-05-25T12:00:00+00:00" if key == "v2_alarm_at" else default)
+        provider._plugin_now = lambda: now
+
+        plugin = provider._time_plugin()
+
+        self.assertEqual(plugin.status, "alarm")
+        self.assertEqual(plugin.alert_title, "闹钟提醒")
+        self.assertIn("12:00", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 3)
+
     def test_timer_remaining_uses_plugin_timezone(self):
         now = datetime(2026, 5, 25, 20, 0, tzinfo=timezone(timedelta(hours=8)))
         provider = RealPluginProvider(
@@ -205,6 +217,50 @@ class PluginProviderTests(unittest.TestCase):
         self.assertIn("network down", plugin.alert_body)
         self.assertEqual(plugin.alert_priority, 20)
 
+    def test_weather_rain_exports_alert_copy(self):
+        provider = RealPluginProvider(lambda key, default=None: {"v2_weather_location": "北京"}.get(key, default))
+        provider._resolve_weather_location = lambda _location: (39.9042, 116.4074, "北京市")
+        provider._fetch_open_meteo_weather = lambda _lat, _lon: {
+            "city": "北京市",
+            "weather": "小雨",
+            "temperature": "22",
+            "winddirection": "东风",
+            "windspeed": "8",
+            "humidity": "80",
+            "weather_code": 61,
+            "precipitation": "1.2",
+        }
+
+        provider._refresh_weather("北京")
+        plugin = provider._weather_plugin()
+
+        self.assertEqual(plugin.status, "rain")
+        self.assertEqual(plugin.alert_title, "降雨提醒")
+        self.assertIn("小雨", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 12)
+
+    def test_weather_severe_exports_alert_copy(self):
+        provider = RealPluginProvider(lambda key, default=None: {"v2_weather_location": "北京"}.get(key, default))
+        provider._resolve_weather_location = lambda _location: (39.9042, 116.4074, "北京市")
+        provider._fetch_open_meteo_weather = lambda _lat, _lon: {
+            "city": "北京市",
+            "weather": "雷雨",
+            "temperature": "25",
+            "winddirection": "东风",
+            "windspeed": "18",
+            "humidity": "88",
+            "weather_code": 95,
+            "precipitation": "4.0",
+        }
+
+        provider._refresh_weather("北京")
+        plugin = provider._weather_plugin()
+
+        self.assertEqual(plugin.status, "severe")
+        self.assertEqual(plugin.alert_title, "严重天气提醒")
+        self.assertIn("雷雨", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 2)
+
     def test_open_meteo_geocode_parses_location(self):
         provider = RealPluginProvider()
         payload = {
@@ -331,6 +387,18 @@ class PluginProviderTests(unittest.TestCase):
         self.assertEqual(plugin.alert_title, "日程到点")
         self.assertIn("正在开会", plugin.alert_body)
         self.assertEqual(plugin.alert_priority, 0)
+
+    def test_schedule_uses_custom_reminder_thresholds(self):
+        now = datetime.now().astimezone()
+        upcoming = (now + timedelta(minutes=28)).isoformat(timespec="minutes")
+        provider = RealPluginProvider(lambda key, default=None: "30,15,5" if key == "v2_schedule_reminder_minutes" else default)
+        provider._load_events = lambda: [(provider._parse_datetime(upcoming), "准备上课")]
+
+        plugin = provider._schedule_plugin()
+
+        self.assertEqual(plugin.status, "soon")
+        self.assertIn("准备上课", plugin.alert_body)
+        self.assertGreater(plugin.progress, 0.0)
 
 
 if __name__ == "__main__":

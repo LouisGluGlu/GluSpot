@@ -81,6 +81,10 @@ class RealPluginProvider:
         self._weather_detail = "设置位置后刷新"
         self._weather_report_time = ""
         self._weather_error = ""
+        self._weather_alert_status = "normal"
+        self._weather_alert_title = ""
+        self._weather_alert_body = ""
+        self._weather_alert_priority = 50
         self._weather_location_source = "manual"
         self._weather_last_nonce = ""
         self._weather_refreshing = False
@@ -128,6 +132,10 @@ class RealPluginProvider:
         summary = now.strftime("%m/%d %a")
         timer = self._timer_summary(now)
         status = self.timer_state(now)
+        alarm = self.alarm_due_at(now)
+        if alarm is not None:
+            status = "alarm"
+            summary = alarm.strftime("%H:%M")
         if timer:
             summary = timer
         alert_title = ""
@@ -141,6 +149,10 @@ class RealPluginProvider:
             alert_title = "计时结束"
             alert_body = "点击查看或清除计时器"
             alert_priority = 5
+        elif status == "alarm" and alarm is not None:
+            alert_title = "闹钟提醒"
+            alert_body = alarm.strftime("%H:%M")
+            alert_priority = 3
         return PluginData(
             label="TIME",
             detail=detail,
@@ -154,7 +166,7 @@ class RealPluginProvider:
             alert_title=alert_title,
             alert_body=alert_body,
             alert_priority=alert_priority,
-            progress=self.timer_progress(now),
+            progress=1.0 if status == "alarm" else self.timer_progress(now),
         )
 
     def _parse_timezone(self, value: str):
@@ -253,6 +265,20 @@ class RealPluginProvider:
             return "done"
         return "running"
 
+    def alarm_due_at(self, now: datetime | None = None) -> datetime | None:
+        now = now or self._plugin_now()
+        raw = str(self._setting("v2_alarm_at", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            alarm = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if alarm.tzinfo is None:
+            alarm = alarm.replace(tzinfo=now.tzinfo)
+        alarm = alarm.astimezone(now.tzinfo)
+        return alarm if abs((alarm - now).total_seconds()) <= 60.0 else None
+
     def _weather_plugin(self) -> PluginData:
         self._schedule_weather_refresh_if_needed()
         with self._weather_lock:
@@ -260,10 +286,11 @@ class RealPluginProvider:
             summary = self._weather_summary
             error = self._weather_error
             refreshing = self._weather_refreshing
-        status = "loading" if refreshing else ("error" if error else "normal")
-        alert_title = ""
-        alert_body = ""
-        alert_priority = 50
+            alert_status = self._weather_alert_status
+            alert_title = self._weather_alert_title
+            alert_body = self._weather_alert_body
+            alert_priority = self._weather_alert_priority
+        status = "loading" if refreshing else ("error" if error else alert_status or "normal")
         if status == "loading":
             alert_title = "天气刷新中"
             alert_body = detail or summary
@@ -349,6 +376,10 @@ class RealPluginProvider:
         error = ""
         report_time = ""
         location_source = "manual"
+        alert_status = "normal"
+        alert_title = ""
+        alert_body = ""
+        alert_priority = 50
         request_location = str(location or "").strip() or self._weather_manual_location()
         self._weather_location = location
         try:
@@ -382,11 +413,28 @@ class RealPluginProvider:
             wind = f"{wind_direction}{wind_speed}km/h" if wind_direction and wind_speed else "风力未知"
             humidity_text = f"湿度 {humidity}%" if humidity else "湿度未知"
             summary = f"{city} · {wind} · {humidity_text}"
+            code = self._int_value(weather.get("weather_code"), -1)
+            severe_codes = {82, 95, 96, 99}
+            rain_codes = {51, 53, 55, 61, 63, 65, 80, 81}
+            if code in severe_codes or any(token in weather_name for token in ("暴", "雷", "强")):
+                alert_status = "severe"
+                alert_title = "严重天气提醒"
+                alert_body = f"{city} · {weather_name}"
+                alert_priority = 2
+            elif code in rain_codes or "雨" in weather_name:
+                alert_status = "rain"
+                alert_title = "降雨提醒"
+                alert_body = f"{city} · {weather_name}"
+                alert_priority = 12
         except Exception as exc:
             with self._weather_lock:
                 summary = self._weather_summary or "天气不可用"
                 detail = self._weather_detail or request_location[:16]
             error = str(exc)
+            alert_status = "normal"
+            alert_title = ""
+            alert_body = ""
+            alert_priority = 50
         finally:
             with self._weather_lock:
                 if summary:
@@ -394,6 +442,10 @@ class RealPluginProvider:
                 if detail:
                     self._weather_detail = detail
                 self._weather_error = error
+                self._weather_alert_status = alert_status
+                self._weather_alert_title = alert_title
+                self._weather_alert_body = alert_body
+                self._weather_alert_priority = alert_priority
                 self._weather_report_time = report_time
                 self._weather_location_source = location_source
                 self._weather_cached_at = now
@@ -441,6 +493,8 @@ class RealPluginProvider:
             "windspeed": self._compact_number(current.get("wind_speed_10m")),
             "humidity": self._compact_number(current.get("relative_humidity_2m")),
             "reporttime": str(current.get("time") or ""),
+            "weather_code": code,
+            "precipitation": self._compact_number(current.get("precipitation")),
         }
 
     def _normalize_location_key(self, value: str) -> str:
@@ -539,10 +593,12 @@ class RealPluginProvider:
         events.sort(key=lambda item: item[0])
         due = [event for event in events if -300 <= (event[0] - now).total_seconds() <= 0]
         upcoming = [event for event in events if event[0] > now]
+        thresholds = self._schedule_reminder_thresholds()
         status = "normal"
         alert_title = ""
         alert_body = ""
         alert_priority = 50
+        progress = 0.0
         if due:
             _when, title = due[0]
             detail = "现在"
@@ -559,11 +615,13 @@ class RealPluginProvider:
             else:
                 minutes = max(0, math.ceil(delta.total_seconds() / 60))
                 detail = f"{minutes} 分钟后"
-                if minutes <= 10:
+                threshold = next((item for item in thresholds if minutes <= item), 0)
+                if threshold:
                     status = "soon"
                     alert_title = "日程将近"
                     alert_body = f"{detail} · {title[:28]}"
                     alert_priority = 10
+                    progress = max(0.0, min(1.0, (threshold - minutes) / max(1.0, float(threshold))))
             summary = title[:24]
         else:
             detail = "暂无日程"
@@ -581,7 +639,24 @@ class RealPluginProvider:
             alert_title=alert_title,
             alert_body=alert_body,
             alert_priority=alert_priority,
+            progress=progress,
         )
+
+    def _schedule_reminder_thresholds(self) -> tuple[int, ...]:
+        raw = str(self._setting("v2_schedule_reminder_minutes", "15,30,5") or "")
+        values = []
+        for piece in re.split(r"[,，\s]+", raw):
+            if not piece:
+                continue
+            try:
+                value = int(piece)
+            except ValueError:
+                continue
+            if 1 <= value <= 240:
+                values.append(value)
+        if not values:
+            values = [15, 30, 5]
+        return tuple(sorted(set(values), reverse=True))
 
     def _load_events(self) -> list[tuple[datetime, str]]:
         events: list[tuple[datetime, str]] = []

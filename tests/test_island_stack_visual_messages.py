@@ -409,6 +409,50 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.expanded)
         self.assertEqual(visual.plugin_focus_target, 2)
 
+    def test_expanded_plugin_keeps_alert_inside_plugin_panel(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.persistent_plugin = True
+        visual.expanded = True
+        visual.enabled_plugin_count = 3
+        visual.plugin_focus = 0
+        visual.plugin_focus_from = 0
+        visual.plugin_focus_target = 0
+        visual.plugin_focus_changed_at = 0.0
+        visual.music_playing = False
+        visual.messages = []
+        visual.finder_mode = False
+        visual.width = lambda: 900
+        visual.height = lambda: 420
+        visual._current_screen_geometry = lambda: None
+        visual._stack_target_width = lambda _kind: 420.0
+        visual._standalone_width_limit = lambda _center_x, _screen: 420.0
+        visual.mapToGlobal = lambda point: point
+        visual.plugin_samples = [
+            ("TIME", "00:24", "Countdown 0:24", QColor(67, 162, 255), "●", "time", "running", "Timer running", "Countdown 0:24", 30, 0.4),
+            ("WEATHER", "26°C 晴", "北京", QColor(80, 210, 255), "☀", "weather", "normal", "", "", 50, 0.0),
+            ("AGENDA", "暂无日程", "JSON / ICS", QColor(118, 236, 160), "■", "agenda", "normal", "", "", 50, 0.0),
+        ]
+
+        visuals = visual._build_visuals()
+
+        self.assertEqual([item.key for item in visuals], ["plugin"])
+        self.assertGreater(visual._plugin_panel_alert_progress(0), 0.0)
+
+    def test_plugin_ring_style_is_thick_for_animation_first_language(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        style = visual._plugin_ring_style("running")
+
+        self.assertGreaterEqual(style["width"], 3.4 * IslandStackVisual.VISUAL_SCALE)
+        self.assertGreater(style["pulse"], 0.0)
+
+    def test_plugin_function_lines_include_alert_context(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        _title, lines = visual._plugin_function_lines("TIME", "00:24", "Countdown 0:24", "running", "Timer running", "Countdown 0:24")
+
+        self.assertIn("Countdown 0:24", lines)
+
 
 if __name__ == "__main__":
     unittest.main()
