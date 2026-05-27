@@ -232,6 +232,7 @@ class WindowsMediaProvider:
         if data is None:
             return
         data = self._stabilize_incoming_position(data, now)
+        data = self._apply_recent_local_seek_to_visual_data(data, now)
         self._last_data = data
         self._last_ready_at = now
 
@@ -253,6 +254,54 @@ class WindowsMediaProvider:
             return data
         updated = replace(track, position_seconds=projected_position)
         return replace(data, track=updated)
+
+    def _recent_local_seek_age(self, now: float) -> float | None:
+        if self._local_seek_position_seconds is None:
+            return None
+        seek_at = float(self._local_seek_at or 0.0)
+        if seek_at <= 0.0:
+            return None
+        age = now - seek_at
+        if age < 0.0 or age > 4.5:
+            return None
+        return age
+
+    def _project_recent_local_seek_position(self, duration_seconds: float, is_playing: bool, now: float) -> float:
+        age = self._recent_local_seek_age(now)
+        if age is None:
+            return 0.0
+        position = max(0.0, float(self._local_seek_position_seconds or 0.0))
+        if is_playing:
+            position += age
+        duration = max(0.0, float(duration_seconds or 0.0))
+        if duration > 0.0:
+            position = min(duration, position)
+        return position
+
+    def _apply_recent_local_seek_to_visual_data(self, data: IslandVisualData, now: float) -> IslandVisualData:
+        age = self._recent_local_seek_age(now)
+        if age is None:
+            return data
+        track = data.track
+        track_id = str(track.track_id or "")
+        local_track_id = str(self._local_seek_track_id or "")
+        if local_track_id and local_track_id != track_id:
+            return data
+        if not local_track_id and track_id:
+            self._local_seek_track_id = track_id
+        position = self._project_recent_local_seek_position(track.duration_seconds, track.is_playing, now)
+        source = str(track.position_source or "")
+        player_seek_sources = STABILIZED_PLAYER_POSITION_SOURCES | {"netease-uia-lyrics", "qq-uia-lyrics"}
+        if source in player_seek_sources and abs(float(track.position_seconds) - position) <= 2.5:
+            return data
+        updated_track = replace(
+            track,
+            position_seconds=position,
+            position_source="local-seek",
+            position_confidence=max(float(track.position_confidence), 0.68),
+            position_interactive=True,
+        )
+        return replace(data, track=updated_track)
 
     def _project_visual_position(self, data: IslandVisualData, now: float, anchor_at: float) -> IslandVisualData:
         track = data.track
@@ -347,8 +396,65 @@ class WindowsMediaProvider:
     def send_playback_command(self, command: PlaybackCommand) -> bool:
         if self._loop is None:
             return False
-        result = self._run(self._send_command(command))
-        return bool(result)
+        result = bool(self._run(self._send_command(command)))
+        if result:
+            self._request_immediate_media_refresh()
+            self._prefetch_adjacent_lyrics_for_command(command)
+        return result
+
+    def _request_immediate_media_refresh(self):
+        self._last_refresh_at = 0.0
+        if self._loop is None:
+            return
+        future = getattr(self, "_refresh_future", None)
+        if future is not None and not future.done():
+            return
+        try:
+            self._refresh_future = asyncio.run_coroutine_threadsafe(self._read_visual_data(), self._loop)
+        except Exception:
+            self._refresh_future = None
+
+    def _prefetch_adjacent_lyrics_for_command(self, command: PlaybackCommand) -> bool:
+        if command not in {"previous", "next"}:
+            return False
+        track = self._last_data.track if self._last_data is not None else None
+        if track is None:
+            return False
+        direction = "previous" if command == "previous" else "next"
+        reader = self._player_position_reader_for(self._music_player_adapter)
+        return self._prefetch_adjacent_lyrics(track.title, track.artist, reader, direction)
+
+    def _prefetch_adjacent_lyrics(self, title: str, artist: str, player_position_reader, direction: str = "next") -> bool:
+        adjacent_reader = getattr(player_position_reader, "adjacent_track", None)
+        if not callable(adjacent_reader) or not title:
+            return False
+        try:
+            adjacent = adjacent_reader(title, artist, direction)
+        except Exception:
+            return False
+        return self._prefetch_lyrics_for_track(adjacent)
+
+    def _prefetch_lyrics_for_track(self, track) -> bool:
+        if track is None:
+            return False
+        title = str(getattr(track, "title", "") or "").strip()
+        artist = str(getattr(track, "artist", "") or "").strip()
+        album_title = str(getattr(track, "album_title", "") or "").strip()
+        if not title:
+            return False
+        try:
+            duration_seconds = max(0.0, float(getattr(track, "duration_seconds", 0.0) or 0.0))
+        except Exception:
+            duration_seconds = 0.0
+        try:
+            match = self.lyrics_store.resolve_cached_or_local(title, artist, album_title, duration_seconds)
+            if match.timed_lyrics or match.lyrics:
+                return False
+            if self.lyrics_store.is_lookup_pending(title, artist, album_title, duration_seconds):
+                return False
+            return bool(self.lyrics_store.resolve_in_background(title, artist, album_title, duration_seconds))
+        except Exception:
+            return False
 
     def seek_playback_position(self, position_seconds: float) -> bool:
         if self._loop is None:
@@ -356,11 +462,13 @@ class WindowsMediaProvider:
         result = self._run(self._seek_position(position_seconds))
         if result:
             self._remember_local_seek(position_seconds)
+            self._request_immediate_media_refresh()
         return bool(result)
 
     def _remember_local_seek(self, position_seconds: float):
         track = self._last_data.track if self._last_data is not None else None
         if track is None:
+            self._remember_local_seek_for_track("", position_seconds, 0.0)
             return
         self._remember_local_seek_for_track(track.track_id, position_seconds, track.duration_seconds)
 
@@ -576,11 +684,23 @@ class WindowsMediaProvider:
         )
         adapter_interactive = player_adapter in {"netease", "qq"} and source_app_interactive
         foreground_metadata = self._foreground_track_metadata(player_adapter, source_app_foreground)
+        player_window_track = None
         if foreground_metadata is not None:
             foreground_title, foreground_artist = foreground_metadata
             if foreground_title and foreground_artist and (foreground_title != title or foreground_artist != artist):
                 title = foreground_title
                 artist = foreground_artist
+        else:
+            player_window_track = self._player_window_track_metadata(player_adapter, player_position_reader)
+            if player_window_track is not None:
+                player_title = str(getattr(player_window_track, "title", "") or "").strip()
+                player_artist = str(getattr(player_window_track, "artist", "") or "").strip()
+                if player_title and player_artist and (player_title != title or player_artist != artist):
+                    title = player_title
+                    artist = player_artist
+                    player_album = str(getattr(player_window_track, "album_title", "") or "").strip()
+                    if player_album:
+                        album_title = player_album
         self._raw_source_app_user_model_id = raw_source_app
         self._music_player_adapter = player_adapter
         self._source_app_foreground = source_app_foreground
@@ -590,6 +710,13 @@ class WindowsMediaProvider:
         duration_seconds = self._timespan_seconds(getattr(timeline, "end_time", None)) - self._timespan_seconds(getattr(timeline, "start_time", None))
         if duration_seconds < 0:
             duration_seconds = 0.0
+        if player_window_track is not None:
+            try:
+                player_duration = max(0.0, float(getattr(player_window_track, "duration_seconds", 0.0) or 0.0))
+            except Exception:
+                player_duration = 0.0
+            if player_duration > 0.0:
+                duration_seconds = player_duration
         track_key = self._track_key(source_app, title, artist, album_title, duration_seconds)
         previous_track = self._last_data.track if self._last_data is not None else None
         if previous_track is not None and self._same_track_metadata(previous_track, title, artist):
@@ -608,6 +735,7 @@ class WindowsMediaProvider:
         timed_lyrics = lyrics_match.timed_lyrics
         lyrics_source = lyrics_match.source
         lyrics = lyrics_match.lyrics or tuple(line.text for line in timed_lyrics) or (("查找歌词中",) if lyrics_lookup_pending else ("暂无歌词",))
+        self._prefetch_adjacent_lyrics(title, artist, player_position_reader, "next")
         position_source = "windows-media"
         position_confidence = 1.0 if position_seconds > 0.0 else (0.26 if duration_seconds > 0.0 else 0.18)
         raw_timeline_position = position_seconds
@@ -622,18 +750,28 @@ class WindowsMediaProvider:
             if local_duration > 0.0:
                 duration_seconds = local_duration
                 position_confidence = max(position_confidence, 0.26)
-        local_seek_active = (
-            same_track_as_previous
-            and self._local_seek_track_id == track_key
-            and self._local_seek_position_seconds is not None
-            and time.monotonic() - float(self._local_seek_at or 0.0) <= 4.5
+        local_seek_age = self._recent_local_seek_age(time.monotonic())
+        pending_cold_start_seek = (
+            previous_track is None
+            and not str(self._local_seek_track_id or "")
+            and local_seek_age is not None
         )
+        local_seek_active = (
+            local_seek_age is not None
+            and (
+                (same_track_as_previous and self._local_seek_track_id == track_key)
+                or pending_cold_start_seek
+            )
+        )
+        if pending_cold_start_seek and track_key:
+            self._local_seek_track_id = track_key
         local_seek_estimate = 0.0
         if local_seek_active:
-            seek_age = max(0.0, time.monotonic() - float(self._local_seek_at))
-            local_seek_estimate = float(self._local_seek_position_seconds) + (seek_age if is_playing else 0.0)
-            if duration_seconds > 0.0:
-                local_seek_estimate = min(duration_seconds, local_seek_estimate)
+            local_seek_estimate = self._project_recent_local_seek_position(duration_seconds, is_playing, time.monotonic())
+        if pending_cold_start_seek:
+            position_seconds = local_seek_estimate
+            position_source = "local-seek"
+            position_confidence = max(position_confidence, 0.68)
         if same_track_as_previous:
             if duration_seconds <= 0.0 and previous_duration > 0.0:
                 duration_seconds = previous_duration
@@ -684,6 +822,11 @@ class WindowsMediaProvider:
         recent_click_pos = self._source_app_recent_click_position(read_at)
         if recent_click_pos is None and source_app_foreground:
             recent_click_pos = self._global_recent_click_position(read_at)
+        recent_pointer_pos = self._source_app_recent_pointer_position(read_at)
+        if recent_pointer_pos is None and source_app_foreground:
+            recent_pointer_pos = self._global_recent_pointer_position(read_at)
+        if recent_pointer_pos is None:
+            recent_pointer_pos = recent_click_pos
         recent_lyric_click = self._source_app_recent_click(read_at) or (
             source_app_foreground and self._global_recent_click(read_at)
         )
@@ -695,6 +838,32 @@ class WindowsMediaProvider:
             and bool(timed_lyrics)
         )
         lyric_click_pos = recent_click_pos if allow_lyric_click_anchor else None
+        progress_point_position = None
+        progress_point_reader = getattr(player_position_reader, "position_from_progress_point", None)
+        if (
+            callable(progress_point_reader)
+            and player_adapter in {"netease", "qq"}
+            and source_app_foreground
+            and recent_pointer_pos is not None
+            and duration_seconds > 0.0
+            and (recent_source_pointer or recent_global_pointer or recent_lyric_click)
+        ):
+            try:
+                progress_point_position = progress_point_reader(recent_pointer_pos, duration_seconds)
+            except Exception:
+                progress_point_position = None
+        if progress_point_position is not None:
+            allow_lyric_click_anchor = False
+            lyric_click_pos = None
+            if same_track_as_previous or previous_track is None:
+                position_seconds = max(0.0, float(progress_point_position))
+                if duration_seconds > 0.0:
+                    position_seconds = min(duration_seconds, position_seconds)
+                position_source = "local-seek"
+                position_confidence = max(position_confidence, 0.68)
+                self._remember_local_seek_for_track(track_key, position_seconds, duration_seconds)
+                local_seek_active = True
+                local_seek_estimate = position_seconds
         force_player_anchor_read = (
             player_adapter in {"netease", "qq"}
             and source_app_foreground
@@ -715,6 +884,11 @@ class WindowsMediaProvider:
                 or force_player_anchor_read
                 or allow_lyric_click_anchor
             )
+            force_progress_image = bool(
+                previous_track is None
+                or track_change_anchor_read
+                or force_player_anchor_read
+            )
             if use_immediate_reader:
                 player_sample = read_immediate(
                     title,
@@ -724,6 +898,7 @@ class WindowsMediaProvider:
                     interactive=source_app_interactive,
                     allow_lyric_anchor=allow_lyric_click_anchor,
                     click_pos=lyric_click_pos,
+                    force_progress_image=force_progress_image,
                 )
             else:
                 player_sample = player_position_reader.read(
@@ -734,6 +909,7 @@ class WindowsMediaProvider:
                     interactive=source_app_interactive,
                     allow_lyric_anchor=allow_lyric_click_anchor,
                     click_pos=lyric_click_pos,
+                    force_progress_image=force_progress_image,
                 )
             if player_sample is not None:
                 if duration_seconds <= 0.0 and player_sample.duration_seconds > 0.0:
@@ -786,6 +962,7 @@ class WindowsMediaProvider:
                         ):
                             self._remember_local_seek_for_track(track_key, projected_player_position, duration_seconds)
                             await self._seek_session_position(session, projected_player_position)
+                            self._consume_recent_click_anchor(lyric_click_pos)
         if not title and not artist:
             self._provider_status = "no_session"
             return None
@@ -810,7 +987,8 @@ class WindowsMediaProvider:
             source_app_foreground=source_app_foreground,
             position_interactive=source_app_interactive,
         )
-        return replace(fallback_data, track=track, messages=self.message_detector.messages(), plugins=self.plugin_provider.plugins())
+        data = replace(fallback_data, track=track, messages=self.message_detector.messages(), plugins=self.plugin_provider.plugins())
+        return self._apply_recent_local_seek_to_visual_data(data, time.monotonic())
 
     async def _send_command(self, command: PlaybackCommand) -> bool:
         session = await self._get_session()
@@ -1179,6 +1357,22 @@ class WindowsMediaProvider:
             return None
         return track_title, track_artist
 
+    def _player_window_track_metadata(self, player_adapter: str, player_position_reader):
+        if player_adapter not in {"netease", "qq"}:
+            return None
+        current_track = getattr(player_position_reader, "current_track", None)
+        if not callable(current_track):
+            return None
+        try:
+            track = current_track()
+        except Exception:
+            return None
+        title = str(getattr(track, "title", "") or "").strip()
+        artist = str(getattr(track, "artist", "") or "").strip()
+        if not title or not artist:
+            return None
+        return track
+
     def _should_use_player_sample(self, source_prefix: str, sample_source: str, sample_age: float, is_playing: bool) -> bool:
         source_prefix = str(source_prefix or "").strip().casefold()
         if sample_source == f"{source_prefix}-uia-progress":
@@ -1265,12 +1459,14 @@ class WindowsMediaProvider:
         was_down = bool(getattr(self, "_source_app_left_down", False))
         if pressed_since_last and source_app_foreground:
             self._source_app_recent_pointer_at = now
+            self._source_app_recent_pointer_pos = pos
             if not down:
                 self._source_app_recent_click_at = now
                 self._source_app_recent_click_pos = pos
         if down and not was_down:
             if source_app_foreground:
                 self._source_app_recent_pointer_at = now
+                self._source_app_recent_pointer_pos = pos
                 self._source_app_recent_click_at = 0.0
                 self._source_app_recent_click_pos = None
             self._source_app_left_down_at = now
@@ -1287,6 +1483,7 @@ class WindowsMediaProvider:
                 and source_app_foreground
             ):
                 self._source_app_recent_pointer_at = now
+                self._source_app_recent_pointer_pos = pos or start
                 if duration <= 0.65 and distance <= 18.0:
                     self._source_app_recent_click_at = now
                     self._source_app_recent_click_pos = pos or start
@@ -1363,6 +1560,17 @@ class WindowsMediaProvider:
         except Exception:
             return None
 
+    def _source_app_recent_pointer_position(self, now: float) -> tuple[int, int] | None:
+        if not self._source_app_recent_pointer_activity(now):
+            return None
+        pos = getattr(self, "_source_app_recent_pointer_pos", None)
+        if not isinstance(pos, tuple) or len(pos) != 2:
+            return None
+        try:
+            return int(pos[0]), int(pos[1])
+        except Exception:
+            return None
+
     def _global_recent_click(self, now: float) -> bool:
         lock = getattr(self, "_global_pointer_lock", None)
         if lock is None:
@@ -1381,6 +1589,22 @@ class WindowsMediaProvider:
         else:
             with lock:
                 pos = getattr(self, "_global_recent_click_pos", None)
+        if not isinstance(pos, tuple) or len(pos) != 2:
+            return None
+        try:
+            return int(pos[0]), int(pos[1])
+        except Exception:
+            return None
+
+    def _global_recent_pointer_position(self, now: float) -> tuple[int, int] | None:
+        if not self._global_recent_pointer_activity(now):
+            return None
+        lock = getattr(self, "_global_pointer_lock", None)
+        if lock is None:
+            pos = getattr(self, "_global_recent_pointer_pos", None)
+        else:
+            with lock:
+                pos = getattr(self, "_global_recent_pointer_pos", None)
         if not isinstance(pos, tuple) or len(pos) != 2:
             return None
         try:
@@ -1413,10 +1637,14 @@ class WindowsMediaProvider:
         return "system"
 
     def _music_player_adapter_for(self, source_app: str, raw_source_app: str = "") -> str:
-        if not self._player_progress_plugin_enabled():
-            return "system"
         mode = self._music_player_mode()
         detected = self._detect_music_player_service(source_app, raw_source_app)
+        if not self._player_progress_plugin_enabled():
+            if detected in {"netease", "qq"}:
+                return detected
+            if mode in {"netease", "qq"} and self._music_player_source_matches(mode, source_app, raw_source_app):
+                return mode
+            return "system"
         if self._player_progress_auto_detect_enabled():
             if detected != "system":
                 return detected
@@ -1426,6 +1654,20 @@ class WindowsMediaProvider:
         if self._music_player_source_matches(mode, source_app, raw_source_app):
             return mode
         return "system"
+
+    def _consume_recent_click_anchor(self, click_pos: tuple[int, int] | None):
+        if click_pos is None:
+            return
+        self._source_app_recent_click_at = 0.0
+        self._source_app_recent_click_pos = None
+        lock = getattr(self, "_global_pointer_lock", None)
+        if lock is None:
+            self._global_recent_click_at = 0.0
+            self._global_recent_click_pos = None
+        else:
+            with lock:
+                self._global_recent_click_at = 0.0
+                self._global_recent_click_pos = None
 
     def _is_playing(self, playback) -> bool:
         try:

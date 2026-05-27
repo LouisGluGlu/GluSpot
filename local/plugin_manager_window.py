@@ -14,14 +14,25 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from local.ios_widgets import IosSwitch
-from local.ui_theme import ios_theme, is_theme_change_event, style_combo_popup
+from local.mac_style import (
+    mac_preferences_stylesheet,
+    mac_preferences_theme,
+    mac_sidebar_icon,
+    mac_sidebar_icon_colors,
+    mac_traffic_lights,
+)
+from local.ui_theme import is_theme_change_event, style_combo_popup
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -53,50 +64,30 @@ class PluginManagerWindow(QDialog):
         self.plugin_label = str(plugin_label or "PLUGIN").strip().upper()
         self.plugin_detail = str(plugin_detail or "")
         self.plugin_summary = str(plugin_summary or "")
+        self._opened_plugin_label = self.plugin_label
         self.settings_getter = settings_getter or (lambda _key, default=None: default)
         self.settings_setter = settings_setter or (lambda _key, _value: None)
         self.refresh_callback = refresh_callback
         self.diagnostics_getter = diagnostics_getter
         self._applying_theme = False
+        self._window_drag_global = None
+        self._window_drag_pos = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_live_labels)
         self._timer.start(500)
 
         title = self._title_for_label(self.plugin_label)
         self.setWindowTitle(f"{title}管理")
-        self.setMinimumSize(500, 520)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
-        self._apply_theme()
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 20)
-        root.setSpacing(10)
-
-        title_label = QLabel(title)
-        title_label.setObjectName("Title")
-        root.addWidget(title_label)
-
-        subtitle = QLabel(self._subtitle_for_label(self.plugin_label))
-        subtitle.setObjectName("Subtitle")
-        subtitle.setWordWrap(True)
-        root.addWidget(subtitle)
-
-        if self.plugin_label == "TIME":
-            self._build_time_page(root)
-        elif self.plugin_label == "WEATHER":
-            self._build_weather_page(root)
-        elif self.plugin_label == "AGENDA":
-            self._build_agenda_page(root)
-        else:
-            self._build_placeholder_page(root)
-
-        close = QPushButton("关闭")
-        close.clicked.connect(self.close)
-        root.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+        self.setMinimumSize(680, 560)
+        self.setWindowFlags(
+            (self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            & ~Qt.WindowType.WindowContextHelpButtonHint
+        )
+        self._build_ui()
         self._refresh_live_labels()
 
     def _theme(self) -> dict[str, str]:
-        return ios_theme()
+        return mac_preferences_theme()
 
     def _apply_theme(self):
         if getattr(self, "_applying_theme", False):
@@ -104,29 +95,7 @@ class PluginManagerWindow(QDialog):
         self._applying_theme = True
         t = self._theme()
         try:
-            self.setStyleSheet(
-                f"""
-                QDialog {{ background: {t["window"]}; color: {t["text"]}; }}
-                QLabel {{ background: transparent; color: {t["text"]}; }}
-                QLabel#Title {{ font-size: 24px; font-weight: 700; color: {t["text"]}; }}
-                QLabel#Subtitle {{ color: {t["muted"]}; font-size: 13px; }}
-                QLabel#Section {{ color: {t["muted"]}; font-size: 12px; font-weight: 700; padding: 12px 0 4px 2px; }}
-                QLabel#Value {{ color: {t["text"]}; font-size: 14px; }}
-                QLabel#Muted {{ color: {t["muted"]}; font-size: 12px; }}
-                QFrame#Card {{ background: {t["card"]}; border: 1px solid {t["card_border"]}; border-radius: 14px; }}
-                QFrame#Card QWidget {{ background: transparent; color: {t["text"]}; }}
-                QPushButton {{ min-height: 34px; border: 0; border-radius: 10px; background: {t["button"]}; color: {t["text"]}; padding: 0 14px; }}
-                QPushButton:hover {{ background: {t["button_hover"]}; }}
-                QPushButton#Primary {{ background: #007aff; color: white; }}
-                QPushButton#Danger {{ background: #ff3b30; color: white; }}
-                QLineEdit, QComboBox, QSpinBox {{ color: {t["text"]}; min-height: 34px; border: 1px solid {t["card_border"]}; border-radius: 10px; padding: 4px 10px; background: {t["input"]}; }}
-                QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color: #007aff; background: {t["input_focus"]}; }}
-                QComboBox QAbstractItemView {{ background: {t["card"]}; color: {t["text"]}; border: 1px solid {t["card_border"]}; selection-background-color: #007aff; selection-color: #ffffff; outline: 0; }}
-                QComboBox QAbstractItemView::item {{ min-height: 30px; padding: 6px 10px; background: transparent; color: {t["text"]}; }}
-                QComboBox QAbstractItemView::item:hover {{ background: {t["popup_hover"]}; color: {t["text"]}; }}
-                QComboBox QAbstractItemView::item:selected {{ background: #007aff; color: #ffffff; }}
-                """
-            )
+            self.setStyleSheet(mac_preferences_stylesheet(t))
         finally:
             self._applying_theme = False
 
@@ -142,6 +111,157 @@ class PluginManagerWindow(QDialog):
             for combo in self.findChildren(QComboBox):
                 self._style_combo_popup(combo)
         super().changeEvent(event)
+
+    def _build_ui(self):
+        self._apply_theme()
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        side = QFrame()
+        side.setObjectName("MacSidebar")
+        side.setFixedWidth(196)
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(10, 10, 10, 12)
+        side_layout.setSpacing(8)
+        side_layout.addWidget(mac_traffic_lights(self), 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("MacSearch")
+        self.search_input.setPlaceholderText("搜索")
+        self.search_input.textChanged.connect(self._filter_plugin_nav)
+        side_layout.addWidget(self.search_input)
+
+        self.nav = QListWidget()
+        self.nav.setObjectName("MacSidebarList")
+        self.nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        side_layout.addWidget(self.nav, 1)
+        root.addWidget(side)
+
+        content = QWidget()
+        content.setObjectName("MacContentPane")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        title_bar = QFrame()
+        title_bar.setObjectName("MacTitleBar")
+        title_bar.setFixedHeight(52)
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(24, 0, 24, 0)
+        title_layout.setSpacing(10)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("MacTitle")
+        title_layout.addWidget(self.title_label)
+        title_layout.addStretch(1)
+        content_layout.addWidget(title_bar)
+
+        self.stack = QStackedWidget()
+        content_layout.addWidget(self.stack, 1)
+        root.addWidget(content, 1)
+
+        pages = (
+            ("TIME", "时间", self._build_time_page),
+            ("WEATHER", "天气", self._build_weather_page),
+            ("AGENDA", "日程", self._build_agenda_page),
+        )
+        colors = mac_sidebar_icon_colors()
+        current_row = 0
+        for index, (label, nav_title, builder) in enumerate(pages):
+            item = QListWidgetItem(mac_sidebar_icon(colors[index % len(colors)], nav_title[:1]), nav_title)
+            item.setData(Qt.ItemDataRole.UserRole, label)
+            self.nav.addItem(item)
+
+            page = self._page(label)
+            layout: QVBoxLayout = page._content_layout
+            subtitle = QLabel(self._subtitle_for_label(label))
+            subtitle.setObjectName("Subtitle")
+            subtitle.setWordWrap(True)
+            layout.addWidget(subtitle)
+            builder(layout)
+            layout.addStretch(1)
+            self.stack.addWidget(page)
+            if label == self.plugin_label:
+                current_row = index
+
+        self.nav.currentRowChanged.connect(self._select_plugin_page)
+        self.nav.setCurrentRow(current_row)
+
+    def _page(self, label: str) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("MacContentScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        body.setObjectName("MacScrollBody")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(24, 18, 28, 28)
+        layout.setSpacing(16)
+        scroll.setWidget(body)
+        scroll._content_layout = layout
+        return scroll
+
+    def _select_plugin_page(self, row: int):
+        if row < 0 or row >= self.stack.count():
+            return
+        item = self.nav.item(row)
+        label = str(item.data(Qt.ItemDataRole.UserRole) or self.plugin_label) if item is not None else self.plugin_label
+        self.plugin_label = label
+        title = self._title_for_label(label)
+        self.title_label.setText(title)
+        self.setWindowTitle(f"{title}管理")
+        self.stack.setCurrentIndex(row)
+        self._refresh_live_labels()
+
+    def _filter_plugin_nav(self, text: str):
+        query = str(text or "").strip().lower()
+        first_visible = -1
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            hidden = bool(query and query not in item.text().lower())
+            item.setHidden(hidden)
+            if not hidden and first_visible < 0:
+                first_visible = row
+        current = self.nav.currentItem()
+        if first_visible >= 0 and current is not None and current.isHidden():
+            self.nav.setCurrentRow(first_visible)
+
+    def _is_window_drag_area(self, point) -> bool:
+        if point.y() > 54 and point.x() > 196:
+            return False
+        child = self.childAt(point.toPoint())
+        if child is None:
+            return True
+        if isinstance(child, (QLineEdit, QListWidget, QComboBox, QPushButton, IosSwitch, QSpinBox)):
+            return False
+        return True
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._is_window_drag_area(event.position()):
+            self._window_drag_global = event.globalPosition().toPoint()
+            self._window_drag_pos = self.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._window_drag_global is not None and self._window_drag_pos is not None:
+            self.move(self._window_drag_pos + event.globalPosition().toPoint() - self._window_drag_global)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._window_drag_global = None
+        self._window_drag_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _detail_for_label(self, label: str) -> str:
+        return self.plugin_detail if str(label).upper() == self._opened_plugin_label else ""
+
+    def _summary_for_label(self, label: str) -> str:
+        return self.plugin_summary if str(label).upper() == self._opened_plugin_label else ""
 
     def _build_time_page(self, root: QVBoxLayout):
         status = self._card(root)
@@ -204,8 +324,8 @@ class PluginManagerWindow(QDialog):
 
     def _build_placeholder_page(self, root: QVBoxLayout):
         card = self._card(root)
-        self._value_row(card, "当前状态", self.plugin_detail or "-")
-        self._value_row(card, "摘要", self.plugin_summary or "-")
+        self._value_row(card, "当前状态", self._detail_for_label(self.plugin_label) or "-")
+        self._value_row(card, "摘要", self._summary_for_label(self.plugin_label) or "-")
         if self.plugin_label == "WEATHER":
             self._value_row(card, "推进方式", "天气插件先保留当前展示，等数据源和隐私策略确认后再完善。")
         elif self.plugin_label == "AGENDA":
@@ -215,8 +335,8 @@ class PluginManagerWindow(QDialog):
 
     def _build_weather_page(self, root: QVBoxLayout):
         status = self._card(root)
-        self.weather_detail_label = self._value_row(status, "当前天气", self.plugin_detail or "-")
-        self.weather_summary_label = self._value_row(status, "摘要", self.plugin_summary or "-")
+        self.weather_detail_label = self._value_row(status, "当前天气", self._detail_for_label("WEATHER") or "-")
+        self.weather_summary_label = self._value_row(status, "摘要", self._summary_for_label("WEATHER") or "-")
         self.weather_error_label = self._value_row(status, "状态", "-")
 
         actions_title = QLabel("快捷操作")
@@ -254,8 +374,8 @@ class PluginManagerWindow(QDialog):
 
     def _build_agenda_page(self, root: QVBoxLayout):
         status = self._card(root)
-        self.agenda_detail_label = self._value_row(status, "下一项", self.plugin_detail or "-")
-        self.agenda_summary_label = self._value_row(status, "摘要", self.plugin_summary or "-")
+        self.agenda_detail_label = self._value_row(status, "下一项", self._detail_for_label("AGENDA") or "-")
+        self.agenda_summary_label = self._value_row(status, "摘要", self._summary_for_label("AGENDA") or "-")
 
         actions_title = QLabel("新增本地日程")
         actions_title.setObjectName("Section")
@@ -300,7 +420,7 @@ class PluginManagerWindow(QDialog):
 
     def _card(self, root: QVBoxLayout) -> QVBoxLayout:
         frame = QFrame()
-        frame.setObjectName("Card")
+        frame.setObjectName("MacCard")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
@@ -469,8 +589,8 @@ class PluginManagerWindow(QDialog):
     def _refresh_live_labels(self):
         if self.plugin_label == "WEATHER" and hasattr(self, "weather_detail_label"):
             diag = self._diagnostics()
-            self.weather_detail_label.setText(self.plugin_detail or "-")
-            self.weather_summary_label.setText(self.plugin_summary or "-")
+            self.weather_detail_label.setText(self._detail_for_label("WEATHER") or "-")
+            self.weather_summary_label.setText(self._summary_for_label("WEATHER") or "-")
             error = str(diag.get("weather_error") or "").strip()
             self.weather_error_label.setText(error or "正常")
             self.weather_provider_label.setText(str(diag.get("weather_provider") or "Open-Meteo"))
@@ -486,8 +606,8 @@ class PluginManagerWindow(QDialog):
                 count = len(events) if isinstance(events, list) else 0
             except Exception:
                 count = 0
-            self.agenda_detail_label.setText(self.plugin_detail or "-")
-            self.agenda_summary_label.setText(self.plugin_summary or "-")
+            self.agenda_detail_label.setText(self._detail_for_label("AGENDA") or "-")
+            self.agenda_summary_label.setText(self._summary_for_label("AGENDA") or "-")
             self.agenda_file_label.setText(str(path))
             self.agenda_count_label.setText(str(count))
             return

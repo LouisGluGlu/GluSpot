@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import types
 import unittest
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image
@@ -28,6 +30,63 @@ class NeteasePositionReaderTests(unittest.TestCase):
         duration = reader._find_duration(payload, "Contagious", "SAFE")
 
         self.assertAlmostEqual(duration, 219.637)
+
+    def test_adjacent_track_from_queue_returns_next_song_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            queue = Path(root) / "playingList"
+            queue.write_text(
+                """
+                {
+                  "list": [
+                    {"name": "Current", "duration": 180000, "artists": [{"name": "A"}], "album": {"name": "One"}},
+                    {"name": "Next", "duration": 201000, "artists": [{"name": "B"}], "album": {"name": "Two"}}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            reader = NeteasePositionReader(queue_paths=(queue,))
+
+            track = reader.adjacent_track("Current", "A", "next")
+
+        self.assertIsNotNone(track)
+        self.assertEqual(track.title, "Next")
+        self.assertEqual(track.artist, "B")
+        self.assertEqual(track.album_title, "Two")
+        self.assertAlmostEqual(track.duration_seconds, 201.0)
+
+    def test_current_track_reads_visible_window_title(self):
+        reader = NeteasePositionReader()
+
+        class FakeInfo:
+            class_name = "OrpheusBrowserHost"
+            process_id = 2924
+            process_name = "cloudmusic.exe"
+
+        class FakeWindow:
+            element_info = FakeInfo()
+
+            def window_text(self):
+                return "Press Play - MAETA"
+
+        class FakeDesktop:
+            def windows(self):
+                return [FakeWindow()]
+
+        fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": FakeDesktop())
+        previous = sys.modules.get("pywinauto")
+        sys.modules["pywinauto"] = fake_pywinauto
+        try:
+            track = reader.current_track()
+        finally:
+            if previous is None:
+                sys.modules.pop("pywinauto", None)
+            else:
+                sys.modules["pywinauto"] = previous
+
+        self.assertIsNotNone(track)
+        self.assertEqual(track.title, "Press Play")
+        self.assertEqual(track.artist, "MAETA")
 
     def test_lyric_index_map_uses_normalized_text(self):
         reader = NeteasePositionReader()
@@ -257,6 +316,56 @@ class NeteasePositionReaderTests(unittest.TestCase):
         self.assertIsNotNone(fraction)
         self.assertAlmostEqual(fraction, 0.25, delta=0.02)
 
+    def test_progress_image_fallback_estimates_netease_red_bottom_line(self):
+        reader = NeteasePositionReader()
+        image = Image.new("RGB", (1000, 600), (247, 249, 252))
+        y = 538
+        for x in range(0, 371):
+            image.putpixel((x, y), (246, 112, 126))
+            image.putpixel((x, y + 1), (246, 112, 126))
+        for x in range(371, 1000):
+            image.putpixel((x, y), (231, 232, 234))
+            image.putpixel((x, y + 1), (231, 232, 234))
+        for yy in range(y + 2, 600):
+            for x in range(0, 1000):
+                image.putpixel((x, yy), (240, 242, 246))
+        for x in range(70, 122):
+            for yy in range(560, 592):
+                image.putpixel((x, yy), (42, 38, 40))
+        for x in range(488, 536):
+            for yy in range(560, 592):
+                image.putpixel((x, yy), (218, 45, 70))
+
+        fraction = reader._progress_fraction_from_image(image)
+
+        self.assertIsNotNone(fraction)
+        self.assertAlmostEqual(fraction, 0.37, delta=0.02)
+
+    def test_progress_image_fallback_ignores_hover_preview_after_white_thumb(self):
+        reader = NeteasePositionReader()
+        image = Image.new("RGB", (1000, 600), (247, 249, 252))
+        y = 538
+        for x in range(0, 821):
+            image.putpixel((x, y), (246, 112, 126))
+            image.putpixel((x, y + 1), (246, 112, 126))
+        for x in range(821, 1000):
+            image.putpixel((x, y), (231, 232, 234))
+            image.putpixel((x, y + 1), (231, 232, 234))
+        for x in range(236, 245):
+            image.putpixel((x, y), (255, 255, 255))
+            image.putpixel((x, y + 1), (255, 255, 255))
+        for yy in range(y + 2, 600):
+            for x in range(0, 1000):
+                image.putpixel((x, yy), (240, 242, 246))
+        for x in range(70, 122):
+            for yy in range(560, 592):
+                image.putpixel((x, yy), (42, 38, 40))
+
+        fraction = reader._progress_fraction_from_image(image)
+
+        self.assertIsNotNone(fraction)
+        self.assertAlmostEqual(fraction, 0.24, delta=0.02)
+
     def test_progress_image_fallback_rejects_bottom_panel_edge(self):
         reader = NeteasePositionReader()
         image = Image.new("RGB", (1000, 600), (36, 39, 45))
@@ -417,7 +526,7 @@ class NeteasePositionReaderTests(unittest.TestCase):
         self.assertEqual(calls, ["progress"])
         self.assertEqual(reader.diagnostics()["last_source"], "")
 
-    def test_interactive_refresh_uses_image_progress_when_controls_are_hidden(self):
+    def test_interactive_refresh_does_not_capture_image_when_controls_are_hidden(self):
         reader = NeteasePositionReader()
         calls = []
 
@@ -436,11 +545,122 @@ class NeteasePositionReaderTests(unittest.TestCase):
 
         reader._refresh_sample("song\x00artist", "Song", "Artist", (TimedLyricLine(120.0, "line"),), 240.0, interactive=True)
 
-        self.assertEqual(calls, ["image-progress"])
-        self.assertEqual(reader.diagnostics()["last_source"], "netease-uia-progress")
-        self.assertAlmostEqual(reader.diagnostics()["last_confidence"], 0.74)
+        self.assertEqual(calls, ["progress"])
+        self.assertEqual(reader.diagnostics()["last_source"], "")
+        self.assertEqual(reader.diagnostics()["last_confidence"], 0.0)
 
-    def test_interactive_refresh_prefers_image_progress_over_stale_text_progress(self):
+    def test_forced_refresh_uses_image_progress_when_controls_are_hidden(self):
+        reader = NeteasePositionReader()
+        calls = []
+
+        def progress(_title, _duration):
+            calls.append("progress")
+            return None
+
+        def image_progress(_title, _duration):
+            calls.append("image-progress")
+            return NeteasePositionSample(132.0, 240.0, "netease-uia-progress", 0.74, sampled_at=100.0)
+
+        reader._duration_from_local_queue = lambda _title, _artist: 240.0
+        reader._position_from_visible_progress = progress
+        reader._position_from_visible_progress_image = image_progress
+        reader._last_track_key = "song\x00artist"
+
+        reader._refresh_sample("song\x00artist", "Song", "Artist", (TimedLyricLine(120.0, "line"),), 240.0, force_progress_image=True)
+
+        self.assertEqual(calls, ["progress", "image-progress"])
+        self.assertEqual(reader.diagnostics()["last_source"], "netease-uia-progress")
+
+    def test_visible_progress_image_uses_window_capture_without_printwindow(self):
+        reader = NeteasePositionReader()
+        progress_image = Image.new("RGB", (1000, 600), (247, 249, 252))
+        y = 538
+        for x in range(0, 501):
+            progress_image.putpixel((x, y), (246, 112, 126))
+            progress_image.putpixel((x, y + 1), (246, 112, 126))
+        for x in range(501, 1000):
+            progress_image.putpixel((x, y), (231, 232, 234))
+            progress_image.putpixel((x, y + 1), (231, 232, 234))
+        calls = []
+
+        class FakeWindow:
+            def capture_as_image(self):
+                calls.append("screen")
+                return progress_image
+
+        reader._netease_windows = lambda _desktop, _title, require_title=False: [FakeWindow()]
+        reader._capture_window_image_offscreen = lambda _window: (_ for _ in ()).throw(AssertionError("PrintWindow should not run by default"))
+        fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": object())
+        previous = sys.modules.get("pywinauto")
+        sys.modules["pywinauto"] = fake_pywinauto
+        try:
+            sample = reader._position_from_visible_progress_image("Song", 240.0)
+        finally:
+            if previous is None:
+                sys.modules.pop("pywinauto", None)
+            else:
+                sys.modules["pywinauto"] = previous
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(calls, ["screen"])
+        self.assertAlmostEqual(sample.position_seconds, 120.0, delta=6.0)
+
+    def test_progress_point_maps_bottom_progress_bar(self):
+        reader = NeteasePositionReader()
+
+        class FakeRect:
+            left = 100
+            top = 100
+            right = 1100
+            bottom = 960
+
+        class FakeWindow:
+            def rectangle(self):
+                return FakeRect()
+
+        reader._netease_windows = lambda _desktop, _title, require_title=False: [FakeWindow()]
+        fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": object())
+        previous = sys.modules.get("pywinauto")
+        sys.modules["pywinauto"] = fake_pywinauto
+        try:
+            position = reader.position_from_progress_point((700, 868), 240.0)
+        finally:
+            if previous is None:
+                sys.modules.pop("pywinauto", None)
+            else:
+                sys.modules["pywinauto"] = previous
+
+        self.assertIsNotNone(position)
+        self.assertAlmostEqual(position, 144.0, delta=1.0)
+
+    def test_progress_point_ignores_bottom_controls(self):
+        reader = NeteasePositionReader()
+
+        class FakeRect:
+            left = 100
+            top = 100
+            right = 1100
+            bottom = 960
+
+        class FakeWindow:
+            def rectangle(self):
+                return FakeRect()
+
+        reader._netease_windows = lambda _desktop, _title, require_title=False: [FakeWindow()]
+        fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": object())
+        previous = sys.modules.get("pywinauto")
+        sys.modules["pywinauto"] = fake_pywinauto
+        try:
+            position = reader.position_from_progress_point((700, 916), 240.0)
+        finally:
+            if previous is None:
+                sys.modules.pop("pywinauto", None)
+            else:
+                sys.modules["pywinauto"] = previous
+
+        self.assertIsNone(position)
+
+    def test_interactive_refresh_keeps_text_progress_without_image_capture(self):
         reader = NeteasePositionReader()
         calls = []
 
@@ -459,9 +679,9 @@ class NeteasePositionReaderTests(unittest.TestCase):
 
         reader._refresh_sample("song\x00artist", "Song", "Artist", (), 171.0, interactive=True)
 
-        self.assertEqual(calls, ["image-progress"])
+        self.assertEqual(calls, ["progress"])
         self.assertEqual(reader.diagnostics()["last_source"], "netease-uia-progress")
-        self.assertEqual(reader._last_sample.position_seconds, 122.0)
+        self.assertEqual(reader._last_sample.position_seconds, 54.0)
 
     def test_interactive_refresh_prefers_visible_lyrics_for_click_seek(self):
         reader = NeteasePositionReader()
@@ -566,7 +786,7 @@ class NeteasePositionReaderTests(unittest.TestCase):
                 "max_text_height": 42.0,
             },
         )
-        reader._visible_lyric_rows = lambda _desktop, _title: list(rows)
+        reader._visible_lyric_rows = lambda _desktop, _title, require_title=True: list(rows)
         fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": object())
         previous = sys.modules.get("pywinauto")
         sys.modules["pywinauto"] = fake_pywinauto
@@ -581,6 +801,51 @@ class NeteasePositionReaderTests(unittest.TestCase):
         self.assertIsNotNone(sample)
         self.assertEqual(sample.lyric_index, 1)
         self.assertEqual(sample.lyric_text, "target")
+        self.assertEqual(sample.position_seconds, 160.0)
+
+    def test_visible_lyrics_click_does_not_require_window_title_match(self):
+        reader = NeteasePositionReader()
+        calls = []
+        lines = (
+            TimedLyricLine(96.0, "before"),
+            TimedLyricLine(160.0, "target"),
+            TimedLyricLine(166.0, "after"),
+        )
+        rows = (
+            {
+                "left": 180.0,
+                "right": 520.0,
+                "top": 154.0,
+                "bottom": 186.0,
+                "container_left": 100.0,
+                "container_right": 900.0,
+                "container_top": 80.0,
+                "container_bottom": 420.0,
+                "texts": ("target",),
+                "max_text_height": 18.0,
+            },
+        )
+
+        def visible_rows(_desktop, _title, require_title=True):
+            calls.append(require_title)
+            return list(rows)
+
+        reader._visible_lyric_rows = visible_rows
+        fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": object())
+        previous = sys.modules.get("pywinauto")
+        sys.modules["pywinauto"] = fake_pywinauto
+        try:
+            sample = reader._position_from_visible_lyrics("Different Window Title", "Artist", lines, 240.0, click_pos=(780, 168))
+        finally:
+            if previous is None:
+                sys.modules.pop("pywinauto", None)
+            else:
+                sys.modules["pywinauto"] = previous
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(calls, [False])
+        self.assertEqual(sample.lyric_index, 1)
+        self.assertEqual(sample.position_seconds, 160.0)
 
     def test_click_geometry_fallback_selects_nearby_visible_line(self):
         reader = NeteasePositionReader()

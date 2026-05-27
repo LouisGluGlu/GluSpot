@@ -40,6 +40,7 @@ class FakeSession:
         self.playback = SimpleNamespace(playback_status=(status if status is not None else (4 if playing else 3)))
         self.timeline = FakeTimeline(position, duration)
         self.seek_requests = []
+        self.commands = []
         self.seek_result = True
 
     async def try_get_media_properties_async(self):
@@ -54,6 +55,18 @@ class FakeSession:
     async def try_change_playback_position_async(self, requested):
         self.seek_requests.append(int(requested))
         return self.seek_result
+
+    async def try_skip_previous_async(self):
+        self.commands.append("previous")
+        return True
+
+    async def try_skip_next_async(self):
+        self.commands.append("next")
+        return True
+
+    async def try_toggle_play_pause_async(self):
+        self.commands.append("toggle_play_pause")
+        return True
 
 
 class FakeManager:
@@ -84,6 +97,25 @@ class FakeLyricsStore:
         return False
 
 
+class TrackingLyricsStore(FakeLyricsStore):
+    def __init__(self):
+        self.local_calls = []
+        self.pending_calls = []
+        self.background_calls = []
+
+    def resolve_cached_or_local(self, title, artist, album_title="", duration_seconds=0.0):
+        self.local_calls.append((title, artist, album_title, duration_seconds))
+        return SimpleNamespace(timed_lyrics=(), lyrics=(), source="")
+
+    def is_lookup_pending(self, title, artist, album_title="", duration_seconds=0.0):
+        self.pending_calls.append((title, artist, album_title, duration_seconds))
+        return False
+
+    def resolve_in_background(self, title, artist, album_title="", duration_seconds=0.0):
+        self.background_calls.append((title, artist, album_title, duration_seconds))
+        return True
+
+
 class FakePositionReader:
     source_prefix = "netease"
 
@@ -94,11 +126,11 @@ class FakePositionReader:
     def duration_for_track(self, _title, _artist):
         return 0.0
 
-    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None):
+    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
         self.immediate_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos))
         return NeteasePositionSample(42.0, 180.0, "netease-uia-progress", 0.92, sampled_at=time.monotonic())
 
-    def read(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None):
+    def read(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
         self.read_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos))
         return None
 
@@ -114,7 +146,7 @@ class FakeTimedLyricsStore(FakeLyricsStore):
 
 
 class FakeClickPositionReader(FakePositionReader):
-    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None):
+    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
         self.immediate_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos))
         if allow_lyric_anchor:
             return NeteasePositionSample(160.0, 240.0, "netease-uia-lyrics", 0.86, 1, "line", time.monotonic())
@@ -122,9 +154,61 @@ class FakeClickPositionReader(FakePositionReader):
 
 
 class FakeStaleProgressReader(FakePositionReader):
-    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None):
+    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
         self.immediate_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos))
         return NeteasePositionSample(153.0, 240.0, "netease-uia-progress", 0.92, sampled_at=time.monotonic())
+
+
+class FakeQueuePositionReader(FakePositionReader):
+    def __init__(self):
+        super().__init__()
+        self.adjacent_calls = []
+
+    def adjacent_track(self, title, artist, direction):
+        self.adjacent_calls.append((title, artist, direction))
+        return SimpleNamespace(
+            title="Next Song" if direction == "next" else "Previous Song",
+            artist="Next Artist" if direction == "next" else "Previous Artist",
+            album_title="Next Album" if direction == "next" else "Previous Album",
+            duration_seconds=201.0 if direction == "next" else 199.0,
+        )
+
+
+class FakeForceImagePositionReader(FakePositionReader):
+    def read(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
+        self.read_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos, force_progress_image))
+        if force_progress_image:
+            return NeteasePositionSample(66.0, 240.0, "netease-uia-progress", 0.74, sampled_at=time.monotonic())
+        return None
+
+
+class FakeWindowTrackPositionReader(FakePositionReader):
+    def __init__(self):
+        super().__init__()
+        self.current_track_calls = 0
+
+    def current_track(self):
+        self.current_track_calls += 1
+        return SimpleNamespace(
+            title="New Song",
+            artist="New Artist",
+            album_title="New Album",
+            duration_seconds=201.0,
+        )
+
+
+class FakeProgressPointPositionReader(FakePositionReader):
+    def __init__(self):
+        super().__init__()
+        self.point_calls = []
+
+    def position_from_progress_point(self, point, duration_seconds):
+        self.point_calls.append((point, duration_seconds))
+        return 170.0
+
+    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
+        self.immediate_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos))
+        return NeteasePositionSample(58.0, 240.0, "netease-uia-progress", 0.74, sampled_at=time.monotonic())
 
 
 class FakeUser32:
@@ -370,16 +454,26 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIn("current-session-failed", provider._media_session_error)
         self.assertIn("cloudmusic.exe", " ".join(provider._media_session_candidates))
 
-    def test_music_player_adapter_default_does_not_enable_plugin(self):
+    def test_music_player_adapter_default_uses_selected_netease_core_adapter(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_music_player_mode": "auto",
         }.get(key, default)
 
-        self.assertEqual(provider._music_player_adapter_for("网易云音乐", "cloudmusic.exe"), "system")
+        self.assertEqual(provider._music_player_adapter_for("网易云音乐", "cloudmusic.exe"), "netease")
         self.assertEqual(provider._music_player_adapter_for("汽水音乐", "qishui.exe"), "system")
         self.assertEqual(provider._music_player_mode(), "netease")
+
+    def test_core_adapter_uses_selected_netease_when_progress_plugin_disabled(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("网易云音乐", "cloudmusic.exe"), "netease")
 
     def test_music_player_adapter_requires_selected_netease_source(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -811,6 +905,460 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(data.track.position_source, "netease-uia-progress")
         self.assertAlmostEqual(data.track.position_seconds, 144.0, delta=0.25)
 
+    def test_recent_progress_drag_uses_core_netease_progress_when_plugin_disabled(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakeClickPositionReader()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = replace(
+            base,
+            track=replace(
+                base.track,
+                title="Song",
+                artist="Artist",
+                track_id="same-track",
+                is_playing=True,
+                duration_seconds=240.0,
+                position_seconds=96.0,
+                position_source="local-estimate",
+                position_confidence=0.58,
+            ),
+        )
+        provider._last_ready_at = time.monotonic()
+        provider._source_app_foreground_at = provider._last_ready_at
+        provider._source_app_recent_click_at = 0.0
+        provider._source_app_recent_pointer_at = provider._last_ready_at
+        provider._last_raw_timeline_track_id = "same-track"
+        provider._last_raw_timeline_position = 96.0
+        provider._last_raw_timeline_at = provider._last_ready_at
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: True
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 96.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(len(reader.immediate_calls), 1)
+        self.assertFalse(reader.immediate_calls[0][5])
+        self.assertEqual(data.track.position_source, "netease-uia-progress")
+        self.assertAlmostEqual(data.track.position_seconds, 144.0, delta=0.25)
+
+    def test_background_netease_read_does_not_force_progress_image_without_user_action(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakeForceImagePositionReader()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = replace(
+            base,
+            track=replace(
+                base.track,
+                title="Song",
+                artist="Artist",
+                track_id="same-track",
+                is_playing=True,
+                duration_seconds=240.0,
+                position_seconds=34.0,
+                position_source="local-background",
+                position_confidence=0.46,
+            ),
+        )
+        provider._last_ready_at = time.monotonic()
+        provider._source_app_foreground_at = 0.0
+        provider._source_app_recent_click_at = 0.0
+        provider._source_app_recent_pointer_at = 0.0
+        provider._last_raw_timeline_track_id = "same-track"
+        provider._last_raw_timeline_position = 0.0
+        provider._last_raw_timeline_at = provider._last_ready_at
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 0.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(len(reader.read_calls), 1)
+        self.assertFalse(reader.read_calls[0][7])
+        self.assertEqual(data.track.position_source, "local-background")
+        self.assertGreaterEqual(data.track.position_seconds, 34.0)
+
+    def test_background_netease_window_title_corrects_stale_windows_metadata(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakeWindowTrackPositionReader()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = replace(
+            base,
+            track=replace(
+                base.track,
+                title="Old Song",
+                artist="Old Artist",
+                track_id="old-track",
+                source_app="cloudmusic.exe",
+                is_playing=True,
+                duration_seconds=180.0,
+                position_seconds=95.0,
+                position_source="local-background",
+            ),
+        )
+        provider._last_ready_at = time.monotonic()
+        provider._source_app_foreground_at = 0.0
+        provider._source_app_recent_click_at = 0.0
+        provider._source_app_recent_pointer_at = 0.0
+        provider._last_raw_timeline_track_id = "old-track"
+        provider._last_raw_timeline_position = 95.0
+        provider._last_raw_timeline_at = provider._last_ready_at
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Old Song", "Old Artist", True, 95.0, 180.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(reader.current_track_calls, 1)
+        self.assertEqual(data.track.title, "New Song")
+        self.assertEqual(data.track.artist, "New Artist")
+        self.assertEqual(data.track.duration_seconds, 201.0)
+        self.assertNotEqual(data.track.track_id, "old-track")
+
+    def test_recent_progress_drag_point_updates_local_seek_before_player_sample(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakeProgressPointPositionReader()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = replace(
+            base,
+            track=replace(
+                base.track,
+                title="Song",
+                artist="Artist",
+                track_id="same-track",
+                is_playing=True,
+                duration_seconds=240.0,
+                position_seconds=58.0,
+                position_source="netease-uia-progress",
+            ),
+        )
+        now = time.monotonic()
+        provider._last_ready_at = now
+        provider._source_app_foreground_at = now
+        provider._source_app_recent_click_at = 0.0
+        provider._source_app_recent_click_pos = None
+        provider._source_app_recent_pointer_at = now
+        provider._source_app_recent_pointer_pos = (802, 868)
+        provider._last_raw_timeline_track_id = "same-track"
+        provider._last_raw_timeline_position = 0.0
+        provider._last_raw_timeline_at = now
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: True
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 0.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(reader.point_calls, [((802, 868), 240.0)])
+        self.assertEqual(data.track.position_source, "local-seek")
+        self.assertAlmostEqual(data.track.position_seconds, 170.0, delta=0.25)
+
+    def test_cold_start_progress_drag_point_updates_local_seek_before_player_sample(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakeProgressPointPositionReader()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = None
+        now = time.monotonic()
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = now
+        provider._source_app_recent_click_at = 0.0
+        provider._source_app_recent_click_pos = None
+        provider._source_app_recent_pointer_at = now
+        provider._source_app_recent_pointer_pos = (520, 740)
+        provider._global_recent_click_at = 0.0
+        provider._global_recent_click_pos = None
+        provider._global_recent_pointer_at = 0.0
+        provider._global_recent_pointer_pos = None
+        provider._global_pointer_lock = None
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: True
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 96.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(reader.point_calls, [((520, 740), 240.0)])
+        self.assertEqual(data.track.position_source, "local-seek")
+        self.assertAlmostEqual(data.track.position_seconds, 170.0, delta=0.25)
+        self.assertEqual(provider._local_seek_track_id, data.track.track_id)
+
+    def test_current_read_prefetches_next_queue_track_lyrics(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakeQueuePositionReader()
+        lyrics_store = TrackingLyricsStore()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = lyrics_store
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: True
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 12.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(reader.adjacent_calls, [("Song", "Artist", "next")])
+        self.assertIn(("Next Song", "Next Artist", "Next Album", 201.0), lyrics_store.background_calls)
+
+    def test_successful_skip_command_requests_immediate_refresh_and_prefetch(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._loop = object()
+        refresh_calls = []
+
+        async def fake_send(_command):
+            return True
+
+        provider._send_command = fake_send
+        provider._run = lambda coro: asyncio.run(coro)
+        provider._request_immediate_media_refresh = lambda: refresh_calls.append("refresh")
+        provider._prefetch_adjacent_lyrics_for_command = lambda command: refresh_calls.append(f"prefetch:{command}")
+
+        self.assertTrue(provider.send_playback_command("next"))
+        self.assertEqual(refresh_calls, ["refresh", "prefetch:next"])
+
+    def test_successful_seek_without_cached_track_keeps_pending_anchor_and_refreshes(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._loop = object()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        refresh_calls = []
+
+        async def fake_seek(_position):
+            return True
+
+        provider._seek_position = fake_seek
+        provider._run = lambda coro: asyncio.run(coro)
+        provider._request_immediate_media_refresh = lambda: refresh_calls.append("refresh")
+
+        self.assertTrue(provider.seek_playback_position(123.0))
+        self.assertAlmostEqual(provider._local_seek_position_seconds, 123.0, delta=0.01)
+        self.assertGreater(provider._local_seek_at, 0.0)
+        self.assertEqual(provider._local_seek_track_id, "")
+        self.assertEqual(refresh_calls, ["refresh"])
+
+    def test_first_read_applies_pending_cold_start_seek_to_current_track(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._source_app_recent_click_at = 0.0
+        provider._source_app_recent_click_pos = None
+        provider._source_app_recent_pointer_at = 0.0
+        provider._global_recent_click_at = 0.0
+        provider._global_recent_click_pos = None
+        provider._global_recent_pointer_at = 0.0
+        provider._global_recent_pointer_pos = None
+        provider._global_pointer_lock = None
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = 123.0
+        provider._local_seek_at = time.monotonic()
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = None
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 30.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(data.track.position_source, "local-seek")
+        self.assertAlmostEqual(data.track.position_seconds, 123.0, delta=0.25)
+        self.assertEqual(provider._local_seek_track_id, data.track.track_id)
+
+    def test_consuming_first_refresh_applies_pending_cold_start_seek(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        track = replace(
+            base.track,
+            title="Song",
+            artist="Artist",
+            track_id="same-track",
+            is_playing=True,
+            duration_seconds=240.0,
+            position_seconds=30.0,
+            position_source="windows-media",
+            position_confidence=1.0,
+        )
+        data = replace(base, track=track)
+
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return data
+
+        provider._refresh_future = DoneFuture()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._local_seek_position_seconds = 123.0
+        provider._local_seek_at = time.monotonic()
+        provider._local_seek_track_id = ""
+
+        provider._consume_refresh_future(time.monotonic())
+
+        self.assertIsNotNone(provider._last_data)
+        self.assertEqual(provider._last_data.track.position_source, "local-seek")
+        self.assertAlmostEqual(provider._last_data.track.position_seconds, 123.0, delta=0.25)
+        self.assertEqual(provider._local_seek_track_id, "same-track")
+
     def test_recent_local_seek_rejects_stale_forward_progress_anchor(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeStaleProgressReader()
@@ -1138,6 +1686,47 @@ class ProviderStateTests(unittest.TestCase):
             "v2_music_player_mode": "netease",
             "v2_enable_dual_line_lyrics": False,
         }.get(key, default)
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 0.0, 180.0)
+
+        provider._get_session = fake_get_session
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: False
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(len(reader.immediate_calls), 1)
+        self.assertEqual(reader.read_calls, [])
+        self.assertAlmostEqual(data.track.position_seconds, 42.0, delta=0.25)
+        self.assertEqual(data.track.position_source, "netease-uia-progress")
+
+    def test_first_read_uses_core_netease_progress_when_plugin_disabled(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakePositionReader()
+        provider.fallback = EmptyIslandDataProvider(empty_visual_data())
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+
         async def fake_get_session():
             return FakeSession("cloudmusic.exe", "Song", "Artist", True, 0.0, 180.0)
 

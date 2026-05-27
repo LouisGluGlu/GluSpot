@@ -70,6 +70,10 @@ class PluginData:
     status: str = "normal"
     primary_value: str = ""
     secondary_value: str = ""
+    alert_title: str = ""
+    alert_body: str = ""
+    alert_priority: int = 50
+    progress: float = 0.0
 
 
 @dataclass(frozen=True)

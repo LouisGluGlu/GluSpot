@@ -28,12 +28,48 @@ class PluginProviderTests(unittest.TestCase):
         self.assertEqual(plugin.plugin_id, "time")
         self.assertEqual(plugin.status, "running")
 
+    def test_running_timer_exports_alert_copy(self):
+        provider = RealPluginProvider(lambda key, default=None: "2099-01-01T00:00:00" if key == "v2_timer_end_at" else default)
+
+        plugin = provider._time_plugin()
+
+        self.assertEqual(plugin.alert_title, "计时进行中")
+        self.assertIn("倒计时", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 30)
+
+    def test_running_timer_exports_progress_fraction(self):
+        now = datetime(2026, 5, 25, 12, 5, tzinfo=timezone.utc)
+        provider = RealPluginProvider(
+            lambda key, default=None: {
+                "v2_timer_started_at": "2026-05-25T12:00:00+00:00",
+                "v2_timer_end_at": "2026-05-25T12:10:00+00:00",
+            }.get(key, default)
+        )
+        provider._plugin_now = lambda: now
+
+        plugin = provider._time_plugin()
+
+        self.assertEqual(plugin.status, "running")
+        self.assertAlmostEqual(plugin.progress, 0.5)
+
     def test_timer_state_reports_done(self):
         now = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
         provider = RealPluginProvider(lambda key, default=None: "2026-05-25T11:59:00+00:00" if key == "v2_timer_end_at" else default)
 
         self.assertEqual(provider.timer_state(now), "done")
         self.assertEqual(provider._timer_summary(now), "计时结束")
+
+    def test_done_timer_exports_alert_copy(self):
+        now = datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+        provider = RealPluginProvider(lambda key, default=None: "2026-05-25T11:59:00+00:00" if key == "v2_timer_end_at" else default)
+        provider._plugin_now = lambda: now
+
+        plugin = provider._time_plugin()
+
+        self.assertEqual(plugin.status, "done")
+        self.assertEqual(plugin.alert_title, "计时结束")
+        self.assertIn("清除", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 5)
 
     def test_timer_remaining_uses_plugin_timezone(self):
         now = datetime(2026, 5, 25, 20, 0, tzinfo=timezone(timedelta(hours=8)))
@@ -81,6 +117,93 @@ class PluginProviderTests(unittest.TestCase):
         self.assertIn("北京市", plugin.summary)
         self.assertFalse(provider.diagnostics()["weather_has_api_key"])
         self.assertFalse(provider.diagnostics()["weather_requires_api_key"])
+
+    def test_weather_prefers_detected_location_when_enabled(self):
+        provider = RealPluginProvider(
+            lambda key, default=None: {
+                "v2_weather_use_location": True,
+                "v2_weather_manual_location": "北京",
+            }.get(key, default)
+        )
+        provider._detect_user_location = lambda: (31.2304, 121.4737, "上海市", "windows-location")
+        provider._resolve_weather_location = lambda _location: (_ for _ in ()).throw(AssertionError("manual geocode should not run"))
+        provider._fetch_open_meteo_weather = lambda _lat, _lon: {
+            "weather": "晴",
+            "temperature": "26",
+            "winddirection": "东南风",
+            "windspeed": "12",
+            "humidity": "40",
+            "reporttime": "2026-05-26T12:00",
+        }
+
+        provider._refresh_weather("auto:北京")
+
+        plugin = provider._weather_plugin()
+        self.assertIn("上海市", plugin.summary)
+        self.assertEqual(provider.diagnostics()["weather_location_source"], "windows-location")
+
+    def test_weather_falls_back_to_manual_city_when_location_unavailable(self):
+        provider = RealPluginProvider(
+            lambda key, default=None: {
+                "v2_weather_use_location": True,
+                "v2_weather_manual_location": "北京",
+            }.get(key, default)
+        )
+        provider._detect_user_location = lambda: None
+        provider._resolve_weather_location = lambda _location: (39.9042, 116.4074, "北京市")
+        provider._fetch_open_meteo_weather = lambda _lat, _lon: {
+            "weather": "晴",
+            "temperature": "26",
+            "winddirection": "东南风",
+            "windspeed": "12",
+            "humidity": "40",
+            "reporttime": "2026-05-26T12:00",
+        }
+
+        provider._refresh_weather("auto:北京")
+
+        plugin = provider._weather_plugin()
+        self.assertIn("北京市", plugin.summary)
+        self.assertEqual(provider.diagnostics()["weather_location_source"], "manual-fallback")
+
+    def test_agenda_diagnostics_include_class_schedule_roadmap(self):
+        provider = RealPluginProvider()
+
+        diagnostics = provider.diagnostics()
+
+        self.assertIn("课表读取录入", diagnostics["schedule_todo_items"])
+        self.assertIn("课表提醒功能", diagnostics["schedule_todo_items"])
+
+    def test_weather_loading_exports_alert_copy(self):
+        provider = RealPluginProvider(lambda key, default=None: {"v2_weather_location": "北京"}.get(key, default))
+        with provider._weather_lock:
+            provider._weather_location = "北京"
+            provider._weather_detail = "北京"
+            provider._weather_summary = "天气刷新中"
+            provider._weather_refreshing = True
+
+        plugin = provider._weather_plugin()
+
+        self.assertEqual(plugin.status, "loading")
+        self.assertEqual(plugin.alert_title, "天气刷新中")
+        self.assertEqual(plugin.alert_body, "北京")
+        self.assertEqual(plugin.alert_priority, 40)
+
+    def test_weather_error_exports_alert_copy(self):
+        provider = RealPluginProvider(lambda key, default=None: {"v2_weather_location": "北京"}.get(key, default))
+        with provider._weather_lock:
+            provider._weather_location = "北京"
+            provider._weather_cached_at = 999999999.0
+            provider._weather_detail = "北京"
+            provider._weather_summary = "上次数据"
+            provider._weather_error = "network down"
+
+        plugin = provider._weather_plugin()
+
+        self.assertEqual(plugin.status, "error")
+        self.assertEqual(plugin.alert_title, "天气不可用")
+        self.assertIn("network down", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 20)
 
     def test_open_meteo_geocode_parses_location(self):
         provider = RealPluginProvider()
@@ -182,6 +305,32 @@ class PluginProviderTests(unittest.TestCase):
         self.assertEqual(plugin.status, "due")
         self.assertEqual(plugin.detail, "现在")
         self.assertEqual(plugin.summary, "正在进行")
+
+    def test_schedule_soon_exports_alert_copy(self):
+        now = datetime.now().astimezone()
+        soon = (now + timedelta(minutes=4)).isoformat(timespec="minutes")
+        provider = RealPluginProvider()
+        provider._load_events = lambda: [(provider._parse_datetime(soon), "准备开会")]
+
+        plugin = provider._schedule_plugin()
+
+        self.assertEqual(plugin.status, "soon")
+        self.assertEqual(plugin.alert_title, "日程将近")
+        self.assertIn("准备开会", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 10)
+
+    def test_schedule_due_exports_alert_copy(self):
+        now = datetime.now().astimezone()
+        due = (now - timedelta(minutes=1)).isoformat(timespec="minutes")
+        provider = RealPluginProvider()
+        provider._load_events = lambda: [(provider._parse_datetime(due), "正在开会")]
+
+        plugin = provider._schedule_plugin()
+
+        self.assertEqual(plugin.status, "due")
+        self.assertEqual(plugin.alert_title, "日程到点")
+        self.assertIn("正在开会", plugin.alert_body)
+        self.assertEqual(plugin.alert_priority, 0)
 
 
 if __name__ == "__main__":

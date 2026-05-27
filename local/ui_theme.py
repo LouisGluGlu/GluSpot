@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, time as clock_time
+from typing import Callable
 
 from PySide6.QtCore import QEvent
 from PySide6.QtGui import QPalette
@@ -12,6 +14,22 @@ THEME_CHANGE_EVENT_TYPES = (
     QEvent.Type.PaletteChange,
     QEvent.Type.ThemeChange,
 )
+_theme_settings_getter: Callable[[str, object], object] | None = None
+
+
+def set_theme_settings_getter(getter: Callable[[str, object], object] | None):
+    global _theme_settings_getter
+    _theme_settings_getter = getter
+
+
+def _theme_setting(key: str, default=None, settings_getter: Callable[[str, object], object] | None = None):
+    getter = settings_getter or _theme_settings_getter
+    if getter is None:
+        return default
+    try:
+        return getter(key, default)
+    except Exception:
+        return default
 
 
 def _windows_apps_use_light_theme() -> int | None:
@@ -30,7 +48,57 @@ def _windows_apps_use_light_theme() -> int | None:
         return None
 
 
-def app_dark_mode() -> bool:
+def _parse_clock(value: object, fallback: clock_time) -> clock_time:
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    for separator in (":", "."):
+        if separator in text:
+            hours, minutes = text.split(separator, 1)
+            break
+    else:
+        hours, minutes = text, "0"
+    try:
+        hour_value = max(0, min(23, int(hours)))
+        minute_value = max(0, min(59, int(minutes[:2] or "0")))
+        return clock_time(hour_value, minute_value)
+    except ValueError:
+        return fallback
+
+
+def _clock_from_now(now: datetime | clock_time | None) -> clock_time:
+    if isinstance(now, datetime):
+        return now.time().replace(second=0, microsecond=0)
+    if isinstance(now, clock_time):
+        return now.replace(second=0, microsecond=0)
+    return datetime.now().time().replace(second=0, microsecond=0)
+
+
+def _clock_in_window(current: clock_time, start: clock_time, end: clock_time) -> bool:
+    current_value = current.hour * 60 + current.minute
+    start_value = start.hour * 60 + start.minute
+    end_value = end.hour * 60 + end.minute
+    if start_value == end_value:
+        return False
+    if start_value < end_value:
+        return start_value <= current_value < end_value
+    return current_value >= start_value or current_value < end_value
+
+
+def _scheduled_dark_mode(settings_getter: Callable[[str, object], object] | None = None, now: datetime | clock_time | None = None) -> bool:
+    start = _parse_clock(_theme_setting("v2_theme_dark_start", "22:00", settings_getter), clock_time(22, 0))
+    end = _parse_clock(_theme_setting("v2_theme_dark_end", "07:00", settings_getter), clock_time(7, 0))
+    return _clock_in_window(_clock_from_now(now), start, end)
+
+
+def app_dark_mode(settings_getter: Callable[[str, object], object] | None = None, now: datetime | clock_time | None = None) -> bool:
+    mode = str(_theme_setting("v2_theme_mode", "system", settings_getter) or "system").strip().lower()
+    if mode in {"dark", "night"}:
+        return True
+    if mode in {"light", "day"}:
+        return False
+    if mode in {"schedule", "scheduled", "custom"}:
+        return _scheduled_dark_mode(settings_getter, now)
     apps_use_light_theme = _windows_apps_use_light_theme()
     if apps_use_light_theme is not None:
         return int(apps_use_light_theme) == 0
@@ -53,8 +121,8 @@ def is_theme_change_event(event) -> bool:
         return False
 
 
-def ios_theme() -> dict[str, str]:
-    if app_dark_mode():
+def ios_theme(settings_getter: Callable[[str, object], object] | None = None, now: datetime | clock_time | None = None) -> dict[str, str]:
+    if app_dark_mode(settings_getter=settings_getter, now=now):
         return {
             "window": "#1c1c1e",
             "panel": "#2c2c2e",

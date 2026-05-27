@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+from datetime import datetime, timedelta
+
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
@@ -18,13 +21,22 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from local.ios_widgets import IosSwitch
-from local.ui_theme import ios_theme, is_theme_change_event, style_combo_popup
+from local.mac_style import (
+    mac_preferences_stylesheet,
+    mac_preferences_theme,
+    mac_sidebar_icon,
+    mac_sidebar_icon_colors,
+    mac_traffic_lights,
+)
+from local.no_wheel_widgets import NoWheelComboBox, NoWheelSpinBox
+from local.ui_theme import is_theme_change_event, style_combo_popup
 
 
 class ColorButton(QPushButton):
@@ -98,6 +110,22 @@ class SettingsWindow(QDialog):
         ("2x", 2.0),
     )
 
+    TIMEZONES = (
+        ("本地时区", "local"),
+        ("中国 UTC+8", "UTC+8"),
+        ("日本 UTC+9", "UTC+9"),
+        ("美国西部 UTC-8", "UTC-8"),
+        ("美国东部 UTC-5", "UTC-5"),
+        ("伦敦 UTC+0", "UTC+0"),
+    )
+
+    THEME_MODES = (
+        ("跟随系统", "system"),
+        ("浅色", "light"),
+        ("深色", "dark"),
+        ("自定时间", "schedule"),
+    )
+
     LYRIC_ELASTIC_MODES = (
         ("双侧悦动", "both"),
         ("左侧轻推", "left"),
@@ -108,20 +136,22 @@ class SettingsWindow(QDialog):
         self.island_widget = island_widget
         self.settings = settings_manager
         self._barrage_adjust_generation = 0
-        self._barrage_page_index = 3
-        self._diagnostics_page_index = 4
+        self._barrage_page_index = 4
+        self._diagnostics_page_index = 5
         self._diagnostic_labels: dict[str, QLabel] = {}
         self._applying_theme = False
+        self._window_drag_global = None
+        self._window_drag_pos = None
         self.setWindowTitle("gpt-island 设置")
         self.setMinimumSize(860, 620)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
-        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, True)
-        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
-        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setWindowFlags(
+            (self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            & ~Qt.WindowType.WindowContextHelpButtonHint
+        )
         self._build_ui()
 
     def _theme(self) -> dict[str, str]:
-        return ios_theme()
+        return mac_preferences_theme()
 
     def _apply_theme(self):
         if getattr(self, "_applying_theme", False):
@@ -129,41 +159,7 @@ class SettingsWindow(QDialog):
         self._applying_theme = True
         t = self._theme()
         try:
-            self.setStyleSheet(
-                f"""
-                QDialog, QWidget {{ background: {t["window"]}; color: {t["text"]}; selection-background-color: #007aff; selection-color: #ffffff; }}
-                QScrollArea {{ border: 0; background: transparent; }}
-                QScrollArea > QWidget > QWidget {{ background: {t["window"]}; color: {t["text"]}; }}
-                QListWidget {{ background: {t["panel"]}; color: {t["text"]}; border: 0; outline: 0; padding: 16px 10px; font-size: 14px; }}
-                QListWidget::item {{ border-radius: 12px; padding: 12px 14px; margin: 3px 0; color: {t["text"]}; }}
-                QListWidget::item:hover {{ background: {t["popup_hover"]}; color: {t["text"]}; }}
-                QListWidget::item:focus {{ outline: 0; border: 0; }}
-                QListWidget::item:selected {{ background: #007aff; color: white; }}
-                QLabel {{ background: transparent; color: {t["text"]}; }}
-                QLabel#Title {{ font-size: 28px; font-weight: 700; color: {t["text"]}; padding: 0 0 14px 0; }}
-                QLabel#Section {{ font-size: 13px; font-weight: 700; color: {t["muted"]}; padding: 20px 0 8px 2px; text-transform: uppercase; }}
-                QFrame#Card {{ background: {t["card"]}; border: 1px solid {t["card_border"]}; border-radius: 14px; }}
-                QFrame#Card QWidget {{ background: transparent; color: {t["text"]}; }}
-                QLabel#RowTitle {{ font-size: 14px; color: {t["text"]}; }}
-                QLabel#Value {{ color: {t["muted"]}; min-width: 58px; }}
-                QLineEdit, QComboBox {{ color: {t["text"]}; min-height: 36px; border: 1px solid {t["card_border"]}; border-radius: 10px; padding: 4px 12px; background: {t["input"]}; }}
-                QLineEdit:focus, QComboBox:focus {{ border-color: #007aff; background: {t["input_focus"]}; }}
-                QComboBox QAbstractItemView {{ background: {t["card"]}; color: {t["text"]}; border: 1px solid {t["card_border"]}; selection-background-color: #007aff; selection-color: #ffffff; outline: 0; }}
-                QComboBox QAbstractItemView::item {{ min-height: 30px; padding: 6px 10px; background: transparent; color: {t["text"]}; }}
-                QComboBox QAbstractItemView::item:hover {{ background: {t["popup_hover"]}; color: {t["text"]}; }}
-                QComboBox QAbstractItemView::item:selected {{ background: #007aff; color: #ffffff; }}
-                QPushButton {{ min-height: 36px; border: 0; border-radius: 10px; background: {t["button"]}; color: {t["text"]}; padding: 0 16px; }}
-                QPushButton:hover {{ background: {t["button_hover"]}; }}
-                QPushButton#Primary {{ background: #007aff; color: white; }}
-                QSlider::groove:horizontal {{ height: 6px; border-radius: 3px; background: {t["track"]}; }}
-                QSlider::sub-page:horizontal {{ height: 6px; border-radius: 3px; background: #007aff; }}
-                QSlider::handle:horizontal {{ width: 22px; height: 22px; margin: -8px 0; border-radius: 11px; background: #ffffff; border: 1px solid {t["track"]}; }}
-                QScrollBar:vertical {{ background: transparent; width: 10px; margin: 8px 2px 8px 2px; }}
-                QScrollBar::handle:vertical {{ background: {t["scroll"]}; border-radius: 5px; min-height: 36px; }}
-                QScrollBar::handle:vertical:hover {{ background: {t["muted"]}; }}
-                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-                """
-            )
+            self.setStyleSheet(mac_preferences_stylesheet(t))
         finally:
             self._applying_theme = False
 
@@ -190,61 +186,138 @@ class SettingsWindow(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        side = QWidget()
+        side = QFrame()
+        side.setObjectName("MacSidebar")
+        side.setFixedWidth(196)
         side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(10, 12, 10, 12)
-        side_layout.setSpacing(0)
+        side_layout.setContentsMargins(10, 10, 10, 12)
+        side_layout.setSpacing(8)
+
+        side_layout.addWidget(mac_traffic_lights(self), 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("MacSearch")
+        self.search_input.setPlaceholderText("搜索")
+        self.search_input.textChanged.connect(self._filter_settings_nav)
+        side_layout.addWidget(self.search_input)
 
         self.nav = QListWidget()
-        self.nav.setFixedWidth(172)
+        self.nav.setObjectName("MacSidebarList")
         self.nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         side_layout.addWidget(self.nav, 1)
-        close_btn = QPushButton("关闭")
-        close_btn.setFixedHeight(34)
-        close_btn.clicked.connect(self.close)
-        side_layout.addWidget(close_btn)
         root.addWidget(side)
 
+        content = QWidget()
+        content.setObjectName("MacContentPane")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        title_bar = QFrame()
+        title_bar.setObjectName("MacTitleBar")
+        title_bar.setFixedHeight(52)
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(24, 0, 24, 0)
+        title_layout.setSpacing(10)
+        self.title_label = QLabel()
+        self.title_label.setObjectName("MacTitle")
+        title_layout.addWidget(self.title_label)
+        title_layout.addStretch(1)
+        content_layout.addWidget(title_bar)
+
         self.stack = QStackedWidget()
-        root.addWidget(self.stack, 1)
+        content_layout.addWidget(self.stack, 1)
+        root.addWidget(content, 1)
 
         pages = (
             ("系统", self._system_page()),
             ("媒体播放", self._media_page()),
             ("外观", self._appearance_page()),
+            ("插件", self._plugins_page()),
             ("弹幕", self._barrage_page()),
             ("快捷动作", self._actions_page()),
             ("诊断", self._diagnostics_page()),
         )
-        pages = pages[:4] + pages[5:]
-        for name, page in pages:
-            self.nav.addItem(QListWidgetItem(name))
+        pages = pages[:5] + pages[6:]
+        colors = mac_sidebar_icon_colors()
+        for index, (name, page) in enumerate(pages):
+            self.nav.addItem(QListWidgetItem(mac_sidebar_icon(colors[index % len(colors)], name[:1]), name))
             self.stack.addWidget(page)
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.nav.currentRowChanged.connect(self._settings_page_changed)
+        self.nav.currentRowChanged.connect(self._select_settings_page)
         self.nav.setCurrentRow(0)
+
+    def _select_settings_page(self, row: int):
+        if row < 0 or row >= self.stack.count():
+            return
+        self.stack.setCurrentIndex(row)
+        item = self.nav.item(row)
+        if item is not None:
+            self.title_label.setText(item.text())
+        self._settings_page_changed(row)
+
+    def _filter_settings_nav(self, text: str):
+        query = str(text or "").strip().lower()
+        first_visible = -1
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            hidden = bool(query and query not in item.text().lower())
+            item.setHidden(hidden)
+            if not hidden and first_visible < 0:
+                first_visible = row
+        current = self.nav.currentItem()
+        if first_visible >= 0 and current is not None and current.isHidden():
+            self.nav.setCurrentRow(first_visible)
+
+    def _is_window_drag_area(self, point) -> bool:
+        if point.y() > 54 and point.x() > 196:
+            return False
+        child = self.childAt(point.toPoint())
+        if child is None:
+            return True
+        if isinstance(child, (QLineEdit, QListWidget, QComboBox, QPushButton, IosSwitch, QSlider, QSpinBox)):
+            return False
+        return True
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._is_window_drag_area(event.position()):
+            self._window_drag_global = event.globalPosition().toPoint()
+            self._window_drag_pos = self.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._window_drag_global is not None and self._window_drag_pos is not None:
+            self.move(self._window_drag_pos + event.globalPosition().toPoint() - self._window_drag_global)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._window_drag_global = None
+        self._window_drag_pos = None
+        super().mouseReleaseEvent(event)
 
     def _page(self, title: str) -> QWidget:
         scroll = QScrollArea()
+        scroll.setObjectName("MacContentScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         page = QWidget()
+        page.setObjectName("MacScrollBody")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 30, 32, 30)
+        layout.setContentsMargins(24, 18, 28, 28)
         layout.setSpacing(16)
-        label = QLabel(title)
-        label.setObjectName("Title")
-        layout.addWidget(label)
         scroll.setWidget(page)
         scroll._content_layout = layout
         return scroll
 
     def _card(self, parent_layout: QVBoxLayout) -> QFrame:
         card = QFrame()
-        card.setObjectName("Card")
+        card.setObjectName("MacCard")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 14, 20, 14)
+        layout.setContentsMargins(18, 12, 18, 12)
         layout.setSpacing(0)
         parent_layout.addWidget(card)
         return card
@@ -314,7 +387,7 @@ class SettingsWindow(QDialog):
         return slider
 
     def _combo(self, items: list[tuple[str, object]], current, callback) -> QComboBox:
-        combo = QComboBox()
+        combo = NoWheelComboBox()
         for label, data in items:
             combo.addItem(label, data)
         for index in range(combo.count()):
@@ -333,6 +406,7 @@ class SettingsWindow(QDialog):
         layout: QVBoxLayout = page._content_layout
         card = self._card(layout)
         c = card.layout()
+
         self.music_checkbox = self._check("音乐岛", bool(getattr(self.island_widget, "music_playing", True)), self._set_music_playing)
         self.music_auto_checkbox = self._check("音乐岛自动识别：无音频时隐藏", bool(getattr(self.island_widget, "music_auto_detect", False)), self._set_music_auto_detect)
         self.plugin_checkbox = self._check("插件岛", bool(getattr(self.island_widget, "persistent_plugin", True)), self._set_persistent_plugin)
@@ -435,14 +509,24 @@ class SettingsWindow(QDialog):
         card = self._card(layout)
         c = card.layout()
 
-        self.seconds_checkbox = self._check("时间插件显示秒数", bool(getattr(self.island_widget, "show_seconds", True)), self._set_show_seconds)
-        c.addWidget(self.seconds_checkbox)
+        self.theme_mode = self._combo(
+            list(self.THEME_MODES),
+            str(self._setting_value("v2_theme_mode", "system") or "system"),
+            self._set_theme_mode,
+        )
+        self._row(c, "界面模式", self.theme_mode)
+        self.theme_dark_start = QLineEdit(str(self._setting_value("v2_theme_dark_start", "22:00") or "22:00"))
+        self.theme_dark_start.setPlaceholderText("22:00")
+        self.theme_dark_start.editingFinished.connect(self._set_theme_dark_start)
+        self._row(c, "深色开始", self.theme_dark_start)
+        self.theme_dark_end = QLineEdit(str(self._setting_value("v2_theme_dark_end", "07:00") or "07:00"))
+        self.theme_dark_end.setPlaceholderText("07:00")
+        self.theme_dark_end.editingFinished.connect(self._set_theme_dark_end)
+        self._row(c, "深色结束", self.theme_dark_end)
+
         self.high_quality_font_checkbox = self._check("高质量字体渲染", bool(getattr(self.island_widget, "high_quality_font_rendering", False)), self._set_high_quality_font_rendering)
         c.addWidget(self.high_quality_font_checkbox)
         self.high_quality_font_checkbox.hide()
-        self.plugin_count = self._slider_row(c, "插件数量", 0, 3, max(0, min(3, int(getattr(self.island_widget, "enabled_plugin_count", 3)))), self._set_plugin_count)
-        if self.plugin_count.parentWidget():
-            self.plugin_count.parentWidget().hide()
         self.music_ambience_style = self._combo(list(self.MUSIC_AMBIENCE_STYLES), str(getattr(self.island_widget, "music_ambience_style", "sea_level")), self._set_music_ambience_style)
         self._row(c, "音乐岛光效", self.music_ambience_style)
         self.music_preview = self._preview_frame(54)
@@ -479,6 +563,94 @@ class SettingsWindow(QDialog):
         self.empty_bar_opacity = self._slider_row(c, "横条不透明度", 10, 100, int(getattr(self.island_widget, "empty_bar_opacity", 100)), self._set_empty_bar_opacity, "%")
         self.custom_color_inputs = self._color_buttons_row(c, "自定义颜色", getattr(self.island_widget, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86")))
         self._update_previews()
+        layout.addStretch(1)
+        return page
+
+    def _plugins_page(self) -> QWidget:
+        page = self._page("插件")
+        layout: QVBoxLayout = page._content_layout
+
+        general = self._card(layout)
+        g = general.layout()
+        self.plugin_count = self._slider_row(g, "插件数量", 0, 3, max(0, min(3, int(getattr(self.island_widget, "enabled_plugin_count", 3)))), self._set_plugin_count)
+        self.seconds_checkbox = self._check("时间显示秒数", bool(getattr(self.island_widget, "show_seconds", True)), self._set_show_seconds)
+        g.addWidget(self.seconds_checkbox)
+
+        time_title = QLabel("时间 / 计时器")
+        time_title.setObjectName("Section")
+        layout.addWidget(time_title)
+        time_card = self._card(layout)
+        t = time_card.layout()
+        self.plugin_timezone = self._combo(
+            list(self.TIMEZONES),
+            str(self._setting_value("v2_plugin_timezone", "local") or "local"),
+            self._set_plugin_timezone_combo,
+        )
+        self._row(t, "时区", self.plugin_timezone)
+        self.plugin_timezone_text = QLineEdit(str(self._setting_value("v2_plugin_timezone", "local") or "local"))
+        self.plugin_timezone_text.setPlaceholderText("local 或 UTC+8")
+        self.plugin_timezone_text.editingFinished.connect(self._set_plugin_timezone_text)
+        self._row(t, "自定义时区", self.plugin_timezone_text)
+        quick_row = QHBoxLayout()
+        for minutes in (5, 10, 25):
+            button = QPushButton(f"{minutes} 分钟")
+            button.clicked.connect(lambda _checked=False, m=minutes: self._start_plugin_timer(m))
+            quick_row.addWidget(button)
+        clear = QPushButton("清除")
+        clear.setObjectName("Danger")
+        clear.clicked.connect(self._clear_plugin_timer)
+        quick_row.addWidget(clear)
+        t.addLayout(quick_row)
+        timer_row = QHBoxLayout()
+        self.plugin_timer_minutes = NoWheelSpinBox()
+        self.plugin_timer_minutes.setRange(1, 600)
+        self.plugin_timer_minutes.setValue(15)
+        self.plugin_timer_minutes.setSuffix(" 分钟")
+        timer_row.addWidget(self.plugin_timer_minutes, 1)
+        start = QPushButton("开始")
+        start.setObjectName("Primary")
+        start.clicked.connect(lambda: self._start_plugin_timer(int(self.plugin_timer_minutes.value())))
+        timer_row.addWidget(start)
+        t.addLayout(timer_row)
+
+        weather_title = QLabel("天气")
+        weather_title.setObjectName("Section")
+        layout.addWidget(weather_title)
+        weather_card = self._card(layout)
+        w = weather_card.layout()
+        self.weather_use_location = self._check(
+            "优先读取定位",
+            bool(self._setting_value("v2_weather_use_location", True)),
+            self._set_weather_use_location,
+        )
+        w.addWidget(self.weather_use_location)
+        self.weather_manual_location = QLineEdit(
+            str(self._setting_value("v2_weather_manual_location", self._setting_value("v2_weather_location", "北京")) or "北京")
+        )
+        self.weather_manual_location.setPlaceholderText("北京、上海、深圳")
+        self.weather_manual_location.editingFinished.connect(self._set_weather_manual_location)
+        self._row(w, "手动城市", self.weather_manual_location)
+        refresh = QPushButton("刷新天气")
+        refresh.setObjectName("Primary")
+        refresh.clicked.connect(lambda: self._save("v2_weather_refresh_nonce", str(time.monotonic())))
+        w.addWidget(refresh, 0, Qt.AlignmentFlag.AlignRight)
+
+        agenda_title = QLabel("日程")
+        agenda_title.setObjectName("Section")
+        layout.addWidget(agenda_title)
+        agenda_card = self._card(layout)
+        a = agenda_card.layout()
+        self.schedule_json_input = QLineEdit(str(self._setting_value("v2_schedule_json_path", "") or ""))
+        self.schedule_json_input.setPlaceholderText("data/schedule.json")
+        self.schedule_json_input.editingFinished.connect(lambda: self._set_schedule_json_path(self.schedule_json_input.text()))
+        self._row(a, "JSON", self.schedule_json_input)
+        self.schedule_ics_input = QLineEdit(str(self._setting_value("v2_schedule_ics_path", "") or ""))
+        self.schedule_ics_input.setPlaceholderText("data/schedule.ics")
+        self.schedule_ics_input.editingFinished.connect(lambda: self._set_schedule_ics_path(self.schedule_ics_input.text()))
+        self._row(a, "ICS", self.schedule_ics_input)
+        self._row(a, "待做清单", QLabel("课表读取录入"))
+        self._row(a, "提醒路线", QLabel("课表提醒功能"))
+
         layout.addStretch(1)
         return page
 
@@ -612,6 +784,7 @@ class SettingsWindow(QDialog):
             (self.manual_finder_checkbox, bool(getattr(self.island_widget, "manual_finder_available", False))),
             (self.expanded_checkbox, bool(getattr(self.island_widget, "expanded", False))),
             (self.seconds_checkbox, bool(getattr(self.island_widget, "show_seconds", True))),
+            (self.weather_use_location, bool(self._setting_value("v2_weather_use_location", True))),
             (self.high_quality_font_checkbox, bool(getattr(self.island_widget, "high_quality_font_rendering", False))),
             (self.auto_bounds_checkbox, bool(getattr(self.island_widget, "auto_expand_bounds", True))),
             (self.barrage_backdrop, bool(getattr(self.island_widget, "barrage_use_backdrop", True))),
@@ -657,6 +830,31 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.music_ambience_style, str(getattr(self.island_widget, "music_ambience_style", "sea_level")))
         self._set_combo_data(self.music_player_mode, self._music_player_mode_setting())
         self._set_combo_data(self.lyric_elastic_mode, str(getattr(self.island_widget, "lyric_elastic_mode", "both")))
+        self._set_combo_data(self.plugin_timezone, str(self._setting_value("v2_plugin_timezone", "local") or "local"))
+        self.plugin_timezone_text.blockSignals(True)
+        self.plugin_timezone_text.setText(str(self._setting_value("v2_plugin_timezone", "local") or "local"))
+        self.plugin_timezone_text.blockSignals(False)
+        self.weather_manual_location.blockSignals(True)
+        self.weather_manual_location.setText(
+            str(self._setting_value("v2_weather_manual_location", self._setting_value("v2_weather_location", "北京")) or "北京")
+        )
+        self.weather_manual_location.blockSignals(False)
+        self.schedule_json_input.blockSignals(True)
+        self.schedule_json_input.setText(str(self._setting_value("v2_schedule_json_path", "") or ""))
+        self.schedule_json_input.blockSignals(False)
+        self.schedule_ics_input.blockSignals(True)
+        self.schedule_ics_input.setText(str(self._setting_value("v2_schedule_ics_path", "") or ""))
+        self.schedule_ics_input.blockSignals(False)
+        if hasattr(self, "theme_mode"):
+            self._set_combo_data(self.theme_mode, str(self._setting_value("v2_theme_mode", "system") or "system"))
+        if hasattr(self, "theme_dark_start"):
+            self.theme_dark_start.blockSignals(True)
+            self.theme_dark_start.setText(str(self._setting_value("v2_theme_dark_start", "22:00") or "22:00"))
+            self.theme_dark_start.blockSignals(False)
+        if hasattr(self, "theme_dark_end"):
+            self.theme_dark_end.blockSignals(True)
+            self.theme_dark_end.setText(str(self._setting_value("v2_theme_dark_end", "07:00") or "07:00"))
+            self.theme_dark_end.blockSignals(False)
         colors = list(getattr(self.island_widget, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86")))
         for edit, value in zip(self.custom_color_inputs, colors):
             if hasattr(edit, "set_color"):
@@ -747,6 +945,15 @@ class SettingsWindow(QDialog):
     def _save(self, key: str, value):
         if self.settings:
             self.settings.set(key, value)
+
+    def _refresh_theme_after_setting_change(self):
+        self._apply_theme()
+        for combo in self.findChildren(QComboBox):
+            self._style_combo_popup(combo)
+        for switch in self.findChildren(IosSwitch):
+            switch.update()
+        if hasattr(self.island_widget, "update"):
+            self.island_widget.update()
 
     def _setting_value(self, key: str, default=None):
         if self.settings:
@@ -974,6 +1181,37 @@ class SettingsWindow(QDialog):
             self.island_widget.update()
         self._save("v2_high_quality_font_rendering", bool(enabled))
 
+    def _set_theme_mode(self, _index: int = -1):
+        mode = str(self.theme_mode.currentData() or "system")
+        if mode not in {"system", "light", "dark", "schedule"}:
+            mode = "system"
+        self._save("v2_theme_mode", mode)
+        self._refresh_theme_after_setting_change()
+
+    def _normalize_theme_time(self, value: str, fallback: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            text = fallback
+        parts = text.replace(".", ":").split(":", 1)
+        try:
+            hour = max(0, min(23, int(parts[0])))
+            minute = max(0, min(59, int(parts[1][:2]) if len(parts) > 1 and parts[1] else 0))
+            return f"{hour:02d}:{minute:02d}"
+        except ValueError:
+            return fallback
+
+    def _set_theme_dark_start(self):
+        value = self._normalize_theme_time(self.theme_dark_start.text(), "22:00")
+        self.theme_dark_start.setText(value)
+        self._save("v2_theme_dark_start", value)
+        self._refresh_theme_after_setting_change()
+
+    def _set_theme_dark_end(self):
+        value = self._normalize_theme_time(self.theme_dark_end.text(), "07:00")
+        self.theme_dark_end.setText(value)
+        self._save("v2_theme_dark_end", value)
+        self._refresh_theme_after_setting_change()
+
     def _set_no_lyrics_text(self, value: str):
         text = " ".join(str(value or "暂无歌词").split())[:16] or "暂无歌词"
         if text != value:
@@ -992,11 +1230,49 @@ class SettingsWindow(QDialog):
     def _set_weather_location(self, value: str):
         self._save("v2_weather_location", str(value or "").strip() or "Beijing")
 
+    def _set_weather_manual_location(self):
+        value = str(self.weather_manual_location.text() or "").strip() or "北京"
+        self.weather_manual_location.setText(value)
+        self._save("v2_weather_manual_location", value)
+        if not bool(self._setting_value("v2_weather_use_location", True)):
+            self._save("v2_weather_location", value)
+        self._save("v2_weather_refresh_nonce", str(time.monotonic()))
+
+    def _set_weather_use_location(self, enabled: bool):
+        self._save("v2_weather_use_location", bool(enabled))
+        if not enabled:
+            self._set_weather_manual_location()
+        else:
+            self._save("v2_weather_refresh_nonce", str(time.monotonic()))
+
     def _set_plugin_timezone(self, value: str):
         self._save("v2_plugin_timezone", str(value or "").strip() or "local")
 
+    def _set_plugin_timezone_combo(self, _index: int = -1):
+        value = str(self.plugin_timezone.currentData() or "local")
+        self.plugin_timezone_text.setText(value)
+        self._set_plugin_timezone(value)
+
+    def _set_plugin_timezone_text(self):
+        value = str(self.plugin_timezone_text.text() or "local").strip() or "local"
+        self.plugin_timezone_text.setText(value)
+        self._set_combo_data(self.plugin_timezone, value)
+        self._set_plugin_timezone(value)
+
     def _set_timer_end_at(self, value: str):
         self._save("v2_timer_end_at", str(value or "").strip())
+
+    def _start_plugin_timer(self, minutes: int):
+        minutes = max(1, min(600, int(minutes)))
+        now = datetime.now().astimezone()
+        self._save("v2_timer_started_at", now.isoformat(timespec="seconds"))
+        self._save("v2_timer_end_at", (now + timedelta(minutes=minutes)).isoformat(timespec="seconds"))
+        self._touch()
+
+    def _clear_plugin_timer(self):
+        self._save("v2_timer_started_at", "")
+        self._save("v2_timer_end_at", "")
+        self._touch()
 
     def _set_schedule_json_path(self, value: str):
         self._save("v2_schedule_json_path", str(value or "").strip())

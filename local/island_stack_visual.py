@@ -321,6 +321,10 @@ class IslandStackVisual(QWidget):
                 plugin.icon,
                 plugin.plugin_id,
                 plugin.status,
+                plugin.alert_title,
+                plugin.alert_body,
+                plugin.alert_priority,
+                plugin.progress,
             )
             for plugin in visual_data.plugins
         ]
@@ -448,6 +452,10 @@ class IslandStackVisual(QWidget):
                 plugin.icon,
                 plugin.plugin_id,
                 plugin.status,
+                plugin.alert_title,
+                plugin.alert_body,
+                plugin.alert_priority,
+                plugin.progress,
             )
             for plugin in visual_data.plugins
         ]
@@ -1725,7 +1733,6 @@ class IslandStackVisual(QWidget):
         elif key == "plugin":
             if self.expanded:
                 self._focus_plugin_at(self.pointer_pos.x(), immediate=True)
-                self._open_plugin_manager()
             else:
                 self._set_expanded(True)
         elif self._is_message_hit(key):
@@ -1740,7 +1747,7 @@ class IslandStackVisual(QWidget):
         if not self.plugin_samples:
             return
         index = max(0, min(self._active_plugin_focus(time.monotonic()), len(self.plugin_samples) - 1))
-        label, detail, summary, _color, _icon, plugin_id, status = self._plugin_tuple(self.plugin_samples[index])
+        label, detail, summary, _color, _icon, plugin_id, status, _alert_title, _alert_body, _alert_priority, _progress = self._plugin_tuple(self.plugin_samples[index])
         try:
             from local.plugin_manager_window import PluginManagerWindow
             existing = self.plugin_manager_windows.get(label)
@@ -1772,17 +1779,24 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def _plugin_tuple(self, plugin):
+        if len(plugin) >= 11:
+            label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress = plugin[:11]
+            return label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress
+        if len(plugin) >= 10:
+            label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority = plugin[:10]
+            return label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, 0.0
         if len(plugin) >= 7:
-            return plugin[:7]
+            label, detail, summary, color, icon, plugin_id, status = plugin[:7]
+            return label, detail, summary, color, icon, plugin_id, status, "", "", 50, 0.0
         label, detail, summary, color, icon = plugin[:5]
-        return label, detail, summary, color, icon, "", "normal"
+        return label, detail, summary, color, icon, "", "normal", "", "", 50, 0.0
 
     def _plugin_index_for_id(self, plugin_id: str) -> int:
         target = str(plugin_id or "").strip().casefold()
         if not target:
             return -1
         for index, plugin in enumerate(self.plugin_samples[: self.enabled_plugin_count]):
-            _label, _detail, _summary, _color, _icon, current_id, _status = self._plugin_tuple(plugin)
+            _label, _detail, _summary, _color, _icon, current_id, _status, _alert_title, _alert_body, _alert_priority, _progress = self._plugin_tuple(plugin)
             if str(current_id or "").strip().casefold() == target:
                 return index
         return -1
@@ -1790,18 +1804,32 @@ class IslandStackVisual(QWidget):
     def _active_plugin_alerts(self, limit: int = 2):
         if not self._plugin_enabled() or self.expanded:
             return []
-        alert_statuses = {"done", "due", "soon", "running"}
-        priority = {"due": 0, "done": 1, "soon": 2, "running": 3}
+        alert_statuses = {"done", "due", "soon", "running", "loading", "error"}
+        status_priority = {"due": 0, "done": 1, "soon": 2, "error": 3, "running": 4, "loading": 5}
         candidates = []
         for index, plugin in enumerate(self.plugin_samples[: self.enabled_plugin_count]):
-            label, detail, summary, color, icon, plugin_id, status = self._plugin_tuple(plugin)
+            label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, _progress = self._plugin_tuple(plugin)
             normalized_status = str(status or "").lower()
-            if normalized_status in alert_statuses:
-                candidates.append((priority.get(normalized_status, 99), index, label, detail, summary, color, icon, plugin_id, status))
-        candidates.sort(key=lambda item: (item[0], item[1]))
+            if normalized_status in alert_statuses or alert_title or alert_body:
+                candidates.append((
+                    int(alert_priority),
+                    status_priority.get(normalized_status, 99),
+                    index,
+                    label,
+                    detail,
+                    summary,
+                    color,
+                    icon,
+                    plugin_id,
+                    status,
+                    alert_title,
+                    alert_body,
+                    alert_priority,
+                ))
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         return [
-            (index, label, detail, summary, color, icon, plugin_id, status)
-            for _priority, index, label, detail, summary, color, icon, plugin_id, status in candidates[: max(0, int(limit))]
+            (index, label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority)
+            for _alert_priority, _status_priority, index, label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority in candidates[: max(0, int(limit))]
         ]
 
     def _active_plugin_alert(self):
@@ -2075,7 +2103,7 @@ class IslandStackVisual(QWidget):
         if not motion:
             return
         now = time.monotonic()
-        cells = self._plugin_item_rects(motion.rect, now)
+        cells = self._plugin_item_rects(motion.rect, now, expand_active=False)
         if not cells:
             return
         for index, cell in cells:
@@ -2100,10 +2128,10 @@ class IslandStackVisual(QWidget):
             return self.plugin_focus_from if progress < 0.5 else self.plugin_focus_target
         return min(self.plugin_focus, self.enabled_plugin_count - 1)
 
-    def _plugin_focus_weights(self, count: int, now: float) -> list[float]:
+    def _plugin_focus_weights(self, count: int, now: float, expand_active: bool = True) -> list[float]:
         if count <= 0:
             return []
-        if not self.expanded:
+        if not self.expanded or not expand_active:
             return [1.0] * count
         from_index = max(0, min(self.plugin_focus_from, count - 1))
         target_index = max(0, min(self.plugin_focus_target, count - 1))
@@ -2116,27 +2144,27 @@ class IslandStackVisual(QWidget):
             weights[target_index] = progress
         return weights
 
-    def _plugin_widths(self, count: int, total_width: float, now: float) -> list[float]:
+    def _plugin_widths(self, count: int, total_width: float, now: float, expand_active: bool = True) -> list[float]:
         if count <= 0:
             return []
-        if not self.expanded or count == 1:
+        if not self.expanded or count == 1 or not expand_active:
             return [total_width / count] * count
-        icon_slot = self._u(50.0)
-        focus_width = max(total_width - icon_slot * (count - 1), total_width / count)
+        compact_slot = max(self._u(90.0), min(self._u(126.0), total_width * 0.28))
+        focus_width = max(total_width - compact_slot * (count - 1), total_width / count)
         from_index = max(0, min(self.plugin_focus_from, count - 1))
         target_index = max(0, min(self.plugin_focus_target, count - 1))
         progress = self._plugin_focus_progress(now)
-        from_widths = [icon_slot] * count
-        target_widths = [icon_slot] * count
+        from_widths = [compact_slot] * count
+        target_widths = [compact_slot] * count
         from_widths[from_index] = focus_width
         target_widths[target_index] = focus_width
         widths = [from_widths[i] + (target_widths[i] - from_widths[i]) * progress for i in range(count)]
         scale = total_width / max(1.0, sum(widths))
         return [width * scale for width in widths]
 
-    def _plugin_item_rects(self, rect: QRectF, now: float) -> list[tuple[int, QRectF]]:
+    def _plugin_item_rects(self, rect: QRectF, now: float, expand_active: bool = True) -> list[tuple[int, QRectF]]:
         count = max(0, min(self.enabled_plugin_count, 3))
-        widths = self._plugin_widths(count, rect.width(), now)
+        widths = self._plugin_widths(count, rect.width(), now, expand_active=expand_active)
         cells = []
         x = rect.left()
         for index, width in enumerate(widths):
@@ -2352,7 +2380,7 @@ class IslandStackVisual(QWidget):
             return stack_w, self._u(height)
         if main_kind == IslandKind.PLUGIN:
             if self.expanded:
-                return stack_w, self._u(48.0)
+                return stack_w, self._u(188.0)
             base_plugin_width = self._u(420.0)
             return base_plugin_width / 3.0 * max(1, self.enabled_plugin_count), self._u(48.0)
         if main_kind == IslandKind.MESSAGE:
@@ -2467,7 +2495,7 @@ class IslandStackVisual(QWidget):
         plugin_alerts = self._active_plugin_alerts(2)
         if plugin_alerts and main_kind != IslandKind.PLUGIN:
             for alert_slot, plugin_alert in enumerate(plugin_alerts):
-                _index, _label, _detail, _summary, _color, _icon, plugin_id, _status = plugin_alert
+                _index, _label, _detail, _summary, _color, _icon, plugin_id, _status, _alert_title, _alert_body, _alert_priority = plugin_alert
                 alert_rect = self._plugin_alert_rect(main_rect, alert_slot, len(plugin_alerts))
                 visuals.append(StackVisual(f"plugin-alert:{plugin_id}", IslandKind.PLUGIN_ALERT, alert_rect, False, None, 8))
 
@@ -2529,8 +2557,8 @@ class IslandStackVisual(QWidget):
         try:
             alerts = self._active_plugin_alerts(total)
             if 0 <= int(slot) < len(alerts):
-                _index, label, detail, summary, _color, _icon, _plugin_id, _status = alerts[int(slot)]
-                width = max(width, self._plugin_alert_width_for(label, detail, summary))
+                _index, label, detail, summary, _color, _icon, _plugin_id, _status, _alert_title, alert_body, _alert_priority = alerts[int(slot)]
+                width = max(width, self._plugin_alert_width_for(label, detail, alert_body or summary))
         except Exception:
             pass
         height = self._u(42.0)
@@ -2563,18 +2591,24 @@ class IslandStackVisual(QWidget):
 
     def _plugin_alert_width_for(self, label: str, detail: str, summary: str) -> float:
         longest = max(len(str(label or "")), len(str(detail or "")), len(str(summary or "")))
-        summary_weight = min(14, len(str(summary or "")))
-        width_units = 124.0 + longest * 6.8 + summary_weight * 1.8
-        return self._u(max(150.0, min(252.0, width_units)))
+        summary_weight = min(10, len(str(summary or "")))
+        width_units = 112.0 + min(10, longest) * 4.0 + summary_weight * 2.0
+        return self._u(max(126.0, min(226.0, width_units)))
 
-    def _plugin_alert_text_parts(self, label: str, detail: str, summary: str, status: str) -> tuple[str, str]:
+    def _plugin_alert_text_parts(self, label: str, detail: str, summary: str, status: str, alert_title: str = "", alert_body: str = "") -> tuple[str, str]:
         normalized_status = str(status or "").strip().lower()
         status_text = {
             "done": "完成",
             "due": "现在",
             "soon": "将近",
             "running": "计时中",
+            "loading": "刷新中",
+            "error": "需要注意",
         }.get(normalized_status, "提醒")
+        if str(alert_title or "").strip() or str(alert_body or "").strip():
+            title = str(alert_title or status_text).strip()
+            body = str(alert_body or detail or summary or "").strip()
+            return f"{label} · {title}", body
         body = str(detail or summary or "")
         if normalized_status == "running" and str(summary or "").strip():
             body = str(summary)
@@ -4438,8 +4472,12 @@ class IslandStackVisual(QWidget):
                 icon,
                 plugin_id,
                 status,
+                alert_title,
+                alert_body,
+                alert_priority,
+                progress,
             )
-            for label, detail, summary, color, icon, plugin_id, status in (self._plugin_tuple(plugin) for plugin in self.plugin_samples)
+            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self.plugin_samples)
         ][:self.enabled_plugin_count]
         if not plugins:
             return
@@ -4447,20 +4485,69 @@ class IslandStackVisual(QWidget):
         now = time.monotonic()
         count = len(plugins)
         active_focus = self._active_plugin_focus(now)
-        weights = self._plugin_focus_weights(count, now)
-        cells = self._plugin_item_rects(rect, now)
+        function_panel = self.expanded and rect.height() > self._u(88.0)
+        strip_expand_active = bool(function_panel or self.hovered_key == "plugin")
+        weights = self._plugin_focus_weights(count, now, expand_active=strip_expand_active)
+        cells = self._plugin_item_rects(rect, now, expand_active=strip_expand_active)
 
-        for i, (label, detail, summary, color, icon, _plugin_id, status) in enumerate(plugins):
+        if function_panel:
+            self._paint_plugin_function_panel(painter, rect, plugins, active_focus)
+            return
+
+        for i, (label, detail, summary, color, icon, _plugin_id, status, _alert_title, _alert_body, _alert_priority, progress) in enumerate(plugins):
             cell = cells[i][1]
             sr = cell.adjusted(self._u(5), self._u(6), -self._u(5), -self._u(6))
             focus_weight = weights[i] if i < len(weights) else 0.0
-            icon_mode = self.expanded and focus_weight < 0.58 and count > 1
-            if self.expanded:
-                self._paint_plugin_focus_cell(painter, sr, label, detail, color, icon, focus_weight, icon_mode, status)
+            if self.expanded and strip_expand_active and i == active_focus:
+                self._paint_plugin_focus_cell(painter, sr, label, detail, color, icon, focus_weight, False, status)
             else:
-                self._paint_plugin_compact_cell(painter, sr, label, summary, color, i == active_focus, status)
+                self._paint_plugin_compact_cell(painter, sr, label, detail, summary, color, i == active_focus, status, progress)
 
-    def _paint_plugin_compact_cell(self, painter: QPainter, rect: QRectF, label: str, summary: str, color: QColor, active: bool, status: str = "normal"):
+    def _plugin_compact_value(self, label: str, detail: str, summary: str, status: str = "normal") -> str:
+        text = str(detail or "").strip()
+        if str(label or "").upper() == "TIME" and str(status or "").lower() == "running":
+            text = re.sub(r"^\s*倒计时\s*", "", str(summary or "").strip())
+        return text or str(summary or "").strip()
+
+    def _strip_timer_prefix(self, text: str) -> str:
+        text = str(text or "").strip()
+        match = re.search(r"\d{1,2}:\d{2}(?::\d{2})?", text)
+        if match:
+            return match.group(0)
+        return re.sub(r"^\s*(?:倒计时|Countdown|Timer|timer|计时)\s*", "", text, flags=re.I).strip()
+
+    def _plugin_alert_display_value(self, label: str, detail: str, summary: str, status: str, alert_title: str = "", alert_body: str = "") -> str:
+        label_key = str(label or "").strip().upper()
+        status_key = str(status or "").strip().lower()
+        body = str(alert_body or summary or detail or "").strip()
+        if label_key == "TIME" and status_key in {"running", "done"}:
+            return self._strip_timer_prefix(body) or self._strip_timer_prefix(detail) or "TIME"
+        return self._plugin_compact_value(label, detail, body, status)
+
+    def _plugin_function_lines(self, label: str, detail: str, summary: str, status: str) -> tuple[str, tuple[str, ...]]:
+        label_key = str(label or "").strip().upper()
+        detail = str(detail or "").strip()
+        summary = str(summary or "").strip()
+        status_key = str(status or "").strip().lower()
+        status_copy = {
+            "running": "进行中",
+            "done": "已完成",
+            "due": "现在",
+            "soon": "即将开始",
+            "loading": "刷新中",
+            "error": "需要注意",
+        }.get(status_key, "实时状态")
+        if label_key == "TIME":
+            value = self._plugin_compact_value(label, detail, summary, status)
+            second = summary if summary and summary != value else status_copy
+            return "时间 TIME", tuple(line for line in (value, second, "时钟与倒计时在这里运行") if line)
+        if label_key == "WEATHER":
+            return "天气 WEATHER", tuple(line for line in (detail or "天气刷新中", summary or status_copy, "公共天气源 · 定位优先") if line)
+        if label_key == "AGENDA":
+            return "日程 AGENDA", tuple(line for line in (detail or "暂无日程", summary or "JSON / ICS", "课表读取录入 · 课表提醒功能") if line)
+        return str(label or "PLUGIN"), tuple(line for line in (detail, summary, status_copy) if line)
+
+    def _paint_plugin_compact_cell(self, painter: QPainter, rect: QRectF, label: str, detail: str, summary: str, color: QColor, active: bool, status: str = "normal", progress: float = 0.0):
         theme = self._plugin_theme_colors()
         color = self._pure_plugin_color(color)
         radius = min(self._u(15), rect.height() / 2)
@@ -4475,6 +4562,7 @@ class IslandStackVisual(QWidget):
         painter.setPen(QColor(255, 255, 255, 242))
         painter.setFont(self._font(7, QFont.Weight.Bold))
         painter.drawText(accent, Qt.AlignmentFlag.AlignCenter, label[:1])
+        self._paint_plugin_progress_ring(painter, accent.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), color, progress, status)
 
         painter.setPen(QPen(theme["stroke"], self._u(1.0)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -4485,8 +4573,89 @@ class IslandStackVisual(QWidget):
         detail_rect = QRectF(accent.right() + self._u(8), rect.top(), rect.right() - accent.right() - self._u(16), rect.height())
         detail_color = QColor(theme["text"])
         detail_color.setAlpha(232 if active else 188)
-        self._paint_scrolling_text(painter, detail_rect, summary, 10, detail_color, False)
+        self._paint_scrolling_text(painter, detail_rect, self._plugin_compact_value(label, detail, summary, status), 10, detail_color, False)
         self._paint_plugin_status_dot(painter, rect, status)
+
+    def _paint_plugin_progress_ring(self, painter: QPainter, rect: QRectF, color: QColor, progress: float, status: str = "normal"):
+        status = str(status or "").lower()
+        if status == "loading":
+            progress = (time.monotonic() * 0.82) % 1.0
+        elif status == "error":
+            progress = 1.0
+        if status not in {"running", "done", "due", "soon", "loading", "error"} and float(progress or 0.0) <= 0.0:
+            return
+        progress = 1.0 if status in {"done", "due"} else max(0.0, min(1.0, float(progress or 0.0)))
+        base = QColor(255, 255, 255, 54)
+        accent = QColor(color.red(), color.green(), color.blue(), 245)
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(base, self._u(2.0), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawEllipse(rect)
+        painter.setPen(QPen(accent, self._u(2.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(rect, 90 * 16, int(-360 * 16 * progress))
+        painter.restore()
+
+    def _paint_plugin_function_panel(self, painter: QPainter, rect: QRectF, plugins: list[tuple], active_focus: int):
+        if not plugins:
+            return
+        index = max(0, min(int(active_focus), len(plugins) - 1))
+        label, detail, summary, color, icon, _plugin_id, status, _alert_title, _alert_body, _alert_priority, progress = plugins[index]
+        theme = self._plugin_theme_colors()
+        color = self._pure_plugin_color(color)
+
+        nav_h = self._u(34.0)
+        nav_rect = QRectF(rect.left() + self._u(10.0), rect.top() + self._u(8.0), rect.width() - self._u(20.0), nav_h)
+        cells = self._plugin_item_rects(nav_rect, time.monotonic())
+        for i, plugin in enumerate(plugins):
+            if i >= len(cells):
+                break
+            p_label, p_detail, p_summary, p_color, _p_icon, _p_id, p_status, _t, _b, _prio, p_progress = plugin
+            cell = cells[i][1].adjusted(self._u(2.0), 0, -self._u(2.0), 0)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(theme["cell_active"] if i == index else theme["cell"])
+            painter.drawRoundedRect(cell, self._u(12.0), self._u(12.0))
+            icon_box = QRectF(cell.left() + self._u(7.0), cell.center().y() - self._u(10.0), self._u(20.0), self._u(20.0))
+            pure = self._pure_plugin_color(p_color)
+            painter.setBrush(QColor(pure.red(), pure.green(), pure.blue(), 230))
+            painter.drawRoundedRect(icon_box, self._u(6.0), self._u(6.0))
+            self._paint_plugin_progress_ring(painter, icon_box.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), pure, p_progress, p_status)
+            text_rect = QRectF(icon_box.right() + self._u(7.0), cell.top(), cell.right() - icon_box.right() - self._u(10.0), cell.height())
+            self._paint_scrolling_text(painter, text_rect, self._plugin_compact_value(p_label, p_detail, p_summary, p_status), 9, theme["text"], False)
+
+        body = rect.adjusted(self._u(18.0), self._u(55.0), -self._u(18.0), -self._u(16.0))
+        title, lines = self._plugin_function_lines(label, detail, summary, status)
+        icon_size = min(body.height() - self._u(8.0), self._u(88.0))
+        accent = QRectF(body.left() + self._u(8.0), body.center().y() - icon_size / 2.0, icon_size, icon_size)
+        pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 3.0)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), int(172 + pulse * 46)))
+        painter.drawRoundedRect(accent, self._u(22.0), self._u(22.0))
+        self._paint_plugin_progress_ring(painter, accent.adjusted(self._u(5.0), self._u(5.0), -self._u(5.0), -self._u(5.0)), color, progress, status)
+        if str(label).upper() == "TIME":
+            center = accent.center()
+            painter.setPen(QPen(QColor(255, 255, 255, 236), self._u(3.0), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(center, QPointF(center.x() + accent.width() * 0.24, center.y() + accent.height() * 0.16))
+            painter.setPen(QPen(QColor(255, 255, 255, 215), self._u(2.0), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(center, QPointF(center.x() - accent.width() * 0.18, center.y() - accent.height() * 0.12))
+        else:
+            painter.setFont(QFont("Segoe UI Symbol", self._font_size(22), QFont.Weight.Bold))
+            painter.setPen(QColor(255, 255, 255, 244))
+            painter.drawText(accent, Qt.AlignmentFlag.AlignCenter, icon or str(label)[:1])
+
+        text_left = accent.right() + self._u(20.0)
+        title_rect = QRectF(text_left, body.top() + self._u(2.0), body.right() - text_left, self._u(24.0))
+        painter.setFont(self._font(12, QFont.Weight.Bold))
+        painter.setPen(theme["muted"])
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+        if lines:
+            self._paint_scrolling_text(painter, QRectF(text_left, title_rect.bottom() + self._u(4.0), body.right() - text_left, self._u(32.0)), lines[0], 19, theme["text"], False)
+        if len(lines) > 1:
+            self._paint_scrolling_text(painter, QRectF(text_left, body.bottom() - self._u(44.0), body.right() - text_left, self._u(20.0)), lines[1], 10, theme["muted"], False)
+        if len(lines) > 2:
+            third_color = QColor(theme["muted"])
+            third_color.setAlpha(170)
+            self._paint_scrolling_text(painter, QRectF(text_left, body.bottom() - self._u(22.0), body.right() - text_left, self._u(18.0)), lines[2], 9, third_color, False)
 
     def _paint_plugin_focus_cell(self, painter: QPainter, rect: QRectF, label: str, detail: str, color: QColor, icon: str, focus_weight: float, icon_mode: bool, status: str = "normal"):
         theme = self._plugin_theme_colors()
@@ -4540,10 +4709,10 @@ class IslandStackVisual(QWidget):
         index = self._plugin_index_for_id(plugin_id)
         if index < 0:
             return
-        label, detail, summary, color, icon, _plugin_id, status = self._plugin_tuple(self.plugin_samples[index])
+        label, detail, summary, color, icon, _plugin_id, status, alert_title, alert_body, _alert_priority, progress = self._plugin_tuple(self.plugin_samples[index])
         theme = self._plugin_theme_colors()
         color = self._pure_plugin_color(color)
-        radius = min(self._u(18.0), rect.height() / 2.0)
+        radius = min(self._u(17.0), rect.height() / 2.0)
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -4554,23 +4723,27 @@ class IslandStackVisual(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), radius - self._u(0.8), radius - self._u(0.8))
 
+        pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 4.0)
         icon_size = self._u(28.0)
         icon_rect = QRectF(rect.left() + self._u(8.0), rect.center().y() - icon_size / 2.0, icon_size, icon_size)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
-        painter.drawRoundedRect(icon_rect, self._u(9.0), self._u(9.0))
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), int(214 + pulse * 32)))
+        painter.drawRoundedRect(icon_rect, self._u(10.0), self._u(10.0))
+        glow_rect = icon_rect.adjusted(-self._u(4.0), -self._u(4.0), self._u(4.0), self._u(4.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), int(44 + pulse * 48)), self._u(1.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawRoundedRect(glow_rect, self._u(12.0), self._u(12.0))
+        self._paint_plugin_progress_ring(painter, icon_rect.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), color, progress, status)
         painter.setFont(QFont("Segoe UI Symbol", self._font_size(11), QFont.Weight.Bold))
         painter.setPen(QColor(255, 255, 255, 245))
         painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, icon or label[:1])
 
-        title, body = self._plugin_alert_text_parts(label, detail, summary, status)
+        value = self._plugin_alert_display_value(label, detail, summary, status, alert_title, alert_body)
         text_left = icon_rect.right() + self._u(8.0)
-        title_rect = QRectF(text_left, rect.top() + self._u(5.0), rect.right() - text_left - self._u(10.0), self._u(15.0))
-        detail_rect = QRectF(text_left, rect.top() + self._u(21.0), rect.right() - text_left - self._u(12.0), self._u(16.0))
-        painter.setFont(self._font(7, QFont.Weight.Bold))
+        value_rect = QRectF(text_left, rect.top(), rect.right() - text_left - self._u(12.0), rect.height())
+        painter.setFont(self._font(12, QFont.Weight.DemiBold))
         painter.setPen(theme["text"])
-        painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, title)
-        self._paint_scrolling_text(painter, detail_rect, body, 9, theme["muted"], False)
+        self._paint_scrolling_text(painter, value_rect, value, 12, theme["text"], False)
         self._paint_plugin_status_dot(painter, rect, status)
         painter.restore()
 

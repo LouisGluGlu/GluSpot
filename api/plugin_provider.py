@@ -81,6 +81,7 @@ class RealPluginProvider:
         self._weather_detail = "设置位置后刷新"
         self._weather_report_time = ""
         self._weather_error = ""
+        self._weather_location_source = "manual"
         self._weather_last_nonce = ""
         self._weather_refreshing = False
         self._weather_lock = threading.Lock()
@@ -105,11 +106,13 @@ class RealPluginProvider:
             "weather_provider": "Open-Meteo 免 Key",
             "weather_has_api_key": False,
             "weather_requires_api_key": False,
+            "weather_location_source": self._weather_location_source,
             "weather_extensions": str(self._setting("v2_weather_extensions", "base") or "base"),
             "weather_error": self._weather_error,
             "weather_report_time": self._weather_report_time,
             "schedule_json_path": self._setting("v2_schedule_json_path", ""),
             "schedule_ics_path": self._setting("v2_schedule_ics_path", ""),
+            "schedule_todo_items": ("课表读取录入", "课表提醒功能"),
         }
 
     def _setting(self, key: str, default=None):
@@ -127,6 +130,17 @@ class RealPluginProvider:
         status = self.timer_state(now)
         if timer:
             summary = timer
+        alert_title = ""
+        alert_body = ""
+        alert_priority = 50
+        if status == "running":
+            alert_title = "计时进行中"
+            alert_body = timer or summary
+            alert_priority = 30
+        elif status == "done":
+            alert_title = "计时结束"
+            alert_body = "点击查看或清除计时器"
+            alert_priority = 5
         return PluginData(
             label="TIME",
             detail=detail,
@@ -137,6 +151,10 @@ class RealPluginProvider:
             status=status,
             primary_value=detail,
             secondary_value=summary,
+            alert_title=alert_title,
+            alert_body=alert_body,
+            alert_priority=alert_priority,
+            progress=self.timer_progress(now),
         )
 
     def _parse_timezone(self, value: str):
@@ -193,12 +211,39 @@ class RealPluginProvider:
             target = target.replace(tzinfo=now.tzinfo)
         return target.astimezone(now.tzinfo)
 
+    def timer_started_at(self, now: datetime | None = None) -> datetime | None:
+        now = now or self._plugin_now()
+        raw = str(self._setting("v2_timer_started_at", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            started = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=now.tzinfo)
+        return started.astimezone(now.tzinfo)
+
     def timer_remaining_seconds(self, now: datetime | None = None) -> int | None:
         now = now or self._plugin_now()
         target = self.timer_end_at(now)
         if target is None:
             return None
         return max(0, int((target - now).total_seconds()))
+
+    def timer_progress(self, now: datetime | None = None) -> float:
+        now = now or self._plugin_now()
+        target = self.timer_end_at(now)
+        if target is None:
+            return 0.0
+        if target <= now:
+            return 1.0
+        started = self.timer_started_at(now)
+        if started is None or started >= target:
+            return 0.0
+        total = max(1.0, (target - started).total_seconds())
+        elapsed = max(0.0, (now - started).total_seconds())
+        return max(0.0, min(1.0, elapsed / total))
 
     def timer_state(self, now: datetime | None = None) -> str:
         remaining = self.timer_remaining_seconds(now or self._plugin_now())
@@ -215,6 +260,18 @@ class RealPluginProvider:
             summary = self._weather_summary
             error = self._weather_error
             refreshing = self._weather_refreshing
+        status = "loading" if refreshing else ("error" if error else "normal")
+        alert_title = ""
+        alert_body = ""
+        alert_priority = 50
+        if status == "loading":
+            alert_title = "天气刷新中"
+            alert_body = detail or summary
+            alert_priority = 40
+        elif status == "error":
+            alert_title = "天气不可用"
+            alert_body = error or summary or detail
+            alert_priority = 20
         return PluginData(
             label="WEATHER",
             detail=detail,
@@ -222,13 +279,16 @@ class RealPluginProvider:
             color=ColorToken(80, 210, 255),
             icon="☁",
             plugin_id="weather",
-            status="loading" if refreshing else ("error" if error else "normal"),
+            status=status,
             primary_value=detail,
             secondary_value=summary,
+            alert_title=alert_title,
+            alert_body=alert_body,
+            alert_priority=alert_priority,
         )
 
     def _schedule_weather_refresh_if_needed(self):
-        location = str(self._setting("v2_weather_location", "北京") or "").strip()
+        location = self._weather_request_location()
         nonce = str(self._setting("v2_weather_refresh_nonce", "") or "").strip()
         now = time.monotonic()
         if not location:
@@ -254,22 +314,64 @@ class RealPluginProvider:
         thread = threading.Thread(target=self._refresh_weather, args=(location,), name="WeatherPluginRefresh", daemon=True)
         thread.start()
 
+    def _weather_manual_location(self) -> str:
+        unset = object()
+        manual = self._setting("v2_weather_manual_location", unset)
+        if manual is unset:
+            manual = self._setting("v2_weather_location", "北京")
+        return str(manual or "").strip() or "北京"
+
+    def _weather_request_location(self) -> str:
+        manual = self._weather_manual_location()
+        unset = object()
+        use_location = self._setting("v2_weather_use_location", unset)
+        if use_location is unset:
+            return manual
+        if bool(use_location):
+            return f"auto:{manual}"
+        return manual
+
+    def _detect_user_location(self) -> tuple[float, float, str, str] | None:
+        try:
+            from winsdk.windows.devices.geolocation import Geolocator
+
+            geoposition = Geolocator().get_geoposition_async().get()
+            point = geoposition.coordinate.point
+            position = point.position
+            return float(position.latitude), float(position.longitude), "当前位置", "windows-location"
+        except Exception:
+            return None
+
     def _refresh_weather(self, location: str):
         now = time.monotonic()
         summary = ""
         detail = ""
         error = ""
         report_time = ""
+        location_source = "manual"
+        request_location = str(location or "").strip() or self._weather_manual_location()
         self._weather_location = location
         try:
-            lat, lon, city_name = self._resolve_weather_location(location)
+            if request_location.startswith("auto:"):
+                manual_location = request_location.split(":", 1)[1].strip() or self._weather_manual_location()
+                detected = self._detect_user_location()
+                if detected is not None:
+                    lat, lon, city_name, detected_source = detected
+                    request_location = city_name or manual_location
+                    location_source = detected_source or "detected"
+                else:
+                    lat, lon, city_name = self._resolve_weather_location(manual_location)
+                    request_location = manual_location
+                    location_source = "manual-fallback"
+            else:
+                lat, lon, city_name = self._resolve_weather_location(request_location)
             if not city_name:
                 summary = "未找到城市"
-                detail = location[:16]
+                detail = request_location[:16]
                 error = "geocoding failed"
                 return
             weather = self._fetch_open_meteo_weather(lat, lon)
-            city = str(weather.get("city") or city_name or location)
+            city = str(weather.get("city") or city_name or request_location)
             weather_name = str(weather.get("weather") or "天气")
             temp = str(weather.get("temperature") or "--")
             wind_direction = str(weather.get("winddirection") or "")
@@ -283,7 +385,7 @@ class RealPluginProvider:
         except Exception as exc:
             with self._weather_lock:
                 summary = self._weather_summary or "天气不可用"
-                detail = self._weather_detail or location[:16]
+                detail = self._weather_detail or request_location[:16]
             error = str(exc)
         finally:
             with self._weather_lock:
@@ -293,6 +395,7 @@ class RealPluginProvider:
                     self._weather_detail = detail
                 self._weather_error = error
                 self._weather_report_time = report_time
+                self._weather_location_source = location_source
                 self._weather_cached_at = now
                 self._weather_refreshing = False
 
@@ -437,11 +540,17 @@ class RealPluginProvider:
         due = [event for event in events if -300 <= (event[0] - now).total_seconds() <= 0]
         upcoming = [event for event in events if event[0] > now]
         status = "normal"
+        alert_title = ""
+        alert_body = ""
+        alert_priority = 50
         if due:
             _when, title = due[0]
             detail = "现在"
             summary = title[:24]
             status = "due"
+            alert_title = "日程到点"
+            alert_body = title[:36]
+            alert_priority = 0
         elif upcoming:
             when, title = upcoming[0]
             delta = when - now
@@ -452,6 +561,9 @@ class RealPluginProvider:
                 detail = f"{minutes} 分钟后"
                 if minutes <= 10:
                     status = "soon"
+                    alert_title = "日程将近"
+                    alert_body = f"{detail} · {title[:28]}"
+                    alert_priority = 10
             summary = title[:24]
         else:
             detail = "暂无日程"
@@ -466,6 +578,9 @@ class RealPluginProvider:
             status=status,
             primary_value=detail,
             secondary_value=summary,
+            alert_title=alert_title,
+            alert_body=alert_body,
+            alert_priority=alert_priority,
         )
 
     def _load_events(self) -> list[tuple[datetime, str]]:

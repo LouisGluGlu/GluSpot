@@ -24,6 +24,14 @@ class NeteasePositionSample:
     sampled_at: float = 0.0
 
 
+@dataclass(frozen=True)
+class QueueTrack:
+    title: str
+    artist: str = ""
+    album_title: str = ""
+    duration_seconds: float = 0.0
+
+
 class NeteasePositionReader:
     def __init__(
         self,
@@ -74,6 +82,7 @@ class NeteasePositionReader:
         interactive: bool = False,
         allow_lyric_anchor: bool = False,
         click_pos: tuple[int, int] | None = None,
+        force_progress_image: bool = False,
     ) -> NeteasePositionSample | None:
         now = time.monotonic()
         track_key = f"{self._normalize_text(title)}\0{self._normalize_text(artist)}"
@@ -106,6 +115,7 @@ class NeteasePositionReader:
                         bool(allow_lyric_anchor),
                         click_pos,
                         refresh_token,
+                        bool(force_progress_image),
                     ),
                     name=f"{self._service_name.title()}PositionReader",
                     daemon=True,
@@ -122,6 +132,7 @@ class NeteasePositionReader:
         interactive: bool = False,
         allow_lyric_anchor: bool = False,
         click_pos: tuple[int, int] | None = None,
+        force_progress_image: bool = False,
     ) -> NeteasePositionSample | None:
         track_key = f"{self._normalize_text(title)}\0{self._normalize_text(artist)}"
         now = time.monotonic()
@@ -149,6 +160,7 @@ class NeteasePositionReader:
             bool(allow_lyric_anchor),
             click_pos,
             refresh_token,
+            bool(force_progress_image),
         )
         with self._lock:
             return self._last_sample
@@ -178,6 +190,85 @@ class NeteasePositionReader:
     def duration_for_track(self, title: str, artist: str) -> float:
         return self._duration_from_local_queue(title, artist)
 
+    def current_track(self) -> QueueTrack | None:
+        try:
+            from pywinauto import Desktop
+        except Exception as exc:
+            self._pywinauto_available = False
+            self._last_error = f"pywinauto unavailable: {exc}"
+            return None
+        self._pywinauto_available = True
+        try:
+            windows = self._netease_windows(Desktop(backend="uia"), "", require_title=False)
+        except Exception as exc:
+            self._last_error = f"uia current track read failed: {exc}"
+            return None
+        for window in list(windows)[:3]:
+            try:
+                window_title = str(window.window_text() or "").strip()
+            except Exception:
+                continue
+            track = self._track_from_window_title(window_title)
+            if track is None:
+                continue
+            queued_track = self._queue_track_for_metadata(track.title, track.artist)
+            return queued_track or track
+        return None
+
+    def position_from_progress_point(self, point: tuple[int, int], duration_seconds: float) -> float | None:
+        try:
+            duration = max(0.0, float(duration_seconds))
+            point_x, point_y = int(point[0]), int(point[1])
+        except Exception:
+            return None
+        if duration <= 0.0:
+            return None
+        try:
+            from pywinauto import Desktop
+        except Exception as exc:
+            self._pywinauto_available = False
+            self._last_error = f"pywinauto unavailable: {exc}"
+            return None
+        self._pywinauto_available = True
+        try:
+            windows = self._netease_windows(Desktop(backend="uia"), "", require_title=False)
+        except Exception as exc:
+            self._last_error = f"uia progress point read failed: {exc}"
+            return None
+        for window in list(windows)[:3]:
+            try:
+                rect = window.rectangle()
+                left = self._rect_value(rect, "left")
+                top = self._rect_value(rect, "top")
+                right = self._rect_value(rect, "right")
+                bottom = self._rect_value(rect, "bottom")
+            except Exception:
+                continue
+            width = right - left
+            height = bottom - top
+            if width <= 240.0 or height <= 240.0:
+                continue
+            if point_x < left or point_x > right or point_y < top or point_y > bottom:
+                continue
+            y_ratio = (float(point_y) - top) / height
+            if y_ratio < 0.865 or y_ratio > 0.925:
+                continue
+            fraction = (float(point_x) - left) / max(1.0, width)
+            return max(0.0, min(duration, duration * max(0.0, min(1.0, fraction))))
+        return None
+
+    def adjacent_track(self, title: str, artist: str, direction: str) -> QueueTrack | None:
+        step = -1 if str(direction or "").strip().casefold() == "previous" else 1
+        for path in self._queue_paths():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            except Exception:
+                continue
+            track = self._find_adjacent_track(payload, title, artist, step)
+            if track is not None:
+                return track
+        return None
+
     def reset(self):
         with self._lock:
             self._last_sample = None
@@ -197,6 +288,7 @@ class NeteasePositionReader:
         allow_lyric_anchor: bool = False,
         click_pos: tuple[int, int] | None = None,
         refresh_token: int | None = None,
+        force_progress_image: bool = False,
     ):
         try:
             duration = duration_seconds
@@ -206,10 +298,10 @@ class NeteasePositionReader:
             sample = None
             if interactive and allow_lyric_anchor:
                 sample = self._position_from_visible_lyrics(title, artist, timed_lyrics, duration, click_pos=click_pos)
-            if sample is None and interactive:
-                sample = self._position_from_visible_progress_image(title, duration)
             if sample is None:
                 sample = self._position_from_visible_progress(title, duration)
+            if sample is None and force_progress_image:
+                sample = self._position_from_visible_progress_image(title, duration)
             with self._lock:
                 if track_key != self._last_track_key:
                     return
@@ -341,6 +433,9 @@ class NeteasePositionReader:
             return self._progress_fraction_from_image_slow(rgb)
         if rgb_array.ndim != 3 or rgb_array.shape[0] != height or rgb_array.shape[1] != width or rgb_array.shape[2] < 3:
             return self._progress_fraction_from_image_slow(rgb)
+        red_fraction = self._netease_red_progress_fraction_from_array(rgb_array)
+        if red_fraction is not None:
+            return red_fraction
         min_run = max(80, int(width * 0.06))
         max_start = max(16, int(width * 0.04))
         best: tuple[float, int, int, int] | None = None
@@ -375,7 +470,7 @@ class NeteasePositionReader:
                 if best is None or score > best[0]:
                     best = (score, y, start, end)
         if best is None:
-            return None
+            return self._netease_red_progress_fraction_from_image_slow(rgb)
         _score, y, start, end = best
         thumb_center = self._progress_thumb_center_from_array(rgb_array, values, y, end)
         if thumb_center is not None:
@@ -383,6 +478,102 @@ class NeteasePositionReader:
         elif self._looks_like_panel_separator(rgb_array, values, y, start, end):
             return None
         return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
+
+    def _netease_red_progress_fraction_from_array(self, rgb_array) -> float | None:
+        try:
+            import numpy as np
+        except Exception:
+            return None
+        height, width = rgb_array.shape[:2]
+        if width < 220 or height < 160:
+            return None
+        red = rgb_array[:, :, 0]
+        green = rgb_array[:, :, 1]
+        blue = rgb_array[:, :, 2]
+        red_mask = (red >= 190) & (green <= 150) & (blue <= 165) & ((red - green) >= 45) & ((red - blue) >= 40)
+        track_mask = (red >= 205) & (green >= 205) & (blue >= 205) & ((rgb_array[:, :, :3].max(axis=2) - rgb_array[:, :, :3].min(axis=2)) <= 34)
+        y_start = int(height * 0.70)
+        y_end = int(height * 0.96)
+        min_red_run = max(80, int(width * 0.055))
+        best: tuple[float, int, int, int] | None = None
+        for y in range(y_start, y_end):
+            mask = red_mask[y]
+            if not mask.any():
+                continue
+            indices = np.flatnonzero(mask)
+            split_points = np.where(np.diff(indices) > 1)[0] + 1
+            for segment in np.split(indices, split_points):
+                if segment.size == 0:
+                    continue
+                start = int(segment[0])
+                end = int(segment[-1])
+                run = end - start + 1
+                if run < min_red_run or run > width * 0.90:
+                    continue
+                if start > max(6, int(width * 0.05)):
+                    continue
+                track_start = min(width - 1, end + 1)
+                track_end = min(width, end + max(60, int(width * 0.16)))
+                if track_end <= track_start:
+                    continue
+                track_ratio = float(track_mask[y, track_start:track_end].mean())
+                preview_red = self._has_red_preview_after_thumb(red_mask[y], end, width)
+                if track_ratio < 0.35 and not preview_red:
+                    continue
+                score = float(run) + track_ratio * 120.0 + (float(y) / float(height)) * 18.0
+                if best is None or score > best[0]:
+                    best = (score, y, start, end)
+        if best is None:
+            return None
+        _score, _y, _start, end = best
+        if self._looks_like_red_panel_separator(rgb_array, _y, _start, end):
+            return None
+        return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
+
+    def _looks_like_red_panel_separator(self, rgb_array, y: int, start: int, end: int) -> bool:
+        try:
+            import numpy as np
+        except Exception:
+            return False
+        height, width = rgb_array.shape[:2]
+        if end - start + 1 < max(160, int(width * 0.18)):
+            return False
+        start = max(0, int(start))
+        end = min(width - 1, int(end))
+        red_thickness = 0
+        for offset in (-2, -1, 0, 1, 2):
+            yy = max(0, min(height - 1, int(y) + offset))
+            row = rgb_array[yy, start : end + 1, :3]
+            if row.size == 0:
+                continue
+            red = row[:, 0]
+            green = row[:, 1]
+            blue = row[:, 2]
+            red_ratio = float(((red >= 190) & (green <= 150) & (blue <= 165) & ((red - green) >= 45) & ((red - blue) >= 40)).mean())
+            if red_ratio >= 0.62:
+                red_thickness += 1
+        if red_thickness >= 2:
+            return False
+        for offset in (1, 2, 3):
+            yy = min(height - 1, int(y) + offset)
+            row = rgb_array[yy, start : end + 1, :3]
+            if row.size == 0:
+                continue
+            values = row.mean(axis=1)
+            color_range = row.max(axis=1) - row.min(axis=1)
+            if float(((values >= 245.0) & (color_range <= 18)).mean()) >= 0.82:
+                return True
+        return False
+
+    def _has_red_preview_after_thumb(self, row_mask, end: int, width: int) -> bool:
+        try:
+            start = min(width, int(end) + 2)
+            stop = min(width, int(end) + max(12, int(width * 0.025)))
+            if stop <= start:
+                return False
+            return bool(row_mask[start:stop].any())
+        except Exception:
+            return False
 
     def _progress_fraction_from_image_slow(self, image) -> float | None:
         try:
@@ -433,9 +624,112 @@ class NeteasePositionReader:
                 if best is None or score > best[0]:
                     best = (score, y, start, end)
         if best is None:
-            return None
+            return self._netease_red_progress_fraction_from_image_slow(rgb)
         _score, _y, _start, end = best
         return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
+
+    def _netease_red_progress_fraction_from_image_slow(self, image) -> float | None:
+        try:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+        except Exception:
+            return None
+        if width < 220 or height < 160:
+            return None
+        y_start = int(height * 0.70)
+        y_end = int(height * 0.96)
+        min_red_run = max(80, int(width * 0.055))
+        best: tuple[float, int, int, int] | None = None
+        for y in range(y_start, y_end):
+            points: list[int] = []
+            for x in range(width):
+                r, g, b = rgb.getpixel((x, y))
+                if r >= 190 and g <= 150 and b <= 165 and r - g >= 45 and r - b >= 40:
+                    points.append(x)
+            if not points:
+                continue
+            start = prev = points[0]
+            runs: list[tuple[int, int]] = []
+            for x in points[1:]:
+                if x <= prev + 1:
+                    prev = x
+                    continue
+                if prev - start + 1 >= min_red_run:
+                    runs.append((start, prev))
+                start = prev = x
+            if prev - start + 1 >= min_red_run:
+                runs.append((start, prev))
+            for start, end in runs:
+                run = end - start + 1
+                if run > width * 0.90 or start > max(6, int(width * 0.05)):
+                    continue
+                track_start = min(width - 1, end + 1)
+                track_end = min(width, end + max(60, int(width * 0.16)))
+                if track_end <= track_start:
+                    continue
+                track_hits = 0
+                track_total = 0
+                for tx in range(track_start, track_end):
+                    r, g, b = rgb.getpixel((tx, y))
+                    track_total += 1
+                    if min(r, g, b) >= 205 and max(r, g, b) - min(r, g, b) <= 34:
+                        track_hits += 1
+                track_ratio = track_hits / max(1, track_total)
+                preview_red = self._has_red_preview_after_thumb_slow(rgb, y, end, width)
+                if track_ratio < 0.35 and not preview_red:
+                    continue
+                score = float(run) + track_ratio * 120.0 + (float(y) / float(height)) * 18.0
+                if best is None or score > best[0]:
+                    best = (score, y, start, end)
+        if best is None:
+            return None
+        _score, _y, _start, end = best
+        if self._looks_like_red_panel_separator_slow(rgb, _y, _start, end):
+            return None
+        return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
+
+    def _has_red_preview_after_thumb_slow(self, rgb, y: int, end: int, width: int) -> bool:
+        start = min(width, int(end) + 2)
+        stop = min(width, int(end) + max(12, int(width * 0.025)))
+        for x in range(start, stop):
+            r, g, b = rgb.getpixel((x, y))
+            if r >= 190 and g <= 150 and b <= 165 and r - g >= 45 and r - b >= 40:
+                return True
+        return False
+
+    def _looks_like_red_panel_separator_slow(self, image, y: int, start: int, end: int) -> bool:
+        try:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+        except Exception:
+            return False
+        if end - start + 1 < max(160, int(width * 0.18)):
+            return False
+        start = max(0, int(start))
+        end = min(width - 1, int(end))
+        total = max(1, end - start + 1)
+        red_thickness = 0
+        for offset in (-2, -1, 0, 1, 2):
+            yy = max(0, min(height - 1, int(y) + offset))
+            hits = 0
+            for x in range(start, end + 1):
+                r, g, b = rgb.getpixel((x, yy))
+                if r >= 190 and g <= 150 and b <= 165 and r - g >= 45 and r - b >= 40:
+                    hits += 1
+            if hits / total >= 0.62:
+                red_thickness += 1
+        if red_thickness >= 2:
+            return False
+        for offset in (1, 2, 3):
+            yy = min(height - 1, int(y) + offset)
+            hits = 0
+            for x in range(start, end + 1):
+                r, g, b = rgb.getpixel((x, yy))
+                if (r + g + b) / 3.0 >= 245.0 and max(r, g, b) - min(r, g, b) <= 18:
+                    hits += 1
+            if hits / total >= 0.82:
+                return True
+        return False
 
     def _progress_thumb_center_from_array(self, rgb_array, values, y: int, progress_end: int | None = None) -> int | None:
         try:
@@ -527,7 +821,7 @@ class NeteasePositionReader:
         self._pywinauto_available = True
 
         try:
-            rows = self._visible_lyric_rows(Desktop(backend="uia"), title)
+            rows = self._visible_lyric_rows(Desktop(backend="uia"), title, require_title=click_pos is None)
         except Exception as exc:
             self._last_error = f"uia read failed: {exc}"
             return None
@@ -563,7 +857,10 @@ class NeteasePositionReader:
             return None
         candidates.sort(reverse=True)
         _score, lyric_index, lyric_text, _top, _height = candidates[0]
-        position = self._estimated_anchor_position(timed_lyrics, lyric_index)
+        if click_pos is not None:
+            position = max(0.0, float(timed_lyrics[lyric_index].time_seconds))
+        else:
+            position = self._estimated_anchor_position(timed_lyrics, lyric_index)
         return NeteasePositionSample(
             position_seconds=position,
             duration_seconds=max(0.0, duration_seconds),
@@ -615,7 +912,7 @@ class NeteasePositionReader:
             row_gap = max(64.0, min(118.0, height * 0.115))
             offset = int(round((click_y - center_y) / row_gap))
             target_index = max(0, min(len(timed_lyrics) - 1, current_index + offset))
-            position = self._estimated_anchor_position(timed_lyrics, target_index)
+            position = max(0.0, float(timed_lyrics[target_index].time_seconds))
             return NeteasePositionSample(
                 position_seconds=position,
                 duration_seconds=max(0.0, duration_seconds),
@@ -902,18 +1199,27 @@ class NeteasePositionReader:
 
         left = float(row.get("left", 0.0) or 0.0)
         right = float(row.get("right", 0.0) or 0.0)
+        container_left = float(row.get("container_left", 0.0) or 0.0)
+        container_right = float(row.get("container_right", 0.0) or 0.0)
         if right <= left:
-            left = float(row.get("container_left", 0.0) or 0.0)
-            right = float(row.get("container_right", 0.0) or 0.0)
+            left = container_left
+            right = container_right
         horizontal_penalty = 0.0
         if right > left:
             x_pad = max(32.0, min(120.0, (right - left) * 0.18))
-            if click_x < left - x_pad or click_x > right + x_pad:
+            in_text_band = left - x_pad <= click_x <= right + x_pad
+            in_container_band = False
+            if container_right > container_left:
+                container_pad = max(16.0, min(80.0, (container_right - container_left) * 0.08))
+                in_container_band = container_left - container_pad <= click_x <= container_right + container_pad
+            if not in_text_band and not in_container_band:
                 return None
             if click_x < left:
                 horizontal_penalty = left - click_x
             elif click_x > right:
                 horizontal_penalty = click_x - right
+                if in_container_band and not in_text_band:
+                    horizontal_penalty *= 0.35
 
         center_y = (top + bottom) / 2.0
         vertical_distance = abs(click_y - center_y)
@@ -1239,10 +1545,18 @@ class NeteasePositionReader:
             return 0.0
 
     def _row_match_text(self, texts: Iterable[str], indexed: dict[str, int]) -> str:
-        for text in texts:
+        values = [str(text or "").strip() for text in texts if str(text or "").strip()]
+        for text in values:
             normalized = self._normalize_text(text)
             if normalized in indexed:
                 return text
+        if len(values) >= 2:
+            combined = "".join(values)
+            if self._normalize_text(combined) in indexed:
+                return combined
+            spaced = " ".join(values)
+            if self._normalize_text(spaced) in indexed:
+                return spaced
         return ""
 
     def _lyric_index_map(self, timed_lyrics: Sequence[TimedLyricLine]) -> dict[str, int]:
@@ -1285,6 +1599,103 @@ class NeteasePositionReader:
             except Exception:
                 continue
         return best
+
+    def _find_adjacent_track(self, payload: object, title: str, artist: str, step: int) -> QueueTrack | None:
+        title_key = self._normalize_text(title)
+        artist_key = self._normalize_text(artist)
+        if not title_key:
+            return None
+        for items in self._walk_lists(payload):
+            tracks = [item for item in items if isinstance(item, dict) and self._normalize_text(str(item.get("name") or item.get("title") or ""))]
+            if len(tracks) < 2:
+                continue
+            for index, item in enumerate(tracks):
+                name = self._normalize_text(str(item.get("name") or item.get("title") or ""))
+                if name != title_key:
+                    continue
+                artists = item.get("artists") or item.get("ar") or item.get("artist") or ()
+                artist_text = self._normalize_text(self._artist_text(artists))
+                if artist_key and artist_key not in artist_text:
+                    continue
+                target_index = index + int(step)
+                if target_index < 0 or target_index >= len(tracks):
+                    return None
+                return self._queue_track_from_item(tracks[target_index])
+        return None
+
+    def _queue_track_from_item(self, item: dict[str, object]) -> QueueTrack | None:
+        title = str(item.get("name") or item.get("title") or "").strip()
+        if not title:
+            return None
+        artists = item.get("artists") or item.get("ar") or item.get("artist") or ()
+        album = item.get("album") or item.get("al") or {}
+        album_title = ""
+        if isinstance(album, dict):
+            album_title = str(album.get("name") or album.get("title") or "").strip()
+        duration = item.get("duration") or item.get("dt") or item.get("durationMs") or 0
+        try:
+            duration_seconds = max(0.0, float(duration) / 1000.0)
+        except Exception:
+            duration_seconds = 0.0
+        return QueueTrack(
+            title=title,
+            artist=self._artist_text(artists).strip(),
+            album_title=album_title,
+            duration_seconds=duration_seconds,
+        )
+
+    def _queue_track_for_metadata(self, title: str, artist: str) -> QueueTrack | None:
+        title_key = self._normalize_text(title)
+        artist_key = self._normalize_text(artist)
+        if not title_key:
+            return None
+        for path in self._queue_paths():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            except Exception:
+                continue
+            for items in self._walk_lists(payload):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    name = self._normalize_text(str(item.get("name") or item.get("title") or ""))
+                    if name != title_key:
+                        continue
+                    artists = item.get("artists") or item.get("ar") or item.get("artist") or ()
+                    artist_text = self._normalize_text(self._artist_text(artists))
+                    if artist_key and artist_key not in artist_text:
+                        continue
+                    return self._queue_track_from_item(item)
+        return None
+
+    def _track_from_window_title(self, window_title: str) -> QueueTrack | None:
+        value = str(window_title or "").strip()
+        if not value or len(value) > 280:
+            return None
+        lowered = value.casefold()
+        if lowered in {"netease cloud music", "cloudmusic", "orpheusbrowserhost"}:
+            return None
+        for separator in (" - ",):
+            if separator not in value:
+                continue
+            title, artist = value.rsplit(separator, 1)
+            title = title.strip()
+            artist = artist.strip()
+            if not title or not artist:
+                continue
+            if len(title) > 160 or len(artist) > 120:
+                continue
+            return QueueTrack(title=title, artist=artist)
+        return None
+
+    def _walk_lists(self, value: object):
+        if isinstance(value, list):
+            yield value
+            for child in value:
+                yield from self._walk_lists(child)
+        elif isinstance(value, dict):
+            for child in value.values():
+                yield from self._walk_lists(child)
 
     def _walk_dicts(self, value: object):
         if isinstance(value, dict):

@@ -18,6 +18,7 @@ from api.providers import WindowsMediaProvider
 from local.island_stack_visual import IslandStackVisual
 from local.settings_store import SettingsManager
 from local.settings_window import SettingsWindow
+from local.ui_theme import set_theme_settings_getter
 
 
 class SingleInstanceGuard:
@@ -105,6 +106,7 @@ class LocalIslandApp:
         self.watchdog = MainThreadWatchdog(self.app)
 
         self.settings = SettingsManager()
+        set_theme_settings_getter(self.settings.get)
         self.data_provider = WindowsMediaProvider(settings_getter=self.settings.get)
         app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", "PingFang SC")))
         self.app.setFont(QFont(app_font_family, 9))

@@ -237,6 +237,89 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual([alert[6] for alert in alerts], ["time"])
 
+    def test_plugin_tuple_reads_progress_field_compatibly(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        plugin = visual._plugin_tuple(("TIME", "12:05", "倒计时 4:52", QColor(67, 162, 255), "●", "time", "running", "", "", 30, 0.52))
+
+        self.assertAlmostEqual(plugin[10], 0.52)
+
+    def test_compact_plugin_value_is_value_only(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        value = visual._plugin_compact_value("TIME", "12:05", "倒计时 4:52", "running")
+
+        self.assertEqual(value, "4:52")
+        self.assertNotIn("倒计时", value)
+
+    def test_expanded_plugin_main_surface_is_function_panel_height(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+
+        _width, height = visual._main_size_for_kind(IslandKind.PLUGIN, 420.0)
+
+        self.assertGreater(height, 160.0 * IslandStackVisual.VISUAL_SCALE)
+
+    def test_expanded_plugin_strip_defaults_to_equal_widths_without_hover(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.enabled_plugin_count = 3
+        visual.plugin_focus_from = 0
+        visual.plugin_focus_target = 0
+        visual.plugin_focus_changed_at = 0.0
+
+        cells = visual._plugin_item_rects(QRectF(0.0, 0.0, 420.0, 48.0), 1.0, expand_active=False)
+
+        widths = [round(cell.width(), 2) for _index, cell in cells]
+        self.assertEqual(widths, [140.0, 140.0, 140.0])
+
+    def test_expanded_plugin_strip_keeps_unfocused_cells_readable(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.enabled_plugin_count = 3
+        visual.plugin_focus_from = 0
+        visual.plugin_focus_target = 1
+        visual.plugin_focus_changed_at = -10.0
+
+        cells = visual._plugin_item_rects(QRectF(0.0, 0.0, 420.0, 48.0), 1.0, expand_active=True)
+
+        widths = [cell.width() for _index, cell in cells]
+        self.assertGreater(widths[1], widths[0])
+        self.assertGreaterEqual(widths[0], 90.0 * IslandStackVisual.VISUAL_SCALE)
+        self.assertGreaterEqual(widths[2], 90.0 * IslandStackVisual.VISUAL_SCALE)
+
+    def test_plugin_alert_display_value_is_value_only(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        value = visual._plugin_alert_display_value("TIME", "12:05:49", "Countdown 0:24", "running", "Timer running", "Countdown 0:24")
+
+        self.assertEqual(value, "0:24")
+        self.assertNotIn("Countdown", value)
+
+    def test_plugin_alert_width_is_small_for_value_only_alerts(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        width = visual._plugin_alert_width_for("TIME", "12:05:49", "0:24")
+
+        self.assertLessEqual(width, 174.0 * IslandStackVisual.VISUAL_SCALE)
+
+    def test_expanded_plugin_panel_is_not_overlong(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+
+        _width, height = visual._main_size_for_kind(IslandKind.PLUGIN, 420.0)
+
+        self.assertLessEqual(height, 190.0 * IslandStackVisual.VISUAL_SCALE)
+
+    def test_plugin_function_lines_are_runtime_not_settings(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        title, lines = visual._plugin_function_lines("WEATHER", "26C Sunny", "Beijing wind humidity 40%", "normal")
+
+        self.assertIn("天气", title)
+        self.assertIn("26C Sunny", lines)
+        self.assertNotIn("手动城市", " ".join(lines))
+
     def test_running_timer_alert_prefers_timer_summary(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
 
@@ -244,6 +327,44 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertIn("计时", title)
         self.assertEqual(body, "倒计时 0:24")
+
+    def test_weather_loading_creates_plugin_alert(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.persistent_plugin = True
+        visual.expanded = False
+        visual.enabled_plugin_count = 3
+        visual.plugin_samples = [
+            ("TIME", "20:00", "05/27", QColor(67, 162, 255), "●", "time", "normal", "", "", 50),
+            ("WEATHER", "北京", "天气刷新中", QColor(80, 210, 255), "☁", "weather", "loading", "天气刷新中", "北京", 40),
+            ("AGENDA", "暂无日程", "JSON / ICS", QColor(118, 236, 160), "■", "agenda", "normal", "", "", 50),
+        ]
+
+        alerts = visual._active_plugin_alerts(1)
+
+        self.assertEqual([alert[6] for alert in alerts], ["weather"])
+
+    def test_plugin_alert_text_prefers_provider_alert_copy(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        title, body = visual._plugin_alert_text_parts("WEATHER", "北京", "天气刷新中", "loading", "天气刷新中", "北京")
+
+        self.assertEqual(title, "WEATHER · 天气刷新中")
+        self.assertEqual(body, "北京")
+
+    def test_plugin_alert_priority_comes_before_status_order(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.persistent_plugin = True
+        visual.expanded = False
+        visual.enabled_plugin_count = 3
+        visual.plugin_samples = [
+            ("TIME", "00:24", "倒计时 0:24", QColor(67, 162, 255), "●", "time", "running", "计时进行中", "倒计时 0:24", 30),
+            ("WEATHER", "北京", "天气刷新中", QColor(80, 210, 255), "☁", "weather", "loading", "天气刷新中", "北京", 40),
+            ("AGENDA", "4 分钟后", "准备开会", QColor(118, 236, 160), "■", "agenda", "soon", "日程将近", "4 分钟后 · 准备开会", 10),
+        ]
+
+        alerts = visual._active_plugin_alerts(2)
+
+        self.assertEqual([alert[6] for alert in alerts], ["agenda", "time"])
 
     def test_plugin_alert_width_adapts_to_content(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
