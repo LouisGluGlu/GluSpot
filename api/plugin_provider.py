@@ -132,7 +132,15 @@ class RealPluginProvider:
         summary = now.strftime("%m/%d %a")
         timer = self._timer_summary(now)
         status = self.timer_state(now)
-        alarm = self.alarm_due_at(now)
+        alarm_row_due = self.alarm_row_due(now)
+        alarm_label = ""
+        if alarm_row_due is not None:
+            alarm, row = alarm_row_due
+            alarm_label = self._alarm_row_label(row)
+        else:
+            alarm = self.alarm_due_at(now)
+            if alarm is not None:
+                alarm_label = alarm.strftime("%H:%M")
         if alarm is not None:
             status = "alarm"
             summary = alarm.strftime("%H:%M")
@@ -151,14 +159,14 @@ class RealPluginProvider:
             alert_priority = 5
         elif status == "alarm" and alarm is not None:
             alert_title = "闹钟提醒"
-            alert_body = alarm.strftime("%H:%M")
+            alert_body = alarm_label or "闹钟"
             alert_priority = 3
         return PluginData(
             label="TIME",
             detail=detail,
             summary=summary,
-            color=ColorToken(67, 162, 255),
-            icon="◷",
+            color=ColorToken(255, 204, 0),
+            icon="T",
             plugin_id="time",
             status=status,
             primary_value=detail,
@@ -265,6 +273,20 @@ class RealPluginProvider:
             return "done"
         return "running"
 
+    def alarm_row_due(self, now: datetime | None = None) -> tuple[datetime, dict[str, object]] | None:
+        now = now or self._plugin_now()
+        due_rows = []
+        for row in self._alarm_rows():
+            if not bool(row.get("enabled", True)):
+                continue
+            due_at = self._alarm_row_due_at(row, now)
+            if due_at is not None:
+                due_rows.append((due_at, row))
+        if not due_rows:
+            return None
+        due_rows.sort(key=lambda item: item[0])
+        return due_rows[0]
+
     def alarm_due_at(self, now: datetime | None = None) -> datetime | None:
         now = now or self._plugin_now()
         raw = str(self._setting("v2_alarm_at", "") or "").strip()
@@ -278,6 +300,142 @@ class RealPluginProvider:
             alarm = alarm.replace(tzinfo=now.tzinfo)
         alarm = alarm.astimezone(now.tzinfo)
         return alarm if abs((alarm - now).total_seconds()) <= 60.0 else None
+
+    def _alarm_rows(self) -> list[dict[str, object]]:
+        raw = self._setting("v2_alarm_rows", "")
+        if raw in (None, ""):
+            return []
+        payload = raw
+        if isinstance(raw, str):
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                return []
+        if isinstance(payload, dict):
+            payload = payload.get("alarms") or payload.get("rows") or []
+        if not isinstance(payload, list):
+            return []
+        rows: list[dict[str, object]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            parsed_time = self._alarm_row_time(item)
+            if parsed_time is None:
+                continue
+            hour, minute = parsed_time
+            rows.append(
+                {
+                    "time": f"{hour:02d}:{minute:02d}",
+                    "label": str(item.get("label") or item.get("note") or "").strip(),
+                    "enabled": bool(item.get("enabled", True)),
+                    "frequency_unit": self._alarm_frequency_unit(item),
+                    "weekdays": self._alarm_weekdays(item.get("weekdays", [])),
+                    "month_day": self._alarm_int(item.get("month_day", 1), 1, 31, 1),
+                    "year_month": self._alarm_int(item.get("year_month", 1), 1, 12, 1),
+                    "year_day": self._alarm_int(item.get("year_day", 1), 1, 31, 1),
+                }
+            )
+            if len(rows) >= 8:
+                break
+        return rows
+
+    def _alarm_row_time(self, row: dict[str, object]) -> tuple[int, int] | None:
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(row.get("time") or ""))
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour, minute
+
+    def _alarm_row_label(self, row: dict[str, object]) -> str:
+        return str(row.get("label") or row.get("note") or "").strip() or "闹钟"
+
+    def _alarm_frequency_unit(self, row: dict[str, object]) -> str:
+        text = str(row.get("frequency_unit") or row.get("frequency") or "").strip().lower()
+        if text in {"weekly", "week"} or "周" in text:
+            return "weekly"
+        if text in {"monthly", "month"} or "月" in text:
+            return "monthly"
+        if text in {"yearly", "year"} or "年" in text or "闰" in text:
+            return "yearly"
+        return "daily"
+
+    def _alarm_weekdays(self, value: object) -> list[int]:
+        if isinstance(value, (list, tuple, set)):
+            days = []
+            for item in value:
+                try:
+                    day = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= day <= 7 and day not in days:
+                    days.append(day)
+            return sorted(days)
+        text = str(value or "").strip()
+        lowered = text.lower()
+        if not text:
+            return []
+        if any(token in lowered for token in ("daily", "every day")) or any(token in text for token in ("每天", "每日", "整周")):
+            return [1, 2, 3, 4, 5, 6, 7]
+        if "workday" in lowered or "工作日" in text:
+            return [1, 2, 3, 4, 5]
+        if "weekend" in lowered or "周末" in text:
+            return [6, 7]
+        mapping = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "日": 7, "天": 7}
+        days = []
+        for token in re.findall(r"[1-7一二三四五六七日天]", text):
+            day = int(token) if token.isdigit() else mapping.get(token, 0)
+            if 1 <= day <= 7 and day not in days:
+                days.append(day)
+        return sorted(days)
+
+    def _alarm_row_due_at(self, row: dict[str, object], now: datetime) -> datetime | None:
+        parsed_time = self._alarm_row_time(row)
+        if parsed_time is None:
+            return None
+        hour, minute = parsed_time
+        due_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if abs((due_at - now).total_seconds()) > 60.0:
+            return None
+        if not self._alarm_row_matches_date(row, due_at):
+            return None
+        return due_at
+
+    def _alarm_row_matches_date(self, row: dict[str, object], due_at: datetime) -> bool:
+        unit = self._alarm_frequency_unit(row)
+        if unit == "weekly":
+            weekdays = self._alarm_weekdays(row.get("weekdays", []))
+            return due_at.isoweekday() in weekdays if weekdays else False
+        if unit == "monthly":
+            day = self._alarm_int(row.get("month_day", 1), 1, 31, 1)
+            return day <= self._days_in_month(due_at.year, due_at.month) and due_at.day == day
+        if unit == "yearly":
+            month = self._alarm_int(row.get("year_month", 1), 1, 12, 1)
+            day = self._alarm_int(row.get("year_day", 1), 1, 31, 1)
+            return due_at.month == month and due_at.day == day and day <= self._days_in_month(due_at.year, month)
+        return True
+
+    def _alarm_int(self, value: object, lower: int, upper: int, default: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = int(default)
+        return max(int(lower), min(int(upper), number))
+
+    def _days_in_month(self, year: int, month: int) -> int:
+        year = max(1, int(year))
+        month = max(1, min(12, int(month)))
+        if month == 2:
+            return 29 if self._is_leap_year(year) else 28
+        if month in {4, 6, 9, 11}:
+            return 30
+        return 31
+
+    def _is_leap_year(self, year: int) -> bool:
+        year = int(year)
+        return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
     def _weather_plugin(self) -> PluginData:
         self._schedule_weather_refresh_if_needed()

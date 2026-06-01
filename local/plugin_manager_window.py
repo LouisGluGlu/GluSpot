@@ -302,6 +302,12 @@ class PluginManagerWindow(QDialog):
         self.custom_timezone_input = custom_tz
         self._control_row(settings, "自定义时区", custom_tz)
 
+        self.alarm_rows_summary = self._value_row(settings, "闹钟", self._alarm_rows_summary())
+        alarm_button = QPushButton("回到插件岛编辑")
+        alarm_button.setObjectName("Primary")
+        alarm_button.clicked.connect(self._request_alarm_rows_editor)
+        settings.addWidget(alarm_button)
+
         timer_row = QHBoxLayout()
         self.minutes_input = QSpinBox()
         self.minutes_input.setRange(1, 600)
@@ -350,10 +356,16 @@ class PluginManagerWindow(QDialog):
         root.addLayout(action_row)
 
         settings = self._card(root)
-        self.weather_location_input = QLineEdit(str(self._setting("v2_weather_location", "北京") or "北京"))
+        self.weather_use_location = IosSwitch("优先读取定位", bool(self._setting("v2_weather_use_location", True)))
+        self.weather_use_location.toggled.connect(self._save_weather_use_location)
+        settings.addWidget(self.weather_use_location)
+
+        self.weather_location_input = QLineEdit(
+            str(self._setting("v2_weather_manual_location", self._setting("v2_weather_location", "北京")) or "北京")
+        )
         self.weather_location_input.setPlaceholderText("例如 北京、上海、深圳")
-        self.weather_location_input.editingFinished.connect(self._save_weather_location)
-        self._control_row(settings, "城市", self.weather_location_input)
+        self.weather_location_input.editingFinished.connect(self._save_weather_manual_location)
+        self._control_row(settings, "手动城市", self.weather_location_input)
 
         self._value_row(settings, "查询方式", "免 Key 直接查询")
 
@@ -410,6 +422,12 @@ class PluginManagerWindow(QDialog):
         self.schedule_ics_input.setPlaceholderText(str(DATA_DIR / "schedule.ics"))
         self.schedule_ics_input.editingFinished.connect(self._save_schedule_ics_path)
         self._control_row(settings, "ICS", self.schedule_ics_input)
+        self.schedule_reminder_minutes = QLineEdit(str(self._setting("v2_schedule_reminder_minutes", "15,30,5") or "15,30,5"))
+        self.schedule_reminder_minutes.setPlaceholderText("15,30,5")
+        self.schedule_reminder_minutes.editingFinished.connect(self._save_schedule_reminder_minutes)
+        self._control_row(settings, "提醒阈值", self.schedule_reminder_minutes)
+        self._value_row(settings, "待做清单", "课表读取录入")
+        self._value_row(settings, "提醒路线", "课表提醒功能")
 
         diagnostics_title = QLabel("诊断")
         diagnostics_title.setObjectName("Section")
@@ -518,11 +536,58 @@ class PluginManagerWindow(QDialog):
     def _clear_timer(self):
         self._save("v2_timer_end_at", "")
 
+    def _alarm_rows_summary(self) -> str:
+        raw = self._setting("v2_alarm_rows", "")
+        if not raw:
+            return "暂无闹钟"
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return "闹钟数据待整理"
+        if isinstance(payload, dict):
+            payload = payload.get("alarms") or payload.get("rows") or []
+        if not isinstance(payload, list):
+            return "闹钟数据待整理"
+        rows = [row for row in payload if isinstance(row, dict)]
+        enabled = sum(1 for row in rows if bool(row.get("enabled", True)))
+        if not rows:
+            return "暂无闹钟"
+        return f"{enabled}/{len(rows)} 个已启用"
+
+    def _request_alarm_rows_editor(self):
+        parent = self.parent()
+        if parent is not None:
+            setattr(parent, "persistent_plugin", True)
+            setattr(parent, "enabled_plugin_count", max(1, int(getattr(parent, "enabled_plugin_count", 1) or 1)))
+            setattr(parent, "plugin_time_mode", "alarm_editor")
+            setattr(parent, "plugin_panel_open", True)
+            if hasattr(parent, "_set_expanded"):
+                parent._set_expanded(True)
+            if hasattr(parent, "_set_plugin_focus"):
+                parent._set_plugin_focus(0, immediate=True)
+        if hasattr(self, "alarm_rows_summary"):
+            self.alarm_rows_summary.setText(self._alarm_rows_summary())
+
     def _save_weather_location(self):
         value = str(self.weather_location_input.text() or "").strip() or "北京"
         self.weather_location_input.setText(value)
         self._save("v2_weather_location", value)
         self._refresh_weather()
+
+    def _save_weather_manual_location(self):
+        value = str(self.weather_location_input.text() or "").strip() or "北京"
+        self.weather_location_input.setText(value)
+        self._save("v2_weather_manual_location", value)
+        if not bool(self._setting("v2_weather_use_location", True)):
+            self._save("v2_weather_location", value)
+        self._refresh_weather()
+
+    def _save_weather_use_location(self, enabled: bool):
+        self._save("v2_weather_use_location", bool(enabled))
+        if not enabled:
+            self._save_weather_manual_location()
+        else:
+            self._refresh_weather()
 
     def _save_weather_key(self):
         input_widget = getattr(self, "weather_key_input", None)
@@ -541,6 +606,11 @@ class PluginManagerWindow(QDialog):
 
     def _save_schedule_ics_path(self):
         self._save("v2_schedule_ics_path", str(self.schedule_ics_input.text() or "").strip())
+
+    def _save_schedule_reminder_minutes(self):
+        value = str(self.schedule_reminder_minutes.text() or "").strip() or "15,30,5"
+        self.schedule_reminder_minutes.setText(value)
+        self._save("v2_schedule_reminder_minutes", value)
 
     def _agenda_json_path(self) -> Path:
         raw = str(self._setting("v2_schedule_json_path", "") or "").strip()
@@ -617,6 +687,8 @@ class PluginManagerWindow(QDialog):
         show_seconds = bool(self._setting("v2_show_seconds", True))
         self.current_time_label.setText(now.strftime("%H:%M:%S" if show_seconds else "%H:%M"))
         self.timezone_label.setText(self._timezone_label())
+        if hasattr(self, "alarm_rows_summary"):
+            self.alarm_rows_summary.setText(self._alarm_rows_summary())
         remaining = self._remaining_seconds(now)
         end_at = str(self._setting("v2_timer_end_at", "") or "").strip()
         self.end_at_label.setText(end_at or "-")

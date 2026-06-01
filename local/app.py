@@ -129,6 +129,7 @@ class LocalIslandApp:
         self.window.music_playing = bool(self.settings.get("v2_music_playing", True))
         self.window.music_auto_detect = bool(self.settings.get("v2_music_auto_detect", False))
         self.window.persistent_plugin = bool(self.settings.get("v2_persistent_plugin", True))
+        self.window.set_super_topmost(bool(self.settings.get("v2_super_topmost", True)), notify=False)
         self.window.set_manual_finder_available(bool(self.settings.get("v2_manual_mydockfinder", False)), notify=False)
         finder_setting = self.settings.get("v2_finder_mode", None)
         self.window.set_finder_mode(
@@ -138,6 +139,10 @@ class LocalIslandApp:
         self.window.expanded = bool(self.settings.get("v2_expanded", False))
         self.window.show_seconds = bool(self.settings.get("v2_show_seconds", True))
         self.window.enabled_plugin_count = max(0, min(3, int(self.settings.get("v2_plugin_count", 3))))
+        self.window.side_island_style = str(self.settings.get("v2_side_island_style", "standard") or "standard")
+        self.window.plugin_island_style = str(self.settings.get("v2_plugin_island_style", "standard") or "standard")
+        self.window.music_island_style = str(self.settings.get("v2_music_island_style", "standard") or "standard")
+        self.window.time_alarm_side_display = str(self.settings.get("v2_time_alarm_side_display", "note") or "note")
         self.window.ambient_intensity = max(0.0, min(1.0, float(self.settings.get("v2_ambient_intensity", 0.0))))
         self.window.set_music_ambience_style(str(self.settings.get("v2_music_ambience_style", "sea_level")), notify=False)
         self.window.set_music_flow_intensity(float(self.settings.get("v2_music_flow_intensity", 0.74)), notify=False)

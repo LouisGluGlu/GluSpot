@@ -23,6 +23,7 @@ YRC_LINE_RE = re.compile(r"^\[(\d+)\s*,\s*(\d+)\](.*)$")
 YRC_WORD_RE = re.compile(r"\(\d+\s*,\s*\d+(?:\s*,\s*\d+)?\)")
 JSONP_RE = re.compile(r"^[A-Za-z_][\w.]*\((.*)\)\s*;?\s*$", re.S)
 METADATA_RE = re.compile(r"^\[(?:ar|ti|al|by|offset|length|re|ve|kana|language):.*\]$", re.I)
+ONLINE_SOURCE_ORDER = ("netease", "qq", "lrclib")
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,8 @@ class LocalLyricsStore:
         self.root = root or Path(__file__).resolve().parents[1] / "lyrics"
         self.request_timeout = float(request_timeout)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._source_hits_path = self.root / ".source_hits.json"
+        self._source_hit_counts = self._load_source_hit_counts()
         self._resolved_cache: dict[str, LyricsMatch] = {}
         self._pending_keys: set[str] = set()
         self._enrich_pending_keys: set[str] = set()
@@ -186,11 +189,54 @@ class LocalLyricsStore:
                 self._enrich_pending_keys.discard(cache_key)
 
     def _resolve_online(self, title: str, artist: str, album_title: str, duration_seconds: float) -> LyricsMatch:
-        for resolver in (self._resolve_netease, self._resolve_qq, self._resolve_lrclib):
+        for source_name, resolver in self._ordered_online_resolvers():
             match = resolver(title, artist, album_title, duration_seconds)
             if match is not None:
+                if match.timed_lyrics or match.lyrics:
+                    self._record_source_hit(str(match.source or source_name))
                 return match
         return LyricsMatch((), (), "")
+
+    def _ordered_online_resolvers(self):
+        resolvers = {
+            "netease": self._resolve_netease,
+            "qq": self._resolve_qq,
+            "lrclib": self._resolve_lrclib,
+        }
+        base_index = {name: index for index, name in enumerate(ONLINE_SOURCE_ORDER)}
+        names = sorted(
+            ONLINE_SOURCE_ORDER,
+            key=lambda name: (-int(self._source_hit_counts.get(name, 0)), base_index[name]),
+        )
+        return [(name, resolvers[name]) for name in names]
+
+    def _load_source_hit_counts(self) -> dict[str, int]:
+        counts = {name: 0 for name in ONLINE_SOURCE_ORDER}
+        try:
+            raw = json.loads(self._source_hits_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return counts
+        if not isinstance(raw, dict):
+            return counts
+        for name in ONLINE_SOURCE_ORDER:
+            try:
+                counts[name] = max(0, int(raw.get(name, 0)))
+            except (TypeError, ValueError):
+                counts[name] = 0
+        return counts
+
+    def _save_source_hit_counts(self):
+        try:
+            self._source_hits_path.write_text(json.dumps(self._source_hit_counts, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            return
+
+    def _record_source_hit(self, source: str):
+        name = str(source or "").split(":", 1)[0].strip().lower()
+        if name not in ONLINE_SOURCE_ORDER:
+            return
+        self._source_hit_counts[name] = int(self._source_hit_counts.get(name, 0)) + 1
+        self._save_source_hit_counts()
 
     def _parse_lrc_text(self, text: str) -> tuple[tuple[TimedLyricLine, ...], tuple[str, ...]]:
         timed: list[TimedLyricLine] = []

@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from api.lyrics import LocalLyricsStore
+from api.lyrics import LocalLyricsStore, LyricsMatch
+from api.models import TimedLyricLine
 
 
 class LyricsStoreTests(unittest.TestCase):
@@ -90,6 +91,31 @@ class LyricsStoreTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match.timed_lyrics[0].text, "薛：我记得那草坪 一览无遗\n刘：我等你的草坪 高楼耸起")
         self.assertEqual(match.lyrics[0], "薛：我记得那草坪 一览无遗\n刘：我等你的草坪 高楼耸起")
+
+    def test_online_resolver_order_prefers_recorded_hits(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+
+            store._record_source_hit("lrclib")
+            store._record_source_hit("lrclib")
+            store._record_source_hit("qq")
+
+            order = [name for name, _resolver in store._ordered_online_resolvers()]
+
+        self.assertEqual(order, ["lrclib", "qq", "netease"])
+
+    def test_resolve_online_records_successful_source_hit(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+            store._resolve_netease = lambda *_args: None
+            store._resolve_qq = lambda *_args: LyricsMatch((TimedLyricLine(0.0, "line"),), ("line",), "qq")
+            store._resolve_lrclib = lambda *_args: None
+
+            match = store._resolve_online("Song", "Artist", "", 0.0)
+            reloaded = LocalLyricsStore(Path(root))
+
+        self.assertEqual(match.source, "qq")
+        self.assertEqual(reloaded._source_hit_counts["qq"], 1)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ Controls:
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
@@ -23,6 +24,7 @@ import threading
 import time
 import ctypes
 import unicodedata
+from datetime import datetime, timedelta
 from ctypes import wintypes
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -50,6 +52,10 @@ from PySide6.QtGui import (
     QRadialGradient,
     QRegion,
 )
+try:
+    from PySide6.QtSvg import QSvgRenderer
+except Exception:
+    QSvgRenderer = None
 from PySide6.QtWidgets import QApplication, QWidget
 
 from api.lyric_timeline import active_index_for_position, lyric_phase_for_index
@@ -62,6 +68,7 @@ from local.ui_theme import app_dark_mode, is_theme_change_event
 class IslandKind(Enum):
     MUSIC = "music"
     PLUGIN = "plugin"
+    PLUGIN_PANEL = "plugin_panel"
     PLUGIN_ALERT = "plugin_alert"
     MESSAGE = "message"
     THIN_BAR = "thin_bar"
@@ -165,8 +172,10 @@ class IslandStackVisual(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
-        self.resize(int(round(self._u(940))), int(round(self._u(650))))
+        self.resize(int(round(self._standalone_canvas_width())), int(round(self._u(650))))
         self.stack_center_ratio = 0.5
         self.saved_window_pos: tuple[int, int] | None = None
         self.drag_press_pos = QPointF()
@@ -178,6 +187,7 @@ class IslandStackVisual(QWidget):
         self.drag_candidate = False
         self.dragging = False
         self.drag_threshold = 5.0
+        self.super_topmost_enabled = True
         self.topmost_reinforced_at = 0.0
         self.scene_suppressed = False
         self.scene_reason = ""
@@ -226,11 +236,16 @@ class IslandStackVisual(QWidget):
         self.enabled_plugin_count = 3
         self.show_seconds = True
         self.expanded = False
+        self.plugin_panel_open = False
         self.plugin_focus = 0
         self.plugin_focus_from = 0
         self.plugin_focus_target = 0
         self.plugin_focus_changed_at = time.monotonic()
         self.plugin_alert_width = 168.0
+        self.side_island_style = "standard"
+        self.plugin_island_style = "standard"
+        self.music_island_style = "standard"
+        self.time_alarm_side_display = "note"
         self.pointer_pos = QPointF(0, 0)
         self.hovered_key = ""
         self.hover_started_at = 0.0
@@ -244,6 +259,31 @@ class IslandStackVisual(QWidget):
         self.settings_getter = None
         self.settings_setter = None
         self.plugin_manager_windows: dict[str, QWidget] = {}
+        self.plugin_action_rects: dict[str, QRectF] = {}
+        self.plugin_time_mode = "dashboard"
+        self.plugin_time_visible_module = "countdown"
+        self.plugin_time_module_animation: dict[str, object] = {}
+        self.plugin_panel_last_width = 0.0
+        self.plugin_timer_paused_remaining_seconds = 0
+        self.plugin_timer_paused_progress = 0.0
+        self.plugin_countdown_entries: list[dict[str, object]] = []
+        self.plugin_alarm_rows = self._default_time_alarm_rows()
+        self.plugin_alarm_list_scroll_index = 0
+        self.plugin_alarm_list_bottom_spacer_rows = 0.0
+        self.plugin_alarm_list_max_scroll = 0.0
+        self.plugin_alarm_list_rect = QRectF()
+        self.plugin_alarm_visible_range = (0, 0)
+        self.plugin_alarm_delete_index: int | None = None
+        self.plugin_alarm_editor = self._default_alarm_editor_state()
+        self.plugin_alarm_editor_focus = ""
+        self.plugin_alarm_editor_input_buffers: dict[str, str] = {}
+        self.plugin_alarm_editor_spin_animations: dict[str, dict[str, float | int]] = {}
+        self.plugin_alarm_editor_page_animation: dict[str, object] = {}
+        self.plugin_alarm_editor_reflow_animation: dict[str, object] = {}
+        self.plugin_alarm_editor_rects: dict[str, QRectF] = {}
+        self.plugin_alarm_editor_note_hint = ""
+        self.plugin_alarm_editor_note_hint_until = 0.0
+        self.plugin_alarm_due_pending: dict[str, object] = {}
         self.show_debug_overlay = False
         self.finder_material_refreshed_at = time.monotonic()
         self.manual_finder_available = False
@@ -484,8 +524,24 @@ class IslandStackVisual(QWidget):
         self._sync_timed_lyrics(now)
 
     def _ingest_provider_messages(self, visual_data: IslandVisualData):
+        latest_by_app: dict[str, tuple[str, object]] = {}
+        app_order: list[str] = []
         for message in visual_data.messages:
-            key = f"{message.app}\0{message.sender}\0{message.text}"
+            app_name = str(getattr(message, "app", "") or "").strip()
+            if not app_name:
+                continue
+            app_key = app_name.casefold()
+            if app_key in latest_by_app:
+                try:
+                    app_order.remove(app_key)
+                except ValueError:
+                    pass
+            latest_by_app[app_key] = (app_name, message)
+            app_order.append(app_key)
+
+        for app_key in app_order:
+            app_name, message = latest_by_app[app_key]
+            key = f"{app_name}\0{message.sender}\0{message.text}"
             if key in self._seen_provider_message_keys:
                 continue
             self._seen_provider_message_keys.add(key)
@@ -494,7 +550,7 @@ class IslandStackVisual(QWidget):
             if avatar_bytes:
                 avatar_image.loadFromData(avatar_bytes)
             msg = Message(
-                message.app,
+                app_name,
                 message.sender,
                 message.text,
                 QColor(*message.name_color.rgba()),
@@ -502,6 +558,10 @@ class IslandStackVisual(QWidget):
                 avatar_image=avatar_image,
                 serial=len(self._seen_provider_message_keys),
             )
+            self.messages = [
+                existing for existing in self.messages
+                if str(getattr(existing, "app", "") or "").strip().casefold() != app_key
+            ]
             msg.barrage_started_at = self.barrage_clock + 0.05 * len(self.messages)
             self.messages.insert(0, msg)
         self.messages = self.messages[:8]
@@ -890,7 +950,7 @@ class IslandStackVisual(QWidget):
             self.move(geo.left(), geo.top())
             self._force_super_topmost()
         else:
-            standalone_width = int(round(self._u(940)))
+            standalone_width = int(round(self._standalone_canvas_width()))
             if self.width() != standalone_width:
                 self.resize(standalone_width, self.height())
             if self.saved_window_pos is not None:
@@ -898,6 +958,9 @@ class IslandStackVisual(QWidget):
                 self.move(int(x), int(y))
             else:
                 self.move(geo.center().x() - self.width() // 2, geo.top() + int(round(self._u(14))))
+
+    def _standalone_canvas_width(self) -> float:
+        return self._u(1180.0)
 
     def set_saved_placement(self, center_ratio=None, window_pos=None, notify: bool = True, stack_direction=None):
         try:
@@ -922,8 +985,18 @@ class IslandStackVisual(QWidget):
         if notify:
             self._notify_settings_changed()
 
+    def set_super_topmost(self, enabled: bool, notify: bool = True):
+        self.super_topmost_enabled = bool(enabled)
+        if self.super_topmost_enabled:
+            self._force_super_topmost()
+        else:
+            self._release_super_topmost()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
     def _force_super_topmost(self):
-        if sys.platform != "win32" or not getattr(self, "finder_mode", False):
+        if sys.platform != "win32" or not getattr(self, "super_topmost_enabled", True):
             return
         try:
             hwnd = int(self.winId())
@@ -934,6 +1007,21 @@ class IslandStackVisual(QWidget):
             flags = 0x0001 | 0x0002 | 0x0010 | 0x0040  # NOSIZE, NOMOVE, NOACTIVATE, SHOWWINDOW
             user32.SetWindowPos(ctypes.c_void_p(hwnd), hwnd_topmost, 0, 0, 0, 0, flags)
             self.topmost_reinforced_at = time.monotonic()
+        except Exception:
+            pass
+
+    def _release_super_topmost(self):
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+            if hwnd <= 0:
+                return
+            user32 = ctypes.windll.user32
+            hwnd_notopmost = ctypes.c_void_p(-2)
+            flags = 0x0001 | 0x0002 | 0x0010 | 0x0040  # NOSIZE, NOMOVE, NOACTIVATE, SHOWWINDOW
+            user32.SetWindowPos(ctypes.c_void_p(hwnd), hwnd_notopmost, 0, 0, 0, 0, flags)
+            self.topmost_reinforced_at = 0.0
         except Exception:
             pass
 
@@ -956,7 +1044,7 @@ class IslandStackVisual(QWidget):
             self.barrage_hovered = self._point_in_barrage(self.pointer_pos)
         if not self.barrage_hovered:
             self.barrage_clock += anim_dt
-        if self.finder_mode and now - self.topmost_reinforced_at > 1.6:
+        if getattr(self, "super_topmost_enabled", True) and now - self.topmost_reinforced_at > 1.6:
             self._force_super_topmost()
 
         if self.media_is_playing:
@@ -977,10 +1065,21 @@ class IslandStackVisual(QWidget):
         if self.hovered_key and not self.expanded and self.hover_armed_key == self.hovered_key and now - self.hover_started_at >= 1.0:
             self._activate_key(self.hovered_key)
             self.hover_armed_key = ""
+        if (
+            self.expanded
+            and self.hovered_key == "plugin"
+            and not getattr(self, "plugin_panel_open", False)
+            and now - self.hover_started_at >= 0.5
+        ):
+            self.plugin_panel_open = True
+            self._pulse_stack()
         if self.expanded and self.left_stack_at and now - self.left_stack_at >= 0.5:
             self._set_expanded(False)
             self.left_stack_at = 0.0
             self._pulse_stack()
+        if self._maybe_trigger_alarm_row_long_press(now):
+            self.update()
+            return
 
         self.scroll_phase += 0.017 * speed
         self.ambient_phase += 0.024 * speed
@@ -1355,8 +1454,12 @@ class IslandStackVisual(QWidget):
     def _set_expanded(self, expanded: bool):
         expanded = bool(expanded)
         if self.expanded == expanded:
+            if not expanded:
+                self.plugin_panel_open = False
             return
         self.expanded = expanded
+        if not expanded:
+            self.plugin_panel_open = False
         if self.finder_mode:
             self.clearMask()
             self.interaction_mask_active = False
@@ -1366,6 +1469,9 @@ class IslandStackVisual(QWidget):
     def keyPressEvent(self, event):
         key = event.key()
         settings_changed = False
+        if self._handle_alarm_editor_key_event(event):
+            self.update()
+            return
         if key == Qt.Key.Key_Escape:
             self.close()
         elif key == Qt.Key.Key_M:
@@ -1408,6 +1514,19 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
         self.update()
 
+    def inputMethodEvent(self, event):
+        try:
+            commit = event.commitString()
+        except Exception:
+            commit = ""
+        if commit and self._handle_alarm_editor_key(commit):
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
+        super().inputMethodEvent(event)
+
     def settings_snapshot(self) -> dict[str, object]:
         return {
             "v2_music_playing": self.music_playing,
@@ -1418,6 +1537,10 @@ class IslandStackVisual(QWidget):
             "v2_expanded": self.expanded,
             "v2_show_seconds": self.show_seconds,
             "v2_plugin_count": self.enabled_plugin_count,
+            "v2_side_island_style": str(getattr(self, "side_island_style", "standard")),
+            "v2_plugin_island_style": str(getattr(self, "plugin_island_style", "standard")),
+            "v2_music_island_style": str(getattr(self, "music_island_style", "standard")),
+            "v2_time_alarm_side_display": str(getattr(self, "time_alarm_side_display", "note")),
             "v2_ambient_intensity": self.ambient_intensity,
             "v2_music_ambience_style": getattr(self, "music_ambience_style", "sea_level"),
             "v2_music_flow_intensity": round(float(getattr(self, "music_flow_intensity", 0.74)), 3),
@@ -1452,6 +1575,7 @@ class IslandStackVisual(QWidget):
             "v2_dual_line_secondary_weight": int(getattr(self, "dual_line_secondary_weight", 72)),
             "v2_dual_line_secondary_spacing": int(getattr(self, "dual_line_secondary_spacing", 100)),
             "v2_no_lyrics_text": getattr(self, "no_lyrics_text", "暂无歌词"),
+            "v2_super_topmost": bool(getattr(self, "super_topmost_enabled", True)),
         }
 
     def _begin_surface_transition(self, reason: str = "layout"):
@@ -1602,6 +1726,9 @@ class IslandStackVisual(QWidget):
             self.left_stack_at = time.monotonic()
         if self.expanded and key == "plugin":
             self._focus_plugin_at(event.position().x())
+        if self._should_close_plugin_panel_for_hover(key):
+            self.plugin_panel_open = False
+            self._pulse_stack()
         if self._main_kind() == IslandKind.MESSAGE and key and self._is_message_hit(key) and not self.expanded:
             self._set_expanded(True)
             self.hover_armed_key = ""
@@ -1632,6 +1759,13 @@ class IslandStackVisual(QWidget):
 
     def _is_message_hit(self, key: str) -> bool:
         return key.startswith("message:") or key.startswith("message-dot:")
+
+    def _should_close_plugin_panel_for_hover(self, key: str) -> bool:
+        if not getattr(self, "plugin_panel_open", False):
+            return False
+        if not self.expanded or self._main_kind() != IslandKind.MUSIC:
+            return False
+        return key == "music" or key.startswith("music:")
 
     def _clear_messages_for_app(self, app_name: str):
         target = str(app_name or "").strip().casefold()
@@ -1730,11 +1864,19 @@ class IslandStackVisual(QWidget):
                 self.enabled_plugin_count = max(self.enabled_plugin_count, index + 1)
                 self._set_plugin_focus(index, immediate=False)
             self._set_expanded(True)
+            self.plugin_panel_open = True
+        elif key.startswith("plugin-action:"):
+            self._activate_plugin_action(key.split(":", 1)[1])
         elif key == "plugin":
+            self.plugin_panel_open = True
             if self.expanded:
                 self._focus_plugin_at(self.pointer_pos.x(), immediate=True)
             else:
                 self._set_expanded(True)
+        elif key == "plugin-panel":
+            if not self.expanded:
+                self._set_expanded(True)
+            self.plugin_panel_open = True
         elif self._is_message_hit(key):
             self._open_message_source(self._message_key_from_hit(key))
         elif key and not self.expanded:
@@ -1773,6 +1915,387 @@ class IslandStackVisual(QWidget):
             self.opened_source_app = f"{label} 管理面板暂不可用"
             self.opened_source_until = time.monotonic() + 1.4
 
+    def _set_plugin_setting(self, key: str, value):
+        setter = getattr(self, "settings_setter", None)
+        if callable(setter):
+            setter(key, value)
+
+    def _plugin_setting(self, key: str, default=None):
+        getter = getattr(self, "settings_getter", None)
+        if callable(getter):
+            try:
+                return getter(key, default)
+            except Exception:
+                return default
+        return default
+
+    def _format_timer_seconds(self, seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes}:{seconds:02d}"
+
+    def _timer_paused_remaining_seconds(self) -> int:
+        try:
+            return max(0, int(getattr(self, "plugin_timer_paused_remaining_seconds", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_timer_paused_state(self, remaining_seconds: int, progress: float = 0.0):
+        self.plugin_timer_paused_remaining_seconds = max(0, int(remaining_seconds))
+        self.plugin_timer_paused_progress = max(0.0, min(1.0, float(progress or 0.0)))
+
+    def _clear_timer_paused_state(self):
+        self.plugin_timer_paused_remaining_seconds = 0
+        self.plugin_timer_paused_progress = 0.0
+
+    def _append_countdown_entry(self, minutes: int, started_at: datetime, end_at: datetime):
+        entries = getattr(self, "plugin_countdown_entries", None)
+        if not isinstance(entries, list):
+            entries = []
+        entries.append(
+            {
+                "minutes": int(minutes),
+                "started_at": started_at.isoformat(timespec="seconds"),
+                "end_at": end_at.isoformat(timespec="seconds"),
+                "status": "running",
+            }
+        )
+        self.plugin_countdown_entries = entries[-2:]
+
+    def _pause_latest_countdown_entry(self, remaining_seconds: int, progress: float):
+        entries = getattr(self, "plugin_countdown_entries", None)
+        if not isinstance(entries, list) or not entries:
+            self.plugin_countdown_entries = [
+                {
+                    "text": self._format_timer_seconds(remaining_seconds),
+                    "progress": max(0.0, min(1.0, float(progress or 0.0))),
+                    "status": "paused",
+                }
+            ]
+            return
+        updated = [dict(entry) for entry in entries[-2:] if isinstance(entry, dict)]
+        if not updated:
+            self.plugin_countdown_entries = []
+            return
+        latest = dict(updated[-1])
+        latest["text"] = self._format_timer_seconds(remaining_seconds)
+        latest["progress"] = max(0.0, min(1.0, float(progress or 0.0)))
+        latest["status"] = "paused"
+        latest.pop("end_at", None)
+        updated[-1] = latest
+        self.plugin_countdown_entries = updated[-2:]
+
+    def _resume_latest_countdown_entry(self, remaining_seconds: int, started_at: datetime, end_at: datetime):
+        entries = getattr(self, "plugin_countdown_entries", None)
+        if not isinstance(entries, list) or not entries:
+            self._append_countdown_entry(max(1, int(math.ceil(max(1, remaining_seconds) / 60.0))), started_at, end_at)
+            return
+        updated = [dict(entry) for entry in entries[-2:] if isinstance(entry, dict)]
+        if not updated:
+            self.plugin_countdown_entries = []
+            return
+        latest = dict(updated[-1])
+        latest["started_at"] = started_at.isoformat(timespec="seconds")
+        latest["end_at"] = end_at.isoformat(timespec="seconds")
+        latest["status"] = "running"
+        latest.pop("text", None)
+        updated[-1] = latest
+        self.plugin_countdown_entries = updated[-2:]
+
+    def _timer_setting_datetime(self, key: str, now: datetime) -> datetime | None:
+        raw = str(self._plugin_setting(key, "") or "").strip()
+        if not raw:
+            return None
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=now.tzinfo)
+        return value.astimezone(now.tzinfo)
+
+    def _timer_remaining_seconds_from_settings(self, now: datetime | None = None) -> int:
+        now = now or datetime.now().astimezone()
+        target = self._timer_setting_datetime("v2_timer_end_at", now)
+        if target is None:
+            return 0
+        return max(0, int((target - now).total_seconds()))
+
+    def _timer_progress_from_settings(self, now: datetime | None = None) -> float:
+        now = now or datetime.now().astimezone()
+        started = self._timer_setting_datetime("v2_timer_started_at", now)
+        target = self._timer_setting_datetime("v2_timer_end_at", now)
+        if started is None or target is None or started >= target:
+            return 0.0
+        total = max(1.0, (target - started).total_seconds())
+        elapsed = max(0.0, (now - started).total_seconds())
+        return max(0.0, min(1.0, elapsed / total))
+
+    def _request_visual_update(self):
+        try:
+            self.update()
+        except RuntimeError:
+            pass
+
+    def _clear_alarm_delete_mode(self):
+        self.plugin_alarm_delete_index = None
+
+    def _handle_alarm_row_long_press(self, command: str) -> bool:
+        match = re.fullmatch(r"alarm-edit-(\d+)", str(command or "").strip().lower())
+        if not match:
+            return False
+        rows = self._time_alarm_rows()
+        index = int(match.group(1))
+        if not (0 <= index < len(rows)):
+            return False
+        self.plugin_alarm_delete_index = index
+        self._request_visual_update()
+        return True
+
+    def _maybe_trigger_alarm_row_long_press(self, now: float) -> bool:
+        if not getattr(self, "drag_candidate", False) or getattr(self, "dragging", False):
+            return False
+        command = str(getattr(self, "drag_press_key", "") or "")
+        if command.startswith("plugin-action:"):
+            command = command.split(":", 1)[1]
+        if not re.fullmatch(r"alarm-edit-\d+", command):
+            return False
+        if float(now) - float(getattr(self, "last_pointer_press_at", 0.0) or 0.0) < 0.48:
+            return False
+        if self._handle_alarm_row_long_press(command):
+            self.drag_candidate = False
+            self.drag_press_key = ""
+            return True
+        return False
+
+    def _begin_time_module_animation(self, from_module: str, to_module: str, steps: int):
+        if from_module == to_module:
+            self.plugin_time_module_animation = {}
+            return
+        direction = 1 if int(steps or 0) >= 0 else -1
+        self.plugin_time_module_animation = {
+            "from": str(from_module or "countdown"),
+            "to": str(to_module or "countdown"),
+            "direction": direction,
+            "started_at": time.monotonic(),
+        }
+
+    def _time_module_transition_offsets(self, visible: str) -> tuple[str, float, float] | None:
+        animation = getattr(self, "plugin_time_module_animation", {})
+        if not isinstance(animation, dict) or not animation:
+            return None
+        if str(animation.get("to") or "") != str(visible or ""):
+            return None
+        try:
+            started_at = float(animation.get("started_at", 0.0) or 0.0)
+            direction = 1 if int(animation.get("direction", 1) or 1) >= 0 else -1
+        except (TypeError, ValueError):
+            return None
+        elapsed = max(0.0, time.monotonic() - started_at)
+        duration = 0.24
+        if elapsed >= duration:
+            self.plugin_time_module_animation = {}
+            return None
+        progress = max(0.0, min(1.0, elapsed / duration))
+        eased = 1.0 - pow(1.0 - progress, 3)
+        from_offset = -direction * eased
+        to_offset = direction * (1.0 - eased)
+        return str(animation.get("from") or ""), from_offset, to_offset
+
+    def _activate_plugin_action(self, command: str):
+        command = str(command or "").strip().lower()
+        focus_match = re.fullmatch(r"alarm-editor-focus-(hour|minute|note|frequency|weekdays|frequency_unit|month_day|year_month|year_day)", command)
+        if focus_match:
+            self.plugin_alarm_editor_focus = focus_match.group(1)
+            if self.plugin_alarm_editor_focus in {"hour", "minute", "month_day", "year_month", "year_day"}:
+                self.plugin_alarm_editor_input_buffers = {}
+            self._request_visual_update()
+            return
+        if command == "alarm-editor-note":
+            self.plugin_alarm_editor_focus = "note"
+            self._request_visual_update()
+            return
+        if command in {"alarm-editor-page-main", "alarm-editor-page-note"}:
+            editor = self._time_alarm_editor_state()
+            previous_page = str(editor.get("editor_page") or "main")
+            next_page = "note" if command.endswith("note") else "main"
+            editor["editor_page"] = next_page
+            editor["detail_mode"] = ""
+            self.plugin_alarm_editor = editor
+            if previous_page != next_page:
+                self._begin_alarm_editor_page_animation(previous_page, next_page, 1 if next_page == "note" else -1)
+            self._request_visual_update()
+            return
+        if command == "alarm-editor-detail-confirm":
+            editor = self._time_alarm_editor_state()
+            editor["detail_mode"] = ""
+            editor["editor_page"] = "main"
+            self.plugin_alarm_editor = editor
+            self.plugin_alarm_editor_focus = ""
+            self._request_visual_update()
+            return
+        detail_commands = {
+            "alarm-editor-open-weekdays": "weekly",
+            "alarm-editor-open-month-day": "monthly",
+            "alarm-editor-open-year-date": "yearly",
+        }
+        if command in detail_commands:
+            editor = self._time_alarm_editor_state()
+            editor["detail_mode"] = detail_commands[command]
+            editor["editor_page"] = "main"
+            self._normalize_alarm_editor_recurrence(editor)
+            self.plugin_alarm_editor = editor
+            self._request_visual_update()
+            return
+        weekday_match = re.fullmatch(r"alarm-editor-toggle-weekday-(\d)", command)
+        if weekday_match:
+            editor = self._time_alarm_editor_state()
+            day = max(1, min(7, int(weekday_match.group(1))))
+            weekdays = self._alarm_weekdays_from_value(editor.get("weekdays", []))
+            if day in weekdays:
+                weekdays = [item for item in weekdays if item != day]
+            else:
+                weekdays.append(day)
+            editor["frequency_unit"] = "weekly"
+            editor["frequency"] = "每周"
+            editor["weekdays"] = sorted(weekdays) or [day]
+            editor["detail_mode"] = "weekly"
+            self.plugin_alarm_editor = editor
+            self._begin_alarm_editor_spin(f"weekday_{day}", 1)
+            self._request_visual_update()
+            return
+        timer_match = re.fullmatch(r"timer-start-(\d+)", command)
+        if timer_match:
+            minutes = max(1, min(180, int(timer_match.group(1))))
+            now = datetime.now().astimezone()
+            end_at = now + timedelta(minutes=minutes)
+            self._clear_timer_paused_state()
+            self._append_countdown_entry(minutes, now, end_at)
+            self._set_plugin_setting("v2_timer_started_at", now.isoformat(timespec="seconds"))
+            self._set_plugin_setting("v2_timer_end_at", end_at.isoformat(timespec="seconds"))
+            self.plugin_time_mode = "dashboard"
+            self.refresh_plugin_data()
+            return
+        if command == "timer-pause":
+            now = datetime.now().astimezone()
+            remaining = self._timer_remaining_seconds_from_settings(now)
+            if remaining > 0:
+                progress = self._timer_progress_from_settings(now)
+                self._set_timer_paused_state(remaining, progress)
+                self._pause_latest_countdown_entry(remaining, progress)
+                self._set_plugin_setting("v2_timer_started_at", "")
+                self._set_plugin_setting("v2_timer_end_at", "")
+                self.refresh_plugin_data()
+            return
+        if command == "timer-resume":
+            remaining = self._timer_paused_remaining_seconds()
+            if remaining > 0:
+                now = datetime.now().astimezone()
+                end_at = now + timedelta(seconds=remaining)
+                self._set_plugin_setting("v2_timer_started_at", now.isoformat(timespec="seconds"))
+                self._set_plugin_setting("v2_timer_end_at", end_at.isoformat(timespec="seconds"))
+                self._resume_latest_countdown_entry(remaining, now, end_at)
+                self._clear_timer_paused_state()
+                self.plugin_time_mode = "dashboard"
+                self.refresh_plugin_data()
+            return
+        if command == "timer-clear":
+            self._clear_timer_paused_state()
+            self.plugin_countdown_entries = []
+            self._set_plugin_setting("v2_timer_started_at", "")
+            self._set_plugin_setting("v2_timer_end_at", "")
+            self.refresh_plugin_data()
+            return
+        if command == "alarm-due-confirm":
+            self.plugin_alarm_due_pending = {}
+            self._request_visual_update()
+            return
+        alarm_match = re.fullmatch(r"alarm-toggle-(\d+)", command)
+        if alarm_match:
+            self._clear_alarm_delete_mode()
+            rows = [dict(row) for row in self._time_alarm_rows()]
+            index = int(alarm_match.group(1))
+            if 0 <= index < len(rows):
+                rows[index]["enabled"] = not bool(rows[index].get("enabled", False))
+                self._persist_alarm_rows(rows)
+                self._request_visual_update()
+            return
+        alarm_delete_match = re.fullmatch(r"alarm-delete-(\d+)", command)
+        if alarm_delete_match:
+            rows = [dict(row) for row in self._time_alarm_rows()]
+            index = int(alarm_delete_match.group(1))
+            if 0 <= index < len(rows):
+                rows.pop(index)
+                self._persist_alarm_rows(rows)
+            self._clear_alarm_delete_mode()
+            self._request_visual_update()
+            return
+        alarm_edit_match = re.fullmatch(r"alarm-edit-(\d+)", command)
+        if alarm_edit_match:
+            self._clear_alarm_delete_mode()
+            rows = [dict(row) for row in self._time_alarm_rows()]
+            index = int(alarm_edit_match.group(1))
+            if 0 <= index < len(rows):
+                self.plugin_time_mode = "alarm_editor"
+                self.plugin_alarm_editor = self._alarm_editor_state_from_row(index, rows[index])
+                self.plugin_alarm_editor_focus = "note"
+                self._request_visual_update()
+            return
+        if command == "alarm-add-open":
+            self.plugin_time_mode = "alarm_editor"
+            self.plugin_alarm_editor = self._default_alarm_editor_state()
+            self.plugin_alarm_editor_focus = "note"
+            self._request_visual_update()
+            return
+        if command == "alarm-editor-cancel":
+            self.plugin_time_mode = "dashboard"
+            self.plugin_alarm_editor_focus = ""
+            self._request_visual_update()
+            return
+        if command == "alarm-editor-save":
+            editor = self._time_alarm_editor_state()
+            rows = [dict(row) for row in self._time_alarm_rows()]
+            normalized_editor = dict(editor)
+            self._normalize_alarm_editor_recurrence(normalized_editor)
+            new_row = {
+                "time": f"{int(normalized_editor['hour']):02d}:{int(normalized_editor['minute']):02d}",
+                "label": str(normalized_editor.get("note") or "闹钟"),
+                "enabled": True,
+                "frequency": self._alarm_recurrence_label(normalized_editor),
+                "frequency_unit": str(normalized_editor.get("frequency_unit") or "daily"),
+                "weekdays": normalized_editor.get("weekdays", ""),
+                "month_day": normalized_editor.get("month_day", 28),
+                "year_month": normalized_editor.get("year_month", 4),
+                "year_day": normalized_editor.get("year_day", 28),
+            }
+            edit_index = editor.get("edit_index")
+            try:
+                edit_index = int(edit_index)
+            except (TypeError, ValueError):
+                edit_index = None
+            if edit_index is not None and 0 <= edit_index < len(rows):
+                new_row["enabled"] = bool(rows[edit_index].get("enabled", True))
+                rows[edit_index].update(new_row)
+            else:
+                rows.insert(0, new_row)
+            self._persist_alarm_rows(rows)
+            self.plugin_time_mode = "dashboard"
+            self.plugin_alarm_editor_focus = ""
+            self._request_visual_update()
+            return
+        if command == "weather-refresh":
+            self._set_plugin_setting("v2_weather_refresh_nonce", str(time.monotonic()))
+            self.refresh_plugin_data()
+            return
+        if command == "agenda-open":
+            self._open_plugin_manager()
+            return
+        if command == "timer-open":
+            self._open_plugin_manager()
+
     def refresh_plugin_data(self):
         self.last_media_refresh_at = -999.0
         self._refresh_media_data(time.monotonic())
@@ -1795,11 +2318,136 @@ class IslandStackVisual(QWidget):
         target = str(plugin_id or "").strip().casefold()
         if not target:
             return -1
+        if target.startswith("time:"):
+            target = "time"
         for index, plugin in enumerate(self.plugin_samples[: self.enabled_plugin_count]):
             _label, _detail, _summary, _color, _icon, current_id, _status, _alert_title, _alert_body, _alert_priority, _progress = self._plugin_tuple(plugin)
             if str(current_id or "").strip().casefold() == target:
                 return index
         return -1
+
+    def _time_alert_side_suppressed(self, include_expanded: bool) -> bool:
+        if include_expanded:
+            return False
+        return bool(
+            self.expanded
+            and getattr(self, "plugin_panel_open", False)
+            and self._main_kind() == IslandKind.PLUGIN
+        )
+
+    def _time_alarm_side_display_mode(self) -> str:
+        value = str(getattr(self, "time_alarm_side_display", "note") or "note").strip().lower()
+        setting = self._plugin_setting("v2_time_alarm_side_display", value)
+        value = str(setting or value or "note").strip().lower()
+        return "time" if value in {"time", "deadline", "due", "clock"} else "note"
+
+    def _time_alarm_side_segment_text(self, segment: dict[str, object]) -> str:
+        if self._time_alarm_side_display_mode() == "time":
+            due_at = segment.get("due_at")
+            if isinstance(due_at, datetime):
+                return due_at.strftime("%H:%M")
+            match = re.search(r"\d{1,2}:\d{2}", str(segment.get("text") or ""))
+            if match:
+                return match.group(0)
+        return str(segment.get("text") or "").strip() or "闹钟"
+
+    def _time_alarm_due_pending(self) -> dict[str, object]:
+        pending = getattr(self, "plugin_alarm_due_pending", {})
+        return dict(pending) if isinstance(pending, dict) and pending else {}
+
+    def _capture_time_alarm_due_pending(self, model: dict[str, object]) -> dict[str, object]:
+        if str(model.get("status") or "").strip().lower() != "alarm":
+            return {}
+        label = self._time_alarm_alert_text_from_parts(
+            str(model.get("alert_body") or ""),
+            str(model.get("alert_title") or ""),
+            str(model.get("summary") or ""),
+        )
+        time_text = self._strip_timer_prefix(str(model.get("summary") or model.get("detail") or ""))
+        if not re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", time_text):
+            match = re.search(r"\d{1,2}:\d{2}(?::\d{2})?", str(model.get("summary") or model.get("detail") or ""))
+            time_text = match.group(0) if match else ""
+        pending = {
+            "time": time_text,
+            "label": label or "闹钟",
+            "key": f"{time_text}|{label or '闹钟'}",
+            "captured_at": time.monotonic(),
+        }
+        self.plugin_alarm_due_pending = pending
+        return dict(pending)
+
+    def _time_side_alert_candidates(
+        self,
+        index: int,
+        label: str,
+        detail: str,
+        summary: str,
+        color,
+        icon: str,
+        plugin_id: str,
+        status: str,
+        alert_title: str,
+        alert_body: str,
+        alert_priority: int,
+    ) -> list[tuple[int, int, int, str, str, str, object, str, str, str, str, int]]:
+        status_key = str(status or "").strip().lower()
+        candidates: list[tuple[int, int, int, str, str, str, object, str, str, str, str, int]] = []
+        status_priority = {"due": 0, "severe": 1, "alarm": 2, "done": 3, "soon": 4, "rain": 5, "error": 6, "running": 7, "loading": 8}
+        base_id = str(plugin_id or "time").strip() or "time"
+
+        def add(kind: str, text: str, candidate_status: str, title: str, priority: int):
+            body = str(text or "").strip()
+            if not body:
+                return
+            virtual_id = f"{base_id}:alarm" if kind == "alarm" else base_id
+            candidate_summary = "闹钟" if kind == "alarm" else body
+            candidates.append(
+                (
+                    int(priority),
+                    status_priority.get(str(candidate_status or "").lower(), 99),
+                    int(index),
+                    label,
+                    body,
+                    candidate_summary,
+                    color,
+                    icon,
+                    virtual_id,
+                    candidate_status,
+                    title,
+                    body,
+                    int(priority),
+                )
+            )
+
+        if status_key == "alarm":
+            add("alarm", self._time_alarm_alert_text_from_parts(alert_body, alert_title, summary), "alarm", "闹钟", min(int(alert_priority), 3))
+            return candidates
+
+        pending_alarm = self._time_alarm_due_pending()
+        if pending_alarm:
+            pending_label = str(pending_alarm.get("label") or "闹钟").strip() or "闹钟"
+            add("alarm", pending_label, "alarm", "闹钟", min(int(alert_priority), 3))
+
+        if status_key in {"done", "due"}:
+            note = self._time_alarm_alert_text(alert_body)
+            if note != "闹钟" and not self._time_text_looks_like_countdown(alert_body):
+                candidates.clear()
+                add("alarm", note, "alarm", "闹钟", min(int(alert_priority), 3))
+            else:
+                add("countdown", "时间到", "done", "倒计时", int(alert_priority))
+            return candidates
+
+        model_segments = self._time_compact_segments(detail, summary, status, alert_body)
+        for segment in model_segments[1:]:
+            kind = str(segment.get("kind") or "").strip().lower()
+            text = str(segment.get("text") or "").strip()
+            if kind == "alarm":
+                add("alarm", self._time_alarm_side_segment_text(segment), "running", "闹钟", 29)
+            elif kind == "countdown":
+                segment_status = str(segment.get("status") or status_key or "running").strip().lower()
+                candidate_status = "done" if segment_status in {"done", "due"} or text == "时间到" else "running"
+                add("countdown", text or self._strip_timer_prefix(alert_body or summary or detail), candidate_status, "倒计时", int(alert_priority))
+        return candidates
 
     def _active_plugin_alerts(self, limit: int = 2, include_expanded: bool = False):
         if not self._plugin_enabled() or (self.expanded and not include_expanded):
@@ -1809,6 +2457,12 @@ class IslandStackVisual(QWidget):
         candidates = []
         for index, plugin in enumerate(self.plugin_samples[: self.enabled_plugin_count]):
             label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, _progress = self._plugin_tuple(plugin)
+            is_time = str(plugin_id or "").strip().casefold() == "time" or str(label or "").strip().upper() == "TIME"
+            if is_time and self._time_alert_side_suppressed(include_expanded):
+                continue
+            if is_time:
+                candidates.extend(self._time_side_alert_candidates(index, label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority))
+                continue
             normalized_status = str(status or "").lower()
             if normalized_status in alert_statuses or alert_title or alert_body:
                 candidates.append((
@@ -1950,7 +2604,9 @@ class IslandStackVisual(QWidget):
         screen_geo = screen.geometry() if screen else None
         main_kind = self._main_kind()
         target_stack_w = self._stack_target_width(main_kind)
-        stack_w = min(target_stack_w, self._standalone_width_limit(self.width() / 2.0, screen_geo))
+        target_main_w, _target_main_h = self._main_size_for_kind(main_kind, target_stack_w)
+        desired_center_x = float(global_pos.x()) + target_main_w / 2.0 - float(self.drag_press_main_offset.x())
+        stack_w = min(target_stack_w, self._standalone_width_limit_for_global_center(desired_center_x, screen_geo, target_stack_w))
         stack_w = max(target_stack_w * 0.5, stack_w)
         main_w, main_h = self._main_size_for_kind(main_kind, stack_w)
         old_direction = getattr(self, "stack_direction", 1)
@@ -1967,14 +2623,42 @@ class IslandStackVisual(QWidget):
         new_x = int(round(global_pos.x() - main_left - self.drag_press_main_offset.x()))
         new_y = int(round(global_pos.y() - main_top - self.drag_press_main_offset.y()))
         if screen_geo:
-            min_y = int(round(screen_geo.top() - main_top + self._u(6.0)))
-            max_y = int(round(screen_geo.bottom() - main_top - main_h - self._u(6.0)))
-            if min_y <= max_y:
-                new_y = max(min_y, min(max_y, new_y))
-        new_pos = QPoint(new_x, new_y)
+            new_pos = self._clamp_standalone_window_pos(new_x, new_y, main_left, main_top, main_w, main_h, screen_geo)
+        else:
+            new_pos = QPoint(new_x, new_y)
         self.move(new_pos)
         self._restore_motion_global_rects_after_move()
-        self.saved_window_pos = (new_x, new_y)
+        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+
+    def _clamp_standalone_window_pos(
+        self,
+        new_x: float,
+        new_y: float,
+        main_left: float,
+        main_top: float,
+        main_w: float,
+        main_h: float,
+        screen_geo,
+    ) -> QPoint:
+        margin = self._u(6.0)
+        x = float(new_x)
+        y = float(new_y)
+        min_x = float(screen_geo.left()) + margin - float(main_left)
+        max_x = float(screen_geo.right()) - margin - float(main_left) - float(main_w)
+        min_y = float(screen_geo.top()) + margin - float(main_top)
+        max_y = float(screen_geo.bottom()) - margin - float(main_top) - float(main_h)
+        if min_x <= max_x:
+            x = max(min_x, min(max_x, x))
+        if min_y <= max_y:
+            y = max(min_y, min(max_y, y))
+        return QPoint(int(round(x)), int(round(y)))
+
+    def _drag_main_offset_for_press(self, press_pos: QPointF, main_rect: QRectF, key: str = "") -> QPointF:
+        if str(key or "").startswith("plugin-alert:"):
+            return QPointF(main_rect.width() / 2.0, main_rect.height() / 2.0)
+        if main_rect.contains(press_pos):
+            return press_pos - main_rect.topLeft()
+        return QPointF(main_rect.width() / 2.0, main_rect.height() / 2.0)
 
     def _save_placement_state(self):
         if self.finder_mode:
@@ -2004,10 +2688,7 @@ class IslandStackVisual(QWidget):
             if main_visual:
                 motion = self.motions.get(main_visual.key)
                 main_rect = QRectF(motion.rect) if motion and motion.opacity > 0.08 else QRectF(main_visual.rect)
-                if main_rect.contains(event.position()):
-                    self.drag_press_main_offset = event.position() - main_rect.topLeft()
-                else:
-                    self.drag_press_main_offset = QPointF(main_rect.width() / 2.0, main_rect.height() / 2.0)
+                self.drag_press_main_offset = self._drag_main_offset_for_press(event.position(), main_rect, self.drag_press_key)
         except Exception:
             self.drag_press_main_offset = QPointF()
         self.drag_candidate = True
@@ -2035,13 +2716,17 @@ class IslandStackVisual(QWidget):
             key = self.drag_press_key or self._hit_test(event.position())
             if key:
                 self._activate_key(key)
-            elif self.expanded:
-                self._set_expanded(False)
-                self._pulse_stack()
             self.update()
         self.drag_candidate = False
         self.dragging = False
         self._save_placement_state()
+
+    def wheelEvent(self, event):
+        if self._handle_time_alarm_editor_wheel(event):
+            return
+        if self._handle_time_panel_module_wheel(event):
+            return
+        super().wheelEvent(event)
 
     def leaveEvent(self, event):
         self.hovered_key = ""
@@ -2070,9 +2755,31 @@ class IslandStackVisual(QWidget):
             for key, rect in self.music_button_rects.items():
                 if rect.contains(point):
                     return key
+        if self.expanded:
+            if str(getattr(self, "plugin_time_mode", "dashboard")) == "alarm_editor":
+                action_rects = getattr(self, "plugin_action_rects", {})
+                for command, rect in action_rects.items():
+                    if str(command).startswith("alarm-editor-open-") and rect.contains(point):
+                        return f"plugin-action:{command}"
+                for command, rect in action_rects.items():
+                    if rect.contains(point):
+                        return f"plugin-action:{command}"
+                for field, rect in getattr(self, "plugin_alarm_editor_rects", {}).items():
+                    if rect.contains(point):
+                        return f"plugin-action:alarm-editor-focus-{field}"
+            else:
+                for command, rect in getattr(self, "plugin_action_rects", {}).items():
+                    if rect.contains(point):
+                        return f"plugin-action:{command}"
         for key, motion in sorted(self.motions.items(), key=lambda item: item[1].rect.y(), reverse=True):
             if motion.opacity > 0.22 and motion.rect.contains(point):
                 return key
+        try:
+            for visual in sorted(self._build_visuals(), key=lambda item: item.z_index, reverse=True):
+                if visual.rect.contains(point):
+                    return visual.key
+        except Exception:
+            pass
         return ""
 
     def _set_plugin_focus(self, index: int, immediate: bool = False):
@@ -2149,8 +2856,9 @@ class IslandStackVisual(QWidget):
             return []
         if not self.expanded or count == 1 or not expand_active:
             return [total_width / count] * count
-        compact_slot = max(self._u(90.0), min(self._u(126.0), total_width * 0.28))
-        focus_width = max(total_width - compact_slot * (count - 1), total_width / count)
+        focus_cap = min(total_width * 0.40, self._u(220.0))
+        focus_width = max(total_width / count, focus_cap)
+        compact_slot = (total_width - focus_width) / max(1, count - 1)
         from_index = max(0, min(self.plugin_focus_from, count - 1))
         target_index = max(0, min(self.plugin_focus_target, count - 1))
         progress = self._plugin_focus_progress(now)
@@ -2158,9 +2866,7 @@ class IslandStackVisual(QWidget):
         target_widths = [compact_slot] * count
         from_widths[from_index] = focus_width
         target_widths[target_index] = focus_width
-        widths = [from_widths[i] + (target_widths[i] - from_widths[i]) * progress for i in range(count)]
-        scale = total_width / max(1.0, sum(widths))
-        return [width * scale for width in widths]
+        return [from_widths[i] + (target_widths[i] - from_widths[i]) * progress for i in range(count)]
 
     def _plugin_item_rects(self, rect: QRectF, now: float, expand_active: bool = True) -> list[tuple[int, QRectF]]:
         count = max(0, min(self.enabled_plugin_count, 3))
@@ -2345,8 +3051,14 @@ class IslandStackVisual(QWidget):
     def _expanded_stack_height(self, main_kind: IslandKind, main_h: float, include_popups: bool) -> float:
         gap = self._u(10.0)
         height = main_h
-        if self._music_enabled_for_stack() and self.persistent_plugin and self.enabled_plugin_count > 0 and self.expanded:
-            height += gap + self._u(48.0)
+        if self.expanded and self._plugin_enabled():
+            panel_visible = self._plugin_panel_visible()
+            if main_kind == IslandKind.MUSIC:
+                height += gap + self._u(48.0)
+                if panel_visible:
+                    height += gap + self._plugin_panel_height(self._stack_target_width(main_kind))
+            elif main_kind == IslandKind.PLUGIN and panel_visible:
+                height += gap + self._plugin_panel_height(self._stack_target_width(main_kind))
 
         if self.expanded:
             if main_kind == IslandKind.MESSAGE:
@@ -2366,6 +3078,13 @@ class IslandStackVisual(QWidget):
         if not screen_geo:
             return target_width
         global_center_x = self.mapToGlobal(QPoint(int(round(center_x)), 0)).x()
+        return self._standalone_width_limit_for_global_center(global_center_x, screen_geo, target_width)
+
+    def _standalone_width_limit_for_global_center(self, global_center_x: float, screen_geo, target_width: float | None = None) -> float:
+        if target_width is None:
+            target_width = self._stack_target_width(self._main_kind())
+        if not screen_geo:
+            return target_width
         left_space = max(0.0, float(global_center_x - screen_geo.left()))
         right_space = max(0.0, float(screen_geo.right() - global_center_x))
         limit = min(left_space, right_space) * 2.0 - self._u(28.0)
@@ -2380,12 +3099,39 @@ class IslandStackVisual(QWidget):
             return stack_w, self._u(height)
         if main_kind == IslandKind.PLUGIN:
             if self.expanded:
-                return stack_w, self._u(188.0)
+                return stack_w, self._u(48.0)
             base_plugin_width = self._u(420.0)
             return base_plugin_width / 3.0 * max(1, self.enabled_plugin_count), self._u(48.0)
         if main_kind == IslandKind.MESSAGE:
             return (stack_w if self.expanded else min(self._u(430.0), stack_w)), self._u(48.0)
         return float(getattr(self, "empty_bar_width", 92)), float(getattr(self, "empty_bar_height", 14))
+
+    def _time_panel_breakpoint(self) -> float:
+        return self._u(560.0)
+
+    def _time_panel_stretch_breakpoint(self) -> float:
+        return self._u(960.0)
+
+    def _time_panel_modules(self) -> list[str]:
+        return ["countdown", "alarm"]
+
+    def _time_visible_module_for_width(self, width: float) -> str:
+        if float(width or 0.0) >= self._time_panel_breakpoint():
+            return "all"
+        module = str(getattr(self, "plugin_time_visible_module", "countdown") or "countdown")
+        return module if module in self._time_panel_modules() else "countdown"
+
+    def _plugin_panel_height(self, width: float | None = None) -> float:
+        mode = str(getattr(self, "plugin_time_mode", "dashboard") or "dashboard")
+        if mode == "alarm_editor":
+            return self._u(190.0)
+        panel_w = float(width if width is not None else getattr(self, "plugin_panel_last_width", 0.0) or 0.0)
+        if panel_w > 0.0 and panel_w < self._time_panel_breakpoint():
+            return self._u(156.0)
+        return self._u(236.0)
+
+    def _plugin_panel_visible(self) -> bool:
+        return bool(self.expanded and self._plugin_enabled() and getattr(self, "plugin_panel_open", False))
 
     def _main_top_for_direction(self, main_kind: IslandKind, main_h: float, direction: int) -> float:
         top_y = self._finder_stack_top_y()
@@ -2499,9 +3245,19 @@ class IslandStackVisual(QWidget):
                 alert_rect = self._plugin_alert_rect(main_rect, alert_slot, len(plugin_alerts))
                 visuals.append(StackVisual(f"plugin-alert:{plugin_id}", IslandKind.PLUGIN_ALERT, alert_rect, False, None, 8))
 
-        if self.music_playing and self.persistent_plugin and self.enabled_plugin_count > 0 and self.expanded:
+        panel_visible = self._plugin_panel_visible()
+        if self.expanded and self._plugin_enabled() and main_kind == IslandKind.MUSIC:
             rect, cursor_edge = self._stack_rect_for_direction(center_x, cursor_edge, stack_w, self._u(48), direction, gap)
             visuals.append(StackVisual("plugin", IslandKind.PLUGIN, rect, False, None, 6))
+            if panel_visible:
+                panel_edge = rect.bottom() if direction >= 0 else rect.top()
+                rect, cursor_edge = self._stack_rect_for_direction(center_x, panel_edge, stack_w, self._plugin_panel_height(stack_w), direction, gap)
+                visuals.append(StackVisual("plugin-panel", IslandKind.PLUGIN_PANEL, rect, False, None, 5))
+        elif self.expanded and self._plugin_enabled() and main_kind == IslandKind.PLUGIN and panel_visible:
+            strip_rect = main_rect
+            panel_edge = strip_rect.bottom() if direction >= 0 else strip_rect.top()
+            rect, cursor_edge = self._stack_rect_for_direction(center_x, panel_edge, stack_w, self._plugin_panel_height(stack_w), direction, gap)
+            visuals.append(StackVisual("plugin-panel", IslandKind.PLUGIN_PANEL, rect, False, None, 5))
 
         if self.expanded:
             expanded_messages = self.messages
@@ -2558,42 +3314,256 @@ class IslandStackVisual(QWidget):
             alerts = self._active_plugin_alerts(total)
             if 0 <= int(slot) < len(alerts):
                 _index, label, detail, summary, _color, _icon, _plugin_id, _status, _alert_title, alert_body, _alert_priority = alerts[int(slot)]
-                width = max(width, self._plugin_alert_width_for(label, detail, alert_body or summary))
+                content_width = self._plugin_alert_width_for(label, detail, alert_body or summary)
+                if str(label or "").strip().upper() == "TIME":
+                    width = content_width
+                else:
+                    width = max(width, content_width)
         except Exception:
             pass
         height = self._u(42.0)
         gap = self._u(10.0)
-        margin = self._u(8.0)
+        screen_left, screen_right = self._screen_bounds_in_local()
         min_width = self._u(128.0)
         right_x = main_rect.right() + gap
-        right_space = max(0.0, float(self.width()) - margin - right_x)
-        left_space = max(0.0, main_rect.left() - gap - margin)
-        if right_space >= width:
+        left_x = main_rect.left() - gap - width
+        right_space = max(0.0, screen_right - right_x)
+        left_space = max(0.0, main_rect.left() - gap - screen_left)
+        pressure = self._main_rect_screen_pressure(main_rect, screen_left, screen_right)
+        total = max(1, int(total))
+        slot = max(0, min(int(slot), total - 1))
+        row_gap = self._u(7.0)
+        side = "right"
+        if pressure:
+            width = self._plugin_alert_circle_size(height)
+            preferred = "left" if pressure == "right" else "right"
+            side = preferred
+            x = self._plugin_alert_x_for_side(main_rect, width, gap, preferred)
+            if not self._rect_x_fits_screen(x, width, screen_left, screen_right):
+                fallback_side = "right" if preferred == "left" else "left"
+                side = fallback_side
+                x = self._plugin_alert_x_for_side(main_rect, width, gap, fallback_side)
+            x = self._clamp_rect_x_to_screen(x, width, screen_left, screen_right)
+        elif self._rect_x_fits_screen(right_x, width, screen_left, screen_right):
+            side = "right"
             x = right_x
-        elif left_space >= width:
-            x = main_rect.left() - gap - width
+        elif self._rect_x_fits_screen(left_x, width, screen_left, screen_right):
+            side = "left"
+            x = left_x
         elif right_space >= left_space and right_space >= min_width:
+            side = "right"
             width = max(min_width, min(width, right_space))
             x = right_x
         elif left_space >= min_width:
+            side = "left"
             width = max(min_width, min(width, left_space))
             x = main_rect.left() - gap - width
         else:
-            width = min(width, max(min_width, float(self.width()) - margin * 2.0))
-            x = max(margin, min(main_rect.left() - gap - width, float(self.width()) - margin - width))
-        total = max(1, int(total))
-        slot = max(0, min(int(slot), total - 1))
-        stack_gap = self._u(7.0)
-        stack_height = height * total + stack_gap * max(0, total - 1)
-        y = main_rect.center().y() - stack_height / 2.0 + slot * (height + stack_gap)
+            side = "right" if right_space >= left_space else "left"
+            usable = max(min_width, screen_right - screen_left)
+            width = min(width, usable)
+            x = self._clamp_rect_x_to_screen(main_rect.left() - gap - width, width, screen_left, screen_right)
+        if total > 1:
+            row_width = self._plugin_alert_row_desired_width(total, width)
+            side = self._plugin_alert_side_for_row(main_rect, row_width, gap, row_gap, total, side, screen_left, screen_right)
+            split_sides = False
+            alternate = "left" if side == "right" else "right"
+            row_fits_side = self._plugin_alert_row_fits(main_rect, row_width, gap, row_gap, total, side, screen_left, screen_right)
+            row_fits_alternate = self._plugin_alert_row_fits(main_rect, row_width, gap, row_gap, total, alternate, screen_left, screen_right)
+            right_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, row_width, gap, "right"), row_width, screen_left, screen_right)
+            left_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, row_width, gap, "left"), row_width, screen_left, screen_right)
+            if total == 2 and not pressure and not row_fits_side and not row_fits_alternate and right_single and left_single:
+                width = row_width
+                side = "right" if slot == 0 else "left"
+                x = self._plugin_alert_x_for_side(main_rect, width, gap, side)
+                split_sides = True
+            else:
+                width = self._plugin_alert_width_for_row(main_rect, row_width, gap, row_gap, total, side, screen_left, screen_right)
+            if not split_sides and self._plugin_alert_uses_ring(QRectF(0.0, 0.0, width, height)):
+                alternate = "left" if side == "right" else "right"
+                row_fits_side = self._plugin_alert_row_fits(main_rect, width, gap, row_gap, total, side, screen_left, screen_right)
+                row_fits_alternate = self._plugin_alert_row_fits(main_rect, width, gap, row_gap, total, alternate, screen_left, screen_right)
+                right_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, width, gap, "right"), width, screen_left, screen_right)
+                left_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, width, gap, "left"), width, screen_left, screen_right)
+                if total == 2 and not row_fits_side and not row_fits_alternate and right_single and left_single:
+                    side = "right" if slot == 0 else "left"
+                    x = self._plugin_alert_x_for_side(main_rect, width, gap, side)
+                    split_sides = True
+                else:
+                    side = self._plugin_alert_side_for_row(main_rect, width, gap, row_gap, total, side, screen_left, screen_right)
+            if not split_sides:
+                x = self._plugin_alert_x_for_slot(main_rect, width, gap, row_gap, side, slot)
+            x = self._clamp_rect_x_to_screen(x, width, screen_left, screen_right)
+        y = main_rect.center().y() - height / 2.0
         y = max(self._u(8.0), min(float(self.height()) - height - self._u(8.0), y))
         return QRectF(x, y, width, height)
 
+    def _screen_bounds_in_local(self) -> tuple[float, float]:
+        margin = self._u(8.0)
+        fallback = (margin, max(margin, float(self.width()) - margin))
+        try:
+            screen_geo = self._current_screen_geometry()
+        except Exception:
+            screen_geo = None
+        if not screen_geo:
+            return fallback
+        try:
+            origin = self.mapToGlobal(QPoint(0, 0))
+            left = float(screen_geo.left() - origin.x()) + margin
+            right = float(screen_geo.right() - origin.x()) - margin
+        except Exception:
+            return fallback
+        left = max(left, margin)
+        right = min(right, float(self.width()) - margin)
+        if right - left < self._u(80.0):
+            return fallback
+        return left, right
+
+    def _main_rect_screen_pressure(self, main_rect: QRectF, screen_left: float, screen_right: float) -> str:
+        try:
+            main_kind = self._main_kind()
+            target_width = self._main_size_for_kind(main_kind, self._stack_target_width(main_kind))[0]
+        except Exception:
+            try:
+                target_width = self._stack_target_width(self._main_kind())
+            except Exception:
+                target_width = main_rect.width()
+        is_shrunk = main_rect.width() < target_width - self._u(2.0)
+        if not is_shrunk:
+            return ""
+        if main_rect.right() > screen_right + self._u(1.0):
+            return "right"
+        if main_rect.left() < screen_left - self._u(1.0):
+            return "left"
+        return ""
+
+    def _plugin_alert_circle_size(self, height: float) -> float:
+        return max(self._u(34.0), float(height))
+
+    def _plugin_alert_x_for_side(self, main_rect: QRectF, width: float, gap: float, side: str) -> float:
+        if side == "left":
+            return main_rect.left() - gap - width
+        return main_rect.right() + gap
+
+    def _plugin_alert_side_for_row(
+        self,
+        main_rect: QRectF,
+        width: float,
+        gap: float,
+        row_gap: float,
+        total: int,
+        preferred_side: str,
+        screen_left: float,
+        screen_right: float,
+    ) -> str:
+        preferred = "left" if preferred_side == "left" else "right"
+        alternate = "right" if preferred == "left" else "left"
+        if self._plugin_alert_row_fits(main_rect, width, gap, row_gap, total, preferred, screen_left, screen_right):
+            return preferred
+        if self._plugin_alert_row_fits(main_rect, width, gap, row_gap, total, alternate, screen_left, screen_right):
+            return alternate
+        preferred_space = self._plugin_alert_side_space(main_rect, gap, preferred, screen_left, screen_right)
+        alternate_space = self._plugin_alert_side_space(main_rect, gap, alternate, screen_left, screen_right)
+        return preferred if preferred_space >= alternate_space else alternate
+
+    def _plugin_alert_row_desired_width(self, total: int, fallback_width: float) -> float:
+        row_width = float(fallback_width)
+        try:
+            alerts = self._active_plugin_alerts(max(1, int(total)))
+        except Exception:
+            alerts = []
+        base_width = self._u(float(getattr(self, "plugin_alert_width", 168.0)))
+        for alert in alerts[: max(1, int(total))]:
+            try:
+                _index, label, detail, summary, _color, _icon, _plugin_id, _status, _alert_title, alert_body, _alert_priority = alert
+            except (TypeError, ValueError):
+                continue
+            content_width = self._plugin_alert_width_for(label, detail, alert_body or summary)
+            if str(label or "").strip().upper() == "TIME":
+                desired = content_width
+            else:
+                desired = max(base_width, content_width)
+            row_width = max(row_width, desired)
+        return row_width
+
+    def _plugin_alert_width_for_row(
+        self,
+        main_rect: QRectF,
+        width: float,
+        gap: float,
+        row_gap: float,
+        total: int,
+        side: str,
+        screen_left: float,
+        screen_right: float,
+    ) -> float:
+        total = max(1, int(total))
+        if total <= 1:
+            return width
+        space = self._plugin_alert_side_space(main_rect, gap, side, screen_left, screen_right)
+        available = max(0.0, space - row_gap * (total - 1))
+        compact_min = self._plugin_alert_circle_size(self._u(42.0))
+        if available <= 0.0:
+            return compact_min
+        item_width = min(width, available / total)
+        if item_width < width - self._u(1.0):
+            return compact_min
+        return item_width
+
+    def _plugin_alert_x_for_slot(self, main_rect: QRectF, width: float, gap: float, row_gap: float, side: str, slot: int) -> float:
+        slot = max(0, int(slot))
+        if side == "left":
+            return main_rect.left() - gap - width - slot * (width + row_gap)
+        return main_rect.right() + gap + slot * (width + row_gap)
+
+    def _plugin_alert_row_fits(
+        self,
+        main_rect: QRectF,
+        width: float,
+        gap: float,
+        row_gap: float,
+        total: int,
+        side: str,
+        screen_left: float,
+        screen_right: float,
+    ) -> bool:
+        row_width = width * max(1, int(total)) + row_gap * max(0, int(total) - 1)
+        if side == "left":
+            return main_rect.left() - gap - row_width >= screen_left
+        return main_rect.right() + gap + row_width <= screen_right
+
+    def _plugin_alert_side_space(self, main_rect: QRectF, gap: float, side: str, screen_left: float, screen_right: float) -> float:
+        if side == "left":
+            return max(0.0, main_rect.left() - gap - screen_left)
+        return max(0.0, screen_right - main_rect.right() - gap)
+
+    def _plugin_alert_uses_ring(self, rect: QRectF) -> bool:
+        return rect.width() <= self._plugin_alert_circle_size(rect.height()) + self._u(0.5)
+
+    def _rect_x_fits_screen(self, x: float, width: float, screen_left: float, screen_right: float) -> bool:
+        return x >= screen_left and x + width <= screen_right
+
+    def _clamp_rect_x_to_screen(self, x: float, width: float, screen_left: float, screen_right: float) -> float:
+        return max(screen_left, min(x, screen_right - width))
+
     def _plugin_alert_width_for(self, label: str, detail: str, summary: str) -> float:
+        if str(label or "").strip().upper() == "TIME":
+            return self._time_plugin_alert_width_for(detail, summary)
         longest = max(len(str(label or "")), len(str(detail or "")), len(str(summary or "")))
         summary_weight = min(10, len(str(summary or "")))
         width_units = 112.0 + min(10, longest) * 4.0 + summary_weight * 2.0
         return self._u(max(126.0, min(226.0, width_units)))
+
+    def _time_plugin_alert_width_for(self, detail: str, summary: str) -> float:
+        source = str(summary or detail or "")
+        if self._time_reminder_kind("", source) == "alarm" or not self._strip_timer_prefix(source):
+            note = self._time_alarm_alert_text(source)
+            char_units = max(5, min(10, len(note)))
+            return max(self._u(150.0), min(self._u(168.0), self._u(92.0 + char_units * 10.0)))
+        value = self._strip_timer_prefix(source)
+        value_units = max(46.0, min(72.0, len(value) * 6.8 + 22.0)) if value else 48.0
+        target_units = 84.0 + value_units
+        return max(self._u(150.0), min(self._u(168.0), self._u(target_units)))
 
     def _plugin_alert_text_parts(self, label: str, detail: str, summary: str, status: str, alert_title: str = "", alert_body: str = "") -> tuple[str, str]:
         normalized_status = str(status or "").strip().lower()
@@ -2666,6 +3636,47 @@ class IslandStackVisual(QWidget):
             return f"{msg.serial}-{msg.app}-{msg.sender}"
         return f"{int(msg.created_at * 1000)}-{msg.app}-{msg.sender}"
 
+    def _initial_motion_rect_for_visual(self, visual: StackVisual, visuals: list[StackVisual]) -> QRectF:
+        start = QRectF(visual.rect)
+        if visual.kind == IslandKind.PLUGIN_PANEL:
+            strip = next((item for item in visuals if item.key == "plugin"), None)
+            if strip is not None:
+                height = min(self._u(10.0), max(self._u(2.0), visual.rect.height()))
+                if getattr(self, "stack_direction", 1) < 0:
+                    return QRectF(visual.rect.left(), strip.rect.top() - height, visual.rect.width(), height)
+                return QRectF(visual.rect.left(), strip.rect.bottom(), visual.rect.width(), height)
+        if visual.kind == IslandKind.MESSAGE:
+            message_motions = [motion.rect for key, motion in self.motions.items() if key.startswith("message:") and motion.opacity > 0.1]
+            main_motion = next((self.motions.get(item.key) for item in visuals if item.z_index == 10 and item.key in self.motions), None)
+            if message_motions and visual.message and time.monotonic() < visual.message.popup_until:
+                source = message_motions[0]
+                if getattr(self, "stack_direction", 1) < 0:
+                    return QRectF(source.center().x() - self._u(8), source.top() - self._u(14), self._u(16), self._u(10))
+                return QRectF(source.center().x() - self._u(8), source.bottom() + self._u(4), self._u(16), self._u(10))
+            if main_motion:
+                if getattr(self, "stack_direction", 1) < 0:
+                    return QRectF(main_motion.rect.center().x() - self._u(3), main_motion.rect.top() - self._u(17), self._u(7), self._u(7))
+                return QRectF(main_motion.rect.center().x() - self._u(3), main_motion.rect.bottom() + self._u(10), self._u(7), self._u(7))
+            if visual.message and self.expanded and time.monotonic() >= visual.message.popup_until:
+                if getattr(self, "stack_direction", 1) < 0:
+                    return QRectF(visual.rect.center().x() - self._u(3), visual.rect.bottom() + self._u(7), self._u(7), self._u(7))
+                return QRectF(visual.rect.center().x() - self._u(3), visual.rect.top() - self._u(14), self._u(7), self._u(7))
+        start.moveTop(start.top() - self._u(12) if getattr(self, "stack_direction", 1) >= 0 else start.top() + self._u(12))
+        return start
+
+    def _plugin_alert_exit_rect_towards_main(self, alert_rect: QRectF, visuals: list[StackVisual]) -> QRectF:
+        main = next((item for item in visuals if item.z_index == 10), None)
+        if main is None:
+            size = min(self._u(10.0), max(self._u(4.0), alert_rect.height()))
+            return QRectF(alert_rect.center().x() - size / 2.0, alert_rect.center().y() - size / 2.0, size, size)
+        size = min(self._u(10.0), max(self._u(4.0), alert_rect.height() * 0.24))
+        y = alert_rect.center().y() - size / 2.0
+        if alert_rect.center().x() >= main.rect.center().x():
+            x = main.rect.right() + self._u(4.0)
+        else:
+            x = main.rect.left() - self._u(4.0) - size
+        return QRectF(x, y, size, size)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2705,28 +3716,7 @@ class IslandStackVisual(QWidget):
 
         for visual in visuals:
             if visual.key not in self.motions:
-                start = QRectF(visual.rect)
-                if visual.kind == IslandKind.MESSAGE:
-                    message_motions = [motion.rect for key, motion in self.motions.items() if key.startswith("message:") and motion.opacity > 0.1]
-                    main_motion = next((self.motions.get(v.key) for v in visuals if v.z_index == 10 and v.key in self.motions), None)
-                    if message_motions and visual.message and time.monotonic() < visual.message.popup_until:
-                        source = message_motions[0]
-                        if getattr(self, "stack_direction", 1) < 0:
-                            start = QRectF(source.center().x() - self._u(8), source.top() - self._u(14), self._u(16), self._u(10))
-                        else:
-                            start = QRectF(source.center().x() - self._u(8), source.bottom() + self._u(4), self._u(16), self._u(10))
-                    elif main_motion:
-                        if getattr(self, "stack_direction", 1) < 0:
-                            start = QRectF(main_motion.rect.center().x() - self._u(3), main_motion.rect.top() - self._u(17), self._u(7), self._u(7))
-                        else:
-                            start = QRectF(main_motion.rect.center().x() - self._u(3), main_motion.rect.bottom() + self._u(10), self._u(7), self._u(7))
-                    elif visual.message and self.expanded and time.monotonic() >= visual.message.popup_until:
-                        if getattr(self, "stack_direction", 1) < 0:
-                            start = QRectF(visual.rect.center().x() - self._u(3), visual.rect.bottom() + self._u(7), self._u(7), self._u(7))
-                        else:
-                            start = QRectF(visual.rect.center().x() - self._u(3), visual.rect.top() - self._u(14), self._u(7), self._u(7))
-                else:
-                    start.moveTop(start.top() - self._u(12) if getattr(self, "stack_direction", 1) >= 0 else start.top() + self._u(12))
+                start = self._initial_motion_rect_for_visual(visual, visuals)
                 self.motions[visual.key] = SpringRect(start)
             if self.finder_mode:
                 response = 0.19 if now < self.stack_bounce_until else 0.24
@@ -2738,13 +3728,20 @@ class IslandStackVisual(QWidget):
 
         for key in list(self.motions):
             if key not in targets:
-                rect = self.motions[key].rect.adjusted(0, -self._u(8), 0, -self.motions[key].rect.height() + self._u(8))
+                if key.startswith("plugin-alert:") and getattr(self, "expanded", False):
+                    rect = self._plugin_alert_exit_rect_towards_main(self.motions[key].rect, visuals)
+                    response = 0.18 if self.finder_mode else 0.22
+                    damping = 0.68 if self.finder_mode else 0.62
+                else:
+                    rect = self.motions[key].rect.adjusted(0, -self._u(8), 0, -self.motions[key].rect.height() + self._u(8))
+                    response = 0.18 if self.finder_mode else 0.24
+                    damping = 0.84 if self.finder_mode else 0.76
                 self.motions[key].step(
                     rect,
                     0.0,
                     dt,
-                    response=0.18 if self.finder_mode else 0.24,
-                    damping=0.84 if self.finder_mode else 0.76,
+                    response=response,
+                    damping=damping,
                 )
                 if self.motions[key].opacity < 0.025:
                     del self.motions[key]
@@ -2753,6 +3750,7 @@ class IslandStackVisual(QWidget):
         self._paint_myfinder_group_frame(painter, items, dt)
 
         self._paint_dot_group_backing(painter, items)
+        self.plugin_action_rects = {}
         for visual, motion in sorted(items, key=lambda item: item[0].z_index):
             painter.save()
             painter.setOpacity(max(0.0, min(1.0, motion.opacity)))
@@ -2763,6 +3761,8 @@ class IslandStackVisual(QWidget):
                 self._paint_music(painter, rect, self.expanded)
             elif visual.kind == IslandKind.PLUGIN:
                 self._paint_plugin(painter, rect, visual.folded)
+            elif visual.kind == IslandKind.PLUGIN_PANEL:
+                self._paint_plugin_panel(painter, rect)
             elif visual.kind == IslandKind.PLUGIN_ALERT:
                 self._paint_plugin_alert(painter, rect, visual.key)
             elif visual.kind == IslandKind.MESSAGE and visual.message:
@@ -3056,6 +4056,24 @@ class IslandStackVisual(QWidget):
         path.closeSubpath()
         return path
 
+    def _finder_texture_source_rect(self, target: QRectF, texture: QImage) -> QRectF:
+        glass = self.finder_material
+        if getattr(glass, "texture_is_full_screen", False):
+            global_top_left = self.mapToGlobal(QPoint(int(round(target.left())), int(round(target.top()))))
+            source_left = float(global_top_left.x() - int(getattr(glass, "texture_screen_left", 0)))
+            source_top = float(global_top_left.y() - int(getattr(glass, "texture_screen_top", 0)))
+            source_left = max(0.0, min(float(texture.width() - 1), source_left))
+            source_top = max(0.0, min(float(texture.height() - 1), source_top))
+            source_width = max(1.0, min(float(texture.width()) - source_left, target.width()))
+            source_height = max(1.0, min(float(texture.height()) - source_top, target.height()))
+            return QRectF(source_left, source_top, source_width, source_height)
+        if texture.width() > 512:
+            global_left = self.mapToGlobal(QPoint(int(round(target.left())), 0)).x()
+            source_left = max(0.0, min(float(texture.width() - 1), float(global_left - int(getattr(glass, "texture_screen_left", 0)))))
+            source_width = max(1.0, min(float(texture.width()) - source_left, target.width()))
+            return QRectF(source_left, 0.0, source_width, float(texture.height()))
+        return QRectF(0.0, 0.0, float(texture.width()), float(texture.height()))
+
     def _paint_myfinder_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
         if not self.finder_mode:
             self.group_frame_motion = None
@@ -3074,7 +4092,11 @@ class IslandStackVisual(QWidget):
             if self.expanded:
                 if visual.folded:
                     continue
-            elif visual.z_index != 10 and not (visual.kind == IslandKind.MESSAGE and not visual.folded):
+            elif (
+                visual.z_index != 10
+                and visual.kind != IslandKind.PLUGIN_ALERT
+                and not (visual.kind == IslandKind.MESSAGE and not visual.folded)
+            ):
                 continue
             rect = QRectF(visual.rect)
             visible_rects.append(rect)
@@ -3154,13 +4176,7 @@ class IslandStackVisual(QWidget):
             painter.save()
             painter.setClipPath(shell)
             target = QRectF(shell_rect)
-            if glass.texture_image.width() > 512:
-                global_left = self.mapToGlobal(QPoint(int(round(left_join)), 0)).x()
-                source_left = max(0.0, min(float(glass.texture_image.width() - 1), float(global_left - glass.texture_screen_left)))
-                source_width = max(1.0, min(float(glass.texture_image.width()) - source_left, target.width()))
-                painter.drawImage(target, glass.texture_image, QRectF(source_left, 0.0, source_width, float(glass.texture_image.height())))
-            else:
-                painter.drawImage(target, glass.texture_image)
+            painter.drawImage(target, glass.texture_image, self._finder_texture_source_rect(target, glass.texture_image))
             painter.restore()
             used_texture = True
         else:
@@ -3259,7 +4275,7 @@ class IslandStackVisual(QWidget):
     def _paint_black_glass(self, painter: QPainter, rect: QRectF, radius: float, folded: bool = False):
         path = self._rounded_path(rect, radius)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillPath(path, QColor(0, 0, 0, 240 if not folded else 220))
+        painter.fillPath(path, QColor(0, 0, 0, 255))
 
         stroke = self._u(1.0)
         inner = rect.adjusted(stroke, stroke, -stroke, -stroke)
@@ -3314,10 +4330,10 @@ class IslandStackVisual(QWidget):
         path = self._rounded_path(rect, radius)
         painter.setPen(Qt.PenStyle.NoPen)
         body = QLinearGradient(0, rect.top(), 0, rect.bottom())
-        body.setColorAt(0.00, QColor(4, 8, 18, 240))
-        body.setColorAt(0.30, QColor(6, 11, 24, 234))
-        body.setColorAt(0.66, QColor(8, 16, 32, 228))
-        body.setColorAt(1.00, QColor(12, 24, 44, 224))
+        body.setColorAt(0.00, QColor(4, 8, 18, 255))
+        body.setColorAt(0.30, QColor(6, 11, 24, 255))
+        body.setColorAt(0.66, QColor(8, 16, 32, 255))
+        body.setColorAt(1.00, QColor(12, 24, 44, 255))
         painter.fillPath(path, body)
 
         shade = QLinearGradient(0, rect.top(), 0, rect.bottom())
@@ -3375,32 +4391,57 @@ class IslandStackVisual(QWidget):
         val = max(0.88, min(1.0, val + 0.12))
         return QColor.fromHsvF(hue, sat, val, 1.0)
 
+    def _plugin_display_color(self, label: str, color: QColor) -> QColor:
+        if str(label or "").strip().upper() == "TIME":
+            return QColor(255, 204, 0)
+        return QColor(color)
+
     def _system_dark_mode(self) -> bool:
         return app_dark_mode()
 
     def _plugin_theme_colors(self) -> dict[str, QColor]:
         if self._system_dark_mode():
             return {
-                "shell": QColor(30, 30, 32, 238),
-                "shell_expanded": QColor(28, 28, 30, 230),
-                "cell": QColor(46, 46, 49, 226),
-                "cell_active": QColor(58, 58, 62, 242),
+                "shell": QColor(30, 30, 32, 255),
+                "shell_expanded": QColor(28, 28, 30, 255),
+                "cell": QColor(46, 46, 49, 255),
+                "cell_active": QColor(58, 58, 62, 255),
                 "stroke": QColor(255, 255, 255, 42),
                 "inner_stroke": QColor(0, 0, 0, 45),
                 "text": QColor(245, 245, 247, 238),
                 "muted": QColor(188, 188, 194, 224),
-                "alert": QColor(38, 38, 41, 240),
+                "alert": QColor(38, 38, 41, 255),
             }
         return {
-            "shell": QColor(248, 248, 252, 238),
-            "shell_expanded": QColor(248, 248, 252, 226),
-            "cell": QColor(255, 255, 255, 178),
-            "cell_active": QColor(255, 255, 255, 232),
+            "shell": QColor(248, 248, 252, 255),
+            "shell_expanded": QColor(248, 248, 252, 255),
+            "cell": QColor(255, 255, 255, 255),
+            "cell_active": QColor(255, 255, 255, 255),
             "stroke": QColor(255, 255, 255, 166),
             "inner_stroke": QColor(0, 0, 0, 18),
             "text": QColor(28, 28, 30, 238),
             "muted": QColor(72, 72, 74, 226),
-            "alert": QColor(248, 248, 252, 236),
+            "alert": QColor(248, 248, 252, 255),
+        }
+
+    def _time_reference_palette(self, theme: dict[str, QColor], color: QColor) -> dict[str, QColor]:
+        return {
+            "surface": QColor(19, 19, 19, 255),
+            "surface_lowest": QColor(14, 14, 14, 255),
+            "module": QColor(28, 27, 27, 255),
+            "module_active": QColor(32, 32, 31, 255),
+            "handle": QColor(42, 42, 42, 255),
+            "divider": QColor(68, 68, 68, 190),
+            "accent": QColor(255, 184, 0, 255),
+            "accent_soft": QColor(255, 184, 0, 16),
+            "accent_track": QColor(255, 184, 0, 46),
+            "active": QColor(2, 201, 83, 255),
+            "text": QColor(229, 226, 225, 242),
+            "muted": QColor(213, 196, 171, 225),
+            "muted_dim": QColor(158, 143, 120, 170),
+            "thumb": QColor(245, 244, 241, 246),
+            "off_track": QColor(19, 19, 19, 230),
+            "note_stroke": QColor(142, 150, 164, 185),
         }
 
     def _accent_pair(self) -> tuple[QColor, QColor]:
@@ -4462,7 +5503,9 @@ class IslandStackVisual(QWidget):
 
     def _paint_plugin(self, painter: QPainter, rect: QRectF, folded: bool):
         radius = rect.height() / 2 if folded else min(self._u(24), rect.height() / 2)
-        self._paint_plugin_solid_shell(painter, rect, radius, folded=folded)
+        joined_panel = bool(not folded and self._plugin_panel_visible())
+        if not joined_panel:
+            self._paint_plugin_solid_shell(painter, rect, radius, folded=folded)
         if folded or rect.height() < self._u(22):
             return
 
@@ -4470,7 +5513,7 @@ class IslandStackVisual(QWidget):
             (
                 label,
                 detail,
-                summary if self.show_seconds or label != "TIME" else summary[:5],
+                summary,
                 color,
                 icon,
                 plugin_id,
@@ -4488,23 +5531,96 @@ class IslandStackVisual(QWidget):
         now = time.monotonic()
         count = len(plugins)
         active_focus = self._active_plugin_focus(now)
-        function_panel = self.expanded and rect.height() > self._u(88.0)
-        strip_expand_active = bool(function_panel or self.hovered_key == "plugin")
+        strip_expand_active = bool(self.hovered_key == "plugin" or self._plugin_panel_visible())
         weights = self._plugin_focus_weights(count, now, expand_active=strip_expand_active)
         cells = self._plugin_item_rects(rect, now, expand_active=strip_expand_active)
-
-        if function_panel:
-            self._paint_plugin_function_panel(painter, rect, plugins, active_focus)
-            return
 
         for i, (label, detail, summary, color, icon, _plugin_id, status, _alert_title, _alert_body, _alert_priority, progress) in enumerate(plugins):
             cell = cells[i][1]
             sr = cell.adjusted(self._u(5), self._u(6), -self._u(5), -self._u(6))
             focus_weight = weights[i] if i < len(weights) else 0.0
             if self.expanded and strip_expand_active and i == active_focus:
-                self._paint_plugin_focus_cell(painter, sr, label, detail, color, icon, focus_weight, False, status)
+                self._paint_plugin_focus_cell(painter, sr, label, detail, color, icon, focus_weight, False, status, summary=summary, progress=progress)
             else:
                 self._paint_plugin_compact_cell(painter, sr, label, detail, summary, color, i == active_focus, status, progress)
+
+    def _plugin_panel_shell_rect(self, panel_rect: QRectF, strip_rect: QRectF | None = None) -> QRectF:
+        if strip_rect is None or strip_rect.isNull():
+            motion = self.motions.get("plugin") if hasattr(self, "motions") else None
+            strip_rect = QRectF(motion.rect) if motion and motion.opacity > 0.02 else QRectF()
+        if strip_rect.isNull():
+            return QRectF(panel_rect)
+        return QRectF(
+            min(panel_rect.left(), strip_rect.left()),
+            min(panel_rect.top(), strip_rect.top()),
+            max(panel_rect.right(), strip_rect.right()) - min(panel_rect.left(), strip_rect.left()),
+            max(panel_rect.bottom(), strip_rect.bottom()) - min(panel_rect.top(), strip_rect.top()),
+        )
+
+    def _paint_plugin_panel(self, painter: QPainter, rect: QRectF):
+        shell_rect = self._plugin_panel_shell_rect(rect)
+        radius = min(self._u(26.0), shell_rect.height() / 4.0)
+        self._paint_plugin_solid_shell(painter, shell_rect, radius, folded=False)
+        plugins = [
+            (
+                label,
+                detail,
+                summary,
+                color,
+                icon,
+                plugin_id,
+                status,
+                alert_title,
+                alert_body,
+                alert_priority,
+                progress,
+            )
+            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self.plugin_samples)
+        ][:self.enabled_plugin_count]
+        if not plugins:
+            theme = self._plugin_theme_colors()
+            muted = QColor(theme["muted"])
+            muted.setAlpha(170)
+            self._paint_scrolling_text(painter, rect.adjusted(self._u(18.0), 0.0, -self._u(18.0), 0.0), "功能待定", 14, muted, False)
+            return
+        self._paint_plugin_function_panel(painter, rect, self._plugin_panel_focus_model() or {})
+
+    def _plugin_panel_focus_model(self) -> dict[str, object] | None:
+        plugins = [
+            (
+                label,
+                detail,
+                summary,
+                color,
+                icon,
+                plugin_id,
+                status,
+                alert_title,
+                alert_body,
+                alert_priority,
+                progress,
+            )
+            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self.plugin_samples)
+        ][:self.enabled_plugin_count]
+        if not plugins:
+            return None
+        index = max(0, min(self._active_plugin_focus(time.monotonic()), len(plugins) - 1))
+        label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress = plugins[index]
+        return {
+            "index": index,
+            "label": label,
+            "detail": detail,
+            "summary": summary,
+            "color": color,
+            "icon": icon,
+            "plugin_id": plugin_id,
+            "status": status,
+            "alert_title": alert_title,
+            "alert_body": alert_body,
+            "alert_priority": alert_priority,
+            "progress": progress,
+            "action": self._plugin_action_model(label, detail, summary, status),
+        }
 
     def _plugin_compact_value(self, label: str, detail: str, summary: str, status: str = "normal") -> str:
         text = str(detail or "").strip()
@@ -4519,13 +5635,1064 @@ class IslandStackVisual(QWidget):
             return match.group(0)
         return re.sub(r"^\s*(?:倒计时|Countdown|Timer|timer|计时)\s*", "", text, flags=re.I).strip()
 
+    def _time_reminder_kind(self, status: str = "", text: str = "") -> str:
+        source = f"{status} {text}".lower()
+        if "alarm" in source or "\u95f9\u949f" in source:
+            return "alarm"
+        return "countdown"
+
+    def _time_alert_kind_from_plugin_id(self, plugin_id: str) -> str:
+        value = str(plugin_id or "").strip().casefold()
+        if value.endswith(":alarm"):
+            return "alarm"
+        return "countdown"
+
+    def _time_reminder_icon_path(self, status: str = "running", kind: str = "countdown") -> str:
+        status_key = str(status or "").strip().lower()
+        kind_key = str(kind or "").strip().lower()
+        base = "\u95f9\u949f" if kind_key == "alarm" else "\u5012\u8ba1\u65f6"
+        tone = "\u9ed1" if status_key in {"done", "due", "alarm"} else "\u9ec4"
+        return str(ROOT_DIR / "logos" / f"{base}{tone}.svg")
+
+    def _time_reminder_display_text(self, text: str, max_chars: int = 18) -> str:
+        value = str(text or "").strip()
+        max_chars = max(4, int(max_chars))
+        if len(value) <= max_chars:
+            return value
+        return value[: max_chars - 3].rstrip() + "..."
+
+    def _time_alarm_note_display_text(self, text: str) -> str:
+        return str(text or "").strip()
+
+    def _time_alarm_alert_text(self, note: str) -> str:
+        value = str(note or "").strip()
+        if not value:
+            return "闹钟"
+        value = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", "", value).strip()
+        value = re.sub(r"^\s*(?:闹钟提醒?|提醒)[:：\s]*", "", value).strip()
+        if value.strip().lower() in {"alarm", "timer", "countdown"}:
+            return "闹钟"
+        return value or "闹钟"
+
+    def _time_alarm_alert_text_from_parts(self, *parts: str) -> str:
+        for part in parts:
+            value = self._time_alarm_alert_text(part)
+            if value != "闹钟":
+                return value
+        return "闹钟"
+
+    def _time_text_looks_like_countdown(self, text: str) -> bool:
+        value = str(text or "").strip().lower()
+        if not value:
+            return False
+        if re.search(r"\d{1,2}:\d{2}(?::\d{2})?", value):
+            return True
+        return any(token in value for token in ("倒计时", "计时", "计时器", "时间到", "计时结束", "countdown", "timer"))
+
+    def _time_reminder_due_from_alarm(self, alarm: dict[str, object], now: datetime) -> datetime | None:
+        parsed = self._alarm_row_time_parts(alarm)
+        if parsed is None:
+            return None
+        hour, minute = parsed
+        for offset in range(0, 366 * 5):
+            day = now + timedelta(days=offset)
+            due = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if due < now:
+                continue
+            if self._alarm_row_matches_date(alarm, due):
+                return due
+        return None
+
+    def _time_display_segment_text(self, detail: str, now: datetime) -> str:
+        match = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", str(detail or ""))
+        if match:
+            hour = int(match.group(1)) % 24
+            minute = int(match.group(2)) % 60
+            second = int(match.group(3) or now.second) % 60
+        else:
+            hour, minute, second = now.hour, now.minute, now.second
+        if bool(getattr(self, "show_seconds", True)):
+            return f"{hour:02d}:{minute:02d}:{second:02d}"
+        return f"{hour:02d}:{minute:02d}"
+
+    def _time_compact_segments(self, detail: str, summary: str, status: str, alert_body: str = "", now: datetime | None = None) -> list[dict[str, object]]:
+        now = now or datetime.now().astimezone()
+        segments: list[dict[str, object]] = [{"kind": "time", "text": self._time_display_segment_text(detail, now), "due_at": now}]
+        reminders: list[dict[str, object]] = []
+        status_key = str(status or "").strip().lower()
+        raw_entries = getattr(self, "plugin_countdown_entries", None)
+        countdown_candidates: list[dict[str, object]] = []
+        if isinstance(raw_entries, list):
+            for raw in raw_entries:
+                if not isinstance(raw, dict):
+                    continue
+                due_at = None
+                raw_end = str(raw.get("end_at") or "").strip()
+                if raw_end:
+                    try:
+                        due_at = datetime.fromisoformat(raw_end)
+                    except ValueError:
+                        due_at = None
+                    if due_at and due_at.tzinfo is None:
+                        due_at = due_at.replace(tzinfo=now.tzinfo)
+                    if due_at:
+                        due_at = due_at.astimezone(now.tzinfo)
+                text = str(raw.get("text") or "").strip()
+                if due_at and not text:
+                    text = self._format_timer_seconds(max(0, int((due_at - now).total_seconds())))
+                if text or due_at:
+                    countdown_candidates.append({"kind": "countdown", "text": text or "0:00", "due_at": due_at or now, "status": str(raw.get("status") or status_key)})
+        fallback_text = self._strip_timer_prefix(str(alert_body or summary or ""))
+        if not countdown_candidates and status_key in {"running", "done", "due"}:
+            countdown_candidates.append(
+                {
+                    "kind": "countdown",
+                    "text": "\u65f6\u95f4\u5230" if status_key == "done" else (fallback_text or self._plugin_compact_value("TIME", detail, summary, status)),
+                    "due_at": now if status_key == "done" else now + timedelta(days=1),
+                    "status": status_key or "running",
+                }
+            )
+        if countdown_candidates:
+            countdown_candidates.sort(key=lambda item: item["due_at"])
+            reminders.append(countdown_candidates[0])
+
+        alarm_candidates: list[dict[str, object]] = []
+        raw_alarm_rows = self._time_alarm_rows()
+        for alarm in raw_alarm_rows if isinstance(raw_alarm_rows, list) else []:
+            if not bool(alarm.get("enabled", False)):
+                continue
+            due_at = self._time_reminder_due_from_alarm(alarm, now)
+            if due_at is None:
+                continue
+            alarm_candidates.append({"kind": "alarm", "text": str(alarm.get("label") or alarm.get("time") or "\u5907\u6ce8"), "due_at": due_at, "status": "running"})
+        if alarm_candidates:
+            alarm_candidates.sort(key=lambda item: item["due_at"])
+            reminders.append(alarm_candidates[0])
+        reminders.sort(key=lambda item: item["due_at"])
+        segments.extend(reminders[:2])
+        return segments
+
+    def _time_compact_cell_layout(self, rect: QRectF, segments: list[dict[str, object]]) -> list[dict[str, object]]:
+        if not segments:
+            return []
+        gap = self._u(4.0)
+        pad_x = self._u(5.0)
+        inner_top = rect.top() + self._u(3.0)
+        inner_h = max(self._u(24.0), rect.height() - self._u(6.0))
+        cursor = rect.left() + pad_x
+        right_limit = rect.right() - pad_x
+        time_text = str(segments[0].get("text") or "")
+        has_seconds = bool(re.fullmatch(r"\d{1,2}:\d{2}:\d{2}", time_text))
+        time_floor = self._u(86.0 if has_seconds else 66.0)
+        time_target = max(time_floor, min(self._u(96.0), len(time_text) * self._u(7.4) + self._u(17.0)))
+        reminders = list(segments[1:3])
+        min_reminder_w = 0.0
+        if reminders:
+            circle = inner_h
+            min_reminder_w = circle * len(reminders) + gap * max(0, len(reminders) - 1)
+        max_time_w = max(self._u(48.0), right_limit - cursor - (gap if reminders else 0.0) - min_reminder_w)
+        time_w = max(self._u(48.0), min(time_target, max_time_w))
+        time_rect = QRectF(cursor, inner_top, max(0.0, time_w), inner_h)
+        layout = [{**segments[0], "kind": "time", "rect": time_rect, "icon_only": False}]
+        cursor = time_rect.right() + gap
+        available = right_limit - cursor
+        if available <= self._u(20.0):
+            return layout
+
+        full_widths = []
+        for segment in reminders:
+            kind = str(segment.get("kind") or "countdown")
+            if kind == "countdown":
+                base_width = self._u(66.0)
+                display_text = self._time_reminder_display_text(str(segment.get("text") or ""), 10)
+                if len(display_text) <= 5:
+                    full_widths.append(base_width)
+                    continue
+                text_width = float(QFontMetrics(self._font(10, QFont.Weight.Bold)).horizontalAdvance(display_text))
+                icon_size = min(self._u(20.0), inner_h - self._u(5.0))
+                required_width = self._u(6.0) + icon_size + self._u(4.0) + text_width + self._u(7.0) + self._u(8.0)
+                full_widths.append(max(base_width, min(self._u(112.0), required_width)))
+            else:
+                full_widths.append(self._u(74.0))
+        full_total = sum(full_widths) + gap * max(0, len(full_widths) - 1)
+        use_circles = bool(reminders) and full_total > available
+        for index, segment in enumerate(reminders):
+            target_w = inner_h if use_circles else full_widths[index]
+            if cursor + target_w > right_limit + self._u(0.5):
+                break
+            layout.append({**segment, "rect": QRectF(cursor, inner_top, target_w, inner_h), "icon_only": use_circles})
+            cursor += target_w + gap
+        return layout
+
+    def _paint_svg_icon(self, painter: QPainter, path: str, rect: QRectF) -> bool:
+        if QSvgRenderer is None:
+            return False
+        try:
+            renderer = QSvgRenderer(str(path))
+            if not renderer.isValid():
+                return False
+            renderer.render(painter, rect)
+            return True
+        except Exception:
+            return False
+
     def _plugin_alert_display_value(self, label: str, detail: str, summary: str, status: str, alert_title: str = "", alert_body: str = "") -> str:
         label_key = str(label or "").strip().upper()
         status_key = str(status or "").strip().lower()
         body = str(alert_body or summary or detail or "").strip()
         if label_key == "TIME" and status_key in {"running", "done"}:
-            return self._strip_timer_prefix(body) or self._strip_timer_prefix(detail) or "TIME"
+            value = self._strip_timer_prefix(body) or self._strip_timer_prefix(detail)
+            if status_key == "done" and not value:
+                value = "\u65f6\u95f4\u5230"
+            return self._time_reminder_display_text(value or "TIME")
         return self._plugin_compact_value(label, detail, body, status)
+
+    def _default_time_alarm_rows(self) -> list[dict[str, object]]:
+        return []
+
+    def _default_alarm_editor_state(self) -> dict[str, object]:
+        now = datetime.now().astimezone()
+        return {
+            "hour": now.hour,
+            "minute": now.minute,
+            "note": "",
+            "frequency": "每周",
+            "frequency_unit": "weekly",
+            "weekdays": [2, 4],
+            "month_day": 28,
+            "year_month": 4,
+            "year_day": 28,
+            "editor_page": "main",
+            "detail_mode": "",
+            "edit_index": None,
+        }
+
+    def _alarm_editor_state_from_row(self, index: int, row: dict[str, object]) -> dict[str, object]:
+        raw_time = str(row.get("time") or "").strip()
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})", raw_time)
+        if match:
+            hour = max(0, min(23, int(match.group(1))))
+            minute = max(0, min(59, int(match.group(2))))
+        else:
+            now = datetime.now().astimezone()
+            hour, minute = now.hour, now.minute
+        return {
+            "hour": hour,
+            "minute": minute,
+            "note": str(row.get("label") or ""),
+            "frequency": str(row.get("frequency") or "每周"),
+            "weekdays": str(row.get("weekdays") or "二、四"),
+            "frequency_unit": str(row.get("frequency_unit") or self._alarm_unit_from_frequency(str(row.get("frequency") or "每周"))),
+            "month_day": int(row.get("month_day", 28) or 28),
+            "year_month": int(row.get("year_month", 4) or 4),
+            "year_day": int(row.get("year_day", 28) or 28),
+            "editor_page": "main",
+            "detail_mode": "",
+            "edit_index": int(index),
+        }
+
+    def _alarm_row_time_parts(self, row: dict[str, object]) -> tuple[int, int] | None:
+        match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(row.get("time") or ""))
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour, minute
+
+    def _alarm_int(self, value: object, lower: int, upper: int, default: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = int(default)
+        return max(int(lower), min(int(upper), number))
+
+    def _alarm_row_matches_date(self, row: dict[str, object], due: datetime) -> bool:
+        unit = str(row.get("frequency_unit") or self._alarm_unit_from_frequency(str(row.get("frequency") or ""))).strip().lower()
+        if unit == "weekly":
+            weekdays = self._alarm_weekdays_from_value(row.get("weekdays", []))
+            return due.isoweekday() in weekdays if weekdays else False
+        if unit == "monthly":
+            day = self._alarm_int(row.get("month_day", 1), 1, 31, 1)
+            return day <= self._days_in_month(due.year, due.month) and due.day == day
+        if unit == "yearly":
+            month = self._alarm_int(row.get("year_month", 1), 1, 12, 1)
+            day = self._alarm_int(row.get("year_day", 1), 1, 31, 1)
+            return due.month == month and due.day == day and day <= self._days_in_month(due.year, month)
+        return True
+
+    def _coerce_alarm_rows(self, rows: object) -> list[dict[str, object]]:
+        if isinstance(rows, dict):
+            rows = rows.get("alarms") or rows.get("rows") or []
+        if not isinstance(rows, list):
+            return []
+        result: list[dict[str, object]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            parsed = self._alarm_row_time_parts(item)
+            if parsed is None:
+                continue
+            hour, minute = parsed
+            unit = str(item.get("frequency_unit") or "").strip().lower()
+            if unit not in {"daily", "weekly", "monthly", "yearly"}:
+                unit = self._alarm_unit_from_frequency(str(item.get("frequency") or ""))
+            row = {
+                "time": f"{hour:02d}:{minute:02d}",
+                "label": str(item.get("label") or item.get("note") or "闹钟").strip()[:10] or "闹钟",
+                "enabled": bool(item.get("enabled", True)),
+                "frequency_unit": unit,
+                "weekdays": self._alarm_weekdays_from_value(item.get("weekdays", [])),
+                "month_day": self._alarm_int(item.get("month_day", 28), 1, 31, 28),
+                "year_month": self._alarm_int(item.get("year_month", 4), 1, 12, 4),
+                "year_day": self._alarm_int(item.get("year_day", 28), 1, 31, 28),
+            }
+            if unit == "weekly" and not row["weekdays"]:
+                row["weekdays"] = [1]
+            if unit == "yearly":
+                row["year_day"] = min(int(row["year_day"]), self._yearly_alarm_max_day(int(row["year_month"])))
+            row["frequency"] = str(item.get("frequency") or self._alarm_recurrence_label(row))
+            result.append(row)
+            if len(result) >= 8:
+                break
+        return result
+
+    def _settings_alarm_rows(self) -> list[dict[str, object]] | None:
+        getter = getattr(self, "settings_getter", None)
+        if not callable(getter):
+            return None
+        raw = self._plugin_setting("v2_alarm_rows", None)
+        if raw is None:
+            return None
+        if raw == "":
+            return []
+        payload = raw
+        if isinstance(raw, str):
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                return []
+        return self._coerce_alarm_rows(payload)
+
+    def _persist_alarm_rows(self, rows: object) -> list[dict[str, object]]:
+        normalized = self._coerce_alarm_rows(rows)
+        self.plugin_alarm_rows = normalized
+        self._set_plugin_setting("v2_alarm_rows", json.dumps(normalized, ensure_ascii=False, separators=(",", ":")))
+        return normalized
+
+    def _time_alarm_rows(self) -> list[dict[str, object]]:
+        settings_rows = self._settings_alarm_rows()
+        if settings_rows is not None:
+            self.plugin_alarm_rows = settings_rows[:8]
+            return self.plugin_alarm_rows
+        rows = getattr(self, "plugin_alarm_rows", None)
+        if not isinstance(rows, list):
+            rows = self._default_time_alarm_rows()
+        capped = [dict(row) for row in rows[:8] if isinstance(row, dict)]
+        self.plugin_alarm_rows = capped
+        return capped
+
+    def _time_alarm_editor_state(self) -> dict[str, object]:
+        editor = getattr(self, "plugin_alarm_editor", None)
+        if not isinstance(editor, dict):
+            editor = self._default_alarm_editor_state()
+            self.plugin_alarm_editor = editor
+        editor.setdefault("hour", datetime.now().astimezone().hour)
+        editor.setdefault("minute", datetime.now().astimezone().minute)
+        editor.setdefault("note", "")
+        editor.setdefault("frequency", "每周")
+        editor.setdefault("frequency_unit", self._alarm_unit_from_frequency(str(editor.get("frequency") or "每周")))
+        editor.setdefault("weekdays", "二、四")
+        editor.setdefault("month_day", 28)
+        editor.setdefault("year_month", 4)
+        editor.setdefault("year_day", 28)
+        editor.setdefault("editor_page", "main")
+        editor.setdefault("detail_mode", "")
+        editor.setdefault("edit_index", None)
+        return editor
+
+    def _alarm_frequency_units(self) -> list[tuple[str, str]]:
+        return [("daily", "每天"), ("weekly", "每周"), ("monthly", "每月"), ("yearly", "每年")]
+
+    def _alarm_unit_from_frequency(self, label: str) -> str:
+        text = str(label or "").strip()
+        if text in {"每周", "周", "weekly"}:
+            return "weekly"
+        if text in {"每月", "每闰月", "每非明年二月", "每大月", "月", "monthly"}:
+            return "monthly"
+        if text in {"每年", "每闰年", "闰年", "年", "yearly"}:
+            return "yearly"
+        return "daily"
+
+    def _alarm_weekdays_from_value(self, value) -> list[int]:
+        if isinstance(value, (list, tuple, set)):
+            result = []
+            for item in value:
+                try:
+                    day = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= day <= 7 and day not in result:
+                    result.append(day)
+            return sorted(result)
+        text = str(value or "").strip()
+        if not text:
+            return []
+        if text in {"每天", "每日"}:
+            return [1, 2, 3, 4, 5, 6, 7]
+        if text in {"周末", "末"}:
+            return [6, 7]
+        mapping = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "日": 7, "天": 7}
+        result = []
+        for token in re.findall(r"[1-7一二三四五六七日天]", text):
+            day = int(token) if token.isdigit() else mapping.get(token, 0)
+            if 1 <= day <= 7 and day not in result:
+                result.append(day)
+        return sorted(result)
+
+    def _days_in_month(self, year: int, month: int) -> int:
+        year = max(1, int(year))
+        month = max(1, min(12, int(month)))
+        if month == 12:
+            next_month = datetime(year + 1, 1, 1)
+        else:
+            next_month = datetime(year, month + 1, 1)
+        return (next_month - timedelta(days=1)).day
+
+    def _is_leap_year(self, year: int) -> bool:
+        year = int(year)
+        return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+    def _alarm_year_boundary_year(self) -> int:
+        return datetime.now().astimezone().year + 1
+
+    def _yearly_alarm_max_day(self, month: int) -> int:
+        month = max(1, min(12, int(month)))
+        if month == 2:
+            return 29
+        return self._days_in_month(self._alarm_year_boundary_year(), month)
+
+    def _normalize_alarm_editor_recurrence(self, editor: dict[str, object]) -> dict[str, object]:
+        unit = str(editor.get("frequency_unit") or "").strip().lower()
+        if not unit:
+            unit = self._alarm_unit_from_frequency(str(editor.get("frequency") or "每周"))
+        if unit not in {"daily", "weekly", "monthly", "yearly"}:
+            unit = self._alarm_unit_from_frequency(unit)
+        editor["frequency_unit"] = unit
+        if unit == "weekly":
+            weekdays = self._alarm_weekdays_from_value(editor.get("weekdays", [2, 4]))
+            editor["weekdays"] = weekdays or [1]
+        elif unit == "monthly":
+            try:
+                month_day = int(editor.get("month_day", 28) or 28)
+            except (TypeError, ValueError):
+                month_day = 28
+            editor["month_day"] = ((month_day - 1) % 31) + 1
+        elif unit == "yearly":
+            try:
+                month = int(editor.get("year_month", 4) or 4)
+            except (TypeError, ValueError):
+                month = 4
+            month = ((month - 1) % 12) + 1
+            try:
+                day = int(editor.get("year_day", 28) or 28)
+            except (TypeError, ValueError):
+                day = 28
+            max_day = self._yearly_alarm_max_day(month)
+            editor["year_month"] = month
+            editor["year_day"] = max(1, min(max_day, day))
+        editor["frequency"] = self._alarm_recurrence_label(editor)
+        return editor
+
+    def _alarm_recurrence_label(self, editor: dict[str, object]) -> str:
+        unit = str(editor.get("frequency_unit") or self._alarm_unit_from_frequency(str(editor.get("frequency") or ""))).lower()
+        if unit == "weekly":
+            return "每周"
+        if unit == "monthly":
+            try:
+                day = int(editor.get("month_day", 28) or 28)
+            except (TypeError, ValueError):
+                day = 28
+            if day == 29:
+                return "每非明年二月"
+            if day == 31:
+                return "每大月"
+            return "每月"
+        if unit == "yearly":
+            try:
+                month = int(editor.get("year_month", 4) or 4)
+                day = int(editor.get("year_day", 28) or 28)
+            except (TypeError, ValueError):
+                month, day = 4, 28
+            if month == 2 and day == 29:
+                return "每闰年"
+            return "每年"
+        return "每天"
+
+    def _alarm_recurrence_value_label(self, editor: dict[str, object]) -> str:
+        unit = str(editor.get("frequency_unit") or self._alarm_unit_from_frequency(str(editor.get("frequency") or ""))).lower()
+        if unit == "weekly":
+            days = self._alarm_weekdays_from_value(editor.get("weekdays", []))
+            if set(days) == {1, 2, 3, 4, 5, 6, 7}:
+                return "整周"
+            return " ".join(str(day) for day in days)
+        if unit == "monthly":
+            try:
+                day = int(editor.get("month_day", 28) or 28)
+            except (TypeError, ValueError):
+                day = 28
+            return f"{day}号"
+        if unit == "yearly":
+            try:
+                month = int(editor.get("year_month", 4) or 4)
+                day = int(editor.get("year_day", 28) or 28)
+            except (TypeError, ValueError):
+                month, day = 4, 28
+            return f"{month}月{day}日"
+        return ""
+
+    def _time_countdown_active_model(self, model: dict[str, object]) -> dict[str, object]:
+        paused_remaining = self._timer_paused_remaining_seconds()
+        if paused_remaining > 0:
+            return {
+                "active": True,
+                "text": self._format_timer_seconds(paused_remaining),
+                "progress": max(0.0, min(1.0, float(getattr(self, "plugin_timer_paused_progress", 0.0) or 0.0))),
+                "status": "paused",
+            }
+        status = str(model.get("status", "") or "").strip().lower()
+        text_source = " ".join(
+            str(model.get(key, "") or "")
+            for key in ("alert_body", "summary", "detail")
+            if str(model.get(key, "") or "").strip()
+        )
+        text = self._strip_timer_prefix(text_source)
+        active = status in {"running", "done"} and bool(text)
+        if status == "done":
+            text = "完成"
+        return {
+            "active": active,
+            "text": text if active else "",
+            "progress": max(0.0, min(1.0, float(model.get("progress", 0.0) or 0.0))),
+            "status": status,
+        }
+
+    def _time_countdown_entries(self, model: dict[str, object]) -> list[dict[str, object]]:
+        raw_entries = getattr(self, "plugin_countdown_entries", None)
+        if isinstance(raw_entries, list) and raw_entries:
+            entries = []
+            now = datetime.now().astimezone()
+            for raw in raw_entries[-2:]:
+                if not isinstance(raw, dict):
+                    continue
+                text = str(raw.get("text") or "").strip()
+                started = None
+                target = None
+                for key, holder in (("started_at", "started"), ("end_at", "target")):
+                    raw_time = str(raw.get(key) or "").strip()
+                    if not raw_time:
+                        continue
+                    try:
+                        value = datetime.fromisoformat(raw_time)
+                    except ValueError:
+                        continue
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=now.tzinfo)
+                    if holder == "started":
+                        started = value.astimezone(now.tzinfo)
+                    else:
+                        target = value.astimezone(now.tzinfo)
+                progress = max(0.0, min(1.0, float(raw.get("progress", 0.0) or 0.0)))
+                status = str(raw.get("status") or "running").strip().lower()
+                if status == "paused":
+                    if not text:
+                        remaining = self._timer_paused_remaining_seconds()
+                        text = self._format_timer_seconds(remaining) if remaining > 0 else "0:00"
+                    entries.append(
+                        {
+                            "active": True,
+                            "text": text,
+                            "progress": progress,
+                            "status": "paused",
+                        }
+                    )
+                    continue
+                if target is not None:
+                    remaining = max(0, int((target - now).total_seconds()))
+                    text = self._format_timer_seconds(remaining)
+                    status = "done" if remaining <= 0 and status != "paused" else status
+                    if started is not None and target > started:
+                        total = max(1.0, (target - started).total_seconds())
+                        elapsed = max(0.0, (now - started).total_seconds())
+                        progress = max(0.0, min(1.0, elapsed / total))
+                if not text:
+                    continue
+                entries.append(
+                    {
+                        "active": True,
+                        "text": text,
+                        "progress": progress,
+                        "status": status,
+                    }
+                )
+            return list(reversed(entries))
+        active = dict(model.get("countdown_active") or {})
+        return [active] if active.get("active") else []
+
+    def _time_plugin_panel_model(self, model: dict[str, object]) -> dict[str, object]:
+        mode = str(getattr(self, "plugin_time_mode", "dashboard") or "dashboard")
+        clock_text = str(model.get("detail", "") or "").strip() or datetime.now().astimezone().strftime("%H:%M")
+        dashboard = {
+            "mode": mode if mode == "alarm_editor" else "dashboard",
+            "clock": {
+                "time": clock_text,
+                "date": str(model.get("summary", "") or "").strip(),
+                "location": "中国 北京",
+            },
+            "countdown_presets": [
+                {"minutes": 5, "label": "5"},
+                {"minutes": 15, "label": "15"},
+                {"minutes": 10, "label": "10"},
+                {"minutes": 20, "label": "20"},
+            ],
+            "countdown_active": self._time_countdown_active_model(model),
+            "alarms": [dict(row) for row in self._time_alarm_rows()[:8]],
+        }
+        dashboard["countdown_entries"] = self._time_countdown_entries(dashboard)
+        pending_alarm = self._capture_time_alarm_due_pending(model) or self._time_alarm_due_pending()
+        if pending_alarm:
+            dashboard["alarm_due_pending"] = pending_alarm
+        if dashboard["mode"] == "alarm_editor":
+            dashboard["editor"] = dict(self._time_alarm_editor_state())
+        return dashboard
+
+    def _adjust_alarm_editor_field(self, field: str, steps: int):
+        editor = self._time_alarm_editor_state()
+        steps = int(steps)
+        adjusted = True
+        if field == "hour":
+            editor["hour"] = (int(editor.get("hour", 0)) + steps) % 24
+        elif field == "minute":
+            editor["minute"] = (int(editor.get("minute", 0)) + steps) % 60
+        elif field == "frequency":
+            options = ["每周", "每天", "工作日", "仅一次"]
+            current = str(editor.get("frequency", options[0]))
+            index = options.index(current) if current in options else 0
+            editor["frequency"] = options[(index + steps) % len(options)]
+            editor["frequency_unit"] = self._alarm_unit_from_frequency(str(editor["frequency"]))
+        elif field == "frequency_unit":
+            units = self._alarm_frequency_units()
+            current = str(editor.get("frequency_unit") or self._alarm_unit_from_frequency(str(editor.get("frequency") or "每周")))
+            keys = [key for key, _label in units]
+            index = keys.index(current) if current in keys else 0
+            next_unit = keys[(index + steps) % len(keys)]
+            editor["frequency_unit"] = next_unit
+            self._normalize_alarm_editor_recurrence(editor)
+            if next_unit != current:
+                self._begin_alarm_editor_reflow_animation(current, next_unit, steps)
+        elif field == "weekdays":
+            options = [[1, 3, 5], [2, 4], [6, 7], [1, 2, 3, 4, 5, 6, 7]]
+            current = self._alarm_weekdays_from_value(editor.get("weekdays", options[0]))
+            index = options.index(current) if current in options else 0
+            editor["weekdays"] = options[(index + steps) % len(options)]
+            editor["frequency_unit"] = "weekly"
+            editor["frequency"] = "每周"
+        elif field == "month_day":
+            current = int(editor.get("month_day", 28) or 28)
+            editor["frequency_unit"] = "monthly"
+            editor["month_day"] = ((current + steps - 1) % 31) + 1
+            self._normalize_alarm_editor_recurrence(editor)
+        elif field == "year_month":
+            current = int(editor.get("year_month", 4) or 4)
+            editor["frequency_unit"] = "yearly"
+            editor["year_month"] = ((current + steps - 1) % 12) + 1
+            self._normalize_alarm_editor_recurrence(editor)
+        elif field == "year_day":
+            editor["frequency_unit"] = "yearly"
+            month = int(editor.get("year_month", 4) or 4)
+            max_day = self._yearly_alarm_max_day(month)
+            current = int(editor.get("year_day", 28) or 28)
+            editor["year_day"] = ((current + steps - 1) % max_day) + 1
+            self._normalize_alarm_editor_recurrence(editor)
+        else:
+            adjusted = False
+        self.plugin_alarm_editor = editor
+        if adjusted:
+            self._begin_alarm_editor_spin(field, steps)
+        self._request_visual_update()
+
+    def _begin_alarm_editor_spin(self, field: str, steps: int):
+        animations = getattr(self, "plugin_alarm_editor_spin_animations", None)
+        if not isinstance(animations, dict):
+            animations = {}
+        direction = 1 if int(steps or 0) >= 0 else -1
+        animations[str(field)] = {"direction": direction, "started_at": time.monotonic()}
+        self.plugin_alarm_editor_spin_animations = animations
+
+    def _begin_alarm_editor_page_animation(self, from_page: str, to_page: str, steps: int):
+        direction = 1 if int(steps or 0) >= 0 else -1
+        self.plugin_alarm_editor_page_animation = {
+            "from": str(from_page or "main"),
+            "to": str(to_page or "main"),
+            "direction": direction,
+            "started_at": time.monotonic(),
+        }
+
+    def _begin_alarm_editor_reflow_animation(self, from_unit: str, to_unit: str, steps: int):
+        direction = 1 if int(steps or 0) >= 0 else -1
+        self.plugin_alarm_editor_reflow_animation = {
+            "from": str(from_unit or ""),
+            "to": str(to_unit or ""),
+            "direction": direction,
+            "started_at": time.monotonic(),
+        }
+
+    def _alarm_editor_reflow_offset(self, unit: str) -> float:
+        animation = getattr(self, "plugin_alarm_editor_reflow_animation", {})
+        if not isinstance(animation, dict) or not animation:
+            return 0.0
+        if str(animation.get("to") or "") != str(unit or ""):
+            return 0.0
+        try:
+            started_at = float(animation.get("started_at", 0.0) or 0.0)
+            direction = 1 if int(animation.get("direction", 1) or 1) >= 0 else -1
+        except (TypeError, ValueError):
+            return 0.0
+        elapsed = max(0.0, time.monotonic() - started_at)
+        duration = 0.24
+        if elapsed >= duration:
+            self.plugin_alarm_editor_reflow_animation = {}
+            return 0.0
+        progress = max(0.0, min(1.0, elapsed / duration))
+        eased = 1.0 - pow(1.0 - progress, 3)
+        return -direction * (1.0 - eased)
+
+    def _alarm_editor_page_transition_offset(self, page: str) -> float:
+        animation = getattr(self, "plugin_alarm_editor_page_animation", {})
+        if not isinstance(animation, dict) or not animation:
+            return 0.0
+        if str(animation.get("to") or "") != str(page or ""):
+            return 0.0
+        try:
+            started_at = float(animation.get("started_at", 0.0) or 0.0)
+            direction = 1 if int(animation.get("direction", 1) or 1) >= 0 else -1
+        except (TypeError, ValueError):
+            return 0.0
+        elapsed = max(0.0, time.monotonic() - started_at)
+        duration = 0.26
+        if elapsed >= duration:
+            self.plugin_alarm_editor_page_animation = {}
+            return 0.0
+        progress = max(0.0, min(1.0, elapsed / duration))
+        eased = 1.0 - pow(1.0 - progress, 3)
+        return direction * (1.0 - eased)
+
+    def _alarm_editor_spin_offset(self, field: str) -> float:
+        animations = getattr(self, "plugin_alarm_editor_spin_animations", {})
+        if not isinstance(animations, dict):
+            return 0.0
+        animation = animations.get(str(field))
+        if not isinstance(animation, dict):
+            return 0.0
+        try:
+            started_at = float(animation.get("started_at", 0.0) or 0.0)
+            direction = 1 if int(animation.get("direction", 1) or 1) >= 0 else -1
+        except (TypeError, ValueError):
+            return 0.0
+        elapsed = max(0.0, time.monotonic() - started_at)
+        duration = 0.22
+        if elapsed >= duration:
+            animations.pop(str(field), None)
+            return 0.0
+        progress = max(0.0, min(1.0, elapsed / duration))
+        eased = 1.0 - pow(1.0 - progress, 3)
+        return direction * (1.0 - eased)
+
+    def _with_alarm_picker_offsets(self, field: str, values: list[dict[str, object]]) -> list[dict[str, object]]:
+        offset = self._alarm_editor_spin_offset(field)
+        if abs(offset) <= 0.001:
+            return values
+        adjusted = []
+        for item in values:
+            clone = dict(item)
+            clone["offset"] = offset
+            adjusted.append(clone)
+        return adjusted
+
+    def _alarm_picker_window_values(self, field: str, options: list[object], current: object, formatter=None, visible_count: int = 7) -> list[dict[str, object]]:
+        if not options:
+            return self._with_alarm_picker_offsets(field, [{"text": str(current), "current": True, "opacity": 1.0}])
+        formatter = formatter or (lambda value: str(value))
+        visible_count = max(3, int(visible_count))
+        if visible_count % 2 == 0:
+            visible_count += 1
+        center = visible_count // 2
+        try:
+            current_index = options.index(current)
+        except ValueError:
+            current_index = 0
+        values = []
+        for slot in range(visible_count):
+            distance = abs(slot - center)
+            if slot == center:
+                value = current
+                current_row = True
+            else:
+                value = options[(current_index + slot - center) % len(options)]
+                current_row = False
+            values.append(
+                {
+                    "text": formatter(value),
+                    "current": current_row,
+                    "opacity": 1.0 if current_row else max(0.18, 0.54 - distance * 0.1),
+                }
+            )
+        return self._with_alarm_picker_offsets(field, values)
+
+    def _alarm_picker_display_values(self, field: str) -> list[dict[str, object]]:
+        editor = self._time_alarm_editor_state()
+        field = str(field or "")
+        if field == "hour":
+            current = int(editor.get("hour", 0)) % 24
+            return self._alarm_picker_window_values(field, list(range(24)), current, lambda value: f"{int(value):02d}")
+        if field == "minute":
+            current = int(editor.get("minute", 0)) % 60
+            return self._alarm_picker_window_values(field, list(range(60)), current, lambda value: f"{int(value):02d}")
+        options_by_field = {
+            "frequency": ["每周", "每天", "工作日", "仅一次"],
+        }
+        if field == "frequency_unit":
+            options_by_field[field] = [label for _key, label in self._alarm_frequency_units()]
+            unit = str(editor.get("frequency_unit") or self._alarm_unit_from_frequency(str(editor.get("frequency") or "每周")))
+            editor = dict(editor)
+            editor[field] = dict(self._alarm_frequency_units()).get(unit, "每周")
+        elif field == "weekdays":
+            options_by_field[field] = ["1 3 5", "2 4", "6 7", "整周"]
+            editor = dict(editor)
+            editor[field] = self._alarm_recurrence_value_label({"frequency_unit": "weekly", "weekdays": editor.get("weekdays", [])})
+        elif field == "month_day":
+            current = int(editor.get("month_day", 28) or 28)
+            return self._alarm_picker_window_values(field, list(range(1, 32)), current, lambda value: f"{int(value)}")
+        elif field == "year_month":
+            current = int(editor.get("year_month", 4) or 4)
+            return self._alarm_picker_window_values(field, list(range(1, 13)), current, lambda value: f"{int(value)}")
+        elif field == "year_day":
+            month = int(editor.get("year_month", 4) or 4)
+            max_day = self._yearly_alarm_max_day(month)
+            current = max(1, min(max_day, int(editor.get("year_day", 28) or 28)))
+            return self._alarm_picker_window_values(field, list(range(1, max_day + 1)), current, lambda value: f"{int(value)}")
+        options = options_by_field.get(field)
+        if options:
+            current = str(editor.get(field, options[0]))
+            return self._alarm_picker_window_values(field, list(options), current, lambda value: str(value))
+        current = str(editor.get(field, ""))
+        return self._with_alarm_picker_offsets(field, [{"text": current, "current": True, "opacity": 1.0}])
+
+    def _handle_alarm_editor_key(self, text: str, key: int | None = None) -> bool:
+        if str(getattr(self, "plugin_time_mode", "dashboard")) != "alarm_editor":
+            return False
+        focus = str(getattr(self, "plugin_alarm_editor_focus", "") or "")
+        numeric_limits = {
+            "hour": (0, 23),
+            "minute": (0, 59),
+            "month_day": (1, 31),
+            "year_month": (1, 12),
+        }
+        if focus in {"year_day"}:
+            editor = self._time_alarm_editor_state()
+            month = int(editor.get("year_month", 1) or 1)
+            numeric_limits["year_day"] = (1, self._yearly_alarm_max_day(month))
+        if focus in numeric_limits:
+            editor = self._time_alarm_editor_state()
+            buffers = getattr(self, "plugin_alarm_editor_input_buffers", None)
+            if not isinstance(buffers, dict):
+                buffers = {}
+            current = str(buffers.get(focus, ""))
+            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) or text == "\b":
+                current = current[:-1]
+            elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._activate_plugin_action("alarm-editor-save")
+                return True
+            elif text and text.isdigit():
+                current = text if len(current) >= 2 else current + text
+            else:
+                return False
+            lower, upper = numeric_limits[focus]
+            value = max(lower, min(upper, int(current or str(lower))))
+            editor[focus] = value
+            if focus == "month_day":
+                editor["frequency_unit"] = "monthly"
+            elif focus in {"year_month", "year_day"}:
+                editor["frequency_unit"] = "yearly"
+            if focus in {"month_day", "year_month", "year_day"}:
+                self._normalize_alarm_editor_recurrence(editor)
+            buffers[focus] = current
+            self.plugin_alarm_editor = editor
+            self.plugin_alarm_editor_input_buffers = buffers
+            self._begin_alarm_editor_spin(focus, 1)
+            self._request_visual_update()
+            return True
+        if focus != "note":
+            return False
+        editor = self._time_alarm_editor_state()
+        note = str(editor.get("note") or "")
+        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) or text == "\b":
+            editor["note"] = note[:-1]
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._activate_plugin_action("alarm-editor-save")
+            return True
+        elif text and text.isprintable():
+            if len(note) >= 10:
+                self.plugin_alarm_editor_note_hint = "最多10字"
+                self.plugin_alarm_editor_note_hint_until = time.monotonic() + 1.4
+            else:
+                editor["note"] = (note + text)[:10]
+                self.plugin_alarm_editor_note_hint = ""
+                self.plugin_alarm_editor_note_hint_until = 0.0
+        else:
+            return False
+        self.plugin_alarm_editor = editor
+        self._request_visual_update()
+        return True
+
+    def _handle_alarm_editor_key_event(self, event) -> bool:
+        if str(getattr(self, "plugin_time_mode", "dashboard")) != "alarm_editor":
+            return False
+        try:
+            key = event.key()
+        except Exception:
+            key = None
+        if key == Qt.Key.Key_Escape:
+            self.plugin_time_mode = "dashboard"
+            self._request_visual_update()
+            return True
+        try:
+            text = event.text()
+        except Exception:
+            text = ""
+        return self._handle_alarm_editor_key(text, key)
+
+    def _handle_time_alarm_editor_wheel(self, event) -> bool:
+        if str(getattr(self, "plugin_time_mode", "dashboard")) != "alarm_editor":
+            return False
+        rects = getattr(self, "plugin_alarm_editor_rects", {})
+        try:
+            pos = event.position()
+        except Exception:
+            return False
+        try:
+            delta = event.angleDelta().y()
+        except Exception:
+            delta = 0
+        field = next((name for name, rect in rects.items() if rect.contains(pos)), "") if isinstance(rects, dict) else ""
+        if not field:
+            editor = self._time_alarm_editor_state()
+            detail_mode = str(editor.get("detail_mode") or "").strip()
+            width = float(getattr(self, "plugin_panel_last_width", 0.0) or 0.0)
+            if detail_mode or width <= 0.0 or width >= self._u(600.0):
+                return False
+            pages = ["main", "note"]
+            current = str(editor.get("editor_page") or "main")
+            index = pages.index(current) if current in pages else 0
+            step = 1 if delta < 0 else -1
+            target = pages[(index + step) % len(pages)]
+            editor["editor_page"] = target
+            editor["detail_mode"] = ""
+            self.plugin_alarm_editor = editor
+            self._begin_alarm_editor_page_animation(current, target, step)
+            try:
+                event.accept()
+            except Exception:
+                pass
+            self._request_visual_update()
+            return True
+        steps = -1 if delta > 0 else 1
+        self._adjust_alarm_editor_field(field, steps)
+        try:
+            event.accept()
+        except Exception:
+            pass
+        return True
+
+    def _handle_time_panel_module_wheel(self, event) -> bool:
+        if str(getattr(self, "plugin_time_mode", "dashboard")) == "alarm_editor":
+            return False
+        width = float(getattr(self, "plugin_panel_last_width", 0.0) or 0.0)
+        if self._handle_time_alarm_list_wheel(event):
+            return True
+        if width <= 0.0 or width >= self._time_panel_breakpoint():
+            return False
+        modules = self._time_panel_modules()
+        current = self._time_visible_module_for_width(width)
+        index = modules.index(current) if current in modules else 0
+        try:
+            delta = event.angleDelta().y()
+        except Exception:
+            delta = 0
+        step = 1 if delta < 0 else -1
+        target = modules[(index + step) % len(modules)]
+        self.plugin_time_visible_module = target
+        self._begin_time_module_animation(current, target, step)
+        try:
+            event.accept()
+        except Exception:
+            pass
+        self._request_visual_update()
+        return True
+
+    def _handle_time_alarm_list_wheel(self, event) -> bool:
+        visible = self._time_visible_module_for_width(float(getattr(self, "plugin_panel_last_width", 0.0) or 0.0))
+        if visible not in {"alarm", "all"}:
+            return False
+        list_rect = getattr(self, "plugin_alarm_list_rect", QRectF())
+        if not isinstance(list_rect, QRectF) or list_rect.isNull():
+            return False
+        try:
+            pos = event.position()
+        except Exception:
+            return False
+        if not list_rect.contains(pos):
+            return False
+        alarms = self._time_alarm_rows()
+        start, count = getattr(self, "plugin_alarm_visible_range", (0, 0))
+        try:
+            start = int(start)
+            count = int(count)
+        except (TypeError, ValueError):
+            start, count = 0, 0
+        if count <= 0:
+            return False
+        try:
+            spacer_rows = float(getattr(self, "plugin_alarm_list_bottom_spacer_rows", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            spacer_rows = 0.0
+        max_start = float(max(0.0, len(alarms) - count + max(0.0, spacer_rows)))
+        if max_start <= 0.0:
+            return False
+        try:
+            delta = event.angleDelta().y()
+        except Exception:
+            delta = 0
+        if delta == 0:
+            return False
+        step = -float(delta) / 120.0
+        try:
+            current = float(getattr(self, "plugin_alarm_list_scroll_index", start) or 0.0)
+        except (TypeError, ValueError):
+            current = float(start)
+        current = max(0.0, min(max_start, current))
+        target = max(0.0, min(max_start, current + step))
+        if math.isclose(target, current, abs_tol=0.001):
+            return False
+        self.plugin_alarm_list_scroll_index = target
+        self._clear_alarm_delete_mode()
+        try:
+            event.accept()
+        except Exception:
+            pass
+        self._request_visual_update()
+        return True
 
     def _plugin_panel_alert_progress(self, index: int) -> float:
         alerts = self._active_plugin_alerts(3, include_expanded=True)
@@ -4545,6 +6712,150 @@ class IslandStackVisual(QWidget):
             "track_width": self._u(3.2 if animated else 1.8),
             "pulse": 1.0 if animated else 0.0,
         }
+
+    def _plugin_action_model(self, label: str, detail: str, summary: str, status: str) -> dict[str, str]:
+        label_key = str(label or "").strip().upper()
+        status_key = str(status or "").strip().lower()
+        if label_key == "TIME":
+            if status_key in {"running", "done", "alarm"}:
+                return {"command": "timer-clear", "label": "清除计时", "hint": "停止当前提醒"}
+            return {"command": "timer-open", "label": "设置计时", "hint": "打开时间插件"}
+        if label_key == "WEATHER":
+            return {"command": "weather-refresh", "label": "刷新天气", "hint": "立即更新"}
+        if label_key == "AGENDA":
+            return {"command": "agenda-open", "label": "管理日程", "hint": "添加或查看"}
+        return {"command": "plugin-open", "label": "打开插件", "hint": "查看详情"}
+
+    def _plugin_panel_layout(self, rect: QRectF) -> dict[str, QRectF]:
+        outer_pad = self._u(10.0)
+        nav_h = max(30.0, self._u(34.0))
+        nav = QRectF(rect.left() + outer_pad, rect.top() + self._u(8.0), rect.width() - outer_pad * 2.0, nav_h)
+        body = QRectF(
+            rect.left() + self._u(18.0),
+            nav.bottom() + self._u(12.0),
+            rect.width() - self._u(36.0),
+            max(self._u(88.0), rect.bottom() - nav.bottom() - self._u(30.0)),
+        )
+        reminders_h = max(26.0, self._u(30.0))
+        reminders = QRectF(body.left(), rect.bottom() - reminders_h - self._u(12.0), body.width(), reminders_h)
+        action_w = min(self._u(104.0), max(self._u(82.0), body.width() * 0.28))
+        action = QRectF(body.right() - action_w, reminders.top() - self._u(34.0), action_w, max(24.0, self._u(26.0)))
+        icon_size = min(self._u(82.0), max(self._u(58.0), body.height() - self._u(26.0)))
+        icon = QRectF(body.left() + self._u(4.0), body.top() + self._u(6.0), icon_size, icon_size)
+        text = QRectF(icon.right() + self._u(18.0), body.top() + self._u(2.0), max(self._u(120.0), body.right() - icon.right() - self._u(24.0)), max(self._u(56.0), action.top() - body.top() - self._u(4.0)))
+        module_top = body.top() + self._u(5.0)
+        module_bottom = max(module_top + self._u(82.0), body.bottom() - self._u(15.0))
+        module_h = min(self._u(116.0), module_bottom - module_top)
+        gap = self._u(9.0)
+        clock_w = min(self._u(170.0), max(self._u(94.0), body.width() * 0.21))
+        countdown_w = min(self._u(420.0), max(self._u(150.0), body.width() * 0.32))
+        alarm_w = max(self._u(76.0), body.width() - clock_w - countdown_w - gap * 2.0)
+        time_clock = QRectF(body.left(), module_top, clock_w, module_h)
+        time_countdown = QRectF(time_clock.right() + gap, module_top, countdown_w, module_h)
+        time_alarm = QRectF(time_countdown.right() + gap, module_top, alarm_w, module_h)
+        time_layout_mode = "single" if rect.width() < self._time_panel_breakpoint() else "triple"
+        time_visible_module = self._time_visible_module_for_width(rect.width())
+        if time_layout_mode == "single":
+            single_rect = QRectF(body.left(), module_top, body.width(), module_h)
+            hidden = QRectF(single_rect.left(), single_rect.top(), 0.0, single_rect.height())
+            time_clock = QRectF(single_rect if time_visible_module == "clock" else hidden)
+            time_countdown = QRectF(single_rect if time_visible_module == "countdown" else hidden)
+            time_alarm = QRectF(single_rect if time_visible_module == "alarm" else hidden)
+        return {
+            "nav": nav,
+            "body": body,
+            "icon": icon,
+            "text": text,
+            "action": action,
+            "reminders": reminders,
+            "time_clock": time_clock,
+            "time_countdown": time_countdown,
+            "time_alarm": time_alarm,
+            "time_layout_mode": time_layout_mode,
+            "time_visible_module": time_visible_module,
+        }
+
+    def _time_plugin_panel_layout(self, rect: QRectF) -> dict[str, QRectF]:
+        title = QRectF(rect.left() + self._u(12.0), rect.top() + self._u(6.0), rect.width() - self._u(24.0), self._u(18.0))
+        body_top = title.bottom() + self._u(4.0)
+        body = QRectF(
+            rect.left() + self._u(18.0),
+            body_top,
+            rect.width() - self._u(36.0),
+            max(self._u(88.0), rect.bottom() - body_top - self._u(5.0)),
+        )
+        module_top = body.top() + self._u(2.0)
+        module_h = min(self._u(205.0), max(self._u(92.0), body.bottom() - module_top - self._u(1.0)))
+        gap = self._u(12.0)
+        pager = QRectF()
+        visible = self._time_visible_module_for_width(rect.width())
+        if rect.width() < self._time_panel_breakpoint():
+            pager_w = self._u(14.0)
+            usable_w = max(self._u(260.0), body.width() - pager_w - self._u(8.0))
+            clock_w = min(self._u(182.0), max(self._u(132.0), usable_w * 0.47))
+            right_w = max(self._u(118.0), usable_w - clock_w - gap)
+            time_clock = QRectF(body.left(), module_top, clock_w, module_h)
+            right_slot = QRectF(time_clock.right() + gap, module_top, right_w, module_h)
+            hidden = QRectF(right_slot.left(), right_slot.top(), 0.0, right_slot.height())
+            time_countdown = QRectF(right_slot if visible == "countdown" else hidden)
+            time_alarm = QRectF(right_slot if visible == "alarm" else hidden)
+            pager = QRectF(body.right() - pager_w, module_top, pager_w, module_h)
+            mode = "double"
+        else:
+            stretch = rect.width() >= self._time_panel_stretch_breakpoint()
+            if stretch:
+                clock_w = min(self._u(190.0), max(self._u(142.0), body.width() * 0.20))
+                countdown_w = min(self._u(400.0), max(self._u(240.0), body.width() * 0.34))
+            else:
+                clock_w = min(self._u(180.0), max(self._u(126.0), body.width() * 0.24))
+                countdown_w = min(self._u(205.0), max(self._u(138.0), body.width() * 0.28))
+            alarm_w = max(self._u(176.0), body.width() - clock_w - countdown_w - gap * 2.0)
+            time_clock = QRectF(body.left(), module_top, clock_w, module_h)
+            time_countdown = QRectF(time_clock.right() + gap, module_top, countdown_w, module_h)
+            time_alarm = QRectF(time_countdown.right() + gap, module_top, alarm_w, module_h)
+            mode = "stretch" if stretch else "triple"
+            visible = "all"
+        return {
+            "nav": title,
+            "time_title": title,
+            "body": body,
+            "icon": QRectF(),
+            "text": QRectF(),
+            "action": QRectF(),
+            "reminders": QRectF(),
+            "time_clock": time_clock,
+            "time_countdown": time_countdown,
+            "time_alarm": time_alarm,
+            "time_pager": pager,
+            "time_layout_mode": mode,
+            "time_visible_module": visible,
+        }
+
+    def _plugin_panel_reminder_models(self, limit: int = 3) -> list[dict[str, object]]:
+        reminders = []
+        for alert in self._active_plugin_alerts(limit, include_expanded=True):
+            index, label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, _alert_priority = alert
+            title, body = self._plugin_alert_text_parts(label, detail, summary, status, alert_title, alert_body)
+            try:
+                progress = self._plugin_tuple(self.plugin_samples[index])[10]
+            except Exception:
+                progress = 0.0
+            reminders.append(
+                {
+                    "index": index,
+                    "label": label,
+                    "detail": detail,
+                    "summary": summary,
+                    "color": color,
+                    "icon": icon,
+                    "plugin_id": plugin_id,
+                    "status": status,
+                    "title": title,
+                    "body": body,
+                    "progress": max(0.0, min(1.0, float(progress or 0.0))),
+                }
+            )
+        return reminders
 
     def _plugin_function_lines(self, label: str, detail: str, summary: str, status: str, alert_title: str = "", alert_body: str = "") -> tuple[str, tuple[str, ...]]:
         label_key = str(label or "").strip().upper()
@@ -4570,9 +6881,1109 @@ class IslandStackVisual(QWidget):
             return "日程 AGENDA", tuple(line for line in (detail or "暂无日程", alert_line or summary or "JSON / ICS", "课表读取录入 · 课表提醒功能") if line)
         return str(label or "PLUGIN"), tuple(line for line in (detail, summary, status_copy) if line)
 
+    def _plugin_panel_sections(self, model: dict[str, object]) -> list[dict[str, str]]:
+        label = str(model.get("label", "")).strip()
+        label_key = label.upper()
+        detail = str(model.get("detail", "") or "").strip()
+        summary = str(model.get("summary", "") or "").strip()
+        status = str(model.get("status", "") or "").strip().lower()
+        alert_title = str(model.get("alert_title", "") or "").strip()
+        alert_body = str(model.get("alert_body", "") or "").strip()
+        alert = alert_body or alert_title
+        if label_key == "TIME":
+            clock = detail or "本地时间"
+            if status in {"running", "done", "alarm"}:
+                countdown = alert or summary or "计时提醒"
+            else:
+                countdown = "5 / 15 / 30 分钟"
+            alarm = alert if status == "alarm" else (summary if re.search(r"\d{1,2}:\d{2}", summary) else "未设置")
+            return [
+                {"id": "clock", "title": "本地时钟", "body": clock},
+                {"id": "countdown", "title": "倒计时", "body": countdown},
+                {"id": "alarm", "title": "闹钟", "body": alarm or "未设置"},
+            ]
+        if label_key == "WEATHER":
+            metrics = summary or alert or "等待天气数据"
+            return [
+                {"id": "current", "title": "当前天气", "body": detail or "刷新中"},
+                {"id": "metrics", "title": "风与湿度", "body": metrics},
+                {"id": "source", "title": "数据源", "body": alert or "定位优先 · 公共天气源"},
+            ]
+        if label_key == "AGENDA":
+            next_item = alert or summary or detail or "暂无日程"
+            return [
+                {"id": "next", "title": "下一项", "body": next_item},
+                {"id": "todo", "title": "代办清单", "body": "课表读取录入 · 课表提醒功能"},
+                {"id": "reminder", "title": "提醒", "body": "15 / 30 / 5 分钟"},
+            ]
+        return [
+            {"id": "primary", "title": label or "PLUGIN", "body": detail},
+            {"id": "secondary", "title": "摘要", "body": summary},
+            {"id": "state", "title": "状态", "body": status or "normal"},
+        ]
+
+    def _paint_plugin_panel_module(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        title: str,
+        body: str,
+        theme: dict[str, QColor],
+        color: QColor,
+        emphasized: bool = False,
+        reserve_action: bool = False,
+    ):
+        radius = min(self._u(15.0), rect.height() * 0.28)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(theme["cell_active"] if emphasized else theme["cell"])
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setPen(QPen(theme["stroke"], self._u(1.0)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), radius, radius)
+
+        accent = QRectF(rect.left() + self._u(10.0), rect.top() + self._u(9.0), self._u(22.0), self._u(3.0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 235))
+        painter.drawRoundedRect(accent, self._u(1.5), self._u(1.5))
+
+        title_rect = QRectF(rect.left() + self._u(10.0), rect.top() + self._u(14.0), rect.width() - self._u(20.0), self._u(18.0))
+        painter.setFont(self._font(8, QFont.Weight.DemiBold))
+        painter.setPen(theme["muted"])
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+
+        body_bottom = rect.bottom() - (self._u(28.0) if reserve_action else self._u(8.0))
+        body_rect = QRectF(rect.left() + self._u(10.0), title_rect.bottom() + self._u(2.0), rect.width() - self._u(20.0), max(self._u(18.0), body_bottom - title_rect.bottom()))
+        self._paint_scrolling_text(painter, body_rect, body, 12 if emphasized else 10, theme["text"], emphasized)
+
+    def _paint_plugin_panel_action_button(self, painter: QPainter, rect: QRectF, action: dict[str, str], color: QColor):
+        command = str(action.get("command", ""))
+        if not command:
+            return
+        button_h = min(self._u(24.0), max(self._u(20.0), rect.height() * 0.26))
+        button = QRectF(rect.left() + self._u(10.0), rect.bottom() - button_h - self._u(8.0), rect.width() - self._u(20.0), button_h)
+        self.plugin_action_rects[command] = QRectF(button)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 232))
+        painter.drawRoundedRect(button, self._u(8.0), self._u(8.0))
+        painter.setFont(self._font(8, QFont.Weight.DemiBold))
+        painter.setPen(QColor(255, 255, 255, 246))
+        painter.drawText(button.adjusted(self._u(8.0), 0.0, -self._u(8.0), 0.0), Qt.AlignmentFlag.AlignCenter, str(action.get("label") or "操作"))
+
+    def _paint_time_clock_module(self, painter: QPainter, rect: QRectF, section: dict[str, str], theme: dict[str, QColor], color: QColor, progress: float, status: str):
+        self._paint_plugin_panel_module(painter, rect, section["title"], "", theme, color, emphasized=True)
+        face_size = min(rect.width() - self._u(22.0), rect.height() - self._u(34.0))
+        face = QRectF(rect.center().x() - face_size / 2.0, rect.top() + self._u(26.0), face_size, face_size)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 238), self._u(3.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawEllipse(face)
+        self._paint_plugin_progress_ring(painter, face.adjusted(self._u(4.0), self._u(4.0), -self._u(4.0), -self._u(4.0)), color, progress, status)
+        center = face.center()
+        painter.setPen(QPen(theme["text"], self._u(2.5), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(center, QPointF(center.x() + face.width() * 0.22, center.y() + face.height() * 0.13))
+        painter.setPen(QPen(theme["muted"], self._u(1.8), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(center, QPointF(center.x() - face.width() * 0.16, center.y() - face.height() * 0.18))
+
+    def _paint_time_module_shell(self, painter: QPainter, rect: QRectF, theme: dict[str, QColor], active: bool = False):
+        ref = self._time_reference_palette(theme, QColor(255, 184, 0))
+        radius = min(self._u(16.0), rect.height() * 0.26)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ref["module"])
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setPen(QPen(ref["accent"], self._u(1.4)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), radius, radius)
+
+    def _time_clock_hand_angles(self, clock_text: str = "") -> dict[str, float]:
+        match = re.search(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", str(clock_text or ""))
+        if match:
+            hour = int(match.group(1)) % 24
+            minute = max(0, min(59, int(match.group(2))))
+            second = max(0, min(59, int(match.group(3) or 0)))
+        else:
+            now = datetime.now().astimezone()
+            hour, minute, second = now.hour, now.minute, now.second
+        return {
+            "hour": (hour % 12) * 30.0 + minute * 0.5 + second / 120.0,
+            "minute": minute * 6.0 + second * 0.1,
+            "second": second * 6.0,
+        }
+
+    def _clock_hand_end(self, center: QPointF, length: float, angle_degrees: float) -> QPointF:
+        radians = math.radians(float(angle_degrees) - 90.0)
+        return QPointF(center.x() + math.cos(radians) * length, center.y() + math.sin(radians) * length)
+
+    def _draw_time_clock_face(self, painter: QPainter, face: QRectF, color: QColor, theme: dict[str, QColor], clock_text: str = ""):
+        ref = self._time_reference_palette(theme, color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(ref["accent_track"], self._u(5.0), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawEllipse(face.adjusted(-self._u(1.0), -self._u(1.0), self._u(1.0), self._u(1.0)))
+        painter.setPen(QPen(ref["accent"], self._u(1.5), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawEllipse(face)
+        center = face.center()
+        angles = self._time_clock_hand_angles(clock_text)
+        radius = face.width() / 2.0
+        painter.setPen(QPen(ref["accent"], self._u(2.4), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(center, self._clock_hand_end(center, radius * 0.48, angles["hour"]))
+        painter.setPen(QPen(ref["accent"], self._u(1.7), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(center, self._clock_hand_end(center, radius * 0.70, angles["minute"]))
+        second_pen = QColor(ref["accent"])
+        second_pen.setAlpha(155)
+        painter.setPen(QPen(second_pen, self._u(0.9), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawLine(center, self._clock_hand_end(center, radius * 0.76, angles["second"]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ref["accent"])
+        painter.drawEllipse(QRectF(center.x() - self._u(2.3), center.y() - self._u(2.3), self._u(4.6), self._u(4.6)))
+
+    def _paint_time_dashboard_clock(self, painter: QPainter, rect: QRectF, model: dict[str, object], color: QColor, theme: dict[str, QColor]):
+        ref = self._time_reference_palette(theme, color)
+        self._paint_time_module_shell(painter, rect, theme, active=True)
+        clock = model["clock"]
+        face_size = min(rect.width() - self._u(24.0), rect.height() - self._u(35.0))
+        face = QRectF(rect.center().x() - face_size / 2.0, rect.top() + self._u(10.0), face_size, face_size)
+        self._draw_time_clock_face(painter, face, color, theme, str(clock.get("time") or ""))
+        painter.setFont(self._font(8, QFont.Weight.DemiBold))
+        painter.setPen(ref["accent"])
+        painter.drawText(QRectF(rect.left() + self._u(8.0), face.bottom() + self._u(2.0), rect.width() - self._u(16.0), self._u(14.0)), Qt.AlignmentFlag.AlignCenter, str(clock["location"]))
+
+    def _time_countdown_ring_rect(self, rect: QRectF) -> QRectF:
+        ring_size = min(rect.width() - self._u(28.0), rect.height() - self._u(18.0))
+        ring_size = max(self._u(42.0), ring_size)
+        center = rect.center() + QPointF(0.0, self._u(4.0))
+        return QRectF(center.x() - ring_size / 2.0, center.y() - ring_size / 2.0, ring_size, ring_size)
+
+    def _time_countdown_ring_widths(self) -> dict[str, float]:
+        return {"width": self._u(7.8), "track_width": self._u(6.6)}
+
+    def _paint_time_countdown_text_button(self, painter: QPainter, rect: QRectF, label: str, fill: QColor, stroke: QColor, text: QColor):
+        painter.setPen(QPen(stroke, self._u(1.3)))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, rect.height() / 2.0, rect.height() / 2.0)
+        painter.setFont(self._font(12, QFont.Weight.Bold))
+        painter.setPen(text)
+        painter.drawText(rect.adjusted(self._u(5.0), 0.0, -self._u(5.0), 0.0), Qt.AlignmentFlag.AlignCenter, label)
+
+    def _paint_time_countdown_icon_button(self, painter: QPainter, rect: QRectF, kind: str, fill: QColor, stroke: QColor, icon: QColor):
+        painter.setPen(QPen(stroke, self._u(1.0)))
+        painter.setBrush(fill)
+        painter.drawEllipse(rect)
+        painter.setPen(QPen(icon, self._u(2.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        if kind == "pause":
+            bar_w = rect.width() * 0.13
+            gap = rect.width() * 0.12
+            top = rect.top() + rect.height() * 0.25
+            bottom = rect.bottom() - rect.height() * 0.25
+            x1 = rect.center().x() - gap - bar_w / 2.0
+            x2 = rect.center().x() + gap + bar_w / 2.0
+            painter.drawLine(QPointF(x1, top), QPointF(x1, bottom))
+            painter.drawLine(QPointF(x2, top), QPointF(x2, bottom))
+            return
+        if kind == "play":
+            path = QPainterPath()
+            path.moveTo(rect.left() + rect.width() * 0.38, rect.top() + rect.height() * 0.28)
+            path.lineTo(rect.left() + rect.width() * 0.38, rect.bottom() - rect.height() * 0.28)
+            path.lineTo(rect.right() - rect.width() * 0.27, rect.center().y())
+            path.closeSubpath()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(icon)
+            painter.drawPath(path)
+            return
+        inset = rect.width() * 0.30
+        painter.drawLine(QPointF(rect.left() + inset, rect.top() + inset), QPointF(rect.right() - inset, rect.bottom() - inset))
+        painter.drawLine(QPointF(rect.right() - inset, rect.top() + inset), QPointF(rect.left() + inset, rect.bottom() - inset))
+
+    def _paint_static_elided_text(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        text: str,
+        size: int,
+        color: QColor,
+        bold: bool,
+        alignment: Qt.AlignmentFlag = Qt.AlignmentFlag.AlignLeft,
+    ):
+        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        painter.setFont(font)
+        painter.setPen(color)
+        fm = QFontMetrics(font)
+        available = max(1, int(rect.width() - self._u(4.0)))
+        clipped = fm.elidedText(str(text or ""), Qt.TextElideMode.ElideRight, available)
+        painter.save()
+        painter.setClipRect(rect)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter | alignment, clipped)
+        painter.restore()
+
+    def _time_alarm_note_should_scroll(self, text: str, rect: QRectF, size: int, bold: bool, max_chars: int) -> bool:
+        value = str(text or "").strip()
+        threshold = 5 if int(max_chars) <= 5 else max(4, int(max_chars))
+        if len(value) > threshold:
+            return True
+        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        return QFontMetrics(font).horizontalAdvance(value) > rect.width() - self._u(8.0)
+
+    def _paint_time_symbol(self, painter: QPainter, rect: QRectF, kind: str, color: QColor, stroke_width: float | None = None):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(color, stroke_width if stroke_width is not None else self._u(1.8), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if str(kind or "").lower() == "alarm":
+            painter.drawEllipse(rect.adjusted(self._u(1.0), self._u(1.0), -self._u(1.0), -self._u(1.0)))
+            center = rect.center()
+            painter.drawLine(center, QPointF(center.x(), rect.top() + rect.height() * 0.28))
+            painter.drawLine(center, QPointF(rect.right() - rect.width() * 0.28, rect.bottom() - rect.height() * 0.30))
+        else:
+            top = rect.top() + rect.height() * 0.20
+            bottom = rect.bottom() - rect.height() * 0.20
+            left = rect.left() + rect.width() * 0.30
+            right = rect.right() - rect.width() * 0.30
+            mid = rect.center().y()
+            painter.drawLine(QPointF(left, top), QPointF(right, top))
+            painter.drawLine(QPointF(left, bottom), QPointF(right, bottom))
+            painter.drawLine(QPointF(left, top), QPointF(rect.center().x(), mid))
+            painter.drawLine(QPointF(right, top), QPointF(rect.center().x(), mid))
+            painter.drawLine(QPointF(rect.center().x(), mid), QPointF(left, bottom))
+            painter.drawLine(QPointF(rect.center().x(), mid), QPointF(right, bottom))
+        painter.restore()
+
+    def _paint_time_countdown_ring(self, painter: QPainter, ring: QRectF, entry: dict[str, object], ref: dict[str, QColor]):
+        widths = self._time_countdown_ring_widths()
+        status = str(entry.get("status") or "running").lower()
+        progress = 1.0 if status in {"done", "due", "alarm"} else max(0.0, min(1.0, float(entry.get("progress", 0.0) or 0.0)))
+        ring_line = ring.adjusted(self._u(4.0), self._u(4.0), -self._u(4.0), -self._u(4.0))
+        painter.setPen(QPen(ref["accent_track"], widths["track_width"], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ring_line)
+        painter.setPen(QPen(ref["accent"], widths["width"], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(ring_line, 90 * 16, int(-360 * 16 * progress))
+        painter.setFont(self._font(16, QFont.Weight.Bold))
+        painter.setPen(ref["text"])
+        painter.drawText(ring, Qt.AlignmentFlag.AlignCenter, str(entry.get("text") or ""))
+
+    def _paint_time_countdown_pause_overlay(self, painter: QPainter, rect: QRectF, ring: QRectF, ref: dict[str, QColor]):
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 116))
+        painter.drawRoundedRect(rect.adjusted(self._u(2.0), self._u(2.0), -self._u(2.0), -self._u(2.0)), min(self._u(15.0), rect.height() * 0.24), min(self._u(15.0), rect.height() * 0.24))
+        icon_size = min(self._u(38.0), ring.height() * 0.34)
+        play = QRectF(ring.center().x() - icon_size / 2.0, ring.center().y() - icon_size * 1.22, icon_size, icon_size)
+        clear = QRectF(ring.center().x() - icon_size / 2.0, ring.center().y() + icon_size * 0.38, icon_size, icon_size)
+        red = QColor(223, 0, 0, 245)
+        self._paint_time_countdown_icon_button(painter, play, "play", ref["active"], ref["active"], QColor(255, 255, 255, 246))
+        self._paint_time_countdown_icon_button(painter, clear, "clear", red, red, QColor(255, 255, 255, 246))
+        self.plugin_action_rects["timer-resume"] = QRectF(play.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+        self.plugin_action_rects["timer-clear"] = QRectF(clear.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+
+    def _paint_time_countdown_module(self, painter: QPainter, rect: QRectF, model: dict[str, object], color: QColor, theme: dict[str, QColor]):
+        active = model["countdown_active"]
+        ref = self._time_reference_palette(theme, color)
+        self._paint_time_module_shell(painter, rect, theme, active=bool(active.get("active")))
+        title_rect = QRectF(rect.left() + self._u(12.0), rect.top() + self._u(8.0), rect.width() - self._u(24.0), self._u(18.0))
+        painter.setFont(self._font(9, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "倒计时")
+        entries = self._time_countdown_entries(model)
+        if entries:
+            layout_mode = str(model.get("time_layout_mode") or "").lower()
+            stretch_controls = layout_mode == "stretch" or (not layout_mode and rect.width() >= self._u(250.0))
+            show_two = len(entries) > 1 and stretch_controls
+            terminal_statuses = {"done", "due", "alarm"}
+            if show_two:
+                ring_size = min(rect.height() - self._u(16.0), (rect.width() - self._u(34.0)) / 2.0)
+                ring_size = max(self._u(52.0), ring_size)
+                total_w = ring_size * 2.0 + self._u(8.0)
+                x = rect.center().x() - total_w / 2.0
+                y = rect.center().y() - ring_size / 2.0 + self._u(4.0)
+                for index, entry in enumerate(entries[:2]):
+                    ring = QRectF(x + index * (ring_size + self._u(8.0)), y, ring_size, ring_size)
+                    self._paint_time_countdown_ring(painter, ring, entry, ref)
+                    entry_status = str(entry.get("status") or "").lower()
+                    if entry_status == "paused":
+                        self._paint_time_countdown_pause_overlay(painter, QRectF(ring.adjusted(-self._u(4.0), -self._u(4.0), self._u(4.0), self._u(4.0))), ring, ref)
+                    elif index == 0 and entry_status in terminal_statuses:
+                        self.plugin_action_rects["timer-clear"] = QRectF(ring.adjusted(-self._u(5.0), -self._u(5.0), self._u(5.0), self._u(5.0)))
+                    elif index == 0:
+                        self.plugin_action_rects["timer-pause"] = QRectF(ring.adjusted(-self._u(5.0), -self._u(5.0), self._u(5.0), self._u(5.0)))
+                return
+
+            entry = entries[0]
+            status = str(entry.get("status") or "running").lower()
+            paused = status == "paused"
+            terminal = status in terminal_statuses
+            if terminal:
+                ring = self._time_countdown_ring_rect(rect)
+                self._paint_time_countdown_ring(painter, ring, entry, ref)
+                self.plugin_action_rects["timer-clear"] = QRectF(ring.adjusted(-self._u(5.0), -self._u(5.0), self._u(5.0), self._u(5.0)))
+                return
+            if stretch_controls and not paused:
+                ring_size = min(rect.height() - self._u(24.0), rect.width() * 0.36)
+                ring_size = max(self._u(48.0), ring_size)
+                ring = QRectF(rect.left() + self._u(18.0), rect.center().y() - ring_size / 2.0 + self._u(5.0), ring_size, ring_size)
+                self._paint_time_countdown_ring(painter, ring, entry, ref)
+                ring_hit = QRectF(ring.adjusted(-self._u(5.0), -self._u(5.0), self._u(5.0), self._u(5.0)))
+                button_w = min(self._u(82.0), max(self._u(56.0), rect.right() - ring.right() - self._u(24.0)))
+                button_h = self._u(28.0)
+                button_x = rect.right() - button_w - self._u(14.0)
+                pause = QRectF(button_x, rect.center().y() - button_h - self._u(3.0), button_w, button_h)
+                clear = QRectF(button_x, rect.center().y() + self._u(5.0), button_w, button_h)
+                red = QColor(223, 0, 0, 245)
+                self._paint_time_countdown_text_button(painter, pause, "暂停", QColor(0, 0, 0, 0), ref["accent"], ref["text"])
+                self._paint_time_countdown_text_button(painter, clear, "取消", red, ref["accent"], ref["text"])
+                self.plugin_action_rects["timer-pause"] = ring_hit.united(pause.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+                self.plugin_action_rects["timer-clear"] = QRectF(clear.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+                return
+
+            ring = self._time_countdown_ring_rect(rect)
+            self._paint_time_countdown_ring(painter, ring, entry, ref)
+            if paused:
+                self._paint_time_countdown_pause_overlay(painter, rect, ring, ref)
+            else:
+                self.plugin_action_rects["timer-pause"] = QRectF(ring.adjusted(-self._u(5.0), -self._u(5.0), self._u(5.0), self._u(5.0)))
+            return
+
+        presets = model["countdown_presets"]
+        grid_top = title_rect.bottom() + self._u(3.0)
+        grid_h = max(self._u(46.0), rect.bottom() - grid_top - self._u(10.0))
+        layout_mode = str(model.get("time_layout_mode") or "").lower()
+        if layout_mode == "stretch":
+            side_pad = self._u(15.0)
+            gap = self._u(10.0)
+            available_w = max(self._u(120.0), rect.width() - side_pad * 2.0)
+            ring_size = min(grid_h - self._u(4.0), (available_w - gap * 3.0) / 4.0)
+            ring_size = max(self._u(60.0), ring_size)
+            total_w = ring_size * 4.0 + gap * 3.0
+            start_x = rect.left() + (rect.width() - total_w) / 2.0
+            y = grid_top + (grid_h - ring_size) / 2.0
+            for index, item in enumerate(presets[:4]):
+                ring = QRectF(start_x + index * (ring_size + gap), y, ring_size, ring_size)
+                command = f"timer-start-{int(item['minutes'])}"
+                self.plugin_action_rects[command] = QRectF(ring.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)))
+                ring_line = ring.adjusted(self._u(5.0), self._u(5.0), -self._u(5.0), -self._u(5.0))
+                painter.setPen(QPen(ref["accent_track"], self._u(5.8), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(ring_line)
+                painter.setPen(QPen(ref["accent"], self._u(7.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawArc(ring_line, 90 * 16, -360 * 16)
+                self._paint_static_elided_text(
+                    painter,
+                    ring.adjusted(self._u(5.0), 0.0, -self._u(5.0), 0.0),
+                    f"{int(item['minutes'])}分钟",
+                    12,
+                    ref["accent"],
+                    True,
+                    Qt.AlignmentFlag.AlignCenter,
+                )
+            return
+        use_pills = True
+        gap_x = self._u(10.0 if layout_mode == "double" else 12.0)
+        gap_y = self._u(10.0)
+        button_h = min(self._u(30.0), max(self._u(22.0), (grid_h - gap_y) / 2.0))
+        button_w = min(self._u(108.0), max(button_h * 2.15, (rect.width() - self._u(30.0) - gap_x) / 2.0))
+        grid_w = button_w * 2.0 + gap_x
+        grid_h_used = button_h * 2.0 + gap_y
+        grid_x = rect.left() + (rect.width() - grid_w) / 2.0
+        grid_y = grid_top + (grid_h - grid_h_used) / 2.0
+        for index, item in enumerate(presets):
+            col = index % 2
+            row = index // 2
+            button = QRectF(grid_x + col * (button_w + gap_x), grid_y + row * (button_h + gap_y), button_w, button_h)
+            command = f"timer-start-{int(item['minutes'])}"
+            self.plugin_action_rects[command] = QRectF(button.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)))
+            painter.setPen(QPen(ref["accent"], self._u(1.4)))
+            painter.setBrush(ref["module"])
+            painter.drawRoundedRect(button, button.height() / 2.0, button.height() / 2.0)
+            self._paint_static_elided_text(painter, button.adjusted(self._u(5.0), 0.0, -self._u(5.0), 0.0), f"{int(item['minutes'])}分钟", 10, ref["accent"], True, Qt.AlignmentFlag.AlignCenter)
+
+    def _paint_time_alarm_switch(self, painter: QPainter, rect: QRectF, enabled: bool, color: QColor, theme: dict[str, QColor]):
+        ref = self._time_reference_palette(theme, color)
+        radius = rect.height() / 2.0
+        painter.setPen(QPen(ref["active"] if enabled else ref["muted_dim"], self._u(1.0)))
+        painter.setBrush(ref["active"] if enabled else ref["off_track"])
+        painter.drawRoundedRect(rect, radius, radius)
+        knob = rect.height() - self._u(4.0)
+        knob_x = rect.right() - knob - self._u(2.0) if enabled else rect.left() + self._u(2.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ref["thumb"])
+        painter.drawEllipse(QRectF(knob_x, rect.top() + self._u(2.0), knob, knob))
+
+    def _paint_time_page_dots(self, painter: QPainter, rect: QRectF, visible: str, theme: dict[str, QColor], color: QColor):
+        if rect.isNull() or rect.width() <= 0.0:
+            return
+        ref = self._time_reference_palette(theme, color)
+        dot = self._u(9.0)
+        gap = self._u(7.0)
+        total_h = dot * 2.0 + gap
+        x = rect.center().x() - dot / 2.0
+        y = rect.center().y() - total_h / 2.0
+        modules = self._time_panel_modules()
+        for index, module in enumerate(modules):
+            active = module == visible
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(ref["text"] if active else ref["muted_dim"])
+            painter.drawEllipse(QRectF(x, y + index * (dot + gap), dot, dot))
+
+    def _paint_time_alarm_module(self, painter: QPainter, rect: QRectF, model: dict[str, object], color: QColor, theme: dict[str, QColor]):
+        ref = self._time_reference_palette(theme, color)
+        self._paint_time_module_shell(painter, rect, theme, active=False)
+        painter.setFont(self._font(9, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(QRectF(rect.left() + self._u(10.0), rect.top() + self._u(8.0), rect.width() - self._u(20.0), self._u(16.0)), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "闹钟")
+        alarms = [dict(row) for row in list(model.get("alarms", []))[:8]]
+        pending_alarm = dict(model.get("alarm_due_pending") or self._time_alarm_due_pending())
+        add_h = self._u(27.0)
+        add_rect = QRectF(rect.left() + self._u(8.0), rect.bottom() - self._u(5.0) - add_h, rect.width() - self._u(16.0), add_h)
+        row_top = rect.top() + self._u(27.0)
+        if pending_alarm:
+            confirm_h = min(self._u(62.0), max(self._u(52.0), rect.height() * 0.38))
+            confirm_rect = QRectF(rect.left() + self._u(8.0), row_top, rect.width() - self._u(16.0), confirm_h)
+            self.plugin_action_rects["alarm-due-confirm"] = QRectF(confirm_rect.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(ref["accent"])
+            painter.drawRoundedRect(confirm_rect, confirm_rect.height() / 2.0, confirm_rect.height() / 2.0)
+            text_color = QColor(32, 23, 0, 248)
+            label_text = str(pending_alarm.get("label") or "闹钟").strip() or "闹钟"
+            time_text = str(pending_alarm.get("time") or "").strip()
+            label_rect = QRectF(confirm_rect.left() + self._u(13.0), confirm_rect.top(), max(self._u(80.0), confirm_rect.width() - self._u(78.0)), confirm_rect.height())
+            self._paint_static_elided_text(painter, label_rect, label_text, 12, text_color, True, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            if time_text:
+                time_rect = QRectF(confirm_rect.right() - self._u(70.0), confirm_rect.top(), self._u(58.0), confirm_rect.height())
+                self._paint_static_elided_text(painter, time_rect, time_text, 10, text_color, True, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row_top = confirm_rect.bottom() + self._u(5.0)
+        list_bottom = add_rect.top() - self._u(6.0)
+        list_rect = QRectF(rect.left() + self._u(8.0), row_top, rect.width() - self._u(16.0), max(0.0, list_bottom - row_top))
+        slot_count = 4
+        row_h = max(self._u(18.0), list_rect.height() / float(slot_count))
+        visible_count = min(slot_count, len(alarms)) if alarms else 0
+        bottom_spacer_rows = max(1.0, add_h / max(1.0, row_h))
+        max_start = max(0.0, float(len(alarms) - visible_count) + (bottom_spacer_rows if alarms else 0.0))
+        try:
+            scroll_index = float(getattr(self, "plugin_alarm_list_scroll_index", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            scroll_index = 0.0
+        scroll_index = max(0.0, min(max_start, scroll_index)) if visible_count > 0 else 0.0
+        start = int(math.floor(scroll_index))
+        fraction = scroll_index - float(start)
+        self.plugin_alarm_list_scroll_index = scroll_index
+        self.plugin_alarm_list_bottom_spacer_rows = bottom_spacer_rows if alarms else 0.0
+        self.plugin_alarm_list_max_scroll = max_start
+        self.plugin_alarm_list_rect = QRectF(list_rect)
+        self.plugin_alarm_visible_range = (start, visible_count)
+        self.plugin_action_rects["alarm-add-open"] = QRectF(add_rect.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+        painter.save()
+        painter.setClipRect(list_rect)
+        extra_row = 1 if fraction > 0.001 else 0
+        end = min(len(alarms), start + visible_count + extra_row)
+        for index in range(start, end):
+            local_index = index - start
+            alarm = alarms[index]
+            row = QRectF(list_rect.left(), list_rect.top() + (local_index - fraction) * row_h, list_rect.width(), row_h)
+            if row.bottom() < list_rect.top() or row.top() > list_rect.bottom():
+                continue
+            switch = QRectF(row.right() - self._u(26.0), row.center().y() - self._u(7.0), self._u(25.0), self._u(14.0))
+            delete_active = int(getattr(self, "plugin_alarm_delete_index", -1) if getattr(self, "plugin_alarm_delete_index", None) is not None else -1) == index
+            delete_rect = QRectF(row.right() - self._u(57.0), row.center().y() - self._u(8.5), self._u(54.0), self._u(17.0))
+            control_rect = delete_rect if delete_active else switch
+            edit_hit = QRectF(row.left(), row.top(), max(self._u(32.0), control_rect.left() - row.left() - self._u(5.0)), row.height())
+            self.plugin_action_rects[f"alarm-edit-{index}"] = QRectF(edit_hit)
+            if delete_active:
+                self.plugin_action_rects[f"alarm-delete-{index}"] = QRectF(delete_rect.adjusted(-self._u(3.0), -self._u(4.0), self._u(3.0), self._u(4.0)))
+            else:
+                self.plugin_action_rects[f"alarm-toggle-{index}"] = QRectF(switch.adjusted(-self._u(4.0), -self._u(5.0), self._u(4.0), self._u(5.0)))
+            time_rect = QRectF(row.left(), row.top(), self._u(42.0), row.height())
+            label_rect = QRectF(time_rect.right() + self._u(3.0), row.top(), max(self._u(20.0), control_rect.left() - time_rect.right() - self._u(8.0)), row.height())
+            enabled = bool(alarm.get("enabled"))
+            time_text = str(alarm.get("time", "") or "")
+            label_text = str(alarm.get("label", "") or "")
+            time_color = ref["text"] if enabled else ref["muted_dim"]
+            label_color = ref["text"] if enabled else ref["muted_dim"]
+            self._paint_static_elided_text(painter, time_rect, time_text, 10, time_color, False, Qt.AlignmentFlag.AlignLeft)
+            if label_text:
+                if self._time_alarm_note_should_scroll(label_text, label_rect, 10, True, 5):
+                    self._paint_scrolling_text(painter, label_rect, self._time_alarm_note_display_text(label_text), 10, label_color, True)
+                else:
+                    self._paint_static_elided_text(painter, label_rect, label_text, 10, label_color, True, Qt.AlignmentFlag.AlignLeft)
+            if delete_active:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(210, 35, 39, 245))
+                painter.drawRoundedRect(delete_rect, delete_rect.height() / 2.0, delete_rect.height() / 2.0)
+                self._paint_static_elided_text(painter, delete_rect.adjusted(self._u(5.0), 0.0, -self._u(5.0), 0.0), "删除", 8, QColor(255, 248, 245, 248), True, Qt.AlignmentFlag.AlignCenter)
+            else:
+                self._paint_time_alarm_switch(painter, switch, enabled, color, theme)
+            if index < end - 1 and row.bottom() < list_rect.bottom():
+                painter.setPen(QPen(ref["divider"], self._u(0.8)))
+                painter.drawLine(QPointF(row.left(), row.bottom()), QPointF(row.right(), row.bottom()))
+        painter.restore()
+        self.plugin_action_rects["alarm-list"] = QRectF(list_rect)
+        if visible_count > 0 and len(alarms) > visible_count:
+            track = QRectF(rect.right() - self._u(5.0), list_rect.top() + self._u(2.0), self._u(2.0), list_rect.height() - self._u(4.0))
+            total_rows = max(1.0, len(alarms) + bottom_spacer_rows)
+            thumb_h = max(self._u(12.0), track.height() * visible_count / total_rows)
+            travel = max(0.0, track.height() - thumb_h)
+            thumb_y = track.top() + travel * (scroll_index / max(1.0, max_start))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(ref["muted_dim"])
+            painter.drawRoundedRect(QRectF(track.left(), thumb_y, track.width(), thumb_h), track.width() / 2.0, track.width() / 2.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ref["accent"])
+        painter.drawRoundedRect(add_rect, add_rect.height() / 2.0, add_rect.height() / 2.0)
+        self._paint_static_elided_text(painter, add_rect.adjusted(self._u(8.0), 0.0, -self._u(8.0), 0.0), "添 加 闹 钟", 10, QColor(26, 21, 0, 245), True, Qt.AlignmentFlag.AlignCenter)
+
+    def _paint_alarm_picker_field(self, painter: QPainter, rect: QRectF, field: str, value: str, title: str, theme: dict[str, QColor], color: QColor):
+        ref = self._time_reference_palette(theme, color)
+        self.plugin_alarm_editor_rects[field] = QRectF(rect)
+        painter.setPen(QPen(ref["accent"], self._u(1.2)))
+        painter.setBrush(ref["module_active"])
+        painter.drawRoundedRect(rect, self._u(11.0), self._u(11.0))
+        painter.setFont(self._font(10, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(QRectF(rect.left(), rect.top() + self._u(4.0), rect.width(), self._u(15.0)), Qt.AlignmentFlag.AlignCenter, title)
+        painter.setPen(QPen(ref["accent_track"], self._u(1.0)))
+        painter.drawLine(QPointF(rect.left() + self._u(9.0), rect.center().y()), QPointF(rect.right() - self._u(9.0), rect.center().y()))
+        values = self._alarm_picker_display_values(field)
+        row_h = max(self._u(14.0), (rect.height() - self._u(19.0)) / 3.0)
+        value_clip = rect.adjusted(self._u(3.0), self._u(18.0), -self._u(3.0), -self._u(3.0))
+        center_index = next((index for index, item in enumerate(values) if bool(item.get("current"))), len(values) // 2)
+        center_y = value_clip.center().y() - row_h / 2.0
+        for index, item in enumerate(values):
+            current = bool(item.get("current"))
+            text = str(item.get("text") or value)
+            painter.save()
+            painter.setClipRect(value_clip)
+            painter.setOpacity(float(item.get("opacity", 1.0)))
+            value_size = 20 if current and field in {"hour", "minute"} else (14 if current else 11)
+            painter.setFont(self._font(value_size, QFont.Weight.Bold if current else QFont.Weight.DemiBold))
+            painter.setPen(ref["text"] if current else ref["muted_dim"])
+            offset = float(item.get("offset", 0.0) or 0.0)
+            row = QRectF(rect.left() + self._u(4.0), center_y + (index - center_index + offset) * row_h, rect.width() - self._u(8.0), row_h)
+            painter.drawText(row, Qt.AlignmentFlag.AlignCenter, text)
+            painter.restore()
+
+    def _time_alarm_editor_layout(self, rect: QRectF) -> dict[str, QRectF]:
+        if rect.width() < self._u(600.0):
+            shell = QRectF(rect)
+            title = QRectF(rect.left() + self._u(18.0), rect.top() + self._u(7.0), rect.width() - self._u(36.0), self._u(19.0))
+            label_gap = self._u(10.0)
+            label_h = self._u(20.0)
+            top_floor = self._u(38.0)
+            action_h = self._u(32.0)
+            action_gap = self._u(8.0)
+            bottom_pad = self._u(10.0) + action_h + action_gap
+            max_field_h = max(self._u(44.0), rect.height() - top_floor - label_gap - label_h - bottom_pad)
+            field_h = min(self._u(82.0), max(self._u(68.0), rect.height() * 0.38), max_field_h)
+            field_y = rect.top() + max(top_floor, rect.height() * 0.30)
+            label_y = field_y + field_h + label_gap
+            label_bottom = label_y + label_h
+            max_label_bottom = rect.bottom() - bottom_pad
+            if label_bottom > max_label_bottom:
+                field_y = max(rect.top() + self._u(32.0), max_label_bottom - label_h - label_gap - field_h)
+                label_y = field_y + field_h + label_gap
+            gap = self._u(16.0)
+            dot_w = self._u(18.0)
+            left_pad = self._u(20.0)
+            right_pad = self._u(30.0)
+            usable_w = max(self._u(210.0), rect.width() - left_pad - right_pad - dot_w)
+            time_w = min(self._u(138.0), max(self._u(104.0), usable_w * 0.28))
+            value_w = min(self._u(112.0), max(self._u(72.0), usable_w * 0.22))
+            freq_w = usable_w - time_w - value_w - gap * 2.0
+            if freq_w < self._u(88.0):
+                value_w = 0.0
+                freq_w = usable_w - time_w - gap
+            time_rect = QRectF(rect.left() + left_pad, field_y, time_w, field_h)
+            frequency_rect = QRectF(time_rect.right() + gap, field_y, max(self._u(88.0), freq_w), field_h)
+            value_rect = QRectF(frequency_rect.right() + gap, field_y, value_w, field_h) if value_w > 0.0 else QRectF()
+            if not value_rect.isNull() and value_rect.right() > rect.right() - dot_w - self._u(10.0):
+                value_rect = QRectF()
+            note_right = rect.right() - dot_w - right_pad
+            note_rect = QRectF(rect.left() + left_pad, field_y, max(self._u(170.0), note_right - rect.left() - left_pad), field_h)
+            action_y = rect.bottom() - self._u(10.0) - action_h
+            action_gap_x = self._u(14.0)
+            action_w = min(self._u(156.0), max(self._u(118.0), (rect.width() - self._u(44.0) - action_gap_x) / 2.0))
+            actions_total = action_w * 2.0 + action_gap_x
+            action_x = rect.center().x() - actions_total / 2.0
+            cancel = QRectF(action_x, action_y, action_w, action_h)
+            save = QRectF(cancel.right() + action_gap_x, action_y, action_w, action_h)
+            main_dot = QRectF(rect.right() - self._u(26.0), rect.center().y() - self._u(13.0), self._u(18.0), self._u(26.0))
+            note_dot = QRectF(main_dot)
+            return {
+                "mode": "narrow",
+                "shell": shell,
+                "title": title,
+                "main_page": QRectF(rect),
+                "note_page": QRectF(rect),
+                "time": time_rect,
+                "main_time": time_rect,
+                "main_frequency": frequency_rect,
+                "main_frequency_value": value_rect,
+                "frequency": frequency_rect,
+                "frequency_value": value_rect,
+                "note": note_rect,
+                "time_label": QRectF(time_rect.left(), label_y, time_rect.width(), label_h),
+                "frequency_label": QRectF(frequency_rect.left(), label_y, max(frequency_rect.width(), value_rect.right() - frequency_rect.left() if not value_rect.isNull() else frequency_rect.width()), label_h),
+                "note_label": QRectF(note_rect.left(), label_y, note_rect.width(), label_h),
+                "main_note_dot": main_dot,
+                "note_main_dot": note_dot,
+                "save": save,
+                "cancel": cancel,
+            }
+        shell = QRectF(rect)
+        title = QRectF(rect.left() + self._u(16.0), rect.top() + self._u(7.0), rect.width() - self._u(32.0), self._u(19.0))
+        field_h = min(self._u(43.0), max(self._u(34.0), rect.height() * 0.31))
+        label_h = self._u(15.0)
+        row_gap = self._u(16.0)
+        action_h = self._u(32.0)
+        action_gap = self._u(8.0)
+        action_y = rect.bottom() - self._u(10.0) - action_h
+        field_y = title.bottom() + self._u(12.0)
+        max_label_bottom = action_y - action_gap
+        field_y = min(field_y, max(rect.top() + self._u(28.0), max_label_bottom - label_h - self._u(6.0) - field_h))
+        label_y = field_y + field_h + self._u(6.0)
+        time_w = self._u(112.0)
+        note_w = self._u(106.0)
+        frequency_w = self._u(58.0)
+        weekdays_w = self._u(78.0)
+        total_w = time_w + note_w + frequency_w + weekdays_w + row_gap * 3.0
+        if total_w > rect.width() - self._u(24.0):
+            scale = max(0.72, (rect.width() - self._u(24.0) - row_gap * 3.0) / max(1.0, total_w - row_gap * 3.0))
+            time_w *= scale
+            note_w *= scale
+            frequency_w *= scale
+            weekdays_w *= scale
+            total_w = time_w + note_w + frequency_w + weekdays_w + row_gap * 3.0
+        x = rect.center().x() - total_w / 2.0
+        time_rect = QRectF(x, field_y, time_w, field_h)
+        note_rect = QRectF(time_rect.right() + row_gap, field_y, note_w, field_h)
+        frequency_rect = QRectF(note_rect.right() + row_gap, field_y, frequency_w, field_h)
+        weekdays_rect = QRectF(frequency_rect.right() + row_gap, field_y, weekdays_w, field_h)
+        action_gap_x = self._u(16.0)
+        action_w = min(self._u(150.0), max(self._u(118.0), (rect.width() - self._u(64.0) - action_gap_x) / 2.0))
+        actions_total = action_w * 2.0 + action_gap_x
+        action_x = rect.center().x() - actions_total / 2.0
+        cancel = QRectF(action_x, action_y, action_w, action_h)
+        save = QRectF(cancel.right() + action_gap_x, action_y, action_w, action_h)
+        return {
+            "shell": shell,
+            "title": title,
+            "time": time_rect,
+            "note": note_rect,
+            "frequency": frequency_rect,
+            "weekdays": weekdays_rect,
+            "time_label": QRectF(time_rect.left(), label_y, time_rect.width(), label_h),
+            "note_label": QRectF(note_rect.left(), label_y, note_rect.width(), label_h),
+            "frequency_label": QRectF(frequency_rect.left(), label_y, frequency_rect.width(), label_h),
+            "weekdays_label": QRectF(weekdays_rect.left(), label_y, weekdays_rect.width(), label_h),
+            "save": save,
+            "cancel": cancel,
+        }
+
+    def _paint_alarm_editor_caret(self, painter: QPainter, rect: QRectF, field: str, ref: dict[str, QColor]):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(ref["text"], self._u(1.6), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        x = rect.center().x() + rect.width() * 0.22
+        top = rect.top() + rect.height() * 0.26
+        bottom = rect.bottom() - rect.height() * 0.26
+        painter.drawLine(QPointF(x, top), QPointF(x, bottom))
+        painter.restore()
+
+    def _paint_time_alarm_editor_box(self, painter: QPainter, rect: QRectF, text: str, placeholder: bool, ref: dict[str, QColor], size: int = 14, bold: bool = True, focused: bool = False, field: str = ""):
+        painter.setPen(QPen(ref["accent"], self._u(1.9 if focused else 1.5)))
+        painter.setBrush(ref["module_active"])
+        painter.drawRoundedRect(rect, self._u(7.0), self._u(7.0))
+        color = ref["muted_dim"] if placeholder else ref["text"]
+        text_rect = rect.adjusted(self._u(7.0), 0.0, -self._u(7.0), 0.0)
+        if field == "note" and not placeholder and self._time_alarm_note_should_scroll(text, text_rect, size, bold, 5):
+            self._paint_scrolling_text(painter, text_rect, self._time_alarm_note_display_text(text), size, color, bold, centered=True)
+        else:
+            self._paint_static_elided_text(painter, text_rect, text, size, color, bold, Qt.AlignmentFlag.AlignCenter)
+        if focused and field:
+            self._paint_alarm_editor_caret(painter, rect, field, ref)
+
+    def _paint_alarm_detail_input_box(self, painter: QPainter, rect: QRectF, field: str, text: str, ref: dict[str, QColor], focused: bool):
+        self.plugin_alarm_editor_rects[field] = QRectF(rect)
+        self.plugin_action_rects[f"alarm-editor-focus-{field}"] = QRectF(rect)
+        painter.setPen(QPen(ref["accent"], self._u(2.0)))
+        painter.setBrush(QColor(28, 28, 27, 238))
+        painter.drawRoundedRect(rect, self._u(10.0), self._u(10.0))
+        values = self._alarm_picker_display_values(field)
+        if len(values) <= 1:
+            painter.setFont(self._font(30, QFont.Weight.Bold))
+            painter.setPen(ref["accent"])
+            painter.drawText(rect.adjusted(self._u(8.0), 0.0, -self._u(8.0), 0.0), Qt.AlignmentFlag.AlignCenter, text)
+        else:
+            clip = rect.adjusted(self._u(4.0), self._u(4.0), -self._u(4.0), -self._u(4.0))
+            row_h = max(self._u(23.0), rect.height() * 0.44)
+            center_index = next((index for index, item in enumerate(values) if bool(item.get("current"))), len(values) // 2)
+            center_y = clip.center().y() - row_h / 2.0
+            for index, item in enumerate(values):
+                current = bool(item.get("current"))
+                painter.save()
+                painter.setClipRect(clip)
+                painter.setOpacity(float(item.get("opacity", 1.0)))
+                painter.setFont(self._font(30 if current else 18, QFont.Weight.Bold if current else QFont.Weight.DemiBold))
+                painter.setPen(ref["accent"] if current else ref["muted_dim"])
+                offset = float(item.get("offset", 0.0) or 0.0)
+                row = QRectF(rect.left() + self._u(8.0), center_y + (index - center_index + offset) * row_h, rect.width() - self._u(16.0), row_h)
+                painter.drawText(row, Qt.AlignmentFlag.AlignCenter, str(item.get("text") or text))
+                painter.restore()
+        if focused:
+            self._paint_alarm_editor_caret(painter, rect, field, ref)
+
+    def _paint_time_alarm_editor_action(self, painter: QPainter, rect: QRectF, text: str, ref: dict[str, QColor], primary: bool):
+        painter.setPen(QPen(ref["accent"], self._u(1.1)))
+        painter.setBrush(ref["accent"] if primary else QColor(24, 24, 23, 245))
+        painter.drawRoundedRect(rect, rect.height() / 2.0, rect.height() / 2.0)
+        painter.setFont(self._font(12 if rect.height() >= self._u(30.0) else 10, QFont.Weight.Bold))
+        painter.setPen(QColor(35, 24, 0, 245) if primary else ref["accent"])
+        painter.drawText(rect.adjusted(self._u(5.0), 0.0, -self._u(5.0), 0.0), Qt.AlignmentFlag.AlignCenter, text)
+
+    def _paint_time_alarm_editor_label(self, painter: QPainter, rect: QRectF, text: str, ref: dict[str, QColor]):
+        painter.setFont(self._font(10, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _paint_alarm_editor_page_dots(self, painter: QPainter, rect: QRectF, active_page: str, ref: dict[str, QColor]):
+        if rect.isNull() or rect.width() <= 0.0:
+            return
+        dot = self._u(7.0)
+        gap = self._u(7.0)
+        total_h = dot * 2.0 + gap
+        x = rect.center().x() - dot / 2.0
+        y = rect.center().y() - total_h / 2.0
+        for index, page in enumerate(("main", "note")):
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(ref["text"] if page == active_page else ref["muted_dim"])
+            painter.drawEllipse(QRectF(x, y + index * (dot + gap), dot, dot))
+
+    def _alarm_editor_frequency_value(self, editor: dict[str, object]) -> tuple[str, str, str]:
+        unit = str(editor.get("frequency_unit") or self._alarm_unit_from_frequency(str(editor.get("frequency") or "每周"))).lower()
+        if unit == "weekly":
+            return "weekdays", self._alarm_recurrence_value_label(editor) or "1", "alarm-editor-open-weekdays"
+        if unit == "monthly":
+            return "month_day", self._alarm_recurrence_value_label(editor), "alarm-editor-open-month-day"
+        if unit == "yearly":
+            return "year_date", self._alarm_recurrence_value_label(editor), "alarm-editor-open-year-date"
+        return "", "", ""
+
+    def _alarm_editor_narrow_frequency_rect(self, layout: dict[str, QRectF], value_field: str) -> QRectF:
+        frequency = QRectF(layout["main_frequency"])
+        if value_field:
+            return frequency
+        slot_left = layout["main_time"].right() + self._u(16.0)
+        slot_right = layout["main_note_dot"].left() - self._u(8.0)
+        slot_w = max(frequency.width(), slot_right - slot_left)
+        target_w = min(slot_w, max(frequency.width() * 1.24, self._u(132.0)))
+        rect = QRectF(slot_left + (slot_w - target_w) / 2.0, frequency.top(), target_w, frequency.height())
+        unit = str(self._time_alarm_editor_state().get("frequency_unit") or "")
+        offset = self._alarm_editor_reflow_offset(unit)
+        if abs(offset) > 0.001:
+            rect.translate(offset * self._u(18.0), 0.0)
+        return rect
+
+    def _paint_time_alarm_editor_detail(self, painter: QPainter, rect: QRectF, editor: dict[str, object], color: QColor, theme: dict[str, QColor], ref: dict[str, QColor]):
+        mode = str(editor.get("detail_mode") or "").strip().lower()
+        confirm = QRectF(rect.right() - self._u(40.0), rect.top() + self._u(10.0), self._u(30.0), self._u(24.0))
+        self.plugin_action_rects["alarm-editor-detail-confirm"] = QRectF(confirm.adjusted(-self._u(4.0), -self._u(4.0), self._u(4.0), self._u(4.0)))
+        painter.setPen(QPen(ref["accent"], self._u(1.2)))
+        painter.setBrush(QColor(ref["accent"].red(), ref["accent"].green(), ref["accent"].blue(), 34))
+        painter.drawRoundedRect(confirm, self._u(8.0), self._u(8.0))
+        painter.setPen(QPen(ref["accent"], self._u(2.0), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawLine(QPointF(confirm.left() + confirm.width() * 0.28, confirm.center().y()), QPointF(confirm.left() + confirm.width() * 0.44, confirm.bottom() - confirm.height() * 0.30))
+        painter.drawLine(QPointF(confirm.left() + confirm.width() * 0.44, confirm.bottom() - confirm.height() * 0.30), QPointF(confirm.right() - confirm.width() * 0.24, confirm.top() + confirm.height() * 0.30))
+        title_rect = QRectF(rect.left() + self._u(40.0), rect.top() + self._u(24.0), rect.width() - self._u(100.0), self._u(46.0))
+        content = QRectF(rect.left() + self._u(40.0), title_rect.bottom() + self._u(18.0), rect.width() - self._u(80.0), max(self._u(54.0), rect.bottom() - title_rect.bottom() - self._u(32.0)))
+        painter.setFont(self._font(30, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        title = {"weekly": "每周", "monthly": self._alarm_recurrence_label(editor), "yearly": self._alarm_recurrence_label(editor)}.get(mode, "频次")
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+        if mode == "weekly":
+            weekdays = set(self._alarm_weekdays_from_value(editor.get("weekdays", [])))
+            gap = self._u(12.0)
+            chip_w = min(self._u(48.0), max(self._u(34.0), (content.width() - gap * 6.0) / 7.0))
+            x = content.left()
+            y = content.top() + self._u(2.0)
+            for day in range(1, 8):
+                chip = QRectF(x + (day - 1) * (chip_w + gap), y, chip_w, self._u(58.0))
+                selected = day in weekdays
+                painter.setFont(self._font(34, QFont.Weight.Bold))
+                painter.setPen(ref["accent"] if selected else QColor(118, 118, 118, 235))
+                painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, str(day))
+                self.plugin_action_rects[f"alarm-editor-toggle-weekday-{day}"] = QRectF(chip.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+            return
+        if mode == "monthly":
+            field_w = min(self._u(142.0), max(self._u(104.0), content.width() * 0.34))
+            field_h = self._u(74.0)
+            field = QRectF(content.center().x() - field_w / 2.0 - self._u(18.0), content.top(), field_w, field_h)
+            self._paint_alarm_detail_input_box(painter, field, "month_day", str(editor.get("month_day", 28)), ref, str(getattr(self, "plugin_alarm_editor_focus", "") or "") == "month_day")
+            painter.setFont(self._font(30, QFont.Weight.Bold))
+            painter.setPen(ref["text"])
+            painter.drawText(QRectF(field.right() + self._u(18.0), field.top(), self._u(58.0), field.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "号")
+            return
+        if mode == "yearly":
+            gap = self._u(26.0)
+            field_w = min(self._u(96.0), max(self._u(80.0), (content.width() - gap - self._u(92.0)) / 2.0))
+            field_h = self._u(74.0)
+            total_w = field_w * 2.0 + gap + self._u(84.0)
+            x = content.center().x() - total_w / 2.0
+            y = content.top()
+            month = QRectF(x, y, field_w, field_h)
+            day = QRectF(month.right() + gap + self._u(42.0), y, field_w, field_h)
+            focus = str(getattr(self, "plugin_alarm_editor_focus", "") or "")
+            self._paint_alarm_detail_input_box(painter, month, "year_month", str(editor.get("year_month", 4)), ref, focus == "year_month")
+            self._paint_alarm_detail_input_box(painter, day, "year_day", str(editor.get("year_day", 28)), ref, focus == "year_day")
+            painter.setFont(self._font(30, QFont.Weight.Bold))
+            painter.setPen(ref["text"])
+            painter.drawText(QRectF(month.right() + self._u(12.0), month.top(), self._u(48.0), month.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "月")
+            painter.drawText(QRectF(day.right() + self._u(12.0), day.top(), self._u(48.0), day.height()), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "日")
+
+    def _paint_time_alarm_editor_narrow(self, painter: QPainter, layout: dict[str, QRectF], editor: dict[str, object], color: QColor, theme: dict[str, QColor], ref: dict[str, QColor]):
+        self._normalize_alarm_editor_recurrence(editor)
+        focus = str(getattr(self, "plugin_alarm_editor_focus", "") or "")
+        if str(editor.get("detail_mode") or "").strip():
+            self._paint_time_alarm_editor_detail(painter, layout["shell"], editor, color, theme, ref)
+            return
+
+        page = str(editor.get("editor_page") or "main")
+        self._paint_alarm_editor_page_dots(painter, layout["main_note_dot"], "note" if page == "note" else "main", ref)
+        page_offset = self._alarm_editor_page_transition_offset("note" if page == "note" else "main")
+        page_translated = abs(page_offset) > 0.001
+        if page_translated:
+            painter.save()
+            painter.translate(0.0, page_offset * layout["shell"].height() * 0.18)
+        if page == "note":
+            note_text = str(editor.get("note") or "")
+            self._paint_time_alarm_editor_box(painter, layout["note"], note_text or "备注...", not bool(note_text), ref, size=15, bold=True, focused=focus == "note", field="note")
+            hint = str(getattr(self, "plugin_alarm_editor_note_hint", "") or "")
+            if hint and time.monotonic() < float(getattr(self, "plugin_alarm_editor_note_hint_until", 0.0) or 0.0):
+                self._paint_time_alarm_editor_label(painter, layout["note_label"], hint, ref)
+            else:
+                self._paint_time_alarm_editor_label(painter, layout["note_label"], "备注（最多10字）", ref)
+            self.plugin_action_rects["alarm-editor-note"] = QRectF(layout["note"])
+            self.plugin_action_rects["alarm-editor-focus-note"] = QRectF(layout["note"])
+            self.plugin_action_rects["alarm-editor-page-main"] = QRectF(layout["note_main_dot"])
+            if page_translated:
+                painter.restore()
+            return
+
+        time_rect = layout["main_time"]
+        hour_rect = QRectF(time_rect.left(), time_rect.top(), time_rect.width() * 0.46, time_rect.height())
+        minute_rect = QRectF(time_rect.left() + time_rect.width() * 0.54, time_rect.top(), time_rect.width() * 0.46, time_rect.height())
+        self.plugin_alarm_editor_rects["hour"] = hour_rect
+        self.plugin_alarm_editor_rects["minute"] = minute_rect
+        self.plugin_action_rects["alarm-editor-focus-hour"] = QRectF(hour_rect)
+        self.plugin_action_rects["alarm-editor-focus-minute"] = QRectF(minute_rect)
+        time_text = f"{int(editor.get('hour', 0)):02d}:{int(editor.get('minute', 0)):02d}"
+        self._paint_time_alarm_editor_box(painter, time_rect, time_text, False, ref, size=24, bold=True, focused=focus in {"hour", "minute"})
+        unit_label = dict(self._alarm_frequency_units()).get(str(editor.get("frequency_unit") or "weekly"), self._alarm_recurrence_label(editor))
+        value_field, value_text, open_command = self._alarm_editor_frequency_value(editor)
+        frequency_rect = self._alarm_editor_narrow_frequency_rect(layout, value_field)
+        self._paint_alarm_picker_field(painter, frequency_rect, "frequency_unit", unit_label, "频次", theme, color)
+        self.plugin_action_rects["alarm-editor-focus-frequency_unit"] = QRectF(frequency_rect)
+        if value_field:
+            open_rect = QRectF(layout["main_frequency_value"]) if not layout["main_frequency_value"].isNull() else QRectF(
+                frequency_rect.center().x(),
+                frequency_rect.top(),
+                frequency_rect.width() * 0.5,
+                frequency_rect.height(),
+            )
+            self.plugin_action_rects[open_command] = QRectF(open_rect)
+        if value_field and not layout["main_frequency_value"].isNull():
+            value_rect = layout["main_frequency_value"]
+            self._paint_time_alarm_editor_box(painter, value_rect, value_text, False, ref, size=13, bold=True, focused=focus in {value_field, "weekdays"})
+            if value_field == "year_date":
+                self.plugin_alarm_editor_rects["year_month"] = QRectF(value_rect.left(), value_rect.top(), value_rect.width() * 0.48, value_rect.height())
+                self.plugin_alarm_editor_rects["year_day"] = QRectF(value_rect.left() + value_rect.width() * 0.52, value_rect.top(), value_rect.width() * 0.48, value_rect.height())
+            else:
+                self.plugin_alarm_editor_rects[value_field] = QRectF(value_rect)
+        self._paint_time_alarm_editor_label(painter, layout["time_label"], "时间", ref)
+        frequency_label = QRectF(frequency_rect.left(), layout["frequency_label"].top(), frequency_rect.width(), layout["frequency_label"].height())
+        if value_field and not layout["main_frequency_value"].isNull():
+            frequency_label = QRectF(frequency_rect.left(), layout["frequency_label"].top(), layout["main_frequency_value"].right() - frequency_rect.left(), layout["frequency_label"].height())
+        self._paint_time_alarm_editor_label(painter, frequency_label, "频次", ref)
+        self.plugin_action_rects["alarm-editor-page-note"] = QRectF(layout["main_note_dot"])
+        if page_translated:
+            painter.restore()
+
+    def _paint_time_alarm_editor(self, painter: QPainter, rect: QRectF, model: dict[str, object], color: QColor, theme: dict[str, QColor]):
+        ref = self._time_reference_palette(theme, color)
+        self.plugin_alarm_editor_rects = {}
+        editor = model["editor"]
+        self._normalize_alarm_editor_recurrence(editor)
+        layout = self._time_alarm_editor_layout(rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(35, 36, 38, 248))
+        painter.drawRoundedRect(layout["shell"], self._u(14.0), self._u(14.0))
+        painter.setPen(QPen(ref["divider"], self._u(0.8)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(layout["shell"].adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), self._u(13.0), self._u(13.0))
+        if str(editor.get("detail_mode") or "").strip():
+            self._paint_time_alarm_editor_detail(painter, layout["shell"], editor, color, theme, ref)
+            return
+        painter.setFont(self._font(13, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(layout["title"], Qt.AlignmentFlag.AlignCenter, "闹钟设置")
+
+        if layout.get("mode") == "narrow":
+            self._paint_time_alarm_editor_narrow(painter, layout, editor, color, theme, ref)
+            self.plugin_action_rects["alarm-editor-save"] = QRectF(layout["save"])
+            self.plugin_action_rects["alarm-editor-cancel"] = QRectF(layout["cancel"])
+            self._paint_time_alarm_editor_action(painter, layout["cancel"], "取消", ref, False)
+            self._paint_time_alarm_editor_action(painter, layout["save"], "确定", ref, True)
+            return
+
+        time_rect = layout["time"]
+        hour_rect = QRectF(time_rect.left(), time_rect.top(), time_rect.width() * 0.46, time_rect.height())
+        minute_rect = QRectF(time_rect.left() + time_rect.width() * 0.54, time_rect.top(), time_rect.width() * 0.46, time_rect.height())
+        self.plugin_alarm_editor_rects["hour"] = hour_rect
+        self.plugin_alarm_editor_rects["minute"] = minute_rect
+
+        time_text = f"{int(editor['hour']):02d}:{int(editor['minute']):02d}"
+        focus = str(getattr(self, "plugin_alarm_editor_focus", "") or "")
+        self._paint_time_alarm_editor_box(painter, time_rect, time_text, False, ref, size=24, bold=True, focused=focus in {"hour", "minute"})
+        note_text = str(editor.get("note") or "")
+        self._paint_time_alarm_editor_box(painter, layout["note"], note_text or "备注...", not bool(note_text), ref, size=12, bold=True, focused=focus == "note", field="note")
+        unit_label = dict(self._alarm_frequency_units()).get(
+            str(editor.get("frequency_unit") or self._alarm_unit_from_frequency(str(editor.get("frequency") or "每周"))),
+            self._alarm_recurrence_label(editor),
+        )
+        value_field, value_text, open_command = self._alarm_editor_frequency_value(editor)
+        frequency_rect = QRectF(layout["frequency"])
+        value_rect = QRectF(layout["weekdays"])
+        self._paint_alarm_picker_field(painter, frequency_rect, "frequency_unit", unit_label, "频次", theme, color)
+        self.plugin_alarm_editor_rects["frequency"] = QRectF(frequency_rect)
+        if value_field:
+            self._paint_time_alarm_editor_box(painter, value_rect, value_text, False, ref, size=12, bold=True, focused=focus in {value_field, "weekdays", "year_month", "year_day"})
+            if value_field == "year_date":
+                self.plugin_alarm_editor_rects["year_month"] = QRectF(value_rect.left(), value_rect.top(), value_rect.width() * 0.48, value_rect.height())
+                self.plugin_alarm_editor_rects["year_day"] = QRectF(value_rect.left() + value_rect.width() * 0.52, value_rect.top(), value_rect.width() * 0.48, value_rect.height())
+                self.plugin_action_rects["alarm-editor-focus-year_month"] = QRectF(self.plugin_alarm_editor_rects["year_month"])
+                self.plugin_action_rects["alarm-editor-focus-year_day"] = QRectF(self.plugin_alarm_editor_rects["year_day"])
+            else:
+                self.plugin_alarm_editor_rects[value_field] = QRectF(value_rect)
+                self.plugin_action_rects[f"alarm-editor-focus-{value_field}"] = QRectF(value_rect)
+            self.plugin_alarm_editor_rects["weekdays"] = QRectF(value_rect)
+        else:
+            self._paint_time_alarm_editor_box(painter, value_rect, "默认", False, ref, size=12, bold=True, focused=False)
+            self.plugin_alarm_editor_rects["weekdays"] = QRectF(value_rect)
+
+        self._paint_time_alarm_editor_label(painter, layout["time_label"], "时间", ref)
+        hint = str(getattr(self, "plugin_alarm_editor_note_hint", "") or "")
+        if hint and time.monotonic() < float(getattr(self, "plugin_alarm_editor_note_hint_until", 0.0) or 0.0):
+            self._paint_time_alarm_editor_label(painter, layout["note_label"], hint, ref)
+        else:
+            self._paint_time_alarm_editor_label(painter, layout["note_label"], "备注", ref)
+        self._paint_time_alarm_editor_label(painter, layout["frequency_label"], "频次", ref)
+        self._paint_time_alarm_editor_label(painter, layout["weekdays_label"], "日期", ref)
+
+        self.plugin_action_rects["alarm-editor-note"] = QRectF(layout["note"])
+        self.plugin_action_rects["alarm-editor-focus-hour"] = QRectF(hour_rect)
+        self.plugin_action_rects["alarm-editor-focus-minute"] = QRectF(minute_rect)
+        self.plugin_action_rects["alarm-editor-focus-frequency_unit"] = QRectF(frequency_rect)
+        self.plugin_action_rects["alarm-editor-focus-frequency"] = QRectF(frequency_rect)
+        self.plugin_action_rects["alarm-editor-focus-weekdays"] = QRectF(value_rect)
+        if open_command:
+            self.plugin_action_rects[open_command] = QRectF(value_rect)
+        self.plugin_action_rects["alarm-editor-save"] = QRectF(layout["save"])
+        self.plugin_action_rects["alarm-editor-cancel"] = QRectF(layout["cancel"])
+        self._paint_time_alarm_editor_action(painter, layout["cancel"], "取消", ref, False)
+        self._paint_time_alarm_editor_action(painter, layout["save"], "确定", ref, True)
+
+    def _paint_time_module_by_name(self, painter: QPainter, module: str, rect: QRectF, panel: dict[str, object], color: QColor, theme: dict[str, QColor]):
+        if module == "alarm":
+            self._paint_time_alarm_module(painter, rect, panel, color, theme)
+        else:
+            self._paint_time_countdown_module(painter, rect, panel, color, theme)
+
+    def _paint_time_plugin_panel(self, painter: QPainter, rect: QRectF, model: dict[str, object], color: QColor, theme: dict[str, QColor]):
+        self.plugin_panel_last_width = float(rect.width())
+        panel = self._time_plugin_panel_model(model)
+        if panel["mode"] == "alarm_editor":
+            self._paint_time_alarm_editor(painter, rect, panel, color, theme)
+            return
+        ref = self._time_reference_palette(theme, color)
+        layout = self._time_plugin_panel_layout(rect)
+        panel_for_paint = dict(panel)
+        panel_for_paint["time_layout_mode"] = layout["time_layout_mode"]
+        title = layout["time_title"]
+        painter.setFont(self._font(10, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(title, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "TIME")
+        if layout["time_layout_mode"] == "double":
+            visible = str(layout.get("time_visible_module") or "countdown")
+            self._paint_time_dashboard_clock(painter, layout["time_clock"], panel, color, theme)
+            slot_rect = QRectF(layout["time_alarm"] if visible == "alarm" else layout["time_countdown"])
+            transition = self._time_module_transition_offsets(visible)
+            if transition and not slot_rect.isNull():
+                from_module, from_offset, to_offset = transition
+                painter.save()
+                painter.setClipRect(slot_rect)
+                action_snapshot = dict(self.plugin_action_rects)
+                if from_module in self._time_panel_modules():
+                    painter.save()
+                    painter.translate(0.0, from_offset * slot_rect.height())
+                    self._paint_time_module_by_name(painter, from_module, slot_rect, panel_for_paint, color, theme)
+                    painter.restore()
+                self.plugin_action_rects = action_snapshot
+                painter.save()
+                painter.translate(0.0, to_offset * slot_rect.height())
+                self._paint_time_module_by_name(painter, visible, slot_rect, panel_for_paint, color, theme)
+                painter.restore()
+                painter.restore()
+            else:
+                self._paint_time_module_by_name(painter, visible, slot_rect, panel_for_paint, color, theme)
+            self._paint_time_page_dots(painter, layout["time_pager"], visible, theme, color)
+            return
+        self._paint_time_dashboard_clock(painter, layout["time_clock"], panel, color, theme)
+        self._paint_time_countdown_module(painter, layout["time_countdown"], panel_for_paint, color, theme)
+        self._paint_time_alarm_module(painter, layout["time_alarm"], panel, color, theme)
+
+    def _paint_structured_plugin_panel(self, painter: QPainter, rect: QRectF, model: dict[str, object], color: QColor, theme: dict[str, QColor]):
+        label = str(model.get("label", ""))
+        if label.strip().upper() == "TIME":
+            self._paint_time_plugin_panel(painter, rect, model, color, theme)
+            return
+        detail = str(model.get("detail", ""))
+        summary = str(model.get("summary", ""))
+        status = str(model.get("status", "normal"))
+        alert_title = str(model.get("alert_title", ""))
+        alert_body = str(model.get("alert_body", ""))
+        progress = float(model.get("progress", 0.0) or 0.0)
+        layout = self._plugin_panel_layout(rect)
+        title, _lines = self._plugin_function_lines(label, detail, summary, status, alert_title, alert_body)
+        nav = layout["nav"]
+        painter.setFont(self._font(10, QFont.Weight.Bold))
+        painter.setPen(theme["text"])
+        painter.drawText(nav.adjusted(self._u(4.0), 0.0, 0.0, 0.0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+        status_text = {"running": "运行中", "done": "完成", "alarm": "提醒", "loading": "刷新中", "soon": "即将", "due": "现在", "rain": "降雨", "severe": "预警"}.get(status.lower(), "就绪")
+        painter.setFont(self._font(8, QFont.Weight.DemiBold))
+        painter.setPen(theme["muted"])
+        painter.drawText(nav.adjusted(0.0, 0.0, -self._u(4.0), 0.0), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, status_text)
+
+        sections = self._plugin_panel_sections(model)
+        module_rects = (layout["time_clock"], layout["time_countdown"], layout["time_alarm"])
+        action = self._plugin_action_model(label, detail, summary, status)
+        for index, section in enumerate(sections[:3]):
+            module = module_rects[index]
+            reserve_action = index == 2
+            if str(section["id"]) == "clock":
+                self._paint_time_clock_module(painter, module, section, theme, color, progress, status)
+            else:
+                self._paint_plugin_panel_module(
+                    painter,
+                    module,
+                    section["title"],
+                    section["body"],
+                    theme,
+                    color,
+                    emphasized=index == 0 and str(label).upper() != "TIME",
+                    reserve_action=reserve_action,
+                )
+            if reserve_action:
+                self._paint_plugin_panel_action_button(painter, module, action, color)
+        self._paint_plugin_panel_reminders(painter, layout["reminders"])
+
     def _paint_plugin_compact_cell(self, painter: QPainter, rect: QRectF, label: str, detail: str, summary: str, color: QColor, active: bool, status: str = "normal", progress: float = 0.0):
+        if str(label or "").strip().upper() == "TIME":
+            self._paint_time_compact_cell(painter, rect, detail, summary, color, active, status, progress)
+            return
         theme = self._plugin_theme_colors()
-        color = self._pure_plugin_color(color)
+        color = self._pure_plugin_color(self._plugin_display_color(label, color))
         radius = min(self._u(15), rect.height() / 2)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(theme["cell_active"] if active else theme["cell"])
@@ -4580,12 +7991,24 @@ class IslandStackVisual(QWidget):
 
         accent_size = self._u(20)
         accent = QRectF(rect.left() + self._u(8), rect.center().y() - accent_size / 2.0, accent_size, accent_size)
-        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 238 if active else 218))
+        label_key = str(label or "").strip().upper()
+        status_key = str(status or "").strip().lower()
+        is_time = label_key == "TIME"
+        is_time_done = is_time and status_key in {"done", "due", "alarm"}
+        accent_fill = QColor(color.red(), color.green(), color.blue(), 238 if active else 218)
+        if is_time:
+            accent_fill = QColor(255, 184, 0, 238) if is_time_done else QColor(30, 26, 18, 232)
+        painter.setBrush(accent_fill)
         painter.drawRoundedRect(accent, self._u(6), self._u(6))
-        painter.setPen(QColor(255, 255, 255, 242))
-        painter.setFont(self._font(7, QFont.Weight.Bold))
-        painter.drawText(accent, Qt.AlignmentFlag.AlignCenter, label[:1])
-        self._paint_plugin_progress_ring(painter, accent.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), color, progress, status)
+        painted_icon = False
+        if is_time:
+            painted_icon = self._paint_svg_icon(painter, self._time_reminder_icon_path(status, self._time_reminder_kind(status, summary)), accent.adjusted(self._u(3.0), self._u(3.0), -self._u(3.0), -self._u(3.0)))
+        if not painted_icon:
+            painter.setPen(QColor(39, 25, 0, 245) if is_time_done else QColor(255, 255, 255, 242))
+            painter.setFont(self._font(7, QFont.Weight.Bold))
+            painter.drawText(accent, Qt.AlignmentFlag.AlignCenter, label[:1])
+        if not is_time_done:
+            self._paint_plugin_progress_ring(painter, accent.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), color, progress, status)
 
         painter.setPen(QPen(theme["stroke"], self._u(1.0)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -4619,42 +8042,126 @@ class IslandStackVisual(QWidget):
         painter.drawArc(rect, 90 * 16, int(-360 * 16 * progress))
         painter.restore()
 
-    def _paint_plugin_function_panel(self, painter: QPainter, rect: QRectF, plugins: list[tuple], active_focus: int):
-        if not plugins:
-            return
-        index = max(0, min(int(active_focus), len(plugins) - 1))
-        label, detail, summary, color, icon, _plugin_id, status, alert_title, alert_body, _alert_priority, progress = plugins[index]
-        theme = self._plugin_theme_colors()
-        color = self._pure_plugin_color(color)
-
-        nav_h = self._u(34.0)
-        nav_rect = QRectF(rect.left() + self._u(10.0), rect.top() + self._u(8.0), rect.width() - self._u(20.0), nav_h)
-        cells = self._plugin_item_rects(nav_rect, time.monotonic())
-        for i, plugin in enumerate(plugins):
-            if i >= len(cells):
-                break
-            p_label, p_detail, p_summary, p_color, _p_icon, _p_id, p_status, _t, _b, _prio, p_progress = plugin
-            cell = cells[i][1].adjusted(self._u(2.0), 0, -self._u(2.0), 0)
-            alert_weight = self._plugin_panel_alert_progress(i)
+    def _paint_plugin_panel_reminders(self, painter: QPainter, rect: QRectF):
+        reminders = self._plugin_panel_reminder_models(3)
+        if not reminders:
+            theme = self._plugin_theme_colors()
+            idle = QRectF(rect.left(), rect.top(), min(rect.width(), self._u(132.0)), rect.height())
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(theme["cell_active"] if i == index else theme["cell"])
-            painter.drawRoundedRect(cell, self._u(12.0), self._u(12.0))
-            icon_box = QRectF(cell.left() + self._u(7.0), cell.center().y() - self._u(10.0), self._u(20.0), self._u(20.0))
-            pure = self._pure_plugin_color(p_color)
-            painter.setBrush(QColor(pure.red(), pure.green(), pure.blue(), 230))
-            painter.drawRoundedRect(icon_box, self._u(6.0), self._u(6.0))
-            self._paint_plugin_progress_ring(painter, icon_box.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), pure, p_progress, p_status)
-            if alert_weight > 0.0:
-                painter.setPen(QPen(QColor(pure.red(), pure.green(), pure.blue(), 170), self._u(1.2)))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(cell.adjusted(self._u(1.2), self._u(1.2), -self._u(1.2), -self._u(1.2)), self._u(11.0), self._u(11.0))
-            text_rect = QRectF(icon_box.right() + self._u(7.0), cell.top(), cell.right() - icon_box.right() - self._u(10.0), cell.height())
-            self._paint_scrolling_text(painter, text_rect, self._plugin_compact_value(p_label, p_detail, p_summary, p_status), 9, theme["text"], False)
+            painter.setBrush(theme["cell"])
+            painter.drawRoundedRect(idle, self._u(12.0), self._u(12.0))
+            muted = QColor(theme["muted"])
+            muted.setAlpha(160)
+            self._paint_scrolling_text(painter, idle.adjusted(self._u(10.0), 0.0, -self._u(10.0), 0.0), "暂无提醒", 9, muted, False)
+            return
 
-        body = rect.adjusted(self._u(18.0), self._u(55.0), -self._u(18.0), -self._u(16.0))
+        gap = self._u(7.0)
+        count = len(reminders)
+        chip_w = max(self._u(78.0), min(self._u(132.0), (rect.width() - gap * max(0, count - 1)) / max(1, count)))
+        theme = self._plugin_theme_colors()
+        for i, item in enumerate(reminders):
+            chip = QRectF(rect.left() + i * (chip_w + gap), rect.top(), chip_w, rect.height())
+            label = str(item["label"])
+            plugin_id = str(item.get("plugin_id") or "")
+            color = self._pure_plugin_color(self._plugin_display_color(label, item["color"]))
+            status = str(item["status"] or "normal")
+            status_key = status.lower()
+            is_time = label.strip().upper() == "TIME" or plugin_id.strip().casefold() == "time"
+            is_time_done = is_time and status_key in {"done", "due", "alarm"}
+            text_color = QColor(39, 25, 0, 245) if is_time_done else theme["text"]
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 184, 0, 240) if is_time_done else (theme["cell_active"] if i == 0 else theme["cell"]))
+            painter.drawRoundedRect(chip, self._u(12.0), self._u(12.0))
+            icon_size = self._u(18.0)
+            icon_rect = QRectF(chip.left() + self._u(7.0), chip.center().y() - icon_size / 2.0, icon_size, icon_size)
+            painter.setBrush(QColor(30, 26, 18, 226) if is_time and not is_time_done else QColor(color.red(), color.green(), color.blue(), 226 if not is_time_done else 0))
+            painter.drawRoundedRect(icon_rect, self._u(6.0), self._u(6.0))
+            progress = float(item.get("progress", 0.0) or 0.0)
+            if not is_time_done:
+                self._paint_plugin_progress_ring(painter, icon_rect.adjusted(-self._u(2.6), -self._u(2.6), self._u(2.6), self._u(2.6)), color, progress, status)
+            painted_icon = False
+            if is_time:
+                kind = self._time_reminder_kind(status, f"{item.get('body')} {item.get('detail')}")
+                painted_icon = self._paint_svg_icon(painter, self._time_reminder_icon_path(status, kind), icon_rect.adjusted(self._u(2.8), self._u(2.8), -self._u(2.8), -self._u(2.8)))
+            if not painted_icon:
+                painter.setFont(QFont("Segoe UI Symbol", self._font_size(8), QFont.Weight.Bold))
+                painter.setPen(text_color if is_time_done else QColor(255, 255, 255, 244))
+                painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, str(item["icon"] or item["label"])[:1])
+            text_rect = QRectF(icon_rect.right() + self._u(6.0), chip.top(), chip.right() - icon_rect.right() - self._u(10.0), chip.height())
+            self._paint_scrolling_text(painter, text_rect, str(item["body"] or item["detail"] or item["label"]), 8, text_color, False)
+
+    def _paint_time_compact_cell(self, painter: QPainter, rect: QRectF, detail: str, summary: str, color: QColor, active: bool, status: str = "normal", progress: float = 0.0):
+        theme = self._plugin_theme_colors()
+        ref = self._time_reference_palette(theme, color)
+        radius = min(self._u(16.0), rect.height() / 2.0)
+        painter.setPen(QPen(QColor(170, 170, 170, 150 if active else 92), self._u(1.1)))
+        painter.setBrush(QColor(52, 52, 52, 238 if active else 214))
+        painter.drawRoundedRect(rect, radius, radius)
+        segments = self._time_compact_segments(detail, summary, status)
+        if not segments:
+            return
+        layout = self._time_compact_cell_layout(rect, segments)
+        if not layout:
+            return
+        time_text = str(layout[0].get("text") or "")
+        time_rect = QRectF(layout[0]["rect"])
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(26, 26, 26, 232))
+        painter.drawRoundedRect(time_rect, time_rect.height() / 2.0, time_rect.height() / 2.0)
+        painter.setFont(self._font(12 if len(time_text) <= 5 else 9, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(time_rect.adjusted(self._u(4.0), 0.0, -self._u(4.0), 0.0), Qt.AlignmentFlag.AlignCenter, time_text)
+        for segment in layout[1:]:
+            chip = QRectF(segment["rect"])
+            seg_status = str(segment.get("status") or status).lower()
+            done = seg_status in {"done", "due", "alarm-done"} or str(segment.get("text") or "") == "\u65f6\u95f4\u5230"
+            fill = ref["accent"] if done else QColor(24, 24, 24, 235)
+            text_color = QColor(34, 24, 0, 245) if done else ref["accent"]
+            painter.setPen(QPen(ref["accent"] if not done else ref["accent"], self._u(1.0)))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(chip, chip.height() / 2.0, chip.height() / 2.0)
+            icon_size = min(self._u(20.0), chip.height() - self._u(5.0))
+            segment_kind = str(segment.get("kind") or "countdown")
+            if bool(segment.get("icon_only")):
+                icon_size = min(chip.height() - self._u(7.0), self._u(24.0))
+                icon_rect = QRectF(chip.center().x() - icon_size / 2.0, chip.center().y() - icon_size / 2.0, icon_size, icon_size)
+                self._paint_time_symbol(painter, icon_rect, segment_kind, text_color, self._u(1.8))
+                continue
+            icon_rect = QRectF(chip.left() + self._u(6.0), chip.center().y() - icon_size / 2.0, icon_size, icon_size)
+            self._paint_time_symbol(painter, icon_rect, segment_kind, text_color, self._u(1.6))
+            text_rect = QRectF(icon_rect.right() + self._u(4.0), chip.top(), chip.right() - icon_rect.right() - self._u(7.0), chip.height())
+            segment_text = str(segment.get("text") or "")
+            display_text = self._time_alarm_note_display_text(segment_text) if segment_kind == "alarm" else self._time_reminder_display_text(segment_text, 10)
+            if segment_kind == "alarm" and self._time_alarm_note_should_scroll(segment_text, text_rect, 10, True, 5):
+                self._paint_scrolling_text(painter, text_rect, display_text, 10, text_color, True)
+            else:
+                self._paint_static_elided_text(painter, text_rect, display_text, 10, text_color, True)
+
+    def _paint_plugin_function_panel(self, painter: QPainter, rect: QRectF, model: dict[str, object]):
+        if not model:
+            return
+        index = int(model.get("index", 0))
+        label = str(model.get("label", ""))
+        detail = str(model.get("detail", ""))
+        summary = str(model.get("summary", ""))
+        color = model.get("color")
+        icon = str(model.get("icon", ""))
+        status = str(model.get("status", "normal"))
+        alert_title = str(model.get("alert_title", ""))
+        alert_body = str(model.get("alert_body", ""))
+        progress = float(model.get("progress", 0.0) or 0.0)
+        theme = self._plugin_theme_colors()
+        color = self._pure_plugin_color(self._plugin_display_color(label, color))
+
+        layout = self._plugin_panel_layout(rect)
+        if str(label).upper() in {"TIME", "WEATHER", "AGENDA"}:
+            self._paint_structured_plugin_panel(painter, rect, model, color, theme)
+            return
+
+        body = layout["body"]
         title, lines = self._plugin_function_lines(label, detail, summary, status, alert_title, alert_body)
-        icon_size = min(body.height() - self._u(8.0), self._u(88.0))
-        accent = QRectF(body.left() + self._u(8.0), body.center().y() - icon_size / 2.0, icon_size, icon_size)
+        action = self._plugin_action_model(label, detail, summary, status)
+        accent = layout["icon"]
         pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 3.0)
 
         painter.setPen(Qt.PenStyle.NoPen)
@@ -4672,23 +8179,52 @@ class IslandStackVisual(QWidget):
             painter.setPen(QColor(255, 255, 255, 244))
             painter.drawText(accent, Qt.AlignmentFlag.AlignCenter, icon or str(label)[:1])
 
-        text_left = accent.right() + self._u(20.0)
-        title_rect = QRectF(text_left, body.top() + self._u(2.0), body.right() - text_left, self._u(24.0))
+        text_rect = layout["text"]
+        text_left = text_rect.left()
+        title_rect = QRectF(text_left, text_rect.top(), text_rect.width(), self._u(22.0))
         painter.setFont(self._font(12, QFont.Weight.Bold))
         painter.setPen(theme["muted"])
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
         if lines:
-            self._paint_scrolling_text(painter, QRectF(text_left, title_rect.bottom() + self._u(4.0), body.right() - text_left, self._u(32.0)), lines[0], 19, theme["text"], False)
+            self._paint_scrolling_text(painter, QRectF(text_left, title_rect.bottom() + self._u(3.0), text_rect.width(), self._u(30.0)), lines[0], 18, theme["text"], False)
         if len(lines) > 1:
-            self._paint_scrolling_text(painter, QRectF(text_left, body.bottom() - self._u(44.0), body.right() - text_left, self._u(20.0)), lines[1], 10, theme["muted"], False)
+            self._paint_scrolling_text(painter, QRectF(text_left, title_rect.bottom() + self._u(34.0), text_rect.width(), self._u(18.0)), lines[1], 10, theme["muted"], False)
         if len(lines) > 2:
             third_color = QColor(theme["muted"])
             third_color.setAlpha(170)
-            self._paint_scrolling_text(painter, QRectF(text_left, body.bottom() - self._u(22.0), body.right() - text_left, self._u(18.0)), lines[2], 9, third_color, False)
+            self._paint_scrolling_text(painter, QRectF(text_left, title_rect.bottom() + self._u(52.0), text_rect.width(), self._u(16.0)), lines[2], 9, third_color, False)
 
-    def _paint_plugin_focus_cell(self, painter: QPainter, rect: QRectF, label: str, detail: str, color: QColor, icon: str, focus_weight: float, icon_mode: bool, status: str = "normal"):
+        action_rect = layout["action"]
+        command = str(action.get("command", ""))
+        if command:
+            self.plugin_action_rects[command] = QRectF(action_rect)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color.red(), color.green(), color.blue(), 218))
+        painter.drawRoundedRect(action_rect, self._u(9.0), self._u(9.0))
+        painter.setFont(self._font(9, QFont.Weight.DemiBold))
+        painter.setPen(QColor(255, 255, 255, 244))
+        painter.drawText(action_rect.adjusted(self._u(8.0), 0.0, -self._u(8.0), 0.0), Qt.AlignmentFlag.AlignCenter, str(action.get("label") or "操作"))
+        self._paint_plugin_panel_reminders(painter, layout["reminders"])
+
+    def _paint_plugin_focus_cell(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        label: str,
+        detail: str,
+        color: QColor,
+        icon: str,
+        focus_weight: float,
+        icon_mode: bool,
+        status: str = "normal",
+        summary: str = "",
+        progress: float = 0.0,
+    ):
+        if str(label or "").strip().upper() == "TIME":
+            self._paint_time_compact_cell(painter, rect, detail, summary or detail, color, True, status, progress)
+            return
         theme = self._plugin_theme_colors()
-        color = self._pure_plugin_color(color)
+        color = self._pure_plugin_color(self._plugin_display_color(label, color))
         if icon_mode or rect.width() < self._u(138):
             circle_size = min(self._u(32.0), max(self._u(28.0), rect.height() - self._u(4.0)))
             circle = QRectF(rect.center().x() - circle_size / 2.0, rect.center().y() - circle_size / 2.0, circle_size, circle_size)
@@ -4733,19 +8269,239 @@ class IslandStackVisual(QWidget):
         self._paint_scrolling_text(painter, detail_rect, detail, 10, theme["muted"], False)
         self._paint_plugin_status_dot(painter, rect, status)
 
+    def _time_done_alert_size_levels(self, phase: float | None = None) -> tuple[int, int, int]:
+        pattern = (
+            (1, 1, 1),
+            (1, 1, 1),
+            (2, 2, 2),
+            (2, 2, 2),
+            (3, 3, 3),
+            (3, 3, 3),
+            (4, 4, 4),
+            (5, 5, 5),
+            (5, 5, 5),
+            (4, 4, 4),
+            (3, 3, 3),
+            (3, 3, 3),
+            (2, 2, 2),
+            (2, 2, 2),
+            (1, 1, 1),
+            (1, 1, 1),
+        )
+        if phase is None:
+            phase = (time.monotonic() / self._time_done_alert_cycle_seconds()) % 1.0
+        try:
+            value = float(phase)
+        except (TypeError, ValueError):
+            value = 0.0
+        index = int(max(0.0, min(0.999, value)) * len(pattern))
+        return pattern[index]
+
+    def _time_done_alert_cycle_seconds(self) -> float:
+        return 0.96
+
+    def _alarm_scroll_focus_index(self, text: str) -> int:
+        chars = list(str(text or ""))
+        if not chars:
+            return -1
+        return int((float(getattr(self, "scroll_phase", 0.0) or 0.0) * 0.72) % len(chars))
+
+    def _alarm_scroll_character_styles(self, text: str, color: QColor) -> list[tuple[str, QColor]]:
+        chars = list(str(text or ""))
+        if not chars:
+            return []
+        focus = self._alarm_scroll_focus_index("".join(chars))
+        base = QColor(color)
+        white = QColor(255, 255, 255, 255)
+        return [(char, QColor(white if index == focus else base)) for index, char in enumerate(chars)]
+
+    def _paint_alarm_scrolling_text(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        text: str,
+        size: int,
+        color: QColor,
+        bold: bool,
+        centered: bool = False,
+        centered_scroll: bool = False,
+    ):
+        value = str(text or "")
+        styles = self._alarm_scroll_character_styles(value, color)
+        if not styles:
+            return
+        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        widths = [max(1.0, float(fm.horizontalAdvance(char))) for char, _color in styles]
+        text_w = sum(widths)
+        painter.save()
+        painter.setClipRect(rect)
+        if text_w <= rect.width() - self._u(10):
+            x = rect.center().x() - text_w / 2.0 if centered else rect.left()
+        else:
+            x = self._scrolling_text_x(rect, text_w, centered, centered_scroll)
+        cursor = x
+        for (char, char_color), width in zip(styles, widths):
+            painter.setPen(char_color)
+            painter.drawText(QRectF(cursor, rect.top(), width + self._u(2.0), rect.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, char)
+            cursor += width
+        painter.restore()
+
+    def _paint_time_done_alert_text(self, painter: QPainter, rect: QRectF, text: str, color: QColor, base_size: int = 23, boost: float = 2.0):
+        value = str(text or "").strip()
+        if not value:
+            return
+        chars = list(value)
+        levels = self._time_done_alert_size_levels()
+        if len(chars) == 3:
+            char_levels = list(levels)
+        else:
+            focus = int((time.monotonic() * 0.84) % max(1, len(chars)))
+            char_levels = [1] * len(chars)
+            for index in range(len(chars)):
+                distance = abs(index - focus)
+                char_levels[index] = 3 if distance == 0 else (2 if distance == 1 else 1)
+        base = float(base_size)
+        step = max(0.0, float(boost or 0.0))
+        max_level = max(1, max(int(level) for level in char_levels))
+        sizes = [base + (max(1, int(level)) - 1) * step for level in char_levels]
+        max_size = base + (max_level - 1) * step
+        slot_font = self._font(max_size, QFont.Weight.Bold)
+        slot_metrics = QFontMetrics(slot_font)
+        slot_widths = [max(1.0, float(slot_metrics.horizontalAdvance(char))) for char in chars]
+        gap = self._u(0.6)
+        total_w = sum(slot_widths) + gap * max(0, len(slot_widths) - 1)
+        x = rect.center().x() - total_w / 2.0
+        painter.save()
+        painter.setClipRect(rect.adjusted(-self._u(8.0), -self._u(8.0), self._u(8.0), self._u(8.0)))
+        cursor = x
+        for char, size, slot_width in zip(chars, sizes, slot_widths):
+            font = self._font(size, QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.setPen(QColor(color))
+            painter.drawText(QRectF(cursor, rect.top(), slot_width, rect.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, char)
+            cursor += slot_width + gap
+        painter.restore()
+
+    def _paint_time_plugin_alert(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        label: str,
+        detail: str,
+        summary: str,
+        color: QColor,
+        status: str,
+        alert_title: str,
+        alert_body: str,
+        progress: float,
+        reminder_kind: str = "",
+    ):
+        ref = self._time_reference_palette(self._plugin_theme_colors(), color)
+        status_key = str(status or "").strip().lower()
+        done = status_key in {"done", "due", "alarm"}
+        kind = str(reminder_kind or "").strip().lower()
+        if kind not in {"alarm", "countdown"}:
+            kind = self._time_reminder_kind(status, f"{summary} {alert_title} {alert_body}")
+        alert_note = self._time_alarm_alert_text(alert_body)
+        if status_key in {"done", "due"} and kind == "countdown" and alert_note != "闹钟" and not self._time_text_looks_like_countdown(alert_body):
+            kind = "alarm"
+        radius = rect.height() / 2.0
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ref["accent"] if done else QColor(21, 21, 20, 244))
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setPen(QPen(QColor(46, 46, 44, 210) if not done else QColor(255, 184, 0, 245), self._u(1.0)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), radius - self._u(0.8), radius - self._u(0.8))
+        text_color = QColor(35, 24, 0, 245) if done else ref["accent"]
+        icon_size = min(rect.height() - self._u(5.0), max(self._u(30.0), rect.height() * 0.84))
+        icon_rect = QRectF(rect.left() + self._u(8.0), rect.center().y() - icon_size / 2.0, icon_size, icon_size)
+        use_ring = self._plugin_alert_uses_ring(rect)
+        if done:
+            if use_ring:
+                icon_color = QColor(28, 21, 0, 248)
+                icon_inner = rect.adjusted(self._u(8.0), self._u(8.0), -self._u(8.0), -self._u(8.0))
+                self._paint_time_symbol(painter, icon_inner, "countdown", icon_color, self._u(2.2))
+                painter.restore()
+                return
+            text_rect = rect.adjusted(self._u(12.0), 0.0, -self._u(12.0), 0.0)
+            body_source = self._time_alarm_alert_text_from_parts(alert_body, alert_title, summary)
+            if kind == "alarm" and body_source:
+                body_text = self._time_alarm_note_display_text(body_source)
+            else:
+                body_source = "\u65f6\u95f4\u5230"
+                body_text = "\u65f6\u95f4\u5230"
+            if kind == "alarm":
+                self._paint_alarm_scrolling_text(painter, text_rect, body_text, 23, text_color, True, centered=True, centered_scroll=True)
+            else:
+                self._paint_time_done_alert_text(painter, text_rect, body_text, text_color, 23, 2.0)
+            painter.restore()
+            return
+
+        if use_ring:
+            icon_inner = rect.adjusted(self._u(8.0), self._u(8.0), -self._u(8.0), -self._u(8.0))
+            self._paint_time_symbol(painter, icon_inner, kind, ref["accent"], self._u(2.1))
+            self._paint_plugin_progress_ring(painter, rect.adjusted(self._u(4.0), self._u(4.0), -self._u(4.0), -self._u(4.0)), ref["accent"], progress, status)
+            painter.restore()
+            return
+
+        painter.setPen(QPen(ref["accent"], self._u(2.0)))
+        painter.setBrush(QColor(255, 184, 0, 18) if kind == "alarm" else Qt.BrushStyle.NoBrush)
+        if kind == "alarm":
+            painter.drawEllipse(icon_rect)
+        self._paint_time_symbol(painter, icon_rect.adjusted(self._u(3.6), self._u(3.6), -self._u(3.6), -self._u(3.6)), kind, ref["accent"], self._u(2.1))
+        if use_ring:
+            self._paint_plugin_progress_ring(painter, icon_rect.adjusted(-self._u(2.4), -self._u(2.4), self._u(2.4), self._u(2.4)), ref["accent"], progress, status)
+
+        text_left = icon_rect.right() + self._u(8.0)
+        text_rect = QRectF(text_left, rect.top(), max(self._u(20.0), rect.right() - text_left - self._u(12.0)), rect.height())
+        value = self._strip_timer_prefix(str(alert_body or summary or detail)) or self._plugin_compact_value(label, detail, summary, status)
+        if kind == "countdown":
+            self._paint_static_elided_text(painter, text_rect, self._time_reminder_display_text(value, 8), 20, text_color, True, Qt.AlignmentFlag.AlignLeft)
+        else:
+            note_source = self._time_alarm_alert_text_from_parts(alert_body, alert_title)
+            note = self._time_alarm_note_display_text(note_source)
+            if self._time_alarm_note_should_scroll(note_source, text_rect, 20, True, 5):
+                self._paint_alarm_scrolling_text(painter, text_rect, note, 20, text_color, True)
+            else:
+                self._paint_static_elided_text(painter, text_rect, note, 20, text_color, True, Qt.AlignmentFlag.AlignLeft)
+        painter.restore()
+
     def _paint_plugin_alert(self, painter: QPainter, rect: QRectF, key: str):
         plugin_id = key.split(":", 1)[-1] if ":" in key else ""
-        index = self._plugin_index_for_id(plugin_id)
-        if index < 0:
-            return
-        label, detail, summary, color, icon, _plugin_id, status, alert_title, alert_body, _alert_priority, progress = self._plugin_tuple(self.plugin_samples[index])
+        alert = None
+        if hasattr(self, "persistent_plugin"):
+            alert = next((item for item in self._active_plugin_alerts(4, include_expanded=True) if str(item[6] or "").strip().casefold() == str(plugin_id or "").strip().casefold()), None)
+        if alert is not None:
+            index, label, detail, summary, color, icon, alert_plugin_id, status, alert_title, alert_body, _alert_priority = alert
+            progress = 0.0
+            if 0 <= int(index) < len(self.plugin_samples):
+                _label, _detail, _summary, _color, _icon, _source_id, _status, _title, _body, _priority, progress = self._plugin_tuple(self.plugin_samples[int(index)])
+        else:
+            index = self._plugin_index_for_id(plugin_id)
+            if index < 0:
+                return
+            label, detail, summary, color, icon, alert_plugin_id, status, alert_title, alert_body, _alert_priority, progress = self._plugin_tuple(self.plugin_samples[index])
         theme = self._plugin_theme_colors()
-        color = self._pure_plugin_color(color)
-        radius = min(self._u(17.0), rect.height() / 2.0)
+        color = self._pure_plugin_color(self._plugin_display_color(label, color))
+        label_key = str(label or "").strip().upper()
+        is_time = label_key == "TIME" or str(plugin_id or "").strip().casefold() == "time"
+        if is_time:
+            time_kind = self._time_alert_kind_from_plugin_id(str(plugin_id))
+            if time_kind != "alarm":
+                time_kind = self._time_alert_kind_from_plugin_id(str(alert_plugin_id))
+            self._paint_time_plugin_alert(painter, rect, label, detail, summary, color, status, alert_title, alert_body, progress, time_kind)
+            return
+        icon_only = rect.width() <= rect.height() * 1.28
+        radius = rect.height() / 2.0 if icon_only else min(self._u(17.0), rect.height() / 2.0)
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(Qt.PenStyle.NoPen)
+        text_color = theme["text"]
         painter.setBrush(theme["alert"])
         painter.drawRoundedRect(rect, radius, radius)
         painter.setPen(QPen(theme["stroke"], self._u(1.0)))
@@ -4756,23 +8512,30 @@ class IslandStackVisual(QWidget):
         icon_size = self._u(28.0)
         icon_rect = QRectF(rect.left() + self._u(8.0), rect.center().y() - icon_size / 2.0, icon_size, icon_size)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(color.red(), color.green(), color.blue(), int(214 + pulse * 32)))
+        icon_fill = QColor(color.red(), color.green(), color.blue(), int(214 + pulse * 32))
+        painter.setBrush(icon_fill)
         painter.drawRoundedRect(icon_rect, self._u(10.0), self._u(10.0))
         glow_rect = icon_rect.adjusted(-self._u(4.0), -self._u(4.0), self._u(4.0), self._u(4.0))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), int(44 + pulse * 48)), self._u(1.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        glow_color = QColor(color.red(), color.green(), color.blue(), int(44 + pulse * 48))
+        painter.setPen(QPen(glow_color, self._u(1.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawRoundedRect(glow_rect, self._u(12.0), self._u(12.0))
-        self._paint_plugin_progress_ring(painter, icon_rect.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), color, progress, status)
+        if self._plugin_alert_uses_ring(rect):
+            self._paint_plugin_progress_ring(painter, icon_rect.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)), color, progress, status)
         painter.setFont(QFont("Segoe UI Symbol", self._font_size(11), QFont.Weight.Bold))
         painter.setPen(QColor(255, 255, 255, 245))
         painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, icon or label[:1])
+        if icon_only:
+            self._paint_plugin_status_dot(painter, rect, status)
+            painter.restore()
+            return
 
         value = self._plugin_alert_display_value(label, detail, summary, status, alert_title, alert_body)
         text_left = icon_rect.right() + self._u(8.0)
         value_rect = QRectF(text_left, rect.top(), rect.right() - text_left - self._u(12.0), rect.height())
         painter.setFont(self._font(12, QFont.Weight.DemiBold))
-        painter.setPen(theme["text"])
-        self._paint_scrolling_text(painter, value_rect, value, 12, theme["text"], False)
+        painter.setPen(text_color)
+        self._paint_scrolling_text(painter, value_rect, value, 12, text_color, False)
         self._paint_plugin_status_dot(painter, rect, status)
         painter.restore()
 

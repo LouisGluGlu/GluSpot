@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta
 
@@ -94,6 +95,26 @@ class SettingsWindow(QDialog):
     MUSIC_AMBIENCE_STYLES = (
         ("海平面", "sea_level"),
         ("整岛双色", "duotone_full"),
+    )
+
+    MUSIC_ISLAND_STYLES = (
+        ("当前样式", "standard"),
+        ("预留样式 A", "scheme_a"),
+    )
+
+    SIDE_ISLAND_STYLES = (
+        ("当前胶囊", "standard"),
+        ("预留样式 A", "scheme_a"),
+    )
+
+    PLUGIN_ISLAND_STYLES = (
+        ("当前样式", "standard"),
+        ("预留样式 A", "scheme_a"),
+    )
+
+    TIME_ALARM_SIDE_DISPLAYS = (
+        ("显示备注", "note"),
+        ("显示时间", "time"),
     )
 
     MUSIC_PLAYER_MODES = (
@@ -410,11 +431,13 @@ class SettingsWindow(QDialog):
         self.music_checkbox = self._check("音乐岛", bool(getattr(self.island_widget, "music_playing", True)), self._set_music_playing)
         self.music_auto_checkbox = self._check("音乐岛自动识别：无音频时隐藏", bool(getattr(self.island_widget, "music_auto_detect", False)), self._set_music_auto_detect)
         self.plugin_checkbox = self._check("插件岛", bool(getattr(self.island_widget, "persistent_plugin", True)), self._set_persistent_plugin)
+        self.super_topmost_checkbox = self._check("灵动岛超级置顶", bool(getattr(self.island_widget, "super_topmost_enabled", True)), self._set_super_topmost)
         self.finder_checkbox = self._check("Finder 融合", bool(getattr(self.island_widget, "finder_mode", True)), self._set_finder_mode)
         self.message_detection_checkbox = self._check("消息识别总开关", bool(self._setting_value("v2_enable_message_detection", True)), self._set_message_detection)
         c.addWidget(self.music_checkbox)
         c.addWidget(self.music_auto_checkbox)
         c.addWidget(self.plugin_checkbox)
+        c.addWidget(self.super_topmost_checkbox)
         c.addWidget(self.finder_checkbox)
         c.addWidget(self.message_detection_checkbox)
 
@@ -529,6 +552,12 @@ class SettingsWindow(QDialog):
         self.high_quality_font_checkbox.hide()
         self.music_ambience_style = self._combo(list(self.MUSIC_AMBIENCE_STYLES), str(getattr(self.island_widget, "music_ambience_style", "sea_level")), self._set_music_ambience_style)
         self._row(c, "音乐岛光效", self.music_ambience_style)
+        self.music_island_style = self._combo(
+            list(self.MUSIC_ISLAND_STYLES),
+            str(getattr(self.island_widget, "music_island_style", self._setting_value("v2_music_island_style", "standard")) or "standard"),
+            self._set_music_island_style,
+        )
+        self._row(c, "音乐岛样式", self.music_island_style)
         self.music_preview = self._preview_frame(54)
         c.addWidget(self.music_preview)
         self.wave_slider = self._slider_row(c, "氛围光增强", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
@@ -573,6 +602,18 @@ class SettingsWindow(QDialog):
         general = self._card(layout)
         g = general.layout()
         self.plugin_count = self._slider_row(g, "插件数量", 0, 3, max(0, min(3, int(getattr(self.island_widget, "enabled_plugin_count", 3)))), self._set_plugin_count)
+        self.side_island_style = self._combo(
+            list(self.SIDE_ISLAND_STYLES),
+            str(getattr(self.island_widget, "side_island_style", self._setting_value("v2_side_island_style", "standard")) or "standard"),
+            self._set_side_island_style,
+        )
+        self._row(g, "副岛样式", self.side_island_style)
+        self.plugin_island_style = self._combo(
+            list(self.PLUGIN_ISLAND_STYLES),
+            str(getattr(self.island_widget, "plugin_island_style", self._setting_value("v2_plugin_island_style", "standard")) or "standard"),
+            self._set_plugin_island_style,
+        )
+        self._row(g, "插件岛样式", self.plugin_island_style)
         self.seconds_checkbox = self._check("时间显示秒数", bool(getattr(self.island_widget, "show_seconds", True)), self._set_show_seconds)
         g.addWidget(self.seconds_checkbox)
 
@@ -591,10 +632,22 @@ class SettingsWindow(QDialog):
         self.plugin_timezone_text.setPlaceholderText("local 或 UTC+8")
         self.plugin_timezone_text.editingFinished.connect(self._set_plugin_timezone_text)
         self._row(t, "自定义时区", self.plugin_timezone_text)
-        self.plugin_alarm_at = QLineEdit(str(self._setting_value("v2_alarm_at", "") or ""))
-        self.plugin_alarm_at.setPlaceholderText("2026-05-27T08:30:00+08:00")
-        self.plugin_alarm_at.editingFinished.connect(self._set_plugin_alarm_at)
-        self._row(t, "闹钟时间", self.plugin_alarm_at)
+        self.plugin_alarm_summary = QLabel(self._alarm_rows_summary())
+        self.plugin_alarm_summary.setObjectName("Value")
+        self._row(t, "闹钟", self.plugin_alarm_summary)
+        self.time_alarm_side_display = self._combo(
+            list(self.TIME_ALARM_SIDE_DISPLAYS),
+            str(getattr(self.island_widget, "time_alarm_side_display", self._setting_value("v2_time_alarm_side_display", "note")) or "note"),
+            self._set_time_alarm_side_display,
+        )
+        self._row(t, "闹钟副岛", self.time_alarm_side_display)
+        alarm_button_row = QHBoxLayout()
+        alarm_open = QPushButton("打开闹钟设置")
+        alarm_open.setObjectName("Primary")
+        alarm_open.clicked.connect(self._open_time_alarm_editor)
+        alarm_button_row.addWidget(alarm_open)
+        alarm_button_row.addStretch(1)
+        t.addLayout(alarm_button_row)
         quick_row = QHBoxLayout()
         for minutes in (5, 10, 25):
             button = QPushButton(f"{minutes} 分钟")
@@ -780,6 +833,7 @@ class SettingsWindow(QDialog):
             (self.music_checkbox, bool(getattr(self.island_widget, "music_playing", True))),
             (self.music_auto_checkbox, bool(getattr(self.island_widget, "music_auto_detect", False))),
             (self.plugin_checkbox, bool(getattr(self.island_widget, "persistent_plugin", True))),
+            (self.super_topmost_checkbox, bool(getattr(self.island_widget, "super_topmost_enabled", True))),
             (self.finder_checkbox, bool(getattr(self.island_widget, "finder_mode", True))),
             (self.message_detection_checkbox, bool(self._setting_value("v2_enable_message_detection", True))),
             (self.wechat_notification_checkbox, bool(self._setting_value("v2_enable_wechat_notification", True))),
@@ -836,15 +890,18 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.expand_direction, str(getattr(self.island_widget, "expand_direction", "auto")))
         self._set_combo_data(self.animation_speed, float(getattr(self.island_widget, "animation_speed", 1.0)))
         self._set_combo_data(self.music_ambience_style, str(getattr(self.island_widget, "music_ambience_style", "sea_level")))
+        self._set_combo_data(self.music_island_style, str(getattr(self.island_widget, "music_island_style", self._setting_value("v2_music_island_style", "standard")) or "standard"))
+        self._set_combo_data(self.side_island_style, str(getattr(self.island_widget, "side_island_style", self._setting_value("v2_side_island_style", "standard")) or "standard"))
+        self._set_combo_data(self.plugin_island_style, str(getattr(self.island_widget, "plugin_island_style", self._setting_value("v2_plugin_island_style", "standard")) or "standard"))
+        self._set_combo_data(self.time_alarm_side_display, str(getattr(self.island_widget, "time_alarm_side_display", self._setting_value("v2_time_alarm_side_display", "note")) or "note"))
         self._set_combo_data(self.music_player_mode, self._music_player_mode_setting())
         self._set_combo_data(self.lyric_elastic_mode, str(getattr(self.island_widget, "lyric_elastic_mode", "both")))
         self._set_combo_data(self.plugin_timezone, str(self._setting_value("v2_plugin_timezone", "local") or "local"))
         self.plugin_timezone_text.blockSignals(True)
         self.plugin_timezone_text.setText(str(self._setting_value("v2_plugin_timezone", "local") or "local"))
         self.plugin_timezone_text.blockSignals(False)
-        self.plugin_alarm_at.blockSignals(True)
-        self.plugin_alarm_at.setText(str(self._setting_value("v2_alarm_at", "") or ""))
-        self.plugin_alarm_at.blockSignals(False)
+        if hasattr(self, "plugin_alarm_summary"):
+            self.plugin_alarm_summary.setText(self._alarm_rows_summary())
         self.weather_manual_location.blockSignals(True)
         self.weather_manual_location.setText(
             str(self._setting_value("v2_weather_manual_location", self._setting_value("v2_weather_location", "北京")) or "北京")
@@ -1132,6 +1189,14 @@ class SettingsWindow(QDialog):
         self._save("v2_persistent_plugin", enabled)
         self._touch()
 
+    def _set_super_topmost(self, enabled: bool):
+        if hasattr(self.island_widget, "set_super_topmost"):
+            self.island_widget.set_super_topmost(bool(enabled), notify=False)
+        else:
+            self.island_widget.super_topmost_enabled = bool(enabled)
+        self._save("v2_super_topmost", bool(enabled))
+        self._touch()
+
     def _set_finder_mode(self, enabled: bool):
         if hasattr(self.island_widget, "set_finder_mode"):
             self.island_widget.set_finder_mode(enabled, notify=False)
@@ -1273,14 +1338,45 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.plugin_timezone, value)
         self._set_plugin_timezone(value)
 
+    def _alarm_rows_summary(self) -> str:
+        raw = self._setting_value("v2_alarm_rows", "")
+        if not raw:
+            return "暂无闹钟"
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return "闹钟数据待整理"
+        if isinstance(payload, dict):
+            payload = payload.get("alarms") or payload.get("rows") or []
+        if not isinstance(payload, list):
+            return "闹钟数据待整理"
+        rows = [row for row in payload if isinstance(row, dict)]
+        enabled = sum(1 for row in rows if bool(row.get("enabled", True)))
+        if not rows:
+            return "暂无闹钟"
+        return f"{enabled}/{len(rows)} 个已启用"
+
+    def _open_time_alarm_editor(self):
+        widget = self.island_widget
+        widget.persistent_plugin = True
+        widget.enabled_plugin_count = max(1, int(getattr(widget, "enabled_plugin_count", 1) or 1))
+        widget.plugin_panel_open = True
+        widget.plugin_time_mode = "alarm_editor"
+        if hasattr(widget, "_set_plugin_focus"):
+            widget._set_plugin_focus(0, immediate=True)
+        if hasattr(widget, "_set_expanded"):
+            widget._set_expanded(True)
+        else:
+            widget.expanded = True
+        self._save("v2_persistent_plugin", True)
+        self._save("v2_plugin_count", widget.enabled_plugin_count)
+        self._save("v2_expanded", True)
+        if hasattr(self, "plugin_alarm_summary"):
+            self.plugin_alarm_summary.setText(self._alarm_rows_summary())
+        self._touch()
+
     def _set_timer_end_at(self, value: str):
         self._save("v2_timer_end_at", str(value or "").strip())
-
-    def _set_plugin_alarm_at(self):
-        value = str(self.plugin_alarm_at.text() or "").strip()
-        self.plugin_alarm_at.setText(value)
-        self._save("v2_alarm_at", value)
-        self._touch()
 
     def _start_plugin_timer(self, minutes: int):
         minutes = max(1, min(600, int(minutes)))
@@ -1312,6 +1408,24 @@ class SettingsWindow(QDialog):
         self.island_widget._set_plugin_focus(min(self.island_widget.plugin_focus_target, max(0, count - 1)), immediate=True)
         self._touch()
 
+    def _set_side_island_style(self, _index: int = -1):
+        style = str(self.side_island_style.currentData() or "standard")
+        self.island_widget.side_island_style = style
+        self._save("v2_side_island_style", style)
+        self._touch()
+
+    def _set_plugin_island_style(self, _index: int = -1):
+        style = str(self.plugin_island_style.currentData() or "standard")
+        self.island_widget.plugin_island_style = style
+        self._save("v2_plugin_island_style", style)
+        self._touch()
+
+    def _set_time_alarm_side_display(self, _index: int = -1):
+        mode = str(self.time_alarm_side_display.currentData() or "note")
+        self.island_widget.time_alarm_side_display = mode
+        self._save("v2_time_alarm_side_display", mode)
+        self._touch()
+
     def _set_wave_intensity(self, value: int):
         intensity = max(0.0, min(1.0, value / 100.0))
         self.island_widget.ambient_intensity = intensity
@@ -1328,6 +1442,12 @@ class SettingsWindow(QDialog):
             self.island_widget.update()
         self._save("v2_music_ambience_style", style)
         self._update_previews()
+
+    def _set_music_island_style(self, _index: int = -1):
+        style = str(self.music_island_style.currentData() or "standard")
+        self.island_widget.music_island_style = style
+        self._save("v2_music_island_style", style)
+        self._touch()
 
     def _set_music_flow_intensity(self, value: int):
         intensity = max(0.0, min(1.0, value / 100.0))

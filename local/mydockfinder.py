@@ -40,6 +40,8 @@ class FinderGlassMaterial:
     available: bool = False
     texture_image: QImage | None = None
     texture_screen_left: int = 0
+    texture_screen_top: int = 0
+    texture_is_full_screen: bool = False
     finder_opacity: int | None = None
     finder_blur: int | None = None
 
@@ -58,6 +60,8 @@ class FinderBarSample:
     has_border: bool
     texture_image: QImage | None
     texture_screen_left: int
+    texture_screen_top: int
+    texture_is_full_screen: bool
 
 
 def read_finder_material(
@@ -127,6 +131,8 @@ def read_finder_material(
         material.has_border = sampled.has_border
         material.texture_image = sampled.texture_image
         material.texture_screen_left = sampled.texture_screen_left
+        material.texture_screen_top = sampled.texture_screen_top
+        material.texture_is_full_screen = sampled.texture_is_full_screen
         material.available = True
         material.source = f"{material.source}; screen sample"
 
@@ -222,7 +228,9 @@ def sample_live_finder_bar(
         corner_radius=max(13.0, min(25.0, detected_height * 0.48 + edge["border_width"] * 1.7)),
         has_border=edge["has_border"],
         texture_image=texture,
-        texture_screen_left=geo.left() if full_bar_image else 0,
+        texture_screen_left=0,
+        texture_screen_top=0,
+        texture_is_full_screen=False,
     )
 
 
@@ -389,12 +397,12 @@ def _make_material_texture(
         row_color = _average_colors([_average_row(image, source_y) for image in images])
         if not row_color:
             row_color = _blend(bottom_color, mid_color, min(0.18, ratio * 0.18))
-        material_alpha = int(bottom_color.alpha() * (1.0 - ratio * 0.08) + mid_color.alpha() * ratio * 0.08)
         fade = min(1.0, ratio / 0.18)
         fade = fade * fade * (3.0 - 2.0 * fade)
-        alpha = material_alpha
         feather_base = _blend(bottom_color, row_color, fade)
-        clean = QColor(feather_base.red(), feather_base.green(), feather_base.blue(), alpha)
+        # Screen samples are already composited pixels; keep the generated texture opaque
+        # so the fused cradle does not show the wallpaper a second time.
+        clean = QColor(feather_base.red(), feather_base.green(), feather_base.blue(), 255)
         for x in range(width):
             texture.setPixelColor(x, y, clean)
     return texture

@@ -417,11 +417,22 @@ class WindowsMediaProvider:
     def _prefetch_adjacent_lyrics_for_command(self, command: PlaybackCommand) -> bool:
         if command not in {"previous", "next"}:
             return False
+        direction = "previous" if command == "previous" else "next"
+        reader = self._player_position_reader_for(self._music_player_adapter)
+        live_track_reader = getattr(reader, "current_track", None)
+        if callable(live_track_reader):
+            try:
+                live_track = live_track_reader()
+            except Exception:
+                live_track = None
+            live_title = str(getattr(live_track, "title", "") or "").strip()
+            if live_title:
+                live_artist = str(getattr(live_track, "artist", "") or "").strip()
+                if self._prefetch_adjacent_lyrics(live_title, live_artist, reader, direction):
+                    return True
         track = self._last_data.track if self._last_data is not None else None
         if track is None:
             return False
-        direction = "previous" if command == "previous" else "next"
-        reader = self._player_position_reader_for(self._music_player_adapter)
         return self._prefetch_adjacent_lyrics(track.title, track.artist, reader, direction)
 
     def _prefetch_adjacent_lyrics(self, title: str, artist: str, player_position_reader, direction: str = "next") -> bool:
@@ -447,14 +458,21 @@ class WindowsMediaProvider:
         except Exception:
             duration_seconds = 0.0
         try:
-            match = self.lyrics_store.resolve_cached_or_local(title, artist, album_title, duration_seconds)
-            if match.timed_lyrics or match.lyrics:
-                return False
-            if self.lyrics_store.is_lookup_pending(title, artist, album_title, duration_seconds):
-                return False
-            return bool(self.lyrics_store.resolve_in_background(title, artist, album_title, duration_seconds))
+            _match, _pending, started = self._ensure_lyrics_lookup_started(title, artist, album_title, duration_seconds)
+            return bool(started)
         except Exception:
             return False
+
+    def _ensure_lyrics_lookup_started(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0):
+        lyrics_match = self.lyrics_store.resolve_cached_or_local(title, artist, album_title, duration_seconds)
+        lyrics_lookup_pending = self.lyrics_store.is_lookup_pending(title, artist, album_title, duration_seconds)
+        lookup_started = False
+        if not lyrics_match.timed_lyrics and not lyrics_match.lyrics and not lyrics_lookup_pending:
+            lookup_started = bool(self.lyrics_store.resolve_in_background(title, artist, album_title, duration_seconds))
+            lyrics_lookup_pending = lookup_started
+        elif self._dual_line_lyrics_enabled() and lyrics_match.timed_lyrics and not self._has_multiline_lyrics(lyrics_match.timed_lyrics):
+            self.lyrics_store.enrich_in_background(title, artist, album_title, duration_seconds)
+        return lyrics_match, lyrics_lookup_pending, lookup_started
 
     def seek_playback_position(self, position_seconds: float) -> bool:
         if self._loop is None:
@@ -724,14 +742,9 @@ class WindowsMediaProvider:
         same_track_as_previous = previous_track is not None and previous_track.track_id == track_key
         previous_position = max(0.0, float(previous_track.position_seconds)) if previous_track is not None else 0.0
         previous_duration = max(0.0, float(previous_track.duration_seconds)) if previous_track is not None else 0.0
+        lyrics_match, lyrics_lookup_pending, _lyrics_lookup_started = self._ensure_lyrics_lookup_started(title, artist, album_title, duration_seconds)
         album_art = await self._read_thumbnail(properties, track_key)
         album_color, secondary_color = self._colors_from_art(album_art, fallback_track.album_color, fallback_track.secondary_color)
-        lyrics_match = self.lyrics_store.resolve_cached_or_local(title, artist, album_title, duration_seconds)
-        lyrics_lookup_pending = self.lyrics_store.is_lookup_pending(title, artist, album_title, duration_seconds)
-        if not lyrics_match.timed_lyrics and not lyrics_match.lyrics and not lyrics_lookup_pending:
-            lyrics_lookup_pending = self.lyrics_store.resolve_in_background(title, artist, album_title, duration_seconds)
-        elif self._dual_line_lyrics_enabled() and lyrics_match.timed_lyrics and not self._has_multiline_lyrics(lyrics_match.timed_lyrics):
-            self.lyrics_store.enrich_in_background(title, artist, album_title, duration_seconds)
         timed_lyrics = lyrics_match.timed_lyrics
         lyrics_source = lyrics_match.source
         lyrics = lyrics_match.lyrics or tuple(line.text for line in timed_lyrics) or (("查找歌词中",) if lyrics_lookup_pending else ("暂无歌词",))

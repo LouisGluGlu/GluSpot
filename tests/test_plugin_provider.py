@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,15 @@ class PluginProviderTests(unittest.TestCase):
         self.assertIn("倒计时", plugin.summary)
         self.assertEqual(plugin.plugin_id, "time")
         self.assertEqual(plugin.status, "running")
+
+    def test_time_plugin_uses_yellow_accent(self):
+        provider = RealPluginProvider()
+
+        plugin = provider._time_plugin()
+
+        self.assertGreaterEqual(plugin.color.red, 240)
+        self.assertGreaterEqual(plugin.color.green, 180)
+        self.assertLessEqual(plugin.color.blue, 80)
 
     def test_running_timer_exports_alert_copy(self):
         provider = RealPluginProvider(lambda key, default=None: "2099-01-01T00:00:00" if key == "v2_timer_end_at" else default)
@@ -82,6 +92,93 @@ class PluginProviderTests(unittest.TestCase):
         self.assertEqual(plugin.alert_title, "闹钟提醒")
         self.assertIn("12:00", plugin.alert_body)
         self.assertEqual(plugin.alert_priority, 3)
+
+    def test_alarm_rows_due_exports_note_alert_copy(self):
+        now = datetime(2026, 5, 25, 7, 30, 20, tzinfo=timezone.utc)
+        rows = [
+            {
+                "time": "07:30",
+                "label": "早课",
+                "enabled": True,
+                "frequency_unit": "daily",
+            }
+        ]
+        provider = RealPluginProvider(lambda key, default=None: json.dumps(rows, ensure_ascii=False) if key == "v2_alarm_rows" else default)
+        provider._plugin_now = lambda: now
+
+        plugin = provider._time_plugin()
+
+        self.assertEqual(plugin.status, "alarm")
+        self.assertEqual(plugin.summary, "07:30")
+        self.assertEqual(plugin.alert_title, "闹钟提醒")
+        self.assertEqual(plugin.alert_body, "早课")
+        self.assertEqual(plugin.alert_priority, 3)
+        self.assertEqual(plugin.progress, 1.0)
+
+    def test_alarm_rows_ignore_disabled_rows(self):
+        now = datetime(2026, 5, 25, 7, 30, tzinfo=timezone.utc)
+        rows = [{"time": "07:30", "label": "早课", "enabled": False, "frequency_unit": "daily"}]
+        provider = RealPluginProvider(lambda key, default=None: json.dumps(rows, ensure_ascii=False) if key == "v2_alarm_rows" else default)
+        provider._plugin_now = lambda: now
+
+        plugin = provider._time_plugin()
+
+        self.assertNotEqual(plugin.status, "alarm")
+
+    def test_weekly_alarm_rows_fire_only_on_selected_weekday(self):
+        rows = [
+            {
+                "time": "15:22",
+                "label": "周会",
+                "enabled": True,
+                "frequency_unit": "weekly",
+                "weekdays": [2, 4, 6],
+            }
+        ]
+        provider = RealPluginProvider(lambda key, default=None: json.dumps(rows, ensure_ascii=False) if key == "v2_alarm_rows" else default)
+
+        provider._plugin_now = lambda: datetime(2026, 5, 26, 15, 22, tzinfo=timezone.utc)
+        self.assertEqual(provider._time_plugin().status, "alarm")
+
+        provider._plugin_now = lambda: datetime(2026, 5, 27, 15, 22, tzinfo=timezone.utc)
+        self.assertNotEqual(provider._time_plugin().status, "alarm")
+
+    def test_monthly_alarm_rows_respect_month_length(self):
+        rows = [
+            {
+                "time": "8:05",
+                "label": "月报",
+                "enabled": True,
+                "frequency_unit": "monthly",
+                "month_day": 31,
+            }
+        ]
+        provider = RealPluginProvider(lambda key, default=None: json.dumps(rows, ensure_ascii=False) if key == "v2_alarm_rows" else default)
+
+        provider._plugin_now = lambda: datetime(2026, 5, 31, 8, 5, tzinfo=timezone.utc)
+        self.assertEqual(provider._time_plugin().status, "alarm")
+
+        provider._plugin_now = lambda: datetime(2026, 6, 30, 8, 5, tzinfo=timezone.utc)
+        self.assertNotEqual(provider._time_plugin().status, "alarm")
+
+    def test_yearly_feb_29_alarm_rows_use_leap_year_rule(self):
+        rows = [
+            {
+                "time": "9:00",
+                "label": "闰年",
+                "enabled": True,
+                "frequency_unit": "yearly",
+                "year_month": 2,
+                "year_day": 29,
+            }
+        ]
+        provider = RealPluginProvider(lambda key, default=None: json.dumps(rows, ensure_ascii=False) if key == "v2_alarm_rows" else default)
+
+        provider._plugin_now = lambda: datetime(2028, 2, 29, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(provider._time_plugin().status, "alarm")
+
+        provider._plugin_now = lambda: datetime(2027, 2, 28, 9, 0, tzinfo=timezone.utc)
+        self.assertNotEqual(provider._time_plugin().status, "alarm")
 
     def test_timer_remaining_uses_plugin_timezone(self):
         now = datetime(2026, 5, 25, 20, 0, tzinfo=timezone(timedelta(hours=8)))

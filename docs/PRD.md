@@ -41,6 +41,7 @@ The UI should avoid a literal progress bar. Song progress should be expressed th
 - Background color should cover the whole island, not sit as a hard bottom strip.
 - Color transitions must be soft, blurred, and mixed.
 - Avoid sharp light balls, hard color bands, blinking, and obvious layer seams.
+- Finder-style material should replicate the visible upper Finder bar material and use that replicated glass texture to fill the fused background. It must not use a full-screen wallpaper crop as the island/cradle background.
 - Compact and expanded music islands may use separate album-color duotone balance settings. The balance should affect soft color weighting, not create a hard split.
 - Active lyric text should be readable on bright and dark album palettes.
 - Lyric movement should feel continuous even when media position updates arrive in coarse intervals.
@@ -53,8 +54,22 @@ The UI should avoid a literal progress bar. Song progress should be expressed th
 
 - The plugin island should feel like a compact modern dashboard strip rather than a legacy pill cluster.
 - Compact plugin cells should emphasize icon, one-line summary, and a subtle colored accent.
-- Expanded plugin cells should present a clear focus item while keeping non-focused items lightweight.
+- Hovering or single-clicking the plugin strip should keep the 48px strip in place and add a separate downward expanded panel below it.
+- Expanded plugin panels should present a clear focus item while keeping non-focused entries lightweight.
+- Expanded plugin panels should include a contextual action and fold active side reminders into an in-panel reminder rail.
 - Each plugin should have a management surface that can grow into real settings and diagnostics instead of remaining a placeholder.
+- Side reminder islands must arrange multiple active reminders horizontally, including the circular boundary fallback state. They must never stack circular reminders vertically beside the main island.
+- Boundary-aware side reminders should consider the combined footprint of the main island and side reminders before choosing right, left, or circular fallback placement.
+- TIME countdown and alarm reminders must keep separate waiting and due styles. Waiting countdowns and alarms use black side islands with yellow icons/text; due countdowns use a yellow island with black `时间到`; due alarms use a yellow island with the alarm note and white-focus scrolling text.
+- Finder-style mode must not replace the island's own visual shell. Finder material may frame or sample behind the island, but the music island itself must remain opaque and use the normal island rendering path.
+- In Finder-style mode, plugin side reminders keep their own semantic backgrounds while the Finder fused outer material frame expands horizontally to include active side reminders, preventing side islands from floating outside the shared background.
+
+## Boundary And Drag Requirements
+
+- In standalone mode, dragging must clamp the main island to the visible screen on all four edges.
+- When the main island has already shrunk to its minimum boundary width, continued dragging toward that screen edge must not move the island farther out of bounds.
+- Side reminder islands should transition smoothly when switching sides or changing between rectangular and circular states, using the existing spring motion rather than abrupt jumps.
+- Side reminder islands may collapse to circular fallback only at a real boundary pressure state. When the main island is not at a boundary, multiple reminders should remain full rectangular side islands, splitting across both sides if needed.
 
 ## Data Requirements
 
@@ -81,5 +96,5 @@ The UI should avoid a literal progress bar. Song progress should be expressed th
 - Add a structured enhanced-lyrics parser for NetEase YRC/translated lyric pairing before attempting duet-style simultaneous two-line display.
 - Use a temporary compact island height increase for current two-line lyrics rather than spawning a second island by default.
 - Keep previous and next lyric lines visible in expanded mode while preserving the active lyric highlight.
-- Modernize plugin island visuals.
-- Start replacing plugin placeholder windows with useful plugin-specific management panels.
+- Continue tuning plugin island visual polish after the first functional expanded panel.
+- Expand plugin-specific management diagnostics beyond the current time, weather, and agenda controls.
