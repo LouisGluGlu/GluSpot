@@ -137,6 +137,29 @@ class LocalIslandApp:
             "expanded_duotone_balance": raw_values.get("expanded_duotone_balance", self.settings.get("v2_expanded_duotone_balance", defaults["expanded_duotone_balance"])),
         }
 
+    def _location_mode_setting(self) -> str:
+        value = str(self.settings.get("v2_location_mode", "") or "").strip().lower()
+        if value in {"finder", "free", "tasker"}:
+            return value
+        legacy_taskbar = str(self.settings.get("v2_taskbar_fusion_mode", "") or "").strip().lower()
+        if legacy_taskbar in {"compact", "expanded"}:
+            return "tasker"
+        if self.settings.get("v2_finder_mode", None) is True:
+            return "finder"
+        return "free"
+
+    def _enabled_plugins_setting(self) -> list[str]:
+        known = ["time", "weather", "agenda"]
+        raw = self.settings.get("v2_enabled_plugins", None)
+        if isinstance(raw, (list, tuple, set)):
+            enabled = {str(item or "").strip().casefold() for item in raw}
+            return [plugin_id for plugin_id in known if plugin_id in enabled]
+        try:
+            legacy_count = max(0, min(3, int(self.settings.get("v2_plugin_count", 3))))
+        except (TypeError, ValueError):
+            legacy_count = 3
+        return known[:legacy_count]
+
     def _apply_saved_settings(self):
         self.window.set_saved_placement(
             self.settings.get("v2_stack_center_ratio", 0.5),
@@ -149,14 +172,14 @@ class LocalIslandApp:
         self.window.persistent_plugin = bool(self.settings.get("v2_persistent_plugin", True))
         self.window.set_super_topmost(bool(self.settings.get("v2_super_topmost", True)), notify=False)
         self.window.set_manual_finder_available(bool(self.settings.get("v2_manual_mydockfinder", False)), notify=False)
-        finder_setting = self.settings.get("v2_finder_mode", None)
-        self.window.set_finder_mode(
-            bool(self.window.finder_material.available) if finder_setting is None else bool(finder_setting),
-            notify=False,
-        )
+        self.window.set_location_mode(self._location_mode_setting(), notify=False)
+        self.window.set_taskbar_corner_style(str(self.settings.get("v2_taskbar_corner_style", "win11")), notify=False)
+        self.window.set_taskbar_left_handle_color(str(self.settings.get("v2_taskbar_left_handle_color", "#8E8E93")), notify=False)
         self.window.expanded = bool(self.settings.get("v2_expanded", False))
         self.window.show_seconds = bool(self.settings.get("v2_show_seconds", True))
-        self.window.enabled_plugin_count = max(0, min(3, int(self.settings.get("v2_plugin_count", 3))))
+        enabled_plugins = self._enabled_plugins_setting()
+        self.window.enabled_plugin_ids = set(enabled_plugins)
+        self.window.enabled_plugin_count = len(enabled_plugins)
         self.window.side_island_style = str(self.settings.get("v2_side_island_style", "standard") or "standard")
         self.window.plugin_island_style = str(self.settings.get("v2_plugin_island_style", "standard") or "standard")
         self.window.music_island_style = str(self.settings.get("v2_music_island_style", "standard") or "standard")
@@ -203,6 +226,7 @@ class LocalIslandApp:
         self.window.set_lyric_elastic_mode(str(self.settings.get("v2_lyric_elastic_mode", "both")), notify=False)
         self.window.set_lyric_word_spacing(int(self.settings.get("v2_lyric_word_spacing", 100)), notify=False)
         self.window.set_enable_dual_line_lyrics(bool(self.settings.get("v2_enable_dual_line_lyrics", False)), notify=False)
+        self.window.set_dual_line_font_size(int(self.settings.get("v2_dual_line_font_size", 12)), notify=False)
         self.window.set_dual_line_secondary_weight(int(self.settings.get("v2_dual_line_secondary_weight", 72)), notify=False)
         self.window.set_dual_line_secondary_spacing(int(self.settings.get("v2_dual_line_secondary_spacing", 100)), notify=False)
         self.window.set_compact_lyric_show_cover(bool(self.settings.get("v2_compact_lyric_show_cover", True)), notify=False)

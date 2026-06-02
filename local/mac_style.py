@@ -24,6 +24,7 @@ def mac_preferences_theme(dark: bool | None = None) -> dict[str, str]:
             "text": "#f5f5f7",
             "muted": "#b8b8be",
             "secondary": "#8e8e93",
+            "disabled_text": "#6f6f75",
             "control": "#3a3a3c",
             "control_hover": "#48484a",
             "popup_hover": "#3a3a3c",
@@ -44,6 +45,7 @@ def mac_preferences_theme(dark: bool | None = None) -> dict[str, str]:
         "text": "#1d1d1f",
         "muted": "#5f6368",
         "secondary": "#8e8e93",
+        "disabled_text": "#a0a0a5",
         "control": "#ffffff",
         "control_hover": "#f7f7f7",
         "popup_hover": "#dedede",
@@ -67,13 +69,36 @@ def mac_sidebar_icon_colors() -> tuple[str, ...]:
 
 
 class MacTrafficButton(QPushButton):
-    def __init__(self, object_name: str, tooltip: str, parent=None):
+    def __init__(self, object_name: str, tooltip: str, symbol: str, parent=None):
         super().__init__(parent)
+        self._symbol = symbol
+        self._hovered = False
         self.setObjectName(object_name)
         self.setToolTip(tooltip)
         self.setFixedSize(12, 12)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._hovered:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setPen(QColor(70, 50, 46, 210))
+        painter.setFont(QFont("Segoe UI Symbol", 7, QFont.Weight.Bold))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._symbol)
+        painter.end()
 
 
 def mac_traffic_lights(window=None) -> QFrame:
@@ -83,11 +108,12 @@ def mac_traffic_lights(window=None) -> QFrame:
     layout.setContentsMargins(2, 2, 0, 2)
     layout.setSpacing(8)
     controls = (
-        ("MacTrafficRed", "关闭", lambda: window.close() if window is not None else None),
-        ("MacTrafficYellow", "最小化", lambda: window.showMinimized() if window is not None else None),
+        ("MacTrafficRed", "关闭", "×", lambda: window.close() if window is not None else None),
+        ("MacTrafficYellow", "最小化", "−", lambda: window.showMinimized() if window is not None else None),
         (
             "MacTrafficGreen",
             "缩放",
+            "□",
             lambda: (
                 window.showNormal()
                 if window is not None and window.isMaximized()
@@ -97,8 +123,8 @@ def mac_traffic_lights(window=None) -> QFrame:
             ),
         ),
     )
-    for name, tooltip, callback in controls:
-        button = MacTrafficButton(name, tooltip)
+    for name, tooltip, symbol, callback in controls:
+        button = MacTrafficButton(name, tooltip, symbol)
         button.clicked.connect(callback)
         layout.addWidget(button)
     return traffic
@@ -124,10 +150,15 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
     t = theme
     return f"""
         QDialog {{
-            background: {t["content"]};
+            background: transparent;
             color: {t["text"]};
             selection-background-color: {t["accent"]};
             selection-color: #ffffff;
+            border-radius: 14px;
+        }}
+        QFrame#MacWindowShell {{
+            background: {t["window"]};
+            border-radius: 14px;
         }}
         QWidget {{
             color: {t["text"]};
@@ -135,9 +166,13 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         QFrame#MacSidebar {{
             background: {t["sidebar"]};
             border-right: 1px solid {t["sidebar_border"]};
+            border-top-left-radius: 14px;
+            border-bottom-left-radius: 14px;
         }}
         QWidget#MacContentPane {{
             background: {t["content"]};
+            border-top-right-radius: 14px;
+            border-bottom-right-radius: 14px;
         }}
         QWidget#MacSidebarHeader {{
             background: transparent;
@@ -158,7 +193,7 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         QPushButton#MacTrafficYellow {{ background: #ffbd2e; border: 1px solid rgba(0, 0, 0, 28); }}
         QPushButton#MacTrafficGreen {{ background: #28c840; border: 1px solid rgba(0, 0, 0, 28); }}
         QLineEdit#MacSearch {{
-            min-height: 26px;
+            min-height: 24px;
             border: 1px solid {t["search_border"]};
             border-radius: 5px;
             padding: 2px 9px;
@@ -178,7 +213,7 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             font-size: 13px;
         }}
         QListWidget#MacSidebarList::item {{
-            min-height: 26px;
+            min-height: 24px;
             border-radius: 5px;
             padding: 4px 8px;
             margin: 1px 0;
@@ -194,6 +229,7 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         QFrame#MacTitleBar {{
             background: {t["titlebar"]};
             border-bottom: 1px solid {t["card_border"]};
+            border-top-right-radius: 14px;
         }}
         QLabel#MacTitle {{
             font-size: 14px;
@@ -213,7 +249,7 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         QFrame#MacCard {{
             background: {t["card"]};
             border: 1px solid {t["card_border"]};
-            border-radius: 8px;
+            border-radius: 10px;
         }}
         QFrame#MacCard QWidget {{
             background: transparent;
@@ -247,24 +283,34 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             font-size: 12px;
         }}
         QLineEdit, QComboBox, QSpinBox {{
-            min-height: 28px;
+            min-height: 24px;
             border: 1px solid {t["card_border"]};
             border-radius: 5px;
             padding: 3px 8px;
             background: {t["control"]};
             color: {t["text"]};
         }}
+        QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+            color: {t["disabled_text"]};
+            background: {t["control"]};
+            border-color: {t["card_border"]};
+        }}
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{
             border-color: {t["accent"]};
             background: {t["control_hover"]};
         }}
         QPushButton {{
-            min-height: 28px;
+            min-height: 24px;
             border: 1px solid {t["card_border"]};
             border-radius: 5px;
             background: {t["control"]};
             color: {t["text"]};
             padding: 0 13px;
+        }}
+        QPushButton:disabled {{
+            color: {t["disabled_text"]};
+            background: {t["control"]};
+            border-color: {t["card_border"]};
         }}
         QPushButton:hover {{
             background: {t["control_hover"]};
@@ -323,6 +369,9 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             padding: 5px 9px;
             background: transparent;
             color: {t["text"]};
+        }}
+        QComboBox QAbstractItemView::item:disabled {{
+            color: {t["disabled_text"]};
         }}
         QComboBox QAbstractItemView::item:hover {{
             background: {t["control_hover"]};

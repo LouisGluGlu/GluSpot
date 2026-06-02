@@ -15,7 +15,7 @@ class IosSwitch(QWidget):
         self._text = str(text or "")
         self._checked = bool(checked)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(34)
+        self.setMinimumHeight(28)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def isChecked(self) -> bool:
@@ -45,13 +45,13 @@ class IosSwitch(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        label_rect = QRectF(0, 0, max(0, self.width() - 76), self.height())
+        label_rect = QRectF(0, 0, max(0, self.width() - 64), self.height())
         painter.setFont(QFont("Microsoft YaHei UI", 10))
         painter.setPen(QColor(245, 245, 247) if dark else QColor(28, 28, 30))
         painter.drawText(label_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._text)
 
-        switch_w = 58.0
-        switch_h = 30.0
+        switch_w = 48.0
+        switch_h = 24.0
         switch = QRectF(float(self.width()) - switch_w, (float(self.height()) - switch_h) / 2.0, switch_w, switch_h)
         bg = QColor(52, 199, 89) if self._checked else (QColor(72, 72, 76) if dark else QColor(209, 209, 214))
         painter.setPen(Qt.PenStyle.NoPen)

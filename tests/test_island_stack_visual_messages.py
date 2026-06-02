@@ -8,11 +8,11 @@ import unittest
 from unittest.mock import patch
 
 from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, MessageData, TrackData
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtWidgets import QApplication
 
-from local.island_stack_visual import IslandKind, IslandStackVisual, LyricLayout, Message, SpringRect, StackVisual
+from local.island_stack_visual import IslandKind, IslandStackVisual, LyricLayout, Message, SpringRect, StackVisual, TaskbarDropOverlay
 from local.mydockfinder import FinderGlassMaterial
 
 
@@ -241,6 +241,1431 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(snapshot["v2_album_island_secondary_style"], "perspective_dim")
         self.assertEqual(snapshot["v2_album_island_perspective_amount"], 135)
         self.assertFalse(snapshot["v2_compact_lyric_show_cover"])
+
+    def test_location_tasker_settings_are_saved_in_snapshot(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_playing = True
+        visual.music_auto_detect = False
+        visual.persistent_plugin = True
+        visual.finder_mode = False
+        visual.manual_finder_available = False
+        visual.expanded = False
+        visual.show_seconds = True
+        visual.enabled_plugin_count = 3
+        visual.ambient_intensity = 0.0
+        visual.music_ambience_style = "sea_level"
+        visual.music_flow_intensity = 0.74
+        visual.compact_duotone_balance = 50
+        visual.expanded_duotone_balance = 50
+        visual.ui_font_family = "PingFang SC"
+        visual.high_quality_font_rendering = False
+        visual.animation_fps = 60
+        visual.animation_speed = 1.0
+        visual.empty_bar_palette = "aurora"
+        visual.empty_bar_width = 92
+        visual.empty_bar_height = 14
+        visual.empty_bar_y_offset = 0
+        visual.empty_bar_opacity = 100
+        visual.empty_bar_custom_colors = ("#46D6FF", "#73FFA6", "#FF5A86")
+        visual.stack_center_ratio = 0.5
+        visual.saved_window_pos = None
+        visual.stack_direction = 1
+        visual.barrage_y_offset = 0
+        visual.barrage_font_size = 10
+        visual.barrage_speed = 100
+        visual.barrage_use_backdrop = True
+        visual.barrage_show_icon = True
+        visual.auto_expand_bounds = True
+        visual.expand_direction = "auto"
+        visual.lyric_offset_seconds = 0.0
+        visual.lyric_font_size = 18
+        visual.lyric_elastic_strength = 100
+        visual.lyric_elastic_mode = "both"
+        visual.lyric_word_spacing = 100
+        visual.wave_color_fill_enabled = False
+        visual.wave_color_fill_fallback = "#00D7FF"
+        visual.enable_dual_line_lyrics = False
+        visual.dual_line_secondary_weight = 72
+        visual.dual_line_secondary_spacing = 100
+        visual.no_lyrics_text = "暂无歌词"
+        visual.super_topmost_enabled = True
+        visual.lyric_flow_style = "wave_stream"
+        visual.gelv_font_family = "Source Han Serif SC"
+        visual.gelv_primary_font_size = 22
+        visual.gelv_secondary_font_size = 12
+        visual.gelv_dual_line_font_size = 17
+        visual.gelv_initial_word_spacing = 220
+        visual.gelv_word_spacing = 320
+        visual.gelv_size_shift_enabled = True
+        visual.gelv_color_fill_enabled = False
+        visual.gelv_color_fill_fallback = "#00D7FF"
+        visual.no_lyrics_display_mode = "text"
+        visual.album_island_cover_count = 5
+        visual.album_island_cover_size = 30
+        visual.album_island_spacing = 112
+        visual.album_island_secondary_style = "perspective_dim"
+        visual.album_island_perspective_amount = 100
+        visual.compact_lyric_show_cover = True
+        visual.location_mode = "tasker"
+        visual.taskbar_fusion_mode = "compact"
+        visual.taskbar_recognition_threshold = 0.66
+        visual.taskbar_corner_style = "win11"
+        visual.taskbar_plugin_compact_style = "block"
+        visual.taskbar_preview_visible = True
+        visual.dual_line_font_size = 13
+
+        snapshot = visual.settings_snapshot()
+
+        self.assertEqual(snapshot["v2_location_mode"], "tasker")
+        self.assertEqual(snapshot["v2_taskbar_corner_style"], "win11")
+        self.assertEqual(snapshot["v2_dual_line_font_size"], 13)
+        self.assertNotIn("v2_taskbar_recognition_threshold", snapshot)
+        self.assertNotIn("v2_taskbar_plugin_compact_style", snapshot)
+        self.assertNotIn("v2_taskbar_message_compact_style", snapshot)
+        self.assertNotIn("v2_taskbar_fusion_mode", snapshot)
+        self.assertNotIn("v2_taskbar_hint_text", snapshot)
+
+    def test_taskbar_preview_appears_when_free_mode_is_dragged_into_lower_third(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.finder_mode = False
+        visual.manual_finder_available = False
+        visual.location_mode = "free"
+        visual.taskbar_fusion_mode = "off"
+        visual.taskbar_preview_visible = False
+        visual.taskbar_recognition_threshold = 0.66
+
+        self.assertFalse(visual._should_show_taskbar_preview(0.62))
+        self.assertTrue(visual._should_show_taskbar_preview(0.70))
+
+    def test_taskbar_preview_requires_main_rect_contact_not_only_lower_third(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.finder_mode = False
+        visual.manual_finder_available = False
+        visual.location_mode = "free"
+        visual.taskbar_recognition_threshold = 0.66
+        taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        floating = QRectF(760.0, 930.0, 360.0, 38.0)
+        touching = QRectF(760.0, 1026.0, 360.0, 38.0)
+
+        self.assertFalse(visual._should_show_taskbar_preview_for_rect(0.95, floating, taskbar))
+        self.assertTrue(visual._should_show_taskbar_preview_for_rect(0.95, touching, taskbar))
+
+    def test_taskbar_preview_hides_when_finder_or_manual_mydockfinder_is_enabled(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.finder_mode = True
+        visual.manual_finder_available = False
+        visual.location_mode = "finder"
+        visual.taskbar_fusion_mode = "off"
+        visual.taskbar_preview_visible = False
+        visual.taskbar_recognition_threshold = 0.66
+
+        self.assertFalse(visual._should_show_taskbar_preview(0.95))
+        visual.finder_mode = False
+        visual.location_mode = "free"
+        visual.manual_finder_available = True
+
+        self.assertFalse(visual._should_show_taskbar_preview(0.95))
+
+    def test_accepting_taskbar_drop_sets_tasker_location_mode(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.finder_mode = False
+        visual.manual_finder_available = False
+        visual.location_mode = "free"
+        visual.taskbar_fusion_mode = "off"
+        visual.taskbar_preview_visible = True
+        visual.expanded = False
+        visual.plugin_panel_open = False
+        dock_calls: list[str] = []
+        visual._dock_to_taskbar_task_area = lambda: dock_calls.append("dock") or True
+        visual._pulse_stack = lambda: None
+        visual.update = lambda: None
+
+        self.assertTrue(visual._accept_taskbar_preview_drop())
+        self.assertEqual(visual.location_mode, "tasker")
+        self.assertEqual(visual.taskbar_fusion_mode, "compact")
+        self.assertEqual(dock_calls, ["dock"])
+
+    def test_tasker_location_reverts_to_free_when_leaving_taskbar_zone(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.finder_mode = False
+        visual.manual_finder_available = False
+        visual.location_mode = "tasker"
+        visual.taskbar_fusion_mode = "compact"
+        visual.taskbar_preview_visible = True
+        visual._pulse_stack = lambda: None
+        visual.update = lambda: None
+
+        visual._set_taskbar_presence(False, notify=False)
+
+        self.assertEqual(visual.location_mode, "free")
+        self.assertEqual(visual.taskbar_fusion_mode, "off")
+        self.assertFalse(visual.taskbar_preview_visible)
+
+    def test_taskbar_drop_zone_rect_uses_taskbar_bounds(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+
+        taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        zone = visual._taskbar_drop_zone_rect(taskbar, desired_width=360.0)
+
+        self.assertGreaterEqual(zone.top(), taskbar.top())
+        self.assertLessEqual(zone.bottom(), taskbar.bottom())
+        self.assertAlmostEqual(zone.center().x(), taskbar.center().x(), delta=0.1)
+
+    def test_taskbar_drop_zone_prefers_detected_task_area(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        screen = object()
+        taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        task_area = QRectF(180.0, 1040.0, 1320.0, 40.0)
+        visual._taskbar_rect_for_screen = lambda _screen: taskbar
+        visual._taskbar_task_area_rect_for_screen = lambda _screen, _taskbar: task_area
+
+        zones = visual._taskbar_drop_zones_for_screen(screen, desired_width=360.0)
+
+        self.assertEqual(len(zones), 2)
+        self.assertTrue(all(zone.left() >= task_area.left() and zone.right() <= task_area.right() for zone in zones))
+        self.assertLess(zones[0].center().x(), task_area.center().x())
+        self.assertGreater(zones[1].center().x(), task_area.center().x())
+
+    def test_taskbar_drop_zones_use_left_and_right_available_slots(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        screen = object()
+        taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_rect_for_screen = lambda _screen: taskbar
+        visual._taskbar_task_area_rect_for_screen = lambda _screen, _taskbar: taskbar
+        visual._taskbar_occupied_rects_for_screen = lambda _screen, _taskbar: [
+            QRectF(0.0, 1040.0, 170.0, 40.0),
+            QRectF(640.0, 1040.0, 710.0, 40.0),
+            QRectF(1810.0, 1040.0, 110.0, 40.0),
+        ]
+
+        zones = visual._taskbar_drop_zones_for_screen(screen, desired_width=360.0)
+
+        self.assertEqual(len(zones), 2)
+        self.assertLess(zones[0].center().x(), taskbar.center().x())
+        self.assertGreater(zones[1].center().x(), taskbar.center().x())
+
+    def test_taskbar_drop_zones_split_empty_taskbar_into_left_and_right_not_center(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        screen = object()
+        taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_rect_for_screen = lambda _screen: taskbar
+        visual._taskbar_task_area_rect_for_screen = lambda _screen, _taskbar: taskbar
+        visual._taskbar_occupied_rects_for_screen = lambda _screen, _taskbar: []
+
+        zones = visual._taskbar_drop_zones_for_screen(screen, desired_width=360.0)
+
+        self.assertEqual(len(zones), 2)
+        self.assertLess(zones[0].center().x(), taskbar.center().x() - 120.0)
+        self.assertGreater(zones[1].center().x(), taskbar.center().x() + 120.0)
+        self.assertFalse(any(abs(zone.center().x() - taskbar.center().x()) < 80.0 for zone in zones))
+
+    def test_taskbar_drop_zone_selection_uses_drag_position(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        zones = [QRectF(190.0, 1044.0, 360.0, 32.0), QRectF(1460.0, 1044.0, 320.0, 32.0)]
+
+        selected = visual._select_taskbar_drop_zone(zones, QPoint(1580, 1060))
+
+        self.assertEqual(selected, zones[1])
+
+    def test_tasker_track_drag_updates_position_ratio_within_taskbar_bounds(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        track = QRectF(180.0, 1040.0, 1500.0, 40.0)
+
+        left_ratio = visual._taskbar_position_ratio_for_center(track, 280.0, 100.0)
+        right_ratio = visual._taskbar_position_ratio_for_center(track, 280.0, 2000.0)
+        middle_ratio = visual._taskbar_position_ratio_for_center(track, 280.0, 930.0)
+
+        self.assertEqual(left_ratio, 0.0)
+        self.assertEqual(right_ratio, 1.0)
+        self.assertAlmostEqual(middle_ratio, 0.5, delta=0.02)
+
+    def test_tasker_left_resize_handle_is_small_rounded_vertical_rail(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        main_rect = QRectF(520.0, 1044.0, 360.0, 34.0)
+
+        handle = visual._taskbar_left_handle_rect(main_rect)
+
+        self.assertLess(handle.width(), handle.height())
+        self.assertLessEqual(handle.right(), main_rect.left() - 3.0)
+        self.assertLessEqual(handle.width(), 4.0)
+        self.assertGreater(handle.height(), main_rect.height() * 0.45)
+
+    def test_tasker_left_resize_handle_is_visible_only_on_tasker_hover_or_drag(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.hovered_key = ""
+        visual.drag_press_key = ""
+        visual.dragging = False
+
+        self.assertFalse(visual._taskbar_left_handle_visible())
+
+        visual.hovered_key = "music"
+        self.assertTrue(visual._taskbar_left_handle_visible())
+
+        visual.hovered_key = ""
+        visual.dragging = True
+        visual.drag_press_key = "taskbar:left-handle"
+        self.assertTrue(visual._taskbar_left_handle_visible())
+
+    def test_tasker_window_position_clamps_to_bottom_screen_boundary(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        screen_geo = QRect(0, 0, 1920, 1080)
+        new_pos = QPoint(500, 1100)
+
+        clamped = visual._clamp_taskbar_window_pos(new_pos, main_top=940.0, main_w=420.0, main_h=176.0, screen_geo=screen_geo)
+
+        self.assertLessEqual(clamped.y() + 940.0 + 176.0, screen_geo.bottom() - 6.0 + 1.0)
+
+    def test_tasker_compact_music_width_is_stable_across_content_width_changes(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_manual_width = 0.0
+        visual.taskbar_selected_drop_zone = QRectF()
+        visual._u = lambda value: float(value)
+
+        narrow = visual._taskbar_compact_music_size(300.0, 44.0)
+        wide = visual._taskbar_compact_music_size(760.0, 44.0)
+
+        self.assertEqual(narrow[0], wide[0])
+        self.assertGreaterEqual(narrow[0], 360.0)
+
+    def test_tasker_follow_position_preserves_intended_width_when_track_detection_is_narrow(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_position_ratio = 0.5
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 260
+        visual.mapToGlobal = lambda _point: QPoint(960, 1040)
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(910.0, 1040.0, 96.0, 40.0)
+        visual._update_taskbar_material_for_screen = lambda *_args: None
+        visual._taskbar_stack_direction_for_rect = lambda *_args: -1
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 760.0
+        visual._main_size_for_kind = lambda _kind, _stack_w: (420.0, 34.0)
+        visual._main_top_for_direction = lambda *_args: 10.0
+        visual.move = lambda _pos: None
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            self.assertTrue(visual._refresh_taskbar_follow_position())
+
+        self.assertAlmostEqual(visual.taskbar_selected_drop_zone.width(), 420.0, delta=0.1)
+
+    def test_set_location_mode_tasker_refreshes_position_immediately(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.manual_finder_available = False
+        visual.location_mode = "free"
+        visual.finder_mode = False
+        visual.attach_to_real_finder = False
+        visual.taskbar_preview_visible = False
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.scene_transition_mode = ""
+        visual.group_frame_mask_path = None
+        visual._reset_location_runtime_state = lambda **_kwargs: None
+        visual._begin_surface_transition = lambda _reason="": False
+        visual._sync_taskbar_drop_overlay = lambda: None
+        visual.clearMask = lambda: None
+        visual.update = lambda: None
+        visual._notify_settings_changed = lambda: None
+        refresh_calls: list[str] = []
+        visual._refresh_taskbar_follow_position = lambda: refresh_calls.append("refresh") or True
+
+        visual.set_location_mode("tasker", notify=False)
+
+        self.assertEqual(visual.location_mode, "tasker")
+        self.assertEqual(refresh_calls, ["refresh"])
+
+    def test_tasker_follow_recovers_from_stale_cover_only_selected_zone(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.expanded = False
+        visual.taskbar_position_ratio = 0.5
+        visual.taskbar_manual_width = 0.0
+        visual.taskbar_selected_drop_zone = QRectF(930.0, 1044.0, 42.0, 32.0)
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 650
+        visual.mapToGlobal = lambda _point: QPoint(960, 1080)
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(180.0, 1040.0, 1500.0, 40.0)
+        visual._update_taskbar_material_for_screen = lambda *_args: None
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 760.0
+        moves: list[QPoint] = []
+        visual.move = lambda pos: moves.append(QPoint(pos))
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            self.assertTrue(visual._refresh_taskbar_follow_position())
+
+        self.assertGreaterEqual(visual.taskbar_selected_drop_zone.width(), 360.0)
+        self.assertTrue(moves)
+        main_global = QRectF(
+            moves[-1].x() + visual.width() / 2.0 - visual.taskbar_selected_drop_zone.width() / 2.0,
+            visual.taskbar_selected_drop_zone.top(),
+            visual.taskbar_selected_drop_zone.width(),
+            visual.taskbar_selected_drop_zone.height(),
+        )
+        self.assertGreaterEqual(main_global.left(), 0.0)
+        self.assertLessEqual(main_global.right(), 1920.0)
+        self.assertLessEqual(main_global.bottom(), 1080.0)
+
+    def test_tasker_follow_skips_redundant_window_move(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.expanded = True
+        visual.taskbar_position_ratio = 0.5
+        visual.taskbar_manual_width = 0.0
+        visual.taskbar_selected_drop_zone = QRectF()
+        visual.saved_window_pos = None
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 650
+        visual.mapToGlobal = lambda _point: QPoint(960, 1080)
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(180.0, 1040.0, 1500.0, 40.0)
+        visual._update_taskbar_material_for_screen = lambda *_args: None
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 760.0
+        moves: list[QPoint] = []
+        visual.move = lambda pos: moves.append(QPoint(pos))
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            self.assertTrue(visual._refresh_taskbar_follow_position())
+            self.assertTrue(visual._refresh_taskbar_follow_position())
+
+        self.assertEqual(len(moves), 1)
+
+    def test_tasker_tick_skips_recent_follow_refresh(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.last_tick_at = 100.0
+        visual.animation_speed = 1.0
+        visual.location_mode = "tasker"
+        visual.drag_candidate = False
+        visual.taskbar_follow_last_at = 100.0
+        visual.scene_suppressed = False
+        visual.pointer_pos = QPointF(-1.0, -1.0)
+        visual.barrage_clock = 0.0
+        visual.super_topmost_enabled = False
+        visual.media_is_playing = False
+        visual.timed_lyrics = []
+        visual.lyric_changed_at = 100.0
+        visual.lyrics = ["line"]
+        visual.lyric_index = 0
+        visual.prev_lyric_index = 0
+        visual.hovered_key = ""
+        visual.hover_armed_key = ""
+        visual.hover_started_at = 0.0
+        visual.expanded = False
+        visual.plugin_panel_open = False
+        visual.left_stack_at = 0.0
+        visual.scroll_phase = 0.0
+        visual.ambient_phase = 0.0
+        visual._refresh_media_data = lambda _now: None
+        visual._update_scene_state = lambda _now: None
+        visual._point_in_barrage = lambda _point: False
+        visual._maybe_trigger_alarm_row_long_press = lambda _now: False
+        visual._update_wave_values = lambda: None
+        visual.update = lambda: None
+        refresh_calls: list[str] = []
+        visual._refresh_taskbar_follow_position = lambda: refresh_calls.append("refresh") or True
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=100.02):
+            visual._tick()
+
+        self.assertEqual(refresh_calls, [])
+
+    def test_tasker_follow_skips_stable_material_refresh(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.expanded = True
+        visual.taskbar_position_ratio = 0.5
+        visual.taskbar_manual_width = 0.0
+        visual.taskbar_selected_drop_zone = QRectF()
+        visual.saved_window_pos = None
+        visual.taskbar_follow_last_key = ""
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 650
+        visual.mapToGlobal = lambda _point: QPoint(960, 1080)
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(180.0, 1040.0, 1500.0, 40.0)
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 760.0
+        visual.move = lambda _pos: None
+        material_calls: list[str] = []
+        visual._update_taskbar_material_for_screen = lambda *_args: material_calls.append("material")
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            with patch("local.island_stack_visual.time.monotonic", return_value=200.0):
+                self.assertTrue(visual._refresh_taskbar_follow_position())
+            with patch("local.island_stack_visual.time.monotonic", return_value=200.05):
+                self.assertTrue(visual._refresh_taskbar_follow_position())
+
+        self.assertEqual(material_calls, ["material"])
+
+    def test_taskbar_material_exclusion_uses_tasker_slot_without_rebuilding_layout(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_selected_drop_zone = QRectF(500.0, 1042.0, 420.0, 34.0)
+        visual.motions = {}
+        visual._u = lambda value: float(value)
+        visual.mapToGlobal = lambda _point: QPoint(0, 0)
+        rebuild_calls: list[str] = []
+
+        def rebuild_layout():
+            rebuild_calls.append("layout")
+            return QRectF(500.0, 1042.0, 420.0, 34.0)
+
+        visual._current_main_global_rect = rebuild_layout
+
+        rects = visual._taskbar_material_exclusion_rects()
+
+        self.assertEqual(rebuild_calls, [])
+        self.assertTrue(rects)
+        self.assertTrue(any(rect.contains(visual.taskbar_selected_drop_zone.center()) for rect in rects))
+
+    def test_tasker_vertical_direction_uses_taskbar_position_not_standalone_auto(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.expanded = True
+        visual.persistent_plugin = False
+        visual.messages = []
+        visual.stack_direction = 1
+        visual.auto_expand_bounds = True
+        visual.expand_direction = "auto"
+        visual.last_taskbar_rect = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._u = lambda value: float(value)
+        visual.mapToGlobal = lambda _point: QPoint(0, 0)
+
+        direction = visual._vertical_stack_direction(IslandKind.MUSIC, 176.0, QRect(0, 0, 1920, 1080))
+
+        self.assertEqual(direction, -1)
+
+    def test_tasker_window_move_treats_one_pixel_jitter_as_same_position(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.saved_window_pos = (100, 200)
+        moves: list[QPoint] = []
+        visual.move = lambda pos: moves.append(QPoint(pos))
+
+        moved = visual._move_taskbar_window_if_needed(QPoint(101, 199))
+
+        self.assertFalse(moved)
+        self.assertEqual(moves, [])
+
+    def test_tasker_scene_suppression_ignores_fullscreen_foreground(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.scene_checked_at = -10.0
+        visual.scene_suppressed = False
+        visual.scene_transition_mode = ""
+        visual.hovered_key = "music"
+        visual.hover_armed_key = "music"
+        visual.left_stack_at = 1.0
+        visual.group_frame_mask_path = None
+        visual._detect_scene_suppression = lambda: (True, "fullscreen")
+        visual._set_input_passthrough = lambda _enabled: (_ for _ in ()).throw(AssertionError("Tasker should not passthrough on fullscreen"))
+        visual.clearMask = lambda: None
+        visual.update = lambda: None
+
+        visual._update_scene_state(1.0)
+
+        self.assertFalse(visual.scene_suppressed)
+        self.assertEqual(visual.scene_reason, "")
+
+    def test_tasker_follow_refresh_repositions_when_taskbar_moves(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_position_ratio = 0.8
+        visual.taskbar_manual_width = 0.0
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 260
+        visual.mapToGlobal = lambda _point: QPoint(840, 1040)
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1000.0, 1920.0, 80.0)
+        visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(180.0, 1000.0, 1500.0, 80.0)
+        visual._update_taskbar_material_for_screen = lambda *_args: None
+        visual._taskbar_stack_direction_for_rect = lambda *_args: -1
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 420.0
+        visual._main_size_for_kind = lambda _kind, _stack_w: (300.0, 62.0)
+        visual._main_top_for_direction = lambda *_args: 10.0
+        moves: list[QPoint] = []
+        visual.move = lambda pos: moves.append(QPoint(pos))
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            self.assertTrue(visual._refresh_taskbar_follow_position())
+
+        self.assertTrue(moves)
+        self.assertLessEqual(moves[-1].y() + 10.0 + 62.0, 1080.0)
+
+    def test_taskbar_expanded_material_tokens_follow_sampled_taskbar_color(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.taskbar_material_color = QColor(238, 240, 244)
+        visual.taskbar_material_is_light = True
+
+        tokens = visual._taskbar_material_frame_tokens()
+
+        self.assertGreater(tokens["fill_top"].red(), 210)
+        self.assertLess(tokens["stroke"].alpha(), 120)
+
+    def test_taskbar_message_block_uses_app_color_without_sender_initial(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        msg = Message("微信", "张三", "hello", QColor(75, 210, 110), QColor(75, 210, 110))
+
+        model = visual._taskbar_message_block_model(msg, QRectF(0.0, 0.0, 34.0, 34.0))
+
+        self.assertEqual(model["fill"], QColor(75, 210, 110))
+        self.assertNotEqual(model["glyph"], "张")
+        self.assertNotEqual(model["outer"], QColor(0, 0, 0, 238))
+
+    def test_tasker_compact_album_island_uses_current_cover_without_side_slots(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.album_island_cover_count = 5
+        visual.album_island_cover_size = 30
+        visual.album_island_spacing = 112
+        visual.album_island_secondary_style = "perspective_dim"
+        visual.album_island_perspective_amount = 100
+        visual.album_island_transition_started_at = 1.0
+        visual.album_island_transition_direction = 1
+        visual._u = lambda value: float(value)
+        art = QImage(16, 16, QImage.Format.Format_ARGB32)
+        art.fill(QColor(120, 80, 50))
+        previous = QImage(16, 16, QImage.Format.Format_ARGB32)
+        previous.fill(QColor(50, 90, 140))
+        next_art = QImage(16, 16, QImage.Format.Format_ARGB32)
+        next_art.fill(QColor(180, 90, 120))
+        visual.album_art = art
+        visual.album_history = [{"track_id": "old", "album_art": previous}]
+        visual.album_queue = [{"track_id": "next", "album_art": next_art}]
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=1.08):
+            slots = visual._album_island_slots(QRectF(0.0, 0.0, 260.0, 34.0), reserve_text=True)
+
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(int(slots[0]["side"]), 0)
+
+    def test_taskbar_message_rails_cap_at_three_and_stay_inside_main_shell(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_message_compact_style = "strip"
+        visual.music_playing = False
+        visual.persistent_plugin = False
+        visual.messages = [
+            Message("微信", str(index), "hello", QColor(75, 210, 110), QColor(75, 210, 110))
+            for index in range(5)
+        ]
+        visual._u = lambda value: float(value)
+        main_rect = QRectF(500.0, 1044.0, 280.0, 34.0)
+
+        rail = visual._taskbar_message_rect(main_rect, 0, 3, 1)
+        second = visual._taskbar_message_rect(main_rect, 1, 3, 1)
+
+        self.assertEqual(visual._folded_message_limit(IslandKind.MESSAGE), 3)
+        self.assertLessEqual(rail.right(), main_rect.right())
+        self.assertGreaterEqual(rail.left(), main_rect.left())
+        self.assertAlmostEqual(main_rect.right() - rail.right(), 3.0, delta=0.1)
+        self.assertGreaterEqual(second.left(), main_rect.left())
+        self.assertLessEqual(second.right(), main_rect.right())
+
+    def test_taskbar_material_sampling_skips_own_island_region(self):
+        class FakeScreen:
+            def __init__(self, exclusion: QRectF):
+                self.exclusion = QRectF(exclusion)
+                self.samples: list[QRectF] = []
+
+            def grabWindow(self, _win_id, x, y, width, height):
+                sample = QRectF(float(x), float(y), float(width), float(height))
+                self.samples.append(sample)
+                image = QImage(max(1, int(width)), max(1, int(height)), QImage.Format.Format_ARGB32)
+                center = sample.center()
+                if self.exclusion.contains(center):
+                    image.fill(QColor(75, 210, 110))
+                else:
+                    image.fill(QColor(36, 38, 42))
+                return QPixmap.fromImage(image)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        exclusion = QRectF(920.0, 1000.0, 160.0, 80.0)
+        visual._taskbar_material_exclusion_rects = lambda: [QRectF(exclusion)]
+        screen = FakeScreen(exclusion)
+
+        color = visual._sample_taskbar_material_color(screen, QRectF(0.0, 1000.0, 2000.0, 80.0))
+
+        self.assertEqual(color, QColor(36, 38, 42))
+        self.assertTrue(screen.samples)
+        self.assertFalse(exclusion.contains(screen.samples[-1].center()))
+
+    def test_taskbar_material_sampling_is_throttled_between_animation_ticks(self):
+        class FakeScreen:
+            def __init__(self):
+                self.calls = 0
+
+            def grabWindow(self, _win_id, _x, _y, width, height):
+                self.calls += 1
+                image = QImage(max(1, int(width)), max(1, int(height)), QImage.Format.Format_ARGB32)
+                image.fill(QColor(36, 38, 42))
+                return QPixmap.fromImage(image)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual.taskbar_material_color = QColor()
+        visual.taskbar_material_is_light = False
+        visual.taskbar_material_sampled_at = 0.0
+        visual.taskbar_material_sample_key = ""
+        visual._taskbar_material_exclusion_rects = lambda: []
+        screen = FakeScreen()
+        taskbar = QRectF(0.0, 1000.0, 2000.0, 80.0)
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=100.0):
+            visual._update_taskbar_material_for_screen(screen, taskbar)
+        first_refresh_calls = screen.calls
+        with patch("local.island_stack_visual.time.monotonic", return_value=100.05):
+            visual._update_taskbar_material_for_screen(screen, taskbar)
+
+        self.assertGreater(first_refresh_calls, 0)
+        self.assertEqual(screen.calls, first_refresh_calls)
+
+    def test_taskbar_expanded_frame_targets_visual_rects_not_child_spring_rects(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.finder_mode = False
+        visual.location_mode = "tasker"
+        visual.taskbar_corner_style = "win11"
+        visual.taskbar_material_color = QColor(36, 38, 42)
+        visual.taskbar_material_is_light = False
+        visual.group_frame_motion = None
+        visual.group_frame_mask_path = None
+        visual.finder_hover_rect = QRectF()
+        visual._u = lambda value: float(value)
+        image = QImage(900, 260, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        target_rect = QRectF(320.0, 120.0, 420.0, 52.0)
+        old_motion = SpringRect(QRectF(40.0, 20.0, 18.0, 18.0))
+        old_motion.opacity = 1.0
+        items = [(StackVisual("music", IslandKind.MUSIC, target_rect, False, None, 10), old_motion)]
+
+        visual._paint_taskbar_group_frame(painter, items, 1.0)
+        painter.end()
+
+        self.assertTrue(visual.finder_hover_rect.contains(target_rect.center()))
+
+    def test_taskbar_expanded_frame_ignores_transient_plugin_alerts(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.finder_mode = False
+        visual.location_mode = "tasker"
+        visual.taskbar_corner_style = "win11"
+        visual.taskbar_material_color = QColor(36, 38, 42)
+        visual.taskbar_material_is_light = False
+        visual.group_frame_motion = None
+        visual.group_frame_mask_path = None
+        visual.finder_hover_rect = QRectF()
+        visual._u = lambda value: float(value)
+        image = QImage(1200, 320, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        main_rect = QRectF(420.0, 140.0, 360.0, 48.0)
+        alert_rect = QRectF(980.0, 140.0, 120.0, 42.0)
+        main_motion = SpringRect(main_rect)
+        main_motion.opacity = 1.0
+        alert_motion = SpringRect(alert_rect)
+        alert_motion.opacity = 1.0
+        items = [
+            (StackVisual("music", IslandKind.MUSIC, main_rect, False, None, 10), main_motion),
+            (StackVisual("plugin-alert:time", IslandKind.PLUGIN_ALERT, alert_rect, False, None, 8), alert_motion),
+        ]
+
+        visual._paint_taskbar_group_frame(painter, items, 1.0)
+        painter.end()
+
+        self.assertTrue(visual.finder_hover_rect.contains(main_rect.center()))
+        self.assertLess(visual.finder_hover_rect.right(), alert_rect.left())
+
+    def test_tasker_compact_drops_stale_side_motion_without_exit_ghost(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+
+        drop = getattr(visual, "_taskbar_should_drop_stale_motion_key", lambda _key: False)
+
+        self.assertTrue(drop("plugin-alert:time"))
+        self.assertTrue(drop("taskbar-overlay:time"))
+        self.assertTrue(drop("message-dot:wechat"))
+        self.assertFalse(drop("music"))
+
+    def test_tasker_motion_uses_finder_like_stable_response(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.stack_bounce_until = 0.0
+
+        params = getattr(visual, "_visual_motion_params", lambda _now: (0.34, 0.76))(10.0)
+
+        self.assertLessEqual(params[0], 0.22)
+        self.assertGreaterEqual(params[1], 0.88)
+
+    def test_group_frame_target_reuses_tiny_tasker_jitter(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        previous = QRectF(100.0, 50.0, 320.0, 46.0)
+        visual.group_frame_target_rect = QRectF(previous)
+        visual.group_frame_target_mode_key = "tasker"
+
+        coalesce = getattr(visual, "_coalesced_group_frame_target", lambda target, _mode: QRectF(target))
+        tiny = coalesce(QRectF(101.0, 50.8, 319.4, 46.6), "tasker")
+        large = coalesce(QRectF(116.0, 52.0, 320.0, 46.0), "tasker")
+
+        self.assertEqual(tiny, previous)
+        self.assertNotEqual(large, previous)
+
+    def test_album_history_entry_downscales_large_art_for_memory(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.media_track_id = "track-1"
+        visual.track_title = "Song"
+        visual.artist = "Artist"
+        art = QImage(1200, 900, QImage.Format.Format_ARGB32)
+        art.fill(QColor(80, 120, 180))
+        visual.album_art = art
+        visual.listened_seconds_total = 0.0
+
+        entry = visual._current_album_history_entry()
+        image = entry["album_art"]
+
+        self.assertLessEqual(max(image.width(), image.height()), 256)
+
+    def test_scaled_album_art_cache_keeps_only_small_recent_working_set(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._scaled_album_art_cache = {}
+        art = QImage(320, 320, QImage.Format.Format_ARGB32)
+        art.fill(QColor(80, 120, 180))
+        image = QImage(260, 80, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+
+        for index in range(7):
+            visual._paint_cover(
+                painter,
+                QRectF(8.0 + index, 8.0, 42.0 + index, 42.0),
+                6.0,
+                art,
+                cache_key=f"stress-{index}",
+            )
+        painter.end()
+
+        self.assertLessEqual(len(visual._scaled_album_art_cache), 4)
+
+    def test_lyric_layout_cache_keeps_small_recent_working_set(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._lyric_layout_cache = {}
+        visual.ui_font_family = "PingFang SC"
+        visual.high_quality_font_rendering = False
+        visual.font_shrink_scale = 1.0
+        visual.lyric_elastic_strength = 100
+        visual.lyric_word_spacing = 100
+
+        for index in range(72):
+            visual._lyric_layout(f"line {index}", 16, True)
+
+        self.assertLessEqual(len(visual._lyric_layout_cache), 48)
+
+    def test_taskbar_group_frame_resets_when_target_jumps_from_stale_mode(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.finder_mode = False
+        visual.location_mode = "tasker"
+        visual.taskbar_corner_style = "win11"
+        visual.taskbar_material_color = QColor(36, 38, 42)
+        visual.taskbar_material_is_light = False
+        visual.group_frame_motion = SpringRect(QRectF(0.0, 0.0, 1150.0, 220.0))
+        visual.group_frame_motion.opacity = 1.0
+        visual.group_frame_mode_key = "finder"
+        visual.group_frame_mask_path = None
+        visual.finder_hover_rect = QRectF()
+        visual._u = lambda value: float(value)
+        image = QImage(900, 260, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        main_rect = QRectF(360.0, 118.0, 300.0, 44.0)
+        motion = SpringRect(main_rect)
+        motion.opacity = 1.0
+
+        visual._paint_taskbar_group_frame(painter, [(StackVisual("music", IslandKind.MUSIC, main_rect, False, None, 10), motion)], 1.0)
+        painter.end()
+
+        self.assertLess(visual.finder_hover_rect.width(), main_rect.width() + 60.0)
+        self.assertAlmostEqual(visual.finder_hover_rect.center().x(), main_rect.center().x(), delta=20.0)
+
+    def test_finder_frame_targets_visual_rects_not_child_spring_rects(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.finder_mode = True
+        visual.location_mode = "finder"
+        visual.group_frame_motion = None
+        visual.group_frame_mask_path = None
+        visual.finder_hover_rect = QRectF()
+        visual.stack_direction = 1
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 900
+        visual.finder_material = FinderGlassMaterial(
+            top_color=QColor(31, 32, 36, 235),
+            mid_color=QColor(37, 38, 42, 235),
+            bottom_color=QColor(44, 45, 50, 238),
+            highlight_alpha=88,
+            border_alpha=100,
+            shadow_alpha=50,
+            bar_height=44.0,
+            blur_value=11,
+            source="test",
+            corner_radius=12.0,
+            available=True,
+        )
+        visual._has_current_two_line_lyric = lambda: False
+        image = QImage(900, 360, QImage.Format.Format_ARGB32)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        target_rect = QRectF(340.0, 118.0, 360.0, 64.0)
+        old_motion = SpringRect(QRectF(32.0, 18.0, 20.0, 18.0))
+        old_motion.opacity = 1.0
+        items = [(StackVisual("music", IslandKind.MUSIC, target_rect, False, None, 10), old_motion)]
+
+        visual._paint_myfinder_group_frame(painter, items, 1.0)
+        painter.end()
+
+        self.assertGreater(visual.finder_hover_rect.width(), target_rect.width())
+        self.assertAlmostEqual(visual.finder_hover_rect.center().x(), target_rect.center().x(), delta=28.0)
+
+    def test_manual_finder_toggle_resets_stale_tasker_frame_and_transition(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.attach_to_real_finder = False
+        visual.manual_finder_available = False
+        visual.taskbar_fusion_mode = "compact"
+        visual.taskbar_preview_visible = True
+        visual.taskbar_selected_drop_zone = QRectF(100.0, 100.0, 300.0, 40.0)
+        visual.taskbar_drop_zones = [QRectF(100.0, 100.0, 300.0, 40.0)]
+        visual.group_frame_motion = SpringRect(QRectF(0.0, 0.0, 1100.0, 240.0))
+        visual.group_frame_mask_path = object()
+        visual.group_frame_mode_key = "tasker"
+        visual.finder_hover_rect = QRectF(20.0, 20.0, 400.0, 60.0)
+        visual.interaction_mask_active = True
+        visual.last_mask_rect = QRectF(20.0, 20.0, 400.0, 60.0)
+        visual.surface_transition_pixmap = QPixmap(8, 8)
+        visual.surface_transition_global_rect = QRectF(10.0, 10.0, 8.0, 8.0)
+        visual.surface_transition_reason = "tasker"
+        visual.hovered_key = "plugin"
+        visual.hover_armed_key = "plugin"
+        visual.left_stack_at = 10.0
+        visual.drag_detach_global_rects = {"music": QRectF(10.0, 10.0, 30.0, 30.0)}
+        visual._sync_taskbar_drop_overlay = lambda: None
+        visual._pulse_stack = lambda: None
+        visual._notify_settings_changed = lambda: None
+        visual.update = lambda: None
+        visual.clearMask = lambda: None
+
+        visual.set_manual_finder_available(True, notify=False)
+
+        self.assertEqual(visual.location_mode, "free")
+        self.assertFalse(visual.finder_mode)
+        self.assertEqual(visual.taskbar_fusion_mode, "off")
+        self.assertFalse(visual.taskbar_preview_visible)
+        self.assertIsNone(visual.group_frame_motion)
+        self.assertIsNone(visual.group_frame_mask_path)
+        self.assertTrue(visual.finder_hover_rect.isNull())
+        self.assertFalse(visual.interaction_mask_active)
+        self.assertTrue(visual.last_mask_rect.isNull())
+        self.assertTrue(visual.surface_transition_pixmap.isNull())
+        self.assertTrue(visual.surface_transition_global_rect.isNull())
+        self.assertEqual(visual.surface_transition_reason, "")
+        self.assertEqual(visual.hovered_key, "")
+        self.assertEqual(visual.hover_armed_key, "")
+        self.assertEqual(visual.drag_detach_global_rects, {})
+
+    def test_finder_attach_disallowed_when_manual_finder_is_off(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.manual_finder_available = False
+        visual.finder_material = FinderGlassMaterial(
+            top_color=QColor(31, 32, 36, 235),
+            mid_color=QColor(37, 38, 42, 235),
+            bottom_color=QColor(44, 45, 50, 238),
+            highlight_alpha=88,
+            border_alpha=100,
+            shadow_alpha=50,
+            bar_height=44.0,
+            blur_value=11,
+            source="test",
+            corner_radius=12.0,
+            available=True,
+        )
+
+        self.assertFalse(visual._finder_attach_allowed())
+
+        visual.manual_finder_available = True
+        self.assertTrue(visual._finder_attach_allowed())
+
+    def test_taskbar_left_handle_stays_visible_for_three_seconds_after_hover(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.hovered_key = ""
+        visual.dragging = False
+        visual.drag_press_key = ""
+        visual.taskbar_left_handle_visible_until = 12.0
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=10.5):
+            self.assertTrue(visual._taskbar_left_handle_visible())
+        with patch("local.island_stack_visual.time.monotonic", return_value=13.2):
+            self.assertFalse(visual._taskbar_left_handle_visible())
+
+    def test_taskbar_left_handle_default_color_is_gray_and_configurable(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.taskbar_left_handle_color = "#8E8E93"
+        visual._effective_music_ambience_style = lambda: "pure_black"
+
+        default_color = visual._taskbar_left_handle_color()
+        visual.taskbar_left_handle_color = "#FF3366"
+        custom_color = visual._taskbar_left_handle_color()
+
+        self.assertEqual(default_color, QColor("#8E8E93"))
+        self.assertEqual(custom_color, QColor("#FF3366"))
+
+    def test_tasker_color_fill_does_not_restrict_music_background_style(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.lyric_flow_style = "wave_stream"
+        visual.wave_color_fill_enabled = True
+        visual.update = lambda: None
+        visual._notify_settings_changed = lambda: None
+
+        visual.set_music_ambience_style("sea_level", notify=False)
+
+        self.assertEqual(visual.music_ambience_style, "sea_level")
+        self.assertEqual(visual._effective_music_ambience_style(), "sea_level")
+
+    def test_gelv_color_fill_does_not_restrict_music_background_style(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "free"
+        visual.music_ambience_style = "pure_black"
+        visual.lyric_flow_style = "gelv_songscatter"
+        visual.gelv_color_fill_enabled = True
+        visual._pulse_stack = lambda: None
+        visual.update = lambda: None
+        visual._notify_settings_changed = lambda: None
+
+        visual.set_music_ambience_style("sea_level", notify=False)
+
+        self.assertEqual(visual.music_ambience_style, "sea_level")
+        self.assertEqual(visual._effective_music_ambience_style(), "sea_level")
+
+    def test_enabling_gelv_color_fill_keeps_selected_music_background_style(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "free"
+        visual.music_ambience_style = "duotone_full"
+        visual.lyric_flow_style = "gelv_songscatter"
+        visual.gelv_color_fill_enabled = False
+        visual._pulse_stack = lambda: None
+        visual.update = lambda: None
+        visual._notify_settings_changed = lambda: None
+
+        visual.set_gelv_color_fill_enabled(True, notify=False)
+
+        self.assertEqual(visual.music_ambience_style, "duotone_full")
+
+    def test_music_auto_detect_hides_without_real_audio_even_when_metadata_exists(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_playing = True
+        visual.music_auto_detect = True
+        visual.live_audio_available = False
+        visual.media_is_playing = True
+        visual.media_source_app = "NetEase"
+        visual.track_title = "Song"
+        visual._estimated_media_position = lambda _now: 42.0
+
+        self.assertFalse(visual._music_enabled_for_stack())
+
+    def test_taskbar_time_due_alert_overlays_main_rect(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [
+            (0, "TIME", "0:00", "时间到", QColor(255, 184, 0), "", "time:countdown", "done", "倒计时", "时间到", 0)
+        ]
+        main_rect = QRectF(120.0, 30.0, 280.0, 40.0)
+
+        alert = visual._taskbar_main_overlay_alert()
+        rect = visual._taskbar_main_overlay_rect(main_rect, alert)
+
+        self.assertIsNotNone(alert)
+        self.assertEqual(rect, main_rect)
+
+    def test_tasker_left_handle_drag_adjusts_width_without_exceeding_track(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        main_rect = QRectF(320.0, 1044.0, 260.0, 34.0)
+        track = QRectF(100.0, 1040.0, 820.0, 40.0)
+
+        expanded_width = visual._taskbar_manual_width_for_left_edge(main_rect, track, 240.0)
+        clamped_width = visual._taskbar_manual_width_for_left_edge(main_rect, track, -200.0)
+
+        self.assertGreater(expanded_width, main_rect.width())
+        self.assertLessEqual(clamped_width, track.width())
+        self.assertGreaterEqual(clamped_width, 120.0)
+
+    def test_taskbar_drop_overlay_is_pure_drawn_without_text_label(self):
+        self.assertFalse(hasattr(TaskbarDropOverlay, "LABEL"))
+        self.assertNotIn("drawText", inspect.getsource(TaskbarDropOverlay.paintEvent))
+
+    def test_taskbar_drop_overlay_accepts_multiple_zones(self):
+        overlay = TaskbarDropOverlay()
+        taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        zones = [QRectF(190.0, 1044.0, 360.0, 32.0), QRectF(1460.0, 1044.0, 320.0, 32.0)]
+
+        overlay.show_zones(taskbar, zones, 6.0)
+
+        self.assertEqual(len(overlay.drop_rects), 2)
+        overlay.hide()
+
+    def test_taskbar_preview_does_not_create_drop_overlay_frame(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.taskbar_preview_visible = True
+        visual.taskbar_drop_overlay = None
+        visual._taskbar_allowed = lambda: True
+        visual._hide_taskbar_drop_overlay = lambda: None
+        visual.width = lambda: 940
+        visual.height = lambda: 260
+        visual.mapToGlobal = lambda _point: QPoint(1200, 1072)
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual.taskbar_drop_zones = [QRectF(190.0, 1044.0, 360.0, 32.0)]
+        visual._u = lambda value: float(value)
+
+        with patch("local.island_stack_visual.TaskbarDropOverlay") as overlay_class:
+            visual._sync_taskbar_drop_overlay()
+
+        overlay_class.assert_not_called()
+
+    def test_taskbar_dock_uses_current_probe_position_without_slot_magnet(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.taskbar_selected_drop_zone = QRectF(100.0, 1044.0, 320.0, 32.0)
+        visual.width = lambda: 940
+        visual.height = lambda: 260
+        visual.mapToGlobal = lambda _point: QPoint(1500, 1072)
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(180.0, 1040.0, 1500.0, 40.0)
+        visual._update_taskbar_material_for_screen = lambda *_args: None
+        visual._taskbar_stack_direction_for_rect = lambda *_args: -1
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 420.0
+        visual._main_size_for_kind = lambda _kind, _stack_w: (300.0, 34.0)
+        visual._main_top_for_direction = lambda *_args: 10.0
+        visual.move = lambda _pos: None
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            self.assertTrue(visual._dock_to_taskbar_task_area())
+
+        self.assertGreater(visual.taskbar_position_ratio, 0.75)
+
+    def test_taskbar_compact_plugin_style_routes_to_rail_or_block(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_fusion_mode = "compact"
+        visual.plugin_samples = [("TIME", "计时", "10:00", QColor(255, 204, 0), "T", "time", "running", "", "", 30, 0.4)]
+        calls: list[str] = []
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: []
+        visual._plugin_index_for_id = lambda _plugin_id: 0
+        visual._plugin_tuple = lambda plugin: plugin
+        visual._plugin_theme_colors = lambda: {"text": QColor(255, 255, 255), "alert": QColor(0, 0, 0), "stroke": QColor(0, 0, 0)}
+        visual._pure_plugin_color = lambda color: color
+        visual._plugin_display_color = lambda _label, color: color
+        visual._paint_taskbar_plugin_rail = lambda *_args, **_kwargs: calls.append("rail")
+        visual._paint_taskbar_plugin_block = lambda *_args, **_kwargs: calls.append("block")
+
+        visual.taskbar_plugin_compact_style = "rail"
+        visual._paint_plugin_alert(QPainter(), QRectF(0, 0, 8, 34), "plugin-alert:time")
+        visual.taskbar_plugin_compact_style = "block"
+        visual._paint_plugin_alert(QPainter(), QRectF(0, 0, 34, 34), "plugin-alert:time")
+
+        self.assertEqual(calls, ["rail", "block"])
+
+    def test_taskbar_plugin_rail_segments_use_black_and_theme_ratio(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        rect = QRectF(0.0, 0.0, 6.0, 42.0)
+
+        segments = visual._taskbar_plugin_rail_segments(rect, QColor(50, 160, 255), "running", 0.25)
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["color"], QColor(0, 0, 0, 255))
+        self.assertEqual(segments[1]["color"], QColor(50, 160, 255, 235))
+        self.assertAlmostEqual(segments[1]["rect"].height(), rect.height() * 0.25, delta=0.1)
+
+    def test_taskbar_material_classifies_light_and_uses_pure_white_background(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.music_ambience_style = "sea_level"
+        visual.taskbar_material_is_light = True
+
+        self.assertTrue(visual._taskbar_material_is_light(QColor(242, 244, 241)))
+        self.assertEqual(visual._effective_music_ambience_style(), "pure_white")
+
+    def test_pure_white_music_background_uses_dark_lyric_text(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.music_ambience_style = "pure_white"
+
+        self.assertEqual(visual._music_lyric_text_color().black(), 255)
+
+    def test_pure_white_music_background_remains_available_with_color_fill_enabled(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "sea_level"
+        visual.lyric_flow_style = "wave_stream"
+        visual.wave_color_fill_enabled = True
+        visual._pulse_stack = lambda: None
+        visual.update = lambda: None
+        visual._notify_settings_changed = lambda: None
+
+        visual.set_music_ambience_style("pure_white", notify=False)
+
+        self.assertEqual(visual.music_ambience_style, "pure_white")
+        self.assertEqual(visual._music_lyric_text_color().black(), 255)
+
+    def test_pure_white_expanded_music_title_and_artist_use_dark_text(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "pure_white"
+        visual.track_title = "Title"
+        visual.artist = "Artist"
+        visual.media_is_playing = True
+        visual.music_button_rects = {}
+        visual._u = lambda value: float(value)
+        visual._font_size = lambda value: int(value)
+        visual._should_paint_album_island = lambda: False
+        visual._paint_cover = lambda *_args, **_kwargs: None
+        visual._paint_lyric_viewport = lambda *_args, **_kwargs: None
+        colors: list[QColor] = []
+        visual._paint_scrolling_text = lambda _painter, _rect, _text, _size, color, *_args, **_kwargs: colors.append(QColor(color))
+        image = QImage(520, 220, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_music_expanded(painter, QRectF(12.0, 12.0, 480.0, 176.0))
+        painter.end()
+
+        self.assertEqual([color.black() for color in colors[:2]], [255, 255])
+
+    def test_pure_white_album_island_expanded_title_and_artist_use_dark_text(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "pure_white"
+        visual.track_title = "Title"
+        visual.artist = "Artist"
+        visual.media_is_playing = True
+        visual.music_button_rects = {}
+        visual._u = lambda value: float(value)
+        visual._font_size = lambda value: int(value)
+        visual._album_island_slots = lambda *_args, **_kwargs: []
+        visual._paint_album_island_slots = lambda *_args, **_kwargs: None
+        visual._paint_album_island_listened_text = lambda *_args, **_kwargs: None
+        colors: list[QColor] = []
+        visual._paint_scrolling_text = lambda _painter, _rect, _text, _size, color, *_args, **_kwargs: colors.append(QColor(color))
+        image = QImage(520, 220, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_album_island_expanded(painter, QRectF(12.0, 12.0, 480.0, 176.0))
+        painter.end()
+
+        self.assertEqual([color.black() for color in colors[:2]], [255, 255])
+
+    def test_pure_white_wave_stream_uses_black_chunks_without_fill_or_highlight(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "pure_white"
+        visual.wave_color_fill_enabled = True
+        visual.wave_color_fill_fallback = "#00D7FF"
+        visual._u = lambda value: float(value)
+        visual._lyric_layout = lambda *_args, **_kwargs: LyricLayout("hello", ("hello",), (42.0,), 42.0, ())
+        visual._lyric_progress_width = lambda _layout, _progress: 21.0
+        visual._scrolling_text_x = lambda *_args, **_kwargs: 0.0
+        visual._accent_pair = lambda: (QColor(255, 0, 0), QColor(0, 0, 255))
+        visual._wave_fill_color = lambda: QColor(0, 215, 255)
+        calls = []
+        visual._paint_wave_stream_lyric_chunks = (
+            lambda _painter, _rect, _x, _layout, _size, _bold, base, live, _progress, _confidence, glow=False:
+            calls.append((QColor(base), QColor(live), bool(glow)))
+        )
+        image = QImage(220, 80, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_live_lyric_text(
+            painter,
+            QRectF(10.0, 10.0, 180.0, 36.0),
+            "hello",
+            16,
+            QColor(0, 0, 0, 132),
+            QColor(0, 0, 0, 246),
+            True,
+            {"progress": 0.5, "confidence": 1.0},
+        )
+        painter.end()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0].black(), 255)
+        self.assertEqual(calls[0][1].black(), 255)
+        self.assertFalse(calls[0][2])
+
+    def test_pure_white_gelv_line_uses_black_text_without_color_fill(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "pure_white"
+        visual.gelv_color_fill_enabled = True
+        visual._gelv_layout = lambda *_args, **_kwargs: LyricLayout("hello", ("hello",), (42.0,), 42.0, ())
+        visual._gelv_line_x = lambda *_args, **_kwargs: 0.0
+        visual._gelv_spacing_percent = lambda _progress: 100
+        captured: list[tuple[QColor, QColor]] = []
+        visual._paint_gelv_songscatter_chunks = (
+            lambda _painter, _rect, _x, _layout, _size, base, live, *_args, **_kwargs:
+            captured.append((QColor(base), QColor(live)))
+        )
+        image = QImage(220, 80, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_gelv_line(painter, QRectF(10.0, 10.0, 180.0, 36.0), "hello", 16.0, 0.5, True, color_fill=True)
+        painter.end()
+
+        self.assertEqual(captured[0][0].black(), 255)
+        self.assertEqual(captured[0][1].black(), 255)
+
+    def test_enabled_plugin_ids_filter_plugin_samples_without_count_slider(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.enabled_plugin_ids = {"time", "agenda"}
+        visual.enabled_plugin_count = 3
+        visual.plugin_samples = [
+            ("TIME", "", "", QColor(), "T", "time", "normal", "", "", 0, 0.0),
+            ("WEATHER", "", "", QColor(), "W", "weather", "normal", "", "", 0, 0.0),
+            ("AGENDA", "", "", QColor(), "A", "agenda", "normal", "", "", 0, 0.0),
+        ]
+
+        samples = visual._enabled_plugin_samples()
+
+        self.assertEqual([sample[5] for sample in samples], ["time", "agenda"])
+
+    def test_congested_taskbar_slot_shrinks_music_to_cover_only_size(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual._u = lambda value: float(value)
+        visual.taskbar_selected_drop_zone = QRectF(0.0, 0.0, 58.0, 40.0)
+
+        width, height = visual._taskbar_compact_music_size(420.0, 44.0)
+
+        self.assertLessEqual(width, 58.0)
+        self.assertLessEqual(height, 44.0)
+
+    def test_taskbar_message_rects_use_user_style_and_collapse_blocks_when_crowded(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_message_compact_style = "block"
+        visual._u = lambda value: float(value)
+        main_rect = QRectF(500.0, 1044.0, 280.0, 34.0)
+
+        block = visual._taskbar_message_rect(main_rect, 0, 2, 1)
+        rail = visual._taskbar_message_rect(main_rect, 0, 5, 1)
+
+        self.assertAlmostEqual(block.width(), block.height(), delta=0.1)
+        self.assertLess(rail.width(), rail.height())
+
+    def test_tasker_music_cover_radius_matches_outer_radius(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_fusion_mode = "compact"
+        visual.taskbar_corner_style = "win11"
+        visual._u = lambda value: float(value)
+        rect = QRectF(0.0, 0.0, 280.0, 40.0)
+
+        self.assertEqual(
+            visual._compact_cover_radius(rect, two_line=False),
+            visual._music_shell_radius(rect, expanded=False),
+        )
+
+    def test_expanded_tasker_music_uses_windows_corner_radius(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_fusion_mode = "compact"
+        visual.taskbar_corner_style = "win11"
+        visual._u = lambda value: float(value)
+        rect = QRectF(0.0, 0.0, 520.0, 176.0)
+
+        self.assertLess(visual._music_shell_radius(rect, expanded=True), 30.0)
+
+    def test_taskbar_compact_layout_uses_tighter_height_and_keeps_all_surfaces_inside_bounds(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.taskbar_fusion_mode = "compact"
+        visual.taskbar_corner_style = "win11"
+
+        width, height = visual._taskbar_compact_music_size(420.0, 44.0)
+
+        self.assertLessEqual(height, 44.0)
+        self.assertGreater(width, 0.0)
+
+    def test_taskbar_corner_style_switches_between_win10_and_win11(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        self.assertEqual(visual._taskbar_corner_radius(44.0, "win10"), 0.0)
+        self.assertGreater(visual._taskbar_corner_radius(44.0, "win11"), 0.0)
+
+    def test_taskbar_expanded_panel_uses_outer_material_frame_without_replacing_the_shell(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = True
+        visual.finder_mode = False
+        visual.taskbar_corner_style = "win11"
+
+        self.assertTrue(visual._taskbar_uses_expanded_material_frame())
+        self.assertTrue(visual._taskbar_shell_remains_opaque())
+
+    def test_taskbar_expanded_panel_uses_windows_corner_policy(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.taskbar_corner_style = "win10"
+
+        self.assertEqual(visual._taskbar_panel_corner_policy(), "square")
 
     def test_gelv_songscatter_font_family_is_source_han_serif_only(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)

@@ -141,6 +141,62 @@ class SpringRect:
         return value, velocity
 
 
+class TaskbarDropOverlay(QWidget):
+    def __init__(self):
+        super().__init__(None)
+        self.drop_rect = QRectF()
+        self.drop_rects: list[QRectF] = []
+        self.corner_radius = 8.0
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setWindowFlags(
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
+        )
+
+    def show_zone(self, taskbar_rect: QRectF, drop_rect: QRectF, corner_radius: float):
+        self.show_zones(taskbar_rect, [drop_rect], corner_radius)
+
+    def show_zones(self, taskbar_rect: QRectF, drop_rects: list[QRectF], corner_radius: float):
+        zones = [QRectF(rect) for rect in drop_rects if rect is not None and not rect.isNull()]
+        if taskbar_rect.isNull() or not zones:
+            self.hide()
+            return
+        self.corner_radius = float(corner_radius)
+        self.drop_rects = []
+        for rect in zones:
+            local = QRectF(rect)
+            local.translate(-taskbar_rect.left(), -taskbar_rect.top())
+            self.drop_rects.append(local)
+        self.drop_rect = QRectF(self.drop_rects[0])
+        self.setGeometry(taskbar_rect.toAlignedRect())
+        self.show()
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, event):
+        rects = list(getattr(self, "drop_rects", []))
+        if not rects and not self.drop_rect.isNull():
+            rects = [QRectF(self.drop_rect)]
+        if not rects:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        radius = max(2.0, self.corner_radius)
+        for rect in rects:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 72))
+            painter.drawRoundedRect(rect.adjusted(-5.0, -5.0, 5.0, 5.0), radius + 5.0, radius + 5.0)
+            painter.setBrush(QColor(38, 98, 180, 72))
+            painter.drawRoundedRect(rect, radius, radius)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(125, 190, 255, 235), 1.4, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap))
+            painter.drawRoundedRect(rect.adjusted(0.7, 0.7, -0.7, -0.7), max(1.0, radius - 0.7), max(1.0, radius - 0.7))
+        painter.end()
+
+
 class IslandStackVisual(QWidget):
     VISUAL_SCALE = 0.75
     STACK_WIDTH = 560
@@ -152,10 +208,17 @@ class IslandStackVisual(QWidget):
         "PingFang SC",
         "Source Han Serif SC",
     )
-    MUSIC_AMBIENCE_STYLES = ("sea_level", "duotone_full", "pure_black", "bilateral_diffraction")
-    COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "bilateral_diffraction")
+    MUSIC_AMBIENCE_STYLES = ("sea_level", "duotone_full", "pure_black", "bilateral_diffraction", "pure_white")
+    COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "bilateral_diffraction", "pure_white")
     LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "album_island")
     ALBUM_ISLAND_SECONDARY_STYLES = ("shrink_dim", "perspective_dim")
+    CURRENT_ALBUM_ART_MAX_SIDE = 384
+    STORED_ALBUM_ART_MAX_SIDE = 192
+    SCALED_ALBUM_ART_CACHE_LIMIT = 3
+    LYRIC_LAYOUT_CACHE_LIMIT = 40
+    REPRESENTATIVE_WIDTH_CACHE_LIMIT = 8
+    TASKBAR_FOLLOW_REFRESH_INTERVAL = 0.28
+    TASKBAR_FOLLOW_MATERIAL_REFRESH_INTERVAL = 0.50
 
     def __init__(self, data_provider=None):
         super().__init__()
@@ -204,6 +267,7 @@ class IslandStackVisual(QWidget):
         self.barrage_style_checked_at = 0.0
         self.last_pointer_press_at = 0.0
         self.last_pointer_move_at = 0.0
+        self.drag_press_main_global_rect = QRectF()
         self.last_mask_update_at = 0.0
         self.interaction_mask_active = False
         self.surface_transition_pixmap = QPixmap()
@@ -239,6 +303,7 @@ class IslandStackVisual(QWidget):
         self.music_cover_rect = QRectF()
         self.persistent_plugin = True
         self.enabled_plugin_count = 3
+        self.enabled_plugin_ids = {"time", "weather", "agenda"}
         self.show_seconds = True
         self.expanded = False
         self.plugin_panel_open = False
@@ -293,6 +358,30 @@ class IslandStackVisual(QWidget):
         self.show_debug_overlay = False
         self.finder_material_refreshed_at = time.monotonic()
         self.manual_finder_available = False
+        self.location_mode = "finder" if self.finder_mode else "free"
+        self.taskbar_fusion_mode = "off"
+        self.taskbar_recognition_threshold = 0.66
+        self.taskbar_corner_style = "win11"
+        self.taskbar_plugin_compact_style = "rail"
+        self.taskbar_message_compact_style = "strip"
+        self.taskbar_selected_drop_zone = QRectF()
+        self.taskbar_drop_zones: list[QRectF] = []
+        self.taskbar_position_ratio = 0.5
+        self.taskbar_manual_width = 0.0
+        self.taskbar_left_handle_rect = QRectF()
+        self.taskbar_left_handle_visible_until = 0.0
+        self.taskbar_left_handle_color = "#8E8E93"
+        self.taskbar_material_color = QColor()
+        self.taskbar_material_is_light = False
+        self.taskbar_material_sampled_at = 0.0
+        self.taskbar_material_sample_key = ""
+        self.last_taskbar_rect = QRectF()
+        self.taskbar_follow_last_at = 0.0
+        self.taskbar_follow_last_key: tuple[object, ...] | str = ""
+        self.taskbar_follow_material_last_at = 0.0
+        self.taskbar_preview_visible = False
+        self.taskbar_preview_follow_taskbar = True
+        self.taskbar_drop_overlay = None
         self.ui_font_family = self.DEFAULT_FONT_FAMILY
         self.high_quality_font_rendering = False
         self.animation_fps = 60
@@ -320,6 +409,7 @@ class IslandStackVisual(QWidget):
         self.wave_color_fill_enabled = False
         self.wave_color_fill_fallback = "#00D7FF"
         self.enable_dual_line_lyrics = False
+        self.dual_line_font_size = 12
         self.dual_line_secondary_weight = 72
         self.dual_line_secondary_spacing = 100
         self.compact_lyric_show_cover = True
@@ -397,6 +487,9 @@ class IslandStackVisual(QWidget):
 
         self.motions: dict[str, SpringRect] = {}
         self.group_frame_motion: SpringRect | None = None
+        self.group_frame_mode_key = ""
+        self.group_frame_target_rect = QRectF()
+        self.group_frame_target_mode_key = ""
         self.group_frame_mask_path: QPainterPath | None = None
         self.finder_hover_rect = QRectF()
         self.last_mask_rect = QRectF()
@@ -572,7 +665,7 @@ class IslandStackVisual(QWidget):
         if preserve_existing_cover:
             cover_loaded = False
         if cover_loaded:
-            self.album_art = image
+            self.album_art = self._bounded_album_image(image, self.CURRENT_ALBUM_ART_MAX_SIDE, smooth=True)
             self._scaled_album_art_cache.clear()
         elif track_changed and not preserve_existing_cover and not preserve_missing_cover:
             self.album_art = QImage()
@@ -611,6 +704,22 @@ class IslandStackVisual(QWidget):
             return False
         average_luma = total_luma / max(1, opaque_pixels)
         return average_luma <= 8.0 and max_channel <= 24 and (max_luma - min_luma) <= 10
+
+    def _bounded_album_image(self, image: QImage, max_side: int | float | None = None, smooth: bool = False) -> QImage:
+        if not isinstance(image, QImage) or image.isNull():
+            return QImage()
+        try:
+            limit = int(max(24, float(max_side if max_side is not None else self.STORED_ALBUM_ART_MAX_SIDE)))
+        except (TypeError, ValueError):
+            limit = int(self.STORED_ALBUM_ART_MAX_SIDE)
+        width = int(image.width())
+        height = int(image.height())
+        if width <= 0 or height <= 0:
+            return QImage()
+        if max(width, height) <= limit:
+            return QImage(image)
+        mode = Qt.TransformationMode.SmoothTransformation if smooth else Qt.TransformationMode.FastTransformation
+        return image.scaled(limit, limit, Qt.AspectRatioMode.KeepAspectRatio, mode)
 
     def _ingest_provider_messages(self, visual_data: IslandVisualData):
         latest_by_app: dict[str, tuple[str, object]] = {}
@@ -870,7 +979,7 @@ class IslandStackVisual(QWidget):
             style = "sea_level"
         if style not in self.MUSIC_AMBIENCE_STYLES:
             style = "sea_level"
-        if self._active_lyric_color_fill_enabled() and style not in self.COLOR_FILL_AMBIENCE_STYLES:
+        if self._active_lyric_color_fill_paints_background(style) and style not in self.COLOR_FILL_AMBIENCE_STYLES and not self._taskbar_compact_active():
             style = "pure_black"
         self.music_ambience_style = style
         self.update()
@@ -878,8 +987,57 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
 
     def _coerce_music_ambience_for_color_fill(self):
+        if self._taskbar_compact_active():
+            return
+        if self._gelv_enabled():
+            return
         if str(getattr(self, "music_ambience_style", "sea_level")) not in self.COLOR_FILL_AMBIENCE_STYLES:
             self.music_ambience_style = "pure_black"
+
+    def _effective_music_ambience_style(self) -> str:
+        style = str(getattr(self, "music_ambience_style", "sea_level") or "sea_level")
+        if self._active_lyric_color_fill_paints_background(style) and style not in self.COLOR_FILL_AMBIENCE_STYLES and not self._taskbar_compact_active():
+            return "pure_black"
+        if style == "sea_level" and self._taskbar_compact_active() and bool(getattr(self, "taskbar_material_is_light", False)):
+            return "pure_white"
+        return style if style in self.MUSIC_AMBIENCE_STYLES else "sea_level"
+
+    def _active_lyric_color_fill_paints_background(self, ambience_style: str | None = None) -> bool:
+        if not self._active_lyric_color_fill_enabled():
+            return False
+        if self._gelv_enabled():
+            return False
+        style = str(ambience_style or self._effective_music_ambience_style())
+        if self._taskbar_compact_active() and style not in self.COLOR_FILL_AMBIENCE_STYLES:
+            return False
+        return True
+
+    def _music_lyric_text_color(self, alpha: int = 246) -> QColor:
+        alpha = max(0, min(255, int(alpha)))
+        if self._effective_music_ambience_style() == "pure_white":
+            return QColor(0, 0, 0, alpha)
+        return QColor(255, 255, 255, alpha)
+
+    def _music_lyric_base_text_color(self, alpha: int = 132) -> QColor:
+        alpha = max(0, min(255, int(alpha)))
+        if self._effective_music_ambience_style() == "pure_white":
+            return QColor(0, 0, 0, alpha)
+        return QColor(255, 255, 255, alpha)
+
+    def _pure_white_music_active(self) -> bool:
+        return self._effective_music_ambience_style() == "pure_white"
+
+    def _music_meta_text_color(self, alpha: int = 240) -> QColor:
+        return self._music_lyric_text_color(alpha)
+
+    def _music_control_icon_color(self, alpha: int = 232) -> QColor:
+        return self._music_lyric_text_color(alpha)
+
+    def _music_control_fill_color(self, alpha: int = 24) -> QColor:
+        alpha = max(0, min(255, int(alpha)))
+        if self._pure_white_music_active():
+            return QColor(0, 0, 0, max(18, min(76, alpha + 14)))
+        return QColor(255, 255, 255, alpha)
 
     def set_music_flow_intensity(self, value: float, notify: bool = True):
         try:
@@ -999,6 +1157,14 @@ class IslandStackVisual(QWidget):
 
     def set_enable_dual_line_lyrics(self, enabled: bool, notify: bool = True):
         self.enable_dual_line_lyrics = bool(enabled)
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_dual_line_font_size(self, size: int, notify: bool = True):
+        self.dual_line_font_size = max(8, min(20, int(size)))
+        self._clear_lyric_metrics_cache()
         self._pulse_stack()
         if notify:
             self._notify_settings_changed()
@@ -1339,6 +1505,12 @@ class IslandStackVisual(QWidget):
         anim_dt = tick_dt * speed
         self._refresh_media_data(now)
         self._update_scene_state(now)
+        if (
+            self._taskbar_compact_active()
+            and not bool(getattr(self, "drag_candidate", False))
+            and self._taskbar_follow_refresh_due(now)
+        ):
+            self._refresh_taskbar_follow_position()
         if self.scene_suppressed:
             self.barrage_hovered = False
         else:
@@ -1469,6 +1641,10 @@ class IslandStackVisual(QWidget):
             return
         self.scene_checked_at = now
         suppressed, reason = self._detect_scene_suppression()
+        if self._taskbar_compact_active() and str(reason or "") in {"fullscreen", "maximized"}:
+            suppressed = False
+            reason = ""
+            self.scene_reason = ""
         new_state = bool(suppressed)
         if new_state == self.scene_suppressed:
             if not new_state and self.scene_transition_mode == "hide":
@@ -1761,6 +1937,9 @@ class IslandStackVisual(QWidget):
         self.expanded = expanded
         if not expanded:
             self.plugin_panel_open = False
+        if self._taskbar_compact_active():
+            self.taskbar_follow_last_at = 0.0
+            self.taskbar_follow_last_key = ""
         if self.finder_mode:
             self.clearMask()
             self.interaction_mask_active = False
@@ -1803,8 +1982,11 @@ class IslandStackVisual(QWidget):
             self._pulse_stack()
             settings_changed = True
         elif key == Qt.Key.Key_0:
-            self.enabled_plugin_count = (self.enabled_plugin_count + 1) % 4
-            self._set_plugin_focus(min(self.plugin_focus_target, max(0, self.enabled_plugin_count - 1)), immediate=True)
+            known_plugins = ["time", "weather", "agenda"]
+            next_count = (len(self._enabled_plugin_ids()) + 1) % 4
+            self.enabled_plugin_ids = set(known_plugins[:next_count])
+            self.enabled_plugin_count = next_count
+            self._set_plugin_focus(min(self.plugin_focus_target, max(0, next_count - 1)), immediate=True)
             self._pulse_stack()
             settings_changed = True
         elif key == Qt.Key.Key_T:
@@ -1833,11 +2015,13 @@ class IslandStackVisual(QWidget):
             "v2_music_playing": self.music_playing,
             "v2_music_auto_detect": bool(getattr(self, "music_auto_detect", False)),
             "v2_persistent_plugin": self.persistent_plugin,
+            "v2_location_mode": str(getattr(self, "location_mode", "finder" if self.finder_mode else "free")),
             "v2_finder_mode": self.finder_mode,
             "v2_manual_mydockfinder": self.manual_finder_available,
+            "v2_taskbar_corner_style": str(getattr(self, "taskbar_corner_style", "win11")),
             "v2_expanded": self.expanded,
             "v2_show_seconds": self.show_seconds,
-            "v2_plugin_count": self.enabled_plugin_count,
+            "v2_enabled_plugins": list(self._enabled_plugin_ids()),
             "v2_side_island_style": str(getattr(self, "side_island_style", "standard")),
             "v2_plugin_island_style": str(getattr(self, "plugin_island_style", "standard")),
             "v2_music_island_style": str(getattr(self, "music_island_style", "standard")),
@@ -1873,6 +2057,7 @@ class IslandStackVisual(QWidget):
             "v2_lyric_elastic_mode": str(getattr(self, "lyric_elastic_mode", "both")),
             "v2_lyric_word_spacing": int(getattr(self, "lyric_word_spacing", 100)),
             "v2_enable_dual_line_lyrics": bool(getattr(self, "enable_dual_line_lyrics", False)),
+            "v2_dual_line_font_size": int(getattr(self, "dual_line_font_size", 12)),
             "v2_dual_line_secondary_weight": int(getattr(self, "dual_line_secondary_weight", 72)),
             "v2_dual_line_secondary_spacing": int(getattr(self, "dual_line_secondary_spacing", 100)),
             "v2_compact_lyric_show_cover": bool(getattr(self, "compact_lyric_show_cover", True)),
@@ -1900,13 +2085,13 @@ class IslandStackVisual(QWidget):
 
     def _begin_surface_transition(self, reason: str = "layout"):
         if not self.isVisible() or self.width() <= 2 or self.height() <= 2:
-            return
+            return False
         try:
             pixmap = self.grab()
         except Exception:
-            return
+            return False
         if pixmap.isNull():
-            return
+            return False
         top_left = self.mapToGlobal(QPoint(0, 0))
         self.surface_transition_pixmap = pixmap
         self.surface_transition_global_rect = QRectF(
@@ -1918,6 +2103,7 @@ class IslandStackVisual(QWidget):
         self.surface_transition_started_at = time.monotonic()
         self.surface_transition_duration = 0.24 if reason in ("finder", "standalone") else 0.20
         self.surface_transition_reason = reason
+        return True
 
     def _paint_surface_transition(self, painter: QPainter, now: float):
         pixmap = getattr(self, "surface_transition_pixmap", QPixmap())
@@ -1952,33 +2138,1001 @@ class IslandStackVisual(QWidget):
         painter.drawPixmap(target, pixmap, QRectF(0.0, 0.0, float(pixmap.width()), float(pixmap.height())))
         painter.restore()
 
+    def _clear_surface_transition(self):
+        self.surface_transition_pixmap = QPixmap()
+        self.surface_transition_global_rect = QRectF()
+        self.surface_transition_started_at = 0.0
+        self.surface_transition_reason = ""
+
+    def _reset_group_frame_state(self, clear_mask: bool = True):
+        self.group_frame_motion = None
+        self.group_frame_mode_key = ""
+        self.group_frame_target_rect = QRectF()
+        self.group_frame_target_mode_key = ""
+        self.group_frame_mask_path = None
+        self.finder_hover_rect = QRectF()
+        self.interaction_mask_active = False
+        self.last_mask_rect = QRectF()
+        if clear_mask:
+            try:
+                self.clearMask()
+            except Exception:
+                pass
+
+    def _clear_mode_interaction_state(self, clear_drag_detach: bool = True):
+        self.hovered_key = ""
+        self.hover_armed_key = ""
+        self.left_stack_at = 0.0
+        if clear_drag_detach:
+            self.drag_detach_global_rects = {}
+
+    def _reset_location_runtime_state(self, clear_surface: bool = False, clear_drag_detach: bool = True):
+        self._reset_group_frame_state(clear_mask=True)
+        self._clear_mode_interaction_state(clear_drag_detach=clear_drag_detach)
+        self.taskbar_follow_last_at = 0.0
+        self.taskbar_follow_last_key = ""
+        if clear_surface:
+            self._clear_surface_transition()
+
     def set_manual_finder_available(self, enabled: bool, notify: bool = True):
+        previous = bool(getattr(self, "manual_finder_available", False))
         self.manual_finder_available = bool(enabled)
+        current_mode = str(getattr(self, "location_mode", "free") or "free")
+        desired_mode = self._canonical_location_mode(current_mode)
+        if desired_mode != current_mode:
+            self.set_location_mode(desired_mode, notify=False)
+        elif previous != self.manual_finder_available:
+            self._reset_location_runtime_state(clear_surface=True)
         if notify:
             self._notify_settings_changed()
 
-    def set_finder_mode(self, enabled: bool, notify: bool = True):
-        enabled = bool(enabled)
-        if enabled != bool(getattr(self, "finder_mode", False)):
-            self._begin_surface_transition("finder" if enabled else "standalone")
-        self.finder_mode = enabled
+    def _canonical_location_mode(self, mode: str) -> str:
+        value = str(mode or "free").strip().lower()
+        legacy = {
+            "off": "free",
+            "preview": "free",
+            "compact": "tasker",
+            "expanded": "tasker",
+            "taskbar": "tasker",
+        }
+        value = legacy.get(value, value)
+        if value not in {"finder", "free", "tasker"}:
+            value = "free"
+        if value == "finder" and not bool(getattr(self, "manual_finder_available", False)):
+            value = "free"
+        if value == "tasker" and bool(getattr(self, "manual_finder_available", False)):
+            value = "free"
+        return value
+
+    def set_location_mode(self, mode: str, notify: bool = True):
+        mode = self._canonical_location_mode(mode)
+        previous = str(getattr(self, "location_mode", "finder" if getattr(self, "finder_mode", False) else "free"))
+        mode_changed = mode != previous
+        started_surface_transition = False
+        if mode != previous and (mode == "finder" or previous == "finder"):
+            try:
+                started_surface_transition = bool(self._begin_surface_transition("finder" if mode == "finder" else "standalone"))
+            except Exception:
+                pass
+        if mode_changed:
+            self._reset_location_runtime_state(clear_surface=not started_surface_transition)
+        self.location_mode = mode
+        self.finder_mode = mode == "finder"
         self.attach_to_real_finder = self.finder_mode
-        if self.finder_mode:
-            self.finder_material = read_finder_material(force_screen_sample=True, include_center=not self.isVisible())
-            self.finder_material_refreshed_at = time.monotonic()
-        self._center_on_screen()
-        if self.finder_mode:
-            self._force_super_topmost()
-        else:
+        if mode == "finder":
+            self.taskbar_fusion_mode = "off"
+            self.taskbar_preview_visible = False
+            try:
+                self.finder_material = read_finder_material(force_screen_sample=True, include_center=not self.isVisible())
+                self.finder_material_refreshed_at = time.monotonic()
+                self._center_on_screen()
+                self._force_super_topmost()
+            except Exception:
+                pass
+        elif mode == "tasker":
+            self.taskbar_fusion_mode = "compact"
+            self.taskbar_preview_visible = True
             self.scene_suppressed = False
             self.scene_reason = ""
             self.scene_transition_mode = ""
             self.group_frame_mask_path = None
-            self.clearMask()
+            try:
+                self.clearMask()
+            except Exception:
+                pass
+            if not bool(getattr(self, "drag_candidate", False)):
+                try:
+                    self._refresh_taskbar_follow_position()
+                except Exception:
+                    pass
+        else:
+            self.taskbar_fusion_mode = "off"
+            self.taskbar_preview_visible = False
+            self.scene_suppressed = False
+            self.scene_reason = ""
+            self.scene_transition_mode = ""
+            self.group_frame_mask_path = None
+            try:
+                self.clearMask()
+            except Exception:
+                pass
+        self._sync_taskbar_drop_overlay()
+        try:
+            self._pulse_stack()
+        except Exception:
+            pass
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_taskbar_fusion_mode(self, mode: str, notify: bool = True):
+        mode = str(mode or "off").strip()
+        if mode not in {"off", "preview", "compact", "expanded"}:
+            mode = "off"
+        if mode == "expanded":
+            self.expanded = True
+            self.plugin_panel_open = True
+        elif mode == "compact":
+            self.expanded = False
+        if mode in {"compact", "expanded"}:
+            self.set_location_mode("tasker", notify=notify)
+        else:
+            self.taskbar_preview_visible = mode == "preview"
+            self.set_location_mode("free", notify=notify)
+
+    def set_taskbar_recognition_threshold(self, threshold: float, notify: bool = True):
+        try:
+            value = float(threshold)
+        except (TypeError, ValueError):
+            value = 0.66
+        self.taskbar_recognition_threshold = max(0.34, min(0.95, value))
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_taskbar_corner_style(self, style: str, notify: bool = True):
+        style = str(style or "win11").strip().lower()
+        if style not in {"win10", "win11"}:
+            style = "win11"
+        self.taskbar_corner_style = style
         self._pulse_stack()
         if notify:
             self._notify_settings_changed()
         self.update()
+
+    def set_taskbar_plugin_compact_style(self, style: str, notify: bool = True):
+        style = str(style or "rail").strip().lower()
+        if style not in {"rail", "block"}:
+            style = "rail"
+        self.taskbar_plugin_compact_style = style
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_taskbar_message_compact_style(self, style: str, notify: bool = True):
+        style = str(style or "strip").strip().lower()
+        if style not in {"strip", "block"}:
+            style = "strip"
+        self.taskbar_message_compact_style = style
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_taskbar_left_handle_color(self, color: str, notify: bool = True):
+        qcolor = QColor(str(color or "#8E8E93"))
+        self.taskbar_left_handle_color = qcolor.name().upper() if qcolor.isValid() else "#8E8E93"
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def _taskbar_allowed(self) -> bool:
+        return (
+            not bool(getattr(self, "finder_mode", False))
+            and str(getattr(self, "location_mode", "free")) != "finder"
+            and not bool(getattr(self, "manual_finder_available", False))
+        )
+
+    def _should_show_taskbar_preview(self, lower_third_ratio: float) -> bool:
+        if not self._taskbar_allowed():
+            return False
+        threshold = float(getattr(self, "taskbar_recognition_threshold", 0.66))
+        mode = str(getattr(self, "location_mode", "free") or "free")
+        if mode not in {"free", "tasker"}:
+            return False
+        return float(lower_third_ratio) >= threshold
+
+    def _taskbar_contacting_rect(self, main_rect: QRectF, taskbar_rect: QRectF) -> bool:
+        if main_rect is None or taskbar_rect is None or main_rect.isNull() or taskbar_rect.isNull():
+            return False
+        slop = self._u(4.0) if hasattr(self, "_u") else 4.0
+        return QRectF(taskbar_rect).adjusted(-slop, -slop, slop, slop).intersects(QRectF(main_rect))
+
+    def _should_show_taskbar_preview_for_rect(self, lower_third_ratio: float, main_rect: QRectF, taskbar_rect: QRectF) -> bool:
+        return self._should_show_taskbar_preview(lower_third_ratio) and self._taskbar_contacting_rect(main_rect, taskbar_rect)
+
+    def _taskbar_visible_for_screen(self, screen) -> bool:
+        rect = self._taskbar_rect_for_screen(screen)
+        return rect is not None and not rect.isNull() and rect.width() > 1.0 and rect.height() > 1.0
+
+    def _taskbar_drag_ratio(self, global_pos: QPoint) -> tuple[float, object | None]:
+        screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return 0.0, None
+        geo = screen.geometry()
+        height = max(1.0, float(geo.height()))
+        return max(0.0, min(1.0, (float(global_pos.y()) - float(geo.top())) / height)), screen
+
+    def _current_main_global_rect(self) -> QRectF:
+        try:
+            visuals = self._build_visuals()
+            main_visual = next((visual for visual in visuals if visual.z_index == 10), None)
+            if main_visual is None:
+                return QRectF()
+            rect = QRectF(main_visual.rect)
+            motion = getattr(self, "motions", {}).get(main_visual.key)
+            if motion is not None and getattr(motion, "opacity", 0.0) > 0.08:
+                rect = QRectF(motion.x, motion.y, motion.w, motion.h)
+            origin = self.mapToGlobal(QPoint(0, 0))
+            rect.translate(float(origin.x()), float(origin.y()))
+            return rect
+        except Exception:
+            return QRectF()
+
+    def _taskbar_material_is_light(self, color: QColor) -> bool:
+        if color is None or not color.isValid():
+            return False
+        luminance = 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF()
+        return luminance >= 0.72
+
+    def _taskbar_material_exclusion_rects(self) -> list[QRectF]:
+        rects: list[QRectF] = []
+        selected = QRectF(getattr(self, "taskbar_selected_drop_zone", QRectF()))
+        if not selected.isNull() and selected.width() > 1.0 and selected.height() > 1.0:
+            rects.append(selected.adjusted(-self._u(14.0), -self._u(8.0), self._u(14.0), self._u(8.0)))
+        tasker_slot_is_authoritative = self._taskbar_compact_active() and bool(rects)
+        if not tasker_slot_is_authoritative:
+            try:
+                main_rect = self._current_main_global_rect()
+                if not main_rect.isNull() and main_rect.width() > 1.0 and main_rect.height() > 1.0:
+                    rects.append(main_rect.adjusted(-self._u(18.0), -self._u(10.0), self._u(18.0), self._u(10.0)))
+            except Exception:
+                pass
+        try:
+            origin = self.mapToGlobal(QPoint(0, 0))
+            for motion in getattr(self, "motions", {}).values():
+                if getattr(motion, "opacity", 0.0) <= 0.08:
+                    continue
+                rect = QRectF(motion.rect)
+                if rect.isNull() or rect.width() <= 1.0 or rect.height() <= 1.0:
+                    continue
+                rect.translate(float(origin.x()), float(origin.y()))
+                rects.append(rect.adjusted(-self._u(10.0), -self._u(6.0), self._u(10.0), self._u(6.0)))
+        except Exception:
+            pass
+        return rects
+
+    def _sample_taskbar_material_color(self, screen, taskbar_rect: QRectF) -> QColor:
+        if screen is None or taskbar_rect is None or taskbar_rect.isNull():
+            return QColor()
+        try:
+            sample_size = int(max(6, min(18, min(taskbar_rect.width(), taskbar_rect.height()) * 0.45)))
+            horizontal = taskbar_rect.width() >= taskbar_rect.height()
+            ratios = (0.18, 0.32, 0.50, 0.68, 0.82)
+            exclusions = []
+            try:
+                exclusions = [
+                    QRectF(rect).adjusted(-sample_size, -sample_size, sample_size, sample_size)
+                    for rect in self._taskbar_material_exclusion_rects()
+                    if rect is not None and not QRectF(rect).isNull()
+                ]
+            except Exception:
+                exclusions = []
+
+            candidates: list[QRectF] = []
+            for ratio in ratios:
+                if horizontal:
+                    cx = taskbar_rect.left() + taskbar_rect.width() * ratio
+                    cy = taskbar_rect.center().y()
+                else:
+                    cx = taskbar_rect.center().x()
+                    cy = taskbar_rect.top() + taskbar_rect.height() * ratio
+                sample = QRectF(cx - sample_size / 2.0, cy - sample_size / 2.0, sample_size, sample_size)
+                candidates.append(sample)
+            safe_candidates = [
+                sample for sample in candidates
+                if not any(sample.intersects(exclusion) for exclusion in exclusions)
+            ]
+            if not safe_candidates:
+                safe_candidates = [QRectF(taskbar_rect.center().x() - sample_size / 2.0, taskbar_rect.center().y() - sample_size / 2.0, sample_size, sample_size)]
+
+            colors: list[QColor] = []
+            for sample in safe_candidates:
+                x = int(round(sample.left()))
+                y = int(round(sample.top()))
+                image = screen.grabWindow(0, x, y, sample_size, sample_size).toImage()
+                if image.isNull():
+                    continue
+                red = green = blue = count = 0
+                step = max(1, sample_size // 6)
+                for py in range(0, image.height(), step):
+                    for px in range(0, image.width(), step):
+                        pixel = image.pixelColor(px, py)
+                        red += pixel.red()
+                        green += pixel.green()
+                        blue += pixel.blue()
+                        count += 1
+                if count > 0:
+                    colors.append(QColor(red // count, green // count, blue // count))
+            if not colors:
+                return QColor()
+            colors.sort(key=lambda color: 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF())
+            return QColor(colors[len(colors) // 2])
+        except Exception:
+            return QColor()
+
+    def _update_taskbar_material_for_screen(self, screen, taskbar_rect: QRectF):
+        if screen is None or taskbar_rect is None or taskbar_rect.isNull():
+            return
+        now = time.monotonic()
+        key = (
+            f"{id(screen)}:"
+            f"{int(round(taskbar_rect.left()))},"
+            f"{int(round(taskbar_rect.top()))},"
+            f"{int(round(taskbar_rect.width()))},"
+            f"{int(round(taskbar_rect.height()))}"
+        )
+        current = QColor(getattr(self, "taskbar_material_color", QColor()))
+        if (
+            current.isValid()
+            and key == str(getattr(self, "taskbar_material_sample_key", "") or "")
+            and now - float(getattr(self, "taskbar_material_sampled_at", 0.0) or 0.0) < 0.45
+        ):
+            return
+        color = self._sample_taskbar_material_color(screen, taskbar_rect)
+        self.taskbar_material_sampled_at = now
+        self.taskbar_material_sample_key = key
+        if color.isValid():
+            self.taskbar_material_color = QColor(color)
+            self.taskbar_material_is_light = self._taskbar_material_is_light(color)
+
+    def _taskbar_material_frame_tokens(self) -> dict[str, QColor]:
+        base = QColor(getattr(self, "taskbar_material_color", QColor()))
+        if not base.isValid():
+            base = QColor(34, 38, 46)
+        light = bool(getattr(self, "taskbar_material_is_light", False)) or self._taskbar_material_is_light(base)
+        if light:
+            return {
+                "fill_top": QColor(min(255, base.red() + 14), min(255, base.green() + 14), min(255, base.blue() + 14), 232),
+                "fill_mid": QColor(max(0, base.red() - 2), max(0, base.green() - 2), max(0, base.blue() - 2), 236),
+                "fill_bottom": QColor(max(0, base.red() - 18), max(0, base.green() - 18), max(0, base.blue() - 18), 240),
+                "stroke": QColor(0, 0, 0, 64),
+                "shadow": QColor(0, 0, 0, 54),
+            }
+        return {
+            "fill_top": QColor(min(255, base.red() + 18), min(255, base.green() + 18), min(255, base.blue() + 18), 226),
+            "fill_mid": QColor(base.red(), base.green(), base.blue(), 234),
+            "fill_bottom": QColor(max(0, base.red() - 16), max(0, base.green() - 16), max(0, base.blue() - 16), 240),
+            "stroke": QColor(255, 255, 255, 46),
+            "shadow": QColor(0, 0, 0, 86),
+        }
+
+    def _windows_taskbar_hwnds(self) -> list[int]:
+        if sys.platform != "win32":
+            return []
+        try:
+            user32 = ctypes.windll.user32
+            hwnds: list[int] = []
+            primary = user32.FindWindowW("Shell_TrayWnd", None)
+            if primary:
+                hwnds.append(int(primary))
+
+            enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+            def enum_proc(hwnd, _lparam):
+                buffer = ctypes.create_unicode_buffer(128)
+                user32.GetClassNameW(hwnd, buffer, 128)
+                if buffer.value == "Shell_SecondaryTrayWnd":
+                    hwnds.append(int(hwnd))
+                return True
+
+            user32.EnumWindows(enum_proc_type(enum_proc), 0)
+            return list(dict.fromkeys(hwnds))
+        except Exception:
+            return []
+
+    def _window_class_name(self, hwnd: int) -> str:
+        if sys.platform != "win32" or not hwnd:
+            return ""
+        try:
+            buffer = ctypes.create_unicode_buffer(128)
+            ctypes.windll.user32.GetClassNameW(wintypes.HWND(int(hwnd)), buffer, 128)
+            return str(buffer.value or "")
+        except Exception:
+            return ""
+
+    def _window_rect_for_hwnd(self, hwnd: int) -> QRectF | None:
+        if sys.platform != "win32":
+            return None
+        try:
+            user32 = ctypes.windll.user32
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(wintypes.HWND(int(hwnd)), ctypes.byref(rect)):
+                return None
+            return QRectF(
+                float(rect.left),
+                float(rect.top),
+                float(rect.right - rect.left),
+                float(rect.bottom - rect.top),
+            )
+        except Exception:
+            return None
+
+    def _windows_taskbar_hwnd_for_screen(self, screen) -> int | None:
+        if sys.platform != "win32" or screen is None:
+            return None
+        screen_geo = QRectF(screen.geometry())
+        for hwnd in self._windows_taskbar_hwnds():
+            taskbar = self._window_rect_for_hwnd(hwnd)
+            if taskbar is None or taskbar.isNull() or not taskbar.intersects(screen_geo):
+                continue
+            return int(hwnd)
+        return None
+
+    def _windows_taskbar_rect_for_screen(self, screen) -> QRectF | None:
+        if sys.platform != "win32" or screen is None:
+            return None
+        hwnd = self._windows_taskbar_hwnd_for_screen(screen)
+        if not hwnd:
+            return None
+        taskbar = self._window_rect_for_hwnd(hwnd)
+        if taskbar is None or taskbar.isNull():
+            return None
+        return taskbar.intersected(QRectF(screen.geometry()))
+
+    def _windows_taskbar_child_rects(self, taskbar_hwnd: int) -> list[tuple[str, QRectF]]:
+        if sys.platform != "win32" or not taskbar_hwnd:
+            return []
+        try:
+            user32 = ctypes.windll.user32
+            children: list[tuple[str, QRectF]] = []
+            enum_proc_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+            def enum_proc(hwnd, _lparam):
+                class_name = self._window_class_name(int(hwnd))
+                rect = self._window_rect_for_hwnd(int(hwnd))
+                if class_name and rect is not None and not rect.isNull():
+                    children.append((class_name, rect))
+                return True
+
+            user32.EnumChildWindows(wintypes.HWND(int(taskbar_hwnd)), enum_proc_type(enum_proc), 0)
+            return children
+        except Exception:
+            return []
+
+    def _windows_taskbar_task_area_rect_for_screen(self, screen, taskbar_rect: QRectF) -> QRectF | None:
+        hwnd = self._windows_taskbar_hwnd_for_screen(screen)
+        if not hwnd:
+            return None
+        taskbar = QRectF(taskbar_rect)
+        if taskbar.isNull():
+            return None
+        class_priority = {
+            "MSTaskListWClass": 0,
+            "MSTaskSwWClass": 1,
+        }
+        candidates: list[tuple[int, float, QRectF]] = []
+        horizontal = taskbar.width() >= taskbar.height()
+        for class_name, rect in self._windows_taskbar_child_rects(hwnd):
+            if class_name not in class_priority:
+                continue
+            candidate = rect.intersected(taskbar)
+            if candidate.isNull():
+                continue
+            if horizontal:
+                if candidate.height() < taskbar.height() * 0.42 or candidate.width() < self._u(120.0):
+                    continue
+            elif candidate.width() < taskbar.width() * 0.42 or candidate.height() < self._u(120.0):
+                continue
+            candidates.append((class_priority[class_name], -candidate.width() * candidate.height(), candidate))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return QRectF(candidates[0][2])
+
+    def _fallback_taskbar_task_area_rect(self, taskbar_rect: QRectF) -> QRectF:
+        taskbar = QRectF(taskbar_rect)
+        if taskbar.isNull():
+            return QRectF()
+        if taskbar.width() >= taskbar.height():
+            lead = min(max(self._u(56.0), taskbar.height() * 1.75), taskbar.width() * 0.22)
+            trail = min(max(self._u(150.0), taskbar.height() * 4.0), taskbar.width() * 0.32)
+            area = taskbar.adjusted(lead, 0.0, -trail, 0.0)
+            return area if area.width() >= self._u(180.0) else taskbar
+        lead = min(max(self._u(56.0), taskbar.width() * 1.75), taskbar.height() * 0.22)
+        trail = min(max(self._u(150.0), taskbar.width() * 4.0), taskbar.height() * 0.32)
+        area = taskbar.adjusted(0.0, lead, 0.0, -trail)
+        return area if area.height() >= self._u(180.0) else taskbar
+
+    def _taskbar_task_area_rect_for_screen(self, screen, taskbar_rect: QRectF) -> QRectF:
+        taskbar = QRectF(taskbar_rect)
+        if taskbar.isNull():
+            return QRectF()
+        detected = self._windows_taskbar_task_area_rect_for_screen(screen, taskbar)
+        if detected is not None and not detected.isNull():
+            return detected.intersected(taskbar)
+        return self._fallback_taskbar_task_area_rect(taskbar)
+
+    def _taskbar_occupied_rects_for_screen(self, screen, taskbar_rect: QRectF) -> list[QRectF]:
+        taskbar = QRectF(taskbar_rect)
+        if taskbar.isNull() or screen is None or not hasattr(screen, "geometry"):
+            return []
+        hwnd = self._windows_taskbar_hwnd_for_screen(screen)
+        if not hwnd:
+            return []
+        task_area = self._windows_taskbar_task_area_rect_for_screen(screen, taskbar)
+        ignored = {"MSTaskListWClass", "MSTaskSwWClass"}
+        occupied: list[QRectF] = []
+        for class_name, rect in self._windows_taskbar_child_rects(hwnd):
+            candidate = QRectF(rect).intersected(taskbar)
+            if candidate.isNull():
+                continue
+            if class_name in ignored:
+                continue
+            if task_area is not None and not task_area.isNull() and candidate.contains(task_area.center()):
+                continue
+            if taskbar.width() >= taskbar.height():
+                if candidate.height() < taskbar.height() * 0.28 or candidate.width() < self._u(14.0):
+                    continue
+            elif candidate.width() < taskbar.width() * 0.28 or candidate.height() < self._u(14.0):
+                continue
+            occupied.append(candidate)
+        return occupied
+
+    def _taskbar_rect_for_screen(self, screen) -> QRectF | None:
+        if screen is None:
+            return None
+        shell_rect = self._windows_taskbar_rect_for_screen(screen)
+        if shell_rect is not None and not shell_rect.isNull():
+            return shell_rect
+        geo = screen.geometry()
+        available = screen.availableGeometry()
+        if available.bottom() < geo.bottom() - 1:
+            return QRectF(float(geo.left()), float(available.bottom() + 1), float(geo.width()), float(geo.bottom() - available.bottom()))
+        if available.top() > geo.top() + 1:
+            return QRectF(float(geo.left()), float(geo.top()), float(geo.width()), float(available.top() - geo.top()))
+        if available.left() > geo.left() + 1:
+            return QRectF(float(geo.left()), float(geo.top()), float(available.left() - geo.left()), float(geo.height()))
+        if available.right() < geo.right() - 1:
+            return QRectF(float(available.right() + 1), float(geo.top()), float(geo.right() - available.right()), float(geo.height()))
+        return None
+
+    def _taskbar_available_slot_rects(self, task_area: QRectF, occupied_rects: list[QRectF]) -> list[QRectF]:
+        area = QRectF(task_area)
+        if area.isNull():
+            return []
+        horizontal = area.width() >= area.height()
+        min_size = self._u(72.0)
+        if horizontal:
+            segments: list[tuple[float, float]] = [(area.left(), area.right())]
+            for occupied in sorted((QRectF(rect).intersected(area) for rect in occupied_rects), key=lambda rect: rect.left()):
+                if occupied.isNull() or occupied.height() < area.height() * 0.24:
+                    continue
+                next_segments: list[tuple[float, float]] = []
+                for left, right in segments:
+                    if occupied.right() <= left or occupied.left() >= right:
+                        next_segments.append((left, right))
+                        continue
+                    if occupied.left() - left >= min_size:
+                        next_segments.append((left, min(right, occupied.left())))
+                    if right - occupied.right() >= min_size:
+                        next_segments.append((max(left, occupied.right()), right))
+                segments = next_segments
+            return [QRectF(left, area.top(), right - left, area.height()) for left, right in segments if right - left >= min_size]
+
+        segments = [(area.top(), area.bottom())]
+        for occupied in sorted((QRectF(rect).intersected(area) for rect in occupied_rects), key=lambda rect: rect.top()):
+            if occupied.isNull() or occupied.width() < area.width() * 0.24:
+                continue
+            next_segments: list[tuple[float, float]] = []
+            for top, bottom in segments:
+                if occupied.bottom() <= top or occupied.top() >= bottom:
+                    next_segments.append((top, bottom))
+                    continue
+                if occupied.top() - top >= min_size:
+                    next_segments.append((top, min(bottom, occupied.top())))
+                if bottom - occupied.bottom() >= min_size:
+                    next_segments.append((max(top, occupied.bottom()), bottom))
+            segments = next_segments
+        return [QRectF(area.left(), top, area.width(), bottom - top) for top, bottom in segments if bottom - top >= min_size]
+
+    def _taskbar_side_slot_rects(self, task_area: QRectF, available_slots: list[QRectF]) -> list[QRectF]:
+        area = QRectF(task_area)
+        if area.isNull():
+            return []
+        slots = [QRectF(slot).intersected(area) for slot in available_slots if slot is not None and not slot.isNull()]
+        slots = [slot for slot in slots if not slot.isNull()]
+        horizontal = area.width() >= area.height()
+        center = area.center().x() if horizontal else area.center().y()
+        min_size = self._u(72.0)
+        gap = min(self._u(96.0), (area.width() if horizontal else area.height()) * 0.12)
+        if not slots or (len(slots) == 1 and abs((slots[0].center().x() if horizontal else slots[0].center().y()) - center) < min_size):
+            if horizontal:
+                left = QRectF(area.left(), area.top(), max(0.0, center - gap / 2.0 - area.left()), area.height())
+                right = QRectF(center + gap / 2.0, area.top(), max(0.0, area.right() - center - gap / 2.0), area.height())
+            else:
+                left = QRectF(area.left(), area.top(), area.width(), max(0.0, center - gap / 2.0 - area.top()))
+                right = QRectF(area.left(), center + gap / 2.0, area.width(), max(0.0, area.bottom() - center - gap / 2.0))
+            return [slot for slot in (left, right) if (slot.width() if horizontal else slot.height()) >= min_size]
+
+        before = [slot for slot in slots if (slot.center().x() if horizontal else slot.center().y()) < center]
+        after = [slot for slot in slots if (slot.center().x() if horizontal else slot.center().y()) > center]
+        side_slots: list[QRectF] = []
+        if before:
+            side_slots.append(max(before, key=lambda slot: slot.width() if horizontal else slot.height()))
+        if after:
+            side_slots.append(max(after, key=lambda slot: slot.width() if horizontal else slot.height()))
+        if len(side_slots) == 2:
+            side_slots.sort(key=lambda slot: slot.center().x() if horizontal else slot.center().y())
+            return side_slots
+        return self._taskbar_side_slot_rects(area, [])
+
+    def _taskbar_drop_zone_rect(self, taskbar_rect: QRectF, desired_width: float | None = None) -> QRectF:
+        taskbar = QRectF(taskbar_rect)
+        if taskbar.isNull():
+            return QRectF()
+        inset = self._u(5.0)
+        if taskbar.width() >= taskbar.height():
+            width = min(float(desired_width or self._u(420.0)), max(self._u(180.0), taskbar.width() - inset * 2.0))
+            height = max(self._u(24.0), taskbar.height() - inset * 2.0)
+            return QRectF(taskbar.center().x() - width / 2.0, taskbar.center().y() - height / 2.0, width, height)
+        width = max(self._u(24.0), taskbar.width() - inset * 2.0)
+        height = min(float(desired_width or self._u(360.0)), max(self._u(180.0), taskbar.height() - inset * 2.0))
+        return QRectF(taskbar.center().x() - width / 2.0, taskbar.center().y() - height / 2.0, width, height)
+
+    def _taskbar_drop_zones_for_screen(self, screen, desired_width: float | None = None) -> list[QRectF]:
+        taskbar = self._taskbar_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            return []
+        task_area = self._taskbar_task_area_rect_for_screen(screen, taskbar)
+        base = task_area if not task_area.isNull() else taskbar
+        occupied = self._taskbar_occupied_rects_for_screen(screen, taskbar)
+        slots = self._taskbar_available_slot_rects(base, occupied)
+        slots = self._taskbar_side_slot_rects(base, slots)
+        zones = [self._taskbar_drop_zone_rect(slot, desired_width=desired_width) for slot in slots]
+        zones = [zone for zone in zones if not zone.isNull()]
+        if zones:
+            return zones
+        fallback = self._taskbar_drop_zone_rect(taskbar, desired_width=desired_width)
+        return [] if fallback.isNull() else [fallback]
+
+    def _select_taskbar_drop_zone(self, zones: list[QRectF], global_pos: QPoint | QPointF | None) -> QRectF:
+        clean = [QRectF(zone) for zone in zones if zone is not None and not zone.isNull()]
+        if not clean:
+            return QRectF()
+        if global_pos is None:
+            return clean[0]
+        px = float(global_pos.x())
+        py = float(global_pos.y())
+
+        def score(zone: QRectF) -> float:
+            dx = abs(px - zone.center().x())
+            dy = abs(py - zone.center().y())
+            inside_bonus = -10000.0 if zone.contains(QPointF(px, py)) else 0.0
+            return dx * dx + dy * dy + inside_bonus
+
+        return min(clean, key=score)
+
+    def _taskbar_position_ratio_for_center(self, track_rect: QRectF, main_width: float, center_x: float) -> float:
+        track = QRectF(track_rect)
+        if track.isNull():
+            return 0.5
+        half = max(0.0, float(main_width) / 2.0)
+        left_center = track.left() + half
+        right_center = track.right() - half
+        if right_center <= left_center:
+            return 0.5
+        clamped = max(left_center, min(right_center, float(center_x)))
+        return max(0.0, min(1.0, (clamped - left_center) / (right_center - left_center)))
+
+    def _taskbar_center_for_position_ratio(self, track_rect: QRectF, main_width: float, ratio: float) -> float:
+        track = QRectF(track_rect)
+        if track.isNull():
+            return 0.0
+        half = max(0.0, float(main_width) / 2.0)
+        left_center = track.left() + half
+        right_center = track.right() - half
+        if right_center <= left_center:
+            return track.center().x()
+        value = max(0.0, min(1.0, float(ratio)))
+        return left_center + (right_center - left_center) * value
+
+    def _taskbar_left_handle_rect(self, main_rect: QRectF) -> QRectF:
+        rect = QRectF(main_rect)
+        if rect.isNull():
+            return QRectF()
+        width = max(self._u(2.0), min(self._u(4.0), rect.height() * 0.09))
+        height = max(self._u(18.0), rect.height() * 0.62)
+        gap = max(self._u(4.0), min(self._u(7.0), rect.height() * 0.16))
+        return QRectF(rect.left() - gap - width, rect.center().y() - height / 2.0, width, height)
+
+    def _taskbar_left_handle_visible(self) -> bool:
+        if not self._taskbar_compact_active():
+            return False
+        try:
+            if time.monotonic() <= float(getattr(self, "taskbar_left_handle_visible_until", 0.0) or 0.0):
+                return True
+        except Exception:
+            pass
+        if bool(getattr(self, "dragging", False)) and str(getattr(self, "drag_press_key", "") or "") == "taskbar:left-handle":
+            return True
+        key = str(getattr(self, "hovered_key", "") or "")
+        if key == "taskbar:left-handle":
+            return True
+        return key in {"music", "plugin", "message"} or key.startswith("message:")
+
+    def _extend_taskbar_left_handle_visibility(self, now: float | None = None):
+        if not self._taskbar_compact_active():
+            return
+        now = time.monotonic() if now is None else float(now)
+        self.taskbar_left_handle_visible_until = max(
+            float(getattr(self, "taskbar_left_handle_visible_until", 0.0) or 0.0),
+            now + 3.0,
+        )
+
+    def _taskbar_manual_width_for_left_edge(self, main_rect: QRectF, track_rect: QRectF, left_x: float) -> float:
+        rect = QRectF(main_rect)
+        track = QRectF(track_rect)
+        if rect.isNull() or track.isNull():
+            return 0.0
+        min_width = max(self._u(120.0), rect.height() + self._u(16.0))
+        max_width = max(min_width, track.width())
+        right_edge = max(track.left() + min_width, min(track.right(), rect.right()))
+        left_edge = max(track.left(), min(float(left_x), right_edge - min_width))
+        return max(min_width, min(max_width, right_edge - left_edge))
+
+    def _taskbar_drop_zone_for_screen(self, screen, desired_width: float | None = None) -> QRectF:
+        selected = getattr(self, "taskbar_selected_drop_zone", QRectF())
+        if selected is not None and not selected.isNull():
+            return QRectF(selected)
+        zones = self._taskbar_drop_zones_for_screen(screen, desired_width=desired_width)
+        return QRectF(zones[0]) if zones else QRectF()
+
+    def _taskbar_track_rect_for_screen(self, screen, taskbar_rect: QRectF) -> QRectF:
+        taskbar = QRectF(taskbar_rect)
+        if taskbar.isNull():
+            return QRectF()
+        task_area = self._taskbar_task_area_rect_for_screen(screen, taskbar)
+        return task_area if not task_area.isNull() else taskbar
+
+    def _taskbar_hidden_fallback_rect_for_screen(self, screen) -> QRectF:
+        if screen is None:
+            return QRectF()
+        geo = screen.geometry()
+        previous = QRectF(getattr(self, "last_taskbar_rect", QRectF()))
+        if not previous.isNull():
+            height = max(self._u(34.0), min(self._u(72.0), previous.height()))
+            y = max(float(geo.top()), min(float(geo.bottom()) - height + 1.0, previous.top()))
+            return QRectF(float(geo.left()), y, float(geo.width()), height)
+        height = self._u(48.0)
+        return QRectF(float(geo.left()), float(geo.bottom()) - height + 1.0, float(geo.width()), height)
+
+    def _taskbar_intended_zone_rect(self, center_x: float, center_y: float, main_w: float, main_h: float) -> QRectF:
+        return QRectF(
+            float(center_x) - float(main_w) / 2.0,
+            float(center_y) - float(main_h) / 2.0,
+            float(main_w),
+            float(main_h),
+        )
+
+    def _taskbar_follow_refresh_due(self, now: float) -> bool:
+        try:
+            last = float(getattr(self, "taskbar_follow_last_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if last <= 0.0:
+            return True
+        interval = float(getattr(self, "TASKBAR_FOLLOW_REFRESH_INTERVAL", 0.28))
+        return float(now) - last >= max(0.08, interval)
+
+    def _taskbar_follow_rect_key(self, rect: QRectF) -> tuple[int, int, int, int]:
+        value = QRectF(rect)
+        if value.isNull():
+            return (0, 0, 0, 0)
+        return (
+            int(round(value.left())),
+            int(round(value.top())),
+            int(round(value.width())),
+            int(round(value.height())),
+        )
+
+    def _taskbar_follow_geometry_key(
+        self,
+        screen,
+        taskbar_rect: QRectF,
+        track_rect: QRectF,
+        zone_rect: QRectF,
+        window_pos: QPoint,
+        main_top: float,
+        direction: int,
+    ) -> tuple[object, ...]:
+        return (
+            id(screen),
+            self._taskbar_follow_rect_key(taskbar_rect),
+            self._taskbar_follow_rect_key(track_rect),
+            self._taskbar_follow_rect_key(zone_rect),
+            int(round(float(main_top))),
+            int(direction),
+            int(window_pos.x()),
+            int(window_pos.y()),
+            int(round(float(self.width()))),
+            int(round(float(self.height()))),
+            str(getattr(self, "location_mode", "free") or "free"),
+            bool(getattr(self, "expanded", False)),
+            str(self._main_kind()),
+        )
+
+    def _move_taskbar_window_if_needed(self, new_pos: QPoint) -> bool:
+        target = QPoint(new_pos)
+        def close_enough(x: int, y: int) -> bool:
+            return abs(int(x) - int(target.x())) <= 1 and abs(int(y) - int(target.y())) <= 1
+
+        current = None
+        try:
+            current = QPoint(self.pos())
+        except Exception:
+            current = None
+        if current is not None and close_enough(current.x(), current.y()):
+            return False
+        saved = getattr(self, "saved_window_pos", None)
+        if current is None and isinstance(saved, (list, tuple)) and len(saved) >= 2:
+            try:
+                if close_enough(int(saved[0]), int(saved[1])):
+                    return False
+            except (TypeError, ValueError):
+                pass
+        self.move(target)
+        return True
+
+    def _refresh_taskbar_follow_position(self) -> bool:
+        if not self._taskbar_compact_active():
+            return False
+        probe = self.mapToGlobal(QPoint(max(1, self.width() // 2), max(1, self.height())))
+        screen = QGuiApplication.screenAt(probe) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return False
+        taskbar = self._taskbar_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            taskbar = self._taskbar_hidden_fallback_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            return False
+        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+        if track.isNull():
+            track = QRectF(taskbar)
+        screen_geo = screen.geometry()
+        direction = self._taskbar_stack_direction_for_rect(taskbar, screen_geo)
+        main_kind = self._main_kind()
+        stack_w = self._stack_target_width(main_kind)
+        main_w, main_h = self._main_size_for_taskbar_anchor(main_kind, stack_w, taskbar)
+        main_top = self._main_top_for_direction(main_kind, main_h, direction)
+        ratio = max(0.0, min(1.0, float(getattr(self, "taskbar_position_ratio", 0.5) or 0.5)))
+        center_x = self._taskbar_center_for_position_ratio(track, main_w, ratio)
+        center_y = taskbar.center().y()
+        selected_zone = self._taskbar_intended_zone_rect(center_x, center_y, main_w, main_h)
+        new_pos = QPoint(int(round(center_x - self.width() / 2.0)), int(round(center_y - main_top - main_h / 2.0)))
+        new_pos = self._clamp_taskbar_window_pos(new_pos, main_top, main_w, main_h, screen_geo)
+        geometry_key = self._taskbar_follow_geometry_key(screen, taskbar, track, selected_zone, new_pos, main_top, direction)
+        stable_geometry = geometry_key == getattr(self, "taskbar_follow_last_key", "")
+        self.last_taskbar_rect = QRectF(taskbar)
+        self.stack_direction = direction
+        self.taskbar_selected_drop_zone = selected_zone
+        self._move_taskbar_window_if_needed(new_pos)
+        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        now = time.monotonic()
+        self.taskbar_follow_last_at = now
+        self.taskbar_follow_last_key = geometry_key
+        try:
+            material_last = float(getattr(self, "taskbar_follow_material_last_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            material_last = 0.0
+        material_interval = float(getattr(self, "TASKBAR_FOLLOW_MATERIAL_REFRESH_INTERVAL", 0.50))
+        if not stable_geometry or now - material_last >= max(0.20, material_interval):
+            self._update_taskbar_material_for_screen(screen, taskbar)
+            self.taskbar_follow_material_last_at = now
+        return True
+
+    def _hide_taskbar_drop_overlay(self):
+        overlay = getattr(self, "taskbar_drop_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.hide()
+            except Exception:
+                pass
+
+    def _sync_taskbar_drop_overlay(self):
+        self._hide_taskbar_drop_overlay()
+
+    def _set_taskbar_presence(self, inside: bool, notify: bool = True):
+        inside = bool(inside)
+        if inside:
+            self.taskbar_preview_visible = True
+            self._sync_taskbar_drop_overlay()
+            return
+        self.taskbar_preview_visible = False
+        self.taskbar_selected_drop_zone = QRectF()
+        self.taskbar_drop_zones = []
+        self._hide_taskbar_drop_overlay()
+        if str(getattr(self, "location_mode", "free")) == "tasker":
+            self.set_location_mode("free", notify=notify)
+
+    def _update_taskbar_preview_for_drag(self, global_pos: QPoint):
+        ratio, screen = self._taskbar_drag_ratio(global_pos)
+        taskbar = self._taskbar_rect_for_screen(screen)
+        zones: list[QRectF] = []
+        selected = QRectF()
+        visible = False
+        if taskbar is not None and not taskbar.isNull():
+            main_rect = self._current_main_global_rect()
+            visible = self._should_show_taskbar_preview_for_rect(ratio, main_rect, taskbar)
+            if visible:
+                zones = self._taskbar_drop_zones_for_screen(screen, desired_width=self._u(420.0))
+                self._update_taskbar_material_for_screen(screen, taskbar)
+        self.taskbar_drop_zones = zones
+        self.taskbar_selected_drop_zone = selected
+        self._set_taskbar_presence(bool(visible), notify=False)
+
+    def _accept_taskbar_preview_drop(self) -> bool:
+        if not self._taskbar_allowed():
+            return False
+        if not bool(getattr(self, "taskbar_preview_visible", False)):
+            return False
+        self.set_location_mode("tasker", notify=False)
+        try:
+            self._dock_to_taskbar_task_area()
+        except Exception:
+            pass
+        return True
+
+    def _taskbar_stack_direction_for_rect(self, taskbar_rect: QRectF, screen_geo) -> int:
+        if taskbar_rect.width() >= taskbar_rect.height() and screen_geo is not None:
+            return -1 if taskbar_rect.center().y() >= QRectF(screen_geo).center().y() else 1
+        return 1
+
+    def _dock_to_taskbar_task_area(self) -> bool:
+        probe = self.mapToGlobal(QPoint(max(1, self.width() // 2), max(1, self.height())))
+        screen = QGuiApplication.screenAt(probe) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return False
+        taskbar = self._taskbar_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            return False
+        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+        if track.isNull():
+            return False
+        self.last_taskbar_rect = QRectF(taskbar)
+        self._update_taskbar_material_for_screen(screen, taskbar)
+        screen_geo = screen.geometry()
+        direction = self._taskbar_stack_direction_for_rect(taskbar, screen_geo)
+        self.stack_direction = direction
+        main_kind = self._main_kind()
+        stack_w = self._stack_target_width(main_kind)
+        main_w, main_h = self._main_size_for_taskbar_anchor(main_kind, stack_w, taskbar)
+        main_top = self._main_top_for_direction(main_kind, main_h, direction)
+        self.taskbar_position_ratio = self._taskbar_position_ratio_for_center(track, main_w, probe.x())
+        center_x = self._taskbar_center_for_position_ratio(track, main_w, self.taskbar_position_ratio)
+        center_y = taskbar.center().y()
+        self.taskbar_selected_drop_zone = self._taskbar_intended_zone_rect(center_x, center_y, main_w, main_h)
+        global_x = center_x - self.width() / 2.0
+        global_y = center_y - main_top - main_h / 2.0
+        new_pos = QPoint(int(round(global_x)), int(round(global_y)))
+        new_pos = self._clamp_taskbar_window_pos(new_pos, main_top, main_w, main_h, screen_geo)
+        self._move_taskbar_window_if_needed(new_pos)
+        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        return True
+
+    def set_finder_mode(self, enabled: bool, notify: bool = True):
+        self.set_location_mode("finder" if enabled else "free", notify=notify)
 
     def _notify_settings_changed(self):
         if self.settings_changed_callback:
@@ -2039,6 +3193,8 @@ class IslandStackVisual(QWidget):
             self.update()
             return
         key = self._hit_test(event.position())
+        if key in {"music", "plugin", "message", "taskbar:left-handle"} or str(key or "").startswith("message:"):
+            self._extend_taskbar_left_handle_visibility(now)
         in_finder_frame = self._point_in_finder_frame(event.position())
         if key or in_finder_frame:
             self.left_stack_at = 0.0
@@ -2206,10 +3362,11 @@ class IslandStackVisual(QWidget):
         self._pulse_stack()
 
     def _open_plugin_manager(self):
-        if not self.plugin_samples:
+        samples = self._enabled_plugin_samples()
+        if not samples:
             return
-        index = max(0, min(self._active_plugin_focus(time.monotonic()), len(self.plugin_samples) - 1))
-        label, detail, summary, _color, _icon, plugin_id, status, _alert_title, _alert_body, _alert_priority, _progress = self._plugin_tuple(self.plugin_samples[index])
+        index = max(0, min(self._active_plugin_focus(time.monotonic()), len(samples) - 1))
+        label, detail, summary, _color, _icon, plugin_id, status, _alert_title, _alert_body, _alert_priority, _progress = self._plugin_tuple(samples[index])
         try:
             from local.plugin_manager_window import PluginManagerWindow
             existing = self.plugin_manager_windows.get(label)
@@ -2639,13 +3796,38 @@ class IslandStackVisual(QWidget):
         label, detail, summary, color, icon = plugin[:5]
         return label, detail, summary, color, icon, "", "normal", "", "", 50, 0.0
 
+    def _enabled_plugin_ids(self) -> list[str]:
+        raw = getattr(self, "enabled_plugin_ids", None)
+        known = ["time", "weather", "agenda"]
+        if raw is None:
+            count = max(0, min(3, int(getattr(self, "enabled_plugin_count", 3) or 0)))
+            return known[:count]
+        values = {str(item or "").strip().casefold() for item in raw}
+        return [plugin_id for plugin_id in known if plugin_id in values]
+
+    def _enabled_plugin_slot_count(self) -> int:
+        return len(self._enabled_plugin_ids())
+
+    def _enabled_plugin_samples(self) -> list[tuple]:
+        enabled = set(self._enabled_plugin_ids())
+        if not enabled:
+            self.enabled_plugin_count = 0
+            return []
+        samples = []
+        for plugin in list(getattr(self, "plugin_samples", [])):
+            plugin_id = str(self._plugin_tuple(plugin)[5] or "").strip().casefold()
+            if plugin_id in enabled:
+                samples.append(plugin)
+        self.enabled_plugin_count = len(samples) if samples else len(enabled)
+        return samples
+
     def _plugin_index_for_id(self, plugin_id: str) -> int:
         target = str(plugin_id or "").strip().casefold()
         if not target:
             return -1
         if target.startswith("time:"):
             target = "time"
-        for index, plugin in enumerate(self.plugin_samples[: self.enabled_plugin_count]):
+        for index, plugin in enumerate(self._enabled_plugin_samples()):
             _label, _detail, _summary, _color, _icon, current_id, _status, _alert_title, _alert_body, _alert_priority, _progress = self._plugin_tuple(plugin)
             if str(current_id or "").strip().casefold() == target:
                 return index
@@ -2845,7 +4027,7 @@ class IslandStackVisual(QWidget):
         alert_statuses = {"done", "due", "soon", "running", "loading", "error", "alarm", "severe", "rain"}
         status_priority = {"due": 0, "severe": 1, "alarm": 2, "done": 3, "soon": 4, "rain": 5, "error": 6, "running": 7, "loading": 8}
         candidates = []
-        for index, plugin in enumerate(self.plugin_samples[: self.enabled_plugin_count]):
+        for index, plugin in enumerate(self._enabled_plugin_samples()):
             label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, _progress = self._plugin_tuple(plugin)
             is_time = str(plugin_id or "").strip().casefold() == "time" or str(label or "").strip().upper() == "TIME"
             if is_time and self._time_alert_side_suppressed(include_expanded):
@@ -2890,6 +4072,22 @@ class IslandStackVisual(QWidget):
         alerts = self._active_plugin_alerts(1)
         return alerts[0] if alerts else None
 
+    def _taskbar_main_overlay_alert(self):
+        if not self._taskbar_compact_active():
+            return None
+        for alert in self._active_plugin_alerts(4, include_expanded=True):
+            try:
+                _index, label, _detail, _summary, _color, _icon, plugin_id, status, _alert_title, _alert_body, _priority = alert
+            except (TypeError, ValueError):
+                continue
+            is_time = str(label or "").strip().upper() == "TIME" or str(plugin_id or "").strip().casefold().startswith("time")
+            if is_time and str(status or "").strip().lower() in {"done", "due", "alarm"}:
+                return alert
+        return None
+
+    def _taskbar_main_overlay_rect(self, main_rect: QRectF, alert) -> QRectF:
+        return QRectF(main_rect)
+
     def _open_music_source(self):
         app_name = str(getattr(self, "media_source_app", "") or "").strip()
         self._focus_app_window_async(app_name)
@@ -2923,12 +4121,23 @@ class IslandStackVisual(QWidget):
         else:
             if self._should_attach_to_finder(global_pos, delta):
                 self._attach_to_finder_for_drag(global_pos)
+            elif (
+                str(getattr(self, "location_mode", "free") or "free") == "tasker"
+                and str(getattr(self, "drag_press_key", "") or "") == "taskbar:left-handle"
+                and self._taskbar_drag_should_stay_on_track(global_pos)
+            ):
+                self._resize_taskbar_from_left_handle(global_pos)
+            elif str(getattr(self, "location_mode", "free") or "free") == "tasker" and self._taskbar_drag_should_stay_on_track(global_pos):
+                self._move_taskbar_drag(global_pos)
             else:
+                if str(getattr(self, "location_mode", "free") or "free") == "tasker":
+                    self.set_location_mode("free", notify=False)
                 self._move_standalone_drag(global_pos)
+                self._update_taskbar_preview_for_drag(global_pos)
         self._pulse_stack()
 
     def _finder_attach_allowed(self) -> bool:
-        return bool(getattr(self.finder_material, "available", False) or getattr(self, "manual_finder_available", False))
+        return bool(getattr(self, "manual_finder_available", False))
 
     def _should_attach_to_finder(self, global_pos: QPoint, delta: QPoint) -> bool:
         if not self._finder_attach_allowed() or delta.y() >= 0:
@@ -2941,13 +4150,20 @@ class IslandStackVisual(QWidget):
         return global_pos.y() <= geo.top() + threshold
 
     def _attach_to_finder_for_drag(self, global_pos: QPoint):
+        if not self._finder_attach_allowed():
+            return
         screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
         if not screen:
             return
         geo = screen.geometry()
-        self._begin_surface_transition("finder")
+        started_surface_transition = bool(self._begin_surface_transition("finder"))
+        self._reset_location_runtime_state(clear_surface=not started_surface_transition)
+        self.location_mode = "finder"
         self.finder_mode = True
         self.attach_to_real_finder = True
+        self.taskbar_fusion_mode = "off"
+        self.taskbar_preview_visible = False
+        self._hide_taskbar_drop_overlay()
         self.finder_material = read_finder_material(force_screen_sample=True, include_center=True)
         self.finder_material_refreshed_at = time.monotonic()
         self.resize(geo.width(), self.height())
@@ -2987,13 +4203,10 @@ class IslandStackVisual(QWidget):
 
     def _detach_from_finder_for_drag(self, global_pos: QPoint):
         self._remember_motion_global_rects()
+        self.location_mode = "free"
         self.finder_mode = False
         self.attach_to_real_finder = False
-        self.group_frame_motion = None
-        self.group_frame_mask_path = None
-        self.clearMask()
-        self.interaction_mask_active = False
-        self.last_mask_rect = QRectF()
+        self._reset_location_runtime_state(clear_surface=True, clear_drag_detach=False)
         standalone_width = int(round(self._u(940)))
         if self.width() != standalone_width:
             self.resize(standalone_width, self.height())
@@ -3029,6 +4242,107 @@ class IslandStackVisual(QWidget):
         self.move(new_pos)
         self._restore_motion_global_rects_after_move()
         self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+
+    def _taskbar_drag_should_stay_on_track(self, global_pos: QPoint) -> bool:
+        screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
+        taskbar = self._taskbar_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            return False
+        band = QRectF(taskbar).adjusted(0.0, -taskbar.height() * 1.8, 0.0, taskbar.height() * 1.8)
+        return band.contains(QPointF(global_pos))
+
+    def _move_taskbar_drag(self, global_pos: QPoint):
+        screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        taskbar = self._taskbar_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            return
+        self.last_taskbar_rect = QRectF(taskbar)
+        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+        if track.isNull():
+            return
+        direction = self._taskbar_stack_direction_for_rect(taskbar, screen.geometry())
+        self.stack_direction = direction
+        main_kind = self._main_kind()
+        stack_w = self._stack_target_width(main_kind)
+        main_w, main_h = self._main_size_for_taskbar_anchor(main_kind, stack_w, taskbar)
+        main_top = self._main_top_for_direction(main_kind, main_h, direction)
+        desired_center = float(global_pos.x()) + main_w / 2.0 - float(getattr(self, "drag_press_main_offset", QPointF()).x())
+        ratio = self._taskbar_position_ratio_for_center(track, main_w, desired_center)
+        center_x = self._taskbar_center_for_position_ratio(track, main_w, ratio)
+        center_y = taskbar.center().y()
+        self.taskbar_position_ratio = ratio
+        self.taskbar_selected_drop_zone = self._taskbar_intended_zone_rect(center_x, center_y, main_w, main_h)
+        new_pos = QPoint(int(round(center_x - self.width() / 2.0)), int(round(center_y - main_top - main_h / 2.0)))
+        new_pos = self._clamp_taskbar_window_pos(new_pos, main_top, main_w, main_h, screen.geometry())
+        self._move_taskbar_window_if_needed(new_pos)
+        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        self._update_taskbar_material_for_screen(screen, taskbar)
+
+    def _resize_taskbar_from_left_handle(self, global_pos: QPoint):
+        screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        taskbar = self._taskbar_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            return
+        self.last_taskbar_rect = QRectF(taskbar)
+        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+        if track.isNull():
+            return
+        main_rect = QRectF(getattr(self, "drag_press_main_global_rect", QRectF()))
+        if main_rect.isNull():
+            main_rect = self._current_main_global_rect()
+        if main_rect.isNull():
+            return
+        width = self._taskbar_manual_width_for_left_edge(main_rect, track, float(global_pos.x()))
+        if width <= 0.0:
+            return
+        self.taskbar_manual_width = width
+        direction = self._taskbar_stack_direction_for_rect(taskbar, screen.geometry())
+        self.stack_direction = direction
+        main_kind = self._main_kind()
+        stack_w = self._stack_target_width(main_kind)
+        main_w, main_h = self._main_size_for_taskbar_anchor(main_kind, stack_w, taskbar)
+        main_w = max(main_w, width)
+        main_top = self._main_top_for_direction(main_kind, main_h, direction)
+        right_edge = max(track.left() + main_w, min(track.right(), main_rect.right()))
+        left_edge = max(track.left(), right_edge - main_w)
+        if left_edge + main_w > track.right():
+            left_edge = max(track.left(), track.right() - main_w)
+        center_x = left_edge + main_w / 2.0
+        center_y = taskbar.center().y()
+        self.taskbar_position_ratio = self._taskbar_position_ratio_for_center(track, main_w, center_x)
+        self.taskbar_selected_drop_zone = QRectF(left_edge, center_y - main_h / 2.0, main_w, main_h)
+        new_pos = QPoint(int(round(center_x - self.width() / 2.0)), int(round(center_y - main_top - main_h / 2.0)))
+        new_pos = self._clamp_taskbar_window_pos(new_pos, main_top, main_w, main_h, screen.geometry())
+        self._move_taskbar_window_if_needed(new_pos)
+        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        self._update_taskbar_material_for_screen(screen, taskbar)
+
+    def _clamp_taskbar_window_pos(
+        self,
+        new_pos: QPoint,
+        main_top: float,
+        main_w: float,
+        main_h: float,
+        screen_geo,
+    ) -> QPoint:
+        try:
+            window_w = float(self.width())
+        except Exception:
+            window_w = float(main_w)
+        main_left = window_w / 2.0 - float(main_w) / 2.0
+        return self._clamp_standalone_window_pos(
+            float(new_pos.x()),
+            float(new_pos.y()),
+            main_left,
+            float(main_top),
+            float(main_w),
+            float(main_h),
+            screen_geo,
+        )
 
     def _clamp_standalone_window_pos(
         self,
@@ -3082,6 +4396,7 @@ class IslandStackVisual(QWidget):
         self.drag_press_center_ratio = self.stack_center_ratio
         self.drag_press_key = self._hit_test(event.position())
         self.drag_press_main_offset = QPointF()
+        self.drag_press_main_global_rect = QRectF()
         try:
             visuals = self._build_visuals()
             main_visual = next((visual for visual in visuals if visual.z_index == 10), None)
@@ -3089,8 +4404,12 @@ class IslandStackVisual(QWidget):
                 motion = self.motions.get(main_visual.key)
                 main_rect = QRectF(motion.rect) if motion and motion.opacity > 0.08 else QRectF(main_visual.rect)
                 self.drag_press_main_offset = self._drag_main_offset_for_press(event.position(), main_rect, self.drag_press_key)
+                self.drag_press_main_global_rect = QRectF(main_rect)
+                origin = self.mapToGlobal(QPoint(0, 0))
+                self.drag_press_main_global_rect.translate(float(origin.x()), float(origin.y()))
         except Exception:
             self.drag_press_main_offset = QPointF()
+            self.drag_press_main_global_rect = QRectF()
         self.drag_candidate = True
         self.dragging = False
         self.hover_armed_key = ""
@@ -3119,6 +4438,8 @@ class IslandStackVisual(QWidget):
             if key:
                 self._activate_key(key)
             self.update()
+        elif self.dragging:
+            self._accept_taskbar_preview_drop()
         self.drag_candidate = False
         self.dragging = False
         self._save_placement_state()
@@ -3151,6 +4472,14 @@ class IslandStackVisual(QWidget):
         return not rect.isNull() and rect.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)).contains(point)
 
     def _hit_test(self, point: QPointF) -> str:
+        if self._taskbar_compact_active():
+            handle = getattr(self, "taskbar_left_handle_rect", QRectF())
+            if (
+                not handle.isNull()
+                and self._taskbar_left_handle_visible()
+                and handle.adjusted(-self._u(5.0), -self._u(5.0), self._u(5.0), self._u(5.0)).contains(point)
+            ):
+                return "taskbar:left-handle"
         if self.expanded and self._main_kind() == IslandKind.MUSIC:
             if getattr(self, "music_cover_rect", QRectF()).contains(point):
                 return "music:open_source"
@@ -3185,12 +4514,13 @@ class IslandStackVisual(QWidget):
         return ""
 
     def _set_plugin_focus(self, index: int, immediate: bool = False):
-        if self.enabled_plugin_count <= 0:
+        count = self._enabled_plugin_slot_count()
+        if count <= 0:
             self.plugin_focus = 0
             self.plugin_focus_from = 0
             self.plugin_focus_target = 0
             return
-        index = max(0, min(index, self.enabled_plugin_count - 1))
+        index = max(0, min(index, count - 1))
         now = time.monotonic()
         if immediate:
             self.plugin_focus = index
@@ -3206,7 +4536,7 @@ class IslandStackVisual(QWidget):
         self.plugin_focus_changed_at = now
 
     def _focus_plugin_at(self, x: float, immediate: bool = False):
-        if self.enabled_plugin_count <= 0:
+        if self._enabled_plugin_slot_count() <= 0:
             return
         motion = self.motions.get("plugin")
         if not motion:
@@ -3228,14 +4558,15 @@ class IslandStackVisual(QWidget):
         return progress * progress * (3.0 - 2.0 * progress)
 
     def _active_plugin_focus(self, now: float) -> int:
-        if self.enabled_plugin_count <= 0:
+        count = self._enabled_plugin_slot_count()
+        if count <= 0:
             return 0
         if self.expanded:
             progress = self._plugin_focus_progress(now)
             if progress >= 1.0:
                 return self.plugin_focus_target
             return self.plugin_focus_from if progress < 0.5 else self.plugin_focus_target
-        return min(self.plugin_focus, self.enabled_plugin_count - 1)
+        return min(self.plugin_focus, count - 1)
 
     def _plugin_focus_weights(self, count: int, now: float, expand_active: bool = True) -> list[float]:
         if count <= 0:
@@ -3271,7 +4602,7 @@ class IslandStackVisual(QWidget):
         return [from_widths[i] + (target_widths[i] - from_widths[i]) * progress for i in range(count)]
 
     def _plugin_item_rects(self, rect: QRectF, now: float, expand_active: bool = True) -> list[tuple[int, QRectF]]:
-        count = max(0, min(self.enabled_plugin_count, 3))
+        count = max(0, min(self._enabled_plugin_slot_count(), 3))
         widths = self._plugin_widths(count, rect.width(), now, expand_active=expand_active)
         cells = []
         x = rect.left()
@@ -3357,8 +4688,11 @@ class IslandStackVisual(QWidget):
         secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
         secondary_spacing = int(getattr(self, "dual_line_secondary_spacing", 100))
         primary_w = self._lyric_layout(lines[0], max(12, compact_size - 1), True).total_width
-        secondary_w = self._lyric_layout(lines[1], max(10, compact_size - 4), secondary_bold, secondary_spacing).total_width
+        secondary_w = self._lyric_layout(lines[1], self._dual_line_secondary_font_size(), secondary_bold, secondary_spacing).total_width
         return max(primary_w, secondary_w)
+
+    def _dual_line_secondary_font_size(self) -> int:
+        return max(8, min(20, int(getattr(self, "dual_line_font_size", 12))))
 
     def _representative_text_width(self, lines: list[str], metrics: QFontMetrics) -> float:
         if not lines:
@@ -3394,7 +4728,7 @@ class IslandStackVisual(QWidget):
         index = min(len(widths) - 1, max(0, int(round((len(widths) - 1) * 0.72))))
         value = float(widths[index])
         cache[key] = value
-        if len(cache) > 16:
+        while len(cache) > int(getattr(self, "REPRESENTATIVE_WIDTH_CACHE_LIMIT", 12)):
             cache.pop(next(iter(cache)))
         return value
 
@@ -3749,6 +5083,8 @@ class IslandStackVisual(QWidget):
         count = int(getattr(self, "album_island_cover_count", 5))
         if count not in (3, 5, 7):
             count = 5
+        if self._taskbar_compact_active() and not bool(getattr(self, "expanded", False)):
+            count = 1
         center = count // 2
         stage = QRectF(rect)
         transition = self._album_island_transition_progress()
@@ -3897,24 +5233,24 @@ class IslandStackVisual(QWidget):
 
     def _album_art_from_entry(self, entry) -> QImage:
         if isinstance(entry, QImage):
-            return QImage(entry)
+            return self._bounded_album_image(entry, self.STORED_ALBUM_ART_MAX_SIDE)
         if isinstance(entry, dict):
             image = entry.get("album_art") or entry.get("image")
             if isinstance(image, QImage):
-                return QImage(image)
+                return self._bounded_album_image(image, self.STORED_ALBUM_ART_MAX_SIDE)
             data = entry.get("album_art_bytes") or entry.get("image_bytes")
             if isinstance(data, bytes):
                 loaded = QImage()
                 if loaded.loadFromData(data) and not loaded.isNull():
-                    return loaded
+                    return self._bounded_album_image(loaded, self.STORED_ALBUM_ART_MAX_SIDE)
         image = getattr(entry, "album_art", None)
         if isinstance(image, QImage):
-            return QImage(image)
+            return self._bounded_album_image(image, self.STORED_ALBUM_ART_MAX_SIDE)
         data = getattr(entry, "album_art_bytes", b"") or getattr(entry, "image_bytes", b"") or b""
         if isinstance(data, bytes) and data:
             loaded = QImage()
             if loaded.loadFromData(data) and not loaded.isNull():
-                return loaded
+                return self._bounded_album_image(loaded, self.STORED_ALBUM_ART_MAX_SIDE)
         return QImage()
 
     def _album_island_listened_text(self) -> str:
@@ -3927,7 +5263,7 @@ class IslandStackVisual(QWidget):
             "track_id": str(getattr(self, "media_track_id", "") or ""),
             "title": str(getattr(self, "track_title", "") or ""),
             "artist": str(getattr(self, "artist", "") or ""),
-            "album_art": getattr(self, "album_art", QImage()),
+            "album_art": self._bounded_album_image(getattr(self, "album_art", QImage()), self.STORED_ALBUM_ART_MAX_SIDE),
         }
 
     def _entry_matches_track_id(self, entry, track_id: str) -> bool:
@@ -3968,7 +5304,7 @@ class IslandStackVisual(QWidget):
                 {
                     "track_id": previous_id,
                     "title": str(getattr(self, "track_title", "") or ""),
-                    "album_art": getattr(self, "album_art", QImage()),
+                    "album_art": self._bounded_album_image(getattr(self, "album_art", QImage()), self.STORED_ALBUM_ART_MAX_SIDE),
                 },
             )
         self.album_history = history[:6]
@@ -3993,6 +5329,105 @@ class IslandStackVisual(QWidget):
         if main_kind == IslandKind.MUSIC:
             return self._music_target_width(self.expanded)
         return self._u(float(self.STACK_WIDTH))
+
+    def _taskbar_compact_active(self) -> bool:
+        return str(getattr(self, "location_mode", "free") or "free") == "tasker"
+
+    def _taskbar_uses_expanded_material_frame(self) -> bool:
+        return (
+            str(getattr(self, "location_mode", "free") or "free") == "tasker"
+            and bool(getattr(self, "expanded", False))
+            and not bool(getattr(self, "finder_mode", False))
+        )
+
+    def _taskbar_shell_remains_opaque(self) -> bool:
+        return True
+
+    def _taskbar_panel_corner_policy(self) -> str:
+        return "square" if str(getattr(self, "taskbar_corner_style", "win11") or "win11") == "win10" else "small-round"
+
+    def _taskbar_height(self) -> float:
+        if self._taskbar_compact_active():
+            previous = QRectF(getattr(self, "last_taskbar_rect", QRectF()))
+            if not previous.isNull():
+                height = min(float(previous.width()), float(previous.height()))
+                if height > 1.0:
+                    return max(self._u(34.0), min(self._u(72.0), height))
+        screen = QGuiApplication.screenAt(self.mapToGlobal(QPoint(self.width() // 2, self.height()))) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return self._u(48.0)
+        taskbar = self._taskbar_rect_for_screen(screen)
+        if taskbar is None or taskbar.isNull():
+            return self._u(48.0)
+        height = min(float(taskbar.width()), float(taskbar.height()))
+        if height <= 1.0:
+            return self._u(48.0)
+        return max(self._u(34.0), min(self._u(72.0), height))
+
+    def _taskbar_corner_radius(self, taskbar_height: float, style: str | None = None) -> float:
+        style = str(style or getattr(self, "taskbar_corner_style", "win11") or "win11").strip().lower()
+        if style == "win10":
+            return 0.0
+        return max(self._u(4.0), min(self._u(10.0), float(taskbar_height) * 0.18))
+
+    def _taskbar_default_music_width(self) -> float:
+        return self._u(420.0)
+
+    def _taskbar_width_with_manual(self, default_width: float) -> float:
+        if not self._taskbar_compact_active():
+            return float(default_width)
+        try:
+            manual = float(getattr(self, "taskbar_manual_width", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            manual = 0.0
+        if manual <= 0.0:
+            return float(default_width)
+        return max(self._u(120.0), min(self._u(760.0), manual))
+
+    def _taskbar_compact_music_size(self, base_width: float, taskbar_height: float, selected_zone: QRectF | None = None) -> tuple[float, float]:
+        inset = max(self._u(3.0), float(taskbar_height) * 0.09)
+        height = max(self._u(28.0), float(taskbar_height) - inset * 2.0)
+        width = self._taskbar_default_music_width()
+        normal_width = self._taskbar_width_with_manual(max(self._u(180.0), width))
+        selected = QRectF(getattr(self, "taskbar_selected_drop_zone", QRectF()) if selected_zone is None else selected_zone)
+        if (
+            self._taskbar_compact_active()
+            and float(getattr(self, "taskbar_manual_width", 0.0) or 0.0) <= 0.0
+            and not selected.isNull()
+        ):
+            slot_width = max(0.0, float(selected.width()))
+            slot_height = max(0.0, float(selected.height()))
+            height = min(height, slot_height if slot_height > 1.0 else height)
+            if slot_width > 1.0 and slot_width < normal_width:
+                cover_width = min(slot_width, max(self._u(28.0), height + self._u(8.0)))
+                return cover_width, height
+        return normal_width, height
+
+    def _main_size_for_taskbar_anchor(self, main_kind: IslandKind, stack_w: float, taskbar_rect: QRectF) -> tuple[float, float]:
+        if main_kind == IslandKind.MUSIC and not bool(getattr(self, "expanded", False)):
+            taskbar = QRectF(taskbar_rect)
+            taskbar_height = min(float(taskbar.width()), float(taskbar.height())) if not taskbar.isNull() else self._u(48.0)
+            return self._taskbar_compact_music_size(stack_w, taskbar_height, selected_zone=QRectF())
+        return self._main_size_for_kind(main_kind, stack_w)
+
+    def _taskbar_cover_only_music_active(self, rect: QRectF | None = None) -> bool:
+        if not self._taskbar_compact_active():
+            return False
+        selected = QRectF(getattr(self, "taskbar_selected_drop_zone", QRectF()))
+        if not selected.isNull() and selected.width() < self._u(120.0):
+            return True
+        if rect is not None and not rect.isNull() and rect.width() <= rect.height() + self._u(18.0):
+            return True
+        return False
+
+    def _music_shell_radius(self, rect: QRectF, expanded: bool) -> float:
+        if self._taskbar_compact_active():
+            try:
+                taskbar_height = self._taskbar_height()
+            except Exception:
+                taskbar_height = rect.height()
+            return self._taskbar_corner_radius(min(float(rect.height()), float(taskbar_height)))
+        return self._u(30.0) if expanded else rect.height() / 2.0
 
     def _current_screen_geometry(self):
         screen = QGuiApplication.screenAt(self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))) or QGuiApplication.primaryScreen()
@@ -4045,6 +5480,8 @@ class IslandStackVisual(QWidget):
         if main_kind == IslandKind.MUSIC:
             if self.expanded:
                 return stack_w, self._u(176.0)
+            if self._taskbar_compact_active():
+                return self._taskbar_compact_music_size(stack_w, self._taskbar_height())
             if self._should_paint_album_island():
                 height = self._album_island_compact_music_height()
             elif self._gelv_enabled():
@@ -4056,9 +5493,11 @@ class IslandStackVisual(QWidget):
             if self.expanded:
                 return stack_w, self._u(48.0)
             base_plugin_width = self._u(420.0)
-            return base_plugin_width / 3.0 * max(1, self.enabled_plugin_count), self._u(48.0)
+            width = base_plugin_width / 3.0 * max(1, self._enabled_plugin_slot_count())
+            return self._taskbar_width_with_manual(width), self._u(48.0)
         if main_kind == IslandKind.MESSAGE:
-            return (stack_w if self.expanded else min(self._u(430.0), stack_w)), self._u(48.0)
+            width = stack_w if self.expanded else min(self._u(430.0), stack_w)
+            return self._taskbar_width_with_manual(width), self._u(48.0)
         return float(getattr(self, "empty_bar_width", 92)), float(getattr(self, "empty_bar_height", 14))
 
     def _time_panel_breakpoint(self) -> float:
@@ -4114,6 +5553,11 @@ class IslandStackVisual(QWidget):
     def _vertical_stack_direction(self, main_kind: IslandKind, main_h: float, screen_geo) -> int:
         if self.finder_mode:
             return 1
+        if self._taskbar_compact_active():
+            taskbar = QRectF(getattr(self, "last_taskbar_rect", QRectF()))
+            if not taskbar.isNull() and screen_geo is not None:
+                return self._taskbar_stack_direction_for_rect(taskbar, screen_geo)
+            return -1 if int(getattr(self, "stack_direction", -1) or -1) < 0 else 1
         mode = str(getattr(self, "expand_direction", "auto") or "auto").lower()
         if mode == "down":
             return 1
@@ -4164,7 +5608,7 @@ class IslandStackVisual(QWidget):
         target_stack_w = self._stack_target_width(main_kind)
         stack_w = target_stack_w
         center_x = self._stack_center_x(stack_w)
-        if not self.finder_mode:
+        if not self.finder_mode and not self._taskbar_compact_active():
             stack_w = min(stack_w, self._standalone_width_limit(center_x, screen_geo))
             stack_w = max(target_stack_w * 0.5, stack_w)
         self.font_shrink_scale = 1.0
@@ -4193,7 +5637,22 @@ class IslandStackVisual(QWidget):
         visuals.append(StackVisual(main_key, main_kind, main_rect, False, message, 10))
         cursor_edge = main_rect.bottom() + gap if direction >= 0 else main_rect.top() - gap
 
+        taskbar_overlay_alert = self._taskbar_main_overlay_alert()
+        overlay_plugin_id = ""
+        if taskbar_overlay_alert is not None:
+            try:
+                overlay_plugin_id = str(taskbar_overlay_alert[6] or "time")
+            except (TypeError, IndexError):
+                overlay_plugin_id = "time"
+            visuals.append(StackVisual(f"taskbar-overlay:{overlay_plugin_id}", IslandKind.PLUGIN_ALERT, self._taskbar_main_overlay_rect(main_rect, taskbar_overlay_alert), False, None, 12))
+
         plugin_alerts = self._active_plugin_alerts(2)
+        if overlay_plugin_id:
+            overlay_base = overlay_plugin_id.split(":", 1)[0].casefold()
+            plugin_alerts = [
+                alert for alert in plugin_alerts
+                if str(alert[6] or "").split(":", 1)[0].casefold() != overlay_base
+            ]
         if plugin_alerts:
             for alert_slot, plugin_alert in enumerate(plugin_alerts):
                 _index, _label, _detail, _summary, _color, _icon, plugin_id, _status, _alert_title, _alert_body, _alert_priority = plugin_alert
@@ -4231,7 +5690,8 @@ class IslandStackVisual(QWidget):
         for dot_index, msg in enumerate(dot_messages):
             key = f"message-dot:{self._message_key(msg)}"
             rect = self._message_dot_rect(main_rect, dot_index, len(dot_messages), direction)
-            visuals.append(StackVisual(key, IslandKind.MESSAGE, rect, True, msg, 5 - dot_index))
+            z_index = 14 - dot_index if self._taskbar_compact_active() else 5 - dot_index
+            visuals.append(StackVisual(key, IslandKind.MESSAGE, rect, True, msg, z_index))
 
         dot_tray_edge = main_rect.bottom() if direction >= 0 else main_rect.top()
         if dot_messages:
@@ -4264,6 +5724,28 @@ class IslandStackVisual(QWidget):
         return visuals
 
     def _plugin_alert_rect(self, main_rect: QRectF, slot: int = 0, total: int = 1) -> QRectF:
+        if self._taskbar_compact_active():
+            style = str(getattr(self, "taskbar_plugin_compact_style", "rail") or "rail")
+            if style == "block":
+                rail_w = max(self._u(30.0), min(self._u(42.0), main_rect.height() * 0.90))
+                rail_h = rail_w
+                gap = self._u(4.0)
+            else:
+                rail_w = max(self._u(4.0), min(self._u(7.0), main_rect.height() * 0.16))
+                rail_h = max(self._u(22.0), main_rect.height() * 0.72)
+                gap = 0.0
+            row_gap = self._u(4.0)
+            total = max(1, int(total))
+            slot = max(0, min(int(slot), total - 1))
+            side = "right" if slot % 2 == 0 else "left"
+            side_index = slot // 2
+            if side == "right":
+                x = main_rect.right() + gap + side_index * (rail_w + row_gap)
+            else:
+                x = main_rect.left() - gap - rail_w - side_index * (rail_w + row_gap)
+            y = main_rect.center().y() - rail_h / 2.0
+            return QRectF(x, y, rail_w, rail_h)
+
         width = self._u(float(getattr(self, "plugin_alert_width", 168.0)))
         try:
             alerts = self._active_plugin_alerts(total)
@@ -4572,22 +6054,64 @@ class IslandStackVisual(QWidget):
         if not bool(getattr(self, "music_auto_detect", False)):
             return True
         has_audio = bool(getattr(self, "live_audio_available", False))
-        estimated = self._estimated_media_position(time.monotonic()) if hasattr(self, "media_position_sync_at") else 0.0
-        has_position = bool(getattr(self, "media_is_playing", False)) and estimated > 0.25
-        source = str(getattr(self, "media_source_app", "") or "")
-        title = str(getattr(self, "track_title", "") or "").strip()
-        has_real_track = bool(title) and source not in ("", "system", "dependency", "windows-media")
-        return has_audio or has_position or (bool(getattr(self, "media_is_playing", False)) and has_real_track)
+        if not has_audio:
+            try:
+                has_audio = bool(getattr(self.data_provider, "has_live_audio", lambda: False)())
+            except Exception:
+                has_audio = False
+        return has_audio
 
     def _plugin_enabled(self) -> bool:
-        return self.persistent_plugin and self.enabled_plugin_count > 0
+        return self.persistent_plugin and len(self._enabled_plugin_ids()) > 0
 
     def _folded_message_limit(self, main_kind: IslandKind) -> int:
+        if self._taskbar_compact_active():
+            return 3
         if main_kind == IslandKind.MESSAGE and not self._music_enabled_for_stack() and not self._plugin_enabled():
             return 5
         return 3
 
+    def _taskbar_message_effective_style(self, count: int) -> str:
+        style = str(getattr(self, "taskbar_message_compact_style", "strip") or "strip").strip().lower()
+        if style != "block":
+            return "strip"
+        if int(count) > 3:
+            return "strip"
+        selected = QRectF(getattr(self, "taskbar_selected_drop_zone", QRectF()))
+        if not selected.isNull() and selected.width() < self._u(160.0):
+            return "strip"
+        return "block"
+
+    def _taskbar_message_rect(self, main_rect: QRectF, index: int, count: int, direction: int = 1) -> QRectF:
+        style = self._taskbar_message_effective_style(count)
+        total = max(1, int(count))
+        slot = max(0, min(int(index), total - 1))
+        row_gap = self._u(4.0)
+        if style == "block":
+            gap = self._u(4.0)
+            width = max(self._u(24.0), min(self._u(34.0), main_rect.height() * 0.86))
+            height = width
+        else:
+            gap = self._u(3.0)
+            width = max(self._u(4.0), min(self._u(6.0), main_rect.height() * 0.15))
+            height = max(self._u(20.0), main_rect.height() * 0.72)
+        side = "right" if slot % 2 == 0 else "left"
+        side_index = slot // 2
+        if self._taskbar_compact_active():
+            if side == "right":
+                x = main_rect.right() - gap - width - side_index * (width + row_gap)
+            else:
+                x = main_rect.left() + gap + side_index * (width + row_gap)
+        elif side == "right":
+            x = main_rect.right() + gap + side_index * (width + row_gap)
+        else:
+            x = main_rect.left() - gap - width - side_index * (width + row_gap)
+        y = main_rect.center().y() - height / 2.0
+        return QRectF(x, y, width, height)
+
     def _message_dot_rect(self, main_rect: QRectF, index: int, count: int, direction: int = 1) -> QRectF:
+        if self._taskbar_compact_active():
+            return self._taskbar_message_rect(main_rect, index, count, direction)
         dot_size = self._u(7.0)
         gap = self._u(8.0)
         total_w = count * dot_size + max(0, count - 1) * gap
@@ -4647,6 +6171,19 @@ class IslandStackVisual(QWidget):
             x = main.rect.left() - self._u(4.0) - size
         return QRectF(x, y, size, size)
 
+    def _taskbar_should_drop_stale_motion_key(self, key: str) -> bool:
+        if not self._taskbar_compact_active():
+            return False
+        value = str(key or "")
+        return value.startswith(("plugin-alert:", "taskbar-overlay:", "message-dot:"))
+
+    def _visual_motion_params(self, now: float) -> tuple[float, float]:
+        if self.finder_mode:
+            return (0.19 if now < self.stack_bounce_until else 0.24, 0.84)
+        if self._taskbar_compact_active():
+            return (0.16 if now < self.stack_bounce_until else 0.20, 0.90)
+        return (0.28 if now < self.stack_bounce_until else 0.34, 0.76)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -4659,6 +6196,7 @@ class IslandStackVisual(QWidget):
         self.last_frame_at = now
 
         self._paint_stage(painter)
+        self._paint_taskbar_drop_hint(painter)
         visuals = self._build_visuals()
         transition_scale, transition_opacity, scene_hidden, transition_edge_progress = self._scene_transition_params(now)
         if scene_hidden:
@@ -4688,16 +6226,14 @@ class IslandStackVisual(QWidget):
             if visual.key not in self.motions:
                 start = self._initial_motion_rect_for_visual(visual, visuals)
                 self.motions[visual.key] = SpringRect(start)
-            if self.finder_mode:
-                response = 0.19 if now < self.stack_bounce_until else 0.24
-                damping = 0.84
-            else:
-                response = 0.28 if now < self.stack_bounce_until else 0.34
-                damping = 0.76
+            response, damping = self._visual_motion_params(now)
             self.motions[visual.key].step(visual.rect, 1.0, dt, response=response, damping=damping)
 
         for key in list(self.motions):
             if key not in targets:
+                if self._taskbar_should_drop_stale_motion_key(key):
+                    del self.motions[key]
+                    continue
                 if key.startswith("plugin-alert:") and getattr(self, "expanded", False):
                     rect = self._plugin_alert_exit_rect_towards_main(self.motions[key].rect, visuals)
                     response = 0.18 if self.finder_mode else 0.22
@@ -4739,6 +6275,8 @@ class IslandStackVisual(QWidget):
                 self._paint_message(painter, rect, visual.message, visual.folded)
             else:
                 self._paint_thin_bar(painter, rect)
+            if visual.z_index == 10 and self._taskbar_compact_active():
+                self._paint_taskbar_left_handle(painter, rect)
             painter.restore()
 
         self.barrage_rects = {}
@@ -4784,6 +6322,9 @@ class IslandStackVisual(QWidget):
             painter.setFont(self._font(9, QFont.Weight.Medium))
             painter.setPen(QColor(255, 255, 255, 105))
             painter.drawText(QRectF(42, 29, self.width() - 84, 24), Qt.AlignmentFlag.AlignLeft, "Standalone floating mode · V2 island stack")
+
+    def _paint_taskbar_drop_hint(self, painter: QPainter):
+        self._sync_taskbar_drop_overlay()
 
     def _paint_barrage_scene(self, painter: QPainter) -> dict[str, QRectF]:
         now = time.monotonic()
@@ -5044,20 +6585,133 @@ class IslandStackVisual(QWidget):
             return QRectF(source_left, 0.0, source_width, float(texture.height()))
         return QRectF(0.0, 0.0, float(texture.width()), float(texture.height()))
 
-    def _paint_myfinder_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
-        if not self.finder_mode:
+    def _group_frame_target_is_discontinuous(self, current: QRectF, target: QRectF) -> bool:
+        if current.isNull() or target.isNull():
+            return False
+        width_delta = abs(current.width() - target.width())
+        height_delta = abs(current.height() - target.height())
+        center_delta = math.hypot(current.center().x() - target.center().x(), current.center().y() - target.center().y())
+        large_width_shift = width_delta > max(self._u(140.0), target.width() * 0.72)
+        large_height_shift = height_delta > max(self._u(90.0), target.height() * 1.25)
+        large_center_shift = center_delta > max(self._u(180.0), target.width() * 0.64)
+        return large_width_shift or large_height_shift or large_center_shift
+
+    def _group_frame_should_snap_to_target(self, target: QRectF, mode_key: str) -> bool:
+        motion = getattr(self, "group_frame_motion", None)
+        if motion is None:
+            return False
+        previous_key = str(getattr(self, "group_frame_mode_key", "") or "")
+        if previous_key and previous_key != mode_key:
+            return True
+        return self._group_frame_target_is_discontinuous(motion.rect, target)
+
+    def _coalesced_group_frame_target(self, target: QRectF, mode_key: str) -> QRectF:
+        previous_key = str(getattr(self, "group_frame_target_mode_key", "") or "")
+        previous = QRectF(getattr(self, "group_frame_target_rect", QRectF()))
+        if previous_key == mode_key and not previous.isNull():
+            edge_delta = max(
+                abs(previous.left() - target.left()),
+                abs(previous.top() - target.top()),
+                abs(previous.right() - target.right()),
+                abs(previous.bottom() - target.bottom()),
+            )
+            if edge_delta <= self._u(2.5):
+                return previous
+        self.group_frame_target_rect = QRectF(target)
+        self.group_frame_target_mode_key = mode_key
+        return target
+
+    def _paint_taskbar_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
+        visible_rects = []
+        for visual, motion in items:
+            rect = QRectF(visual.rect)
+            if motion.opacity <= 0.16 or rect.width() <= 4 or rect.height() <= 4:
+                continue
+            if visual.folded:
+                continue
+            if visual.kind == IslandKind.PLUGIN_ALERT:
+                continue
+            visible_rects.append(rect)
+        if not visible_rects:
             self.group_frame_motion = None
+            self.group_frame_mode_key = ""
+            self.group_frame_target_rect = QRectF()
+            self.group_frame_target_mode_key = ""
             self.group_frame_mask_path = None
             self.finder_hover_rect = QRectF()
+            return
+
+        pad_x = self._u(10.0)
+        pad_y = self._u(8.0)
+        left = min(rect.left() for rect in visible_rects) - pad_x
+        right = max(rect.right() for rect in visible_rects) + pad_x
+        top = min(rect.top() for rect in visible_rects) - pad_y
+        bottom = max(rect.bottom() for rect in visible_rects) + pad_y
+        target = QRectF(left, top, right - left, bottom - top)
+        mode_key = "tasker"
+        target = self._coalesced_group_frame_target(target, mode_key)
+        if self.group_frame_motion is None:
+            start = QRectF(target)
+            start.setHeight(self._u(34.0))
+            start.moveBottom(target.bottom())
+            self.group_frame_motion = SpringRect(start)
+        if self._group_frame_should_snap_to_target(target, mode_key):
+            self.group_frame_motion = SpringRect(target)
+            self.group_frame_motion.opacity = 1.0
+        else:
+            self.group_frame_motion.step(target, 1.0, dt, response=0.18, damping=0.86)
+        self.group_frame_mode_key = mode_key
+
+        frame = self.group_frame_motion.rect
+        radius = 0.0 if self._taskbar_panel_corner_policy() == "square" else min(self._u(10.0), frame.height() * 0.12)
+        shell = self._rounded_path(frame, radius)
+        self.group_frame_mask_path = QPainterPath(shell)
+        self.finder_hover_rect = frame.adjusted(-self._u(8.0), -self._u(6.0), self._u(8.0), self._u(8.0))
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        shadow = QRectF(frame).adjusted(-self._u(8.0), -self._u(8.0), self._u(8.0), self._u(10.0))
+        shadow_gradient = QRadialGradient(shadow.center(), max(shadow.width(), shadow.height()) * 0.58)
+        tokens = self._taskbar_material_frame_tokens()
+        shadow_color = tokens["shadow"]
+        shadow_gradient.setColorAt(0.0, shadow_color)
+        shadow_gradient.setColorAt(0.70, QColor(0, 0, 0, 28))
+        shadow_gradient.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(shadow_gradient)
+        painter.drawRoundedRect(shadow, radius + self._u(10.0), radius + self._u(10.0))
+
+        material = QLinearGradient(frame.topLeft(), frame.bottomLeft())
+        material.setColorAt(0.0, tokens["fill_top"])
+        material.setColorAt(0.42, tokens["fill_mid"])
+        material.setColorAt(1.0, tokens["fill_bottom"])
+        painter.fillPath(shell, material)
+        painter.setPen(QPen(tokens["stroke"], self._u(1.0)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(shell)
+        painter.restore()
+
+    def _paint_myfinder_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
+        if not self.finder_mode:
+            if self._taskbar_uses_expanded_material_frame():
+                self._paint_taskbar_group_frame(painter, items, dt)
+            else:
+                self.group_frame_motion = None
+                self.group_frame_mode_key = ""
+                self.group_frame_target_rect = QRectF()
+                self.group_frame_target_mode_key = ""
+                self.group_frame_mask_path = None
+                self.finder_hover_rect = QRectF()
             return
         visible_rects = []
         main_rect = None
         main_kind = None
         for visual, motion in items:
-            if motion.opacity <= 0.16 or motion.rect.width() <= 4 or motion.rect.height() <= 4:
+            rect = QRectF(visual.rect)
+            if motion.opacity <= 0.16 or rect.width() <= 4 or rect.height() <= 4:
                 continue
             if visual.z_index == 10:
-                main_rect = QRectF(visual.rect)
+                main_rect = QRectF(rect)
                 main_kind = visual.kind
             if self.expanded:
                 if visual.folded:
@@ -5068,15 +6722,20 @@ class IslandStackVisual(QWidget):
                 and not (visual.kind == IslandKind.MESSAGE and not visual.folded)
             ):
                 continue
-            rect = QRectF(visual.rect)
             visible_rects.append(rect)
         if not visible_rects:
             self.group_frame_motion = None
+            self.group_frame_mode_key = ""
+            self.group_frame_target_rect = QRectF()
+            self.group_frame_target_mode_key = ""
             self.group_frame_mask_path = None
             self.finder_hover_rect = QRectF()
             return
         if main_kind == IslandKind.THIN_BAR:
             self.group_frame_motion = None
+            self.group_frame_mode_key = ""
+            self.group_frame_target_rect = QRectF()
+            self.group_frame_target_mode_key = ""
             self.group_frame_mask_path = None
             self.finder_hover_rect = QRectF()
             return
@@ -5107,6 +6766,8 @@ class IslandStackVisual(QWidget):
         target_bottom = bottom + balance_gap
         target = QRectF(left - pad_x, frame_top, right - left + pad_x * 2.0, target_bottom - frame_top)
         stable_dual_compact_music = main_kind == IslandKind.MUSIC and not self.expanded and self._has_current_two_line_lyric()
+        mode_key = "finder"
+        target = self._coalesced_group_frame_target(target, mode_key)
         if self.group_frame_motion is None:
             start = QRectF(target)
             start.setHeight(self._u(22.0))
@@ -5115,8 +6776,12 @@ class IslandStackVisual(QWidget):
         if stable_dual_compact_music:
             self.group_frame_motion = SpringRect(target)
             self.group_frame_motion.opacity = 1.0
+        elif self._group_frame_should_snap_to_target(target, mode_key):
+            self.group_frame_motion = SpringRect(target)
+            self.group_frame_motion.opacity = 1.0
         else:
             self.group_frame_motion.step(target, 1.0, dt, response=0.16, damping=0.9)
+        self.group_frame_mode_key = mode_key
 
         frame = self.group_frame_motion.rect
         side_flare = max(
@@ -5274,10 +6939,12 @@ class IslandStackVisual(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_music(self, painter: QPainter, rect: QRectF, expanded: bool):
-        radius = self._u(30) if expanded else rect.height() / 2
-        ambience_style = getattr(self, "music_ambience_style", "sea_level")
-        black_background = self._active_lyric_color_fill_enabled() or ambience_style in {"pure_black", "bilateral_diffraction"}
-        if black_background:
+        radius = self._music_shell_radius(rect, expanded)
+        ambience_style = self._effective_music_ambience_style()
+        black_background = self._active_lyric_color_fill_paints_background(ambience_style) or ambience_style in {"pure_black", "bilateral_diffraction"}
+        if ambience_style == "pure_white":
+            self._paint_pure_white_music_background(painter, rect, radius)
+        elif black_background:
             self._paint_pure_black_music_background(painter, rect, radius)
             if ambience_style == "bilateral_diffraction":
                 self._paint_bilateral_diffraction_ambience(painter, rect, radius, expanded)
@@ -5300,6 +6967,20 @@ class IslandStackVisual(QWidget):
         painter.drawRoundedRect(rect, radius, radius)
         painter.restore()
 
+    def _paint_pure_white_music_background(self, painter: QPainter, rect: QRectF, radius: float):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 255))
+        painter.drawRoundedRect(rect, radius, radius)
+        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 82))
+        sheen.setColorAt(0.55, QColor(245, 247, 250, 34))
+        sheen.setColorAt(1.0, QColor(225, 229, 235, 54))
+        painter.setBrush(sheen)
+        painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), max(1.0, radius - self._u(0.8)), max(1.0, radius - self._u(0.8)))
+        painter.restore()
+
     def _compact_cover_rect(self, rect: QRectF) -> QRectF:
         if self._gelv_enabled():
             cover_size = min(rect.height() - self._u(12.0), self._u(38.0))
@@ -5312,6 +6993,11 @@ class IslandStackVisual(QWidget):
             cover_size = self._u(30.0)
             y_offset = 0.0
         return QRectF(rect.left() + self._u(9), rect.center().y() - cover_size / 2.0 + y_offset, cover_size, cover_size)
+
+    def _compact_cover_radius(self, rect: QRectF, two_line: bool) -> float:
+        if self._taskbar_compact_active():
+            return self._music_shell_radius(rect, expanded=False)
+        return self._u(10.0 if two_line else 8.0)
 
     def _paint_music_glass_body(self, painter: QPainter, rect: QRectF, radius: float):
         path = self._rounded_path(rect, radius)
@@ -6319,7 +8005,7 @@ class IslandStackVisual(QWidget):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 scaled_cache[scaled_key] = scaled
-                if len(scaled_cache) > 8:
+                while len(scaled_cache) > int(getattr(self, "SCALED_ALBUM_ART_CACHE_LIMIT", 4)):
                     scaled_cache.pop(next(iter(scaled_cache)))
             source = QRectF(
                 (scaled.width() - rect.width()) / 2.0,
@@ -6370,13 +8056,19 @@ class IslandStackVisual(QWidget):
             self.music_cover_rect = QRectF()
             self._paint_album_island_compact(painter, rect)
             return
+        if self._taskbar_cover_only_music_active(rect):
+            cover_size = max(self._u(24.0), min(rect.width(), rect.height()) - self._u(6.0))
+            cover = QRectF(rect.center().x() - cover_size / 2.0, rect.center().y() - cover_size / 2.0, cover_size, cover_size)
+            self.music_cover_rect = QRectF(cover)
+            self._paint_cover(painter, cover, self._compact_cover_radius(rect, False))
+            return
         two_line = self._has_current_two_line_lyric() and not self._gelv_enabled()
         top_padding = self._u(7 if two_line else 3)
         bottom_padding = self._u(6 if two_line else 6)
         if bool(getattr(self, "compact_lyric_show_cover", True)):
             cover = self._compact_cover_rect(rect)
             self.music_cover_rect = QRectF(cover)
-            self._paint_cover(painter, cover, self._u(10 if two_line else 8))
+            self._paint_cover(painter, cover, self._compact_cover_radius(rect, two_line))
             text_left = cover.right() + self._u(15 if two_line else 12)
         else:
             self.music_cover_rect = QRectF()
@@ -6403,16 +8095,18 @@ class IslandStackVisual(QWidget):
         phase = self._lyric_phase(time.monotonic())
         compact_size = max(12, min(20, int(getattr(self, "lyric_font_size", 18)) - 2))
         display_lines = self._lyric_display_lines(lines[index])
+        base_text = self._music_lyric_base_text_color(132)
+        live_text = self._music_lyric_text_color(246)
         if len(display_lines) > 1 and rect.height() >= self._u(48.0):
             secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
             secondary_spacing = int(getattr(self, "dual_line_secondary_spacing", 100))
             first_h = rect.height() * 0.54
             first = QRectF(rect.left(), rect.top() + self._u(2.0), rect.width(), first_h)
             second = QRectF(rect.left(), first.bottom() - self._u(1.0), rect.width(), rect.bottom() - first.bottom() - self._u(1.0))
-            self._paint_live_lyric_text(painter, first, display_lines[0], max(12, compact_size - 1), QColor(255, 255, 255, 132), QColor(255, 255, 255, 246), True, phase, centered=True, centered_scroll=True)
-            self._paint_live_lyric_text(painter, second, display_lines[1], max(10, compact_size - 4), QColor(255, 255, 255, 96), QColor(255, 255, 255, 204), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
+            self._paint_live_lyric_text(painter, first, display_lines[0], max(12, compact_size - 1), base_text, live_text, True, phase, centered=True, centered_scroll=True)
+            self._paint_live_lyric_text(painter, second, display_lines[1], self._dual_line_secondary_font_size(), self._music_lyric_base_text_color(96), self._music_lyric_text_color(204), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
         else:
-            self._paint_live_lyric_text(painter, rect, display_lines[0] if display_lines else lines[index], compact_size, QColor(255, 255, 255, 132), QColor(255, 255, 255, 246), True, phase, centered=True, centered_scroll=True)
+            self._paint_live_lyric_text(painter, rect, display_lines[0] if display_lines else lines[index], compact_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
         painter.restore()
 
     def _paint_gelv_compact_lyrics(self, painter: QPainter, rect: QRectF):
@@ -6478,7 +8172,10 @@ class IslandStackVisual(QWidget):
         spacing = int(spacing_percent) if spacing_percent is not None else self._gelv_spacing_percent(progress)
         layout = self._gelv_layout(text, size, spacing_percent=spacing)
         x = self._gelv_line_x(rect, text, size, progress, spacing_percent=spacing)
-        if color_fill and bool(getattr(self, "gelv_color_fill_enabled", False)):
+        if self._pure_white_music_active():
+            base = self._music_lyric_base_text_color(128 if active else 82)
+            live = self._music_lyric_text_color(245 if active else 156)
+        elif color_fill and bool(getattr(self, "gelv_color_fill_enabled", False)):
             base = QColor(255, 255, 255, 120 if active else 82)
             live = self._gelv_fill_color()
             live.setAlpha(250 if active else 178)
@@ -6607,7 +8304,7 @@ class IslandStackVisual(QWidget):
         painter.setOpacity(max(0.0, min(1.0, progress)))
         expanded = rect.height() >= self._u(92.0)
         painter.setFont(self._font(17 if expanded else 9, QFont.Weight.Bold if expanded else QFont.Weight.DemiBold, shrink=False))
-        painter.setPen(QColor(255, 255, 255, 218 if expanded else 152))
+        painter.setPen(self._music_meta_text_color(218 if expanded else 152))
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._album_island_listened_text())
         painter.restore()
 
@@ -6629,8 +8326,8 @@ class IslandStackVisual(QWidget):
 
         controls_w = self._u(132)
         info = QRectF(cover.right() + self._u(15), cover.top() + self._u(2), rect.right() - cover.right() - controls_w - self._u(48), self._u(68))
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)), self.track_title, 13, QColor(255, 255, 255, 240), True)
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, QColor(255, 255, 255, 135), False)
+        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)), self.track_title, 13, self._music_meta_text_color(240), True)
+        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, self._music_meta_text_color(135), False)
 
         controls_x = rect.right() - margin - controls_w
         labels = ["⏮", "⏸" if self.media_is_playing else "▶", "⏭"]
@@ -6641,10 +8338,10 @@ class IslandStackVisual(QWidget):
             br = QRectF(controls_x + i * self._u(45), cover.center().y() - button_size / 2.0, button_size, button_size)
             self.music_button_rects[commands[i]] = QRectF(br)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(255, 255, 255, 24 if i != 1 else 36))
+            painter.setBrush(self._music_control_fill_color(24 if i != 1 else 36))
             painter.drawRoundedRect(br, self._u(13), self._u(13))
             painter.setFont(QFont("Segoe UI Symbol", self._font_size(14), QFont.Weight.Medium))
-            painter.setPen(QColor(255, 255, 255, 232))
+            painter.setPen(self._music_control_icon_color(232))
             painter.drawText(br, Qt.AlignmentFlag.AlignCenter, label)
 
         viewport = QRectF(rect.left() + self._u(22), cover.bottom() + self._u(10), rect.width() - self._u(44), rect.bottom() - cover.bottom() - self._u(28))
@@ -6658,8 +8355,8 @@ class IslandStackVisual(QWidget):
         self.music_button_rects = {}
 
         info = QRectF(rect.left() + margin, rect.top() + self._u(13.0), rect.width() - controls_w - margin * 2.0 - self._u(18.0), self._u(42.0))
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(24.0)), self.track_title, 12, QColor(255, 255, 255, 238), True)
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, QColor(255, 255, 255, 132), False)
+        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(24.0)), self.track_title, 12, self._music_meta_text_color(238), True)
+        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, self._music_meta_text_color(132), False)
 
         controls_x = rect.right() - margin - controls_w
         labels = ["\u23ee", "\u23f8" if self.media_is_playing else "\u25b6", "\u23ed"]
@@ -6669,10 +8366,10 @@ class IslandStackVisual(QWidget):
             br = QRectF(controls_x + i * self._u(44.0), rect.top() + self._u(19.0), button_size, button_size)
             self.music_button_rects[commands[i]] = QRectF(br)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(255, 255, 255, 22 if i != 1 else 34))
+            painter.setBrush(self._music_control_fill_color(22 if i != 1 else 34))
             painter.drawRoundedRect(br, self._u(12.0), self._u(12.0))
             painter.setFont(QFont("Segoe UI Symbol", self._font_size(14), QFont.Weight.Medium))
-            painter.setPen(QColor(255, 255, 255, 232))
+            painter.setPen(self._music_control_icon_color(232))
             painter.drawText(br, Qt.AlignmentFlag.AlignCenter, label)
 
         stage = QRectF(rect.left() + margin, rect.top() + self._u(58.0), rect.width() - margin * 2.0, rect.height() - self._u(76.0))
@@ -6728,6 +8425,8 @@ class IslandStackVisual(QWidget):
     def _paint_lyric_phase_pulse(self, painter: QPainter, rect: QRectF, phase: dict[str, float]):
         progress = max(0.0, min(1.0, float(phase.get("progress", 0.0))))
         confidence = max(0.0, min(1.0, float(phase.get("confidence", 0.0))))
+        if self._pure_white_music_active():
+            confidence = 0.0
         if confidence <= 0.05:
             return
         pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 2.2 + progress * math.tau)
@@ -6767,14 +8466,14 @@ class IslandStackVisual(QWidget):
             first_h = row.height() * 0.56
             first = QRectF(row.left(), row.top(), row.width(), first_h)
             second = QRectF(row.left(), first.bottom() - self._u(1.0), row.width(), row.bottom() - first.bottom())
-            self._paint_live_lyric_text(painter, first, lines[0], max(13, size - 1), QColor(255, 255, 255, 126), QColor(255, 255, 255, alpha), True, phase, centered=True, centered_scroll=True)
-            self._paint_live_lyric_text(painter, second, lines[1], max(10, size - 5), QColor(255, 255, 255, 92), QColor(255, 255, 255, max(84, int(alpha * 0.74))), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
+            self._paint_live_lyric_text(painter, first, lines[0], max(13, size - 1), self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), True, phase, centered=True, centered_scroll=True)
+            self._paint_live_lyric_text(painter, second, lines[1], self._dual_line_secondary_font_size(), self._music_lyric_base_text_color(92), self._music_lyric_text_color(max(84, int(alpha * 0.74))), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
             return
         text = lines[0] if len(lines) == 1 else "  ".join(lines[:2])
         if active:
-            self._paint_live_lyric_text(painter, row, text, size, QColor(255, 255, 255, 126), QColor(255, 255, 255, alpha), bold, phase, centered=True, centered_scroll=True)
+            self._paint_live_lyric_text(painter, row, text, size, self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), bold, phase, centered=True, centered_scroll=True)
         else:
-            self._paint_scrolling_text(painter, row, text, size, QColor(255, 255, 255, max(0, min(255, alpha))), bold, centered=True, centered_scroll=True)
+            self._paint_scrolling_text(painter, row, text, size, self._music_lyric_text_color(max(0, min(255, alpha))), bold, centered=True, centered_scroll=True)
 
     def _paint_lyric_viewport(self, painter: QPainter, rect: QRectF):
         painter.save()
@@ -6801,8 +8500,8 @@ class IslandStackVisual(QWidget):
                 row,
                 text,
                 max(14, min(24, int(getattr(self, "lyric_font_size", 18)))),
-                QColor(255, 255, 255, 110),
-                QColor(255, 255, 255, 218),
+                self._music_lyric_base_text_color(110),
+                self._music_lyric_text_color(218),
                 True,
                 phase,
                 centered=True,
@@ -6911,8 +8610,8 @@ class IslandStackVisual(QWidget):
                 alert_priority,
                 progress,
             )
-            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self.plugin_samples)
-        ][:self.enabled_plugin_count]
+            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self._enabled_plugin_samples())
+        ]
         if not plugins:
             return
 
@@ -6963,8 +8662,8 @@ class IslandStackVisual(QWidget):
                 alert_priority,
                 progress,
             )
-            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self.plugin_samples)
-        ][:self.enabled_plugin_count]
+            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self._enabled_plugin_samples())
+        ]
         if not plugins:
             theme = self._plugin_theme_colors()
             muted = QColor(theme["muted"])
@@ -6988,8 +8687,8 @@ class IslandStackVisual(QWidget):
                 alert_priority,
                 progress,
             )
-            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self.plugin_samples)
-        ][:self.enabled_plugin_count]
+            for label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority, progress in (self._plugin_tuple(plugin) for plugin in self._enabled_plugin_samples())
+        ]
         if not plugins:
             return None
         index = max(0, min(self._active_plugin_focus(time.monotonic()), len(plugins) - 1))
@@ -8222,11 +9921,12 @@ class IslandStackVisual(QWidget):
 
     def _plugin_panel_reminder_models(self, limit: int = 3) -> list[dict[str, object]]:
         reminders = []
+        samples = self._enabled_plugin_samples()
         for alert in self._active_plugin_alerts(limit, include_expanded=True):
             index, label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, _alert_priority = alert
             title, body = self._plugin_alert_text_parts(label, detail, summary, status, alert_title, alert_body)
             try:
-                progress = self._plugin_tuple(self.plugin_samples[index])[10]
+                progress = self._plugin_tuple(samples[index])[10]
             except Exception:
                 progress = 0.0
             reminders.append(
@@ -9083,6 +10783,26 @@ class IslandStackVisual(QWidget):
             rect.translate(offset * self._u(18.0), 0.0)
         return rect
 
+    def _paint_taskbar_left_handle(self, painter: QPainter, main_rect: QRectF):
+        handle = self._taskbar_left_handle_rect(main_rect)
+        self.taskbar_left_handle_rect = QRectF(handle)
+        if handle.isNull() or not self._taskbar_left_handle_visible():
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        color = self._taskbar_left_handle_color()
+        painter.setBrush(color)
+        painter.drawRoundedRect(handle, handle.width() / 2.0, handle.width() / 2.0)
+        painter.restore()
+
+    def _taskbar_left_handle_color(self) -> QColor:
+        color = QColor(str(getattr(self, "taskbar_left_handle_color", "#8E8E93") or "#8E8E93"))
+        if not color.isValid():
+            color = QColor("#8E8E93")
+        color.setAlpha(max(72, color.alpha()))
+        return color
+
     def _paint_time_alarm_editor_detail(self, painter: QPainter, rect: QRectF, editor: dict[str, object], color: QColor, theme: dict[str, QColor], ref: dict[str, QColor]):
         mode = str(editor.get("detail_mode") or "").strip().lower()
         confirm = QRectF(rect.right() - self._u(40.0), rect.top() + self._u(10.0), self._u(30.0), self._u(24.0))
@@ -9759,24 +11479,36 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_plugin_alert(self, painter: QPainter, rect: QRectF, key: str):
+        if str(key or "").startswith("taskbar-overlay:"):
+            self._paint_taskbar_time_overlay_alert(painter, rect, key)
+            return
         plugin_id = key.split(":", 1)[-1] if ":" in key else ""
         alert = None
+        samples = self._enabled_plugin_samples()
         if hasattr(self, "persistent_plugin"):
             alert = next((item for item in self._active_plugin_alerts(4, include_expanded=True) if str(item[6] or "").strip().casefold() == str(plugin_id or "").strip().casefold()), None)
         if alert is not None:
             index, label, detail, summary, color, icon, alert_plugin_id, status, alert_title, alert_body, _alert_priority = alert
             progress = 0.0
-            if 0 <= int(index) < len(self.plugin_samples):
-                _label, _detail, _summary, _color, _icon, _source_id, _status, _title, _body, _priority, progress = self._plugin_tuple(self.plugin_samples[int(index)])
+            if 0 <= int(index) < len(samples):
+                _label, _detail, _summary, _color, _icon, _source_id, _status, _title, _body, _priority, progress = self._plugin_tuple(samples[int(index)])
         else:
             index = self._plugin_index_for_id(plugin_id)
             if index < 0:
                 return
-            label, detail, summary, color, icon, alert_plugin_id, status, alert_title, alert_body, _alert_priority, progress = self._plugin_tuple(self.plugin_samples[index])
+            if index >= len(samples):
+                return
+            label, detail, summary, color, icon, alert_plugin_id, status, alert_title, alert_body, _alert_priority, progress = self._plugin_tuple(samples[index])
         theme = self._plugin_theme_colors()
         color = self._pure_plugin_color(self._plugin_display_color(label, color))
         label_key = str(label or "").strip().upper()
         is_time = label_key == "TIME" or str(plugin_id or "").strip().casefold() == "time"
+        if self._taskbar_compact_active():
+            if str(getattr(self, "taskbar_plugin_compact_style", "rail") or "rail") == "block":
+                self._paint_taskbar_plugin_block(painter, rect, label, detail, summary, color, icon, status, alert_title, alert_body, progress)
+            else:
+                self._paint_taskbar_plugin_rail(painter, rect, color, status, progress)
+            return
         if is_time:
             time_kind = self._time_alert_kind_from_plugin_id(str(plugin_id))
             if time_kind != "alarm":
@@ -9827,6 +11559,112 @@ class IslandStackVisual(QWidget):
         self._paint_plugin_status_dot(painter, rect, status)
         painter.restore()
 
+    def _paint_taskbar_time_overlay_alert(self, painter: QPainter, rect: QRectF, key: str):
+        alert = self._taskbar_main_overlay_alert()
+        if alert is None:
+            return
+        try:
+            _index, label, detail, summary, color, _icon, _plugin_id, status, alert_title, alert_body, _priority = alert
+        except (TypeError, ValueError):
+            return
+        radius = self._taskbar_corner_radius(rect.height())
+        done = str(status or "").strip().lower() in {"done", "due", "alarm"}
+        accent = QColor(color)
+        if not accent.isValid():
+            accent = QColor(255, 184, 0)
+        text_color = QColor(38, 24, 0, 245) if done else QColor(255, 239, 188, 245)
+        bg = QColor(accent.red(), accent.green(), accent.blue(), 244) if done else QColor(24, 21, 14, 244)
+        title = str(alert_title or label or "TIME")
+        body = str(alert_body or summary or detail or "时间到")
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setPen(QPen(QColor(255, 255, 255, 70), self._u(1.0)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), max(1.0, radius - self._u(0.8)), max(1.0, radius - self._u(0.8)))
+        icon_size = min(rect.height() - self._u(10.0), self._u(28.0))
+        icon_rect = QRectF(rect.left() + self._u(10.0), rect.center().y() - icon_size / 2.0, icon_size, icon_size)
+        painter.setPen(text_color)
+        painter.setFont(QFont("Segoe UI Symbol", self._font_size(13), QFont.Weight.Bold))
+        painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, "⏱")
+        text_rect = QRectF(icon_rect.right() + self._u(8.0), rect.top(), rect.right() - icon_rect.right() - self._u(18.0), rect.height())
+        painter.setFont(self._font(10, QFont.Weight.Bold))
+        self._paint_static_elided_text(painter, text_rect, f"{title}  {body}", 10, text_color, True, Qt.AlignmentFlag.AlignLeft)
+        painter.restore()
+
+    def _taskbar_plugin_rail_segments(self, rect: QRectF, color: QColor, status: str, progress: float = 0.0) -> list[dict[str, object]]:
+        status_key = str(status or "").strip().lower()
+        urgent = status_key in {"done", "due", "alarm", "severe", "error"}
+        rail = QColor(color)
+        if urgent:
+            rail = QColor(255, 184, 0)
+        try:
+            ratio = float(progress)
+        except (TypeError, ValueError):
+            ratio = 0.0
+        if ratio <= 0.0:
+            ratio = 1.0 if urgent else 0.36
+        ratio = max(0.08, min(1.0, ratio))
+        color_h = rect.height() * ratio
+        black_rect = QRectF(rect)
+        color_rect = QRectF(rect.left(), rect.bottom() - color_h, rect.width(), color_h)
+        return [
+            {"rect": black_rect, "color": QColor(0, 0, 0, 255)},
+            {"rect": color_rect, "color": QColor(rail.red(), rail.green(), rail.blue(), 235)},
+        ]
+
+    def _paint_taskbar_plugin_rail(self, painter: QPainter, rect: QRectF, color: QColor, status: str, progress: float = 0.0):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        radius = min(rect.width() / 2.0, rect.height() / 2.0)
+        painter.setPen(Qt.PenStyle.NoPen)
+        path = self._rounded_path(rect, radius)
+        painter.setClipPath(path)
+        for segment in self._taskbar_plugin_rail_segments(rect, color, status, progress):
+            painter.setBrush(segment["color"])
+            painter.drawRect(segment["rect"])
+        painter.restore()
+
+    def _paint_taskbar_plugin_block(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        label: str,
+        detail: str,
+        summary: str,
+        color: QColor,
+        icon: str,
+        status: str,
+        alert_title: str,
+        alert_body: str,
+        progress: float,
+    ):
+        radius = self._taskbar_corner_radius(rect.height())
+        value = self._plugin_alert_display_value(label, detail, summary, status, alert_title, alert_body)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 238))
+        painter.drawRoundedRect(rect, radius, radius)
+        accent = QColor(color)
+        painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 218))
+        icon_size = min(rect.width(), rect.height()) * 0.48
+        icon_rect = QRectF(rect.center().x() - icon_size / 2.0, rect.top() + self._u(4.0), icon_size, icon_size)
+        painter.drawRoundedRect(icon_rect, max(2.0, radius * 0.55), max(2.0, radius * 0.55))
+        painter.setFont(QFont("Segoe UI Symbol", self._font_size(9), QFont.Weight.Bold))
+        painter.setPen(QColor(255, 255, 255, 245))
+        painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, icon or str(label or "?")[:1])
+        text_rect = QRectF(rect.left() + self._u(2.0), icon_rect.bottom() - self._u(1.0), rect.width() - self._u(4.0), rect.bottom() - icon_rect.bottom())
+        painter.setFont(self._font(7, QFont.Weight.Bold))
+        painter.setPen(QColor(235, 242, 255, 226))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, str(value or summary or detail)[:6])
+        if progress > 0.0:
+            ring = rect.adjusted(self._u(2.2), self._u(2.2), -self._u(2.2), -self._u(2.2))
+            self._paint_plugin_progress_ring(painter, ring, accent, progress, status)
+        painter.restore()
+
     def _paint_plugin_status_dot(self, painter: QPainter, rect: QRectF, status: str):
         status = str(status or "normal").lower()
         colors = {
@@ -9849,7 +11687,58 @@ class IslandStackVisual(QWidget):
         painter.setBrush(color)
         painter.drawEllipse(dot)
 
+    def _message_app_glyph(self, msg: Message) -> str:
+        app = str(getattr(msg, "app", "") or "").strip().casefold()
+        if "wechat" in app or "微信" in app:
+            return "微"
+        if "qq" in app:
+            return "Q"
+        if "dingtalk" in app or "钉" in app:
+            return "钉"
+        if "feishu" in app or "飞书" in app:
+            return "飞"
+        return (str(getattr(msg, "app", "") or "").strip()[:1] or "•")
+
+    def _taskbar_message_block_model(self, msg: Message, rect: QRectF) -> dict[str, object]:
+        radius = self._taskbar_corner_radius(rect.height())
+        fill = QColor(msg.name_color)
+        return {
+            "fill": QColor(fill),
+            "outer": QColor(fill),
+            "glyph": self._message_app_glyph(msg),
+            "radius": radius,
+        }
+
     def _paint_message(self, painter: QPainter, rect: QRectF, msg: Message, folded: bool):
+        if folded and self._taskbar_compact_active():
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            accent = QColor(msg.name_color)
+            if rect.width() < rect.height():
+                painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 232))
+                painter.drawRoundedRect(rect, rect.width() / 2.0, rect.width() / 2.0)
+            else:
+                model = self._taskbar_message_block_model(msg, rect)
+                radius = float(model["radius"])
+                painter.setBrush(model["fill"])
+                painter.drawRoundedRect(rect, radius, radius)
+                inset = self._u(4.0)
+                icon_rect = rect.adjusted(inset, inset, -inset, -inset)
+                if not msg.avatar_image.isNull():
+                    clip = QPainterPath()
+                    clip.addRoundedRect(icon_rect, max(2.0, radius * 0.62), max(2.0, radius * 0.62))
+                    painter.save()
+                    painter.setClipPath(clip)
+                    painter.drawImage(icon_rect, msg.avatar_image)
+                    painter.restore()
+                else:
+                    painter.setFont(self._font(8, QFont.Weight.Bold))
+                    painter.setPen(QColor(255, 255, 255, 242))
+                    painter.drawText(icon_rect, Qt.AlignmentFlag.AlignCenter, str(model["glyph"]))
+            painter.restore()
+            return
+
         progress = self._message_card_progress(rect)
         if progress < 0.08:
             color = msg.name_color
@@ -10131,7 +12020,7 @@ class IslandStackVisual(QWidget):
         widths = tuple(widths)
         layout = LyricLayout(text=text, chunks=chunks, widths=widths, total_width=sum(widths), font_key=key)
         cache[key] = layout
-        if len(cache) > 96:
+        while len(cache) > int(getattr(self, "LYRIC_LAYOUT_CACHE_LIMIT", 48)):
             cache.pop(next(iter(cache)))
         return layout
 
@@ -10178,7 +12067,7 @@ class IslandStackVisual(QWidget):
             widths.append(width + self._gelv_chunk_spacing(chunk, width, reference_width, spacing_percent))
         layout = LyricLayout(text=text, chunks=chunks, widths=tuple(widths), total_width=sum(widths), font_key=key)
         cache[key] = layout
-        if len(cache) > 96:
+        while len(cache) > int(getattr(self, "LYRIC_LAYOUT_CACHE_LIMIT", 48)):
             cache.pop(next(iter(cache)))
         return layout
 
@@ -10311,7 +12200,8 @@ class IslandStackVisual(QWidget):
         live_width = self._lyric_progress_width(layout, progress)
         x = self._scrolling_text_x(rect, text_w, centered, centered_scroll, focus_px=live_width)
         color, companion = self._accent_pair()
-        wave_fill_enabled = bool(getattr(self, "wave_color_fill_enabled", False))
+        pure_white = self._pure_white_music_active()
+        wave_fill_enabled = bool(getattr(self, "wave_color_fill_enabled", False)) and not pure_white
         if wave_fill_enabled:
             fill = self._wave_fill_color()
             color = QColor(fill)
@@ -10321,7 +12211,7 @@ class IslandStackVisual(QWidget):
 
         painter.save()
         painter.setClipRect(rect)
-        if text and confidence > 0.05:
+        if text and confidence > 0.05 and not pure_white:
             focus_x = x + max(0.0, min(text_w, live_width))
             focus_radius = self._u(42 + 22 * bloom)
             focus = QRadialGradient(QPointF(focus_x, rect.center().y()), focus_radius)
@@ -10333,20 +12223,21 @@ class IslandStackVisual(QWidget):
             painter.setBrush(focus)
             painter.drawEllipse(QPointF(focus_x, rect.center().y()), focus_radius, focus_radius * 0.48)
 
-        glow_alpha = int(30 + 28 * confidence + 18 * bloom)
-        self._paint_wave_stream_lyric_chunks(
-            painter,
-            rect.adjusted(-self._u(0.6), -self._u(0.4), self._u(0.6), self._u(0.4)),
-            x,
-            layout,
-            size,
-            bold,
-            QColor(255, 255, 255, glow_alpha),
-            QColor(255, 255, 255, glow_alpha),
-            progress,
-            confidence * 0.52,
-            glow=True,
-        )
+        if not pure_white:
+            glow_alpha = int(30 + 28 * confidence + 18 * bloom)
+            self._paint_wave_stream_lyric_chunks(
+                painter,
+                rect.adjusted(-self._u(0.6), -self._u(0.4), self._u(0.6), self._u(0.4)),
+                x,
+                layout,
+                size,
+                bold,
+                QColor(255, 255, 255, glow_alpha),
+                QColor(255, 255, 255, glow_alpha),
+                progress,
+                confidence * 0.52,
+                glow=True,
+            )
 
         elastic_live = QColor(live_color.red(), live_color.green(), live_color.blue(), max(0, min(255, int(live_color.alpha() * (0.76 + 0.16 * bloom)))))
         self._paint_wave_stream_lyric_chunks(

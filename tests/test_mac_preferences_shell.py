@@ -143,6 +143,21 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("sea_level", DEFAULT_SETTINGS["v2_music_ambience_values"])
         self.assertIn("bilateral_diffraction", DEFAULT_SETTINGS["v2_music_ambience_values"])
 
+    def test_location_and_tasker_defaults_are_present(self):
+        from local.settings_store import DEFAULT_SETTINGS
+
+        self.assertEqual(DEFAULT_SETTINGS["v2_location_mode"], "free")
+        self.assertEqual(DEFAULT_SETTINGS["v2_taskbar_corner_style"], "win11")
+        self.assertEqual(DEFAULT_SETTINGS["v2_taskbar_left_handle_color"], "#8E8E93")
+        self.assertEqual(DEFAULT_SETTINGS["v2_dual_line_font_size"], 12)
+        self.assertIn("pure_white", DEFAULT_SETTINGS["v2_music_ambience_values"])
+        self.assertEqual(DEFAULT_SETTINGS["v2_enabled_plugins"], ["time", "weather", "agenda"])
+        self.assertNotIn("v2_taskbar_recognition_threshold", DEFAULT_SETTINGS)
+        self.assertNotIn("v2_taskbar_plugin_compact_style", DEFAULT_SETTINGS)
+        self.assertNotIn("v2_taskbar_message_compact_style", DEFAULT_SETTINGS)
+        self.assertNotIn("v2_taskbar_hint_text", DEFAULT_SETTINGS)
+        self.assertNotIn("v2_taskbar_fusion_mode", DEFAULT_SETTINGS)
+
     def test_settings_window_scopes_gelv_controls_and_hides_global_font_selector(self):
         source = self._source("local/settings_window.py")
 
@@ -206,6 +221,140 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertNotIn('self._row(c, "全局字体", font_combo)', source)
         self.assertNotIn("enable_dual_line_lyrics = False", source)
         self.assertIn("setVisible(gelv)", source)
+
+    def test_settings_window_exposes_location_mode_instead_of_old_taskbar_fusion_controls(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("LOCATION_MODES", source)
+        self.assertIn("location_mode", source)
+        self.assertIn("v2_location_mode", source)
+        self.assertIn("taskbar_corner_style", source)
+        self.assertIn("dual_line_font_size", source)
+        self.assertNotIn("taskbar_recognition_threshold", source)
+        self.assertNotIn("taskbar_plugin_compact_style", source)
+        self.assertNotIn("taskbar_message_compact_style", source)
+        self.assertNotIn("TASKBAR_FUSION_MODES", source)
+        self.assertNotIn("taskbar_fusion_mode", source)
+        self.assertNotIn("taskbar_hint_text", source)
+
+    def test_music_ambience_setting_is_renamed_to_background_style(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("音乐岛背景样式", source)
+        self.assertNotIn("音乐岛光效", source)
+
+    def test_settings_window_is_more_compact_with_rounded_shell(self):
+        source = self._source("local/settings_window.py")
+        style = self._source("local/mac_style.py")
+
+        self.assertIn("COMPACT_ROW_VPAD = 8", source)
+        self.assertIn("setMinimumSize(688, 496)", source)
+        self.assertIn("WA_TranslucentBackground", source)
+        self.assertIn("MacWindowShell", source)
+        self.assertIn("border-radius: 14px", style)
+        self.assertIn("border-radius: 10px", style)
+        self.assertIn("min-height: 24px", style)
+        self.assertIn("_apply_rounded_window_mask", source)
+        self.assertIn("setMask", source)
+
+    def test_settings_traffic_lights_show_hover_symbols(self):
+        style = self._source("local/mac_style.py")
+
+        self.assertIn("_symbol", style)
+        self.assertIn("enterEvent", style)
+        self.assertIn("leaveEvent", style)
+        self.assertIn("drawText", style)
+        self.assertIn('"×"', style)
+        self.assertIn('"−"', style)
+        self.assertIn('"□"', style)
+
+    def test_empty_bar_preview_uses_selected_palette_colors(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("_empty_bar_preview_colors", source)
+        self.assertIn('"rainbow"', source)
+        self.assertIn("self.empty_palette.currentData()", source)
+        self.assertNotIn('colors = self._current_custom_colors()\n            bg = f"qlineargradient', source)
+
+    def test_tasker_theme_mode_changes_sync_music_background(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertNotIn("_sync_tasker_music_background_to_theme_mode", source)
+        set_theme_start = source.index("def _set_theme_mode")
+        set_theme_end = source.index("def _normalize_theme_time", set_theme_start)
+        set_theme_source = source[set_theme_start:set_theme_end]
+        self.assertNotIn("set_music_ambience_style", set_theme_source)
+        self.assertNotIn("v2_music_ambience_style", set_theme_source)
+
+    def test_gelv_color_fill_keeps_all_music_background_options_available(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("_music_background_options_allowed", source)
+        self.assertIn("set(DEFAULT_MUSIC_AMBIENCE_VALUES)", source)
+        self.assertNotIn('{"pure_black", "bilateral_diffraction", "pure_white"} if active_fill', source)
+
+    def test_location_mode_options_reflect_manual_finder_state(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn('if manual_finder:', source)
+        self.assertIn('("Free", "free"), ("Finder", "finder")', source)
+        self.assertIn('("Free", "free"), ("Tasker", "tasker")', source)
+        self.assertIn("_refresh_location_mode_options", source)
+
+    def test_disabled_settings_options_are_visually_gray(self):
+        style = self._source("local/mac_style.py")
+
+        self.assertIn(":disabled", style)
+        self.assertIn("color: {t[\"disabled_text\"]}", style)
+        self.assertIn("QComboBox QAbstractItemView::item:disabled", style)
+
+    def test_appearance_page_exposes_settings_font_selection_and_import(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("QFontDatabase", source)
+        self.assertIn("QFileDialog", source)
+        self.assertIn("settings_font_combo", source)
+        self.assertIn("import_settings_font_button", source)
+        self.assertIn("_import_settings_font", source)
+        self.assertIn("_apply_settings_font", source)
+        self.assertIn("addApplicationFont", source)
+        self.assertIn("v2_settings_font_family", source)
+        self.assertIn("v2_imported_settings_fonts", source)
+        self.assertIn("PingFang SC", source)
+        self.assertIn("Source Han Serif SC", source)
+
+    def test_taskbar_left_handle_color_setting_is_exposed(self):
+        source = self._source("local/settings_window.py")
+        app_source = self._source("local/app.py")
+        visual_source = self._source("local/island_stack_visual.py")
+
+        self.assertIn("taskbar_left_handle_color", source)
+        self.assertIn("v2_taskbar_left_handle_color", source)
+        self.assertIn("ColorButton", source)
+        self.assertIn("v2_taskbar_left_handle_color", app_source)
+        self.assertIn("set_taskbar_left_handle_color", visual_source)
+
+    def test_plugin_count_slider_is_replaced_by_three_plugin_checkboxes(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("plugin_time_enabled", source)
+        self.assertIn("plugin_weather_enabled", source)
+        self.assertIn("plugin_agenda_enabled", source)
+        self.assertIn("v2_enabled_plugins", source)
+        self.assertNotIn("plugin_count = self._slider_row", source)
+        self.assertNotIn("插件数量", source)
+
+    def test_settings_window_is_arranged_by_function_pages(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("def _placement_page", source)
+        self.assertIn("def _media_page", source)
+        self.assertIn("def _plugins_page", source)
+        self.assertIn("def _appearance_page", source)
+        self.assertIn("self._placement_page()", source)
+        self.assertLess(source.index("self._placement_page()"), source.index("self._media_page()"))
+        self.assertLess(source.index("self._media_page()"), source.index("self._plugins_page()"))
+        self.assertLess(source.index("self._plugins_page()"), source.index("self._appearance_page()"))
 
 
 if __name__ == "__main__":

@@ -4,13 +4,14 @@ import json
 import time
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainterPath, QRegion
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -90,6 +91,7 @@ class SettingsWindow(QDialog):
         ("整岛双色", "duotone_full"),
         ("纯黑", "pure_black"),
         ("双侧衍射", "bilateral_diffraction"),
+        ("纯白", "pure_white"),
     )
 
     MUSIC_ISLAND_STYLES = (
@@ -175,6 +177,19 @@ class SettingsWindow(QDialog):
         ("透视", "perspective_dim"),
     )
 
+    LOCATION_MODES = (
+        ("Finder", "finder"),
+        ("Free", "free"),
+        ("Tasker", "tasker"),
+    )
+
+    TASKBAR_CORNER_STYLES = (
+        ("Win11 小圆角", "win11"),
+        ("Win10 直角", "win10"),
+    )
+
+    COMPACT_ROW_VPAD = 8
+
     def __init__(self, island_widget: QWidget, settings_manager=None, parent=None):
         super().__init__(parent)
         self.island_widget = island_widget
@@ -188,12 +203,14 @@ class SettingsWindow(QDialog):
         self._window_drag_global = None
         self._window_drag_pos = None
         self.setWindowTitle("gpt-island 设置")
-        self.setMinimumSize(860, 620)
+        self.setMinimumSize(688, 496)
         self.setWindowFlags(
             (self.windowFlags() | Qt.WindowType.FramelessWindowHint)
             & ~Qt.WindowType.WindowContextHelpButtonHint
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._build_ui()
+        self._apply_settings_font()
 
     def _theme(self) -> dict[str, str]:
         return mac_preferences_theme()
@@ -224,19 +241,40 @@ class SettingsWindow(QDialog):
                 self._style_combo_popup(combo)
         super().changeEvent(event)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_rounded_window_mask()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_rounded_window_mask()
+
+    def _apply_rounded_window_mask(self):
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 14.0, 14.0)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
     def _build_ui(self):
         self._apply_theme()
 
-        root = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        shell = QFrame()
+        shell.setObjectName("MacWindowShell")
+        outer.addWidget(shell)
+
+        root = QHBoxLayout(shell)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         side = QFrame()
         side.setObjectName("MacSidebar")
-        side.setFixedWidth(196)
+        side.setFixedWidth(157)
         side_layout = QVBoxLayout(side)
-        side_layout.setContentsMargins(10, 10, 10, 12)
-        side_layout.setSpacing(8)
+        side_layout.setContentsMargins(8, 8, 8, 10)
+        side_layout.setSpacing(6)
 
         side_layout.addWidget(mac_traffic_lights(self), 0, Qt.AlignmentFlag.AlignLeft)
 
@@ -260,10 +298,10 @@ class SettingsWindow(QDialog):
 
         title_bar = QFrame()
         title_bar.setObjectName("MacTitleBar")
-        title_bar.setFixedHeight(52)
+        title_bar.setFixedHeight(42)
         title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(24, 0, 24, 0)
-        title_layout.setSpacing(10)
+        title_layout.setContentsMargins(18, 0, 18, 0)
+        title_layout.setSpacing(8)
         self.title_label = QLabel()
         self.title_label.setObjectName("MacTitle")
         title_layout.addWidget(self.title_label)
@@ -275,15 +313,13 @@ class SettingsWindow(QDialog):
         root.addWidget(content, 1)
 
         pages = (
-            ("系统", self._system_page()),
+            ("位置", self._placement_page()),
             ("媒体播放", self._media_page()),
-            ("外观", self._appearance_page()),
             ("插件", self._plugins_page()),
+            ("外观", self._appearance_page()),
             ("弹幕", self._barrage_page()),
-            ("快捷动作", self._actions_page()),
             ("诊断", self._diagnostics_page()),
         )
-        pages = pages[:5] + pages[6:]
         colors = mac_sidebar_icon_colors()
         for index, (name, page) in enumerate(pages):
             self.nav.addItem(QListWidgetItem(mac_sidebar_icon(colors[index % len(colors)], name[:1]), name))
@@ -314,7 +350,7 @@ class SettingsWindow(QDialog):
             self.nav.setCurrentRow(first_visible)
 
     def _is_window_drag_area(self, point) -> bool:
-        if point.y() > 54 and point.x() > 196:
+        if point.y() > 44 and point.x() > 157:
             return False
         child = self.childAt(point.toPoint())
         if child is None:
@@ -351,8 +387,8 @@ class SettingsWindow(QDialog):
         page = QWidget()
         page.setObjectName("MacScrollBody")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 18, 28, 28)
-        layout.setSpacing(16)
+        layout.setContentsMargins(18, 12, 22, 20)
+        layout.setSpacing(12)
         scroll.setWidget(page)
         scroll._content_layout = layout
         return scroll
@@ -362,7 +398,7 @@ class SettingsWindow(QDialog):
         card.setObjectName("MacCard")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(18, 12, 18, 12)
+        layout.setContentsMargins(14, 8, 14, 8)
         layout.setSpacing(0)
         parent_layout.addWidget(card)
         return card
@@ -370,11 +406,11 @@ class SettingsWindow(QDialog):
     def _row(self, layout: QVBoxLayout, title: str, control: QWidget):
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 11, 0, 11)
-        row_layout.setSpacing(16)
+        row_layout.setContentsMargins(0, self.COMPACT_ROW_VPAD, 0, self.COMPACT_ROW_VPAD)
+        row_layout.setSpacing(12)
         label = QLabel(title)
         label.setObjectName("RowTitle")
-        label.setMinimumWidth(150)
+        label.setMinimumWidth(120)
         control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
         row_layout.addWidget(label, 0)
         row_layout.addWidget(control, 1)
@@ -444,11 +480,11 @@ class SettingsWindow(QDialog):
     def _color_buttons_row(self, layout: QVBoxLayout, title: str, colors) -> list[ColorButton]:
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 10, 0, 10)
-        row_layout.setSpacing(12)
+        row_layout.setContentsMargins(0, self.COMPACT_ROW_VPAD, 0, self.COMPACT_ROW_VPAD)
+        row_layout.setSpacing(10)
         label = QLabel(title)
         label.setObjectName("RowTitle")
-        label.setMinimumWidth(150)
+        label.setMinimumWidth(120)
         row_layout.addWidget(label, 0)
         buttons = [ColorButton(str(color), self._set_empty_bar_custom_colors) for color in list(colors)[:3]]
         while len(buttons) < 3:
@@ -468,8 +504,8 @@ class SettingsWindow(QDialog):
     def _slider_row(self, layout: QVBoxLayout, title: str, minimum: int, maximum: int, value: int, callback, suffix: str = "") -> QSlider:
         row = QWidget()
         grid = QGridLayout(row)
-        grid.setContentsMargins(0, 11, 0, 11)
-        grid.setHorizontalSpacing(14)
+        grid.setContentsMargins(0, self.COMPACT_ROW_VPAD, 0, self.COMPACT_ROW_VPAD)
+        grid.setHorizontalSpacing(12)
         title_label = QLabel(title)
         title_label.setObjectName("RowTitle")
         value_label = QLabel(f"{value}{suffix}")
@@ -511,28 +547,51 @@ class SettingsWindow(QDialog):
     def _style_combo_popup(self, combo: QComboBox):
         style_combo_popup(combo, self._theme())
 
-    def _system_page(self) -> QWidget:
-        page = self._page("系统")
+    def _location_mode_items(self) -> list[tuple[str, str]]:
+        manual_finder = bool(getattr(self.island_widget, "manual_finder_available", False))
+        if manual_finder:
+            return [("Free", "free"), ("Finder", "finder")]
+        return [("Free", "free"), ("Tasker", "tasker")]
+
+    def _placement_page(self) -> QWidget:
+        page = self._page("位置")
         layout: QVBoxLayout = page._content_layout
         card = self._card(layout)
         c = card.layout()
 
-        self.music_checkbox = self._check("音乐岛", bool(getattr(self.island_widget, "music_playing", True)), self._set_music_playing)
-        self.music_auto_checkbox = self._check("音乐岛自动识别：无音频时隐藏", bool(getattr(self.island_widget, "music_auto_detect", False)), self._set_music_auto_detect)
-        self.plugin_checkbox = self._check("插件岛", bool(getattr(self.island_widget, "persistent_plugin", True)), self._set_persistent_plugin)
         self.super_topmost_checkbox = self._check("灵动岛超级置顶", bool(getattr(self.island_widget, "super_topmost_enabled", True)), self._set_super_topmost)
-        self.finder_checkbox = self._check("Finder 融合", bool(getattr(self.island_widget, "finder_mode", True)), self._set_finder_mode)
-        self.message_detection_checkbox = self._check("消息识别总开关", bool(self._setting_value("v2_enable_message_detection", True)), self._set_message_detection)
-        c.addWidget(self.music_checkbox)
-        c.addWidget(self.music_auto_checkbox)
-        c.addWidget(self.plugin_checkbox)
+        self.location_mode = self._combo(
+            self._location_mode_items(),
+            str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free"))),
+            self._set_location_mode,
+        )
+        self._row(c, "位置模式", self.location_mode)
+        self.manual_finder_checkbox = self._check("手动确认存在 MyFinder", bool(getattr(self.island_widget, "manual_finder_available", False)), self._set_manual_finder_available)
+        c.addWidget(self.manual_finder_checkbox)
+        self.taskbar_corner_style = self._combo(
+            list(self.TASKBAR_CORNER_STYLES),
+            str(getattr(self.island_widget, "taskbar_corner_style", self._setting_value("v2_taskbar_corner_style", "win11"))),
+            self._set_taskbar_corner_style,
+        )
+        self._row(c, "Tasker 圆角", self.taskbar_corner_style)
+        self.taskbar_left_handle_color = ColorButton(
+            str(getattr(self.island_widget, "taskbar_left_handle_color", self._setting_value("v2_taskbar_left_handle_color", "#8E8E93"))),
+            self._set_taskbar_left_handle_color,
+        )
+        self._row(c, "Tasker 左侧竖线", self.taskbar_left_handle_color)
         c.addWidget(self.super_topmost_checkbox)
-        c.addWidget(self.finder_checkbox)
-        c.addWidget(self.message_detection_checkbox)
+        self.expanded_checkbox = self._check("默认展开", bool(getattr(self.island_widget, "expanded", False)), self._set_expanded)
+        c.addWidget(self.expanded_checkbox)
+        self.auto_bounds_checkbox = self._check("自动识别上下边界", bool(getattr(self.island_widget, "auto_expand_bounds", True)), self._set_auto_expand_bounds)
+        c.addWidget(self.auto_bounds_checkbox)
+        self.expand_direction = self._combo([("自动", "auto"), ("向下", "down"), ("向上", "up")], str(getattr(self.island_widget, "expand_direction", "auto")), self._set_expand_direction)
+        self._row(c, "展开方向", self.expand_direction)
 
         message_title = QLabel("消息识别")
         message_title.setStyleSheet(self._section_style(16, 2))
         c.addWidget(message_title)
+        self.message_detection_checkbox = self._check("消息识别总开关", bool(self._setting_value("v2_enable_message_detection", True)), self._set_message_detection)
+        c.addWidget(self.message_detection_checkbox)
         self.wechat_notification_checkbox = self._check("微信新消息通知", bool(self._setting_value("v2_enable_wechat_notification", True)), self._set_wechat_notification)
         self.wechat_detail_checkbox = self._check("微信详细消息通知（高性能）", bool(self._setting_value("v2_enable_wechat_detail_notification", False)), self._set_wechat_detail_notification)
         self.qq_notification_checkbox = self._check("QQ（待适配）", bool(self._setting_value("v2_enable_qq_notification", False)), self._set_qq_notification)
@@ -542,11 +601,8 @@ class SettingsWindow(QDialog):
         c.addWidget(self.qq_notification_checkbox)
         c.addWidget(self.dingtalk_notification_checkbox)
 
-        self.manual_finder_checkbox = self._check("手动确认存在 MyFinder", bool(getattr(self.island_widget, "manual_finder_available", False)), self._set_manual_finder_available)
-        self.expanded_checkbox = self._check("默认展开", bool(getattr(self.island_widget, "expanded", False)), self._set_expanded)
-        c.addWidget(self.manual_finder_checkbox)
-        c.addWidget(self.expanded_checkbox)
         self._update_message_controls()
+        self._update_taskbar_controls()
         c.addStretch(1)
         layout.addStretch(1)
         return page
@@ -556,6 +612,11 @@ class SettingsWindow(QDialog):
         layout: QVBoxLayout = page._content_layout
         card = self._card(layout)
         c = card.layout()
+
+        self.music_checkbox = self._check("音乐岛", bool(getattr(self.island_widget, "music_playing", True)), self._set_music_playing)
+        self.music_auto_checkbox = self._check("音乐岛自动识别：无音频时隐藏", bool(getattr(self.island_widget, "music_auto_detect", False)), self._set_music_auto_detect)
+        c.addWidget(self.music_checkbox)
+        c.addWidget(self.music_auto_checkbox)
 
         progress_title = QLabel("进度识别")
         progress_title.setStyleSheet(self._section_style(2, 8))
@@ -676,6 +737,7 @@ class SettingsWindow(QDialog):
             self._set_dual_line_lyrics,
         )
         wave_layout.addWidget(self.dual_line_lyrics_checkbox)
+        self.dual_line_font_size = self._slider_row(wave_layout, "双语字号", 8, 20, max(8, min(20, int(getattr(self.island_widget, "dual_line_font_size", self._setting_value("v2_dual_line_font_size", 12))))), self._set_dual_line_font_size, " px")
         self.dual_line_secondary_weight = self._slider_row(wave_layout, "次行字重", 40, 100, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72)))), self._set_dual_line_secondary_weight, "%")
         self.dual_line_secondary_spacing = self._slider_row(wave_layout, "次行字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "dual_line_secondary_spacing", 100)))), self._set_dual_line_secondary_spacing, "%")
         self.lyric_elastic_mode = self._combo(list(self.LYRIC_ELASTIC_MODES), str(getattr(self.island_widget, "lyric_elastic_mode", "both")), self._set_lyric_elastic_mode)
@@ -755,6 +817,15 @@ class SettingsWindow(QDialog):
             self._set_theme_mode,
         )
         self._row(c, "界面模式", self.theme_mode)
+        self.settings_font_combo = self._combo(
+            self._settings_font_items(),
+            str(self._setting_value("v2_settings_font_family", self.FONT_CHOICES[0]) or self.FONT_CHOICES[0]),
+            self._set_settings_font_family,
+        )
+        self._row(c, "设置字体", self.settings_font_combo)
+        self.import_settings_font_button = QPushButton("导入字体")
+        self.import_settings_font_button.clicked.connect(self._import_settings_font)
+        self._row(c, "导入字体", self.import_settings_font_button)
         self.theme_dark_start = QLineEdit(str(self._setting_value("v2_theme_dark_start", "22:00") or "22:00"))
         self.theme_dark_start.setPlaceholderText("22:00")
         self.theme_dark_start.editingFinished.connect(self._set_theme_dark_start)
@@ -768,7 +839,7 @@ class SettingsWindow(QDialog):
         c.addWidget(self.high_quality_font_checkbox)
         self.high_quality_font_checkbox.hide()
         self.music_ambience_style = self._combo(list(self.MUSIC_AMBIENCE_STYLES), str(getattr(self.island_widget, "music_ambience_style", "sea_level")), self._set_music_ambience_style)
-        self._row(c, "音乐岛光效", self.music_ambience_style)
+        self._row(c, "音乐岛背景样式", self.music_ambience_style)
         self.music_island_style = self._combo(
             list(self.MUSIC_ISLAND_STYLES),
             str(getattr(self.island_widget, "music_island_style", self._setting_value("v2_music_island_style", "standard")) or "standard"),
@@ -777,7 +848,7 @@ class SettingsWindow(QDialog):
         self._row(c, "音乐岛样式", self.music_island_style)
         self.music_preview = self._preview_frame(54)
         c.addWidget(self.music_preview)
-        self._music_ambience_controls, music_ambience_layout, self._music_ambience_detail_toggle = self._detail_panel(c, "音乐岛光效")
+        self._music_ambience_controls, music_ambience_layout, self._music_ambience_detail_toggle = self._detail_panel(c, "音乐岛背景样式")
         self.wave_slider = self._slider_row(music_ambience_layout, "氛围光增强", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
         self.music_flow_slider = self._slider_row(music_ambience_layout, "流光浮动", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
         self.compact_duotone_balance = self._slider_row(music_ambience_layout, "收缩双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50)))), self._set_compact_duotone_balance, "%")
@@ -813,7 +884,15 @@ class SettingsWindow(QDialog):
 
         general = self._card(layout)
         g = general.layout()
-        self.plugin_count = self._slider_row(g, "插件数量", 0, 3, max(0, min(3, int(getattr(self.island_widget, "enabled_plugin_count", 3)))), self._set_plugin_count)
+        self.plugin_checkbox = self._check("插件岛", bool(getattr(self.island_widget, "persistent_plugin", True)), self._set_persistent_plugin)
+        g.addWidget(self.plugin_checkbox)
+        enabled_plugins = self._enabled_plugins_setting()
+        self.plugin_time_enabled = self._check("时间插件", "time" in enabled_plugins, self._set_enabled_plugins_from_checks)
+        self.plugin_weather_enabled = self._check("天气插件", "weather" in enabled_plugins, self._set_enabled_plugins_from_checks)
+        self.plugin_agenda_enabled = self._check("日程插件", "agenda" in enabled_plugins, self._set_enabled_plugins_from_checks)
+        g.addWidget(self.plugin_time_enabled)
+        g.addWidget(self.plugin_weather_enabled)
+        g.addWidget(self.plugin_agenda_enabled)
         self.side_island_style = self._combo(
             list(self.SIDE_ISLAND_STYLES),
             str(getattr(self.island_widget, "side_island_style", self._setting_value("v2_side_island_style", "standard")) or "standard"),
@@ -1041,12 +1120,15 @@ class SettingsWindow(QDialog):
         return page
 
     def sync_from_widget(self):
+        enabled_plugins = self._enabled_plugins_setting()
         pairs = (
             (self.music_checkbox, bool(getattr(self.island_widget, "music_playing", True))),
             (self.music_auto_checkbox, bool(getattr(self.island_widget, "music_auto_detect", False))),
             (self.plugin_checkbox, bool(getattr(self.island_widget, "persistent_plugin", True))),
+            (self.plugin_time_enabled, "time" in enabled_plugins),
+            (self.plugin_weather_enabled, "weather" in enabled_plugins),
+            (self.plugin_agenda_enabled, "agenda" in enabled_plugins),
             (self.super_topmost_checkbox, bool(getattr(self.island_widget, "super_topmost_enabled", True))),
-            (self.finder_checkbox, bool(getattr(self.island_widget, "finder_mode", True))),
             (self.message_detection_checkbox, bool(self._setting_value("v2_enable_message_detection", True))),
             (self.wechat_notification_checkbox, bool(self._setting_value("v2_enable_wechat_notification", True))),
             (self.wechat_detail_checkbox, bool(self._setting_value("v2_enable_wechat_detail_notification", False))),
@@ -1072,7 +1154,6 @@ class SettingsWindow(QDialog):
             widget.blockSignals(False)
 
         slider_values = (
-            (self.plugin_count, max(0, min(3, int(getattr(self.island_widget, "enabled_plugin_count", 3))))),
             (self.wave_slider, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100)))),
             (self.music_flow_slider, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100)))),
             (self.compact_duotone_balance, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50))))),
@@ -1097,6 +1178,7 @@ class SettingsWindow(QDialog):
             (self.album_island_perspective_amount, max(0, min(200, int(getattr(self.island_widget, "album_island_perspective_amount", self._setting_value("v2_album_island_perspective_amount", 100)))))),
             (self.lyric_elastic_strength, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100))))),
             (self.lyric_word_spacing, max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100))))),
+            (self.dual_line_font_size, max(8, min(20, int(getattr(self.island_widget, "dual_line_font_size", self._setting_value("v2_dual_line_font_size", 12)))))),
             (self.dual_line_secondary_weight, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72))))),
             (self.dual_line_secondary_spacing, max(60, min(150, int(getattr(self.island_widget, "dual_line_secondary_spacing", 100))))),
         )
@@ -1109,7 +1191,11 @@ class SettingsWindow(QDialog):
             self.font_combo.blockSignals(True)
             self._set_combo_text(self.font_combo, str(getattr(self.island_widget, "ui_font_family", self.FONT_CHOICES[0])))
             self.font_combo.blockSignals(False)
+        if hasattr(self, "settings_font_combo"):
+            self._refresh_settings_font_combo()
         self._set_combo_data(self.empty_palette, str(getattr(self.island_widget, "empty_bar_palette", "aurora")))
+        self._refresh_location_mode_options()
+        self._set_combo_data(self.location_mode, str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free"))))
         self._set_combo_data(self.expand_direction, str(getattr(self.island_widget, "expand_direction", "auto")))
         self._set_combo_data(self.animation_speed, float(getattr(self.island_widget, "animation_speed", 1.0)))
         self._set_combo_data(self.music_ambience_style, str(getattr(self.island_widget, "music_ambience_style", "sea_level")))
@@ -1320,6 +1406,14 @@ class SettingsWindow(QDialog):
                 widget.setEnabled(wave)
         if hasattr(self, "dual_line_lyrics_checkbox"):
             self.dual_line_lyrics_checkbox.setEnabled(wave)
+        dual_enabled = bool(getattr(self.island_widget, "enable_dual_line_lyrics", False))
+        for widget in (
+            getattr(self, "dual_line_font_size", None),
+            getattr(self, "dual_line_secondary_weight", None),
+            getattr(self, "dual_line_secondary_spacing", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(wave and dual_enabled)
         album_mode = str(
             getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))
         ) == "album_island" or album_flow
@@ -1427,8 +1521,7 @@ class SettingsWindow(QDialog):
     def _update_music_ambience_controls(self):
         if not hasattr(self, "music_ambience_style"):
             return
-        active_fill = self._active_color_fill_enabled_for_settings()
-        allowed = {"pure_black", "bilateral_diffraction"} if active_fill else set(DEFAULT_MUSIC_AMBIENCE_VALUES)
+        allowed = self._music_background_options_allowed()
         current_style = self._current_music_ambience_style()
         if current_style not in allowed:
             current_style = "pure_black"
@@ -1445,7 +1538,17 @@ class SettingsWindow(QDialog):
                 item.setEnabled(style in allowed)
         self._set_combo_data(self.music_ambience_style, current_style)
         if hasattr(self, "_music_ambience_detail_toggle"):
-            self._set_detail_panel_title(self._music_ambience_detail_toggle, f"{self.music_ambience_style.currentText()}光效")
+            self._set_detail_panel_title(self._music_ambience_detail_toggle, f"{self.music_ambience_style.currentText()}背景")
+
+    def _music_background_options_allowed(self) -> set[str]:
+        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")) or "wave_stream")
+        active_fill = self._active_color_fill_enabled_for_settings()
+        tasker = str(getattr(self.island_widget, "location_mode", "free") or "free") == "tasker"
+        if tasker or style == "gelv_songscatter":
+            return set(DEFAULT_MUSIC_AMBIENCE_VALUES)
+        if active_fill:
+            return {"pure_black", "bilateral_diffraction", "pure_white"}
+        return set(DEFAULT_MUSIC_AMBIENCE_VALUES)
 
     def _set_combo_text(self, combo: QComboBox, text: str):
         index = combo.findText(text)
@@ -1470,9 +1573,22 @@ class SettingsWindow(QDialog):
                 bg = "qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7A1DFF, stop:0.48 #25D5FF, stop:1 #FF4E90)"
             self.music_preview.setStyleSheet(f"QFrame {{ border-radius: 12px; border: 1px solid #e5e7eb; background: {bg}; }}")
         if hasattr(self, "empty_preview"):
-            colors = self._current_custom_colors()
+            colors = self._empty_bar_preview_colors()
             bg = f"qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {colors[0]}, stop:0.5 {colors[1]}, stop:1 {colors[2]})"
             self.empty_preview.setStyleSheet(f"QFrame {{ border-radius: 12px; border: 1px solid #e5e7eb; background: {bg}; }}")
+
+    def _empty_bar_preview_colors(self) -> list[str]:
+        key = str(self.empty_palette.currentData() if hasattr(self, "empty_palette") else getattr(self.island_widget, "empty_bar_palette", "aurora") or "aurora")
+        palettes = {
+            "cyan": ["#32E0FF", "#469AFF", "#69FFCF"],
+            "violet": ["#9066FF", "#4278FF", "#EC5CFF"],
+            "amber": ["#FFCD5C", "#FF7E52", "#6EE0FF"],
+            "rainbow": ["#FF5A86", "#4ED6FF", "#70FFA6"],
+            "aurora": ["#50ACFF", "#7668FF", "#4CE5FF"],
+        }
+        if key == "custom":
+            return self._current_custom_colors()
+        return palettes.get(key, palettes["aurora"])
 
     def _current_custom_colors(self) -> list[str]:
         colors = []
@@ -1502,6 +1618,59 @@ class SettingsWindow(QDialog):
         if self.settings:
             return self.settings.get(key, default)
         return default
+
+    def _imported_settings_fonts(self) -> list[str]:
+        raw = self._setting_value("v2_imported_settings_fonts", [])
+        if not isinstance(raw, (list, tuple, set)):
+            return []
+        return [str(item).strip() for item in raw if str(item).strip()]
+
+    def _settings_font_items(self) -> list[tuple[str, str]]:
+        items = [(family, family) for family in self.FONT_CHOICES]
+        existing = {value for _label, value in items}
+        for family in self._imported_settings_fonts():
+            if family not in existing:
+                items.append((family, family))
+                existing.add(family)
+        return items
+
+    def _refresh_settings_font_combo(self):
+        current = str(self._setting_value("v2_settings_font_family", self.FONT_CHOICES[0]) or self.FONT_CHOICES[0])
+        self.settings_font_combo.blockSignals(True)
+        self.settings_font_combo.clear()
+        for label, value in self._settings_font_items():
+            self.settings_font_combo.addItem(label, value)
+        self.settings_font_combo.blockSignals(False)
+        self._set_combo_data(self.settings_font_combo, current)
+        self._style_combo_popup(self.settings_font_combo)
+
+    def _apply_settings_font(self):
+        family = str(self._setting_value("v2_settings_font_family", self.FONT_CHOICES[0]) or self.FONT_CHOICES[0])
+        self.setFont(QFont(family, 9))
+
+    def _enabled_plugins_setting(self) -> list[str]:
+        known = ["time", "weather", "agenda"]
+        raw = getattr(self.island_widget, "enabled_plugin_ids", None)
+        if raw is None:
+            raw = self._setting_value("v2_enabled_plugins", known)
+        if isinstance(raw, (list, tuple, set)):
+            enabled = {str(item or "").strip().casefold() for item in raw}
+            return [plugin_id for plugin_id in known if plugin_id in enabled]
+        try:
+            count = max(0, min(3, int(getattr(self.island_widget, "enabled_plugin_count", len(known)))))
+        except (TypeError, ValueError):
+            count = len(known)
+        return known[:count]
+
+    def _apply_enabled_plugins(self, plugin_ids: list[str]):
+        known = ["time", "weather", "agenda"]
+        enabled = [plugin_id for plugin_id in known if plugin_id in {str(item).casefold() for item in plugin_ids}]
+        self.island_widget.enabled_plugin_ids = set(enabled)
+        self.island_widget.enabled_plugin_count = len(enabled)
+        if hasattr(self.island_widget, "_set_plugin_focus"):
+            self.island_widget._set_plugin_focus(min(getattr(self.island_widget, "plugin_focus_target", 0), max(0, len(enabled) - 1)), immediate=True)
+        if hasattr(self.island_widget, "update"):
+            self.island_widget.update()
 
     def closeEvent(self, event):
         if hasattr(self.island_widget, "set_settings_window_active"):
@@ -1670,13 +1839,73 @@ class SettingsWindow(QDialog):
         self._save("v2_super_topmost", bool(enabled))
         self._touch()
 
-    def _set_finder_mode(self, enabled: bool):
-        if hasattr(self.island_widget, "set_finder_mode"):
-            self.island_widget.set_finder_mode(enabled, notify=False)
+    def _set_location_mode(self, _index: int = -1):
+        mode = str(self.location_mode.currentData() or "free")
+        if hasattr(self.island_widget, "set_location_mode"):
+            self.island_widget.set_location_mode(mode, notify=False)
+            mode = str(getattr(self.island_widget, "location_mode", mode))
         else:
-            self.island_widget.finder_mode = enabled
-        self._save("v2_finder_mode", enabled)
+            self.island_widget.location_mode = mode
+            self.island_widget.finder_mode = mode == "finder"
+            self.island_widget.update()
+        self._save("v2_location_mode", mode)
+        self._save("v2_finder_mode", mode == "finder")
+        self._refresh_location_mode_options()
+        self._set_combo_data(self.location_mode, mode)
+        self._update_taskbar_controls()
         self._touch()
+
+    def _set_taskbar_corner_style(self, _index: int = -1):
+        style = str(self.taskbar_corner_style.currentData() or "win11")
+        if hasattr(self.island_widget, "set_taskbar_corner_style"):
+            self.island_widget.set_taskbar_corner_style(style, notify=False)
+        else:
+            self.island_widget.taskbar_corner_style = style
+            self.island_widget.update()
+        self._save("v2_taskbar_corner_style", style)
+        self._touch()
+
+    def _set_taskbar_left_handle_color(self):
+        color = self.taskbar_left_handle_color.color()
+        if hasattr(self.island_widget, "set_taskbar_left_handle_color"):
+            self.island_widget.set_taskbar_left_handle_color(color, notify=False)
+            color = str(getattr(self.island_widget, "taskbar_left_handle_color", color))
+        else:
+            self.island_widget.taskbar_left_handle_color = color
+            self.island_widget.update()
+        self.taskbar_left_handle_color.set_color(color)
+        self._save("v2_taskbar_left_handle_color", color)
+        self._touch()
+
+    def _refresh_location_mode_options(self):
+        if not hasattr(self, "location_mode"):
+            return
+        current = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")))
+        items = self._location_mode_items()
+        self.location_mode.blockSignals(True)
+        self.location_mode.clear()
+        for label, value in items:
+            self.location_mode.addItem(label, value)
+        if current not in {value for _label, value in items}:
+            current = "free"
+            if hasattr(self.island_widget, "set_location_mode"):
+                self.island_widget.set_location_mode(current, notify=False)
+            else:
+                self.island_widget.location_mode = current
+            self._save("v2_location_mode", current)
+        self.location_mode.blockSignals(False)
+        self._set_combo_data(self.location_mode, current)
+        self._style_combo_popup(self.location_mode)
+
+    def _update_taskbar_controls(self):
+        location = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")) or "free")
+        tasker_available = location != "finder" and not bool(getattr(self.island_widget, "manual_finder_available", False))
+        for widget in (
+            getattr(self, "taskbar_corner_style", None),
+            getattr(self, "taskbar_left_handle_color", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(tasker_available)
 
     def _set_message_detection(self, enabled: bool):
         self._save("v2_enable_message_detection", bool(enabled))
@@ -1709,7 +1938,12 @@ class SettingsWindow(QDialog):
             self.island_widget.set_manual_finder_available(enabled, notify=False)
         else:
             self.island_widget.manual_finder_available = enabled
+            if enabled and str(getattr(self.island_widget, "location_mode", "free")) == "tasker":
+                self.island_widget.location_mode = "free"
         self._save("v2_manual_mydockfinder", enabled)
+        self._refresh_location_mode_options()
+        self._save("v2_location_mode", str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free"))))
+        self._update_taskbar_controls()
         self._touch()
 
     def _set_expanded(self, enabled: bool):
@@ -1732,6 +1966,35 @@ class SettingsWindow(QDialog):
             self.island_widget.high_quality_font_rendering = bool(enabled)
             self.island_widget.update()
         self._save("v2_high_quality_font_rendering", bool(enabled))
+
+    def _set_settings_font_family(self, _index: int = -1):
+        family = str(self.settings_font_combo.currentData() or self.FONT_CHOICES[0]).strip() or self.FONT_CHOICES[0]
+        self._save("v2_settings_font_family", family)
+        self._apply_settings_font()
+
+    def _import_settings_font(self):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "导入字体",
+            "",
+            "Font Files (*.ttf *.otf *.ttc *.otc);;All Files (*)",
+        )
+        if not path:
+            return
+        font_id = QFontDatabase.addApplicationFont(path)
+        if font_id < 0:
+            return
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if not families:
+            return
+        family = str(families[0])
+        imported = self._imported_settings_fonts()
+        if family not in imported and family not in self.FONT_CHOICES:
+            imported.append(family)
+            self._save("v2_imported_settings_fonts", imported)
+        self._refresh_settings_font_combo()
+        self._set_combo_data(self.settings_font_combo, family)
+        self._set_settings_font_family()
 
     def _set_theme_mode(self, _index: int = -1):
         mode = str(self.theme_mode.currentData() or "system")
@@ -2047,7 +2310,9 @@ class SettingsWindow(QDialog):
     def _open_time_alarm_editor(self):
         widget = self.island_widget
         widget.persistent_plugin = True
-        widget.enabled_plugin_count = max(1, int(getattr(widget, "enabled_plugin_count", 1) or 1))
+        enabled = set(self._enabled_plugins_setting())
+        enabled.add("time")
+        self._apply_enabled_plugins([plugin_id for plugin_id in ("time", "weather", "agenda") if plugin_id in enabled])
         widget.plugin_panel_open = True
         widget.plugin_time_mode = "alarm_editor"
         if hasattr(widget, "_set_plugin_focus"):
@@ -2057,7 +2322,7 @@ class SettingsWindow(QDialog):
         else:
             widget.expanded = True
         self._save("v2_persistent_plugin", True)
-        self._save("v2_plugin_count", widget.enabled_plugin_count)
+        self._save("v2_enabled_plugins", self._enabled_plugins_setting())
         self._save("v2_expanded", True)
         if hasattr(self, "plugin_alarm_summary"):
             self.plugin_alarm_summary.setText(self._alarm_rows_summary())
@@ -2090,10 +2355,16 @@ class SettingsWindow(QDialog):
         self._save("v2_schedule_reminder_minutes", value)
         self._touch()
 
-    def _set_plugin_count(self, count: int):
-        self.island_widget.enabled_plugin_count = count
-        self._save("v2_plugin_count", count)
-        self.island_widget._set_plugin_focus(min(self.island_widget.plugin_focus_target, max(0, count - 1)), immediate=True)
+    def _set_enabled_plugins_from_checks(self, _checked: bool = False):
+        enabled = []
+        if getattr(self, "plugin_time_enabled", None) is not None and self.plugin_time_enabled.isChecked():
+            enabled.append("time")
+        if getattr(self, "plugin_weather_enabled", None) is not None and self.plugin_weather_enabled.isChecked():
+            enabled.append("weather")
+        if getattr(self, "plugin_agenda_enabled", None) is not None and self.plugin_agenda_enabled.isChecked():
+            enabled.append("agenda")
+        self._apply_enabled_plugins(enabled)
+        self._save("v2_enabled_plugins", enabled)
         self._touch()
 
     def _set_side_island_style(self, _index: int = -1):
@@ -2324,6 +2595,15 @@ class SettingsWindow(QDialog):
         self._save("v2_enable_dual_line_lyrics", enabled)
         self._update_lyric_flow_controls()
         self._touch()
+
+    def _set_dual_line_font_size(self, value: int):
+        size = max(8, min(20, int(value)))
+        if hasattr(self.island_widget, "set_dual_line_font_size"):
+            self.island_widget.set_dual_line_font_size(size, notify=False)
+        else:
+            self.island_widget.dual_line_font_size = size
+            self.island_widget.update()
+        self._save("v2_dual_line_font_size", size)
 
     def _set_dual_line_secondary_weight(self, value: int):
         weight = max(40, min(100, int(value)))
