@@ -36,6 +36,10 @@ The lyric island should have three levels of fidelity:
 
 The UI should avoid a literal progress bar. Song progress should be expressed through active-line motion, gentle text emphasis, background breathing, and soft highlight movement.
 
+The default text-flow style is `波光逐流`. A new optional style, `格律宋散`, displays the current lyric above the next lyric with a strict 10 px size difference, Source Han Serif SC typography, bottom-to-top line replacement, and expanding word/character spacing. Its dedicated `逐字染色` effect uses a pure black music-island background and fills lyric chunks with a high-saturation album color or the user's fallback color. Detailed direction lives in `docs/lyric-flow/PRD.md`.
+
+When lyrics are unavailable or disabled, the no-lyrics state may either show configured text or use the new album island mode. Album island mode centers the current album cover and expands neighboring covers/history horizontally, with 3, 5, or 7 covers selected by the user.
+
 ## Visual Requirements
 
 - Background color should cover the whole island, not sit as a hard bottom strip.
@@ -66,6 +70,7 @@ The UI should avoid a literal progress bar. Song progress should be expressed th
 - Confirming an alarm due reminder must suppress the same provider alarm payload until a different alarm arrives or TIME leaves alarm status.
 - Finder-style mode must not replace the island's own visual shell. Finder material may frame or sample behind the island, but the music island itself must remain opaque and use the normal island rendering path.
 - In Finder-style mode, plugin side reminders keep their own semantic backgrounds while the Finder fused outer material frame expands horizontally to include active side reminders, preventing side islands from floating outside the shared background.
+- Taskbar fusion is separate from Finder fusion. `Finder融合` enabled means the user is using MyFinder and taskbar fusion must not activate; `Finder融合` disabled means the normal Windows taskbar is present and taskbar placement may be recognized. Detailed taskbar direction lives in `docs/taskbar-island/PRD.md`.
 
 ## Boundary And Drag Requirements
 

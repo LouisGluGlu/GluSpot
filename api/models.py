@@ -28,6 +28,15 @@ class TimedLyricLine:
 
 
 @dataclass(frozen=True)
+class AlbumQueueEntry:
+    title: str
+    artist: str = ""
+    album_title: str = ""
+    album_art_bytes: bytes = b""
+    track_id: str = ""
+
+
+@dataclass(frozen=True)
 class TrackData:
     title: str
     artist: str
@@ -47,6 +56,7 @@ class TrackData:
     position_confidence: float = 1.0
     source_app_foreground: bool = False
     position_interactive: bool = False
+    album_queue: tuple[AlbumQueueEntry, ...] = ()
 
 
 @dataclass(frozen=True)

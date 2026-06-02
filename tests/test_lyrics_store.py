@@ -92,6 +92,50 @@ class LyricsStoreTests(unittest.TestCase):
         self.assertEqual(match.timed_lyrics[0].text, "薛：我记得那草坪 一览无遗\n刘：我等你的草坪 高楼耸起")
         self.assertEqual(match.lyrics[0], "薛：我记得那草坪 一览无遗\n刘：我等你的草坪 高楼耸起")
 
+    def test_netease_english_original_does_not_merge_translation_as_primary(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+
+            lyric_text = store._extract_netease_lyric_text(
+                {
+                    "lrc": {"lyric": "[00:01.00]I keep dancing\n[00:02.00]Under city lights"},
+                    "tlyric": {"lyric": "[00:01.00]我继续跳舞\n[00:02.00]在城市灯光下"},
+                },
+                prefer_original=True,
+            )
+            match = store._lyrics_match_from_text(lyric_text, "netease")
+
+        self.assertIsInstance(lyric_text, str)
+        self.assertIsNotNone(match)
+        self.assertEqual([line.text for line in match.timed_lyrics], ["I keep dancing", "Under city lights"])
+
+    def test_netease_english_translation_only_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+
+            lyric_text = store._extract_netease_lyric_text(
+                {"tlyric": {"lyric": "[00:01.00]我继续跳舞"}},
+                prefer_original=True,
+            )
+
+        self.assertEqual(lyric_text, "")
+
+    def test_lyrics_match_rejects_timestamp_only_content(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+
+            match = store._lyrics_match_from_text("[00:01.00]03:39", "netease")
+
+        self.assertIsNone(match)
+
+    def test_lyrics_match_rejects_single_clock_like_plain_line(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+
+            match = store._lyrics_match_from_text("00:00", "lrclib")
+
+        self.assertIsNone(match)
+
     def test_online_resolver_order_prefers_recorded_hits(self):
         with tempfile.TemporaryDirectory() as root:
             store = LocalLyricsStore(Path(root))

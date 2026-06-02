@@ -55,6 +55,42 @@ class NeteasePositionReaderTests(unittest.TestCase):
         self.assertEqual(track.album_title, "Two")
         self.assertAlmostEqual(track.duration_seconds, 201.0)
 
+    def test_queue_track_reads_album_art_url(self):
+        reader = NeteasePositionReader()
+        track = reader._queue_track_from_item(
+            {
+                "name": "Next",
+                "duration": 201000,
+                "artists": [{"name": "B"}],
+                "album": {"name": "Two", "picUrl": "https://example.test/cover.jpg"},
+            }
+        )
+
+        self.assertIsNotNone(track)
+        self.assertEqual(track.album_art_url, "https://example.test/cover.jpg")
+
+    def test_upcoming_tracks_from_queue_returns_multiple_future_tracks(self):
+        with tempfile.TemporaryDirectory() as root:
+            queue = Path(root) / "playingList"
+            queue.write_text(
+                """
+                {
+                  "list": [
+                    {"name": "Current", "duration": 180000, "artists": [{"name": "A"}], "album": {"name": "One"}},
+                    {"name": "Next", "duration": 201000, "artists": [{"name": "B"}], "album": {"name": "Two", "picUrl": "https://example.test/next.jpg"}},
+                    {"name": "Third", "duration": 202000, "artists": [{"name": "C"}], "album": {"name": "Three", "picUrl": "https://example.test/third.jpg"}}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            reader = NeteasePositionReader(queue_paths=(queue,))
+
+            tracks = reader.upcoming_tracks("Current", "A", 2)
+
+        self.assertEqual([track.title for track in tracks], ["Next", "Third"])
+        self.assertEqual([track.album_art_url for track in tracks], ["https://example.test/next.jpg", "https://example.test/third.jpg"])
+
     def test_current_track_reads_visible_window_title(self):
         reader = NeteasePositionReader()
 
@@ -863,6 +899,83 @@ class NeteasePositionReaderTests(unittest.TestCase):
         self.assertIsNotNone(sample)
         self.assertEqual(sample.lyric_index, 3)
         self.assertEqual(sample.lyric_text, "fourth")
+
+    def test_visible_lyrics_click_uses_geometry_before_slow_row_scan(self):
+        reader = NeteasePositionReader()
+        lines = (
+            TimedLyricLine(10.0, "first"),
+            TimedLyricLine(20.0, "second"),
+            TimedLyricLine(30.0, "third"),
+            TimedLyricLine(40.0, "fourth"),
+        )
+        reader._last_sample = NeteasePositionSample(21.0, 120.0, "netease-uia-progress", 0.74, sampled_at=100.0)
+        reader._visible_lyric_rows = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slow row scan should be skipped"))
+
+        class FakeWindow:
+            def rectangle(self):
+                return SimpleNamespace(left=0, top=0, right=1000, bottom=800)
+
+        reader._netease_windows = lambda _desktop, _title, require_title=False: [FakeWindow()]
+        fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": object())
+        previous = sys.modules.get("pywinauto")
+        sys.modules["pywinauto"] = fake_pywinauto
+        try:
+            sample = reader._position_from_visible_lyrics("Song", "Artist", lines, 120.0, click_pos=(500, 500))
+        finally:
+            if previous is None:
+                sys.modules.pop("pywinauto", None)
+            else:
+                sys.modules["pywinauto"] = previous
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.source, "netease-uia-lyrics")
+        self.assertEqual(sample.confidence, 0.62)
+        self.assertEqual(sample.lyric_index, 2)
+
+    def test_visible_lyrics_click_falls_back_to_row_scan_when_geometry_misses(self):
+        reader = NeteasePositionReader()
+        calls = []
+        lines = (
+            TimedLyricLine(10.0, "first"),
+            TimedLyricLine(20.0, "target"),
+            TimedLyricLine(30.0, "third"),
+        )
+        rows = (
+            {
+                "left": 180.0,
+                "right": 520.0,
+                "top": 154.0,
+                "bottom": 186.0,
+                "container_left": 100.0,
+                "container_right": 900.0,
+                "container_top": 80.0,
+                "container_bottom": 420.0,
+                "texts": ("target",),
+                "max_text_height": 18.0,
+            },
+        )
+        reader._last_sample = None
+        reader._netease_windows = lambda *_args, **_kwargs: []
+
+        def visible_rows(_desktop, _title, require_title=True):
+            calls.append(require_title)
+            return list(rows)
+
+        reader._visible_lyric_rows = visible_rows
+        fake_pywinauto = types.SimpleNamespace(Desktop=lambda backend="uia": object())
+        previous = sys.modules.get("pywinauto")
+        sys.modules["pywinauto"] = fake_pywinauto
+        try:
+            sample = reader._position_from_visible_lyrics("Song", "Artist", lines, 120.0, click_pos=(260, 168))
+        finally:
+            if previous is None:
+                sys.modules.pop("pywinauto", None)
+            else:
+                sys.modules["pywinauto"] = previous
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(calls, [False])
+        self.assertEqual(sample.lyric_index, 1)
 
     def test_read_immediate_refreshes_sample_synchronously(self):
         reader = NeteasePositionReader()

@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
 from api.providers import WindowsMediaProvider
 from local.island_stack_visual import IslandStackVisual
-from local.settings_store import SettingsManager
+from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES, SettingsManager
 from local.settings_window import SettingsWindow
 from local.ui_theme import set_theme_settings_getter
 
@@ -107,6 +107,7 @@ class LocalIslandApp:
 
         self.settings = SettingsManager()
         set_theme_settings_getter(self.settings.get)
+        IslandStackVisual.load_source_han_serif_fonts()
         self.data_provider = WindowsMediaProvider(settings_getter=self.settings.get)
         app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", "PingFang SC")))
         self.app.setFont(QFont(app_font_family, 9))
@@ -118,6 +119,23 @@ class LocalIslandApp:
         self.window.settings_changed_callback = self._save_visual_state
         self.tray = None
         self._setup_tray()
+
+    def _music_ambience_values_for_style(self, style: str) -> dict[str, float | int]:
+        if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
+            style = "sea_level"
+        values_by_style = self.settings.get("v2_music_ambience_values", {}) or {}
+        defaults = DEFAULT_MUSIC_AMBIENCE_VALUES.get(style, DEFAULT_MUSIC_AMBIENCE_VALUES["sea_level"])
+        if not isinstance(values_by_style, dict):
+            values_by_style = {}
+        raw_values = values_by_style.get(style, {})
+        if not isinstance(raw_values, dict):
+            raw_values = {}
+        return {
+            "ambient_intensity": raw_values.get("ambient_intensity", self.settings.get("v2_ambient_intensity", defaults["ambient_intensity"])),
+            "music_flow_intensity": raw_values.get("music_flow_intensity", self.settings.get("v2_music_flow_intensity", defaults["music_flow_intensity"])),
+            "compact_duotone_balance": raw_values.get("compact_duotone_balance", self.settings.get("v2_compact_duotone_balance", defaults["compact_duotone_balance"])),
+            "expanded_duotone_balance": raw_values.get("expanded_duotone_balance", self.settings.get("v2_expanded_duotone_balance", defaults["expanded_duotone_balance"])),
+        }
 
     def _apply_saved_settings(self):
         self.window.set_saved_placement(
@@ -143,12 +161,14 @@ class LocalIslandApp:
         self.window.plugin_island_style = str(self.settings.get("v2_plugin_island_style", "standard") or "standard")
         self.window.music_island_style = str(self.settings.get("v2_music_island_style", "standard") or "standard")
         self.window.time_alarm_side_display = str(self.settings.get("v2_time_alarm_side_display", "note") or "note")
-        self.window.ambient_intensity = max(0.0, min(1.0, float(self.settings.get("v2_ambient_intensity", 0.0))))
-        self.window.set_music_ambience_style(str(self.settings.get("v2_music_ambience_style", "sea_level")), notify=False)
-        self.window.set_music_flow_intensity(float(self.settings.get("v2_music_flow_intensity", 0.74)), notify=False)
+        ambience_style = str(self.settings.get("v2_music_ambience_style", "sea_level") or "sea_level")
+        ambience_values = self._music_ambience_values_for_style(ambience_style)
+        self.window.ambient_intensity = max(0.0, min(1.0, float(ambience_values["ambient_intensity"])))
+        self.window.set_music_ambience_style(ambience_style, notify=False)
+        self.window.set_music_flow_intensity(float(ambience_values["music_flow_intensity"]), notify=False)
         self.window.set_duotone_balance(
-            compact=int(self.settings.get("v2_compact_duotone_balance", 50)),
-            expanded=int(self.settings.get("v2_expanded_duotone_balance", 50)),
+            compact=int(ambience_values["compact_duotone_balance"]),
+            expanded=int(ambience_values["expanded_duotone_balance"]),
             notify=False,
         )
         self.window.set_ui_font(str(self.settings.get("v2_font_family", "PingFang SC")), notify=False)
@@ -185,6 +205,35 @@ class LocalIslandApp:
         self.window.set_enable_dual_line_lyrics(bool(self.settings.get("v2_enable_dual_line_lyrics", False)), notify=False)
         self.window.set_dual_line_secondary_weight(int(self.settings.get("v2_dual_line_secondary_weight", 72)), notify=False)
         self.window.set_dual_line_secondary_spacing(int(self.settings.get("v2_dual_line_secondary_spacing", 100)), notify=False)
+        self.window.set_compact_lyric_show_cover(bool(self.settings.get("v2_compact_lyric_show_cover", True)), notify=False)
+        self.window.set_wave_color_fill_enabled(bool(self.settings.get("v2_wave_color_fill_enabled", False)), notify=False)
+        self.window.set_wave_color_fill_fallback(str(self.settings.get("v2_wave_color_fill_fallback", "#00D7FF")), notify=False)
+        self.window.set_lyric_flow_style(str(self.settings.get("v2_lyric_flow_style", "wave_stream")), notify=False)
+        self.window.set_gelv_font_family(str(self.settings.get("v2_gelv_font_family", "Source Han Serif SC")), notify=False)
+        self.window.set_gelv_primary_font_size(int(self.settings.get("v2_gelv_primary_font_size", 22)), notify=False)
+        self.window.set_gelv_secondary_font_size(int(self.settings.get("v2_gelv_secondary_font_size", 12)), notify=False)
+        self.window.set_gelv_dual_line_font_size(int(self.settings.get("v2_gelv_dual_line_font_size", 17)), notify=False)
+        self.window.set_gelv_initial_word_spacing(int(self.settings.get("v2_gelv_initial_word_spacing", 220)), notify=False)
+        self.window.set_gelv_word_spacing(int(self.settings.get("v2_gelv_word_spacing", 320)), notify=False)
+        self.window.set_gelv_size_shift_enabled(bool(self.settings.get("v2_gelv_size_shift_enabled", True)), notify=False)
+        self.window.set_gelv_color_fill_enabled(bool(self.settings.get("v2_gelv_color_fill_enabled", False)), notify=False)
+        self.window.set_gelv_color_fill_fallback(str(self.settings.get("v2_gelv_color_fill_fallback", "#00D7FF")), notify=False)
+        final_ambience_style = str(getattr(self.window, "music_ambience_style", ambience_style) or "sea_level")
+        if final_ambience_style != ambience_style:
+            final_ambience_values = self._music_ambience_values_for_style(final_ambience_style)
+            self.window.ambient_intensity = max(0.0, min(1.0, float(final_ambience_values["ambient_intensity"])))
+            self.window.set_music_flow_intensity(float(final_ambience_values["music_flow_intensity"]), notify=False)
+            self.window.set_duotone_balance(
+                compact=int(final_ambience_values["compact_duotone_balance"]),
+                expanded=int(final_ambience_values["expanded_duotone_balance"]),
+                notify=False,
+            )
+        self.window.set_no_lyrics_display_mode(str(self.settings.get("v2_no_lyrics_display_mode", "text")), notify=False)
+        self.window.set_album_island_cover_count(int(self.settings.get("v2_album_island_cover_count", 5)), notify=False)
+        self.window.set_album_island_cover_size(int(self.settings.get("v2_album_island_cover_size", 30)), notify=False)
+        self.window.set_album_island_spacing(int(self.settings.get("v2_album_island_spacing", 112)), notify=False)
+        self.window.set_album_island_secondary_style(str(self.settings.get("v2_album_island_secondary_style", "perspective_dim")), notify=False)
+        self.window.set_album_island_perspective_amount(int(self.settings.get("v2_album_island_perspective_amount", 100)), notify=False)
         self.window.set_no_lyrics_text(str(self.settings.get("v2_no_lyrics_text", "暂无歌词")), notify=False)
         self.window._set_plugin_focus(min(self.window.plugin_focus_target, max(0, self.window.enabled_plugin_count - 1)), immediate=True)
 

@@ -318,12 +318,16 @@ class LocalLyricsStore:
             timed_groups = [timed for timed, _plain in parsed if timed]
             if timed_groups:
                 timed = self._merge_timed_lyric_sources(timed_groups)
+                if not self._lyrics_have_vocal_content(tuple(line.text for line in timed)):
+                    return None
                 return LyricsMatch(timed, tuple(line.text for line in timed), source)
             plain_lines: list[str] = []
             for _timed, plain in parsed:
                 plain_lines.extend(plain)
             if plain_lines:
                 plain = tuple(plain_lines)
+                if not self._lyrics_have_vocal_content(plain):
+                    return None
                 synth = self._synthesize_timed_lyrics(plain)
                 return LyricsMatch(synth, plain, source)
             return None
@@ -331,11 +335,34 @@ class LocalLyricsStore:
             return None
         timed, plain = self._parse_lrc_text(text)
         if timed:
+            if not self._lyrics_have_vocal_content(tuple(line.text for line in timed)):
+                return None
             return LyricsMatch(timed, tuple(line.text for line in timed), source)
         if plain:
+            if not self._lyrics_have_vocal_content(plain):
+                return None
             synth = self._synthesize_timed_lyrics(plain)
             return LyricsMatch(synth, plain, source)
         return None
+
+    def _lyrics_have_vocal_content(self, lines: tuple[str, ...]) -> bool:
+        for raw in lines:
+            text = unicodedata.normalize("NFKC", str(raw or "")).strip()
+            if not text:
+                continue
+            if self._looks_like_clock_or_number_only(text):
+                continue
+            if any(char.isalpha() for char in text):
+                return True
+        return False
+
+    def _looks_like_clock_or_number_only(self, text: str) -> bool:
+        cleaned = re.sub(r"\s+", "", str(text or ""))
+        if not cleaned:
+            return True
+        if re.fullmatch(r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.:]\d{1,3})?", cleaned):
+            return True
+        return bool(re.fullmatch(r"[\d.,:：/\\\-+_~·•|()[\]{}<>]+", cleaned))
 
     def _merge_timed_lyric_sources(self, sources: list[tuple[TimedLyricLine, ...]]) -> tuple[TimedLyricLine, ...]:
         merged: list[TimedLyricLine] = []
@@ -453,7 +480,10 @@ class LocalLyricsStore:
             params={"id": str(song_id), "lv": "1", "kv": "1", "tv": "-1"},
             headers=self._netease_headers(),
         )
-        lyric_text = self._extract_netease_lyric_text(lyric_payload)
+        lyric_text = self._extract_netease_lyric_text(
+            lyric_payload,
+            prefer_original=self._prefers_original_lyrics(title, artist),
+        )
         return self._lyrics_match_from_text(lyric_text, "netease")
 
     def _resolve_qq(self, title: str, artist: str, album_title: str, duration_seconds: float) -> LyricsMatch | None:
@@ -644,7 +674,13 @@ class LocalLyricsStore:
                 names.append(name)
         return " / ".join(names)
 
-    def _extract_netease_lyric_text(self, payload: Any) -> str | tuple[str, ...]:
+    def _prefers_original_lyrics(self, title: str, artist: str) -> bool:
+        text = f"{title} {artist}"
+        latin_count = len(re.findall(r"[A-Za-z]", text))
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
+        return latin_count >= 3 and cjk_count == 0
+
+    def _extract_netease_lyric_text(self, payload: Any, prefer_original: bool = False) -> str | tuple[str, ...]:
         if not isinstance(payload, dict):
             return ""
         timed_sources: list[str] = []
@@ -655,6 +691,19 @@ class LocalLyricsStore:
                 if isinstance(lyric, str) and lyric.strip():
                     timed_sources.append(lyric)
                     break
+        if prefer_original:
+            if timed_sources:
+                return timed_sources[0]
+            for key in ("yrc", "klyric"):
+                value = payload.get(key)
+                if isinstance(value, dict):
+                    lyric = value.get("lyric") or value.get("text")
+                    if isinstance(lyric, str) and lyric.strip():
+                        return lyric
+            lyric = payload.get("lyric")
+            if isinstance(lyric, str) and lyric.strip():
+                return lyric
+            return ""
         for key in ("tlyric", "ytlrc"):
             value = payload.get(key)
             if isinstance(value, dict):

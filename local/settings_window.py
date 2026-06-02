@@ -37,6 +37,7 @@ from local.mac_style import (
     mac_traffic_lights,
 )
 from local.no_wheel_widgets import NoWheelComboBox, NoWheelSpinBox
+from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES
 from local.ui_theme import is_theme_change_event, style_combo_popup
 
 
@@ -72,15 +73,7 @@ class ColorButton(QPushButton):
 class SettingsWindow(QDialog):
     FONT_CHOICES = (
         "PingFang SC",
-        "HarmonyOS Sans SC",
-        "MiSans",
-        "Noto Sans CJK SC",
-        "Noto Sans SC",
-        "Source Han Sans SC",
-        "Microsoft YaHei UI",
-        "Microsoft YaHei",
-        "Segoe UI",
-        "Arial",
+        "Source Han Serif SC",
     )
 
     EMPTY_BAR_PALETTES = (
@@ -95,6 +88,8 @@ class SettingsWindow(QDialog):
     MUSIC_AMBIENCE_STYLES = (
         ("海平面", "sea_level"),
         ("整岛双色", "duotone_full"),
+        ("纯黑", "pure_black"),
+        ("双侧衍射", "bilateral_diffraction"),
     )
 
     MUSIC_ISLAND_STYLES = (
@@ -119,6 +114,7 @@ class SettingsWindow(QDialog):
 
     MUSIC_PLAYER_MODES = (
         ("网易云音乐", "netease"),
+        ("网易云音乐（BetterNCM）", "netease_betterncm"),
         ("QQ音乐", "qq"),
         ("汽水音乐（待适配）", "qishui"),
         ("酷狗音乐（待适配）", "kugou"),
@@ -152,6 +148,33 @@ class SettingsWindow(QDialog):
         ("左侧轻推", "left"),
     )
 
+    LYRIC_FLOW_STYLES = (
+        ("波光逐流", "wave_stream"),
+        ("格律宋散", "gelv_songscatter"),
+        ("专辑岛", "album_island"),
+    )
+
+    GELV_FONT_CHOICES = (
+        ("思源宋体", "Source Han Serif SC"),
+        ("PingFang", "PingFang SC"),
+    )
+
+    NO_LYRICS_DISPLAY_MODES = (
+        ("显示特定文字", "text"),
+        ("专辑岛模式", "album_island"),
+    )
+
+    ALBUM_ISLAND_COVER_COUNTS = (
+        ("3 张", 3),
+        ("5 张", 5),
+        ("7 张", 7),
+    )
+
+    ALBUM_ISLAND_SECONDARY_STYLES = (
+        ("平排", "shrink_dim"),
+        ("透视", "perspective_dim"),
+    )
+
     def __init__(self, island_widget: QWidget, settings_manager=None, parent=None):
         super().__init__(parent)
         self.island_widget = island_widget
@@ -160,6 +183,7 @@ class SettingsWindow(QDialog):
         self._barrage_page_index = 4
         self._diagnostics_page_index = 5
         self._diagnostic_labels: dict[str, QLabel] = {}
+        self._detail_panels: list[tuple[QPushButton, QFrame]] = []
         self._applying_theme = False
         self._window_drag_global = None
         self._window_drag_pos = None
@@ -355,6 +379,61 @@ class SettingsWindow(QDialog):
         row_layout.addWidget(label, 0)
         row_layout.addWidget(control, 1)
         layout.addWidget(row)
+        return row
+
+    def _control_group(self, layout: QVBoxLayout) -> QFrame:
+        group = QFrame()
+        group_layout = QVBoxLayout(group)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_layout.setSpacing(0)
+        layout.addWidget(group)
+        return group
+
+    def _detail_panel(self, layout: QVBoxLayout, title: str) -> tuple[QFrame, QVBoxLayout, QPushButton]:
+        panel = QFrame()
+        panel.setObjectName("DetailPanel")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 4, 0, 0)
+        panel_layout.setSpacing(0)
+
+        toggle = QPushButton()
+        toggle.setObjectName("DetailToggle")
+        toggle.setCheckable(True)
+        toggle.setProperty("detail_title", title)
+        toggle.setText(f"{title} 详细设置")
+        panel_layout.addWidget(toggle)
+
+        body = QFrame()
+        body.setObjectName("DetailBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 2, 0, 0)
+        body_layout.setSpacing(0)
+        body.setVisible(False)
+        panel_layout.addWidget(body)
+
+        def update_open_state(opened: bool):
+            body.setVisible(opened)
+            base_title = str(toggle.property("detail_title") or title)
+            toggle.setText(f"{base_title} 详细设置" + (" · 收起" if opened else ""))
+
+        toggle.toggled.connect(update_open_state)
+        layout.addWidget(panel)
+        self._detail_panels.append((toggle, body))
+        return panel, body_layout, toggle
+
+    def _set_detail_panel_title(self, toggle: QPushButton, title: str):
+        toggle.setProperty("detail_title", title)
+        opened = bool(toggle.isChecked())
+        toggle.setText(f"{title} 详细设置" + (" · 收起" if opened else ""))
+
+    def _collapse_detail_panels(self):
+        for toggle, body in getattr(self, "_detail_panels", []):
+            toggle.blockSignals(True)
+            toggle.setChecked(False)
+            toggle.blockSignals(False)
+            body.setVisible(False)
+            base_title = str(toggle.property("detail_title") or "详细")
+            toggle.setText(f"{base_title} 详细设置")
 
     def _preview_frame(self, height: int = 42) -> QFrame:
         frame = QFrame()
@@ -399,6 +478,8 @@ class SettingsWindow(QDialog):
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(minimum, maximum)
         slider.setValue(value)
+        slider._value_label = value_label
+        slider._value_suffix = suffix
         slider.valueChanged.connect(lambda v: value_label.setText(f"{v}{suffix}"))
         slider.valueChanged.connect(callback)
         grid.addWidget(title_label, 0, 0)
@@ -418,6 +499,14 @@ class SettingsWindow(QDialog):
         combo.currentIndexChanged.connect(callback)
         self._style_combo_popup(combo)
         return combo
+
+    def _set_slider_value(self, slider: QSlider, value: int):
+        slider.blockSignals(True)
+        slider.setValue(value)
+        slider.blockSignals(False)
+        value_label = getattr(slider, "_value_label", None)
+        if value_label is not None:
+            value_label.setText(f"{value}{getattr(slider, '_value_suffix', '')}")
 
     def _style_combo_popup(self, combo: QComboBox):
         style_combo_popup(combo, self._theme())
@@ -489,6 +578,10 @@ class SettingsWindow(QDialog):
             self._set_music_player_mode,
         )
         self._row(c, "进度识别服务", self.music_player_mode)
+        self.ncm_path_input = QLineEdit(str(self._setting_value("v2_netease_betterncm_path", "") or ""))
+        self.ncm_path_input.setPlaceholderText(r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe")
+        self.ncm_path_input.editingFinished.connect(self._set_netease_betterncm_path)
+        self._row(c, "NCM 路径", self.ncm_path_input)
         player_hint = QLabel("关闭插件时只使用系统媒体信息；开启后才会按所选服务调用专项进度插件。网易云与QQ已可用，其它服务先保留入口。")
         player_hint.setWordWrap(True)
         player_hint.setStyleSheet(self._hint_style(2, 12))
@@ -504,24 +597,148 @@ class SettingsWindow(QDialog):
         self.no_lyrics_input.textChanged.connect(self._set_no_lyrics_text)
         self._row(c, "无歌词时显示", self.no_lyrics_input)
 
+        self.lyric_flow_style = self._combo(
+            list(self.LYRIC_FLOW_STYLES),
+            str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream"))),
+            self._set_lyric_flow_style,
+        )
+        self._row(c, "文字流转", self.lyric_flow_style)
         self.lyric_offset = self._slider_row(c, "歌词偏移", -12000, 12000, int(round(float(getattr(self.island_widget, "lyric_offset_seconds", 0.0)) * 1000)), self._set_lyric_offset, " ms")
-        self.lyric_font_size = self._slider_row(c, "歌词字号", 14, 24, max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18)))), self._set_lyric_font_size, " px")
-        self.lyric_elastic_strength = self._slider_row(c, "悦动强度", 0, 160, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100)))), self._set_lyric_elastic_strength, "%")
-        self.lyric_word_spacing = self._slider_row(c, "字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100)))), self._set_lyric_word_spacing, "%")
+
+        self._gelv_controls, gelv_layout, self._gelv_detail_toggle = self._detail_panel(c, "格律宋散")
+        self.gelv_font_family = self._combo(
+            list(self.GELV_FONT_CHOICES),
+            str(getattr(self.island_widget, "gelv_font_family", self._setting_value("v2_gelv_font_family", "Source Han Serif SC"))),
+            self._set_gelv_font_family,
+        )
+        self._row(gelv_layout, "格律字体", self.gelv_font_family)
+        self.gelv_primary_font_size = self._slider_row(gelv_layout, "格律主行字号", 14, 30, max(14, min(30, int(getattr(self.island_widget, "gelv_primary_font_size", self._setting_value("v2_gelv_primary_font_size", 22))))), self._set_gelv_primary_font_size, " px")
+        self.gelv_secondary_font_size = self._slider_row(gelv_layout, "格律次行字号", 8, 24, max(8, min(24, int(getattr(self.island_widget, "gelv_secondary_font_size", self._setting_value("v2_gelv_secondary_font_size", 12))))), self._set_gelv_secondary_font_size, " px")
+        self.gelv_initial_word_spacing = self._slider_row(gelv_layout, "格律初始间距", 100, 320, max(100, min(320, int(getattr(self.island_widget, "gelv_initial_word_spacing", self._setting_value("v2_gelv_initial_word_spacing", 220))))), self._set_gelv_initial_word_spacing, "%")
+        self.gelv_word_spacing = self._slider_row(gelv_layout, "格律散开间距", 100, 420, max(100, min(420, int(getattr(self.island_widget, "gelv_word_spacing", self._setting_value("v2_gelv_word_spacing", 320))))), self._set_gelv_word_spacing, "%")
+        self.gelv_size_shift_checkbox = self._check(
+            "格律字号变化",
+            bool(getattr(self.island_widget, "gelv_size_shift_enabled", True)),
+            self._set_gelv_size_shift_enabled,
+        )
+        gelv_layout.addWidget(self.gelv_size_shift_checkbox)
+        self.gelv_compact_cover_checkbox = self._check(
+            "收缩态显示专辑封面",
+            bool(getattr(self.island_widget, "compact_lyric_show_cover", self._setting_value("v2_compact_lyric_show_cover", True))),
+            self._set_compact_lyric_show_cover,
+        )
+        gelv_layout.addWidget(self.gelv_compact_cover_checkbox)
+        self.gelv_dual_line_checkbox = self._check(
+            "格律双语显示",
+            bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)),
+            self._set_dual_line_lyrics,
+        )
+        gelv_layout.addWidget(self.gelv_dual_line_checkbox)
+        self.gelv_dual_line_font_size = self._slider_row(
+            gelv_layout,
+            "同行歌词字号",
+            8,
+            30,
+            max(8, min(30, int(getattr(self.island_widget, "gelv_dual_line_font_size", self._setting_value("v2_gelv_dual_line_font_size", 17))))),
+            self._set_gelv_dual_line_font_size,
+            " px",
+        )
+        self.gelv_color_fill_checkbox = self._check(
+            "逐字染色",
+            bool(getattr(self.island_widget, "gelv_color_fill_enabled", False)),
+            self._set_gelv_color_fill_enabled,
+        )
+        gelv_layout.addWidget(self.gelv_color_fill_checkbox)
+        self.gelv_color_fill_fallback = ColorButton(
+            str(getattr(self.island_widget, "gelv_color_fill_fallback", "#00D7FF")),
+            self._set_gelv_color_fill_fallback,
+        )
+        self._row(gelv_layout, "染色默认色", self.gelv_color_fill_fallback)
+
+        self._wave_stream_controls, wave_layout, self._wave_stream_detail_toggle = self._detail_panel(c, "波光逐流")
+        self.lyric_font_size = self._slider_row(wave_layout, "波光字号", 14, 24, max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18)))), self._set_lyric_font_size, " px")
+        self.lyric_elastic_strength = self._slider_row(wave_layout, "悦动强度", 0, 160, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100)))), self._set_lyric_elastic_strength, "%")
+        self.lyric_word_spacing = self._slider_row(wave_layout, "字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100)))), self._set_lyric_word_spacing, "%")
+        self.wave_color_fill_checkbox = self._check(
+            "波光逐字染色",
+            bool(getattr(self.island_widget, "wave_color_fill_enabled", False)),
+            self._set_wave_color_fill_enabled,
+        )
+        wave_layout.addWidget(self.wave_color_fill_checkbox)
+        self.wave_color_fill_fallback = ColorButton(
+            str(getattr(self.island_widget, "wave_color_fill_fallback", "#00D7FF")),
+            self._set_wave_color_fill_fallback,
+        )
+        self._row(wave_layout, "波光染色默认色", self.wave_color_fill_fallback)
         self.dual_line_lyrics_checkbox = self._check(
             "允许双行歌词",
             bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)),
             self._set_dual_line_lyrics,
         )
-        c.addWidget(self.dual_line_lyrics_checkbox)
-        self.dual_line_secondary_weight = self._slider_row(c, "次行字重", 40, 100, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72)))), self._set_dual_line_secondary_weight, "%")
-        self.dual_line_secondary_spacing = self._slider_row(c, "次行字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "dual_line_secondary_spacing", 100)))), self._set_dual_line_secondary_spacing, "%")
+        wave_layout.addWidget(self.dual_line_lyrics_checkbox)
+        self.dual_line_secondary_weight = self._slider_row(wave_layout, "次行字重", 40, 100, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72)))), self._set_dual_line_secondary_weight, "%")
+        self.dual_line_secondary_spacing = self._slider_row(wave_layout, "次行字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "dual_line_secondary_spacing", 100)))), self._set_dual_line_secondary_spacing, "%")
         self.lyric_elastic_mode = self._combo(list(self.LYRIC_ELASTIC_MODES), str(getattr(self.island_widget, "lyric_elastic_mode", "both")), self._set_lyric_elastic_mode)
-        self._row(c, "悦动方式", self.lyric_elastic_mode)
+        self._row(wave_layout, "悦动方式", self.lyric_elastic_mode)
+        self.wave_compact_cover_checkbox = self._check(
+            "收缩态显示专辑封面",
+            bool(getattr(self.island_widget, "compact_lyric_show_cover", self._setting_value("v2_compact_lyric_show_cover", True))),
+            self._set_compact_lyric_show_cover,
+        )
+        wave_layout.addWidget(self.wave_compact_cover_checkbox)
+
+        self.no_lyrics_display_mode = self._combo(
+            list(self.NO_LYRICS_DISPLAY_MODES),
+            str(getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))),
+            self._set_no_lyrics_display_mode,
+        )
+        self.no_lyrics_display_mode_row = self._row(c, "无歌词模式", self.no_lyrics_display_mode)
+        self._album_island_controls, album_layout, self._album_island_detail_toggle = self._detail_panel(c, "专辑岛")
+        self.album_island_cover_count = self._combo(
+            list(self.ALBUM_ISLAND_COVER_COUNTS),
+            int(getattr(self.island_widget, "album_island_cover_count", self._setting_value("v2_album_island_cover_count", 5))),
+            self._set_album_island_cover_count,
+        )
+        self._row(album_layout, "专辑数量", self.album_island_cover_count)
+        self.album_island_secondary_style = self._combo(
+            list(self.ALBUM_ISLAND_SECONDARY_STYLES),
+            str(getattr(self.island_widget, "album_island_secondary_style", self._setting_value("v2_album_island_secondary_style", "perspective_dim"))),
+            self._set_album_island_secondary_style,
+        )
+        self._row(album_layout, "次专辑效果", self.album_island_secondary_style)
+        self.album_island_perspective_amount = self._slider_row(
+            album_layout,
+            "透视程度",
+            0,
+            200,
+            max(0, min(200, int(getattr(self.island_widget, "album_island_perspective_amount", self._setting_value("v2_album_island_perspective_amount", 100))))),
+            self._set_album_island_perspective_amount,
+            "%",
+        )
+        self.album_island_cover_size = self._slider_row(
+            album_layout,
+            "专辑封面大小",
+            18,
+            44,
+            max(18, min(44, int(getattr(self.island_widget, "album_island_cover_size", self._setting_value("v2_album_island_cover_size", 30))))),
+            self._set_album_island_cover_size,
+            " px",
+        )
+        self.album_island_spacing = self._slider_row(
+            album_layout,
+            "专辑间距",
+            48,
+            170,
+            max(48, min(170, int(getattr(self.island_widget, "album_island_spacing", self._setting_value("v2_album_island_spacing", 112))))),
+            self._set_album_island_spacing,
+            "%",
+        )
+
         hint = QLabel("会根据当前播放器优先选择歌词源，并缓存到项目 lyrics 目录；也可手动放入 .lrc 文件。")
         hint.setWordWrap(True)
         hint.setStyleSheet(self._hint_style(2, 8))
         c.addWidget(hint)
+        self._update_lyric_flow_controls()
         c.addStretch(1)
         layout.addStretch(1)
         return page
@@ -560,10 +777,11 @@ class SettingsWindow(QDialog):
         self._row(c, "音乐岛样式", self.music_island_style)
         self.music_preview = self._preview_frame(54)
         c.addWidget(self.music_preview)
-        self.wave_slider = self._slider_row(c, "氛围光增强", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
-        self.music_flow_slider = self._slider_row(c, "流光浮动", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
-        self.compact_duotone_balance = self._slider_row(c, "收缩双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50)))), self._set_compact_duotone_balance, "%")
-        self.expanded_duotone_balance = self._slider_row(c, "展开双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "expanded_duotone_balance", 50)))), self._set_expanded_duotone_balance, "%")
+        self._music_ambience_controls, music_ambience_layout, self._music_ambience_detail_toggle = self._detail_panel(c, "音乐岛光效")
+        self.wave_slider = self._slider_row(music_ambience_layout, "氛围光增强", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
+        self.music_flow_slider = self._slider_row(music_ambience_layout, "流光浮动", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
+        self.compact_duotone_balance = self._slider_row(music_ambience_layout, "收缩双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50)))), self._set_compact_duotone_balance, "%")
+        self.expanded_duotone_balance = self._slider_row(music_ambience_layout, "展开双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "expanded_duotone_balance", 50)))), self._set_expanded_duotone_balance, "%")
         self.fps_slider = self._slider_row(c, "动画帧率", 24, 90, max(24, min(90, int(getattr(self.island_widget, "animation_fps", 60)))), self._set_animation_fps, " FPS")
         self.animation_speed = self._combo(list(self.ANIMATION_SPEEDS), float(getattr(self.island_widget, "animation_speed", 1.0)), self._set_animation_speed)
         self._row(c, "动画倍速", self.animation_speed)
@@ -573,14 +791,7 @@ class SettingsWindow(QDialog):
         if self.animation_speed.parentWidget():
             self.animation_speed.parentWidget().hide()
 
-        font_combo = QComboBox()
-        font_combo.setEditable(True)
-        font_combo.addItems(self.FONT_CHOICES)
-        self._style_combo_popup(font_combo)
-        self.font_combo = font_combo
-        self._set_combo_text(font_combo, str(getattr(self.island_widget, "ui_font_family", self.FONT_CHOICES[0])))
-        font_combo.currentTextChanged.connect(self._set_font_family)
-        self._row(c, "全局字体", font_combo)
+        self.font_combo = None
 
         self.empty_palette = self._combo([(label, key) for key, label in self.EMPTY_BAR_PALETTES], str(getattr(self.island_widget, "empty_bar_palette", "aurora")), self._set_empty_bar_palette)
         self._row(c, "空态流光", self.empty_palette)
@@ -591,6 +802,7 @@ class SettingsWindow(QDialog):
         self.empty_bar_y_offset = self._slider_row(c, "横条位置", -80, 160, int(getattr(self.island_widget, "empty_bar_y_offset", 0)), self._set_empty_bar_y_offset, " px")
         self.empty_bar_opacity = self._slider_row(c, "横条不透明度", 10, 100, int(getattr(self.island_widget, "empty_bar_opacity", 100)), self._set_empty_bar_opacity, "%")
         self.custom_color_inputs = self._color_buttons_row(c, "自定义颜色", getattr(self.island_widget, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86")))
+        self._update_music_ambience_controls()
         self._update_previews()
         layout.addStretch(1)
         return page
@@ -851,6 +1063,8 @@ class SettingsWindow(QDialog):
             (self.auto_bounds_checkbox, bool(getattr(self.island_widget, "auto_expand_bounds", True))),
             (self.barrage_backdrop, bool(getattr(self.island_widget, "barrage_use_backdrop", True))),
             (self.barrage_icon, bool(getattr(self.island_widget, "barrage_show_icon", True))),
+            (self.wave_compact_cover_checkbox, bool(getattr(self.island_widget, "compact_lyric_show_cover", self._setting_value("v2_compact_lyric_show_cover", True)))),
+            (self.gelv_compact_cover_checkbox, bool(getattr(self.island_widget, "compact_lyric_show_cover", self._setting_value("v2_compact_lyric_show_cover", True)))),
         )
         for widget, value in pairs:
             widget.blockSignals(True)
@@ -873,6 +1087,14 @@ class SettingsWindow(QDialog):
             (self.barrage_speed, int(getattr(self.island_widget, "barrage_speed", 100))),
             (self.lyric_offset, int(round(float(getattr(self.island_widget, "lyric_offset_seconds", 0.0)) * 1000))),
             (self.lyric_font_size, max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18))))),
+            (self.gelv_primary_font_size, max(14, min(30, int(getattr(self.island_widget, "gelv_primary_font_size", self._setting_value("v2_gelv_primary_font_size", 22)))))),
+            (self.gelv_secondary_font_size, max(8, min(24, int(getattr(self.island_widget, "gelv_secondary_font_size", self._setting_value("v2_gelv_secondary_font_size", 12)))))),
+            (self.gelv_dual_line_font_size, max(8, min(30, int(getattr(self.island_widget, "gelv_dual_line_font_size", self._setting_value("v2_gelv_dual_line_font_size", 17)))))),
+            (self.gelv_initial_word_spacing, max(100, min(320, int(getattr(self.island_widget, "gelv_initial_word_spacing", self._setting_value("v2_gelv_initial_word_spacing", 220)))))),
+            (self.gelv_word_spacing, max(100, min(420, int(getattr(self.island_widget, "gelv_word_spacing", self._setting_value("v2_gelv_word_spacing", 320)))))),
+            (self.album_island_cover_size, max(18, min(44, int(getattr(self.island_widget, "album_island_cover_size", self._setting_value("v2_album_island_cover_size", 30)))))),
+            (self.album_island_spacing, max(48, min(170, int(getattr(self.island_widget, "album_island_spacing", self._setting_value("v2_album_island_spacing", 112)))))),
+            (self.album_island_perspective_amount, max(0, min(200, int(getattr(self.island_widget, "album_island_perspective_amount", self._setting_value("v2_album_island_perspective_amount", 100)))))),
             (self.lyric_elastic_strength, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100))))),
             (self.lyric_word_spacing, max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100))))),
             (self.dual_line_secondary_weight, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72))))),
@@ -883,9 +1105,10 @@ class SettingsWindow(QDialog):
             slider.setValue(value)
             slider.blockSignals(False)
 
-        self.font_combo.blockSignals(True)
-        self._set_combo_text(self.font_combo, str(getattr(self.island_widget, "ui_font_family", self.FONT_CHOICES[0])))
-        self.font_combo.blockSignals(False)
+        if self.font_combo is not None:
+            self.font_combo.blockSignals(True)
+            self._set_combo_text(self.font_combo, str(getattr(self.island_widget, "ui_font_family", self.FONT_CHOICES[0])))
+            self.font_combo.blockSignals(False)
         self._set_combo_data(self.empty_palette, str(getattr(self.island_widget, "empty_bar_palette", "aurora")))
         self._set_combo_data(self.expand_direction, str(getattr(self.island_widget, "expand_direction", "auto")))
         self._set_combo_data(self.animation_speed, float(getattr(self.island_widget, "animation_speed", 1.0)))
@@ -895,6 +1118,41 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.plugin_island_style, str(getattr(self.island_widget, "plugin_island_style", self._setting_value("v2_plugin_island_style", "standard")) or "standard"))
         self._set_combo_data(self.time_alarm_side_display, str(getattr(self.island_widget, "time_alarm_side_display", self._setting_value("v2_time_alarm_side_display", "note")) or "note"))
         self._set_combo_data(self.music_player_mode, self._music_player_mode_setting())
+        self.ncm_path_input.blockSignals(True)
+        self.ncm_path_input.setText(str(self._setting_value("v2_netease_betterncm_path", "") or ""))
+        self.ncm_path_input.blockSignals(False)
+        self._set_combo_data(self.lyric_flow_style, str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream"))))
+        self.gelv_color_fill_checkbox.blockSignals(True)
+        self.gelv_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "gelv_color_fill_enabled", False)))
+        self.gelv_color_fill_checkbox.blockSignals(False)
+        self.wave_color_fill_checkbox.blockSignals(True)
+        self.wave_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "wave_color_fill_enabled", False)))
+        self.wave_color_fill_checkbox.blockSignals(False)
+        compact_cover = bool(getattr(self.island_widget, "compact_lyric_show_cover", self._setting_value("v2_compact_lyric_show_cover", True)))
+        for checkbox in (getattr(self, "wave_compact_cover_checkbox", None), getattr(self, "gelv_compact_cover_checkbox", None)):
+            if checkbox is None:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(compact_cover)
+            checkbox.blockSignals(False)
+        self._set_combo_data(self.gelv_font_family, str(getattr(self.island_widget, "gelv_font_family", self._setting_value("v2_gelv_font_family", "Source Han Serif SC"))))
+        self.gelv_color_fill_fallback.set_color(str(getattr(self.island_widget, "gelv_color_fill_fallback", self._setting_value("v2_gelv_color_fill_fallback", "#00D7FF"))))
+        self.wave_color_fill_fallback.set_color(str(getattr(self.island_widget, "wave_color_fill_fallback", self._setting_value("v2_wave_color_fill_fallback", "#00D7FF"))))
+        self._set_combo_data(self.no_lyrics_display_mode, str(getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))))
+        self._set_combo_data(self.album_island_cover_count, int(getattr(self.island_widget, "album_island_cover_count", self._setting_value("v2_album_island_cover_count", 5))))
+        self._set_combo_data(self.album_island_secondary_style, str(getattr(self.island_widget, "album_island_secondary_style", self._setting_value("v2_album_island_secondary_style", "perspective_dim"))))
+        if hasattr(self, "album_island_cover_size"):
+            self.album_island_cover_size.blockSignals(True)
+            self.album_island_cover_size.setValue(max(18, min(44, int(getattr(self.island_widget, "album_island_cover_size", self._setting_value("v2_album_island_cover_size", 30))))))
+            self.album_island_cover_size.blockSignals(False)
+        if hasattr(self, "album_island_spacing"):
+            self.album_island_spacing.blockSignals(True)
+            self.album_island_spacing.setValue(max(48, min(170, int(getattr(self.island_widget, "album_island_spacing", self._setting_value("v2_album_island_spacing", 112))))))
+            self.album_island_spacing.blockSignals(False)
+        if hasattr(self, "album_island_perspective_amount"):
+            self.album_island_perspective_amount.blockSignals(True)
+            self.album_island_perspective_amount.setValue(max(0, min(200, int(getattr(self.island_widget, "album_island_perspective_amount", self._setting_value("v2_album_island_perspective_amount", 100))))))
+            self.album_island_perspective_amount.blockSignals(False)
         self._set_combo_data(self.lyric_elastic_mode, str(getattr(self.island_widget, "lyric_elastic_mode", "both")))
         self._set_combo_data(self.plugin_timezone, str(self._setting_value("v2_plugin_timezone", "local") or "local"))
         self.plugin_timezone_text.blockSignals(True)
@@ -940,12 +1198,49 @@ class SettingsWindow(QDialog):
         self.lyric_font_size.blockSignals(True)
         self.lyric_font_size.setValue(max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18)))))
         self.lyric_font_size.blockSignals(False)
+        if hasattr(self, "gelv_primary_font_size"):
+            self.gelv_primary_font_size.blockSignals(True)
+            self.gelv_primary_font_size.setValue(max(14, min(30, int(getattr(self.island_widget, "gelv_primary_font_size", self._setting_value("v2_gelv_primary_font_size", 22))))))
+            self.gelv_primary_font_size.blockSignals(False)
+        if hasattr(self, "gelv_secondary_font_size"):
+            self.gelv_secondary_font_size.blockSignals(True)
+            self.gelv_secondary_font_size.setValue(max(8, min(24, int(getattr(self.island_widget, "gelv_secondary_font_size", self._setting_value("v2_gelv_secondary_font_size", 12))))))
+            self.gelv_secondary_font_size.blockSignals(False)
+        if hasattr(self, "gelv_dual_line_font_size"):
+            self.gelv_dual_line_font_size.blockSignals(True)
+            self.gelv_dual_line_font_size.setValue(max(8, min(30, int(getattr(self.island_widget, "gelv_dual_line_font_size", self._setting_value("v2_gelv_dual_line_font_size", 17))))))
+            self.gelv_dual_line_font_size.blockSignals(False)
+        if hasattr(self, "gelv_initial_word_spacing"):
+            self.gelv_initial_word_spacing.blockSignals(True)
+            self.gelv_initial_word_spacing.setValue(max(100, min(320, int(getattr(self.island_widget, "gelv_initial_word_spacing", self._setting_value("v2_gelv_initial_word_spacing", 220))))))
+            self.gelv_initial_word_spacing.blockSignals(False)
+        if hasattr(self, "gelv_word_spacing"):
+            self.gelv_word_spacing.blockSignals(True)
+            self.gelv_word_spacing.setValue(max(100, min(420, int(getattr(self.island_widget, "gelv_word_spacing", self._setting_value("v2_gelv_word_spacing", 320))))))
+            self.gelv_word_spacing.blockSignals(False)
         self.lyric_elastic_strength.blockSignals(True)
         self.lyric_elastic_strength.setValue(max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100)))))
         self.lyric_elastic_strength.blockSignals(False)
         self.lyric_word_spacing.blockSignals(True)
         self.lyric_word_spacing.setValue(max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100)))))
         self.lyric_word_spacing.blockSignals(False)
+        if hasattr(self, "wave_color_fill_checkbox"):
+            self.wave_color_fill_checkbox.blockSignals(True)
+            self.wave_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "wave_color_fill_enabled", False)))
+            self.wave_color_fill_checkbox.blockSignals(False)
+        if hasattr(self, "wave_color_fill_fallback"):
+            self.wave_color_fill_fallback.set_color(str(getattr(self.island_widget, "wave_color_fill_fallback", self._setting_value("v2_wave_color_fill_fallback", "#00D7FF"))))
+        self.dual_line_lyrics_checkbox.blockSignals(True)
+        self.dual_line_lyrics_checkbox.setChecked(bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)))
+        self.dual_line_lyrics_checkbox.blockSignals(False)
+        if hasattr(self, "gelv_dual_line_checkbox"):
+            self.gelv_dual_line_checkbox.blockSignals(True)
+            self.gelv_dual_line_checkbox.setChecked(bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)))
+            self.gelv_dual_line_checkbox.blockSignals(False)
+        if hasattr(self, "gelv_size_shift_checkbox"):
+            self.gelv_size_shift_checkbox.blockSignals(True)
+            self.gelv_size_shift_checkbox.setChecked(bool(getattr(self.island_widget, "gelv_size_shift_enabled", True)))
+            self.gelv_size_shift_checkbox.blockSignals(False)
         self.dual_line_secondary_weight.blockSignals(True)
         self.dual_line_secondary_weight.setValue(max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72)))))
         self.dual_line_secondary_weight.blockSignals(False)
@@ -957,6 +1252,8 @@ class SettingsWindow(QDialog):
         self.no_lyrics_input.blockSignals(False)
         self._update_player_progress_controls()
         self._update_message_controls()
+        self._update_lyric_flow_controls()
+        self._update_music_ambience_controls()
         self._update_previews()
         self._refresh_diagnostics()
 
@@ -967,6 +1264,9 @@ class SettingsWindow(QDialog):
             self.player_progress_auto_detect_checkbox.setEnabled(enabled)
         if hasattr(self, "music_player_mode"):
             self.music_player_mode.setEnabled(enabled and not auto_detect)
+        if hasattr(self, "ncm_path_input"):
+            mode = self._music_player_mode_setting()
+            self.ncm_path_input.setEnabled(enabled and not auto_detect and mode == "netease_betterncm")
 
     def _update_message_controls(self):
         enabled = bool(getattr(self, "message_detection_checkbox", None) and self.message_detection_checkbox.isChecked())
@@ -974,6 +1274,178 @@ class SettingsWindow(QDialog):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.setEnabled(enabled)
+
+    def _update_lyric_flow_controls(self):
+        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")))
+        gelv = style == "gelv_songscatter"
+        album_flow = style == "album_island"
+        wave = not gelv and not album_flow
+        if hasattr(self, "_wave_stream_controls"):
+            self._wave_stream_controls.setVisible(wave)
+        if hasattr(self, "_gelv_controls"):
+            self._gelv_controls.setVisible(gelv)
+        if hasattr(self, "_album_island_controls"):
+            album_mode = album_flow or str(
+                getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))
+            ) == "album_island"
+            self._album_island_controls.setVisible(album_mode)
+        if hasattr(self, "lyric_offset") and self.lyric_offset.parentWidget() is not None:
+            self.lyric_offset.parentWidget().setVisible(not album_flow)
+        if hasattr(self, "no_lyrics_display_mode_row"):
+            self.no_lyrics_display_mode_row.setVisible(not album_flow)
+        for widget in (
+            getattr(self, "gelv_font_family", None),
+            getattr(self, "gelv_primary_font_size", None),
+            getattr(self, "gelv_secondary_font_size", None),
+            getattr(self, "gelv_dual_line_font_size", None),
+            getattr(self, "gelv_initial_word_spacing", None),
+            getattr(self, "gelv_word_spacing", None),
+            getattr(self, "gelv_size_shift_checkbox", None),
+            getattr(self, "gelv_compact_cover_checkbox", None),
+            getattr(self, "gelv_dual_line_checkbox", None),
+            getattr(self, "gelv_color_fill_checkbox", None),
+            getattr(self, "gelv_color_fill_fallback", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(gelv)
+        if hasattr(self, "gelv_dual_line_font_size"):
+            dual_enabled = bool(getattr(self.island_widget, "enable_dual_line_lyrics", False))
+            self.gelv_dual_line_font_size.setEnabled(gelv and dual_enabled)
+        for widget in (
+            getattr(self, "wave_color_fill_checkbox", None),
+            getattr(self, "wave_color_fill_fallback", None),
+            getattr(self, "wave_compact_cover_checkbox", None),
+        ):
+            if widget is not None:
+                widget.setEnabled(wave)
+        if hasattr(self, "dual_line_lyrics_checkbox"):
+            self.dual_line_lyrics_checkbox.setEnabled(wave)
+        album_mode = str(
+            getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))
+        ) == "album_island" or album_flow
+        if hasattr(self, "album_island_cover_count"):
+            self.album_island_cover_count.setEnabled(album_mode)
+        if hasattr(self, "album_island_secondary_style"):
+            self.album_island_secondary_style.setEnabled(album_mode)
+        if hasattr(self, "album_island_cover_size"):
+            self.album_island_cover_size.setEnabled(album_mode)
+        if hasattr(self, "album_island_spacing"):
+            self.album_island_spacing.setEnabled(album_mode)
+        if hasattr(self, "album_island_perspective_amount"):
+            perspective_enabled = album_mode and str(getattr(self.album_island_secondary_style, "currentData", lambda: "perspective_dim")() or "perspective_dim") == "perspective_dim"
+            self.album_island_perspective_amount.setEnabled(perspective_enabled)
+
+    def _active_color_fill_enabled_for_settings(self) -> bool:
+        checker = getattr(self.island_widget, "_active_lyric_color_fill_enabled", None)
+        if callable(checker):
+            return bool(checker())
+        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")))
+        if style == "gelv_songscatter":
+            return bool(getattr(self.island_widget, "gelv_color_fill_enabled", False))
+        return bool(getattr(self.island_widget, "wave_color_fill_enabled", False))
+
+    def _music_ambience_values(self) -> dict[str, dict[str, float | int]]:
+        values = {style: dict(defaults) for style, defaults in DEFAULT_MUSIC_AMBIENCE_VALUES.items()}
+        raw = self._setting_value("v2_music_ambience_values", {}) or {}
+        if isinstance(raw, dict):
+            for style, style_values in raw.items():
+                if style not in values or not isinstance(style_values, dict):
+                    continue
+                values[style].update(
+                    {
+                        "ambient_intensity": style_values.get("ambient_intensity", values[style]["ambient_intensity"]),
+                        "music_flow_intensity": style_values.get("music_flow_intensity", values[style]["music_flow_intensity"]),
+                        "compact_duotone_balance": style_values.get("compact_duotone_balance", values[style]["compact_duotone_balance"]),
+                        "expanded_duotone_balance": style_values.get("expanded_duotone_balance", values[style]["expanded_duotone_balance"]),
+                    }
+                )
+        return values
+
+    def _current_music_ambience_style(self) -> str:
+        style = str(getattr(self.island_widget, "music_ambience_style", self._setting_value("v2_music_ambience_style", "sea_level")) or "sea_level")
+        return style if style in DEFAULT_MUSIC_AMBIENCE_VALUES else "sea_level"
+
+    def _current_music_ambience_control_values(self) -> dict[str, float | int]:
+        return {
+            "ambient_intensity": max(0.0, min(1.0, int(self.wave_slider.value()) / 100.0)),
+            "music_flow_intensity": max(0.0, min(1.0, int(self.music_flow_slider.value()) / 100.0)),
+            "compact_duotone_balance": max(0, min(100, int(self.compact_duotone_balance.value()))),
+            "expanded_duotone_balance": max(0, min(100, int(self.expanded_duotone_balance.value()))),
+        }
+
+    def _save_music_ambience_values_for_style(self, style: str | None = None):
+        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance")):
+            return
+        style = style or self._current_music_ambience_style()
+        if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
+            return
+        values = self._music_ambience_values()
+        current_values = self._current_music_ambience_control_values()
+        values[style] = current_values
+        self._save("v2_music_ambience_values", values)
+        if style == self._current_music_ambience_style():
+            self._save_legacy_music_ambience_values(current_values)
+
+    def _save_legacy_music_ambience_values(self, values: dict[str, float | int]):
+        self._save("v2_ambient_intensity", float(values["ambient_intensity"]))
+        self._save("v2_music_flow_intensity", float(values["music_flow_intensity"]))
+        self._save("v2_compact_duotone_balance", int(values["compact_duotone_balance"]))
+        self._save("v2_expanded_duotone_balance", int(values["expanded_duotone_balance"]))
+
+    def _apply_music_ambience_values_for_style(self, style: str):
+        values = self._music_ambience_values().get(style, DEFAULT_MUSIC_AMBIENCE_VALUES["sea_level"])
+        ambient = max(0.0, min(1.0, float(values.get("ambient_intensity", 0.0))))
+        flow = max(0.0, min(1.0, float(values.get("music_flow_intensity", 0.74))))
+        compact = max(0, min(100, int(values.get("compact_duotone_balance", 50))))
+        expanded = max(0, min(100, int(values.get("expanded_duotone_balance", 50))))
+        self.island_widget.ambient_intensity = ambient
+        if hasattr(self.island_widget, "set_music_flow_intensity"):
+            self.island_widget.set_music_flow_intensity(flow, notify=False)
+        else:
+            self.island_widget.music_flow_intensity = flow
+        if hasattr(self.island_widget, "set_duotone_balance"):
+            self.island_widget.set_duotone_balance(compact=compact, expanded=expanded, notify=False)
+        else:
+            self.island_widget.compact_duotone_balance = compact
+            self.island_widget.expanded_duotone_balance = expanded
+        if hasattr(self, "wave_slider"):
+            self._set_slider_value(self.wave_slider, int(round(ambient * 100)))
+            self._set_slider_value(self.music_flow_slider, int(round(flow * 100)))
+            self._set_slider_value(self.compact_duotone_balance, compact)
+            self._set_slider_value(self.expanded_duotone_balance, expanded)
+        self._save_legacy_music_ambience_values(
+            {
+                "ambient_intensity": ambient,
+                "music_flow_intensity": flow,
+                "compact_duotone_balance": compact,
+                "expanded_duotone_balance": expanded,
+            }
+        )
+        if hasattr(self.island_widget, "update"):
+            self.island_widget.update()
+
+    def _update_music_ambience_controls(self):
+        if not hasattr(self, "music_ambience_style"):
+            return
+        active_fill = self._active_color_fill_enabled_for_settings()
+        allowed = {"pure_black", "bilateral_diffraction"} if active_fill else set(DEFAULT_MUSIC_AMBIENCE_VALUES)
+        current_style = self._current_music_ambience_style()
+        if current_style not in allowed:
+            current_style = "pure_black"
+            if hasattr(self.island_widget, "set_music_ambience_style"):
+                self.island_widget.set_music_ambience_style(current_style, notify=False)
+            else:
+                self.island_widget.music_ambience_style = current_style
+            self._save("v2_music_ambience_style", current_style)
+            self._apply_music_ambience_values_for_style(current_style)
+        for index in range(self.music_ambience_style.count()):
+            style = str(self.music_ambience_style.itemData(index) or "")
+            item = self.music_ambience_style.model().item(index)
+            if item is not None:
+                item.setEnabled(style in allowed)
+        self._set_combo_data(self.music_ambience_style, current_style)
+        if hasattr(self, "_music_ambience_detail_toggle"):
+            self._set_detail_panel_title(self._music_ambience_detail_toggle, f"{self.music_ambience_style.currentText()}光效")
 
     def _set_combo_text(self, combo: QComboBox, text: str):
         index = combo.findText(text)
@@ -1047,6 +1519,7 @@ class SettingsWindow(QDialog):
         super().hideEvent(event)
 
     def _settings_page_changed(self, row: int):
+        self._collapse_detail_panels()
         if row != self._barrage_page_index and hasattr(self.island_widget, "set_settings_window_active"):
             self.island_widget.set_settings_window_active(False)
         if row == self._diagnostics_page_index:
@@ -1131,7 +1604,7 @@ class SettingsWindow(QDialog):
         mode = str(self._setting_value("v2_music_player_mode", "netease") or "netease").strip().lower()
         if mode in {"", "auto", "system"}:
             return "netease"
-        return mode if mode in {"netease", "qishui", "qq", "kugou"} else "netease"
+        return mode if mode in {"netease", "netease_betterncm", "qishui", "qq", "kugou"} else "netease"
 
     def _format_netease_position(self, diagnostics: dict[str, object]) -> str:
         source = diagnostics.get("last_source") or "-"
@@ -1306,6 +1779,221 @@ class SettingsWindow(QDialog):
             self.island_widget.update()
         self._save("v2_no_lyrics_text", text)
 
+    def _set_lyric_flow_style(self, _index: int = -1):
+        style = str(self.lyric_flow_style.currentData() or "wave_stream")
+        if hasattr(self.island_widget, "set_lyric_flow_style"):
+            self.island_widget.set_lyric_flow_style(style, notify=False)
+        else:
+            self.island_widget.lyric_flow_style = style
+            self.island_widget.update()
+        self._save("v2_lyric_flow_style", style)
+        actual_style = str(getattr(self.island_widget, "music_ambience_style", self._setting_value("v2_music_ambience_style", "sea_level")) or "sea_level")
+        self._save("v2_music_ambience_style", actual_style)
+        if hasattr(self, "music_ambience_style"):
+            self._apply_music_ambience_values_for_style(actual_style)
+            self._update_music_ambience_controls()
+        self._update_lyric_flow_controls()
+        self._collapse_detail_panels()
+        self._touch()
+
+    def _set_gelv_color_fill_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        if hasattr(self.island_widget, "set_gelv_color_fill_enabled"):
+            self.island_widget.set_gelv_color_fill_enabled(enabled, notify=False)
+        else:
+            self.island_widget.gelv_color_fill_enabled = enabled
+            self.island_widget.update()
+        self._save("v2_gelv_color_fill_enabled", enabled)
+        if hasattr(self, "music_ambience_style"):
+            actual_style = self._current_music_ambience_style()
+            self._save("v2_music_ambience_style", actual_style)
+            self._apply_music_ambience_values_for_style(actual_style)
+            self._update_music_ambience_controls()
+        self._touch()
+
+    def _set_wave_color_fill_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        if hasattr(self.island_widget, "set_wave_color_fill_enabled"):
+            self.island_widget.set_wave_color_fill_enabled(enabled, notify=False)
+        else:
+            self.island_widget.wave_color_fill_enabled = enabled
+            self.island_widget.update()
+        self._save("v2_wave_color_fill_enabled", enabled)
+        if hasattr(self, "music_ambience_style"):
+            actual_style = self._current_music_ambience_style()
+            self._save("v2_music_ambience_style", actual_style)
+            self._apply_music_ambience_values_for_style(actual_style)
+            self._update_music_ambience_controls()
+        self._touch()
+
+    def _set_gelv_font_family(self, _index: int = -1):
+        family = str(self.gelv_font_family.currentData() or "Source Han Serif SC")
+        if hasattr(self.island_widget, "set_gelv_font_family"):
+            self.island_widget.set_gelv_font_family(family, notify=False)
+        else:
+            self.island_widget.gelv_font_family = family
+            self.island_widget.update()
+        self._save("v2_gelv_font_family", family)
+        self._touch()
+
+    def _set_gelv_primary_font_size(self, value: int):
+        size = max(14, min(30, int(value)))
+        if hasattr(self.island_widget, "set_gelv_primary_font_size"):
+            self.island_widget.set_gelv_primary_font_size(size, notify=False)
+        else:
+            self.island_widget.gelv_primary_font_size = size
+            self.island_widget.update()
+        self._save("v2_gelv_primary_font_size", size)
+        self._touch()
+
+    def _set_gelv_secondary_font_size(self, value: int):
+        size = max(8, min(24, int(value)))
+        if hasattr(self.island_widget, "set_gelv_secondary_font_size"):
+            self.island_widget.set_gelv_secondary_font_size(size, notify=False)
+        else:
+            self.island_widget.gelv_secondary_font_size = size
+            self.island_widget.update()
+        self._save("v2_gelv_secondary_font_size", size)
+        self._touch()
+
+    def _set_gelv_dual_line_font_size(self, value: int):
+        size = max(8, min(30, int(value)))
+        if hasattr(self.island_widget, "set_gelv_dual_line_font_size"):
+            self.island_widget.set_gelv_dual_line_font_size(size, notify=False)
+        else:
+            self.island_widget.gelv_dual_line_font_size = size
+            self.island_widget.update()
+        self._save("v2_gelv_dual_line_font_size", size)
+        self._touch()
+
+    def _set_gelv_initial_word_spacing(self, value: int):
+        spacing = max(100, min(320, int(value)))
+        if hasattr(self.island_widget, "set_gelv_initial_word_spacing"):
+            self.island_widget.set_gelv_initial_word_spacing(spacing, notify=False)
+        else:
+            self.island_widget.gelv_initial_word_spacing = spacing
+            self.island_widget.update()
+        self._save("v2_gelv_initial_word_spacing", spacing)
+        self._touch()
+
+    def _set_gelv_word_spacing(self, value: int):
+        spacing = max(100, min(420, int(value)))
+        if hasattr(self.island_widget, "set_gelv_word_spacing"):
+            self.island_widget.set_gelv_word_spacing(spacing, notify=False)
+        else:
+            self.island_widget.gelv_word_spacing = spacing
+            self.island_widget.update()
+        self._save("v2_gelv_word_spacing", spacing)
+        self._touch()
+
+    def _set_gelv_size_shift_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        if hasattr(self.island_widget, "set_gelv_size_shift_enabled"):
+            self.island_widget.set_gelv_size_shift_enabled(enabled, notify=False)
+        else:
+            self.island_widget.gelv_size_shift_enabled = enabled
+            self.island_widget.update()
+        self._save("v2_gelv_size_shift_enabled", enabled)
+        self._touch()
+
+    def _set_compact_lyric_show_cover(self, enabled: bool):
+        enabled = bool(enabled)
+        if hasattr(self.island_widget, "set_compact_lyric_show_cover"):
+            self.island_widget.set_compact_lyric_show_cover(enabled, notify=False)
+        else:
+            self.island_widget.compact_lyric_show_cover = enabled
+            self.island_widget.update()
+        for checkbox in (getattr(self, "wave_compact_cover_checkbox", None), getattr(self, "gelv_compact_cover_checkbox", None)):
+            if checkbox is None:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(enabled)
+            checkbox.blockSignals(False)
+        self._save("v2_compact_lyric_show_cover", enabled)
+        self._touch()
+
+    def _set_gelv_color_fill_fallback(self):
+        color = self.gelv_color_fill_fallback.color()
+        if hasattr(self.island_widget, "set_gelv_color_fill_fallback"):
+            self.island_widget.set_gelv_color_fill_fallback(color, notify=False)
+        else:
+            self.island_widget.gelv_color_fill_fallback = color
+            self.island_widget.update()
+        self._save("v2_gelv_color_fill_fallback", color)
+        self._touch()
+
+    def _set_wave_color_fill_fallback(self):
+        color = self.wave_color_fill_fallback.color()
+        if hasattr(self.island_widget, "set_wave_color_fill_fallback"):
+            self.island_widget.set_wave_color_fill_fallback(color, notify=False)
+        else:
+            self.island_widget.wave_color_fill_fallback = color
+            self.island_widget.update()
+        self._save("v2_wave_color_fill_fallback", color)
+        self._touch()
+
+    def _set_no_lyrics_display_mode(self, _index: int = -1):
+        mode = str(self.no_lyrics_display_mode.currentData() or "text")
+        if hasattr(self.island_widget, "set_no_lyrics_display_mode"):
+            self.island_widget.set_no_lyrics_display_mode(mode, notify=False)
+        else:
+            self.island_widget.no_lyrics_display_mode = mode
+            self.island_widget.update()
+        self._save("v2_no_lyrics_display_mode", mode)
+        self._update_lyric_flow_controls()
+        self._touch()
+
+    def _set_album_island_cover_count(self, _index: int = -1):
+        count = int(self.album_island_cover_count.currentData() or 5)
+        if hasattr(self.island_widget, "set_album_island_cover_count"):
+            self.island_widget.set_album_island_cover_count(count, notify=False)
+        else:
+            self.island_widget.album_island_cover_count = count
+            self.island_widget.update()
+        self._save("v2_album_island_cover_count", count)
+        self._touch()
+
+    def _set_album_island_cover_size(self, value: int):
+        size = max(18, min(44, int(value)))
+        if hasattr(self.island_widget, "set_album_island_cover_size"):
+            self.island_widget.set_album_island_cover_size(size, notify=False)
+        else:
+            self.island_widget.album_island_cover_size = size
+            self.island_widget.update()
+        self._save("v2_album_island_cover_size", size)
+        self._touch()
+
+    def _set_album_island_secondary_style(self, _index: int = -1):
+        style = str(self.album_island_secondary_style.currentData() or "perspective_dim")
+        if hasattr(self.island_widget, "set_album_island_secondary_style"):
+            self.island_widget.set_album_island_secondary_style(style, notify=False)
+        else:
+            self.island_widget.album_island_secondary_style = style
+            self.island_widget.update()
+        self._save("v2_album_island_secondary_style", style)
+        self._update_lyric_flow_controls()
+        self._touch()
+
+    def _set_album_island_perspective_amount(self, value: int):
+        amount = max(0, min(200, int(value)))
+        if hasattr(self.island_widget, "set_album_island_perspective_amount"):
+            self.island_widget.set_album_island_perspective_amount(amount, notify=False)
+        else:
+            self.island_widget.album_island_perspective_amount = amount
+            self.island_widget.update()
+        self._save("v2_album_island_perspective_amount", amount)
+        self._touch()
+
+    def _set_album_island_spacing(self, value: int):
+        spacing = max(48, min(170, int(value)))
+        if hasattr(self.island_widget, "set_album_island_spacing"):
+            self.island_widget.set_album_island_spacing(spacing, notify=False)
+        else:
+            self.island_widget.album_island_spacing = spacing
+            self.island_widget.update()
+        self._save("v2_album_island_spacing", spacing)
+        self._touch()
+
     def _set_weather_location(self, value: str):
         self._save("v2_weather_location", str(value or "").strip() or "Beijing")
 
@@ -1430,17 +2118,25 @@ class SettingsWindow(QDialog):
         intensity = max(0.0, min(1.0, value / 100.0))
         self.island_widget.ambient_intensity = intensity
         self._save("v2_ambient_intensity", intensity)
+        self._save_music_ambience_values_for_style()
         self.island_widget.update()
         self._update_previews()
 
     def _set_music_ambience_style(self, _index: int = -1):
+        previous_style = self._current_music_ambience_style()
+        self._save_music_ambience_values_for_style(previous_style)
         style = self.music_ambience_style.currentData() or "sea_level"
         if hasattr(self.island_widget, "set_music_ambience_style"):
             self.island_widget.set_music_ambience_style(style, notify=False)
         else:
             self.island_widget.music_ambience_style = style
             self.island_widget.update()
-        self._save("v2_music_ambience_style", style)
+        actual_style = self._current_music_ambience_style()
+        self._save("v2_music_ambience_style", actual_style)
+        self._set_combo_data(self.music_ambience_style, actual_style)
+        self._apply_music_ambience_values_for_style(actual_style)
+        self._update_music_ambience_controls()
+        self._collapse_detail_panels()
         self._update_previews()
 
     def _set_music_island_style(self, _index: int = -1):
@@ -1457,6 +2153,7 @@ class SettingsWindow(QDialog):
             self.island_widget.music_flow_intensity = intensity
             self.island_widget.update()
         self._save("v2_music_flow_intensity", intensity)
+        self._save_music_ambience_values_for_style()
         self._update_previews()
 
     def _set_compact_duotone_balance(self, value: int):
@@ -1467,6 +2164,7 @@ class SettingsWindow(QDialog):
             self.island_widget.compact_duotone_balance = value
             self.island_widget.update()
         self._save("v2_compact_duotone_balance", value)
+        self._save_music_ambience_values_for_style()
         self._update_previews()
 
     def _set_expanded_duotone_balance(self, value: int):
@@ -1477,6 +2175,7 @@ class SettingsWindow(QDialog):
             self.island_widget.expanded_duotone_balance = value
             self.island_widget.update()
         self._save("v2_expanded_duotone_balance", value)
+        self._save_music_ambience_values_for_style()
         self._update_previews()
 
     def _set_player_progress_auto_detect(self, enabled: bool):
@@ -1488,6 +2187,14 @@ class SettingsWindow(QDialog):
     def _set_music_player_mode(self, _index: int = -1):
         mode = str(self.music_player_mode.currentData() or "netease")
         self._save("v2_music_player_mode", mode)
+        self._update_player_progress_controls()
+        self._refresh_diagnostics()
+        self._touch()
+
+    def _set_netease_betterncm_path(self):
+        path = str(self.ncm_path_input.text() or "").strip().strip('"')
+        self.ncm_path_input.setText(path)
+        self._save("v2_netease_betterncm_path", path)
         self._refresh_diagnostics()
         self._touch()
 
@@ -1608,7 +2315,14 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.enable_dual_line_lyrics = enabled
             self.island_widget.update()
+        for checkbox in (getattr(self, "dual_line_lyrics_checkbox", None), getattr(self, "gelv_dual_line_checkbox", None)):
+            if checkbox is None:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(enabled)
+            checkbox.blockSignals(False)
         self._save("v2_enable_dual_line_lyrics", enabled)
+        self._update_lyric_flow_controls()
         self._touch()
 
     def _set_dual_line_secondary_weight(self, value: int):

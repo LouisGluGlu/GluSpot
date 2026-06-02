@@ -30,6 +30,7 @@ class QueueTrack:
     artist: str = ""
     album_title: str = ""
     duration_seconds: float = 0.0
+    album_art_url: str = ""
 
 
 class NeteasePositionReader:
@@ -257,6 +258,26 @@ class NeteasePositionReader:
             return max(0.0, min(duration, duration * max(0.0, min(1.0, fraction))))
         return None
 
+    def position_from_lyric_click_point(
+        self,
+        point: tuple[int, int],
+        timed_lyrics: Sequence[TimedLyricLine],
+        duration_seconds: float,
+    ) -> NeteasePositionSample | None:
+        try:
+            from pywinauto import Desktop
+        except Exception as exc:
+            self._pywinauto_available = False
+            self._last_error = f"pywinauto unavailable: {exc}"
+            return None
+        self._pywinauto_available = True
+        try:
+            windows = self._netease_windows(Desktop(backend="uia"), "", require_title=False)
+        except Exception as exc:
+            self._last_error = f"uia lyric click geometry read failed: {exc}"
+            return None
+        return self._position_from_click_geometry(windows, timed_lyrics, duration_seconds, point)
+
     def adjacent_track(self, title: str, artist: str, direction: str) -> QueueTrack | None:
         step = -1 if str(direction or "").strip().casefold() == "previous" else 1
         for path in self._queue_paths():
@@ -268,6 +289,20 @@ class NeteasePositionReader:
             if track is not None:
                 return track
         return None
+
+    def upcoming_tracks(self, title: str, artist: str, count: int = 2) -> tuple[QueueTrack, ...]:
+        limit = max(0, min(6, int(count)))
+        if limit <= 0:
+            return ()
+        for path in self._queue_paths():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            except Exception:
+                continue
+            tracks = self._find_upcoming_tracks(payload, title, artist, limit)
+            if tracks:
+                return tracks
+        return ()
 
     def reset(self):
         with self._lock:
@@ -819,6 +854,15 @@ class NeteasePositionReader:
             self._last_error = f"pywinauto unavailable: {exc}"
             return None
         self._pywinauto_available = True
+
+        if click_pos is not None:
+            try:
+                windows = self._netease_windows(Desktop(backend="uia"), title, require_title=False)
+            except Exception:
+                windows = []
+            sample = self._position_from_click_geometry(windows, timed_lyrics, duration_seconds, click_pos)
+            if sample is not None:
+                return sample
 
         try:
             rows = self._visible_lyric_rows(Desktop(backend="uia"), title, require_title=click_pos is None)
@@ -1623,6 +1667,32 @@ class NeteasePositionReader:
                 return self._queue_track_from_item(tracks[target_index])
         return None
 
+    def _find_upcoming_tracks(self, payload: object, title: str, artist: str, count: int) -> tuple[QueueTrack, ...]:
+        title_key = self._normalize_text(title)
+        artist_key = self._normalize_text(artist)
+        if not title_key:
+            return ()
+        limit = max(0, int(count))
+        for items in self._walk_lists(payload):
+            tracks = [item for item in items if isinstance(item, dict) and self._normalize_text(str(item.get("name") or item.get("title") or ""))]
+            if len(tracks) < 2:
+                continue
+            for index, item in enumerate(tracks):
+                name = self._normalize_text(str(item.get("name") or item.get("title") or ""))
+                if name != title_key:
+                    continue
+                artists = item.get("artists") or item.get("ar") or item.get("artist") or ()
+                artist_text = self._normalize_text(self._artist_text(artists))
+                if artist_key and artist_key not in artist_text:
+                    continue
+                out: list[QueueTrack] = []
+                for queued in tracks[index + 1 : index + 1 + limit]:
+                    track = self._queue_track_from_item(queued)
+                    if track is not None:
+                        out.append(track)
+                return tuple(out)
+        return ()
+
     def _queue_track_from_item(self, item: dict[str, object]) -> QueueTrack | None:
         title = str(item.get("name") or item.get("title") or "").strip()
         if not title:
@@ -1632,6 +1702,7 @@ class NeteasePositionReader:
         album_title = ""
         if isinstance(album, dict):
             album_title = str(album.get("name") or album.get("title") or "").strip()
+        album_art_url = self._album_art_url_from_item(item, album)
         duration = item.get("duration") or item.get("dt") or item.get("durationMs") or 0
         try:
             duration_seconds = max(0.0, float(duration) / 1000.0)
@@ -1642,7 +1713,41 @@ class NeteasePositionReader:
             artist=self._artist_text(artists).strip(),
             album_title=album_title,
             duration_seconds=duration_seconds,
+            album_art_url=album_art_url,
         )
+
+    def _album_art_url_from_item(self, item: dict[str, object], album: object) -> str:
+        candidates: list[object] = []
+        if isinstance(album, dict):
+            candidates.extend(
+                album.get(key)
+                for key in (
+                    "picUrl",
+                    "picurl",
+                    "coverUrl",
+                    "cover",
+                    "img80x80",
+                    "img1v1Url",
+                    "blurPicUrl",
+                )
+            )
+        candidates.extend(
+            item.get(key)
+            for key in (
+                "picUrl",
+                "picurl",
+                "coverUrl",
+                "cover",
+                "albumPicUrl",
+                "image",
+                "img80x80",
+            )
+        )
+        for value in candidates:
+            text = str(value or "").strip()
+            if text.startswith(("http://", "https://")):
+                return text
+        return ""
 
     def _queue_track_for_metadata(self, title: str, artist: str) -> QueueTrack | None:
         title_key = self._normalize_text(title)

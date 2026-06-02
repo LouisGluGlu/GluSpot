@@ -11,6 +11,33 @@ APP_NAME = "DynamicIsland"
 APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.dirname(__file__)), APP_NAME)
 SETTINGS_FILE = os.path.join(APP_DATA_DIR, "settings.json")
 
+DEFAULT_MUSIC_AMBIENCE_VALUES = {
+    "sea_level": {
+        "ambient_intensity": 0.0,
+        "music_flow_intensity": 0.74,
+        "compact_duotone_balance": 50,
+        "expanded_duotone_balance": 50,
+    },
+    "duotone_full": {
+        "ambient_intensity": 0.0,
+        "music_flow_intensity": 0.74,
+        "compact_duotone_balance": 50,
+        "expanded_duotone_balance": 50,
+    },
+    "pure_black": {
+        "ambient_intensity": 0.0,
+        "music_flow_intensity": 0.74,
+        "compact_duotone_balance": 50,
+        "expanded_duotone_balance": 50,
+    },
+    "bilateral_diffraction": {
+        "ambient_intensity": 0.0,
+        "music_flow_intensity": 0.74,
+        "compact_duotone_balance": 50,
+        "expanded_duotone_balance": 50,
+    },
+}
+
 DEFAULT_SETTINGS = {
     "v2_music_playing": True,
     "v2_music_auto_detect": False,
@@ -30,9 +57,29 @@ DEFAULT_SETTINGS = {
     "v2_music_flow_intensity": 0.74,
     "v2_compact_duotone_balance": 50,
     "v2_expanded_duotone_balance": 50,
+    "v2_music_ambience_values": copy.deepcopy(DEFAULT_MUSIC_AMBIENCE_VALUES),
     "v2_enable_player_progress_plugin": False,
     "v2_player_progress_auto_detect": False,
     "v2_music_player_mode": "netease",
+    "v2_netease_betterncm_path": "",
+    "v2_lyric_flow_style": "wave_stream",
+    "v2_gelv_font_family": "Source Han Serif SC",
+    "v2_gelv_primary_font_size": 22,
+    "v2_gelv_secondary_font_size": 12,
+    "v2_gelv_dual_line_font_size": 17,
+    "v2_gelv_initial_word_spacing": 220,
+    "v2_gelv_word_spacing": 320,
+    "v2_gelv_size_shift_enabled": True,
+    "v2_gelv_color_fill_enabled": False,
+    "v2_gelv_color_fill_fallback": "#00D7FF",
+    "v2_wave_color_fill_enabled": False,
+    "v2_wave_color_fill_fallback": "#00D7FF",
+    "v2_no_lyrics_display_mode": "text",
+    "v2_album_island_cover_count": 5,
+    "v2_album_island_cover_size": 30,
+    "v2_album_island_spacing": 112,
+    "v2_album_island_secondary_style": "perspective_dim",
+    "v2_album_island_perspective_amount": 100,
     "v2_theme_mode": "system",
     "v2_theme_dark_start": "22:00",
     "v2_theme_dark_end": "07:00",
@@ -64,6 +111,7 @@ DEFAULT_SETTINGS = {
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_secondary_weight": 72,
     "v2_dual_line_secondary_spacing": 100,
+    "v2_compact_lyric_show_cover": True,
     "v2_no_lyrics_text": "暂无歌词",
     "v2_weather_location": "北京",
     "v2_weather_use_location": True,

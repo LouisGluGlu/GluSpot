@@ -145,18 +145,17 @@ class IslandStackVisual(QWidget):
     VISUAL_SCALE = 0.75
     STACK_WIDTH = 560
     DEFAULT_FONT_FAMILY = "PingFang SC"
+    GELV_FONT_FAMILY = "Source Han Serif SC"
+    GELV_FONT_CHOICES = ("Source Han Serif SC", "PingFang SC")
+    _source_han_serif_loaded = False
     CHINESE_FONT_FALLBACKS = (
         "PingFang SC",
-        "PingFang SC Regular",
-        "HarmonyOS Sans SC",
-        "MiSans",
-        "Noto Sans CJK SC",
-        "Noto Sans SC",
-        "Source Han Sans SC",
-        "Microsoft YaHei UI",
-        "Microsoft YaHei",
-        "SimHei",
+        "Source Han Serif SC",
     )
+    MUSIC_AMBIENCE_STYLES = ("sea_level", "duotone_full", "pure_black", "bilateral_diffraction")
+    COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "bilateral_diffraction")
+    LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "album_island")
+    ALBUM_ISLAND_SECONDARY_STYLES = ("shrink_dim", "perspective_dim")
 
     def __init__(self, data_provider=None):
         super().__init__()
@@ -225,6 +224,12 @@ class IslandStackVisual(QWidget):
         self.media_source_app = ""
         self.media_position_source = "windows-media"
         self.media_position_confidence = 1.0
+        self.listened_seconds_total = 0.0
+        self.album_history: list[dict[str, object]] = []
+        self.album_queue: list[dict[str, object]] = []
+        self.album_island_transition_started_at = 0.0
+        self.album_island_transition_reason = ""
+        self.album_island_transition_direction = 1
         self.lyrics_source = ""
         self.timed_lyrics: list[tuple[float, str]] = []
         self.album_art = QImage()
@@ -312,9 +317,28 @@ class IslandStackVisual(QWidget):
         self.lyric_elastic_strength = 100
         self.lyric_elastic_mode = "both"
         self.lyric_word_spacing = 100
+        self.wave_color_fill_enabled = False
+        self.wave_color_fill_fallback = "#00D7FF"
         self.enable_dual_line_lyrics = False
         self.dual_line_secondary_weight = 72
         self.dual_line_secondary_spacing = 100
+        self.compact_lyric_show_cover = True
+        self.lyric_flow_style = "wave_stream"
+        self.gelv_font_family = self.GELV_FONT_FAMILY
+        self.gelv_primary_font_size = 22
+        self.gelv_secondary_font_size = 12
+        self.gelv_dual_line_font_size = 17
+        self.gelv_initial_word_spacing = 220
+        self.gelv_word_spacing = 320
+        self.gelv_size_shift_enabled = True
+        self.gelv_color_fill_enabled = False
+        self.gelv_color_fill_fallback = "#00D7FF"
+        self.no_lyrics_display_mode = "text"
+        self.album_island_cover_count = 5
+        self.album_island_cover_size = 30
+        self.album_island_spacing = 112
+        self.album_island_secondary_style = "perspective_dim"
+        self.album_island_perspective_amount = 100
         self.lyric_transition_kind = ""
         self.lyric_transition_distance = 0
         self.lyric_last_sync_position = 0.0
@@ -391,9 +415,17 @@ class IslandStackVisual(QWidget):
         now = time.monotonic()
         track = visual_data.track
         previous_track_id = getattr(self, "media_track_id", "")
+        previous_title = str(getattr(self, "track_title", "") or "")
+        previous_artist = str(getattr(self, "artist", "") or "")
         previous_lyrics = tuple(getattr(self, "lyrics", ()))
+        previous_album_island = bool(self._should_paint_album_island()) if hasattr(self, "lyrics") else False
         incoming_track_id = track.track_id or f"{track.source_app}:{track.title}:{track.artist}"
         track_changed = initial or incoming_track_id != previous_track_id
+        same_visible_track = previous_title == str(track.title or "") and previous_artist == str(track.artist or "")
+        message_refresh = bool(getattr(visual_data, "messages", ()))
+        flow_direction = 1
+        if track_changed and not initial:
+            flow_direction = self._prepare_album_flow_for_track_change(incoming_track_id)
         self.track_title = track.title
         self.artist = track.artist
         self.album_color = QColor(*track.album_color.rgba())
@@ -472,6 +504,9 @@ class IslandStackVisual(QWidget):
         self.media_is_playing = incoming_is_playing
         self.media_duration_seconds = max(0.0, float(track.duration_seconds))
         self.media_position_seconds = incoming_position
+        if not track_changed and incoming_is_playing:
+            listened_delta = min(max(0.0, incoming_position - previous_position), max(0.0, elapsed_since_sync) + 1.0)
+            self.listened_seconds_total = float(getattr(self, "listened_seconds_total", 0.0)) + listened_delta
         self.media_position_sync_at = now
         self.media_raw_position_seconds = raw_position
         self.media_raw_position_source = incoming_position_source
@@ -483,7 +518,9 @@ class IslandStackVisual(QWidget):
         self.media_source_foreground = bool(getattr(track, "source_app_foreground", False))
         self.media_refresh_interval = 0.18 if frontstage_position else 0.65
         self.lyrics_source = track.lyrics_source
+        had_timed_lyrics = bool(getattr(self, "timed_lyrics", ()))
         self.timed_lyrics = self._coalesced_timed_lyrics([(line.time_seconds, line.text) for line in track.timed_lyrics])
+        timed_lyrics_appeared = bool(self.timed_lyrics) and not had_timed_lyrics and not track_changed
         self.plugin_samples = [
             (
                 plugin.label,
@@ -509,12 +546,35 @@ class IslandStackVisual(QWidget):
             self.lyrics = ["正在播放"]
         if tuple(self.lyrics) != previous_lyrics:
             self._clear_lyric_metrics_cache()
+        if flow_direction >= 0 or not getattr(self, "album_queue", None):
+            self.album_queue = self._album_queue_from_track(getattr(track, "album_queue", ()))
+        current_album_island = bool(self._should_paint_album_island())
+        if current_album_island and (track_changed or current_album_island != previous_album_island):
+            self.album_island_transition_started_at = now
+            self.album_island_transition_reason = "track" if track_changed else "mode"
+            self.album_island_transition_direction = flow_direction
         image = QImage()
         cover_loaded = bool(track.album_art_bytes) and image.loadFromData(track.album_art_bytes) and not image.isNull()
+        black_placeholder_loaded = cover_loaded and self._looks_like_black_album_placeholder(image)
+        has_existing_cover = not getattr(self, "album_art", QImage()).isNull()
+        preserve_existing_cover = (
+            cover_loaded
+            and black_placeholder_loaded
+            and has_existing_cover
+            and (not track_changed or same_visible_track or message_refresh)
+        )
+        preserve_missing_cover = (
+            not cover_loaded
+            and has_existing_cover
+            and message_refresh
+            and (not track_changed or same_visible_track)
+        )
+        if preserve_existing_cover:
+            cover_loaded = False
         if cover_loaded:
             self.album_art = image
             self._scaled_album_art_cache.clear()
-        elif track_changed:
+        elif track_changed and not preserve_existing_cover and not preserve_missing_cover:
             self.album_art = QImage()
             self._scaled_album_art_cache.clear()
         if track_changed:
@@ -522,7 +582,35 @@ class IslandStackVisual(QWidget):
             self.prev_lyric_index = self.lyric_index
             self.lyric_changed_at = now
             self.audio_started_at = now
-        self._sync_timed_lyrics(now)
+        self._sync_timed_lyrics(now, allow_backward=timed_lyrics_appeared)
+
+    def _looks_like_black_album_placeholder(self, image: QImage) -> bool:
+        if image.isNull():
+            return False
+        sample = image.convertToFormat(QImage.Format.Format_ARGB32)
+        if sample.width() > 12 or sample.height() > 12:
+            sample = sample.scaled(12, 12, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
+        total_luma = 0.0
+        max_channel = 0
+        min_luma = 255
+        max_luma = 0
+        opaque_pixels = 0
+        pixel_count = max(1, sample.width() * sample.height())
+        for y in range(sample.height()):
+            for x in range(sample.width()):
+                color = sample.pixelColor(x, y)
+                if color.alpha() < 220:
+                    continue
+                opaque_pixels += 1
+                luma = int(color.red() * 0.2126 + color.green() * 0.7152 + color.blue() * 0.0722)
+                total_luma += luma
+                min_luma = min(min_luma, luma)
+                max_luma = max(max_luma, luma)
+                max_channel = max(max_channel, color.red(), color.green(), color.blue())
+        if opaque_pixels < pixel_count * 0.70:
+            return False
+        average_luma = total_luma / max(1, opaque_pixels)
+        return average_luma <= 8.0 and max_channel <= 24 and (max_luma - min_luma) <= 10
 
     def _ingest_provider_messages(self, visual_data: IslandVisualData):
         latest_by_app: dict[str, tuple[str, object]] = {}
@@ -563,7 +651,7 @@ class IslandStackVisual(QWidget):
                 existing for existing in self.messages
                 if str(getattr(existing, "app", "") or "").strip().casefold() != app_key
             ]
-            msg.barrage_started_at = self.barrage_clock + 0.05 * len(self.messages)
+            msg.barrage_started_at = float(getattr(self, "barrage_clock", 0.0)) + 0.05 * len(self.messages)
             self.messages.insert(0, msg)
         self.messages = self.messages[:8]
 
@@ -634,13 +722,13 @@ class IslandStackVisual(QWidget):
             return False
         return abs(previous_raw - previous_position) <= max(5.0, previous_position * 0.12)
 
-    def _sync_timed_lyrics(self, now: float):
+    def _sync_timed_lyrics(self, now: float, allow_backward: bool = False):
         if not self.timed_lyrics:
             return
         position = max(0.0, self._estimated_media_position(now) + float(getattr(self, "lyric_offset_seconds", 0.0)))
         index = active_index_for_position(self.timed_lyrics, position)
         previous_index = int(getattr(self, "lyric_index", 0))
-        if index < previous_index and bool(getattr(self, "media_is_playing", False)):
+        if index < previous_index and bool(getattr(self, "media_is_playing", False)) and not allow_backward:
             current_start = float(self.timed_lyrics[min(previous_index, len(self.timed_lyrics) - 1)][0])
             last_position = float(getattr(self, "lyric_last_sync_position", 0.0))
             small_backstep = position >= max(0.0, current_start - 1.05) or 0.0 < last_position - position < 2.4
@@ -684,6 +772,46 @@ class IslandStackVisual(QWidget):
                 families.append(fallback)
         return families
 
+    def _gelv_font_families(self) -> list[str]:
+        selected = str(getattr(self, "gelv_font_family", self.GELV_FONT_FAMILY) or self.GELV_FONT_FAMILY).strip()
+        if selected not in self.GELV_FONT_CHOICES:
+            selected = self.GELV_FONT_FAMILY
+        families = [selected]
+        for family in self.GELV_FONT_CHOICES:
+            if family not in families:
+                families.append(family)
+        return families
+
+    def _gelv_font(self, size: float, weight: QFont.Weight = QFont.Weight.Normal, shrink: bool = True) -> QFont:
+        font = QFont()
+        font.setFamilies(self._gelv_font_families())
+        font.setPointSize(self._font_size(size, shrink=shrink))
+        font.setWeight(max(weight, QFont.Weight.Bold))
+        font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+        return font
+
+    @classmethod
+    def _source_han_serif_asset_paths(cls) -> list[Path]:
+        roots = [ROOT_DIR / "assets" / "fonts" / "SourceHanSerifSC"]
+        paths: list[Path] = []
+        for root in roots:
+            if not root.exists():
+                continue
+            paths.extend(sorted(root.rglob("SourceHanSerifSC-*.otf")))
+            paths.extend(sorted(root.rglob("SourceHanSerifSC-*.otc")))
+        return paths
+
+    @classmethod
+    def load_source_han_serif_fonts(cls):
+        if cls._source_han_serif_loaded:
+            return
+        for path in cls._source_han_serif_asset_paths():
+            try:
+                QFontDatabase.addApplicationFont(str(path))
+            except Exception:
+                continue
+        cls._source_han_serif_loaded = True
+
     def _clear_lyric_metrics_cache(self):
         cache = getattr(self, "_lyric_layout_cache", None)
         if cache is not None:
@@ -706,7 +834,7 @@ class IslandStackVisual(QWidget):
         for candidate in candidates:
             if candidate in families:
                 return candidate
-        return "Microsoft YaHei"
+        return cls.DEFAULT_FONT_FAMILY
 
     @staticmethod
     def _font_supports_simplified_chinese(family: str) -> bool:
@@ -740,12 +868,18 @@ class IslandStackVisual(QWidget):
         style = str(style or "sea_level").lower()
         if style in ("album_mist", "xiaomi_duotone"):
             style = "sea_level"
-        if style not in ("sea_level", "duotone_full"):
+        if style not in self.MUSIC_AMBIENCE_STYLES:
             style = "sea_level"
+        if self._active_lyric_color_fill_enabled() and style not in self.COLOR_FILL_AMBIENCE_STYLES:
+            style = "pure_black"
         self.music_ambience_style = style
         self.update()
         if notify:
             self._notify_settings_changed()
+
+    def _coerce_music_ambience_for_color_fill(self):
+        if str(getattr(self, "music_ambience_style", "sea_level")) not in self.COLOR_FILL_AMBIENCE_STYLES:
+            self.music_ambience_style = "pure_black"
 
     def set_music_flow_intensity(self, value: float, notify: bool = True):
         try:
@@ -835,6 +969,7 @@ class IslandStackVisual(QWidget):
     def set_lyric_font_size(self, size: int, notify: bool = True):
         self.lyric_font_size = max(14, min(24, int(size)))
         self._clear_lyric_metrics_cache()
+        self._pulse_stack()
         if notify:
             self._notify_settings_changed()
         self.update()
@@ -879,6 +1014,171 @@ class IslandStackVisual(QWidget):
     def set_dual_line_secondary_spacing(self, spacing: int, notify: bool = True):
         self.dual_line_secondary_spacing = max(60, min(150, int(spacing)))
         self._clear_lyric_metrics_cache()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_compact_lyric_show_cover(self, enabled: bool, notify: bool = True):
+        self.compact_lyric_show_cover = bool(enabled)
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_lyric_flow_style(self, style: str, notify: bool = True):
+        style = str(style or "wave_stream").strip()
+        if style not in self.LYRIC_FLOW_STYLES:
+            style = "wave_stream"
+        self.lyric_flow_style = style
+        if self._active_lyric_color_fill_enabled():
+            self._coerce_music_ambience_for_color_fill()
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_font_family(self, family: str, notify: bool = True):
+        family = str(family or self.GELV_FONT_FAMILY).strip()
+        if family not in self.GELV_FONT_CHOICES:
+            family = self.GELV_FONT_FAMILY
+        self.gelv_font_family = family
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_primary_font_size(self, size: int, notify: bool = True):
+        self.gelv_primary_font_size = max(14, min(30, int(size)))
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_secondary_font_size(self, size: int, notify: bool = True):
+        self.gelv_secondary_font_size = max(8, min(24, int(size)))
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_dual_line_font_size(self, size: int, notify: bool = True):
+        self.gelv_dual_line_font_size = max(8, min(30, int(size)))
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_initial_word_spacing(self, spacing: int, notify: bool = True):
+        self.gelv_initial_word_spacing = max(100, min(320, int(spacing)))
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_word_spacing(self, spacing: int, notify: bool = True):
+        self.gelv_word_spacing = max(100, min(420, int(spacing)))
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_size_shift_enabled(self, enabled: bool, notify: bool = True):
+        self.gelv_size_shift_enabled = bool(enabled)
+        self._clear_lyric_metrics_cache()
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_color_fill_enabled(self, enabled: bool, notify: bool = True):
+        self.gelv_color_fill_enabled = bool(enabled)
+        if self._gelv_enabled() and self.gelv_color_fill_enabled:
+            self._coerce_music_ambience_for_color_fill()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_gelv_color_fill_fallback(self, color: str, notify: bool = True):
+        qcolor = QColor(str(color or "#00D7FF"))
+        self.gelv_color_fill_fallback = qcolor.name().upper() if qcolor.isValid() else "#00D7FF"
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_wave_color_fill_enabled(self, enabled: bool, notify: bool = True):
+        self.wave_color_fill_enabled = bool(enabled)
+        if not self._gelv_enabled() and self.wave_color_fill_enabled:
+            self._coerce_music_ambience_for_color_fill()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_wave_color_fill_fallback(self, color: str, notify: bool = True):
+        qcolor = QColor(str(color or "#00D7FF"))
+        self.wave_color_fill_fallback = qcolor.name().upper() if qcolor.isValid() else "#00D7FF"
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_no_lyrics_display_mode(self, mode: str, notify: bool = True):
+        mode = str(mode or "text").strip()
+        self.no_lyrics_display_mode = mode if mode in {"text", "album_island"} else "text"
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_album_island_cover_count(self, count: int, notify: bool = True):
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 5
+        if count not in (3, 5, 7):
+            count = 5
+        self.album_island_cover_count = count
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_album_island_cover_size(self, size: int, notify: bool = True):
+        self.album_island_cover_size = max(18, min(44, int(size)))
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_album_island_spacing(self, spacing: int, notify: bool = True):
+        self.album_island_spacing = max(48, min(170, int(spacing)))
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_album_island_secondary_style(self, style: str, notify: bool = True):
+        style = str(style or "perspective_dim").strip()
+        if style not in self.ALBUM_ISLAND_SECONDARY_STYLES:
+            style = "perspective_dim"
+        self.album_island_secondary_style = style
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_album_island_perspective_amount(self, amount: int, notify: bool = True):
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            amount = 100
+        self.album_island_perspective_amount = max(0, min(200, amount))
+        self._pulse_stack()
         if notify:
             self._notify_settings_changed()
         self.update()
@@ -1575,6 +1875,25 @@ class IslandStackVisual(QWidget):
             "v2_enable_dual_line_lyrics": bool(getattr(self, "enable_dual_line_lyrics", False)),
             "v2_dual_line_secondary_weight": int(getattr(self, "dual_line_secondary_weight", 72)),
             "v2_dual_line_secondary_spacing": int(getattr(self, "dual_line_secondary_spacing", 100)),
+            "v2_compact_lyric_show_cover": bool(getattr(self, "compact_lyric_show_cover", True)),
+            "v2_wave_color_fill_enabled": bool(getattr(self, "wave_color_fill_enabled", False)),
+            "v2_wave_color_fill_fallback": str(getattr(self, "wave_color_fill_fallback", "#00D7FF")),
+            "v2_lyric_flow_style": str(getattr(self, "lyric_flow_style", "wave_stream")),
+            "v2_gelv_font_family": str(getattr(self, "gelv_font_family", self.GELV_FONT_FAMILY)),
+            "v2_gelv_primary_font_size": int(getattr(self, "gelv_primary_font_size", 22)),
+            "v2_gelv_secondary_font_size": int(getattr(self, "gelv_secondary_font_size", 12)),
+            "v2_gelv_dual_line_font_size": int(getattr(self, "gelv_dual_line_font_size", 17)),
+            "v2_gelv_initial_word_spacing": int(getattr(self, "gelv_initial_word_spacing", 220)),
+            "v2_gelv_word_spacing": int(getattr(self, "gelv_word_spacing", 320)),
+            "v2_gelv_size_shift_enabled": bool(getattr(self, "gelv_size_shift_enabled", True)),
+            "v2_gelv_color_fill_enabled": bool(getattr(self, "gelv_color_fill_enabled", False)),
+            "v2_gelv_color_fill_fallback": str(getattr(self, "gelv_color_fill_fallback", "#00D7FF")),
+            "v2_no_lyrics_display_mode": str(getattr(self, "no_lyrics_display_mode", "text")),
+            "v2_album_island_cover_count": int(getattr(self, "album_island_cover_count", 5)),
+            "v2_album_island_cover_size": int(getattr(self, "album_island_cover_size", 30)),
+            "v2_album_island_spacing": int(getattr(self, "album_island_spacing", 112)),
+            "v2_album_island_secondary_style": str(getattr(self, "album_island_secondary_style", "perspective_dim")),
+            "v2_album_island_perspective_amount": int(getattr(self, "album_island_perspective_amount", 100)),
             "v2_no_lyrics_text": getattr(self, "no_lyrics_text", "暂无歌词"),
             "v2_super_topmost": bool(getattr(self, "super_topmost_enabled", True)),
         }
@@ -2979,6 +3298,11 @@ class IslandStackVisual(QWidget):
             required = self._u(58 + 16 + 15 + 132 + 48) + content_w
             return max(self._u(470.0), min(self._u(760.0), required))
 
+        if self._should_paint_album_island():
+            stage_w = self._album_island_preferred_stage_width()
+            required = self._u(9 + 30 + 12 + 25) + stage_w
+            return max(self._u(300.0), min(self._u(760.0), required))
+
         compact_text = self._compact_music_text()
         compact_metric = QFontMetrics(self._font(compact_lyric_size, QFont.Weight.Bold, shrink=False))
         title_metric = QFontMetrics(self._font(11, QFont.Weight.Bold, shrink=False))
@@ -2987,6 +3311,20 @@ class IslandStackVisual(QWidget):
         artist_w = title_metric.horizontalAdvance(self.artist)
         lyric_w = self._representative_lyric_width(lyric_lines, compact_lyric_size, True)
         current_dual_w = self._current_compact_dual_line_width(compact_lyric_size)
+        if self._gelv_enabled():
+            active_size, next_size = self._gelv_line_sizes(taskbar=False)
+            dual_size = self._gelv_dual_line_size(taskbar=False)
+            second_size = dual_size if (self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()) else next_size
+            gelv_lines = self._gelv_display_lines()
+            gelv_w = max(
+                (
+                    self._gelv_layout_width(line, active_size if index == 0 else second_size)
+                    for index, line in enumerate(gelv_lines)
+                    if line
+                ),
+                default=0.0,
+            )
+            current_dual_w = max(current_dual_w, gelv_w)
         return self._compact_music_target_width_from_content(content_w, title_w, artist_w, lyric_w, current_dual_w, instrumental)
 
     def _compact_music_target_width_from_content(
@@ -3004,8 +3342,10 @@ class IslandStackVisual(QWidget):
             content_w = max(content_w, current_dual_w, title_w * 0.64)
         else:
             content_w = max(content_w, lyric_w * 0.76, title_w * 0.64)
+        show_cover = bool(getattr(self, "compact_lyric_show_cover", True))
         cover_slot = 50.0 if current_dual_w > 0 else 30.0
-        required = self._u(9 + cover_slot + 15 + 32) + content_w
+        media_lead = cover_slot + 15 if show_cover else 0.0
+        required = self._u(9 + media_lead + 32) + content_w
         min_w = self._u(470.0) if current_dual_w > 0 else self._u(430.0)
         max_w = self._u(760.0) if current_dual_w > 0 else self._u(610.0)
         return max(min_w, min(max_w, required))
@@ -3106,6 +3446,533 @@ class IslandStackVisual(QWidget):
             return True
         return len(first.split()) >= 3 and len(second.split()) >= 3
 
+    def _gelv_enabled(self) -> bool:
+        return str(getattr(self, "lyric_flow_style", "wave_stream")) == "gelv_songscatter"
+
+    def _active_lyric_color_fill_enabled(self) -> bool:
+        style = str(getattr(self, "lyric_flow_style", "wave_stream"))
+        if style == "gelv_songscatter":
+            return bool(getattr(self, "gelv_color_fill_enabled", False))
+        return bool(getattr(self, "wave_color_fill_enabled", False))
+
+    def _active_lyric_fill_color(self) -> QColor:
+        if self._gelv_enabled():
+            return self._gelv_fill_color()
+        return self._wave_fill_color()
+
+    def _gelv_line_sizes(self, taskbar: bool = False) -> tuple[int, int]:
+        active = max(14, min(30, int(getattr(self, "gelv_primary_font_size", 22))))
+        secondary = max(8, min(24, int(getattr(self, "gelv_secondary_font_size", 12))))
+        secondary = min(active, secondary)
+        if taskbar:
+            active = max(12, active - 4)
+            secondary = max(8, min(active, secondary - 3))
+        return active, secondary
+
+    def _gelv_dual_line_size(self, taskbar: bool = False) -> int:
+        active, _secondary = self._gelv_line_sizes(taskbar=taskbar)
+        size = max(8, min(30, int(getattr(self, "gelv_dual_line_font_size", 17))))
+        if taskbar:
+            size = max(8, size - 3)
+        return min(active, size)
+
+    def _gelv_line_pixel_height(self, size: float, expanded: bool = False) -> float:
+        metrics = QFontMetrics(self._gelv_font(size, QFont.Weight.Normal))
+        padding = self._u(3.0 if expanded else 2.0)
+        fallback = self._u(max(float(size) + (10.0 if expanded else 4.0), 14.0))
+        return max(fallback, float(metrics.height()) + padding)
+
+    def _gelv_compact_music_height(self) -> float:
+        active_size, secondary_size = self._gelv_line_sizes(taskbar=False)
+        line_count = len(self._gelv_display_lines())
+        if line_count <= 1:
+            content_px = self._gelv_line_pixel_height(active_size, expanded=False)
+            return max(46.0, min(64.0, content_px / self.VISUAL_SCALE + 9.0))
+        second_size = self._gelv_dual_line_size(taskbar=False) if (
+            self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()
+        ) else secondary_size
+        line_heights = [
+            self._gelv_line_pixel_height(size, expanded=False)
+            for size in (active_size, second_size)[:line_count]
+        ]
+        content_px = sum(line_heights) + self._u(1.0) * max(0, line_count - 1)
+        return max(46.0, min(82.0, content_px / self.VISUAL_SCALE + 9.0))
+
+    def _album_island_compact_music_height(self) -> float:
+        cover = max(18, min(44, int(getattr(self, "album_island_cover_size", 30))))
+        return max(46.0, min(72.0, float(cover) + 16.0))
+
+    def _gelv_display_lines(self) -> list[str]:
+        lyrics = getattr(self, "lyrics", None) or []
+        if not lyrics:
+            return []
+        index = int(getattr(self, "lyric_index", 0)) % len(lyrics)
+        active = str(lyrics[index] or "").strip()
+        active_lines = [line.strip() for line in active.splitlines() if line.strip()]
+        dual_enabled = bool(getattr(self, "enable_dual_line_lyrics", False))
+        active_primary = active_lines[0] if active_lines else active
+        if dual_enabled and len(active_lines) > 1:
+            return active_lines[:2]
+        mixed = self._gelv_split_mixed_language_line(active) if dual_enabled else None
+        if mixed is not None:
+            return [mixed[0], mixed[1]]
+        if len(lyrics) <= 1:
+            return [active_primary] if active_primary else []
+        next_line = str(lyrics[(index + 1) % len(lyrics)] or "").strip()
+        next_primary = next((line.strip() for line in next_line.splitlines() if line.strip()), next_line)
+        return [line for line in (active_primary, next_primary) if line]
+
+    def _gelv_current_dual_line(self) -> bool:
+        lyrics = getattr(self, "lyrics", None) or []
+        if not lyrics or not bool(getattr(self, "enable_dual_line_lyrics", False)):
+            return False
+        index = int(getattr(self, "lyric_index", 0)) % len(lyrics)
+        active = str(lyrics[index] or "")
+        return len([line for line in active.splitlines() if line.strip()]) > 1
+
+    def _gelv_current_mixed_language_line(self) -> bool:
+        lyrics = getattr(self, "lyrics", None) or []
+        if not lyrics or not bool(getattr(self, "enable_dual_line_lyrics", False)):
+            return False
+        index = int(getattr(self, "lyric_index", 0)) % len(lyrics)
+        return self._gelv_split_mixed_language_line(str(lyrics[index] or "")) is not None
+
+    def _gelv_split_mixed_language_line(self, text: str) -> tuple[str, str] | None:
+        text = " ".join(str(text or "").split())
+        if not text:
+            return None
+        has_cjk = any(self._is_cjk_lyric_char(char) for char in text)
+        has_latin = any(("A" <= char <= "Z") or ("a" <= char <= "z") for char in text)
+        if not has_cjk or not has_latin:
+            return None
+        matches = list(re.finditer(r"\s+", text))
+        for match in reversed(matches):
+            left = text[: match.start()].strip()
+            right = text[match.end() :].strip()
+            if not left or not right:
+                continue
+            left_cjk = any(self._is_cjk_lyric_char(char) for char in left)
+            right_cjk = any(self._is_cjk_lyric_char(char) for char in right)
+            left_latin = any(("A" <= char <= "Z") or ("a" <= char <= "z") for char in left)
+            right_latin = any(("A" <= char <= "Z") or ("a" <= char <= "z") for char in right)
+            if left_latin and not left_cjk and right_cjk:
+                return left, right
+            if left_cjk and right_latin and not right_cjk:
+                return left, right
+        return None
+
+    def _gelv_spacing_percent(self, progress: float = 1.0) -> int:
+        initial = max(100, min(320, int(getattr(self, "gelv_initial_word_spacing", 220))))
+        target = max(initial, min(420, int(getattr(self, "gelv_word_spacing", 320))))
+        progress = max(0.0, min(1.0, float(progress)))
+        return int(round(initial + (target - initial) * progress))
+
+    def _gelv_layout_width(self, text: str, size: float, spacing_progress: float = 1.0) -> float:
+        spacing = self._gelv_spacing_percent(spacing_progress)
+        layout = self._gelv_layout(text, size, spacing_percent=spacing)
+        return float(layout.total_width)
+
+    def _gelv_transition_state(self, now: float | None = None) -> dict[str, float]:
+        now = time.monotonic() if now is None else float(now)
+        current_index = int(getattr(self, "lyric_index", 0))
+        previous_index = int(getattr(self, "prev_lyric_index", current_index))
+        changed_at = float(getattr(self, "lyric_changed_at", now))
+        duration = 0.42
+        elapsed = max(0.0, min(1.0, (now - changed_at) / duration))
+        transitioning = previous_index != current_index and elapsed < 1.0
+        if transitioning:
+            eased = 1.0 - (1.0 - elapsed) ** 4
+            size_mix = eased if bool(getattr(self, "gelv_size_shift_enabled", True)) else 1.0
+            return {
+                "progress": elapsed,
+                "eased": eased,
+                "out_alpha": 1.0 - eased,
+                "in_alpha": max(0.18, eased),
+                "out_y_offset": 0.0,
+                "current_y_offset": 0.0,
+                "current_size_mix": size_mix,
+            }
+        return {
+            "progress": 1.0,
+            "eased": 1.0,
+            "out_alpha": 0.0,
+            "in_alpha": 1.0,
+            "out_y_offset": 0.0,
+            "current_y_offset": 0.0,
+            "current_size_mix": 1.0,
+        }
+
+    def _gelv_line_x(self, rect: QRectF, text: str, size: float, progress: float, spacing_percent: int | None = None) -> float:
+        spacing = int(spacing_percent) if spacing_percent is not None else self._gelv_spacing_percent(progress)
+        layout = self._gelv_layout(text, size, spacing_percent=spacing)
+        text_w = float(layout.total_width)
+        if text_w <= rect.width() - self._u(8.0):
+            return rect.center().x() - text_w / 2.0
+        travel = max(0.0, text_w - rect.width() + self._u(18.0))
+        eased = 1.0 - (1.0 - max(0.0, min(1.0, float(progress)))) ** 3
+        return rect.left() - travel * eased
+
+    def _gelv_primary_text_for_index(self, index: int) -> str:
+        lyrics = getattr(self, "lyrics", None) or []
+        if not lyrics:
+            return ""
+        text = str(lyrics[index % len(lyrics)] or "").strip()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return lines[0]
+        mixed = self._gelv_split_mixed_language_line(text) if bool(getattr(self, "enable_dual_line_lyrics", False)) else None
+        return mixed[0] if mixed is not None else text
+
+    def _gelv_line_rects(self, rect: QRectF, expanded: bool = False, now: float | None = None) -> list[dict[str, object]]:
+        lines = self._gelv_display_lines()
+        if not lines:
+            return []
+        active_size, secondary_size = self._gelv_line_sizes(taskbar=False)
+        dual = self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()
+        dual_line_size = self._gelv_dual_line_size(taskbar=False)
+        state = self._gelv_transition_state(now)
+        size_mix = max(0.0, min(1.0, float(state.get("current_size_mix", 1.0))))
+        incoming_size = secondary_size + (active_size - secondary_size) * size_mix
+        if dual:
+            sizes = [incoming_size, dual_line_size]
+            actives = [True, True]
+            stable_sizes = [active_size, dual_line_size]
+        else:
+            sizes = [incoming_size, secondary_size]
+            actives = [True, False]
+            stable_sizes = [active_size, secondary_size]
+        gap = self._u(8.0 if expanded else 1.0)
+        line_heights = [self._gelv_line_pixel_height(size, expanded=expanded) for size in stable_sizes[: len(lines)]]
+        total_h = sum(line_heights) + gap * max(0, len(line_heights) - 1)
+        y = rect.center().y() - total_h / 2.0
+        rows: list[dict[str, object]] = []
+        for index, text in enumerate(lines[:2]):
+            row = QRectF(rect.left(), y, rect.width(), line_heights[index])
+            rows.append({
+                "text": text,
+                "rect": row,
+                "size": sizes[index],
+                "active": actives[index],
+                "opacity": 1.0,
+                "color_fill": index == 0,
+                "progress_fill": dual and index == 1,
+                "spacing_percent": None if index == 0 or (dual and index == 1) else 100,
+                "transition_out": False,
+            })
+            y = row.bottom() + gap
+        out_alpha = max(0.0, min(1.0, float(state.get("out_alpha", 0.0))))
+        previous_index = int(getattr(self, "prev_lyric_index", int(getattr(self, "lyric_index", 0))))
+        current_index = int(getattr(self, "lyric_index", 0))
+        previous_text = self._gelv_primary_text_for_index(previous_index)
+        moving_switch = out_alpha > 0.001 and previous_index != current_index and not dual and len(rows) >= 2
+        if moving_switch:
+            eased = max(0.0, min(1.0, float(state.get("eased", 1.0))))
+            upper_rect = QRectF(rows[0]["rect"])
+            lower_rect = QRectF(rows[1]["rect"])
+            incoming = QRectF(upper_rect)
+            incoming.moveTop(lower_rect.top() + (upper_rect.top() - lower_rect.top()) * eased)
+            rows[0]["rect"] = incoming
+            enter_offset = (lower_rect.height() + gap) * (1.0 - eased)
+            entering_next = QRectF(lower_rect)
+            entering_next.moveTop(lower_rect.top() + enter_offset)
+            rows[1]["rect"] = entering_next
+            rows[1]["opacity"] = max(0.42, eased)
+        if out_alpha > 0.001 and previous_index != current_index and previous_text and rows:
+            out_size_lift = 1.6 * (1.0 - float(state.get("eased", 1.0))) if bool(getattr(self, "gelv_size_shift_enabled", True)) else 0.0
+            out_rect = QRectF(rows[0]["rect"])
+            if moving_switch:
+                eased = max(0.0, min(1.0, float(state.get("eased", 1.0))))
+                upper_rect = QRectF(rect.left(), rect.center().y() - total_h / 2.0, rect.width(), line_heights[0])
+                out_rect = QRectF(upper_rect)
+                out_rect.moveTop(upper_rect.top() - (upper_rect.height() + gap) * eased)
+            out_row = dict(rows[0])
+            out_row.update({
+                "text": previous_text,
+                "rect": out_rect,
+                "size": active_size + out_size_lift,
+                "opacity": out_alpha,
+                "color_fill": True,
+                "spacing_percent": None,
+                "transition_out": True,
+            })
+            rows.insert(0, out_row)
+        return rows
+
+    def _gelv_spacing_progress(self, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else float(now)
+        phase = self._lyric_phase(now)
+        if "progress" in phase:
+            return max(0.0, min(1.0, float(phase.get("progress", 0.0))))
+        timed = getattr(self, "timed_lyrics", []) or []
+        index = int(getattr(self, "lyric_index", 0))
+        if timed and 0 <= index < len(timed):
+            position = max(0.0, self._estimated_media_position(now) + float(getattr(self, "lyric_offset_seconds", 0.0)))
+            start = float(timed[index][0])
+            if index + 1 < len(timed):
+                end = float(timed[index + 1][0])
+            else:
+                end = max(start + 1.0, float(getattr(self, "media_duration_seconds", 0.0) or 0.0))
+            if end > start:
+                return max(0.0, min(1.0, (position - start) / (end - start)))
+        changed_at = float(getattr(self, "lyric_changed_at", now))
+        return max(0.0, min(1.0, (now - changed_at) / 3.0))
+
+    def _lyric_fill_color(self, fallback_attr: str = "gelv_color_fill_fallback") -> QColor:
+        album = QColor(getattr(self, "album_color", QColor(0, 215, 255)))
+        if album.saturation() < 28 or album.value() < 28 or album.value() > 238:
+            fallback = QColor(str(getattr(self, fallback_attr, "#00D7FF")))
+            return fallback if fallback.isValid() else QColor("#00D7FF")
+        hsv = album.toHsv()
+        hsv.setHsv(hsv.hue(), max(190, hsv.saturation()), max(210, hsv.value()), 255)
+        return hsv.toRgb()
+
+    def _gelv_fill_color(self) -> QColor:
+        return self._lyric_fill_color("gelv_color_fill_fallback")
+
+    def _wave_fill_color(self) -> QColor:
+        return self._lyric_fill_color("wave_color_fill_fallback")
+
+    def _should_paint_album_island(self) -> bool:
+        if str(getattr(self, "lyric_flow_style", "wave_stream")) == "album_island":
+            return True
+        if str(getattr(self, "no_lyrics_display_mode", "text")) != "album_island":
+            return False
+        if self._is_instrumental_track():
+            return True
+        lyrics = [str(line).strip() for line in getattr(self, "lyrics", []) if str(line).strip()]
+        if not lyrics:
+            return True
+        no_text = str(getattr(self, "no_lyrics_text", "暂无歌词")).strip()
+        return len(lyrics) == 1 and lyrics[0] == no_text
+
+    def _album_island_slots(self, rect: QRectF, reserve_text: bool = False) -> list[dict[str, object]]:
+        count = int(getattr(self, "album_island_cover_count", 5))
+        if count not in (3, 5, 7):
+            count = 5
+        center = count // 2
+        stage = QRectF(rect)
+        transition = self._album_island_transition_progress()
+        eased_transition = 1.0 - (1.0 - transition) ** 4
+        history_entries = self._album_island_entries_with_art(getattr(self, "album_history", []) or [])
+        queue_entries = self._album_island_entries_with_art(
+            getattr(self, "album_queue", []) or getattr(self, "album_recommendations", []) or []
+        )
+        left_count = min(center, len(history_entries))
+        right_count = min(center, len(queue_entries))
+        if reserve_text and right_count <= 0:
+            text_reserve = min(stage.width() * 0.42, self._u(126.0 if stage.height() < self._u(82.0) else 184.0))
+            stage.setRight(max(stage.left() + self._u(76.0), stage.right() - text_reserve))
+        cover = self._album_island_cover_px(stage)
+        step = self._album_island_step_px(cover, stage, center)
+        center_x = stage.center().x()
+        center_y = stage.center().y()
+        secondary_style = str(getattr(self, "album_island_secondary_style", "perspective_dim") or "perspective_dim")
+        if secondary_style not in self.ALBUM_ISLAND_SECONDARY_STYLES:
+            secondary_style = "perspective_dim"
+        perspective_amount = max(0, min(200, int(getattr(self, "album_island_perspective_amount", 100)))) / 100.0
+        sides = list(range(-left_count, 0)) + [0] + list(range(1, right_count + 1))
+        slots: list[dict[str, object]] = []
+        for side in sides:
+            distance = abs(side)
+            perspective = None
+            if secondary_style == "perspective_dim":
+                scale = max(0.78, 1.0 - 0.08 * distance)
+                alpha = max(92, 255 - 48 * distance)
+                squeeze = min(0.42, (0.10 + 0.055 * distance) * perspective_amount)
+                if side < 0:
+                    perspective = {"left_height": 1.0, "right_height": 1.0 - squeeze}
+                elif side > 0:
+                    perspective = {"left_height": 1.0 - squeeze, "right_height": 1.0}
+                tilt = 0.0
+            else:
+                scale = max(0.48, 1.0 - 0.16 * distance)
+                alpha = max(76, 255 - 56 * distance)
+                tilt = 0.0
+            size = cover * scale
+            animated_side = float(side)
+            if eased_transition < 1.0:
+                animated_side += float(getattr(self, "album_island_transition_direction", 1) or 1) * (1.0 - eased_transition)
+            slot_center_x = center_x + animated_side * step
+            x = slot_center_x - size / 2.0
+            y = center_y - size / 2.0 + distance * stage.height() * 0.020
+            if side == 0:
+                album_art = QImage(getattr(self, "album_art", QImage()))
+            elif side < 0:
+                album_art = history_entries[abs(side) - 1]
+            else:
+                album_art = queue_entries[side - 1]
+            slots.append(
+                {
+                    "index": side + center,
+                    "side": side,
+                    "rect": QRectF(x, y, size, size),
+                    "alpha": alpha,
+                    "center": side == 0,
+                    "z": 100 - distance * 12,
+                    "tilt": tilt,
+                    "perspective": perspective,
+                    "album_art": album_art,
+                }
+            )
+        if slots:
+            leftmost = min(QRectF(slot["rect"]).left() for slot in slots)
+            if leftmost < stage.left():
+                center_slot = next((slot for slot in slots if bool(slot.get("center"))), None)
+                current_center_x = QRectF(center_slot["rect"]).center().x() if center_slot is not None else center_x
+                max_shift = max(0.0, rect.center().x() - current_center_x)
+                shift = min(stage.left() - leftmost, max_shift)
+                if shift > 0.0:
+                    for slot in slots:
+                        moved = QRectF(slot["rect"])
+                        moved.translate(shift, 0.0)
+                        slot["rect"] = moved
+        return slots
+
+    def _album_island_entries_with_art(self, entries) -> list[QImage]:
+        images: list[QImage] = []
+        for entry in list(entries or [])[:6]:
+            image = self._album_art_from_entry(entry)
+            if not image.isNull():
+                images.append(image)
+        return images
+
+    def _album_island_cover_px(self, stage: QRectF) -> float:
+        configured = max(18, min(44, int(getattr(self, "album_island_cover_size", 30))))
+        return min(self._u(float(configured)), stage.height() * 0.84)
+
+    def _album_island_step_px(self, cover: float, stage: QRectF, side_capacity: int) -> float:
+        spacing = max(48, min(170, int(getattr(self, "album_island_spacing", 112))))
+        desired = cover * (spacing / 100.0)
+        max_step = stage.width() / max(1.0, side_capacity * 2.0 + 1.0)
+        return max(cover * 0.72, min(desired, max_step * 1.18))
+
+    def _album_island_transition_progress(self, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else float(now)
+        started_at = float(getattr(self, "album_island_transition_started_at", 0.0) or 0.0)
+        if started_at <= 0.0:
+            started_at = float(getattr(self, "audio_started_at", 0.0) or 0.0)
+        if started_at <= 0.0:
+            return 1.0
+        return max(0.0, min(1.0, (now - started_at) / 0.62))
+
+    def _album_island_preferred_stage_width(self) -> float:
+        count = int(getattr(self, "album_island_cover_count", 5))
+        if count not in (3, 5, 7):
+            count = 5
+        side_capacity = count // 2
+        cover = self._u(float(max(18, min(44, int(getattr(self, "album_island_cover_size", 30))))))
+        step = cover * (max(48, min(170, int(getattr(self, "album_island_spacing", 112)))) / 100.0)
+        history_count = min(side_capacity, len(self._album_island_entries_with_art(getattr(self, "album_history", []) or [])))
+        queue_count = min(side_capacity, len(self._album_island_entries_with_art(getattr(self, "album_queue", []) or [])))
+        text_w = self._u(112.0) if queue_count <= 0 else 0.0
+        span = cover + step * (history_count + queue_count) + text_w + self._u(24.0)
+        minimum = self._u(164.0 if queue_count <= 0 else 132.0)
+        return max(minimum, span)
+
+    def _album_island_art_for_side(self, side: int, center: int) -> QImage:
+        if side == 0:
+            return QImage(getattr(self, "album_art", QImage()))
+        history = list(getattr(self, "album_history", []) or [])
+        queue = list(getattr(self, "album_queue", []) or getattr(self, "album_recommendations", []) or [])
+        if side < 0:
+            return self._album_art_from_entry(history[abs(side) - 1] if abs(side) - 1 < len(history) else None)
+        return self._album_art_from_entry(queue[side - 1] if side - 1 < len(queue) else None)
+
+    def _album_queue_from_track(self, entries) -> list[dict[str, object]]:
+        queue: list[dict[str, object]] = []
+        for entry in list(entries or [])[:6]:
+            image = self._album_art_from_entry(entry)
+            if image.isNull():
+                break
+            queue.append(
+                {
+                    "track_id": str(getattr(entry, "track_id", "") or ""),
+                    "title": str(getattr(entry, "title", "") or ""),
+                    "artist": str(getattr(entry, "artist", "") or ""),
+                    "album_title": str(getattr(entry, "album_title", "") or ""),
+                    "album_art": image,
+                }
+            )
+        return queue
+
+    def _album_art_from_entry(self, entry) -> QImage:
+        if isinstance(entry, QImage):
+            return QImage(entry)
+        if isinstance(entry, dict):
+            image = entry.get("album_art") or entry.get("image")
+            if isinstance(image, QImage):
+                return QImage(image)
+            data = entry.get("album_art_bytes") or entry.get("image_bytes")
+            if isinstance(data, bytes):
+                loaded = QImage()
+                if loaded.loadFromData(data) and not loaded.isNull():
+                    return loaded
+        image = getattr(entry, "album_art", None)
+        if isinstance(image, QImage):
+            return QImage(image)
+        data = getattr(entry, "album_art_bytes", b"") or getattr(entry, "image_bytes", b"") or b""
+        if isinstance(data, bytes) and data:
+            loaded = QImage()
+            if loaded.loadFromData(data) and not loaded.isNull():
+                return loaded
+        return QImage()
+
+    def _album_island_listened_text(self) -> str:
+        seconds = max(0.0, float(getattr(self, "listened_seconds_total", 0.0)))
+        hours = int(seconds / 3600.0)
+        return f"您已听歌 {hours} 小时"
+
+    def _current_album_history_entry(self) -> dict[str, object]:
+        return {
+            "track_id": str(getattr(self, "media_track_id", "") or ""),
+            "title": str(getattr(self, "track_title", "") or ""),
+            "artist": str(getattr(self, "artist", "") or ""),
+            "album_art": getattr(self, "album_art", QImage()),
+        }
+
+    def _entry_matches_track_id(self, entry, track_id: str) -> bool:
+        candidate = ""
+        if isinstance(entry, dict):
+            candidate = str(entry.get("track_id", "") or "")
+        else:
+            candidate = str(getattr(entry, "track_id", "") or "")
+        return bool(candidate) and candidate == str(track_id or "")
+
+    def _prepare_album_flow_for_track_change(self, incoming_track_id: str) -> int:
+        incoming_track_id = str(incoming_track_id or "")
+        history = list(getattr(self, "album_history", []) or [])
+        queue = list(getattr(self, "album_queue", []) or [])
+        previous_id = str(getattr(self, "media_track_id", "") or "")
+        if previous_id and incoming_track_id and previous_id != incoming_track_id:
+            history_index = next(
+                (index for index, entry in enumerate(history) if self._entry_matches_track_id(entry, incoming_track_id)),
+                -1,
+            )
+            current_entry = self._current_album_history_entry()
+            if history_index >= 0:
+                history.pop(history_index)
+                queue = [current_entry] + [entry for entry in queue if not self._entry_matches_track_id(entry, previous_id)]
+                self.album_history = history[:6]
+                self.album_queue = queue[:6]
+                return -1
+            history.insert(0, current_entry)
+        self.album_history = history[:6]
+        return 1
+
+    def _remember_album_history(self, incoming_track_id: str):
+        history = list(getattr(self, "album_history", []))
+        previous_id = str(getattr(self, "media_track_id", "") or "")
+        if previous_id and previous_id != str(incoming_track_id or ""):
+            history.insert(
+                0,
+                {
+                    "track_id": previous_id,
+                    "title": str(getattr(self, "track_title", "") or ""),
+                    "album_art": getattr(self, "album_art", QImage()),
+                },
+            )
+        self.album_history = history[:6]
+
     def _current_lyric_display_lines(self) -> list[str]:
         if not self.lyrics:
             return []
@@ -3178,7 +4045,12 @@ class IslandStackVisual(QWidget):
         if main_kind == IslandKind.MUSIC:
             if self.expanded:
                 return stack_w, self._u(176.0)
-            height = 80.0 if self._has_current_two_line_lyric() else 46.0
+            if self._should_paint_album_island():
+                height = self._album_island_compact_music_height()
+            elif self._gelv_enabled():
+                height = self._gelv_compact_music_height()
+            else:
+                height = 80.0 if self._has_current_two_line_lyric() else 46.0
             return stack_w, self._u(height)
         if main_kind == IslandKind.PLUGIN:
             if self.expanded:
@@ -4403,18 +5275,35 @@ class IslandStackVisual(QWidget):
 
     def _paint_music(self, painter: QPainter, rect: QRectF, expanded: bool):
         radius = self._u(30) if expanded else rect.height() / 2
-        self._paint_music_glass_body(painter, rect, radius)
-        self._paint_bottom_ambience(painter, rect, radius, expanded)
-        if getattr(self, "music_ambience_style", "sea_level") != "duotone_full":
-            self._paint_music_blur_mask(painter, rect, radius, expanded)
-        self._paint_music_light_wave(painter, rect, radius, expanded)
+        ambience_style = getattr(self, "music_ambience_style", "sea_level")
+        black_background = self._active_lyric_color_fill_enabled() or ambience_style in {"pure_black", "bilateral_diffraction"}
+        if black_background:
+            self._paint_pure_black_music_background(painter, rect, radius)
+            if ambience_style == "bilateral_diffraction":
+                self._paint_bilateral_diffraction_ambience(painter, rect, radius, expanded)
+        else:
+            self._paint_music_glass_body(painter, rect, radius)
+            self._paint_bottom_ambience(painter, rect, radius, expanded)
+            if ambience_style != "duotone_full":
+                self._paint_music_blur_mask(painter, rect, radius, expanded)
+            self._paint_music_light_wave(painter, rect, radius, expanded)
         if expanded:
             self._paint_music_expanded(painter, rect)
         else:
             self._paint_music_compact(painter, rect)
         self._paint_music_border(painter, rect, radius)
 
+    def _paint_pure_black_music_background(self, painter: QPainter, rect: QRectF, radius: float):
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 255))
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.restore()
+
     def _compact_cover_rect(self, rect: QRectF) -> QRectF:
+        if self._gelv_enabled():
+            cover_size = min(rect.height() - self._u(12.0), self._u(38.0))
+            return QRectF(rect.left() + self._u(9), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
         two_line = self._has_current_two_line_lyric()
         if two_line:
             cover_size = min(rect.height() - self._u(14.0), self._u(50.0))
@@ -4523,16 +5412,39 @@ class IslandStackVisual(QWidget):
         }
 
     def _time_reference_palette(self, theme: dict[str, QColor], color: QColor) -> dict[str, QColor]:
+        if not self._system_dark_mode():
+            return {
+                "surface": QColor(246, 246, 248, 255),
+                "surface_lowest": QColor(238, 239, 242, 255),
+                "module": QColor(255, 255, 255, 255),
+                "module_active": QColor(248, 250, 255, 255),
+                "module_stroke": QColor(214, 216, 222, 220),
+                "handle": QColor(226, 229, 235, 255),
+                "divider": QColor(196, 200, 210, 190),
+                "accent": QColor(255, 184, 0, 255),
+                "accent_soft": QColor(255, 184, 0, 20),
+                "accent_track": QColor(255, 184, 0, 54),
+                "control_stroke": QColor(218, 154, 18, 170),
+                "active": QColor(2, 170, 74, 255),
+                "text": QColor(24, 24, 27, 242),
+                "muted": QColor(92, 92, 100, 220),
+                "muted_dim": QColor(128, 128, 136, 170),
+                "thumb": QColor(255, 255, 255, 246),
+                "off_track": QColor(232, 234, 238, 230),
+                "note_stroke": QColor(142, 150, 164, 185),
+            }
         return {
             "surface": QColor(19, 19, 19, 255),
             "surface_lowest": QColor(14, 14, 14, 255),
             "module": QColor(28, 27, 27, 255),
             "module_active": QColor(32, 32, 31, 255),
+            "module_stroke": QColor(255, 184, 0, 255),
             "handle": QColor(42, 42, 42, 255),
             "divider": QColor(68, 68, 68, 190),
             "accent": QColor(255, 184, 0, 255),
             "accent_soft": QColor(255, 184, 0, 16),
             "accent_track": QColor(255, 184, 0, 46),
+            "control_stroke": QColor(255, 184, 0, 255),
             "active": QColor(2, 201, 83, 255),
             "text": QColor(229, 226, 225, 242),
             "muted": QColor(213, 196, 171, 225),
@@ -4706,8 +5618,123 @@ class IslandStackVisual(QWidget):
         painter.drawEllipse(QRectF(-1.0, -1.0, 2.0, 2.0))
         painter.restore()
 
+    def _paint_bilateral_diffraction_ambience(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
+        painter.save()
+        inset = self._u(1.2)
+        bleed = self._u(1.0)
+        paint_rect = rect.adjusted(-bleed, -bleed, bleed, bleed)
+        clip_rect = rect.adjusted(inset - bleed, inset - bleed, -inset + bleed, -inset + bleed)
+        painter.setClipPath(self._rounded_path(clip_rect, max(1.0, radius - inset + bleed)))
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        fill = self._active_lyric_fill_color()
+        secondary = self._safe_wave_color(QColor(getattr(self, "secondary_color", fill)))
+        bridge = self._mix_color(fill, secondary, 0.46)
+        low, mid, high = self._audio_bands()
+        intensity, boost, size_boost, opacity_boost = self._ambient_boost()
+        flow = 0.42 + self._music_flow_amount() * 0.58
+        if not bool(getattr(self, "media_is_playing", True)):
+            intensity *= 0.76
+            flow *= 0.42
+        fill = self._boost_mist_color(fill, boost * 0.52)
+        secondary = self._boost_mist_color(secondary, boost * 0.34)
+        bridge = self._boost_mist_color(bridge, boost * 0.28)
+
+        now = time.monotonic()
+        phase = float(getattr(self, "ambient_phase", 0.0)) * (0.92 + flow * 0.48) + now * (0.28 + flow * 0.36)
+        values = list(getattr(self, "wave_values", []) or [0.25] * 36)
+
+        center = rect.center() + QPointF(self._u(8.0) * flow * math.sin(phase * 0.56), self._u(2.8) * math.sin(phase * 0.41 + 1.7))
+        center_radius = rect.width() * (0.56 if expanded else 0.46)
+        center_glow = QRadialGradient(center, center_radius)
+        center_alpha = self._mist_alpha((0.020 if expanded else 0.014) * opacity_boost + mid * 0.006, intensity)
+        center_glow.setColorAt(0.00, QColor(bridge.red(), bridge.green(), bridge.blue(), center_alpha))
+        center_glow.setColorAt(0.34, QColor(bridge.red(), bridge.green(), bridge.blue(), int(center_alpha * 0.42)))
+        center_glow.setColorAt(0.68, QColor(0, 0, 0, 0))
+        center_glow.setColorAt(1.00, QColor(0, 0, 0, 0))
+        painter.fillRect(paint_rect, center_glow)
+
+        side_specs = (
+            (-1, fill, bridge, low, 0.0),
+            (1, secondary, bridge, high, 2.1),
+        )
+        for side, side_color, halo_color, band, seed in side_specs:
+            side_x = rect.left() - rect.width() * (0.055 if expanded else 0.115) if side < 0 else rect.right() + rect.width() * (0.055 if expanded else 0.115)
+            side_y = rect.center().y() + self._u(7.0) * flow * math.sin(phase * 0.72 + seed)
+            wash_alpha = self._mist_alpha((0.115 if expanded else 0.094) * opacity_boost + band * 0.028, intensity)
+            if expanded:
+                wash_rx = rect.width() * (0.28 * size_boost + band * 0.026)
+                wash_ry = rect.height() * (1.26 * size_boost + mid * 0.044)
+                halo_rx = rect.width() * (0.18 + band * 0.018)
+                halo_ry = rect.height() * (0.72 + mid * 0.036)
+            else:
+                wash_rx = wash_ry = rect.height() * (1.18 * size_boost + band * 0.12 + mid * 0.06)
+                halo_rx = halo_ry = rect.height() * (0.82 + band * 0.08 + mid * 0.04)
+            self._paint_mist_ellipse(
+                painter,
+                QPointF(side_x, side_y),
+                wash_rx,
+                wash_ry,
+                side_color,
+                wash_alpha,
+            )
+            self._paint_mist_ellipse(
+                painter,
+                QPointF(side_x + side * self._u(10.0), side_y),
+                halo_rx,
+                halo_ry,
+                halo_color,
+                int(wash_alpha * 0.44),
+            )
+
+        ring_count = 7
+        for side, side_color, _halo_color, band, seed in side_specs:
+            center_x = rect.left() - rect.width() * (0.030 if expanded else 0.130) if side < 0 else rect.right() + rect.width() * (0.030 if expanded else 0.130)
+            center_y = rect.center().y() + self._u(5.5) * flow * math.sin(phase * 0.60 + seed)
+            for index in range(ring_count):
+                wave_sample = float(values[(index * 5 + (0 if side < 0 else 2)) % len(values)])
+                travel = (now * (0.075 + flow * 0.080) + index / ring_count + seed * 0.061) % 1.0
+                falloff = (1.0 - travel) ** 1.36
+                if expanded:
+                    rx = rect.width() * (0.105 + travel * 0.42)
+                    ry = rect.height() * (0.48 + travel * 1.04)
+                    rx += self._u(8.0) * flow * wave_sample
+                    ry += self._u(7.0) * flow * (0.34 + band)
+                else:
+                    ring_radius = rect.height() * (0.62 + travel * 1.42)
+                    ring_radius += self._u(10.0) * flow * (0.34 + band + wave_sample * 0.55)
+                    rx = ry = ring_radius
+                alpha = int(max(0, min(132, falloff * (0.36 + band * 0.22 + wave_sample * 0.10) * 255.0 * intensity * opacity_boost)))
+                if not expanded and alpha <= 2:
+                    alpha = 3
+                if alpha <= 2:
+                    continue
+                tint = self._mix_color(side_color, bridge, 0.28 + 0.22 * travel)
+                pen_color = QColor(tint.red(), tint.green(), tint.blue(), alpha)
+                pen_width = self._u(1.0 + (0.9 if expanded else 0.55) * (1.0 - travel) + wave_sample * 0.36)
+                painter.setPen(QPen(pen_color, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                arc_rect = QRectF(center_x - rx, center_y - ry, rx * 2.0, ry * 2.0)
+                if side < 0:
+                    painter.drawArc(arc_rect, -90 * 16, 180 * 16)
+                else:
+                    painter.drawArc(arc_rect, 90 * 16, 180 * 16)
+
+        edge_shadow = QLinearGradient(rect.left(), 0, rect.right(), 0)
+        edge_shadow.setColorAt(0.00, QColor(0, 0, 0, 50))
+        edge_shadow.setColorAt(0.18, QColor(0, 0, 0, 0))
+        edge_shadow.setColorAt(0.50, QColor(0, 0, 0, 0))
+        edge_shadow.setColorAt(0.82, QColor(0, 0, 0, 0))
+        edge_shadow.setColorAt(1.00, QColor(0, 0, 0, 50))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(edge_shadow)
+        painter.fillRect(paint_rect, edge_shadow)
+        painter.restore()
+
     def _paint_bottom_ambience(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
         style = getattr(self, "music_ambience_style", "sea_level")
+        if style in {"pure_black", "bilateral_diffraction"}:
+            return
         if style == "duotone_full":
             self._paint_full_duotone_ambience(painter, rect, radius, expanded)
             return
@@ -5113,6 +6140,8 @@ class IslandStackVisual(QWidget):
 
     def _paint_music_light_wave(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
         style = getattr(self, "music_ambience_style", "sea_level")
+        if style in {"pure_black", "bilateral_diffraction"}:
+            return
         if style == "duotone_full":
             return
         if style == "sea_level":
@@ -5267,27 +6296,29 @@ class IslandStackVisual(QWidget):
 
         painter.restore()
 
-    def _paint_cover(self, painter: QPainter, rect: QRectF, radius: float):
+    def _paint_cover(self, painter: QPainter, rect: QRectF, radius: float, image: QImage | None = None, cache_key: str | None = None):
         path = self._rounded_path(rect, radius)
         painter.save()
         painter.setClipPath(path)
-        if not self.album_art.isNull():
+        album_art = image if isinstance(image, QImage) else getattr(self, "album_art", QImage())
+        if not album_art.isNull():
             scaled_width = int(max(1, rect.width()))
             scaled_height = int(max(1, rect.height()))
-            cache_key = (str(getattr(self, "media_track_id", "")), scaled_width, scaled_height)
+            cache_id = cache_key or str(album_art.cacheKey() or getattr(self, "media_track_id", ""))
+            scaled_key = (cache_id, scaled_width, scaled_height)
             scaled_cache = getattr(self, "_scaled_album_art_cache", None)
             if scaled_cache is None:
                 scaled_cache = {}
                 self._scaled_album_art_cache = scaled_cache
-            scaled = scaled_cache.get(cache_key)
+            scaled = scaled_cache.get(scaled_key)
             if scaled is None or scaled.isNull():
-                scaled = self.album_art.scaled(
+                scaled = album_art.scaled(
                     scaled_width,
                     scaled_height,
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                scaled_cache[cache_key] = scaled
+                scaled_cache[scaled_key] = scaled
                 if len(scaled_cache) > 8:
                     scaled_cache.pop(next(iter(scaled_cache)))
             source = QRectF(
@@ -5335,17 +6366,35 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_music_compact(self, painter: QPainter, rect: QRectF):
-        cover = self._compact_cover_rect(rect)
-        two_line = self._has_current_two_line_lyric()
-        self._paint_cover(painter, cover, self._u(10 if two_line else 8))
+        if self._should_paint_album_island():
+            self.music_cover_rect = QRectF()
+            self._paint_album_island_compact(painter, rect)
+            return
+        two_line = self._has_current_two_line_lyric() and not self._gelv_enabled()
         top_padding = self._u(7 if two_line else 3)
         bottom_padding = self._u(6 if two_line else 6)
-        text_rect = QRectF(cover.right() + self._u(15 if two_line else 12), rect.top() + top_padding, rect.right() - cover.right() - self._u(25), rect.height() - top_padding - bottom_padding)
+        if bool(getattr(self, "compact_lyric_show_cover", True)):
+            cover = self._compact_cover_rect(rect)
+            self.music_cover_rect = QRectF(cover)
+            self._paint_cover(painter, cover, self._u(10 if two_line else 8))
+            text_left = cover.right() + self._u(15 if two_line else 12)
+        else:
+            self.music_cover_rect = QRectF()
+            text_left = rect.left() + self._u(10.0)
+        text_rect = QRectF(text_left, rect.top() + top_padding, rect.right() - text_left - self._u(25), rect.height() - top_padding - bottom_padding)
         self._paint_compact_lyric_viewport(painter, text_rect)
 
     def _paint_compact_lyric_viewport(self, painter: QPainter, rect: QRectF):
         painter.save()
         painter.setClipRect(rect)
+        if self._should_paint_album_island():
+            self._paint_album_island(painter, rect)
+            painter.restore()
+            return
+        if self._gelv_enabled():
+            self._paint_gelv_compact_lyrics(painter, rect)
+            painter.restore()
+            return
         lines = self._compact_lyric_lines()
         if not lines:
             painter.restore()
@@ -5366,12 +6415,212 @@ class IslandStackVisual(QWidget):
             self._paint_live_lyric_text(painter, rect, display_lines[0] if display_lines else lines[index], compact_size, QColor(255, 255, 255, 132), QColor(255, 255, 255, 246), True, phase, centered=True, centered_scroll=True)
         painter.restore()
 
+    def _paint_gelv_compact_lyrics(self, painter: QPainter, rect: QRectF):
+        now = time.monotonic()
+        progress = self._gelv_spacing_progress(now)
+        for row in self._gelv_line_rects(rect, expanded=False, now=now):
+            opacity = max(0.0, min(1.0, float(row.get("opacity", 1.0))))
+            if opacity <= 0.01:
+                continue
+            painter.save()
+            painter.setOpacity(opacity)
+            self._paint_gelv_line(
+                painter,
+                row["rect"],
+                str(row["text"]),
+                float(row["size"]),
+                progress,
+                active=bool(row["active"]),
+                color_fill=bool(row.get("color_fill", False)),
+                progress_fill=bool(row.get("progress_fill", False)),
+                spacing_percent=row.get("spacing_percent"),
+            )
+            painter.restore()
+
+    def _paint_gelv_expanded_lyrics(self, painter: QPainter, rect: QRectF):
+        now = time.monotonic()
+        progress = self._gelv_spacing_progress(now)
+        self._paint_lyric_phase_pulse(painter, rect, self._lyric_phase(now))
+        inner = rect.adjusted(self._u(18.0), self._u(16.0), -self._u(18.0), -self._u(16.0))
+        for row in self._gelv_line_rects(inner, expanded=True, now=now):
+            opacity = max(0.0, min(1.0, float(row.get("opacity", 1.0))))
+            if opacity <= 0.01:
+                continue
+            painter.save()
+            painter.setOpacity(opacity)
+            self._paint_gelv_line(
+                painter,
+                row["rect"],
+                str(row["text"]),
+                float(row["size"]),
+                progress,
+                active=bool(row["active"]),
+                color_fill=bool(row.get("color_fill", False)),
+                progress_fill=bool(row.get("progress_fill", False)),
+                spacing_percent=row.get("spacing_percent"),
+            )
+            painter.restore()
+
+    def _paint_gelv_line(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        text: str,
+        size: float,
+        progress: float,
+        active: bool,
+        color_fill: bool = True,
+        progress_fill: bool = False,
+        spacing_percent: int | None = None,
+    ):
+        if not text:
+            return
+        spacing = int(spacing_percent) if spacing_percent is not None else self._gelv_spacing_percent(progress)
+        layout = self._gelv_layout(text, size, spacing_percent=spacing)
+        x = self._gelv_line_x(rect, text, size, progress, spacing_percent=spacing)
+        if color_fill and bool(getattr(self, "gelv_color_fill_enabled", False)):
+            base = QColor(255, 255, 255, 120 if active else 82)
+            live = self._gelv_fill_color()
+            live.setAlpha(250 if active else 178)
+        elif progress_fill:
+            base = QColor(255, 255, 255, 128 if active else 82)
+            live = QColor(255, 255, 255, 245 if active else 156)
+        else:
+            base = QColor(255, 255, 255, 245 if active else 156)
+            live = QColor(base)
+        self._paint_gelv_songscatter_chunks(painter, rect, x, layout, size, base, live, progress, active)
+
+    def _paint_gelv_songscatter_chunks(
+        self,
+        painter: QPainter,
+        rect: QRectF,
+        x: float,
+        layout: LyricLayout,
+        size: float,
+        base_color: QColor,
+        live_color: QColor,
+        progress: float,
+        active: bool,
+    ):
+        chunks = layout.chunks
+        if not chunks:
+            return
+        progress = max(0.0, min(1.0, float(progress)))
+        live_width = max(0.0, min(layout.total_width, self._lyric_progress_width(layout, progress)))
+        font = self._gelv_font(size, QFont.Weight.Normal)
+        painter.setFont(font)
+        cursor = x
+        for index, chunk in enumerate(chunks):
+            width = layout.widths[index]
+            if width <= 0.0:
+                cursor += width
+                continue
+            sung_amount = max(0.0, min(1.0, (live_width - (cursor - x)) / max(1.0, width)))
+            chunk_color = self._mix_alpha_color(base_color, live_color, sung_amount)
+            token_rect = QRectF(cursor, rect.top(), width, rect.height())
+            painter.setPen(chunk_color)
+            painter.drawText(
+                token_rect,
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
+                chunk,
+            )
+            cursor += width
+
+    def _paint_album_island(self, painter: QPainter, rect: QRectF):
+        painter.save()
+        painter.setClipRect(rect)
+        raw_slots = self._album_island_slots(rect)
+        self._paint_album_island_slots(painter, raw_slots)
+        painter.setOpacity(1.0)
+        if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
+            self._paint_album_island_listened_text(painter, rect, raw_slots)
+        painter.restore()
+
+    def _paint_album_island_slots(self, painter: QPainter, raw_slots: list[dict[str, object]]):
+        slots = sorted(raw_slots, key=lambda slot: int(slot.get("z", 0)))
+        for slot in slots:
+            painter.setOpacity(float(slot["alpha"]) / 255.0)
+            radius = self._u(8.0 if bool(slot["center"]) else 6.0)
+            self._paint_album_island_slot(painter, slot, radius)
+
+    def _paint_album_island_compact(self, painter: QPainter, rect: QRectF):
+        painter.save()
+        painter.setClipRect(rect)
+        stage = rect.adjusted(self._u(8.0), self._u(4.0), -self._u(8.0), -self._u(4.0))
+        raw_slots = self._album_island_slots(stage, reserve_text=True)
+        self._paint_album_island_slots(painter, raw_slots)
+        painter.setOpacity(1.0)
+        if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
+            self._paint_album_island_listened_text(painter, rect, raw_slots)
+        painter.restore()
+
+    def _paint_album_island_slot(self, painter: QPainter, slot: dict[str, object], radius: float):
+        rect = QRectF(slot["rect"])
+        image = slot.get("album_art")
+        if not bool(slot.get("center")) and (not isinstance(image, QImage) or image.isNull()):
+            return
+        tilt = float(slot.get("tilt", 0.0) or 0.0)
+        perspective = slot.get("perspective")
+        painter.save()
+        if isinstance(perspective, dict) and not bool(slot.get("center")):
+            left_h = max(0.45, min(1.0, float(perspective.get("left_height", 1.0) or 1.0)))
+            right_h = max(0.45, min(1.0, float(perspective.get("right_height", 1.0) or 1.0)))
+            left_top = rect.center().y() - rect.height() * left_h / 2.0
+            left_bottom = rect.center().y() + rect.height() * left_h / 2.0
+            right_top = rect.center().y() - rect.height() * right_h / 2.0
+            right_bottom = rect.center().y() + rect.height() * right_h / 2.0
+            path = QPainterPath(QPointF(rect.left(), left_top))
+            path.lineTo(QPointF(rect.right(), right_top))
+            path.lineTo(QPointF(rect.right(), right_bottom))
+            path.lineTo(QPointF(rect.left(), left_bottom))
+            path.closeSubpath()
+            painter.setClipPath(path)
+            painter.setOpacity(float(slot["alpha"]) / 255.0)
+            cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
+            self._paint_cover(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
+            painter.restore()
+            return
+        if abs(tilt) > 0.01:
+            center = rect.center()
+            painter.translate(center)
+            painter.shear(math.tan(math.radians(tilt)) * 0.34, 0.0)
+            painter.translate(-center)
+        cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
+        self._paint_cover(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
+        painter.restore()
+
+    def _paint_album_island_listened_text(self, painter: QPainter, rect: QRectF, slots: list[dict[str, object]]):
+        center_slot = next((slot for slot in slots if bool(slot.get("center"))), None)
+        if center_slot is None:
+            return
+        cover_rect = QRectF(center_slot["rect"])
+        text_rect = QRectF(
+            cover_rect.right() + self._u(10.0),
+            rect.top(),
+            max(0.0, rect.right() - cover_rect.right() - self._u(12.0)),
+            rect.height(),
+        )
+        if text_rect.width() < self._u(46.0):
+            return
+        painter.save()
+        progress = self._album_island_transition_progress()
+        painter.setOpacity(max(0.0, min(1.0, progress)))
+        expanded = rect.height() >= self._u(92.0)
+        painter.setFont(self._font(17 if expanded else 9, QFont.Weight.Bold if expanded else QFont.Weight.DemiBold, shrink=False))
+        painter.setPen(QColor(255, 255, 255, 218 if expanded else 152))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._album_island_listened_text())
+        painter.restore()
+
     def _compact_lyric_lines(self) -> list[str]:
         if self._is_instrumental_track():
             return [self._compact_music_text()]
         return [self._clean_lyric_for_width(line) or line for line in self.lyrics] or [self.track_title or self.artist or "正在播放"]
 
     def _paint_music_expanded(self, painter: QPainter, rect: QRectF):
+        if self._should_paint_album_island():
+            self.music_cover_rect = QRectF()
+            self._paint_album_island_expanded(painter, rect)
+            return
         margin = self._u(16)
         cover_size = self._u(58)
         cover = QRectF(rect.left() + margin, rect.top() + self._u(14), cover_size, cover_size)
@@ -5400,6 +6649,39 @@ class IslandStackVisual(QWidget):
 
         viewport = QRectF(rect.left() + self._u(22), cover.bottom() + self._u(10), rect.width() - self._u(44), rect.bottom() - cover.bottom() - self._u(28))
         self._paint_lyric_viewport(painter, viewport)
+
+    def _paint_album_island_expanded(self, painter: QPainter, rect: QRectF):
+        painter.save()
+        painter.setClipRect(rect)
+        margin = self._u(18.0)
+        controls_w = self._u(132.0)
+        self.music_button_rects = {}
+
+        info = QRectF(rect.left() + margin, rect.top() + self._u(13.0), rect.width() - controls_w - margin * 2.0 - self._u(18.0), self._u(42.0))
+        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(24.0)), self.track_title, 12, QColor(255, 255, 255, 238), True)
+        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, QColor(255, 255, 255, 132), False)
+
+        controls_x = rect.right() - margin - controls_w
+        labels = ["\u23ee", "\u23f8" if self.media_is_playing else "\u25b6", "\u23ed"]
+        commands = ["music:previous", "music:toggle_play_pause", "music:next"]
+        for i, label in enumerate(labels):
+            button_size = self._u(34.0)
+            br = QRectF(controls_x + i * self._u(44.0), rect.top() + self._u(19.0), button_size, button_size)
+            self.music_button_rects[commands[i]] = QRectF(br)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 22 if i != 1 else 34))
+            painter.drawRoundedRect(br, self._u(12.0), self._u(12.0))
+            painter.setFont(QFont("Segoe UI Symbol", self._font_size(14), QFont.Weight.Medium))
+            painter.setPen(QColor(255, 255, 255, 232))
+            painter.drawText(br, Qt.AlignmentFlag.AlignCenter, label)
+
+        stage = QRectF(rect.left() + margin, rect.top() + self._u(58.0), rect.width() - margin * 2.0, rect.height() - self._u(76.0))
+        raw_slots = self._album_island_slots(stage, reserve_text=True)
+        self._paint_album_island_slots(painter, raw_slots)
+        painter.setOpacity(1.0)
+        if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
+            self._paint_album_island_listened_text(painter, stage, raw_slots)
+        painter.restore()
 
     def _lyric_transition_progress(self, duration: float = 0.52) -> tuple[float, float]:
         if getattr(self, "lyric_transition_kind", "") == "seek":
@@ -5498,6 +6780,14 @@ class IslandStackVisual(QWidget):
         painter.save()
         painter.setClipRect(rect)
         if not self.lyrics:
+            painter.restore()
+            return
+        if self._should_paint_album_island():
+            self._paint_album_island(painter, rect)
+            painter.restore()
+            return
+        if self._gelv_enabled():
+            self._paint_gelv_expanded_lyrics(painter, rect)
             painter.restore()
             return
         if len(self.lyrics) <= 1 and self._is_instrumental_track():
@@ -7088,7 +8378,7 @@ class IslandStackVisual(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(ref["module"])
         painter.drawRoundedRect(rect, radius, radius)
-        painter.setPen(QPen(ref["accent"], self._u(1.4)))
+        painter.setPen(QPen(ref.get("module_stroke", ref["accent"]), self._u(1.2 if not self._system_dark_mode() else 1.4)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), radius, radius)
 
@@ -7323,8 +8613,8 @@ class IslandStackVisual(QWidget):
                 pause = QRectF(button_x, rect.center().y() - button_h - self._u(3.0), button_w, button_h)
                 clear = QRectF(button_x, rect.center().y() + self._u(5.0), button_w, button_h)
                 red = QColor(223, 0, 0, 245)
-                self._paint_time_countdown_text_button(painter, pause, "暂停", QColor(0, 0, 0, 0), ref["accent"], ref["text"])
-                self._paint_time_countdown_text_button(painter, clear, "取消", red, ref["accent"], ref["text"])
+                self._paint_time_countdown_text_button(painter, pause, "暂停", QColor(0, 0, 0, 0), ref.get("control_stroke", ref["accent"]), ref["text"])
+                self._paint_time_countdown_text_button(painter, clear, "取消", red, ref.get("control_stroke", ref["accent"]), ref["text"])
                 self.plugin_action_rects["timer-pause"] = ring_hit.united(pause.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
                 self.plugin_action_rects["timer-clear"] = QRectF(clear.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
                 return
@@ -7385,7 +8675,7 @@ class IslandStackVisual(QWidget):
             button = QRectF(grid_x + col * (button_w + gap_x), grid_y + row * (button_h + gap_y), button_w, button_h)
             command = f"timer-start-{int(item['minutes'])}"
             self.plugin_action_rects[command] = QRectF(button.adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0)))
-            painter.setPen(QPen(ref["accent"], self._u(1.4)))
+            painter.setPen(QPen(ref.get("control_stroke", ref["accent"]), self._u(1.2)))
             painter.setBrush(ref["module"])
             painter.drawRoundedRect(button, button.height() / 2.0, button.height() / 2.0)
             self._paint_static_elided_text(painter, button.adjusted(self._u(5.0), 0.0, -self._u(5.0), 0.0), f"{int(item['minutes'])}分钟", 10, ref["accent"], True, Qt.AlignmentFlag.AlignCenter)
@@ -8755,6 +10045,36 @@ class IslandStackVisual(QWidget):
             chunks.append(buffer)
         return chunks or ([text] if text else [])
 
+    def _gelv_chunks(self, text: str) -> list[str]:
+        return [str(chunk).strip() for chunk in self._lyric_chunks(text) if str(chunk).strip()]
+
+    def _gelv_join_chunks(self, chunks: list[str]) -> str:
+        output = ""
+        for chunk in chunks:
+            if not output:
+                output = chunk
+                continue
+            joins_as_word = (
+                output[-1:].isascii()
+                and output[-1:].isalnum()
+                and chunk[:1].isascii()
+                and chunk[:1].isalnum()
+            )
+            output += (" " if joins_as_word else "") + chunk
+        return output.strip()
+
+    def _gelv_split_line(self, text: str, threshold: int | None = None) -> tuple[str, str] | None:
+        chunks = self._gelv_chunks(text)
+        limit = max(1, int(threshold if threshold is not None else 18))
+        if len(chunks) <= limit:
+            return None
+        upper_count = (len(chunks) + 1) // 2
+        upper = self._gelv_join_chunks(chunks[:upper_count])
+        lower = self._gelv_join_chunks(chunks[upper_count:])
+        if not upper or not lower:
+            return None
+        return upper, lower
+
     def _lyric_layout_key(self, text: str, size: float, bold: bool, spacing_percent: int | None = None) -> tuple[object, ...]:
         weight = QFont.Weight.Bold if bold else QFont.Weight.Normal
         weight_value = getattr(weight, "value", None)
@@ -8815,6 +10135,53 @@ class IslandStackVisual(QWidget):
             cache.pop(next(iter(cache)))
         return layout
 
+    def _gelv_layout_key(self, text: str, size: float, spacing_percent: int | None = None) -> tuple[object, ...]:
+        return (
+            "gelv",
+            text,
+            self._font_size(size),
+            tuple(self._gelv_font_families()),
+            int(spacing_percent if spacing_percent is not None else self._gelv_spacing_percent(1.0)),
+        )
+
+    def _gelv_chunk_spacing(self, chunk: str, base_width: float, reference_width: float | None = None, spacing_percent: int | None = None) -> float:
+        if not chunk or not chunk.strip():
+            return 0.0
+        spacing = max(100, min(420, int(spacing_percent if spacing_percent is not None else self._gelv_spacing_percent(1.0))))
+        spread = max(1.0, min(4.2, spacing / 100.0))
+        has_cjk = any(self._is_cjk_lyric_char(char) for char in chunk)
+        minimum = self._u(8.0 if has_cjk else 10.0)
+        selected_width = max(0.0, float(base_width))
+        original_width = max(0.0, float(reference_width if reference_width is not None else base_width))
+        effective_width = (selected_width + original_width) * 0.5
+        proportional = effective_width * (0.30 if has_cjk else 0.28)
+        return max(minimum, proportional) * spread
+
+    def _gelv_layout(self, text: str, size: float, spacing_percent: int | None = None) -> LyricLayout:
+        key = self._gelv_layout_key(text, size, spacing_percent)
+        cache = getattr(self, "_lyric_layout_cache", None)
+        if cache is None:
+            cache = {}
+            self._lyric_layout_cache = cache
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        chunks = tuple(self._gelv_chunks(text))
+        font = self._gelv_font(size, QFont.Weight.Normal)
+        metrics = QFontMetrics(font)
+        reference_font = self._gelv_font(18 if size >= 16 else 15, QFont.Weight.Normal)
+        reference_metrics = QFontMetrics(reference_font)
+        widths = []
+        for chunk in chunks:
+            width = float(metrics.horizontalAdvance(chunk))
+            reference_width = float(reference_metrics.horizontalAdvance(chunk))
+            widths.append(width + self._gelv_chunk_spacing(chunk, width, reference_width, spacing_percent))
+        layout = LyricLayout(text=text, chunks=chunks, widths=tuple(widths), total_width=sum(widths), font_key=key)
+        cache[key] = layout
+        if len(cache) > 96:
+            cache.pop(next(iter(cache)))
+        return layout
+
     def _lyric_progress_width(self, layout: LyricLayout, progress: float) -> float:
         chunks = layout.chunks
         if not chunks:
@@ -8866,7 +10233,7 @@ class IslandStackVisual(QWidget):
             max(0, min(255, int(a.alpha() + (b.alpha() - a.alpha()) * amount) if alpha is None else alpha)),
         )
 
-    def _paint_elastic_lyric_chunks(
+    def _paint_wave_stream_lyric_chunks(
         self,
         painter: QPainter,
         rect: QRectF,
@@ -8944,6 +10311,13 @@ class IslandStackVisual(QWidget):
         live_width = self._lyric_progress_width(layout, progress)
         x = self._scrolling_text_x(rect, text_w, centered, centered_scroll, focus_px=live_width)
         color, companion = self._accent_pair()
+        wave_fill_enabled = bool(getattr(self, "wave_color_fill_enabled", False))
+        if wave_fill_enabled:
+            fill = self._wave_fill_color()
+            color = QColor(fill)
+            companion = QColor(fill).lighter(128)
+            base_color = self._mix_alpha_color(base_color, fill, 0.34, alpha=base_color.alpha())
+            live_color = QColor(fill.red(), fill.green(), fill.blue(), live_color.alpha())
 
         painter.save()
         painter.setClipRect(rect)
@@ -8960,7 +10334,7 @@ class IslandStackVisual(QWidget):
             painter.drawEllipse(QPointF(focus_x, rect.center().y()), focus_radius, focus_radius * 0.48)
 
         glow_alpha = int(30 + 28 * confidence + 18 * bloom)
-        self._paint_elastic_lyric_chunks(
+        self._paint_wave_stream_lyric_chunks(
             painter,
             rect.adjusted(-self._u(0.6), -self._u(0.4), self._u(0.6), self._u(0.4)),
             x,
@@ -8975,7 +10349,7 @@ class IslandStackVisual(QWidget):
         )
 
         elastic_live = QColor(live_color.red(), live_color.green(), live_color.blue(), max(0, min(255, int(live_color.alpha() * (0.76 + 0.16 * bloom)))))
-        self._paint_elastic_lyric_chunks(
+        self._paint_wave_stream_lyric_chunks(
             painter,
             rect,
             x,

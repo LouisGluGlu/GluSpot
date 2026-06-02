@@ -2,6 +2,11 @@
 
 ## P0
 
+- Add the `格律宋散` text-flow style as separate from the existing `波光逐流` style, including settings exclusivity with the old dual-line lyric option.
+- Add `格律宋散` long-lyric split behavior instead of scrolling: split by chunks/words, center both lines, hide the smaller next-lyric row while split.
+- Add `格律宋散` `逐字染色` mode: pure black music background, album-color high-saturation fill, and `#00D7FF` fallback for neutral album colors.
+- Add no-lyrics album island mode for instrumental/no-lyrics/user-disabled lyrics, with 3/5/7 cover count and queue/history fallback.
+- Define taskbar fusion as a separate Windows-taskbar mode: `Finder融合` enabled must block taskbar fusion; `Finder融合` disabled may recognize taskbar placement.
 - Keep the lyric-led motion system free of visible progress-bar and drag-progress behavior.
 - Keep one timeline module as the owner of active-line selection and line phase.
 - Preserve intentional two-line lyric entries in compact and expanded layouts without changing the provider data contract.
@@ -20,10 +25,13 @@
 - Fix severe Finder regression where Finder material replaced the island shell and made the original island transparent.
 - Fix severe Finder material sampling so fused Finder backgrounds replicate the upper Finder bar material instead of cropping wallpaper/screen content.
 - In Finder mode, expand the replicated Finder outer frame around plugin side reminders while preserving each side reminder's own semantic background.
+- For taskbar island compact mode, shrink the main and side islands together, constrain them to taskbar-safe bounds, adapt height to the taskbar with small vertical insets, and change the main island radius from pill-like rounding to album-cover-like rounding.
+- Keep taskbar fusion design docs isolated under `docs/taskbar-island/` until a code-ready implementation plan is accepted.
 - Fix side-reminder fallback rules so reminders do not collapse before a real boundary and circular fallback keeps icons centered.
 
 ## P1
 
+- Add visual regression coverage for compact and expanded taskbar island states once the screenshot harness is stable.
 - Add separate compact and expanded music island duotone balance controls with animated color weighting.
 - Parse enhanced lyric structures such as NetEase YRC/translated lyric pairing before enabling duet-style simultaneous two-line display.
 - Continue polishing plugin island compact strip and separate down-expanded panel visual styles after the first functional panel pass.
