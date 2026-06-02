@@ -16,8 +16,8 @@
 - **Focused TIME strip:** focused plugin cells must receive `summary` and `progress`, so countdown text such as `倒计时 1:02:03` remains complete instead of falling back to the clock/detail field.
 - **Stretch alarm list:** the alarm list owns wheel scrolling whenever the cursor is inside its list rect, including triple/stretch layouts. At list bounds, the narrow/double page-switch behavior still works.
 - **Stretch alarm editor:** wide alarm editor uses the same `frequency_unit` plus dynamic recurrence value mapping as the narrow editor, including dedicated weekly/monthly/yearly detail page commands.
-- **Side-alert split:** countdown and alarm side pills remain separate render paths and separate virtual ids. Countdown not due shows a black pill with yellow countdown symbol and static remaining time. Countdown due shows a yellow pill with black `时间到` and synchronized scale animation. Alarm not due shows a black pill with yellow alarm symbol and either note or time, controlled by a setting. Alarm due shows a yellow pill with black note text and white focus-character scrolling.
-- **Alarm due confirmation:** when TIME reports an alarm status, capture the latest alarm reminder in widget state. The alarm module shows a confirmation block until `alarm-due-confirm` is clicked. A newer alarm overwrites the old pending block.
+- **Side-alert split:** countdown and alarm side pills remain separate virtual ids so both due states can appear at once. Countdown not due shows a black pill with yellow countdown symbol and static remaining time. Alarm not due shows a black pill with yellow alarm symbol and either note or time, controlled by a setting. Countdown due and alarm due now share the same single-layer yellow pill language with black icon/text; countdown shows `时间到`, alarm shows the alarm note, and neither uses the old oversized text wave or white focus-character scrolling.
+- **Alarm due confirmation:** when TIME reports an alarm status, capture the latest alarm reminder in widget state. The alarm module is temporarily taken over by a large block-level confirmation until `alarm-due-confirm` is clicked; the alarm list and add action stay hidden during that due state. A newer alarm overwrites the old pending block.
 - **Future style placeholders:** add settings keys and visible options for side-island, plugin-island, music-island, and TIME alarm side display style so future visual schemes have a stable home.
 
 ## Tasks
@@ -29,7 +29,7 @@
 - [ ] Add failing tests for alarm list wheel scrolling in stretch layout.
 - [ ] Add failing tests for stretch alarm editor registering `frequency_unit` plus weekly/monthly/yearly detail action targets.
 - [ ] Add failing tests for alarm side display setting (`note` vs `time`).
-- [ ] Add failing tests for alarm due pending capture, confirm block registration, and clearing by `alarm-due-confirm`.
+- [ ] Add failing tests for alarm due pending capture, full-module confirm block registration, hidden list/add actions, and clearing by `alarm-due-confirm`.
 - [ ] Add source/default tests for future style placeholder settings.
 
 ### Task 2: GREEN Implementation

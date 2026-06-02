@@ -111,7 +111,7 @@
 - **No nested chip:** TIME side reminders are a single capsule. Do not draw an inner value pill, inner due pill, or second mini icon inside the same capsule.
 - **Running countdown:** match the figure-2 language: black capsule, yellow countdown/hourglass icon, static countdown value. No `Timer running`, no `备注`, no date text.
 - **Running alarm:** black capsule, yellow clock/alarm icon, alarm remark text. Long remarks may scroll inside the same capsule.
-- **Done state:** match the figure-3 language: yellow capsule with black text only. Countdown done shows `时间到`; alarm done may show the remark. No left icon in done pills.
+- **Done state:** use the same single-layer structure as waiting pills: yellow capsule, black line icon, black text. Countdown done shows `时间到`; alarm done shows the remark. This replaces the earlier text-only done pill.
 - **Layer discipline:** a border/stroke is allowed, but it must not read as an additional contained control. The side reminder should read as one object.
 
 ---
@@ -122,7 +122,7 @@
 - **Fixed reminder chips:** compact countdown and alarm reminders use fixed target widths instead of stretching across all leftover space. The countdown chip is shorter and value-focused; the alarm chip may be slightly wider for a short note.
 - **Circular fallback:** if the remaining compact-strip space cannot fit fixed reminder chips, each reminder degrades to a circular icon-only cell. Countdown values do not scroll in this state, and idle/date summaries still do not create fake countdown cells.
 - **TIME side icon scale:** rectangular TIME side pills keep the current single-layer style but enlarge the yellow line icon. The icon should read clearly at the 42 px side-alert height.
-- **Boundary done fallback:** when boundary pressure collapses a done TIME reminder into the circular fallback, draw a yellow circle with a black countdown icon. Rectangular done pills remain text-only.
+- **Boundary done fallback:** when boundary pressure collapses a done TIME reminder into the circular fallback, draw a yellow circle with the matching black countdown/alarm icon. Rectangular done pills keep the same icon + text structure as waiting pills.
 - **Alarm row editing:** alarm rows expose a dedicated edit hit target separate from the switch toggle. Opening edit pre-fills hour, minute, note, frequency, and weekdays from the selected row; saving updates that same row and preserves its enabled state. Adding a new alarm still inserts a new enabled row.
 
 ---

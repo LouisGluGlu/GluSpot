@@ -14,8 +14,8 @@
 
 - Multiple side reminders should stay in one horizontal fallback row. If both sides cannot fit two circular alerts on the same side, split the pair around the main island instead of clamping them into overlap.
 - Future/scheduled alarms are waiting reminders, not due reminders. They must carry `running` style state until TIME reports an actual `alarm`/due status.
-- Expanded alarm due confirmation reserves its own block and the alarm list reserves room above the add button; no confirmation/list/add hit rects may overlap.
-- Due alarm side reminders always use the alarm scrolling text renderer so the white focus character behavior is visible for both short and long notes.
+- Expanded alarm due confirmation takes over the alarm module as one large block-level reminder; the alarm list, row actions, and add button are hidden until the reminder is confirmed.
+- Superseded by the TIME side-alert unification pass: due alarm side reminders now use the same static black icon/text channel as due countdowns, so the old white focus-character renderer is no longer part of the target style.
 - Finder mode must keep the music island's own opaque shell. The Finder cradle/material may exist behind or around the island, but it must not become the island style or make the original island transparent.
 - Side reminders collapse only under true boundary pressure. If two full reminders cannot fit on one side but the main island is not at a boundary, they split across left/right instead of shrinking to circles.
 - Circular TIME reminders center their icon inside the circular background and skip text painting; the circular fallback must not reuse the rectangular left-icon layout.
@@ -26,8 +26,8 @@
 
 - [x] Add a failing test for two circular side reminders in an extreme floating boundary: they must not intersect each other or the main island.
 - [x] Add a failing test proving scheduled alarm compact segments use waiting/running state instead of due/alarm state.
-- [x] Add a failing test for expanded alarm due confirmation geometry: due block, list, and add button do not overlap, and the due block has a dedicated height.
-- [x] Add a failing test requiring due alarm side reminders to call the alarm scrolling text renderer even for short notes.
+- [x] Add a failing test for expanded alarm due confirmation geometry: due block, list, and add button do not overlap, and the due block has a dedicated height. Superseded on 2026-06-02 by the full-module due confirmation tests that require hidden list/add actions.
+- [x] Add a failing test requiring due alarm side reminders to call the alarm scrolling text renderer even for short notes. Superseded on 2026-06-01 by the unified static TIME side-alert style.
 - [x] Add a failing test proving Finder-owned music surfaces skip standalone music background painters. Superseded by the severe transparent-island regression.
 - [x] Add a failing test proving Finder mode still paints the normal opaque music shell and border.
 - [x] Add a failing test proving non-boundary multi-reminders split as full rectangles instead of shrinking.
@@ -37,8 +37,8 @@
 
 - [x] Update `_plugin_alert_rect()` to split two circular fallback alerts across both sides when neither side can fit the full row.
 - [x] Update `_time_compact_segments()` so scheduled alarm rows emit `running` state.
-- [x] Update `_paint_time_alarm_module()` to reserve add-button space in `list_rect` and enlarge the due confirmation block.
-- [x] Update `_paint_time_plugin_alert()` so due alarm notes consistently use `_paint_alarm_scrolling_text()`.
+- [x] Update `_paint_time_alarm_module()` to reserve add-button space in `list_rect` and enlarge the due confirmation block. Superseded on 2026-06-02: due alarms now return early after painting a full-module confirmation block and resetting alarm list scroll state.
+- [x] Update `_paint_time_plugin_alert()` so due alarm notes consistently use `_paint_alarm_scrolling_text()`. Superseded on 2026-06-01: due alarm notes now use the unified static side-alert text path.
 - [x] Add a Finder-owned surface guard and use it in `_paint_music()` to skip standalone shell/background layers after the Finder cradle has been painted. Superseded by the severe transparent-island regression.
 - [x] Roll back the Finder-owned surface skip so `_paint_music()` keeps the normal shell in Finder mode.
 - [x] Change multi-reminder circular fallback to require boundary pressure or true single-alert space exhaustion.

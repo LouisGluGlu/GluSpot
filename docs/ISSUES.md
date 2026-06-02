@@ -15,7 +15,7 @@
 - Verify NetEase lyric-page anchoring against mini-player, full lyric page, and non-lyric pages.
 - Fix plugin side-reminder regressions: extreme boundary/floating layouts must not overlap, split into half-width remnants, or stack circular reminders vertically.
 - Keep TIME reminder state isolated so a nearby countdown/alarm cannot reuse the abandoned yellow-background waiting style.
-- Fix expanded TIME alarm due presentation so the pending confirmation block and scrollable alarm list do not overlap the add button.
+- Keep expanded TIME alarm due presentation isolated from the scrollable alarm list and add button.
 - Fix Finder fused material painting so the MyFinder-derived cradle does not show a second standalone island layer.
 - Fix severe Finder regression where Finder material replaced the island shell and made the original island transparent.
 - Fix severe Finder material sampling so fused Finder backgrounds replicate the upper Finder bar material instead of cropping wallpaper/screen content.

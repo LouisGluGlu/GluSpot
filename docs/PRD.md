@@ -60,7 +60,10 @@ The UI should avoid a literal progress bar. Song progress should be expressed th
 - Each plugin should have a management surface that can grow into real settings and diagnostics instead of remaining a placeholder.
 - Side reminder islands must arrange multiple active reminders horizontally, including the circular boundary fallback state. They must never stack circular reminders vertically beside the main island.
 - Boundary-aware side reminders should consider the combined footprint of the main island and side reminders before choosing right, left, or circular fallback placement.
-- TIME countdown and alarm reminders must keep separate waiting and due styles. Waiting countdowns and alarms use black side islands with yellow icons/text; due countdowns use a yellow island with black `时间到`; due alarms use a yellow island with the alarm note and white-focus scrolling text.
+- TIME countdown and alarm reminders must keep separate virtual identities so countdown and alarm due states can appear at the same time. Waiting countdowns and alarms use black side islands with yellow icons/text; due countdowns and due alarms use the same yellow side-island shell with black icon/text, where countdown shows `时间到` and alarm shows the alarm note.
+- Expanded TIME alarm due confirmation should temporarily take over the alarm module as a large block-level reminder, hiding the alarm list and add action until the user confirms it.
+- Starting or running a countdown must not overwrite an already captured alarm due confirmation label or alarm time.
+- Confirming an alarm due reminder must suppress the same provider alarm payload until a different alarm arrives or TIME leaves alarm status.
 - Finder-style mode must not replace the island's own visual shell. Finder material may frame or sample behind the island, but the music island itself must remain opaque and use the normal island rendering path.
 - In Finder-style mode, plugin side reminders keep their own semantic backgrounds while the Finder fused outer material frame expands horizontally to include active side reminders, preventing side islands from floating outside the shared background.
 

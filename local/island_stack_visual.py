@@ -284,6 +284,7 @@ class IslandStackVisual(QWidget):
         self.plugin_alarm_editor_note_hint = ""
         self.plugin_alarm_editor_note_hint_until = 0.0
         self.plugin_alarm_due_pending: dict[str, object] = {}
+        self.plugin_alarm_due_acknowledged_key = ""
         self.show_debug_overlay = False
         self.finder_material_refreshed_at = time.monotonic()
         self.manual_finder_available = False
@@ -2210,6 +2211,11 @@ class IslandStackVisual(QWidget):
             self.refresh_plugin_data()
             return
         if command == "alarm-due-confirm":
+            pending = self._time_alarm_due_pending()
+            if pending:
+                label = str(pending.get("label") or "闹钟").strip() or "闹钟"
+                time_text = str(pending.get("time") or "").strip()
+                self.plugin_alarm_due_acknowledged_key = str(pending.get("key") or f"{time_text}|{label}")
             self.plugin_alarm_due_pending = {}
             self._request_visual_update()
             return
@@ -2355,18 +2361,40 @@ class IslandStackVisual(QWidget):
         pending = getattr(self, "plugin_alarm_due_pending", {})
         return dict(pending) if isinstance(pending, dict) and pending else {}
 
+    def _time_alarm_due_acknowledged_matches(self, time_text: str, label: str) -> bool:
+        acknowledged = str(getattr(self, "plugin_alarm_due_acknowledged_key", "") or "").strip()
+        if not acknowledged:
+            return False
+        label = str(label or "闹钟").strip() or "闹钟"
+        time_text = str(time_text or "").strip()
+        key = f"{time_text}|{label}" if time_text else ""
+        return bool((key and acknowledged == key) or acknowledged.endswith(f"|{label}"))
+
     def _capture_time_alarm_due_pending(self, model: dict[str, object]) -> dict[str, object]:
         if str(model.get("status") or "").strip().lower() != "alarm":
+            if not self._time_alarm_due_pending():
+                self.plugin_alarm_due_acknowledged_key = ""
             return {}
-        label = self._time_alarm_alert_text_from_parts(
-            str(model.get("alert_body") or ""),
-            str(model.get("alert_title") or ""),
-            str(model.get("summary") or ""),
-        )
-        time_text = self._strip_timer_prefix(str(model.get("summary") or model.get("detail") or ""))
+        summary = str(model.get("summary") or "")
+        alert_body = str(model.get("alert_body") or "")
+        countdown_source = f"{alert_body} {summary}".lower()
+        has_countdown_context = any(token in countdown_source for token in ("倒计时", "计时", "时间到", "countdown", "timer", "time up", "done"))
+        label_parts = [alert_body, str(model.get("alert_title") or "")]
+        if not has_countdown_context:
+            label_parts.append(summary)
+        label = self._time_alarm_alert_text_from_parts(*label_parts)
+        existing = self._time_alarm_due_pending()
+        if label == "闹钟" and has_countdown_context and existing:
+            return existing
+        if label == "闹钟" and has_countdown_context and self._time_text_looks_like_countdown(alert_body):
+            return {}
+        time_source = summary if not has_countdown_context else ""
+        time_text = self._strip_timer_prefix(str(time_source or model.get("detail") or ""))
         if not re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", time_text):
-            match = re.search(r"\d{1,2}:\d{2}(?::\d{2})?", str(model.get("summary") or model.get("detail") or ""))
+            match = re.search(r"\d{1,2}:\d{2}(?::\d{2})?", str(time_source or model.get("detail") or ""))
             time_text = match.group(0) if match else ""
+        if self._time_alarm_due_acknowledged_matches(time_text, label):
+            return {}
         pending = {
             "time": time_text,
             "label": label or "闹钟",
@@ -2419,8 +2447,43 @@ class IslandStackVisual(QWidget):
                 )
             )
 
+        def add_countdown_from_text(text: str, priority: int, allow_bare_time: bool = True) -> bool:
+            source = str(text or "").strip()
+            if not self._time_text_looks_like_countdown(source):
+                return False
+            lowered = source.lower()
+            has_countdown_context = any(token in lowered for token in ("倒计时", "计时", "时间到", "countdown", "timer", "time up", "done"))
+            if not allow_bare_time and not has_countdown_context:
+                return False
+            done_countdown = any(token in lowered for token in ("计时结束", "时间到", "time up", "timer done", "done"))
+            value = self._strip_timer_prefix(source)
+            if done_countdown or value in {"", "结束"}:
+                add("countdown", "时间到", "done", "倒计时", priority)
+            else:
+                add("countdown", value, "running", "倒计时", max(priority, 30))
+            return True
+
         if status_key == "alarm":
-            add("alarm", self._time_alarm_alert_text_from_parts(alert_body, alert_title, summary), "alarm", "闹钟", min(int(alert_priority), 3))
+            countdown_context = any(token in f"{alert_body} {summary}".lower() for token in ("倒计时", "计时", "时间到", "countdown", "timer", "time up", "done"))
+            alarm_label = self._time_alarm_alert_text_from_parts(alert_body, alert_title)
+            pending_alarm = self._time_alarm_due_pending()
+            if alarm_label == "闹钟" and countdown_context:
+                if pending_alarm:
+                    pending_label = str(pending_alarm.get("label") or "闹钟").strip() or "闹钟"
+                    add("alarm", pending_label, "alarm", "闹钟", min(int(alert_priority), 3))
+                elif not self._time_text_looks_like_countdown(alert_body):
+                    time_text = self._strip_timer_prefix(str(detail or ""))
+                    if not self._time_alarm_due_acknowledged_matches(time_text, alarm_label):
+                        add("alarm", alarm_label, "alarm", "闹钟", min(int(alert_priority), 3))
+            else:
+                time_source = "" if countdown_context else summary
+                time_text = self._strip_timer_prefix(str(time_source or detail or ""))
+                if not re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", time_text):
+                    match = re.search(r"\d{1,2}:\d{2}(?::\d{2})?", str(time_source or detail or ""))
+                    time_text = match.group(0) if match else ""
+                if not self._time_alarm_due_acknowledged_matches(time_text, alarm_label):
+                    add("alarm", alarm_label, "alarm", "闹钟", min(int(alert_priority), 3))
+            add_countdown_from_text(summary, max(min(int(alert_priority) + 2, 5), 4), allow_bare_time=False)
             return candidates
 
         pending_alarm = self._time_alarm_due_pending()
@@ -2434,7 +2497,15 @@ class IslandStackVisual(QWidget):
                 candidates.clear()
                 add("alarm", note, "alarm", "闹钟", min(int(alert_priority), 3))
             else:
-                add("countdown", "时间到", "done", "倒计时", int(alert_priority))
+                countdown_source = next(
+                    (
+                        str(candidate or "")
+                        for candidate in (alert_body, summary, detail)
+                        if self._time_text_looks_like_countdown(str(candidate or ""))
+                    ),
+                    "时间到",
+                )
+                add_countdown_from_text(countdown_source, int(alert_priority))
             return candidates
 
         model_segments = self._time_compact_segments(detail, summary, status, alert_body)
@@ -2461,6 +2532,16 @@ class IslandStackVisual(QWidget):
             if is_time and self._time_alert_side_suppressed(include_expanded):
                 continue
             if is_time:
+                self._capture_time_alarm_due_pending(
+                    {
+                        "label": label,
+                        "detail": detail,
+                        "summary": summary,
+                        "status": status,
+                        "alert_title": alert_title,
+                        "alert_body": alert_body,
+                    }
+                )
                 candidates.extend(self._time_side_alert_candidates(index, label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, alert_priority))
                 continue
             normalized_status = str(status or "").lower()
@@ -2700,6 +2781,8 @@ class IslandStackVisual(QWidget):
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.scene_suppressed:
+                return
+            if self._main_kind() != IslandKind.MUSIC:
                 return
             self._set_expanded(False)
             self._pulse_stack()
@@ -3239,7 +3322,7 @@ class IslandStackVisual(QWidget):
         cursor_edge = main_rect.bottom() + gap if direction >= 0 else main_rect.top() - gap
 
         plugin_alerts = self._active_plugin_alerts(2)
-        if plugin_alerts and main_kind != IslandKind.PLUGIN:
+        if plugin_alerts:
             for alert_slot, plugin_alert in enumerate(plugin_alerts):
                 _index, _label, _detail, _summary, _color, _icon, plugin_id, _status, _alert_title, _alert_body, _alert_priority = plugin_alert
                 alert_rect = self._plugin_alert_rect(main_rect, alert_slot, len(plugin_alerts))
@@ -3364,6 +3447,14 @@ class IslandStackVisual(QWidget):
             width = min(width, usable)
             x = self._clamp_rect_x_to_screen(main_rect.left() - gap - width, width, screen_left, screen_right)
         if total > 1:
+            try:
+                alerts_for_row = self._active_plugin_alerts(total)
+            except Exception:
+                alerts_for_row = []
+            same_time_row = len(alerts_for_row) >= total and all(
+                str(alert[1] or "").strip().upper() == "TIME" or str(alert[6] or "").strip().casefold().startswith("time")
+                for alert in alerts_for_row[:total]
+            )
             row_width = self._plugin_alert_row_desired_width(total, width)
             side = self._plugin_alert_side_for_row(main_rect, row_width, gap, row_gap, total, side, screen_left, screen_right)
             split_sides = False
@@ -3372,7 +3463,14 @@ class IslandStackVisual(QWidget):
             row_fits_alternate = self._plugin_alert_row_fits(main_rect, row_width, gap, row_gap, total, alternate, screen_left, screen_right)
             right_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, row_width, gap, "right"), row_width, screen_left, screen_right)
             left_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, row_width, gap, "left"), row_width, screen_left, screen_right)
-            if total == 2 and not pressure and not row_fits_side and not row_fits_alternate and right_single and left_single:
+            if total == 2 and same_time_row and not row_fits_side and not row_fits_alternate:
+                width = self._plugin_alert_circle_size(height)
+                side = "right" if right_space >= left_space else "left"
+                if not self._plugin_alert_row_fits(main_rect, width, gap, row_gap, total, side, screen_left, screen_right):
+                    alternate = "left" if side == "right" else "right"
+                    if self._plugin_alert_row_fits(main_rect, width, gap, row_gap, total, alternate, screen_left, screen_right):
+                        side = alternate
+            elif total == 2 and not pressure and not row_fits_side and not row_fits_alternate and right_single and left_single:
                 width = row_width
                 side = "right" if slot == 0 else "left"
                 x = self._plugin_alert_x_for_side(main_rect, width, gap, side)
@@ -3385,7 +3483,7 @@ class IslandStackVisual(QWidget):
                 row_fits_alternate = self._plugin_alert_row_fits(main_rect, width, gap, row_gap, total, alternate, screen_left, screen_right)
                 right_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, width, gap, "right"), width, screen_left, screen_right)
                 left_single = self._rect_x_fits_screen(self._plugin_alert_x_for_side(main_rect, width, gap, "left"), width, screen_left, screen_right)
-                if total == 2 and not row_fits_side and not row_fits_alternate and right_single and left_single:
+                if total == 2 and not same_time_row and not row_fits_side and not row_fits_alternate and right_single and left_single:
                     side = "right" if slot == 0 else "left"
                     x = self._plugin_alert_x_for_side(main_rect, width, gap, side)
                     split_sides = True
@@ -5670,7 +5768,8 @@ class IslandStackVisual(QWidget):
             return "闹钟"
         value = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", "", value).strip()
         value = re.sub(r"^\s*(?:闹钟提醒?|提醒)[:：\s]*", "", value).strip()
-        if value.strip().lower() in {"alarm", "timer", "countdown"}:
+        lowered = value.strip().lower()
+        if lowered in {"alarm", "timer", "countdown"} or any(token in lowered for token in ("倒计时", "计时器", "时间到", "计时结束", "countdown", "timer", "time up", "done")):
             return "闹钟"
         return value or "闹钟"
 
@@ -7322,30 +7421,48 @@ class IslandStackVisual(QWidget):
     def _paint_time_alarm_module(self, painter: QPainter, rect: QRectF, model: dict[str, object], color: QColor, theme: dict[str, QColor]):
         ref = self._time_reference_palette(theme, color)
         self._paint_time_module_shell(painter, rect, theme, active=False)
-        painter.setFont(self._font(9, QFont.Weight.Bold))
-        painter.setPen(ref["accent"])
-        painter.drawText(QRectF(rect.left() + self._u(10.0), rect.top() + self._u(8.0), rect.width() - self._u(20.0), self._u(16.0)), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "闹钟")
         alarms = [dict(row) for row in list(model.get("alarms", []))[:8]]
         pending_alarm = dict(model.get("alarm_due_pending") or self._time_alarm_due_pending())
-        add_h = self._u(27.0)
-        add_rect = QRectF(rect.left() + self._u(8.0), rect.bottom() - self._u(5.0) - add_h, rect.width() - self._u(16.0), add_h)
-        row_top = rect.top() + self._u(27.0)
         if pending_alarm:
-            confirm_h = min(self._u(62.0), max(self._u(52.0), rect.height() * 0.38))
-            confirm_rect = QRectF(rect.left() + self._u(8.0), row_top, rect.width() - self._u(16.0), confirm_h)
-            self.plugin_action_rects["alarm-due-confirm"] = QRectF(confirm_rect.adjusted(-self._u(2.0), -self._u(2.0), self._u(2.0), self._u(2.0)))
+            confirm_rect = QRectF(rect)
+            self.plugin_alarm_list_rect = QRectF()
+            self.plugin_alarm_visible_range = (0, 0)
+            self.plugin_alarm_list_scroll_index = 0.0
+            self.plugin_alarm_list_bottom_spacer_rows = 0.0
+            self.plugin_alarm_list_max_scroll = 0.0
+            self.plugin_action_rects["alarm-due-confirm"] = QRectF(rect.adjusted(-self._u(4.0), -self._u(4.0), self._u(4.0), self._u(4.0)))
+            radius = min(self._u(16.0), rect.height() * 0.26)
+            fill = QLinearGradient(confirm_rect.topLeft(), confirm_rect.bottomLeft())
+            fill.setColorAt(0.0, QColor(255, 211, 46, 255))
+            fill.setColorAt(1.0, ref["accent"])
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(ref["accent"])
-            painter.drawRoundedRect(confirm_rect, confirm_rect.height() / 2.0, confirm_rect.height() / 2.0)
+            painter.setBrush(QBrush(fill))
+            painter.drawRoundedRect(confirm_rect, radius, radius)
+            painter.setPen(QPen(QColor(255, 236, 142, 120), self._u(1.0)))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(confirm_rect.adjusted(self._u(0.7), self._u(0.7), -self._u(0.7), -self._u(0.7)), radius, radius)
             text_color = QColor(32, 23, 0, 248)
             label_text = str(pending_alarm.get("label") or "闹钟").strip() or "闹钟"
             time_text = str(pending_alarm.get("time") or "").strip()
-            label_rect = QRectF(confirm_rect.left() + self._u(13.0), confirm_rect.top(), max(self._u(80.0), confirm_rect.width() - self._u(78.0)), confirm_rect.height())
-            self._paint_static_elided_text(painter, label_rect, label_text, 12, text_color, True, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            content = confirm_rect.adjusted(self._u(14.0), self._u(10.0), -self._u(14.0), -self._u(10.0))
+            painter.setFont(self._font(8, QFont.Weight.DemiBold))
+            painter.setPen(QColor(68, 47, 0, 210))
+            painter.drawText(QRectF(content.left(), content.top(), content.width(), self._u(15.0)), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "闹钟提醒")
+            time_w = self._u(66.0) if time_text else 0.0
+            label_rect = QRectF(content.left(), content.center().y() - self._u(17.0), max(self._u(70.0), content.width() - time_w - self._u(8.0)), self._u(34.0))
+            self._paint_static_elided_text(painter, label_rect, label_text, 16, text_color, True, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if time_text:
-                time_rect = QRectF(confirm_rect.right() - self._u(70.0), confirm_rect.top(), self._u(58.0), confirm_rect.height())
-                self._paint_static_elided_text(painter, time_rect, time_text, 10, text_color, True, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            row_top = confirm_rect.bottom() + self._u(5.0)
+                time_rect = QRectF(content.right() - time_w, label_rect.top(), time_w, label_rect.height())
+                self._paint_static_elided_text(painter, time_rect, time_text, 14, text_color, True, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            hint_rect = QRectF(content.left(), content.bottom() - self._u(16.0), content.width(), self._u(16.0))
+            self._paint_static_elided_text(painter, hint_rect, "点击确认", 9, QColor(77, 54, 0, 215), True, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            return
+        painter.setFont(self._font(9, QFont.Weight.Bold))
+        painter.setPen(ref["accent"])
+        painter.drawText(QRectF(rect.left() + self._u(10.0), rect.top() + self._u(8.0), rect.width() - self._u(20.0), self._u(16.0)), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "闹钟")
+        row_top = rect.top() + self._u(27.0)
+        add_h = self._u(27.0)
+        add_rect = QRectF(rect.left() + self._u(8.0), rect.bottom() - self._u(5.0) - add_h, rect.width() - self._u(16.0), add_h)
         list_bottom = add_rect.top() - self._u(6.0)
         list_rect = QRectF(rect.left() + self._u(8.0), row_top, rect.width() - self._u(16.0), max(0.0, list_bottom - row_top))
         slot_count = 4
@@ -8269,121 +8386,6 @@ class IslandStackVisual(QWidget):
         self._paint_scrolling_text(painter, detail_rect, detail, 10, theme["muted"], False)
         self._paint_plugin_status_dot(painter, rect, status)
 
-    def _time_done_alert_size_levels(self, phase: float | None = None) -> tuple[int, int, int]:
-        pattern = (
-            (1, 1, 1),
-            (1, 1, 1),
-            (2, 2, 2),
-            (2, 2, 2),
-            (3, 3, 3),
-            (3, 3, 3),
-            (4, 4, 4),
-            (5, 5, 5),
-            (5, 5, 5),
-            (4, 4, 4),
-            (3, 3, 3),
-            (3, 3, 3),
-            (2, 2, 2),
-            (2, 2, 2),
-            (1, 1, 1),
-            (1, 1, 1),
-        )
-        if phase is None:
-            phase = (time.monotonic() / self._time_done_alert_cycle_seconds()) % 1.0
-        try:
-            value = float(phase)
-        except (TypeError, ValueError):
-            value = 0.0
-        index = int(max(0.0, min(0.999, value)) * len(pattern))
-        return pattern[index]
-
-    def _time_done_alert_cycle_seconds(self) -> float:
-        return 0.96
-
-    def _alarm_scroll_focus_index(self, text: str) -> int:
-        chars = list(str(text or ""))
-        if not chars:
-            return -1
-        return int((float(getattr(self, "scroll_phase", 0.0) or 0.0) * 0.72) % len(chars))
-
-    def _alarm_scroll_character_styles(self, text: str, color: QColor) -> list[tuple[str, QColor]]:
-        chars = list(str(text or ""))
-        if not chars:
-            return []
-        focus = self._alarm_scroll_focus_index("".join(chars))
-        base = QColor(color)
-        white = QColor(255, 255, 255, 255)
-        return [(char, QColor(white if index == focus else base)) for index, char in enumerate(chars)]
-
-    def _paint_alarm_scrolling_text(
-        self,
-        painter: QPainter,
-        rect: QRectF,
-        text: str,
-        size: int,
-        color: QColor,
-        bold: bool,
-        centered: bool = False,
-        centered_scroll: bool = False,
-    ):
-        value = str(text or "")
-        styles = self._alarm_scroll_character_styles(value, color)
-        if not styles:
-            return
-        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
-        painter.setFont(font)
-        fm = QFontMetrics(font)
-        widths = [max(1.0, float(fm.horizontalAdvance(char))) for char, _color in styles]
-        text_w = sum(widths)
-        painter.save()
-        painter.setClipRect(rect)
-        if text_w <= rect.width() - self._u(10):
-            x = rect.center().x() - text_w / 2.0 if centered else rect.left()
-        else:
-            x = self._scrolling_text_x(rect, text_w, centered, centered_scroll)
-        cursor = x
-        for (char, char_color), width in zip(styles, widths):
-            painter.setPen(char_color)
-            painter.drawText(QRectF(cursor, rect.top(), width + self._u(2.0), rect.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, char)
-            cursor += width
-        painter.restore()
-
-    def _paint_time_done_alert_text(self, painter: QPainter, rect: QRectF, text: str, color: QColor, base_size: int = 23, boost: float = 2.0):
-        value = str(text or "").strip()
-        if not value:
-            return
-        chars = list(value)
-        levels = self._time_done_alert_size_levels()
-        if len(chars) == 3:
-            char_levels = list(levels)
-        else:
-            focus = int((time.monotonic() * 0.84) % max(1, len(chars)))
-            char_levels = [1] * len(chars)
-            for index in range(len(chars)):
-                distance = abs(index - focus)
-                char_levels[index] = 3 if distance == 0 else (2 if distance == 1 else 1)
-        base = float(base_size)
-        step = max(0.0, float(boost or 0.0))
-        max_level = max(1, max(int(level) for level in char_levels))
-        sizes = [base + (max(1, int(level)) - 1) * step for level in char_levels]
-        max_size = base + (max_level - 1) * step
-        slot_font = self._font(max_size, QFont.Weight.Bold)
-        slot_metrics = QFontMetrics(slot_font)
-        slot_widths = [max(1.0, float(slot_metrics.horizontalAdvance(char))) for char in chars]
-        gap = self._u(0.6)
-        total_w = sum(slot_widths) + gap * max(0, len(slot_widths) - 1)
-        x = rect.center().x() - total_w / 2.0
-        painter.save()
-        painter.setClipRect(rect.adjusted(-self._u(8.0), -self._u(8.0), self._u(8.0), self._u(8.0)))
-        cursor = x
-        for char, size, slot_width in zip(chars, sizes, slot_widths):
-            font = self._font(size, QFont.Weight.Bold)
-            painter.setFont(font)
-            painter.setPen(QColor(color))
-            painter.drawText(QRectF(cursor, rect.top(), slot_width, rect.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, char)
-            cursor += slot_width + gap
-        painter.restore()
-
     def _paint_time_plugin_alert(
         self,
         painter: QPainter,
@@ -8424,20 +8426,19 @@ class IslandStackVisual(QWidget):
             if use_ring:
                 icon_color = QColor(28, 21, 0, 248)
                 icon_inner = rect.adjusted(self._u(8.0), self._u(8.0), -self._u(8.0), -self._u(8.0))
-                self._paint_time_symbol(painter, icon_inner, "countdown", icon_color, self._u(2.2))
+                self._paint_time_symbol(painter, icon_inner, kind, icon_color, self._u(2.2))
                 painter.restore()
                 return
-            text_rect = rect.adjusted(self._u(12.0), 0.0, -self._u(12.0), 0.0)
             body_source = self._time_alarm_alert_text_from_parts(alert_body, alert_title, summary)
             if kind == "alarm" and body_source:
                 body_text = self._time_alarm_note_display_text(body_source)
             else:
                 body_source = "\u65f6\u95f4\u5230"
                 body_text = "\u65f6\u95f4\u5230"
-            if kind == "alarm":
-                self._paint_alarm_scrolling_text(painter, text_rect, body_text, 23, text_color, True, centered=True, centered_scroll=True)
-            else:
-                self._paint_time_done_alert_text(painter, text_rect, body_text, text_color, 23, 2.0)
+            self._paint_time_symbol(painter, icon_rect.adjusted(self._u(3.6), self._u(3.6), -self._u(3.6), -self._u(3.6)), kind, text_color, self._u(2.1))
+            text_left = icon_rect.right() + self._u(8.0)
+            text_rect = QRectF(text_left, rect.top(), max(self._u(20.0), rect.right() - text_left - self._u(12.0)), rect.height())
+            self._paint_static_elided_text(painter, text_rect, body_text, 20, text_color, True, Qt.AlignmentFlag.AlignLeft)
             painter.restore()
             return
 
@@ -8464,10 +8465,7 @@ class IslandStackVisual(QWidget):
         else:
             note_source = self._time_alarm_alert_text_from_parts(alert_body, alert_title)
             note = self._time_alarm_note_display_text(note_source)
-            if self._time_alarm_note_should_scroll(note_source, text_rect, 20, True, 5):
-                self._paint_alarm_scrolling_text(painter, text_rect, note, 20, text_color, True)
-            else:
-                self._paint_static_elided_text(painter, text_rect, note, 20, text_color, True, Qt.AlignmentFlag.AlignLeft)
+            self._paint_static_elided_text(painter, text_rect, note, 20, text_color, True, Qt.AlignmentFlag.AlignLeft)
         painter.restore()
 
     def _paint_plugin_alert(self, painter: QPainter, rect: QRectF, key: str):

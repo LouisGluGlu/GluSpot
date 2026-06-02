@@ -506,6 +506,27 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         strip = visuals[0]
         self.assertAlmostEqual(strip.rect.height(), 48.0 * IslandStackVisual.VISUAL_SCALE)
 
+    def test_collapsed_plugin_main_shows_time_alarm_and_countdown_side_alerts(self):
+        visual = self._expanded_plugin_layout_visual(music_playing=False)
+        visual.expanded = False
+        visual.enabled_plugin_count = 1
+        visual.plugin_panel_open = False
+        visual.plugin_alarm_due_pending = {}
+        visual.plugin_alarm_due_acknowledged_key = ""
+        visual.plugin_countdown_entries = []
+        visual.plugin_alarm_rows = []
+        visual.show_seconds = False
+        visual.plugin_samples = [
+            ("TIME", "07:31", "倒计时 4:58", QColor(255, 184, 0), "T", "time", "alarm", "闹钟提醒", "晨会", 3, 1.0),
+        ]
+
+        visuals = visual._build_visuals()
+
+        keys = [item.key for item in visuals]
+        self.assertIn("plugin-alert:time:alarm", keys)
+        self.assertIn("plugin-alert:time", keys)
+        self.assertEqual([item.kind for item in visuals if item.key.startswith("plugin-alert:")], [IslandKind.PLUGIN_ALERT, IslandKind.PLUGIN_ALERT])
+
     def test_expanded_empty_click_does_not_collapse_stack(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.expanded = True
@@ -530,6 +551,50 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual(collapsed, [])
         self.assertFalse(visual.drag_candidate)
+
+    def test_plugin_island_double_click_does_not_collapse_expanded_stack(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.scene_suppressed = False
+        visual._main_kind = lambda: IslandKind.PLUGIN
+        visual.update = lambda: None
+        pulses = []
+        collapsed = []
+        visual._pulse_stack = lambda: pulses.append(True)
+        visual._set_expanded = lambda expanded: collapsed.append(bool(expanded))
+
+        class FakeDoubleClick:
+            def button(self):
+                return Qt.MouseButton.LeftButton
+
+            def position(self):
+                return QPointF(120.0, 40.0)
+
+        visual.mouseDoubleClickEvent(FakeDoubleClick())
+
+        self.assertEqual(collapsed, [])
+        self.assertEqual(pulses, [])
+
+    def test_music_island_double_click_still_collapses_expanded_stack(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.scene_suppressed = False
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual.update = lambda: None
+        collapsed = []
+        visual._pulse_stack = lambda: None
+        visual._set_expanded = lambda expanded: collapsed.append(bool(expanded))
+
+        class FakeDoubleClick:
+            def button(self):
+                return Qt.MouseButton.LeftButton
+
+            def position(self):
+                return QPointF(120.0, 40.0)
+
+        visual.mouseDoubleClickEvent(FakeDoubleClick())
+
+        self.assertEqual(collapsed, [False])
 
     def test_plugin_focus_click_reveals_separate_down_panel_below_strip(self):
         visual = self._expanded_plugin_layout_visual(music_playing=False)
@@ -975,6 +1040,46 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         _left, right = visual._screen_bounds_in_local()
 
         self.assertLessEqual(right, visual.width() - visual._u(8.0))
+
+    def test_time_alarm_and_countdown_side_alerts_stay_in_one_stable_row(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.plugin_alert_width = 168.0
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [
+            (0, "TIME", "所爱衬所爱", "闹钟", QColor(255, 184, 0), "T", "time:alarm", "alarm", "闹钟提醒", "所爱衬所爱", 3),
+            (0, "TIME", "4:58", "倒计时 4:58", QColor(255, 184, 0), "T", "time", "running", "计时进行中", "倒计时 4:58", 30),
+        ]
+        visual._screen_bounds_in_local = lambda: (0.0, 760.0)
+        visual._main_rect_screen_pressure = lambda *_args: ""
+        visual.height = lambda: 260
+        main_rect = QRectF(150.0, 82.0, 460.0, 48.0)
+
+        first = visual._plugin_alert_rect(main_rect, 0, 2)
+        second = visual._plugin_alert_rect(main_rect, 1, 2)
+
+        self.assertGreater(first.center().x(), main_rect.right())
+        self.assertGreater(second.center().x(), main_rect.right())
+        self.assertFalse(first.intersects(second))
+        self.assertFalse(first.intersects(main_rect))
+        self.assertFalse(second.intersects(main_rect))
+
+    def test_time_alarm_and_countdown_side_alerts_do_not_split_left_right_when_cramped(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.plugin_alert_width = 168.0
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [
+            (0, "TIME", "晨会", "闹钟", QColor(255, 184, 0), "T", "time:alarm", "alarm", "闹钟提醒", "晨会", 3),
+            (0, "TIME", "4:58", "倒计时 4:58", QColor(255, 184, 0), "T", "time", "running", "计时进行中", "倒计时 4:58", 30),
+        ]
+        visual._screen_bounds_in_local = lambda: (0.0, 720.0)
+        visual._main_rect_screen_pressure = lambda *_args: ""
+        visual.height = lambda: 260
+        main_rect = QRectF(300.0, 82.0, 350.0, 48.0)
+
+        first = visual._plugin_alert_rect(main_rect, 0, 2)
+        second = visual._plugin_alert_rect(main_rect, 1, 2)
+
+        first_on_right = first.center().x() > main_rect.center().x()
+        second_on_right = second.center().x() > main_rect.center().x()
+        self.assertEqual(first_on_right, second_on_right)
 
     def test_standalone_canvas_reserves_room_for_side_alerts(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -1629,20 +1734,21 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertLess(visual.plugin_alarm_list_rect.bottom(), add.bottom())
         self.assertGreater(visual.plugin_alarm_list_max_scroll, 4.0)
 
-    def test_alarm_due_confirmation_reserves_space_above_scroll_list_and_add_button(self):
+    def test_alarm_due_confirmation_replaces_scroll_list_and_add_button(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.plugin_action_rects = {}
         visual.plugin_alarm_rows = [
             {"time": f"06:{index:02d}", "label": f"Alarm {index}", "enabled": True, "frequency": "daily"}
             for index in range(6)
         ]
+        module_rect = QRectF(20.0, 20.0, 280.0, 150.0)
         image = QImage(360, 220, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
 
         visual._paint_time_alarm_module(
             painter,
-            QRectF(20.0, 20.0, 280.0, 150.0),
+            module_rect,
             {
                 "alarms": [dict(row) for row in visual.plugin_alarm_rows],
                 "alarm_due_pending": {"time": "07:30", "label": "晨会"},
@@ -1653,11 +1759,36 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         painter.end()
 
         due = visual.plugin_action_rects["alarm-due-confirm"]
-        alarm_list = visual.plugin_action_rects["alarm-list"]
-        add = visual.plugin_action_rects["alarm-add-open"]
-        self.assertGreaterEqual(due.height(), visual._u(54.0))
-        self.assertLessEqual(due.bottom(), alarm_list.top() + visual._u(0.5))
-        self.assertLessEqual(alarm_list.bottom(), add.top() - visual._u(4.0))
+        self.assertNotIn("alarm-list", visual.plugin_action_rects)
+        self.assertNotIn("alarm-add-open", visual.plugin_action_rects)
+        self.assertGreaterEqual(due.height(), module_rect.height() - visual._u(48.0))
+        self.assertGreaterEqual(due.height(), module_rect.height())
+        self.assertEqual(getattr(visual, "plugin_alarm_visible_range", None), (0, 0))
+
+    def test_alarm_due_confirmation_paints_full_module_block(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.plugin_action_rects = {}
+        module_rect = QRectF(20.0, 20.0, 280.0, 150.0)
+        image = QImage(360, 220, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_time_alarm_module(
+            painter,
+            module_rect,
+            {
+                "alarms": [],
+                "alarm_due_pending": {"time": "07:30", "label": "晨会"},
+            },
+            QColor(255, 204, 0),
+            visual._plugin_theme_colors(),
+        )
+        painter.end()
+
+        header_pixel = image.pixelColor(QPoint(int(module_rect.right() - visual._u(18.0)), int(module_rect.top() + visual._u(14.0))))
+        self.assertGreater(header_pixel.red(), 210)
+        self.assertGreater(header_pixel.green(), 150)
+        self.assertLess(header_pixel.blue(), 90)
 
     def test_time_alarm_add_button_text_is_spaced_and_bold(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -3174,18 +3305,89 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual(getattr(visual, "plugin_alarm_due_pending", {}), {})
 
+    def test_confirmed_alarm_due_is_not_recaptured_from_same_provider_alarm(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.plugin_alarm_due_pending = {}
+        visual.update = lambda: None
+        alarm_payload = {
+            "label": "TIME",
+            "detail": "07:31",
+            "summary": "07:30",
+            "status": "alarm",
+            "alert_title": "闹钟提醒",
+            "alert_body": "晨会",
+        }
+
+        first = visual._time_plugin_panel_model(alarm_payload)
+        visual._activate_plugin_action("alarm-due-confirm")
+        second = visual._time_plugin_panel_model(alarm_payload)
+        new_alarm = visual._time_plugin_panel_model({**alarm_payload, "summary": "07:45", "alert_body": "站会"})
+
+        self.assertEqual(first["alarm_due_pending"]["label"], "晨会")
+        self.assertNotIn("alarm_due_pending", second)
+        self.assertEqual(new_alarm["alarm_due_pending"]["label"], "站会")
+
+    def test_alarm_due_pending_keeps_alarm_note_when_countdown_starts(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.plugin_alarm_due_pending = {"time": "07:30", "label": "晨会", "key": "07:30|晨会"}
+        visual.plugin_countdown_entries = []
+        visual.plugin_alarm_rows = []
+
+        model = visual._time_plugin_panel_model(
+            {
+                "label": "TIME",
+                "detail": "00:52",
+                "summary": "倒计时 4:58",
+                "status": "alarm",
+                "alert_title": "闹钟提醒",
+                "alert_body": "倒计时 4:58",
+                "progress": 0.16,
+            }
+        )
+
+        self.assertEqual(model["alarm_due_pending"]["label"], "晨会")
+        self.assertEqual(model["alarm_due_pending"]["time"], "07:30")
+        self.assertEqual(getattr(visual, "plugin_alarm_due_pending", {})["label"], "晨会")
+
+    def test_alarm_status_with_countdown_text_does_not_create_generic_alarm_side_alert(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.plugin_alarm_due_pending = {}
+        visual.plugin_alarm_due_acknowledged_key = "07:30|晨会"
+        visual.show_seconds = False
+        visual.plugin_countdown_entries = []
+        visual.plugin_alarm_rows = []
+
+        candidates = visual._time_side_alert_candidates(
+            0,
+            "TIME",
+            "00:52",
+            "倒计时 4:58",
+            QColor(255, 184, 0),
+            "T",
+            "time",
+            "alarm",
+            "闹钟提醒",
+            "倒计时 4:58",
+            3,
+        )
+
+        self.assertNotIn("time:alarm", [candidate[8] for candidate in candidates])
+        self.assertEqual([candidate[8] for candidate in candidates], ["time"])
+        self.assertEqual(candidates[0][11], "4:58")
+
     def test_alarm_module_paints_due_confirmation_until_user_confirms(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.plugin_action_rects = {}
+        module_rect = QRectF(20.0, 20.0, 260.0, 132.0)
         image = QImage(340, 190, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
 
         visual._paint_time_alarm_module(
             painter,
-            QRectF(20.0, 20.0, 260.0, 132.0),
+            module_rect,
             {
-                "alarms": [],
+                "alarms": [{"time": "07:30", "label": "晨会", "enabled": True, "frequency": "daily"}],
                 "alarm_due_pending": {"time": "07:30", "label": "晨会"},
             },
             QColor(255, 204, 0),
@@ -3194,8 +3396,44 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         painter.end()
 
         self.assertIn("alarm-due-confirm", visual.plugin_action_rects)
-        self.assertIn("alarm-add-open", visual.plugin_action_rects)
-        self.assertLess(visual.plugin_action_rects["alarm-due-confirm"].top(), visual.plugin_action_rects["alarm-add-open"].top())
+        self.assertNotIn("alarm-add-open", visual.plugin_action_rects)
+        self.assertNotIn("alarm-list", visual.plugin_action_rects)
+        self.assertFalse(any(key.startswith(("alarm-toggle-", "alarm-edit-", "alarm-delete-")) for key in visual.plugin_action_rects))
+        due = visual.plugin_action_rects["alarm-due-confirm"]
+        self.assertGreaterEqual(due.width(), module_rect.width() - visual._u(24.0))
+        self.assertGreaterEqual(due.height(), module_rect.height() - visual._u(48.0))
+        self.assertTrue(due.contains(QPointF(module_rect.left() + visual._u(4.0), module_rect.top() + visual._u(4.0))))
+        self.assertTrue(due.contains(QPointF(module_rect.right() - visual._u(4.0), module_rect.bottom() - visual._u(4.0))))
+
+    def test_alarm_due_confirmation_hit_test_covers_whole_module(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.expanded = True
+        visual.plugin_time_mode = "dashboard"
+        visual._main_kind = lambda: IslandKind.PLUGIN
+        visual.plugin_action_rects = {}
+        module_rect = QRectF(20.0, 20.0, 260.0, 132.0)
+        image = QImage(340, 190, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_time_alarm_module(
+            painter,
+            module_rect,
+            {
+                "alarms": [{"time": "07:30", "label": "晨会", "enabled": True, "frequency": "daily"}],
+                "alarm_due_pending": {"time": "07:30", "label": "晨会"},
+            },
+            QColor(255, 204, 0),
+            visual._plugin_theme_colors(),
+        )
+        painter.end()
+
+        for point in (
+            QPointF(module_rect.left() + visual._u(5.0), module_rect.top() + visual._u(5.0)),
+            QPointF(module_rect.center()),
+            QPointF(module_rect.right() - visual._u(5.0), module_rect.bottom() - visual._u(5.0)),
+        ):
+            self.assertEqual(visual._hit_test(point), "plugin-action:alarm-due-confirm")
 
     def test_pending_alarm_due_keeps_side_alert_until_confirmed(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -3247,6 +3485,81 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(candidates[0][8], "time:alarm")
         self.assertEqual(candidates[0][9], "alarm")
         self.assertEqual(candidates[0][11], "晨会")
+
+    def test_done_countdown_and_due_alarm_can_show_as_separate_time_side_alerts(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.persistent_plugin = True
+        visual.expanded = False
+        visual.enabled_plugin_count = 1
+        visual.plugin_samples = [
+            ("TIME", "07:30", "计时结束", QColor(255, 184, 0), "T", "time", "alarm", "闹钟提醒", "晨会", 3, 1.0),
+        ]
+
+        alerts = visual._active_plugin_alerts(limit=2)
+
+        self.assertEqual([alert[6] for alert in alerts], ["time:alarm", "time"])
+        self.assertEqual([alert[7] for alert in alerts], ["alarm", "done"])
+        self.assertEqual(alerts[0][9], "晨会")
+        self.assertEqual(alerts[1][9], "时间到")
+
+    def test_alarm_side_alert_stays_after_countdown_replaces_alarm_payload_summary(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.persistent_plugin = True
+        visual.expanded = False
+        visual.enabled_plugin_count = 1
+        visual.plugin_alarm_due_pending = {}
+        visual.plugin_alarm_due_acknowledged_key = ""
+        visual.show_seconds = False
+        visual.plugin_countdown_entries = []
+        visual.plugin_alarm_rows = []
+        visual.plugin_samples = [
+            ("TIME", "07:31", "倒计时 4:58", QColor(255, 184, 0), "T", "time", "alarm", "闹钟提醒", "晨会", 3, 1.0),
+        ]
+
+        initial_alerts = visual._active_plugin_alerts(limit=2)
+        visual.plugin_samples = [
+            ("TIME", "07:32", "倒计时 4:12", QColor(255, 184, 0), "T", "time", "running", "计时进行中", "倒计时 4:12", 30, 0.2),
+        ]
+        next_alerts = visual._active_plugin_alerts(limit=2)
+
+        self.assertEqual([alert[6] for alert in initial_alerts], ["time:alarm", "time"])
+        self.assertEqual([alert[6] for alert in next_alerts], ["time:alarm", "time"])
+        self.assertEqual(next_alerts[0][9], "晨会")
+        self.assertEqual(next_alerts[1][9], "4:12")
+
+    def test_default_alarm_side_alert_is_not_swallowed_by_running_countdown(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.persistent_plugin = True
+        visual.expanded = False
+        visual.enabled_plugin_count = 1
+        visual.plugin_alarm_due_pending = {}
+        visual.plugin_alarm_due_acknowledged_key = ""
+        visual.show_seconds = False
+        visual.plugin_countdown_entries = []
+        visual.plugin_alarm_rows = []
+        visual.plugin_samples = [
+            ("TIME", "07:31", "倒计时 4:58", QColor(255, 184, 0), "T", "time", "alarm", "闹钟提醒", "闹钟", 3, 1.0),
+        ]
+
+        alerts = visual._active_plugin_alerts(limit=2)
+
+        self.assertEqual([alert[6] for alert in alerts], ["time:alarm", "time"])
+        self.assertEqual(alerts[0][9], "闹钟")
+        self.assertEqual(alerts[1][9], "4:58")
+
+    def test_due_alarm_bare_time_summary_does_not_create_countdown_side_alert(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.persistent_plugin = True
+        visual.expanded = False
+        visual.enabled_plugin_count = 1
+        visual.plugin_samples = [
+            ("TIME", "00:21", "00:21", QColor(255, 184, 0), "T", "time", "alarm", "闹钟提醒", "看大夫", 3, 1.0),
+        ]
+
+        alerts = visual._active_plugin_alerts(limit=2)
+
+        self.assertEqual([alert[6] for alert in alerts], ["time:alarm"])
+        self.assertEqual(alerts[0][9], "看大夫")
 
     def test_new_done_alarm_note_replaces_pending_alarm_side_alert(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -3519,22 +3832,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         painter.end()
 
         self.assertIn(("4:59", 20, True), static_calls)
-        self.assertIn(("时间到", 23, 2.0), done_calls)
+        self.assertIn(("时间到", 20, True), static_calls)
+        self.assertEqual(done_calls, [])
         self.assertEqual(scroll_calls, [])
-
-    def test_time_done_alert_uses_size_wave_without_black_glow(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-
-        frames = [visual._time_done_alert_size_levels(index / 16.0) for index in range(16)]
-        source = inspect.getsource(IslandStackVisual._paint_time_done_alert_text)
-
-        self.assertTrue(all(frame[0] == frame[1] == frame[2] for frame in frames))
-        self.assertEqual(frames[0], (1, 1, 1))
-        self.assertIn((5, 5, 5), frames)
-        self.assertGreaterEqual(len(set(frames)), 5)
-        self.assertLessEqual(visual._time_done_alert_cycle_seconds(), 1.0)
-        self.assertNotIn("QRadialGradient", source)
-        self.assertNotIn("glow", source.lower())
 
     def test_alarm_note_with_done_status_still_uses_alarm_side_alert_style(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -3542,7 +3842,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         done_texts = []
         scroll_texts = []
         visual._paint_time_done_alert_text = lambda _painter, _rect, text, *_args, **_kwargs: done_texts.append(str(text))
-        visual._paint_static_elided_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("due alarm should not use static text"))
+        static_texts = []
+        visual._paint_static_elided_text = lambda _painter, _rect, text, *_args, **_kwargs: static_texts.append(str(text))
         visual._paint_alarm_scrolling_text = lambda _painter, _rect, text, *_args, **_kwargs: scroll_texts.append(str(text))
         image = QImage(260, 70, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
@@ -3562,15 +3863,18 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         )
         painter.end()
 
-        self.assertEqual(scroll_texts, ["所爱衬所爱"])
+        self.assertEqual(static_texts, ["所爱衬所爱"])
+        self.assertEqual(scroll_texts, [])
         self.assertEqual(done_texts, [])
 
-    def test_alarm_side_alert_long_note_uses_white_character_scroll(self):
+    def test_alarm_side_alert_long_note_uses_unified_static_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.scroll_phase = 0.0
         calls = []
-        visual._paint_scrolling_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("alarm side alert should use character highlight scroll"))
-        visual._paint_alarm_scrolling_text = lambda _painter, _rect, text, size, color, bold, *_args, **_kwargs: calls.append((str(text), int(size), QColor(color), bool(bold)))
+        alarm_scrolls = []
+        visual._paint_scrolling_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("alarm side alert should not use generic scrolling text"))
+        visual._paint_alarm_scrolling_text = lambda _painter, _rect, text, *_args, **_kwargs: alarm_scrolls.append(str(text))
+        visual._paint_static_elided_text = lambda _painter, _rect, text, size, color, bold, *_args, **_kwargs: calls.append((str(text), int(size), QColor(color), bool(bold)))
         image = QImage(260, 70, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -3593,18 +3897,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertIn("alarm", calls[0][0].lower())
         self.assertEqual(calls[0][1], 20)
         self.assertTrue(calls[0][3])
-
-    def test_alarm_scroll_character_styles_make_only_focus_character_white(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.scroll_phase = 0.0
-        base = QColor(35, 24, 0, 245)
-
-        styles = visual._alarm_scroll_character_styles("闹钟提醒", base)
-
-        self.assertEqual([item[0] for item in styles], list("闹钟提醒"))
-        white_indexes = [index for index, (_char, color) in enumerate(styles) if color.red() == 255 and color.green() == 255 and color.blue() == 255]
-        self.assertEqual(white_indexes, [0])
-        self.assertTrue(all(color == base for index, (_char, color) in enumerate(styles) if index != 0))
+        self.assertEqual(alarm_scrolls, [])
 
     def test_plugin_alert_exit_rect_shrinks_towards_main_island(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -3629,10 +3922,11 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertNotIn("drawRoundedRect(due_rect", source)
         self.assertNotIn("mini_icon", source)
 
-    def test_time_done_side_alert_uses_single_text_pill_without_icon(self):
+    def test_time_done_side_alert_uses_same_icon_and_text_pill_as_waiting_state(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.scroll_phase = 0.0
-        visual._paint_time_symbol = lambda *_args: (_ for _ in ()).throw(AssertionError("done TIME pill should not paint an icon"))
+        symbols = []
+        visual._paint_time_symbol = lambda _painter, _rect, kind, *_args, **_kwargs: symbols.append(str(kind))
         static_texts = []
         done_texts = []
         visual._paint_static_elided_text = lambda _painter, _rect, text, *_args, **_kwargs: static_texts.append(str(text))
@@ -3655,15 +3949,17 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         )
         painter.end()
 
-        self.assertEqual(done_texts, ["\u65f6\u95f4\u5230"])
-        self.assertEqual(static_texts, [])
+        self.assertEqual(symbols, ["countdown"])
+        self.assertEqual(static_texts, ["\u65f6\u95f4\u5230"])
+        self.assertEqual(done_texts, [])
 
-    def test_time_side_alarm_note_scrolls_without_scrolling_alarm_time(self):
+    def test_time_side_alarm_note_uses_same_static_text_channel_as_countdown(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.scroll_phase = 0.0
         calls = []
         visual._paint_scrolling_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("alarm side alert should not use generic scrolling text"))
-        visual._paint_alarm_scrolling_text = lambda _painter, _rect, text, *_args, **_kwargs: calls.append(str(text))
+        visual._paint_alarm_scrolling_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("alarm side alert should not use focus-character scrolling"))
+        visual._paint_static_elided_text = lambda _painter, _rect, text, *_args, **_kwargs: calls.append(str(text))
         image = QImage(260, 70, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -3727,13 +4023,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertGreaterEqual(width, visual._u(150.0))
 
-    def test_alarm_done_side_alert_scrolls_note_not_time_even_when_short(self):
+    def test_alarm_done_side_alert_uses_static_note_not_focus_character_scroll(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.scroll_phase = 0.0
-        scroll_texts = []
-        visual._paint_static_elided_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("due alarm should use focus-character scrolling"))
+        static_texts = []
+        visual._paint_static_elided_text = lambda _painter, _rect, text, *_args, **_kwargs: static_texts.append(str(text))
         visual._paint_time_done_alert_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("due alarm should not use countdown done text"))
-        visual._paint_alarm_scrolling_text = lambda _painter, _rect, text, *_args, **_kwargs: scroll_texts.append(str(text))
+        visual._paint_alarm_scrolling_text = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("due alarm should not use focus-character scrolling"))
         image = QImage(260, 70, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -3752,7 +4048,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         )
         painter.end()
 
-        self.assertEqual(scroll_texts, ["下午茶"])
+        self.assertEqual(static_texts, ["下午茶"])
 
     def test_time_compact_countdown_is_static_but_long_alarm_note_scrolls(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
