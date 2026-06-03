@@ -93,8 +93,6 @@ class RealPluginProvider:
     def plugins(self) -> tuple[PluginData, ...]:
         return (
             self._time_plugin(),
-            self._weather_plugin(),
-            self._schedule_plugin(),
         )
 
     def diagnostics(self) -> dict[str, object]:

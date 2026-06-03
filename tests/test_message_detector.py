@@ -110,6 +110,67 @@ class MessageDetectorTests(unittest.TestCase):
 
         self.assertIsNone(message)
 
+    def test_wechat_notification_toggle_can_disable_toast_messages_even_when_detail_enabled(self):
+        def settings(key, default=None):
+            if key == "v2_enable_wechat_notification":
+                return False
+            if key == "v2_enable_wechat_detail_notification":
+                return True
+            return default
+
+        detector = WindowsMessageDetector(settings)
+
+        message = detector._message_from_notification_parts("wechat", "Tencent.WeChat", ("Alice", "hello"))
+
+        self.assertIsNone(message)
+
+    def test_wechat_summary_unread_is_suppressed_when_new_notification_toggle_is_off(self):
+        def settings(key, default=None):
+            if key == "v2_enable_wechat_notification":
+                return False
+            if key == "v2_enable_wechat_detail_notification":
+                return True
+            return default
+
+        detector = WindowsMessageDetector(settings)
+        detector._wechat_initialized = True
+        detector._wechat_previous_total_unread_count = 1
+        detector._native_wechat_windows = lambda: []
+        detector._set_wechat_native_diagnostics = lambda _windows: None
+        detector._wechat_main_native_windows = lambda _windows: []
+        detector._uiautomation_wechat_total_unread = lambda _windows: 2
+        detector._wechat_should_scan_sessions = lambda *_args, **_kwargs: False
+        detector._set_wechat_diagnostics = lambda *_args, **_kwargs: None
+
+        messages = detector._wechat_messages(10.0)
+
+        self.assertEqual(messages, [])
+
+    def test_wechat_detail_message_is_suppressed_when_new_notification_toggle_is_off(self):
+        def settings(key, default=None):
+            if key == "v2_enable_wechat_notification":
+                return False
+            if key == "v2_enable_wechat_detail_notification":
+                return True
+            return default
+
+        detector = WindowsMessageDetector(settings)
+        detector._wechat_initialized = True
+        detector._wechat_previous_total_unread_count = 0
+        detector._wechat_seen_sessions = {}
+        session = WeChatSessionCandidate("Project", "new detail", 1, ("Project", "new detail", "1"))
+        detector._native_wechat_windows = lambda: []
+        detector._set_wechat_native_diagnostics = lambda _windows: None
+        detector._wechat_main_native_windows = lambda _windows: []
+        detector._uiautomation_wechat_total_unread = lambda _windows: 1
+        detector._wechat_should_scan_sessions = lambda *_args, **_kwargs: True
+        detector._uiautomation_wechat_sessions = lambda _windows: [session]
+        detector._set_wechat_diagnostics = lambda *_args, **_kwargs: None
+
+        messages = detector._wechat_messages(10.0)
+
+        self.assertEqual(messages, [])
+
 
 if __name__ == "__main__":
     unittest.main()

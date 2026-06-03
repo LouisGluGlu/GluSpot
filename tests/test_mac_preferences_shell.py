@@ -58,6 +58,20 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("v2_weather_use_location", source)
         self.assertIn("v2_schedule_json_path", source)
 
+    def test_animation_speed_control_is_exposed(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("self.animation_speed = self._combo", source)
+        self.assertNotIn("self.animation_speed.parentWidget().hide()", source)
+
+    def test_empty_bar_stream_uses_global_animation_speed(self):
+        source = self._source("local/island_stack_visual.py")
+        start = source.index("def _paint_thin_bar")
+        end = source.index("def _scrolling_text_x", start)
+        thin_bar_source = source[start:end]
+
+        self.assertIn("self._animation_speed_factor()", thin_bar_source)
+
     def test_plugin_click_no_longer_opens_plugin_settings_window(self):
         source = self._source("local/island_stack_visual.py")
 
@@ -116,7 +130,33 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("网易云音乐（BetterNCM）", settings_source)
         self.assertIn("v2_netease_betterncm_path", store_source)
         self.assertIn("v2_netease_betterncm_path", settings_source)
-        self.assertIn("ncm_path_input", settings_source)
+        self.assertIn("betterncm_path", settings_source)
+        self.assertNotIn("ncm_path_input", settings_source)
+
+    def test_music_app_profiles_defaults_are_present(self):
+        from local.settings_store import DEFAULT_SETTINGS
+
+        profiles = DEFAULT_SETTINGS["v2_music_app_profiles"]
+        for service in ("netease", "qq", "qishui", "kugou"):
+            self.assertIn(service, profiles)
+            self.assertIn("path", profiles[service])
+            self.assertIn("sync_enabled", profiles[service])
+            self.assertIn("lyric_offset_seconds", profiles[service])
+            self.assertFalse(profiles[service]["sync_enabled"])
+        self.assertIn("betterncm_enabled", profiles["netease"])
+        self.assertIn("betterncm_path", profiles["netease"])
+
+    def test_music_app_profile_controls_are_exposed(self):
+        settings_source = self._source("local/settings_window.py")
+
+        self.assertIn("music_app_profile_controls", settings_source)
+        self.assertIn("_music_app_profile", settings_source)
+        self.assertIn("_set_music_app_profile_path", settings_source)
+        self.assertIn("_set_music_app_profile_sync_enabled", settings_source)
+        self.assertIn("_set_music_app_profile_lyric_offset", settings_source)
+        self.assertIn("_set_music_app_profile_betterncm_enabled", settings_source)
+        self.assertIn("_set_music_app_profile_betterncm_path", settings_source)
+        self.assertIn("v2_music_app_profiles", settings_source)
 
     def test_lyric_flow_settings_defaults_are_present(self):
         from local.settings_store import DEFAULT_SETTINGS
@@ -136,9 +176,13 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertEqual(DEFAULT_SETTINGS["v2_no_lyrics_display_mode"], "text")
         self.assertEqual(DEFAULT_SETTINGS["v2_album_island_cover_count"], 5)
         self.assertEqual(DEFAULT_SETTINGS["v2_album_island_cover_size"], 30)
+        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_compact_cover_size"], 30)
+        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_expanded_cover_size"], 72)
         self.assertEqual(DEFAULT_SETTINGS["v2_album_island_spacing"], 112)
         self.assertEqual(DEFAULT_SETTINGS["v2_album_island_secondary_style"], "perspective_dim")
         self.assertEqual(DEFAULT_SETTINGS["v2_album_island_perspective_amount"], 100)
+        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_listened_seconds_total"], 0.0)
+        self.assertEqual(DEFAULT_SETTINGS["v2_album_island_history"], [])
         self.assertTrue(DEFAULT_SETTINGS["v2_compact_lyric_show_cover"])
         self.assertIn("sea_level", DEFAULT_SETTINGS["v2_music_ambience_values"])
         self.assertIn("bilateral_diffraction", DEFAULT_SETTINGS["v2_music_ambience_values"])
@@ -151,7 +195,9 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertEqual(DEFAULT_SETTINGS["v2_taskbar_left_handle_color"], "#8E8E93")
         self.assertEqual(DEFAULT_SETTINGS["v2_dual_line_font_size"], 12)
         self.assertIn("pure_white", DEFAULT_SETTINGS["v2_music_ambience_values"])
-        self.assertEqual(DEFAULT_SETTINGS["v2_enabled_plugins"], ["time", "weather", "agenda"])
+        self.assertEqual(DEFAULT_SETTINGS["v2_enabled_plugins"], ["time"])
+        self.assertIn("v2_mydockfinder_path", DEFAULT_SETTINGS)
+        self.assertIn("v2_last_window_position", DEFAULT_SETTINGS)
         self.assertNotIn("v2_taskbar_recognition_threshold", DEFAULT_SETTINGS)
         self.assertNotIn("v2_taskbar_plugin_compact_style", DEFAULT_SETTINGS)
         self.assertNotIn("v2_taskbar_message_compact_style", DEFAULT_SETTINGS)
@@ -195,6 +241,8 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("_update_music_ambience_controls", source)
         self.assertIn("v2_music_ambience_values", source)
         self.assertIn("album_island_cover_size", source)
+        self.assertIn("album_island_compact_cover_size", source)
+        self.assertIn("album_island_expanded_cover_size", source)
         self.assertIn("album_island_spacing", source)
         self.assertIn("album_island_secondary_style", source)
         self.assertIn("album_island_perspective_amount", source)
@@ -211,7 +259,10 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("self.lyric_offset.parentWidget().setVisible(not album_flow)", source)
         self.assertIn("self.no_lyrics_display_mode_row.setVisible(not album_flow)", source)
         self.assertIn("v2_album_island_cover_size", source)
+        self.assertIn("v2_album_island_compact_cover_size", source)
+        self.assertIn("v2_album_island_expanded_cover_size", source)
         self.assertIn("v2_album_island_spacing", source)
+        self.assertIn("reset_album_island_record", source)
         self.assertIn("详细设置", source)
         self.assertIn("_wave_stream_controls", source)
         self.assertIn("_gelv_controls", source)
@@ -221,6 +272,14 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertNotIn('self._row(c, "全局字体", font_combo)', source)
         self.assertNotIn("enable_dual_line_lyrics = False", source)
         self.assertIn("setVisible(gelv)", source)
+
+    def test_app_loads_persistent_album_island_record_and_split_sizes(self):
+        app_source = self._source("local/app.py")
+
+        self.assertIn("v2_album_island_listened_seconds_total", app_source)
+        self.assertIn("v2_album_island_history", app_source)
+        self.assertIn("v2_album_island_compact_cover_size", app_source)
+        self.assertIn("v2_album_island_expanded_cover_size", app_source)
 
     def test_settings_window_exposes_location_mode_instead_of_old_taskbar_fusion_controls(self):
         source = self._source("local/settings_window.py")
@@ -256,6 +315,20 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("min-height: 24px", style)
         self.assertIn("_apply_rounded_window_mask", source)
         self.assertIn("setMask", source)
+
+    def test_appearance_page_uses_denser_local_layout(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("APPEARANCE_ROW_VPAD = 4", source)
+        self.assertIn("_begin_compact_appearance_page", source)
+        self.assertIn("_end_compact_appearance_page", source)
+        appearance_start = source.index("def _appearance_page")
+        appearance_end = source.index("def _plugins_page", appearance_start)
+        appearance_source = source[appearance_start:appearance_end]
+        self.assertIn("self._begin_compact_appearance_page(page)", appearance_source)
+        self.assertIn("self._end_compact_appearance_page()", appearance_source)
+        self.assertIn("self._preview_frame(38)", appearance_source)
+        self.assertIn("self._preview_frame(22)", appearance_source)
 
     def test_settings_traffic_lights_show_hover_symbols(self):
         style = self._source("local/mac_style.py")
@@ -296,10 +369,111 @@ class MacPreferencesShellTests(unittest.TestCase):
     def test_location_mode_options_reflect_manual_finder_state(self):
         source = self._source("local/settings_window.py")
 
-        self.assertIn('if manual_finder:', source)
+        self.assertIn("mydockfinder_running", source)
         self.assertIn('("Free", "free"), ("Finder", "finder")', source)
         self.assertIn('("Free", "free"), ("Tasker", "tasker")', source)
         self.assertIn("_refresh_location_mode_options", source)
+
+    def test_weather_and_agenda_plugins_are_waiting_state_only(self):
+        source = self._source("local/settings_window.py")
+        app_source = self._source("local/app.py")
+
+        self.assertIn("天气插件（待开发）", source)
+        self.assertIn("日程插件（待开发）", source)
+        self.assertIn("plugin_weather_enabled.setEnabled(False)", source)
+        self.assertIn("plugin_agenda_enabled.setEnabled(False)", source)
+        self.assertIn('known = ["time"]', source)
+        self.assertIn('known = ["time"]', app_source)
+        self.assertNotIn('enabled.append("weather")', source)
+        self.assertNotIn('enabled.append("agenda")', source)
+
+    def test_settings_exposes_mydockfinder_listener_path(self):
+        source = self._source("local/settings_window.py")
+        app_source = self._source("local/app.py")
+
+        self.assertIn("MyDockFinder 监听", source)
+        self.assertIn("mydockfinder_path_input", source)
+        self.assertIn("_set_mydockfinder_path", source)
+        self.assertIn("v2_mydockfinder_path", source)
+        self.assertIn("_setup_mydockfinder_listener", app_source)
+        self.assertIn("_poll_mydockfinder_presence", app_source)
+        self.assertIn("set_mydockfinder_running", app_source)
+        self.assertIn("mydockfinder_status_label", source)
+        self.assertIn("_mydockfinder_status_text", source)
+        self.assertIn("_mydockfinder_process_diagnostics", app_source)
+
+    def test_position_page_exposes_explicit_position_presets_without_auto_snap(self):
+        source = self._source("local/settings_window.py")
+        visual_source = self._source("local/island_stack_visual.py")
+
+        self.assertIn("POSITION_PRESETS", source)
+        self.assertIn("position_preset", source)
+        self.assertIn("_set_position_preset", source)
+        self.assertIn("apply_position_preset", visual_source)
+        self.assertNotIn("_snap_top_center_window_pos", visual_source)
+
+    def test_path_settings_expose_file_picker_buttons(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("_path_picker_row", source)
+        self.assertIn("_browse_mydockfinder_path", source)
+        self.assertIn("_browse_music_app_profile_path", source)
+        self.assertIn("_browse_betterncm_path", source)
+        self.assertIn("_browse_schedule_json_path", source)
+        self.assertIn("_browse_schedule_ics_path", source)
+        self.assertIn("getOpenFileName", source)
+        self.assertIn("getExistingDirectory", source)
+
+    def test_barrage_page_uses_screen_height_range_and_fullscreen_notification_style(self):
+        source = self._source("local/settings_window.py")
+        store_source = self._source("local/settings_store.py")
+        app_source = self._source("local/app.py")
+        visual_source = self._source("local/island_stack_visual.py")
+
+        self.assertIn("_barrage_position_max", source)
+        self.assertIn("self._barrage_position_max()", source)
+        self.assertNotIn('"弹幕位置", 0, 240', source)
+        self.assertIn("PLUGIN_FULLSCREEN_ALERT_STYLES", source)
+        self.assertIn("plugin_fullscreen_alert_style", source)
+        self.assertIn("v2_plugin_fullscreen_alert_style", store_source)
+        self.assertIn("v2_plugin_fullscreen_alert_style", app_source)
+        self.assertIn("set_plugin_fullscreen_alert_style", visual_source)
+        self.assertIn("v2_plugin_fullscreen_alert_x_offset", store_source)
+        self.assertIn("v2_plugin_fullscreen_alert_y_offset", store_source)
+        self.assertIn("set_plugin_fullscreen_alert_position", visual_source)
+        self.assertIn("plugin_fullscreen_alert_x_offset", source)
+        self.assertIn("plugin_fullscreen_alert_y_offset", source)
+        self.assertIn("v2_barrage_display_mode", store_source)
+        self.assertIn("v2_barrage_display_mode", app_source)
+        self.assertIn("BARRAGE_DISPLAY_MODES", source)
+        self.assertIn("_set_barrage_display_mode", source)
+
+    def test_barrage_adjustments_trigger_preview_without_hiding_island(self):
+        source = self._source("local/settings_window.py")
+        preview_start = source.index("def _begin_barrage_adjust_preview")
+        preview_end = source.index("def _touch", preview_start)
+        preview_source = source[preview_start:preview_end]
+        self.assertIn("show_barrage_preview", preview_source)
+        self.assertNotIn("set_settings_window_active(True)", preview_source)
+
+        for name in ("_set_barrage_y_offset", "_set_barrage_font_size", "_set_barrage_speed", "_set_barrage_backdrop", "_set_barrage_icon"):
+            start = source.index(f"def {name}")
+            end = source.index("\n    def ", start + 1)
+            method_source = source[start:end]
+            self.assertIn("_begin_barrage_adjust_preview()", method_source, name)
+
+    def test_plugin_alert_adjustments_trigger_preview(self):
+        source = self._source("local/settings_window.py")
+        preview_start = source.index("def _begin_plugin_alert_adjust_preview")
+        preview_end = source.index("\n    def ", preview_start + 1)
+        preview_source = source[preview_start:preview_end]
+        self.assertIn("show_plugin_fullscreen_alert_preview", preview_source)
+
+        for name in ("_set_plugin_fullscreen_alert_style", "_set_plugin_fullscreen_alert_x_offset", "_set_plugin_fullscreen_alert_y_offset"):
+            start = source.index(f"def {name}")
+            end = source.index("\n    def ", start + 1)
+            method_source = source[start:end]
+            self.assertIn("_begin_plugin_alert_adjust_preview()", method_source, name)
 
     def test_disabled_settings_options_are_visually_gray(self):
         style = self._source("local/mac_style.py")
@@ -322,6 +496,23 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("v2_imported_settings_fonts", source)
         self.assertIn("PingFang SC", source)
         self.assertIn("Source Han Serif SC", source)
+
+    def test_settings_font_reports_actual_applied_family(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("settings_font_status", source)
+        self.assertIn("_resolve_settings_font_family", source)
+        self.assertIn("_update_settings_font_status", source)
+        self.assertIn("QApplication.instance()", source)
+
+    def test_media_page_prioritizes_per_app_sync_profiles(self):
+        source = self._source("local/settings_window.py")
+
+        self.assertIn("music_sync_status", source)
+        self.assertIn("_music_app_profile_status_text", source)
+        self.assertIn("_update_music_app_profile_statuses", source)
+        self.assertNotIn("ncm_path_input", source)
+        self.assertLess(source.index("app_profile_title"), source.index("lyric_title"))
 
     def test_taskbar_left_handle_color_setting_is_exposed(self):
         source = self._source("local/settings_window.py")

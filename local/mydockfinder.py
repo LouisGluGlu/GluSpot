@@ -12,8 +12,16 @@ from PySide6.QtGui import QColor, QGuiApplication, QImage
 
 
 MYDOCKFINDER_ROOT = Path(r"B:\SteamLibrary\steamapps\common\MyDockFinder")
-MYDOCKFINDER_PROCESS_NAMES = {"mydockfinder.exe", "myfinder.exe"}
-MYDOCKFINDER_WINDOW_TOKENS = ("mydockfinder", "myfinder")
+MYDOCKFINDER_PROCESS_NAMES = {
+    "mydockfinder.exe",
+    "myfinder.exe",
+    "mydock.exe",
+    "dock.exe",
+    "dock_64.exe",
+    "dockmod.exe",
+    "dockmod64.exe",
+}
+MYDOCKFINDER_WINDOW_TOKENS = ("mydockfinder", "myfinder", "mydock")
 
 
 @dataclass
@@ -144,7 +152,7 @@ def detect_mydockfinder(root: Path = MYDOCKFINDER_ROOT) -> FinderPresence:
         config_file = candidate / "config.ini"
         if config_file.exists():
             return FinderPresence(True, str(candidate), config_file)
-        if any((candidate / name).exists() for name in ("MyDockFinder.exe", "mydockfinder.exe", "MyFinder.exe")):
+        if any((candidate / name).exists() for name in ("MyDockFinder.exe", "mydockfinder.exe", "MyFinder.exe", "Mydock.exe", "dock.exe", "dock_64.exe", "Dockmod.exe", "Dockmod64.exe")):
             return FinderPresence(True, str(candidate), config_file)
 
     process_name = _running_mydockfinder_process()

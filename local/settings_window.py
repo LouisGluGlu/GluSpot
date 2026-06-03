@@ -38,7 +38,7 @@ from local.mac_style import (
     mac_traffic_lights,
 )
 from local.no_wheel_widgets import NoWheelComboBox, NoWheelSpinBox
-from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES
+from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES, DEFAULT_MUSIC_APP_PROFILES
 from local.ui_theme import is_theme_change_event, style_combo_popup
 
 
@@ -77,6 +77,11 @@ class SettingsWindow(QDialog):
         "Source Han Serif SC",
     )
 
+    SETTINGS_FONT_FALLBACKS = {
+        "PingFang SC": ("PingFang SC", "Microsoft YaHei UI", "Segoe UI"),
+        "Source Han Serif SC": ("Source Han Serif SC", "SimSun", "Microsoft YaHei UI", "Segoe UI"),
+    }
+
     EMPTY_BAR_PALETTES = (
         ("aurora", "极光"),
         ("cyan", "青蓝"),
@@ -114,12 +119,30 @@ class SettingsWindow(QDialog):
         ("显示时间", "time"),
     )
 
+    PLUGIN_FULLSCREEN_ALERT_STYLES = (
+        ("弹出岛", "island"),
+        ("全屏弹窗", "toast"),
+        ("弹幕提醒", "barrage"),
+    )
+
+    BARRAGE_DISPLAY_MODES = (
+        ("仅全屏", "fullscreen"),
+        ("任何时候", "always"),
+    )
+
     MUSIC_PLAYER_MODES = (
         ("网易云音乐", "netease"),
         ("网易云音乐（BetterNCM）", "netease_betterncm"),
         ("QQ音乐", "qq"),
         ("汽水音乐（待适配）", "qishui"),
         ("酷狗音乐（待适配）", "kugou"),
+    )
+
+    MUSIC_APP_PROFILE_PANELS = (
+        ("netease", "网易云音乐", r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe"),
+        ("qq", "QQ音乐", r"C:\Program Files\Tencent\QQMusic\QQMusic.exe"),
+        ("qishui", "汽水音乐", r"C:\Program Files\QishuiMusic\qishui.exe"),
+        ("kugou", "酷狗音乐", r"C:\Program Files\KuGou\KGMusic\KuGou.exe"),
     )
 
     ANIMATION_SPEEDS = (
@@ -183,17 +206,29 @@ class SettingsWindow(QDialog):
         ("Tasker", "tasker"),
     )
 
+    POSITION_PRESETS = (
+        ("上次位置", "last"),
+        ("顶部居中", "top_center"),
+        ("左上角", "top_left"),
+        ("右上角", "top_right"),
+        ("左下角", "bottom_left"),
+        ("右下角", "bottom_right"),
+    )
+
     TASKBAR_CORNER_STYLES = (
         ("Win11 小圆角", "win11"),
         ("Win10 直角", "win10"),
     )
 
     COMPACT_ROW_VPAD = 8
+    APPEARANCE_ROW_VPAD = 4
+    APPEARANCE_LABEL_WIDTH = 100
 
     def __init__(self, island_widget: QWidget, settings_manager=None, parent=None):
         super().__init__(parent)
         self.island_widget = island_widget
         self.settings = settings_manager
+        self._plugin_page_index = 2
         self._barrage_adjust_generation = 0
         self._barrage_page_index = 4
         self._diagnostics_page_index = 5
@@ -202,6 +237,9 @@ class SettingsWindow(QDialog):
         self._applying_theme = False
         self._window_drag_global = None
         self._window_drag_pos = None
+        self._row_vpad_override: int | None = None
+        self._row_label_width_override: int | None = None
+        self._compact_card_active = False
         self.setWindowTitle("gpt-island 设置")
         self.setMinimumSize(688, 496)
         self.setWindowFlags(
@@ -393,12 +431,41 @@ class SettingsWindow(QDialog):
         scroll._content_layout = layout
         return scroll
 
+    def _row_vpad(self) -> int:
+        override = getattr(self, "_row_vpad_override", None)
+        if override is not None:
+            return max(0, int(override))
+        return self.COMPACT_ROW_VPAD
+
+    def _row_label_width(self) -> int:
+        override = getattr(self, "_row_label_width_override", None)
+        if override is not None:
+            return max(80, int(override))
+        return 120
+
+    def _begin_compact_appearance_page(self, page: QWidget):
+        self._row_vpad_override = self.APPEARANCE_ROW_VPAD
+        self._row_label_width_override = self.APPEARANCE_LABEL_WIDTH
+        self._compact_card_active = True
+        layout = getattr(page, "_content_layout", None)
+        if layout is not None:
+            layout.setContentsMargins(12, 6, 14, 12)
+            layout.setSpacing(7)
+
+    def _end_compact_appearance_page(self):
+        self._row_vpad_override = None
+        self._row_label_width_override = None
+        self._compact_card_active = False
+
     def _card(self, parent_layout: QVBoxLayout) -> QFrame:
         card = QFrame()
         card.setObjectName("MacCard")
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 8, 14, 8)
+        if getattr(self, "_compact_card_active", False):
+            layout.setContentsMargins(10, 5, 10, 5)
+        else:
+            layout.setContentsMargins(14, 8, 14, 8)
         layout.setSpacing(0)
         parent_layout.addWidget(card)
         return card
@@ -406,16 +473,30 @@ class SettingsWindow(QDialog):
     def _row(self, layout: QVBoxLayout, title: str, control: QWidget):
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, self.COMPACT_ROW_VPAD, 0, self.COMPACT_ROW_VPAD)
-        row_layout.setSpacing(12)
+        row_layout.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
+        row_layout.setSpacing(10 if getattr(self, "_compact_card_active", False) else 12)
         label = QLabel(title)
         label.setObjectName("RowTitle")
-        label.setMinimumWidth(120)
+        label.setMinimumWidth(self._row_label_width())
         control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
         row_layout.addWidget(label, 0)
         row_layout.addWidget(control, 1)
         layout.addWidget(row)
         return row
+
+    def _path_picker_row(self, layout: QVBoxLayout, title: str, line_edit: QLineEdit, browse_callback):
+        container = QWidget()
+        container_layout = QHBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(8)
+        line_edit.setSizePolicy(QSizePolicy.Policy.Expanding, line_edit.sizePolicy().verticalPolicy())
+        browse_button = QPushButton("选择")
+        browse_button.setObjectName("PathBrowseButton")
+        browse_button.clicked.connect(browse_callback)
+        container_layout.addWidget(line_edit, 1)
+        container_layout.addWidget(browse_button, 0)
+        self._row(layout, title, container)
+        return browse_button
 
     def _control_group(self, layout: QVBoxLayout) -> QFrame:
         group = QFrame()
@@ -462,6 +543,146 @@ class SettingsWindow(QDialog):
         opened = bool(toggle.isChecked())
         toggle.setText(f"{title} 详细设置" + (" · 收起" if opened else ""))
 
+    def _music_app_profiles_setting(self) -> dict[str, dict[str, object]]:
+        raw = self._setting_value("v2_music_app_profiles", {}) or {}
+        profiles: dict[str, dict[str, object]] = {}
+        for service, defaults in DEFAULT_MUSIC_APP_PROFILES.items():
+            profile = dict(defaults)
+            if isinstance(raw, dict) and isinstance(raw.get(service), dict):
+                profile.update(raw.get(service) or {})
+            profiles[service] = profile
+        return profiles
+
+    def _music_app_profile(self, service: str) -> dict[str, object]:
+        profiles = self._music_app_profiles_setting()
+        key = str(service or "").strip().casefold()
+        profile = dict(profiles.get(key, dict(DEFAULT_MUSIC_APP_PROFILES.get(key, {}))))
+        if key == "netease" and not str(profile.get("path", "") or "").strip():
+            legacy_path = self._legacy_netease_executable_path()
+            if legacy_path:
+                profile["path"] = legacy_path
+        return profile
+
+    def _legacy_netease_executable_path(self) -> str:
+        path = str(self._setting_value("v2_netease_betterncm_path", "") or "").strip().strip('"')
+        if self._looks_like_executable_path(path):
+            return path
+        return ""
+
+    @staticmethod
+    def _looks_like_executable_path(path: str) -> bool:
+        normalized = str(path or "").replace("/", "\\").strip().strip('"')
+        basename = normalized.rsplit("\\", 1)[-1].casefold()
+        return bool(basename.endswith(".exe") and len(basename) > 4)
+
+    def _build_music_app_profile_panel(self, layout: QVBoxLayout, service: str, label: str, placeholder: str):
+        profile = self._music_app_profile(service)
+        panel, body_layout, _toggle = self._detail_panel(layout, label)
+        sync_check = self._check(
+            "启用同步插件",
+            bool(profile.get("sync_enabled", False)),
+            lambda enabled, service=service: self._set_music_app_profile_sync_enabled(service, enabled),
+        )
+        body_layout.addWidget(sync_check)
+        path_input = QLineEdit(str(profile.get("path", "") or ""))
+        path_input.setPlaceholderText(placeholder)
+        path_input.editingFinished.connect(lambda service=service, widget=path_input: self._set_music_app_profile_path(service, widget))
+        self._path_picker_row(
+            body_layout,
+            "应用路径",
+            path_input,
+            lambda _checked=False, service=service, widget=path_input: self._browse_music_app_profile_path(service, widget),
+        )
+        status_label = QLabel(self._music_app_profile_status_text(service))
+        status_label.setObjectName("Muted")
+        status_label.setWordWrap(True)
+        self._row(body_layout, "监听状态", status_label)
+        offset_slider = self._slider_row(
+            body_layout,
+            "歌词偏移",
+            -12000,
+            12000,
+            int(round(float(profile.get("lyric_offset_seconds", 0.0) or 0.0) * 1000)),
+            lambda value, service=service: self._set_music_app_profile_lyric_offset(service, value),
+            " ms",
+        )
+        controls = {
+            "panel": panel,
+            "sync": sync_check,
+            "path": path_input,
+            "status": status_label,
+            "offset": offset_slider,
+        }
+        if service == "netease":
+            betterncm_check = self._check(
+                "启用 BetterNCM 接口",
+                bool(profile.get("betterncm_enabled", False)),
+                self._set_music_app_profile_betterncm_enabled,
+            )
+            body_layout.addWidget(betterncm_check)
+            betterncm_path = QLineEdit(str(profile.get("betterncm_path", "") or self._setting_value("v2_netease_betterncm_path", "") or ""))
+            betterncm_path.setPlaceholderText(r"C:\betterncm")
+            betterncm_path.editingFinished.connect(lambda widget=betterncm_path: self._set_music_app_profile_betterncm_path(widget))
+            self._path_picker_row(
+                body_layout,
+                "BetterNCM",
+                betterncm_path,
+                lambda _checked=False, widget=betterncm_path: self._browse_betterncm_path(widget),
+            )
+            controls["betterncm_enabled"] = betterncm_check
+            controls["betterncm_path"] = betterncm_path
+        self.music_app_profile_controls[service] = controls
+
+    def _music_app_profile_status_text(self, service: str) -> str:
+        profile = self._music_app_profile(service)
+        sync_enabled = bool(profile.get("sync_enabled", False))
+        path = str(profile.get("path", "") or "").strip()
+        service_key = str(service or "").strip().casefold()
+        if not sync_enabled:
+            return "未启用，不加载对应监听器。"
+        if not path:
+            return "已开启但未填写应用路径，因此不会监听。"
+        basename = path.replace("/", "\\").rsplit("\\", 1)[-1] or path
+        if service_key in {"netease", "qq"}:
+            return f"已启用，匹配到 {basename} 时才会加载同步监听。"
+        return "已保存路径；该播放器的专用进度读取仍待适配，当前主要使用系统媒体信息。"
+
+    def _music_sync_summary_text(self) -> str:
+        enabled: list[str] = []
+        missing_path: list[str] = []
+        pending: list[str] = []
+        labels = {service: label for service, label, _placeholder in self.MUSIC_APP_PROFILE_PANELS}
+        for service, _label, _placeholder in self.MUSIC_APP_PROFILE_PANELS:
+            profile = self._music_app_profile(service)
+            if not bool(profile.get("sync_enabled", False)):
+                continue
+            if not str(profile.get("path", "") or "").strip():
+                missing_path.append(labels.get(service, service))
+            elif service in {"netease", "qq"}:
+                enabled.append(labels.get(service, service))
+            else:
+                pending.append(labels.get(service, service))
+        if enabled:
+            text = "已开启：" + "、".join(enabled)
+            if missing_path:
+                text += "；缺少路径：" + "、".join(missing_path)
+            if pending:
+                text += "；待适配：" + "、".join(pending)
+            return text
+        if missing_path:
+            return "有同步插件已开启，但缺少应用路径：" + "、".join(missing_path)
+        if pending:
+            return "已保存待适配播放器：" + "、".join(pending)
+        return "未启用专用同步插件；不会加载播放器监听器。"
+
+    def _update_music_app_profile_statuses(self):
+        if hasattr(self, "music_sync_status"):
+            self.music_sync_status.setText(self._music_sync_summary_text())
+        for service, controls in getattr(self, "music_app_profile_controls", {}).items():
+            status = controls.get("status")
+            if status is not None:
+                status.setText(self._music_app_profile_status_text(service))
+
     def _collapse_detail_panels(self):
         for toggle, body in getattr(self, "_detail_panels", []):
             toggle.blockSignals(True)
@@ -480,11 +701,11 @@ class SettingsWindow(QDialog):
     def _color_buttons_row(self, layout: QVBoxLayout, title: str, colors) -> list[ColorButton]:
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, self.COMPACT_ROW_VPAD, 0, self.COMPACT_ROW_VPAD)
+        row_layout.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
         row_layout.setSpacing(10)
         label = QLabel(title)
         label.setObjectName("RowTitle")
-        label.setMinimumWidth(120)
+        label.setMinimumWidth(self._row_label_width())
         row_layout.addWidget(label, 0)
         buttons = [ColorButton(str(color), self._set_empty_bar_custom_colors) for color in list(colors)[:3]]
         while len(buttons) < 3:
@@ -504,8 +725,8 @@ class SettingsWindow(QDialog):
     def _slider_row(self, layout: QVBoxLayout, title: str, minimum: int, maximum: int, value: int, callback, suffix: str = "") -> QSlider:
         row = QWidget()
         grid = QGridLayout(row)
-        grid.setContentsMargins(0, self.COMPACT_ROW_VPAD, 0, self.COMPACT_ROW_VPAD)
-        grid.setHorizontalSpacing(12)
+        grid.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
+        grid.setHorizontalSpacing(10 if getattr(self, "_compact_card_active", False) else 12)
         title_label = QLabel(title)
         title_label.setObjectName("RowTitle")
         value_label = QLabel(f"{value}{suffix}")
@@ -548,10 +769,34 @@ class SettingsWindow(QDialog):
         style_combo_popup(combo, self._theme())
 
     def _location_mode_items(self) -> list[tuple[str, str]]:
-        manual_finder = bool(getattr(self.island_widget, "manual_finder_available", False))
-        if manual_finder:
+        mydockfinder_available = bool(
+            getattr(self.island_widget, "_mydockfinder_available", lambda: bool(getattr(self.island_widget, "mydockfinder_running", False)))()
+        )
+        if mydockfinder_available:
             return [("Free", "free"), ("Finder", "finder")]
         return [("Free", "free"), ("Tasker", "tasker")]
+
+    def _mydockfinder_status_text(self) -> str:
+        running = bool(getattr(self.island_widget, "mydockfinder_running", False))
+        diagnostics = getattr(self.island_widget, "mydockfinder_diagnostics", {}) or {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        configured = str(diagnostics.get("configured_path") or getattr(self.island_widget, "mydockfinder_path", "") or "").strip()
+        matched = str(diagnostics.get("matched_name") or "").strip()
+        reason = str(diagnostics.get("reason") or "").strip()
+        if running:
+            detail = matched or "MyDockFinder"
+            return f"已检测到 {detail}，位置模式已切换为 Free/Finder。"
+        candidates = diagnostics.get("candidate_names") or []
+        if isinstance(candidates, (list, tuple, set)):
+            candidate_text = "、".join(str(item) for item in list(candidates)[:6])
+        else:
+            candidate_text = str(candidates or "")
+        if not configured:
+            return "未填写应用位置。监听会扫描常见 MyDockFinder / MyFinder 进程。"
+        if candidate_text:
+            return f"未检测到。已扫描：{candidate_text}。{reason or '请确认 MyDockFinder 已启动。'}"
+        return f"未检测到。{reason or '请确认 MyDockFinder 已启动。'}"
 
     def _placement_page(self) -> QWidget:
         page = self._page("位置")
@@ -566,8 +811,27 @@ class SettingsWindow(QDialog):
             self._set_location_mode,
         )
         self._row(c, "位置模式", self.location_mode)
-        self.manual_finder_checkbox = self._check("手动确认存在 MyFinder", bool(getattr(self.island_widget, "manual_finder_available", False)), self._set_manual_finder_available)
-        c.addWidget(self.manual_finder_checkbox)
+        self.position_preset = self._combo(
+            list(self.POSITION_PRESETS),
+            str(getattr(self.island_widget, "position_preset", self._setting_value("v2_position_preset", "last")) or "last"),
+            self._set_position_preset,
+        )
+        self._row(c, "位置预设", self.position_preset)
+        self.mydockfinder_listener_checkbox = self._check(
+            "MyDockFinder 监听",
+            bool(getattr(self.island_widget, "mydockfinder_running", False)),
+            lambda _enabled=False: None,
+        )
+        self.mydockfinder_listener_checkbox.setEnabled(False)
+        c.addWidget(self.mydockfinder_listener_checkbox)
+        self.mydockfinder_status_label = QLabel(self._mydockfinder_status_text())
+        self.mydockfinder_status_label.setObjectName("Muted")
+        self.mydockfinder_status_label.setWordWrap(True)
+        c.addWidget(self.mydockfinder_status_label)
+        self.mydockfinder_path_input = QLineEdit(str(getattr(self.island_widget, "mydockfinder_path", self._setting_value("v2_mydockfinder_path", "")) or ""))
+        self.mydockfinder_path_input.setPlaceholderText(r"C:\Program Files\MyDockFinder\MyDockFinder.exe")
+        self.mydockfinder_path_input.editingFinished.connect(self._set_mydockfinder_path)
+        self._path_picker_row(c, "MyDockFinder 应用位置", self.mydockfinder_path_input, self._browse_mydockfinder_path)
         self.taskbar_corner_style = self._combo(
             list(self.TASKBAR_CORNER_STYLES),
             str(getattr(self.island_widget, "taskbar_corner_style", self._setting_value("v2_taskbar_corner_style", "win11"))),
@@ -618,35 +882,41 @@ class SettingsWindow(QDialog):
         c.addWidget(self.music_checkbox)
         c.addWidget(self.music_auto_checkbox)
 
-        progress_title = QLabel("进度识别")
-        progress_title.setStyleSheet(self._section_style(2, 8))
-        c.addWidget(progress_title)
+        app_profile_title = QLabel("音乐软件监听")
+        app_profile_title.setStyleSheet(self._section_style(2, 8))
+        c.addWidget(app_profile_title)
+        self.music_sync_status = QLabel(self._music_sync_summary_text())
+        self.music_sync_status.setObjectName("Muted")
+        self.music_sync_status.setWordWrap(True)
+        c.addWidget(self.music_sync_status)
         self.player_progress_plugin_checkbox = self._check(
             "启用进度插件",
             bool(self._setting_value("v2_enable_player_progress_plugin", False)),
             self._set_player_progress_plugin_enabled,
         )
         c.addWidget(self.player_progress_plugin_checkbox)
+        self.player_progress_plugin_checkbox.hide()
         self.player_progress_auto_detect_checkbox = self._check(
             "插件自动识别",
             bool(self._setting_value("v2_player_progress_auto_detect", False)),
             self._set_player_progress_auto_detect,
         )
         c.addWidget(self.player_progress_auto_detect_checkbox)
+        self.player_progress_auto_detect_checkbox.hide()
         self.music_player_mode = self._combo(
             list(self.MUSIC_PLAYER_MODES),
             self._music_player_mode_setting(),
             self._set_music_player_mode,
         )
-        self._row(c, "进度识别服务", self.music_player_mode)
-        self.ncm_path_input = QLineEdit(str(self._setting_value("v2_netease_betterncm_path", "") or ""))
-        self.ncm_path_input.setPlaceholderText(r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe")
-        self.ncm_path_input.editingFinished.connect(self._set_netease_betterncm_path)
-        self._row(c, "NCM 路径", self.ncm_path_input)
-        player_hint = QLabel("关闭插件时只使用系统媒体信息；开启后才会按所选服务调用专项进度插件。网易云与QQ已可用，其它服务先保留入口。")
+        self.music_player_mode_row = self._row(c, "进度识别服务", self.music_player_mode)
+        self.music_player_mode_row.hide()
+        player_hint = QLabel("每个播放器都需要先填写应用路径，再开启同步插件。未填写路径时不会加载监听器；网易云和 QQ 已接入专用进度读取，其它播放器先保留入口。")
         player_hint.setWordWrap(True)
         player_hint.setStyleSheet(self._hint_style(2, 12))
         c.addWidget(player_hint)
+        self.music_app_profile_controls = {}
+        for service, label, placeholder in self.MUSIC_APP_PROFILE_PANELS:
+            self._build_music_app_profile_panel(c, service, label, placeholder)
         self._update_player_progress_controls()
 
         lyric_title = QLabel("歌词显示")
@@ -777,13 +1047,36 @@ class SettingsWindow(QDialog):
             self._set_album_island_perspective_amount,
             "%",
         )
-        self.album_island_cover_size = self._slider_row(
+        compact_cover_value = max(
+            18,
+            min(
+                44,
+                int(
+                    getattr(
+                        self.island_widget,
+                        "album_island_compact_cover_size",
+                        self._setting_value("v2_album_island_compact_cover_size", self._setting_value("v2_album_island_cover_size", 30)),
+                    )
+                ),
+            ),
+        )
+        self.album_island_compact_cover_size = self._slider_row(
             album_layout,
-            "专辑封面大小",
+            "收缩态封面大小",
             18,
             44,
-            max(18, min(44, int(getattr(self.island_widget, "album_island_cover_size", self._setting_value("v2_album_island_cover_size", 30))))),
-            self._set_album_island_cover_size,
+            compact_cover_value,
+            self._set_album_island_compact_cover_size,
+            " px",
+        )
+        self.album_island_cover_size = self.album_island_compact_cover_size
+        self.album_island_expanded_cover_size = self._slider_row(
+            album_layout,
+            "展开态封面大小",
+            36,
+            96,
+            max(36, min(96, int(getattr(self.island_widget, "album_island_expanded_cover_size", self._setting_value("v2_album_island_expanded_cover_size", 72))))),
+            self._set_album_island_expanded_cover_size,
             " px",
         )
         self.album_island_spacing = self._slider_row(
@@ -795,6 +1088,9 @@ class SettingsWindow(QDialog):
             self._set_album_island_spacing,
             "%",
         )
+        reset_album_record = QPushButton("归零已听记录")
+        reset_album_record.clicked.connect(self._reset_album_island_record)
+        album_layout.addWidget(reset_album_record)
 
         hint = QLabel("会根据当前播放器优先选择歌词源，并缓存到项目 lyrics 目录；也可手动放入 .lrc 文件。")
         hint.setWordWrap(True)
@@ -808,6 +1104,7 @@ class SettingsWindow(QDialog):
     def _appearance_page(self) -> QWidget:
         page = self._page("外观")
         layout: QVBoxLayout = page._content_layout
+        self._begin_compact_appearance_page(page)
         card = self._card(layout)
         c = card.layout()
 
@@ -823,6 +1120,9 @@ class SettingsWindow(QDialog):
             self._set_settings_font_family,
         )
         self._row(c, "设置字体", self.settings_font_combo)
+        self.settings_font_status = QLabel("")
+        self.settings_font_status.setObjectName("Muted")
+        self._row(c, "实际字体", self.settings_font_status)
         self.import_settings_font_button = QPushButton("导入字体")
         self.import_settings_font_button.clicked.connect(self._import_settings_font)
         self._row(c, "导入字体", self.import_settings_font_button)
@@ -846,7 +1146,7 @@ class SettingsWindow(QDialog):
             self._set_music_island_style,
         )
         self._row(c, "音乐岛样式", self.music_island_style)
-        self.music_preview = self._preview_frame(54)
+        self.music_preview = self._preview_frame(38)
         c.addWidget(self.music_preview)
         self._music_ambience_controls, music_ambience_layout, self._music_ambience_detail_toggle = self._detail_panel(c, "音乐岛背景样式")
         self.wave_slider = self._slider_row(music_ambience_layout, "氛围光增强", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
@@ -859,14 +1159,12 @@ class SettingsWindow(QDialog):
 
         if self.fps_slider.parentWidget():
             self.fps_slider.parentWidget().hide()
-        if self.animation_speed.parentWidget():
-            self.animation_speed.parentWidget().hide()
 
         self.font_combo = None
 
         self.empty_palette = self._combo([(label, key) for key, label in self.EMPTY_BAR_PALETTES], str(getattr(self.island_widget, "empty_bar_palette", "aurora")), self._set_empty_bar_palette)
         self._row(c, "空态流光", self.empty_palette)
-        self.empty_preview = self._preview_frame(34)
+        self.empty_preview = self._preview_frame(22)
         c.addWidget(self.empty_preview)
         self.empty_bar_width = self._slider_row(c, "横条长度", 70, 260, int(getattr(self.island_widget, "empty_bar_width", 92)), self._set_empty_bar_width, " px")
         self.empty_bar_height = self._slider_row(c, "横条粗细", 8, 28, int(getattr(self.island_widget, "empty_bar_height", 14)), self._set_empty_bar_height, " px")
@@ -875,6 +1173,7 @@ class SettingsWindow(QDialog):
         self.custom_color_inputs = self._color_buttons_row(c, "自定义颜色", getattr(self.island_widget, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86")))
         self._update_music_ambience_controls()
         self._update_previews()
+        self._end_compact_appearance_page()
         layout.addStretch(1)
         return page
 
@@ -888,8 +1187,10 @@ class SettingsWindow(QDialog):
         g.addWidget(self.plugin_checkbox)
         enabled_plugins = self._enabled_plugins_setting()
         self.plugin_time_enabled = self._check("时间插件", "time" in enabled_plugins, self._set_enabled_plugins_from_checks)
-        self.plugin_weather_enabled = self._check("天气插件", "weather" in enabled_plugins, self._set_enabled_plugins_from_checks)
-        self.plugin_agenda_enabled = self._check("日程插件", "agenda" in enabled_plugins, self._set_enabled_plugins_from_checks)
+        self.plugin_weather_enabled = self._check("天气插件（待开发）", False, self._set_enabled_plugins_from_checks)
+        self.plugin_agenda_enabled = self._check("日程插件（待开发）", False, self._set_enabled_plugins_from_checks)
+        self.plugin_weather_enabled.setEnabled(False)
+        self.plugin_agenda_enabled.setEnabled(False)
         g.addWidget(self.plugin_time_enabled)
         g.addWidget(self.plugin_weather_enabled)
         g.addWidget(self.plugin_agenda_enabled)
@@ -905,6 +1206,33 @@ class SettingsWindow(QDialog):
             self._set_plugin_island_style,
         )
         self._row(g, "插件岛样式", self.plugin_island_style)
+        self.plugin_fullscreen_alert_style = self._combo(
+            list(self.PLUGIN_FULLSCREEN_ALERT_STYLES),
+            str(getattr(self.island_widget, "plugin_fullscreen_alert_style", self._setting_value("v2_plugin_fullscreen_alert_style", "island")) or "island"),
+            self._set_plugin_fullscreen_alert_style,
+        )
+        self._row(g, "全屏提醒", self.plugin_fullscreen_alert_style)
+        self.plugin_fullscreen_alert_x_offset = self._slider_row(
+            g,
+            "提醒横向位置",
+            -self._fullscreen_alert_x_offset_max(),
+            self._fullscreen_alert_x_offset_max(),
+            max(
+                -self._fullscreen_alert_x_offset_max(),
+                min(self._fullscreen_alert_x_offset_max(), int(getattr(self.island_widget, "plugin_fullscreen_alert_x_offset", 0))),
+            ),
+            self._set_plugin_fullscreen_alert_x_offset,
+            " px",
+        )
+        self.plugin_fullscreen_alert_y_offset = self._slider_row(
+            g,
+            "提醒纵向位置",
+            0,
+            self._fullscreen_alert_y_offset_max(),
+            max(0, min(self._fullscreen_alert_y_offset_max(), int(getattr(self.island_widget, "plugin_fullscreen_alert_y_offset", 0)))),
+            self._set_plugin_fullscreen_alert_y_offset,
+            " px",
+        )
         self.seconds_checkbox = self._check("时间显示秒数", bool(getattr(self.island_widget, "show_seconds", True)), self._set_show_seconds)
         g.addWidget(self.seconds_checkbox)
 
@@ -965,7 +1293,12 @@ class SettingsWindow(QDialog):
         weather_title.setObjectName("Section")
         layout.addWidget(weather_title)
         weather_card = self._card(layout)
+        weather_card.setEnabled(False)
         w = weather_card.layout()
+        weather_waiting = QLabel("待开发：天气插件暂不启用，后续会作为独立插件重新接入。")
+        weather_waiting.setObjectName("Muted")
+        weather_waiting.setWordWrap(True)
+        w.addWidget(weather_waiting)
         self.weather_use_location = self._check(
             "优先读取定位",
             bool(self._setting_value("v2_weather_use_location", True)),
@@ -987,15 +1320,20 @@ class SettingsWindow(QDialog):
         agenda_title.setObjectName("Section")
         layout.addWidget(agenda_title)
         agenda_card = self._card(layout)
+        agenda_card.setEnabled(False)
         a = agenda_card.layout()
+        agenda_waiting = QLabel("待开发：日程插件暂不启用，设置仅保留为后续适配入口。")
+        agenda_waiting.setObjectName("Muted")
+        agenda_waiting.setWordWrap(True)
+        a.addWidget(agenda_waiting)
         self.schedule_json_input = QLineEdit(str(self._setting_value("v2_schedule_json_path", "") or ""))
         self.schedule_json_input.setPlaceholderText("data/schedule.json")
         self.schedule_json_input.editingFinished.connect(lambda: self._set_schedule_json_path(self.schedule_json_input.text()))
-        self._row(a, "JSON", self.schedule_json_input)
+        self._path_picker_row(a, "JSON", self.schedule_json_input, self._browse_schedule_json_path)
         self.schedule_ics_input = QLineEdit(str(self._setting_value("v2_schedule_ics_path", "") or ""))
         self.schedule_ics_input.setPlaceholderText("data/schedule.ics")
         self.schedule_ics_input.editingFinished.connect(lambda: self._set_schedule_ics_path(self.schedule_ics_input.text()))
-        self._row(a, "ICS", self.schedule_ics_input)
+        self._path_picker_row(a, "ICS", self.schedule_ics_input, self._browse_schedule_ics_path)
         self.schedule_reminder_minutes = QLineEdit(str(self._setting_value("v2_schedule_reminder_minutes", "15,30,5") or "15,30,5"))
         self.schedule_reminder_minutes.setPlaceholderText("15,30,5")
         self.schedule_reminder_minutes.editingFinished.connect(self._set_schedule_reminder_minutes)
@@ -1006,17 +1344,58 @@ class SettingsWindow(QDialog):
         layout.addStretch(1)
         return page
 
+    def _barrage_position_max(self) -> int:
+        try:
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                return max(240, int(screen.geometry().height()) - 1)
+        except Exception:
+            pass
+        return 240
+
+    def _fullscreen_alert_x_offset_max(self) -> int:
+        try:
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                return max(240, int(screen.geometry().width() // 2))
+        except Exception:
+            pass
+        return 600
+
+    def _fullscreen_alert_y_offset_max(self) -> int:
+        try:
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                return max(240, int(screen.geometry().height()) - 1)
+        except Exception:
+            pass
+        return 600
+
     def _barrage_page(self) -> QWidget:
         page = self._page("弹幕")
         layout: QVBoxLayout = page._content_layout
         card = self._card(layout)
         c = card.layout()
 
+        self.barrage_display_mode = self._combo(
+            list(self.BARRAGE_DISPLAY_MODES),
+            str(getattr(self.island_widget, "barrage_display_mode", self._setting_value("v2_barrage_display_mode", "fullscreen")) or "fullscreen"),
+            self._set_barrage_display_mode,
+        )
+        self._row(c, "弹幕场景", self.barrage_display_mode)
         self.auto_bounds_checkbox = self._check("自动识别上下边界", bool(getattr(self.island_widget, "auto_expand_bounds", True)), self._set_auto_expand_bounds)
         c.addWidget(self.auto_bounds_checkbox)
         self.expand_direction = self._combo([("自动", "auto"), ("向下", "down"), ("向上", "up")], str(getattr(self.island_widget, "expand_direction", "auto")), self._set_expand_direction)
         self._row(c, "展开方向", self.expand_direction)
-        self.barrage_y_offset = self._slider_row(c, "弹幕位置", 0, 240, int(getattr(self.island_widget, "barrage_y_offset", 0)), self._set_barrage_y_offset, " px")
+        self.barrage_y_offset = self._slider_row(
+            c,
+            "弹幕位置",
+            0,
+            self._barrage_position_max(),
+            max(0, min(self._barrage_position_max(), int(getattr(self.island_widget, "barrage_y_offset", 0)))),
+            self._set_barrage_y_offset,
+            " px",
+        )
         self.barrage_font_size = self._slider_row(c, "弹幕字号", 8, 20, int(getattr(self.island_widget, "barrage_font_size", 10)), self._set_barrage_font_size, " px")
         self.barrage_speed = self._slider_row(c, "弹幕速度", 40, 220, int(getattr(self.island_widget, "barrage_speed", 100)), self._set_barrage_speed, "%")
         self.barrage_backdrop = self._check("弹幕背景遮罩", bool(getattr(self.island_widget, "barrage_use_backdrop", True)), self._set_barrage_backdrop)
@@ -1069,6 +1448,9 @@ class SettingsWindow(QDialog):
             ("player_progress_plugin_enabled", "进度插件"),
             ("player_progress_auto_detect", "插件自动识别"),
             ("music_player_adapter", "当前适配器"),
+            ("mydockfinder_running", "MyDockFinder 监听"),
+            ("mydockfinder_match", "MyDockFinder 命中"),
+            ("mydockfinder_reason", "MyDockFinder 诊断"),
             ("media_session_count", "Windows 媒体会话"),
             ("media_session_candidates", "媒体会话候选"),
             ("source_app", "来源应用"),
@@ -1126,8 +1508,8 @@ class SettingsWindow(QDialog):
             (self.music_auto_checkbox, bool(getattr(self.island_widget, "music_auto_detect", False))),
             (self.plugin_checkbox, bool(getattr(self.island_widget, "persistent_plugin", True))),
             (self.plugin_time_enabled, "time" in enabled_plugins),
-            (self.plugin_weather_enabled, "weather" in enabled_plugins),
-            (self.plugin_agenda_enabled, "agenda" in enabled_plugins),
+            (self.plugin_weather_enabled, False),
+            (self.plugin_agenda_enabled, False),
             (self.super_topmost_checkbox, bool(getattr(self.island_widget, "super_topmost_enabled", True))),
             (self.message_detection_checkbox, bool(self._setting_value("v2_enable_message_detection", True))),
             (self.wechat_notification_checkbox, bool(self._setting_value("v2_enable_wechat_notification", True))),
@@ -1137,7 +1519,7 @@ class SettingsWindow(QDialog):
             (self.player_progress_plugin_checkbox, bool(self._setting_value("v2_enable_player_progress_plugin", False))),
             (self.player_progress_auto_detect_checkbox, bool(self._setting_value("v2_player_progress_auto_detect", False))),
             (self.dual_line_lyrics_checkbox, bool(getattr(self.island_widget, "enable_dual_line_lyrics", False))),
-            (self.manual_finder_checkbox, bool(getattr(self.island_widget, "manual_finder_available", False))),
+            (self.mydockfinder_listener_checkbox, bool(getattr(self.island_widget, "mydockfinder_running", False))),
             (self.expanded_checkbox, bool(getattr(self.island_widget, "expanded", False))),
             (self.seconds_checkbox, bool(getattr(self.island_widget, "show_seconds", True))),
             (self.weather_use_location, bool(self._setting_value("v2_weather_use_location", True))),
@@ -1163,6 +1545,17 @@ class SettingsWindow(QDialog):
             (self.empty_bar_height, int(getattr(self.island_widget, "empty_bar_height", 14))),
             (self.empty_bar_y_offset, int(getattr(self.island_widget, "empty_bar_y_offset", 0))),
             (self.empty_bar_opacity, int(getattr(self.island_widget, "empty_bar_opacity", 100))),
+            (
+                self.plugin_fullscreen_alert_x_offset,
+                max(
+                    -self._fullscreen_alert_x_offset_max(),
+                    min(self._fullscreen_alert_x_offset_max(), int(getattr(self.island_widget, "plugin_fullscreen_alert_x_offset", 0))),
+                ),
+            ),
+            (
+                self.plugin_fullscreen_alert_y_offset,
+                max(0, min(self._fullscreen_alert_y_offset_max(), int(getattr(self.island_widget, "plugin_fullscreen_alert_y_offset", 0)))),
+            ),
             (self.barrage_y_offset, int(getattr(self.island_widget, "barrage_y_offset", 0))),
             (self.barrage_font_size, int(getattr(self.island_widget, "barrage_font_size", 10))),
             (self.barrage_speed, int(getattr(self.island_widget, "barrage_speed", 100))),
@@ -1173,7 +1566,8 @@ class SettingsWindow(QDialog):
             (self.gelv_dual_line_font_size, max(8, min(30, int(getattr(self.island_widget, "gelv_dual_line_font_size", self._setting_value("v2_gelv_dual_line_font_size", 17)))))),
             (self.gelv_initial_word_spacing, max(100, min(320, int(getattr(self.island_widget, "gelv_initial_word_spacing", self._setting_value("v2_gelv_initial_word_spacing", 220)))))),
             (self.gelv_word_spacing, max(100, min(420, int(getattr(self.island_widget, "gelv_word_spacing", self._setting_value("v2_gelv_word_spacing", 320)))))),
-            (self.album_island_cover_size, max(18, min(44, int(getattr(self.island_widget, "album_island_cover_size", self._setting_value("v2_album_island_cover_size", 30)))))),
+            (self.album_island_compact_cover_size, max(18, min(44, int(getattr(self.island_widget, "album_island_compact_cover_size", self._setting_value("v2_album_island_compact_cover_size", self._setting_value("v2_album_island_cover_size", 30))))))),
+            (self.album_island_expanded_cover_size, max(36, min(96, int(getattr(self.island_widget, "album_island_expanded_cover_size", self._setting_value("v2_album_island_expanded_cover_size", 72)))))),
             (self.album_island_spacing, max(48, min(170, int(getattr(self.island_widget, "album_island_spacing", self._setting_value("v2_album_island_spacing", 112)))))),
             (self.album_island_perspective_amount, max(0, min(200, int(getattr(self.island_widget, "album_island_perspective_amount", self._setting_value("v2_album_island_perspective_amount", 100)))))),
             (self.lyric_elastic_strength, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100))))),
@@ -1196,6 +1590,19 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.empty_palette, str(getattr(self.island_widget, "empty_bar_palette", "aurora")))
         self._refresh_location_mode_options()
         self._set_combo_data(self.location_mode, str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free"))))
+        if hasattr(self, "position_preset"):
+            self._set_combo_data(self.position_preset, str(getattr(self.island_widget, "position_preset", self._setting_value("v2_position_preset", "last")) or "last"))
+        if hasattr(self, "plugin_fullscreen_alert_style"):
+            self._set_combo_data(
+                self.plugin_fullscreen_alert_style,
+                str(getattr(self.island_widget, "plugin_fullscreen_alert_style", self._setting_value("v2_plugin_fullscreen_alert_style", "island")) or "island"),
+            )
+        if hasattr(self, "mydockfinder_path_input"):
+            self.mydockfinder_path_input.blockSignals(True)
+            self.mydockfinder_path_input.setText(str(getattr(self.island_widget, "mydockfinder_path", self._setting_value("v2_mydockfinder_path", "")) or ""))
+            self.mydockfinder_path_input.blockSignals(False)
+        if hasattr(self, "mydockfinder_status_label"):
+            self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
         self._set_combo_data(self.expand_direction, str(getattr(self.island_widget, "expand_direction", "auto")))
         self._set_combo_data(self.animation_speed, float(getattr(self.island_widget, "animation_speed", 1.0)))
         self._set_combo_data(self.music_ambience_style, str(getattr(self.island_widget, "music_ambience_style", "sea_level")))
@@ -1203,10 +1610,9 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.side_island_style, str(getattr(self.island_widget, "side_island_style", self._setting_value("v2_side_island_style", "standard")) or "standard"))
         self._set_combo_data(self.plugin_island_style, str(getattr(self.island_widget, "plugin_island_style", self._setting_value("v2_plugin_island_style", "standard")) or "standard"))
         self._set_combo_data(self.time_alarm_side_display, str(getattr(self.island_widget, "time_alarm_side_display", self._setting_value("v2_time_alarm_side_display", "note")) or "note"))
+        self._set_combo_data(self.barrage_display_mode, str(getattr(self.island_widget, "barrage_display_mode", self._setting_value("v2_barrage_display_mode", "fullscreen")) or "fullscreen"))
         self._set_combo_data(self.music_player_mode, self._music_player_mode_setting())
-        self.ncm_path_input.blockSignals(True)
-        self.ncm_path_input.setText(str(self._setting_value("v2_netease_betterncm_path", "") or ""))
-        self.ncm_path_input.blockSignals(False)
+        self._update_music_app_profile_controls()
         self._set_combo_data(self.lyric_flow_style, str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream"))))
         self.gelv_color_fill_checkbox.blockSignals(True)
         self.gelv_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "gelv_color_fill_enabled", False)))
@@ -1227,10 +1633,14 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.no_lyrics_display_mode, str(getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))))
         self._set_combo_data(self.album_island_cover_count, int(getattr(self.island_widget, "album_island_cover_count", self._setting_value("v2_album_island_cover_count", 5))))
         self._set_combo_data(self.album_island_secondary_style, str(getattr(self.island_widget, "album_island_secondary_style", self._setting_value("v2_album_island_secondary_style", "perspective_dim"))))
-        if hasattr(self, "album_island_cover_size"):
-            self.album_island_cover_size.blockSignals(True)
-            self.album_island_cover_size.setValue(max(18, min(44, int(getattr(self.island_widget, "album_island_cover_size", self._setting_value("v2_album_island_cover_size", 30))))))
-            self.album_island_cover_size.blockSignals(False)
+        if hasattr(self, "album_island_compact_cover_size"):
+            self.album_island_compact_cover_size.blockSignals(True)
+            self.album_island_compact_cover_size.setValue(max(18, min(44, int(getattr(self.island_widget, "album_island_compact_cover_size", self._setting_value("v2_album_island_compact_cover_size", self._setting_value("v2_album_island_cover_size", 30)))))))
+            self.album_island_compact_cover_size.blockSignals(False)
+        if hasattr(self, "album_island_expanded_cover_size"):
+            self.album_island_expanded_cover_size.blockSignals(True)
+            self.album_island_expanded_cover_size.setValue(max(36, min(96, int(getattr(self.island_widget, "album_island_expanded_cover_size", self._setting_value("v2_album_island_expanded_cover_size", 72))))))
+            self.album_island_expanded_cover_size.blockSignals(False)
         if hasattr(self, "album_island_spacing"):
             self.album_island_spacing.blockSignals(True)
             self.album_island_spacing.setValue(max(48, min(170, int(getattr(self.island_widget, "album_island_spacing", self._setting_value("v2_album_island_spacing", 112))))))
@@ -1350,9 +1760,38 @@ class SettingsWindow(QDialog):
             self.player_progress_auto_detect_checkbox.setEnabled(enabled)
         if hasattr(self, "music_player_mode"):
             self.music_player_mode.setEnabled(enabled and not auto_detect)
-        if hasattr(self, "ncm_path_input"):
-            mode = self._music_player_mode_setting()
-            self.ncm_path_input.setEnabled(enabled and not auto_detect and mode == "netease_betterncm")
+        self._update_music_app_profile_statuses()
+
+    def _update_music_app_profile_controls(self):
+        controls_by_service = getattr(self, "music_app_profile_controls", {})
+        if not controls_by_service:
+            return
+        for service, controls in controls_by_service.items():
+            profile = self._music_app_profile(service)
+            sync = controls.get("sync")
+            if sync is not None:
+                sync.blockSignals(True)
+                sync.setChecked(bool(profile.get("sync_enabled", False)))
+                sync.blockSignals(False)
+            path = controls.get("path")
+            if path is not None:
+                path.blockSignals(True)
+                path.setText(str(profile.get("path", "") or ""))
+                path.blockSignals(False)
+            offset = controls.get("offset")
+            if offset is not None:
+                self._set_slider_value(offset, int(round(float(profile.get("lyric_offset_seconds", 0.0) or 0.0) * 1000)))
+            betterncm_enabled = controls.get("betterncm_enabled")
+            if betterncm_enabled is not None:
+                betterncm_enabled.blockSignals(True)
+                betterncm_enabled.setChecked(bool(profile.get("betterncm_enabled", False)))
+                betterncm_enabled.blockSignals(False)
+            betterncm_path = controls.get("betterncm_path")
+            if betterncm_path is not None:
+                betterncm_path.blockSignals(True)
+                betterncm_path.setText(str(profile.get("betterncm_path", "") or self._setting_value("v2_netease_betterncm_path", "") or ""))
+                betterncm_path.blockSignals(False)
+        self._update_music_app_profile_statuses()
 
     def _update_message_controls(self):
         enabled = bool(getattr(self, "message_detection_checkbox", None) and self.message_detection_checkbox.isChecked())
@@ -1421,8 +1860,10 @@ class SettingsWindow(QDialog):
             self.album_island_cover_count.setEnabled(album_mode)
         if hasattr(self, "album_island_secondary_style"):
             self.album_island_secondary_style.setEnabled(album_mode)
-        if hasattr(self, "album_island_cover_size"):
-            self.album_island_cover_size.setEnabled(album_mode)
+        if hasattr(self, "album_island_compact_cover_size"):
+            self.album_island_compact_cover_size.setEnabled(album_mode)
+        if hasattr(self, "album_island_expanded_cover_size"):
+            self.album_island_expanded_cover_size.setEnabled(album_mode)
         if hasattr(self, "album_island_spacing"):
             self.album_island_spacing.setEnabled(album_mode)
         if hasattr(self, "album_island_perspective_amount"):
@@ -1643,13 +2084,49 @@ class SettingsWindow(QDialog):
         self.settings_font_combo.blockSignals(False)
         self._set_combo_data(self.settings_font_combo, current)
         self._style_combo_popup(self.settings_font_combo)
+        self._update_settings_font_status()
 
     def _apply_settings_font(self):
-        family = str(self._setting_value("v2_settings_font_family", self.FONT_CHOICES[0]) or self.FONT_CHOICES[0])
-        self.setFont(QFont(family, 9))
+        requested = str(self._setting_value("v2_settings_font_family", self.FONT_CHOICES[0]) or self.FONT_CHOICES[0]).strip()
+        family = self._resolve_settings_font_family(requested)
+        app = QApplication.instance()
+        font = QFont(app.font() if app is not None else QFont())
+        candidates = list(self.SETTINGS_FONT_FALLBACKS.get(requested, (requested,)))
+        if family not in candidates:
+            candidates.insert(0, family)
+        font.setFamilies(candidates)
+        font.setPointSize(9)
+        self.setFont(font)
+        for widget in self.findChildren(QWidget):
+            widget.setFont(font)
+        self._update_settings_font_status(family)
+
+    def _resolve_settings_font_family(self, requested: str) -> str:
+        try:
+            from local.island_stack_visual import IslandStackVisual
+
+            IslandStackVisual.load_source_han_serif_fonts()
+        except Exception:
+            pass
+        families = set(QFontDatabase.families())
+        for candidate in self.SETTINGS_FONT_FALLBACKS.get(requested, (requested,)):
+            if candidate in families:
+                return candidate
+        return requested
+
+    def _update_settings_font_status(self, actual_family: str | None = None):
+        if not hasattr(self, "settings_font_status"):
+            return
+        requested = str(self._setting_value("v2_settings_font_family", self.FONT_CHOICES[0]) or self.FONT_CHOICES[0]).strip()
+        actual = actual_family or self._resolve_settings_font_family(requested)
+        if actual == requested:
+            text = f"已即时应用：{actual}"
+        else:
+            text = f"已即时应用：{actual}（{requested} 不可用时自动替代）"
+        self.settings_font_status.setText(text)
 
     def _enabled_plugins_setting(self) -> list[str]:
-        known = ["time", "weather", "agenda"]
+        known = ["time"]
         raw = getattr(self.island_widget, "enabled_plugin_ids", None)
         if raw is None:
             raw = self._setting_value("v2_enabled_plugins", known)
@@ -1657,13 +2134,13 @@ class SettingsWindow(QDialog):
             enabled = {str(item or "").strip().casefold() for item in raw}
             return [plugin_id for plugin_id in known if plugin_id in enabled]
         try:
-            count = max(0, min(3, int(getattr(self.island_widget, "enabled_plugin_count", len(known)))))
+            count = max(0, min(1, int(getattr(self.island_widget, "enabled_plugin_count", len(known)))))
         except (TypeError, ValueError):
             count = len(known)
         return known[:count]
 
     def _apply_enabled_plugins(self, plugin_ids: list[str]):
-        known = ["time", "weather", "agenda"]
+        known = ["time"]
         enabled = [plugin_id for plugin_id in known if plugin_id in {str(item).casefold() for item in plugin_ids}]
         self.island_widget.enabled_plugin_ids = set(enabled)
         self.island_widget.enabled_plugin_count = len(enabled)
@@ -1714,6 +2191,9 @@ class SettingsWindow(QDialog):
         messages = diagnostics.get("messages", {})
         if not isinstance(messages, dict):
             messages = {}
+        mydockfinder = diagnostics.get("mydockfinder_diagnostics", {})
+        if not isinstance(mydockfinder, dict):
+            mydockfinder = {}
         position_confidence = diagnostics.get("position_confidence", diagnostics.get("visible_position_confidence", 0.0))
         values = {
             "provider_status": diagnostics.get("provider_status", "-"),
@@ -1722,6 +2202,9 @@ class SettingsWindow(QDialog):
             "player_progress_plugin_enabled": "启用" if diagnostics.get("player_progress_plugin_enabled") else "关闭",
             "player_progress_auto_detect": "启用" if diagnostics.get("player_progress_auto_detect") else "关闭",
             "music_player_adapter": diagnostics.get("music_player_adapter") or "-",
+            "mydockfinder_running": "开启" if diagnostics.get("mydockfinder_running") else "关闭",
+            "mydockfinder_match": mydockfinder.get("matched_name") or "-",
+            "mydockfinder_reason": mydockfinder.get("reason") or "-",
             "media_session_count": diagnostics.get("media_session_count", 0),
             "media_session_candidates": " | ".join(diagnostics.get("media_session_candidates") or ()) or diagnostics.get("media_session_error") or "-",
             "source_app": diagnostics.get("source_app") or diagnostics.get("visible_source_app") or "-",
@@ -1800,8 +2283,6 @@ class SettingsWindow(QDialog):
             return
         self._barrage_adjust_generation += 1
         generation = self._barrage_adjust_generation
-        if hasattr(self.island_widget, "set_settings_window_active"):
-            self.island_widget.set_settings_window_active(True)
         if hasattr(self.island_widget, "show_barrage_preview"):
             self.island_widget.show_barrage_preview()
 
@@ -1810,6 +2291,12 @@ class SettingsWindow(QDialog):
                 self.island_widget.set_settings_window_active(False)
 
         QTimer.singleShot(6000, release)
+
+    def _begin_plugin_alert_adjust_preview(self):
+        if self.nav.currentRow() != self._plugin_page_index:
+            return
+        if hasattr(self.island_widget, "show_plugin_fullscreen_alert_preview"):
+            self.island_widget.show_plugin_fullscreen_alert_preview()
 
     def _touch(self):
         self.island_widget._enforce_stack_limit()
@@ -1852,6 +2339,20 @@ class SettingsWindow(QDialog):
         self._save("v2_finder_mode", mode == "finder")
         self._refresh_location_mode_options()
         self._set_combo_data(self.location_mode, mode)
+        self._update_taskbar_controls()
+        self._touch()
+
+    def _set_position_preset(self, _index: int = -1):
+        preset = str(self.position_preset.currentData() or "last")
+        if hasattr(self.island_widget, "apply_position_preset"):
+            self.island_widget.apply_position_preset(preset, notify=False)
+            preset = str(getattr(self.island_widget, "position_preset", preset) or "last")
+        else:
+            self.island_widget.position_preset = preset
+        self._save("v2_position_preset", preset)
+        self._save("v2_location_mode", str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free"))))
+        self._set_combo_data(self.position_preset, preset)
+        self._refresh_location_mode_options()
         self._update_taskbar_controls()
         self._touch()
 
@@ -1899,13 +2400,40 @@ class SettingsWindow(QDialog):
 
     def _update_taskbar_controls(self):
         location = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")) or "free")
-        tasker_available = location != "finder" and not bool(getattr(self.island_widget, "manual_finder_available", False))
+        mydockfinder_available = bool(
+            getattr(self.island_widget, "_mydockfinder_available", lambda: bool(getattr(self.island_widget, "mydockfinder_running", False)))()
+        )
+        tasker_available = location != "finder" and not mydockfinder_available
         for widget in (
             getattr(self, "taskbar_corner_style", None),
             getattr(self, "taskbar_left_handle_color", None),
         ):
             if widget is not None:
                 widget.setEnabled(tasker_available)
+
+    def _browse_mydockfinder_path(self, _checked: bool = False):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择 MyDockFinder 应用",
+            str(self.mydockfinder_path_input.text() or ""),
+            "Executable Files (*.exe);;All Files (*)",
+        )
+        if not path:
+            return
+        self.mydockfinder_path_input.setText(path)
+        self._set_mydockfinder_path()
+
+    def _set_mydockfinder_path(self):
+        value = str(self.mydockfinder_path_input.text() or "").strip().strip('"')
+        self.mydockfinder_path_input.setText(value)
+        if hasattr(self.island_widget, "set_mydockfinder_path"):
+            self.island_widget.set_mydockfinder_path(value, notify=False)
+        else:
+            self.island_widget.mydockfinder_path = value
+        self._save("v2_mydockfinder_path", value)
+        if hasattr(self, "mydockfinder_status_label"):
+            self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
+        self._touch()
 
     def _set_message_detection(self, enabled: bool):
         self._save("v2_enable_message_detection", bool(enabled))
@@ -1936,6 +2464,8 @@ class SettingsWindow(QDialog):
     def _set_manual_finder_available(self, enabled: bool):
         if hasattr(self.island_widget, "set_manual_finder_available"):
             self.island_widget.set_manual_finder_available(enabled, notify=False)
+        elif hasattr(self.island_widget, "set_mydockfinder_running"):
+            self.island_widget.set_mydockfinder_running(enabled, notify=False)
         else:
             self.island_widget.manual_finder_available = enabled
             if enabled and str(getattr(self.island_widget, "location_mode", "free")) == "tasker":
@@ -2217,13 +2747,41 @@ class SettingsWindow(QDialog):
         self._touch()
 
     def _set_album_island_cover_size(self, value: int):
+        self._set_album_island_compact_cover_size(value)
+
+    def _set_album_island_compact_cover_size(self, value: int):
         size = max(18, min(44, int(value)))
-        if hasattr(self.island_widget, "set_album_island_cover_size"):
+        if hasattr(self.island_widget, "set_album_island_compact_cover_size"):
+            self.island_widget.set_album_island_compact_cover_size(size, notify=False)
+        elif hasattr(self.island_widget, "set_album_island_cover_size"):
             self.island_widget.set_album_island_cover_size(size, notify=False)
         else:
             self.island_widget.album_island_cover_size = size
+            self.island_widget.album_island_compact_cover_size = size
             self.island_widget.update()
         self._save("v2_album_island_cover_size", size)
+        self._save("v2_album_island_compact_cover_size", size)
+        self._touch()
+
+    def _set_album_island_expanded_cover_size(self, value: int):
+        size = max(36, min(96, int(value)))
+        if hasattr(self.island_widget, "set_album_island_expanded_cover_size"):
+            self.island_widget.set_album_island_expanded_cover_size(size, notify=False)
+        else:
+            self.island_widget.album_island_expanded_cover_size = size
+            self.island_widget.update()
+        self._save("v2_album_island_expanded_cover_size", size)
+        self._touch()
+
+    def _reset_album_island_record(self):
+        if hasattr(self.island_widget, "reset_album_island_record"):
+            self.island_widget.reset_album_island_record(notify=False)
+        else:
+            self.island_widget.listened_seconds_total = 0.0
+            self.island_widget.album_history = []
+            self.island_widget.update()
+        self._save("v2_album_island_listened_seconds_total", 0.0)
+        self._save("v2_album_island_history", [])
         self._touch()
 
     def _set_album_island_secondary_style(self, _index: int = -1):
@@ -2312,7 +2870,7 @@ class SettingsWindow(QDialog):
         widget.persistent_plugin = True
         enabled = set(self._enabled_plugins_setting())
         enabled.add("time")
-        self._apply_enabled_plugins([plugin_id for plugin_id in ("time", "weather", "agenda") if plugin_id in enabled])
+        self._apply_enabled_plugins([plugin_id for plugin_id in ("time",) if plugin_id in enabled])
         widget.plugin_panel_open = True
         widget.plugin_time_mode = "alarm_editor"
         if hasattr(widget, "_set_plugin_focus"):
@@ -2349,6 +2907,30 @@ class SettingsWindow(QDialog):
     def _set_schedule_ics_path(self, value: str):
         self._save("v2_schedule_ics_path", str(value or "").strip())
 
+    def _browse_schedule_json_path(self, _checked: bool = False):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择日程 JSON",
+            str(self.schedule_json_input.text() or ""),
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        self.schedule_json_input.setText(path)
+        self._set_schedule_json_path(path)
+
+    def _browse_schedule_ics_path(self, _checked: bool = False):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择日程 ICS",
+            str(self.schedule_ics_input.text() or ""),
+            "Calendar Files (*.ics);;All Files (*)",
+        )
+        if not path:
+            return
+        self.schedule_ics_input.setText(path)
+        self._set_schedule_ics_path(path)
+
     def _set_schedule_reminder_minutes(self):
         value = str(self.schedule_reminder_minutes.text() or "").strip() or "15,30,5"
         self.schedule_reminder_minutes.setText(value)
@@ -2359,10 +2941,6 @@ class SettingsWindow(QDialog):
         enabled = []
         if getattr(self, "plugin_time_enabled", None) is not None and self.plugin_time_enabled.isChecked():
             enabled.append("time")
-        if getattr(self, "plugin_weather_enabled", None) is not None and self.plugin_weather_enabled.isChecked():
-            enabled.append("weather")
-        if getattr(self, "plugin_agenda_enabled", None) is not None and self.plugin_agenda_enabled.isChecked():
-            enabled.append("agenda")
         self._apply_enabled_plugins(enabled)
         self._save("v2_enabled_plugins", enabled)
         self._touch()
@@ -2378,6 +2956,37 @@ class SettingsWindow(QDialog):
         self.island_widget.plugin_island_style = style
         self._save("v2_plugin_island_style", style)
         self._touch()
+
+    def _set_plugin_fullscreen_alert_style(self, _index: int = -1):
+        style = str(self.plugin_fullscreen_alert_style.currentData() or "island")
+        if hasattr(self.island_widget, "set_plugin_fullscreen_alert_style"):
+            self.island_widget.set_plugin_fullscreen_alert_style(style, notify=False)
+            style = str(getattr(self.island_widget, "plugin_fullscreen_alert_style", style))
+        else:
+            self.island_widget.plugin_fullscreen_alert_style = style
+        self._save("v2_plugin_fullscreen_alert_style", style)
+        self._begin_plugin_alert_adjust_preview()
+        self._touch()
+
+    def _set_plugin_fullscreen_alert_x_offset(self, value: int):
+        if hasattr(self.island_widget, "set_plugin_fullscreen_alert_position"):
+            self.island_widget.set_plugin_fullscreen_alert_position(x_offset=value, notify=False)
+            value = int(getattr(self.island_widget, "plugin_fullscreen_alert_x_offset", value))
+        else:
+            self.island_widget.plugin_fullscreen_alert_x_offset = int(value)
+            self.island_widget.update()
+        self._save("v2_plugin_fullscreen_alert_x_offset", value)
+        self._begin_plugin_alert_adjust_preview()
+
+    def _set_plugin_fullscreen_alert_y_offset(self, value: int):
+        if hasattr(self.island_widget, "set_plugin_fullscreen_alert_position"):
+            self.island_widget.set_plugin_fullscreen_alert_position(y_offset=value, notify=False)
+            value = int(getattr(self.island_widget, "plugin_fullscreen_alert_y_offset", value))
+        else:
+            self.island_widget.plugin_fullscreen_alert_y_offset = int(value)
+            self.island_widget.update()
+        self._save("v2_plugin_fullscreen_alert_y_offset", value)
+        self._begin_plugin_alert_adjust_preview()
 
     def _set_time_alarm_side_display(self, _index: int = -1):
         mode = str(self.time_alarm_side_display.currentData() or "note")
@@ -2462,12 +3071,72 @@ class SettingsWindow(QDialog):
         self._refresh_diagnostics()
         self._touch()
 
-    def _set_netease_betterncm_path(self):
-        path = str(self.ncm_path_input.text() or "").strip().strip('"')
-        self.ncm_path_input.setText(path)
-        self._save("v2_netease_betterncm_path", path)
+    def _save_music_app_profile_value(self, service: str, key: str, value):
+        service = str(service or "").strip().casefold()
+        profiles = self._music_app_profiles_setting()
+        profile = dict(profiles.get(service, DEFAULT_MUSIC_APP_PROFILES.get(service, {})))
+        profile[key] = value
+        profiles[service] = profile
+        self._save("v2_music_app_profiles", profiles)
+        self._update_music_app_profile_statuses()
         self._refresh_diagnostics()
         self._touch()
+
+    def _set_music_app_profile_path(self, service: str, widget: QLineEdit | None = None):
+        controls = getattr(self, "music_app_profile_controls", {}).get(service, {})
+        widget = widget or controls.get("path")
+        path = "" if widget is None else str(widget.text() or "").strip().strip('"')
+        if widget is not None:
+            widget.setText(path)
+        self._save_music_app_profile_value(service, "path", path)
+
+    def _browse_music_app_profile_path(self, service: str, widget: QLineEdit | None = None):
+        controls = getattr(self, "music_app_profile_controls", {}).get(service, {})
+        widget = widget or controls.get("path")
+        current = "" if widget is None else str(widget.text() or "")
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择音乐软件应用",
+            current,
+            "Executable Files (*.exe);;All Files (*)",
+        )
+        if not path:
+            return
+        if widget is not None:
+            widget.setText(path)
+        self._set_music_app_profile_path(service, widget)
+
+    def _set_music_app_profile_sync_enabled(self, service: str, enabled: bool):
+        self._save_music_app_profile_value(service, "sync_enabled", bool(enabled))
+        self._update_player_progress_controls()
+
+    def _set_music_app_profile_lyric_offset(self, service: str, value: int):
+        seconds = max(-12.0, min(12.0, float(value) / 1000.0))
+        self._save_music_app_profile_value(service, "lyric_offset_seconds", seconds)
+
+    def _set_music_app_profile_betterncm_enabled(self, enabled: bool):
+        self._save_music_app_profile_value("netease", "betterncm_enabled", bool(enabled))
+        self._update_player_progress_controls()
+
+    def _set_music_app_profile_betterncm_path(self, widget: QLineEdit | None = None):
+        controls = getattr(self, "music_app_profile_controls", {}).get("netease", {})
+        widget = widget or controls.get("betterncm_path")
+        path = "" if widget is None else str(widget.text() or "").strip().strip('"')
+        if widget is not None:
+            widget.setText(path)
+        self._save_music_app_profile_value("netease", "betterncm_path", path)
+        self._save("v2_netease_betterncm_path", path)
+
+    def _browse_betterncm_path(self, widget: QLineEdit | None = None):
+        controls = getattr(self, "music_app_profile_controls", {}).get("netease", {})
+        widget = widget or controls.get("betterncm_path")
+        current = "" if widget is None else str(widget.text() or "")
+        path = QFileDialog.getExistingDirectory(self, "选择 BetterNCM 目录", current)
+        if not path:
+            return
+        if widget is not None:
+            widget.setText(path)
+        self._set_music_app_profile_betterncm_path(widget)
 
     def _set_player_progress_plugin_enabled(self, enabled: bool):
         self._save("v2_enable_player_progress_plugin", bool(enabled))
@@ -2492,12 +3161,30 @@ class SettingsWindow(QDialog):
             self.island_widget.update()
         self._save("v2_expand_direction", direction)
 
+    def _set_barrage_display_mode(self, _index: int = -1):
+        mode = str(self.barrage_display_mode.currentData() or "fullscreen")
+        if hasattr(self.island_widget, "set_barrage_settings"):
+            self.island_widget.set_barrage_settings(display_mode=mode, notify=False)
+            mode = str(getattr(self.island_widget, "barrage_display_mode", mode))
+        else:
+            self.island_widget.barrage_display_mode = mode
+            self.island_widget.update()
+        self._begin_barrage_adjust_preview()
+        self._save("v2_barrage_display_mode", mode)
+
     def _set_barrage_y_offset(self, value: int):
         if hasattr(self.island_widget, "set_barrage_settings"):
             self.island_widget.set_barrage_settings(y_offset=value, notify=False)
+            value = int(getattr(self.island_widget, "barrage_y_offset", value))
         else:
+            value = max(0, min(self._barrage_position_max(), int(value)))
             self.island_widget.barrage_y_offset = value
             self.island_widget.update()
+        if hasattr(self, "barrage_y_offset"):
+            if self.barrage_y_offset.maximum() != self._barrage_position_max():
+                self.barrage_y_offset.setMaximum(self._barrage_position_max())
+            if self.barrage_y_offset.value() != value:
+                self._set_slider_value(self.barrage_y_offset, value)
         self._begin_barrage_adjust_preview()
         self._save("v2_barrage_y_offset", value)
 
@@ -2507,6 +3194,7 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.barrage_font_size = value
             self.island_widget.update()
+        self._begin_barrage_adjust_preview()
         self._save("v2_barrage_font_size", value)
 
     def _set_barrage_speed(self, value: int):
@@ -2524,6 +3212,7 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.barrage_use_backdrop = enabled
             self.island_widget.update()
+        self._begin_barrage_adjust_preview()
         self._save("v2_barrage_use_backdrop", enabled)
 
     def _set_barrage_icon(self, enabled: bool):
@@ -2532,6 +3221,7 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.barrage_show_icon = enabled
             self.island_widget.update()
+        self._begin_barrage_adjust_preview()
         self._save("v2_barrage_show_icon", enabled)
 
     def _set_lyric_offset(self, value: int):

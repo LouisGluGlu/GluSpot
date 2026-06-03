@@ -57,6 +57,7 @@ class TrackData:
     source_app_foreground: bool = False
     position_interactive: bool = False
     album_queue: tuple[AlbumQueueEntry, ...] = ()
+    lyric_offset_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

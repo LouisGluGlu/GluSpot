@@ -160,7 +160,7 @@ class WindowsMessageDetector:
             candidates = self._collect_candidates()
         has_wechat_notification = any(self._is_wechat_app_name(message.app) for message in notification_messages)
         wechat_messages: list[MessageData] = []
-        if self._wechat_detail_enabled():
+        if self._wechat_notification_enabled() and self._wechat_detail_enabled():
             wechat_messages = self._wechat_messages(
                 now,
                 force_detail=has_wechat_notification,
@@ -208,8 +208,10 @@ class WindowsMessageDetector:
 
     def _message_app_enabled(self, app_name: str) -> bool:
         folded = str(app_name or "").casefold()
+        if self._is_wechat_app_name(app_name):
+            return self._wechat_notification_enabled()
         if "wechat" in folded or "weixin" in folded or "微信" in app_name:
-            return self._wechat_notification_enabled() or self._wechat_detail_enabled()
+            return self._wechat_notification_enabled()
         if folded == "qq":
             return self._qq_notification_enabled()
         if "dingtalk" in folded or "钉钉" in app_name:
@@ -481,6 +483,8 @@ class WindowsMessageDetector:
         return False
 
     def _wechat_messages(self, now: float, force_detail: bool = False, suppress_summary: bool = False) -> list[MessageData]:
+        if not self._wechat_notification_enabled():
+            return []
         native_windows = self._native_wechat_windows()
         self._set_wechat_native_diagnostics(native_windows)
         sessions: list[WeChatSessionCandidate] = []
@@ -538,6 +542,9 @@ class WindowsMessageDetector:
             self._wechat_last_total_change_at = now
         if self._wechat_initialized and total_delta > 0:
             message = self._message_from_wechat_unread(total_unread, sessions, self._wechat_seen_sessions, total_delta=total_delta)
+            summary_message = message is not None and message.sender == message.app and not getattr(message, "avatar_image_bytes", b"")
+            if summary_message and not self._wechat_notification_enabled():
+                message = None
             if suppress_summary and message is not None and message.sender == message.app and not getattr(message, "avatar_image_bytes", b""):
                 message = None
             if message is not None:

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import inspect
 import json
 import re
+import time
 import unittest
 from unittest.mock import patch
 
@@ -12,7 +13,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtWidgets import QApplication
 
-from local.island_stack_visual import IslandKind, IslandStackVisual, LyricLayout, Message, SpringRect, StackVisual, TaskbarDropOverlay
+from local.island_stack_visual import BarrageOverlay, FullscreenPluginAlertOverlay, IslandKind, IslandStackVisual, LyricLayout, Message, SpringRect, StackVisual, TaskbarDropOverlay
 from local.mydockfinder import FinderGlassMaterial
 
 
@@ -29,6 +30,25 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
         image.save(buffer, "PNG")
         return bytes(data)
+
+    def test_animation_duration_scales_with_global_speed(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.animation_speed = 0.5
+        self.assertAlmostEqual(visual._animation_duration(0.24), 0.48, delta=0.001)
+
+        visual.animation_speed = 2.0
+        self.assertAlmostEqual(visual._animation_duration(0.24), 0.12, delta=0.001)
+
+    def test_tasker_motion_response_is_not_faster_than_global_island_motion(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.finder_mode = False
+        visual.location_mode = "tasker"
+        visual.stack_bounce_until = 0.0
+
+        response, damping = visual._visual_motion_params(now=10.0)
+
+        self.assertGreaterEqual(response, 0.28)
+        self.assertGreaterEqual(damping, 0.76)
 
     def test_ingest_provider_messages_keeps_latest_message_per_app(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -78,6 +98,655 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual([message.app for message in visual.messages], ["QQ"])
         self.assertEqual([message.app for message in visual.barrage_preview_messages], ["钉钉"])
+
+    def test_barrage_y_offset_clamps_to_full_screen_height(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.barrage_y_offset = 0
+        visual.barrage_font_size = 10
+        visual.barrage_speed = 100
+        visual.barrage_use_backdrop = True
+        visual.barrage_show_icon = True
+        visual._barrage_max_y_offset = lambda: 1079
+        visual.update = lambda: None
+        visual._notify_settings_changed = lambda: None
+
+        visual.set_barrage_settings(y_offset=900, notify=False)
+        self.assertEqual(visual.barrage_y_offset, 900)
+
+        visual.set_barrage_settings(y_offset=1300, notify=False)
+        self.assertEqual(visual.barrage_y_offset, 1079)
+
+    def test_barrage_motion_uses_full_screen_viewport_width(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual._barrage_viewport_rect = lambda: QRectF(0.0, 0.0, 1920.0, 1080.0)
+
+        travel = visual._barrage_travel_distance(180.0)
+
+        self.assertGreaterEqual(travel, 1920.0 + 180.0)
+        self.assertGreater(travel, 940.0 + 180.0 + 140.0)
+
+    def test_fullscreen_plugin_alert_can_be_repeated_as_clickable_barrage(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.sample_index = 0
+        visual.barrage_clock = 12.0
+        visual.plugin_fullscreen_alert_style = "barrage"
+        alert = (
+            0,
+            "TIME",
+            "0:00",
+            "Countdown 0:00",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "计时结束",
+            "点击查看或清除计时器",
+            5,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [alert]
+
+        messages = visual._fullscreen_plugin_alert_barrage_messages(repeat_count=10, now=12.0)
+
+        self.assertEqual(len(messages), 10)
+        self.assertTrue(all(getattr(message, "action_key", "") == "plugin-alert:time" for message in messages))
+        self.assertTrue(all(message.barrage_started_at >= 12.0 for message in messages))
+        self.assertIn("点击查看", messages[0].text)
+
+    def test_fullscreen_plugin_barrage_uses_barrage_clock_not_monotonic_clock(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.sample_index = 0
+        visual.barrage_clock = 3.25
+        visual.plugin_fullscreen_alert_style = "barrage"
+        alert = (
+            0,
+            "TIME",
+            "0:00",
+            "Countdown 0:00",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "timer done",
+            "click to review or clear",
+            5,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [alert]
+
+        messages = visual._fullscreen_plugin_alert_barrage_messages(repeat_count=3, now=123456.0)
+
+        self.assertAlmostEqual(messages[0].barrage_started_at, 3.25, delta=0.001)
+        self.assertAlmostEqual(messages[1].barrage_started_at, 3.43, delta=0.001)
+        self.assertLess(messages[-1].barrage_started_at, 4.0)
+
+    def test_fullscreen_overlay_configure_reinforces_native_topmost(self):
+        source = inspect.getsource(FullscreenPluginAlertOverlay.configure)
+
+        self.assertIn("_force_overlay_topmost", source)
+
+    def test_fullscreen_overlay_native_topmost_uses_set_window_pos(self):
+        source = inspect.getsource(FullscreenPluginAlertOverlay)
+
+        self.assertIn("SetWindowPos", source)
+        self.assertIn("hwnd_topmost", source)
+
+    def test_fullscreen_plugin_alert_state_requires_scene_suppression_and_alert(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = True
+        visual.plugin_fullscreen_alert_style = "toast"
+        alert = (
+            0,
+            "TIME",
+            "0:00",
+            "Countdown 0:00",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "timer done",
+            "click to review or clear",
+            5,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [alert]
+
+        state = visual._fullscreen_plugin_alert_overlay_state()
+
+        self.assertEqual(state["style"], "toast")
+        self.assertEqual(state["alert"], alert)
+        self.assertEqual(state["action_key"], "plugin-alert:time")
+
+        visual.scene_suppressed = False
+        self.assertIsNone(visual._fullscreen_plugin_alert_overlay_state())
+
+    def test_fullscreen_plugin_alert_ignores_running_time_realtime_state(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = True
+        visual.plugin_fullscreen_alert_style = "toast"
+        running = (
+            0,
+            "TIME",
+            "2:24",
+            "倒计时 2:24",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "running",
+            "倒计时",
+            "2:24",
+            30,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [running]
+
+        self.assertIsNone(visual._fullscreen_plugin_alert_overlay_state())
+
+    def test_fullscreen_plugin_alert_accepts_time_done_reminder_state(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = True
+        visual.plugin_fullscreen_alert_style = "toast"
+        done = (
+            0,
+            "TIME",
+            "0:00",
+            "倒计时 0:00",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "倒计时",
+            "时间到",
+            5,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [done]
+
+        state = visual._fullscreen_plugin_alert_overlay_state()
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state["alert"], done)
+
+    def test_barrage_preview_uses_overlay_even_before_scene_is_hidden(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.settings_window_active = True
+        visual.barrage_clock = 4.0
+        message = Message("Preview", "Barrage", "Position 300px", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        message.barrage_started_at = 4.0
+        visual.barrage_preview_messages = [message]
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.messages = []
+
+        state = visual._fullscreen_barrage_overlay_state(preview_only=True)
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state["style"], "barrage")
+        self.assertEqual(state["alert_key"], "preview-barrage:1")
+
+    def test_barrage_preview_overlay_stops_after_settings_preview_releases(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.settings_window_active = False
+        visual.barrage_clock = 4.0
+        message = Message("Preview", "Barrage", "Position 300px", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        message.barrage_started_at = 4.0
+        visual.barrage_preview_messages = [message]
+
+        state = visual._fullscreen_barrage_overlay_state(preview_only=True)
+
+        self.assertIsNone(state)
+
+    def test_barrage_display_mode_anytime_allows_overlay_without_fullscreen(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = ""
+        visual.settings_window_active = False
+        visual.barrage_display_mode = "always"
+        visual.barrage_clock = 4.0
+        message = Message("WeChat", "Alice", "hello", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        message.barrage_started_at = 4.0
+        visual.messages = [message]
+        visual.barrage_preview_messages = []
+        visual.fullscreen_plugin_barrage_messages = []
+
+        state = visual._barrage_overlay_state()
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state["style"], "barrage")
+
+    def test_barrage_overlay_state_carries_message_snapshot(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = ""
+        visual.settings_window_active = False
+        visual.barrage_display_mode = "always"
+        visual.barrage_clock = 4.0
+        visual.barrage_preview_messages = []
+        visual.fullscreen_plugin_barrage_messages = []
+        message = Message("WeChat", "Alice", "hello", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        message.barrage_started_at = 4.0
+        visual.messages = [message]
+
+        state = visual._barrage_overlay_state()
+
+        self.assertIsNotNone(state)
+        self.assertIn("messages", state)
+        self.assertEqual(state["messages"], [message])
+
+    def test_barrage_overlay_has_independent_frame_timer(self):
+        source = inspect.getsource(BarrageOverlay)
+
+        self.assertIn("frame_timer", source)
+        self.assertIn("_advance_barrage_frame", source)
+        self.assertIn("active_messages=", source)
+        self.assertIn("clock=", source)
+
+    def test_barrage_paint_scene_accepts_snapshot_and_clock(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.barrage_clock = 999.0
+        visual.barrage_y_offset = 40
+        visual.barrage_font_size = 12
+        visual.barrage_speed = 100
+        visual.barrage_use_backdrop = True
+        visual.barrage_show_icon = True
+        visual.barrage_preview_messages = []
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.messages = []
+        visual._u = lambda value: float(value)
+        visual._font = lambda size, weight=QFont.Weight.Normal: QFont("Arial", int(size), int(weight))
+        visual._barrage_travel_distance = lambda content_width, viewport=None: float((viewport or QRectF(0, 0, 640, 220)).width()) + float(content_width) + 140.0
+        painted: list[QRectF] = []
+        visual._paint_barrage_text = lambda _painter, rect, *_args: painted.append(QRectF(rect))
+        message = Message("Preview", "Barrage", "visible", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        message.barrage_started_at = 19.15
+
+        image = QImage(640, 220, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        try:
+            rects = visual._paint_barrage_scene(
+                painter,
+                QRectF(0.0, 0.0, 640.0, 220.0),
+                active_messages=[message],
+                clock=20.0,
+                prune=False,
+            )
+        finally:
+            painter.end()
+
+        self.assertTrue(rects)
+        self.assertTrue(painted)
+        self.assertEqual(visual.barrage_preview_messages, [])
+        self.assertEqual(visual.fullscreen_plugin_barrage_messages, [])
+
+    def test_barrage_display_mode_fullscreen_blocks_normal_overlay_until_preview(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = ""
+        visual.settings_window_active = False
+        visual.barrage_display_mode = "fullscreen"
+        visual.barrage_clock = 4.0
+        message = Message("WeChat", "Alice", "hello", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        message.barrage_started_at = 4.0
+        visual.messages = [message]
+        visual.barrage_preview_messages = []
+        visual.fullscreen_plugin_barrage_messages = []
+
+        self.assertIsNone(visual._barrage_overlay_state())
+
+        preview = Message("Preview", "Barrage", "Position 300px", QColor(96, 186, 255), QColor(52, 118, 240), serial=2)
+        preview.barrage_started_at = 4.0
+        visual.barrage_preview_messages = [preview]
+        visual.last_barrage_preview_at = 10.0
+        with patch("local.island_stack_visual.time.monotonic", return_value=10.5):
+            state = visual._barrage_overlay_state()
+
+        self.assertIsNotNone(state)
+        self.assertEqual(state["alert_key"], "preview-barrage:1")
+
+    def test_barrage_preview_can_sync_overlay_without_hiding_island_for_settings(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.settings_window_active = False
+        visual.last_barrage_preview_at = -100.0
+        visual.sample_index = 0
+        visual.barrage_clock = 4.0
+        visual.barrage_y_offset = 240
+        visual.barrage_preview_messages = []
+        visual.update = lambda: None
+        visual._update_scene_state = lambda _now: (_ for _ in ()).throw(AssertionError("preview should not hide the island"))
+        calls: list[float] = []
+        visual._sync_barrage_overlay = lambda now: calls.append(float(now))
+
+        visual.show_barrage_preview()
+
+        self.assertEqual(len(visual.barrage_preview_messages), 1)
+        self.assertEqual(len(calls), 1)
+        self.assertGreater(getattr(visual, "barrage_preview_force_anytime_until", 0.0), visual.last_barrage_preview_at)
+
+    def test_barrage_preview_first_frame_is_already_visible_on_screen(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.settings_window_active = False
+        visual.last_barrage_preview_at = -100.0
+        visual.sample_index = 0
+        visual.barrage_clock = 20.0
+        visual.barrage_y_offset = 40
+        visual.barrage_font_size = 12
+        visual.barrage_speed = 100
+        visual.barrage_use_backdrop = True
+        visual.barrage_show_icon = True
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.messages = []
+        visual.barrage_preview_messages = []
+        visual._u = lambda value: float(value)
+        visual._font = lambda size, weight=QFont.Weight.Normal: QFont("Arial", int(size), int(weight))
+        visual._barrage_travel_distance = lambda content_width, viewport=None: float((viewport or QRectF(0, 0, 640, 220)).width()) + float(content_width) + 140.0
+        visual._sync_barrage_overlay = lambda _now: None
+        visual.update = lambda: None
+        painted: list[QRectF] = []
+        visual._paint_barrage_text = lambda _painter, rect, *_args: painted.append(QRectF(rect))
+
+        visual.show_barrage_preview()
+        image = QImage(640, 220, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        try:
+            rects = visual._paint_barrage_scene(painter, QRectF(0.0, 0.0, 640.0, 220.0))
+        finally:
+            painter.end()
+
+        self.assertTrue(rects)
+        self.assertTrue(painted)
+        self.assertLess(painted[0].left(), 640.0)
+        self.assertGreater(painted[0].right(), 0.0)
+
+    def test_fullscreen_plugin_alert_position_offsets_card_rect(self):
+        overlay = FullscreenPluginAlertOverlay.__new__(FullscreenPluginAlertOverlay)
+        owner = IslandStackVisual.__new__(IslandStackVisual)
+        owner.plugin_fullscreen_alert_x_offset = 80
+        owner.plugin_fullscreen_alert_y_offset = 120
+        owner._u = lambda value: float(value)
+        overlay.owner = owner
+        overlay.width = lambda: 1000
+        overlay.height = lambda: 700
+
+        baseline_owner = IslandStackVisual.__new__(IslandStackVisual)
+        baseline_owner.plugin_fullscreen_alert_x_offset = 0
+        baseline_owner.plugin_fullscreen_alert_y_offset = 0
+        baseline_owner._u = lambda value: float(value)
+        baseline = FullscreenPluginAlertOverlay.__new__(FullscreenPluginAlertOverlay)
+        baseline.owner = baseline_owner
+        baseline.width = lambda: 1000
+        baseline.height = lambda: 700
+
+        moved = overlay._card_rect("island")
+        original = baseline._card_rect("island")
+
+        self.assertAlmostEqual(moved.left() - original.left(), 80.0, delta=0.01)
+        self.assertAlmostEqual(moved.top() - original.top(), 120.0, delta=0.01)
+
+    def test_plugin_fullscreen_alert_preview_works_without_real_due_alert_or_fullscreen(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = ""
+        visual.settings_window_active = False
+        visual.plugin_fullscreen_alert_style = "toast"
+        visual.plugin_fullscreen_alert_x_offset = 0
+        visual.plugin_fullscreen_alert_y_offset = 0
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.fullscreen_plugin_barrage_alert_key = ""
+        visual.barrage_preview_messages = []
+        visual.messages = []
+        visual.sample_index = 0
+        visual.barrage_clock = 8.0
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: []
+        visual.update = lambda: None
+        calls: list[float] = []
+        visual._sync_fullscreen_plugin_alert_overlay = lambda now: calls.append(float(now))
+
+        visual.show_plugin_fullscreen_alert_preview()
+        state = visual._fullscreen_plugin_alert_overlay_state()
+
+        self.assertEqual(len(calls), 1)
+        self.assertIsNotNone(state)
+        self.assertEqual(state["style"], "toast")
+        self.assertEqual(state["action_key"], "plugin-alert:time")
+
+    def test_plugin_fullscreen_alert_barrage_preview_starts_visible(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = ""
+        visual.settings_window_active = False
+        visual.plugin_fullscreen_alert_style = "barrage"
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.fullscreen_plugin_barrage_alert_key = ""
+        visual.sample_index = 0
+        visual.barrage_clock = 8.0
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: []
+        visual.update = lambda: None
+        visual._sync_fullscreen_plugin_alert_overlay = lambda _now: None
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=100.0):
+            visual.show_plugin_fullscreen_alert_preview()
+            messages = visual._fullscreen_plugin_alert_barrage_messages(repeat_count=3, now=100.0)
+
+        self.assertEqual(len(messages), 3)
+        self.assertLess(messages[0].barrage_started_at, visual.barrage_clock)
+        self.assertEqual(messages[0].action_key, "plugin-alert:time")
+
+    def test_settings_barrage_preview_does_not_trigger_scene_suppression(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.settings_window_active = True
+        visual.last_barrage_preview_at = 10.0
+        message = Message("Preview", "Barrage", "Position 240px", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        visual.barrage_preview_messages = [message]
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=10.5):
+            suppressed, reason = visual._detect_scene_suppression()
+
+        self.assertFalse(suppressed)
+        self.assertEqual(reason, "")
+
+    def test_fullscreen_plugin_alert_uses_detected_fullscreen_even_when_scene_stays_visible(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = "fullscreen"
+        visual.plugin_fullscreen_alert_style = "toast"
+        alert = (
+            0,
+            "TIME",
+            "0:00",
+            "Countdown 0:00",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "timer done",
+            "click to review or clear",
+            5,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [alert]
+
+        state = visual._fullscreen_plugin_alert_overlay_state()
+
+        self.assertEqual(state["style"], "toast")
+        self.assertEqual(state["action_key"], "plugin-alert:time")
+
+    def test_tasker_visible_fullscreen_barrage_alert_generates_messages(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = "fullscreen"
+        visual.plugin_fullscreen_alert_style = "barrage"
+        visual.fullscreen_plugin_barrage_alert_key = ""
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.sample_index = 0
+        visual.barrage_clock = 12.0
+        alert = (
+            0,
+            "TIME",
+            "0:00",
+            "Countdown 0:00",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "timer done",
+            "click to review or clear",
+            5,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [alert]
+
+        visual._ensure_fullscreen_plugin_barrage_messages(12.0)
+
+        self.assertEqual(len(visual.fullscreen_plugin_barrage_messages), 10)
+        self.assertEqual(visual.fullscreen_plugin_barrage_messages[0].action_key, "plugin-alert:time")
+
+    def test_sync_barrage_overlay_generates_plugin_barrage_before_state_lookup(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = "fullscreen"
+        visual.settings_window_active = False
+        visual.plugin_fullscreen_alert_style = "barrage"
+        visual.fullscreen_plugin_barrage_alert_key = ""
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.barrage_preview_messages = []
+        visual.messages = []
+        visual.sample_index = 0
+        visual.barrage_clock = 12.0
+        visual._fullscreen_plugin_alert_screen_rect = lambda: QRectF(0.0, 0.0, 1920.0, 1080.0)
+        alert = (
+            0,
+            "TIME",
+            "0:00",
+            "Countdown 0:00",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "timer done",
+            "click to review or clear",
+            5,
+        )
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [alert]
+
+        configured: list[dict[str, object]] = []
+
+        class FakeOverlay:
+            def configure(self, state, _screen_rect, _now):
+                configured.append(dict(state))
+
+            def request_hide(self, _now):
+                configured.append({"hidden": True})
+
+        visual.barrage_overlay = FakeOverlay()
+
+        visual._sync_barrage_overlay(12.0)
+
+        self.assertEqual(len(visual.fullscreen_plugin_barrage_messages), 10)
+        self.assertEqual(len(configured), 1)
+        self.assertEqual(configured[0]["style"], "barrage")
+
+    def test_barrage_preview_syncs_dedicated_barrage_overlay(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.settings_window_active = True
+        visual.last_barrage_preview_at = -100.0
+        visual.sample_index = 0
+        visual.barrage_clock = 4.0
+        visual.barrage_y_offset = 320
+        visual.barrage_preview_messages = []
+        visual.scene_checked_at = 0.0
+        visual.update = lambda: None
+        visual._update_scene_state = lambda _now: None
+        calls: list[float] = []
+        visual._sync_barrage_overlay = lambda now: calls.append(float(now))
+        visual._sync_fullscreen_plugin_alert_overlay = lambda _now: (_ for _ in ()).throw(AssertionError("preview should not sync plugin alert overlay"))
+
+        visual.show_barrage_preview()
+
+        self.assertEqual(len(visual.barrage_preview_messages), 1)
+        self.assertEqual(len(calls), 1)
+
+    def test_barrage_and_plugin_alert_states_are_independent(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = False
+        visual.scene_reason = ""
+        visual.last_scene_probe_reason = "fullscreen"
+        visual.settings_window_active = True
+        visual.barrage_clock = 8.0
+        preview = Message("Preview", "Barrage", "Position 300px", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        preview.barrage_started_at = 8.0
+        visual.barrage_preview_messages = [preview]
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.messages = []
+        visual.plugin_fullscreen_alert_style = "toast"
+        alert = (0, "TIME", "0:00", "Countdown 0:00", QColor(255, 184, 0), "", "time", "done", "timer done", "click", 5)
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [alert]
+
+        barrage_state = visual._barrage_overlay_state()
+        plugin_state = visual._plugin_alert_overlay_state()
+
+        self.assertEqual(barrage_state["style"], "barrage")
+        self.assertEqual(plugin_state["style"], "toast")
+        self.assertEqual(plugin_state["action_key"], "plugin-alert:time")
+
+    def test_fullscreen_overlay_state_prioritizes_settings_barrage_preview(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = True
+        visual.scene_reason = "settings"
+        visual.last_scene_probe_reason = "settings"
+        visual.settings_window_active = True
+        visual.barrage_clock = 8.0
+        message = Message("Preview", "Barrage", "Position 300px", QColor(96, 186, 255), QColor(52, 118, 240), serial=1)
+        message.barrage_started_at = 8.0
+        visual.barrage_preview_messages = [message]
+        visual.fullscreen_plugin_barrage_messages = []
+        visual.messages = []
+        visual.plugin_fullscreen_alert_style = "toast"
+        visual._active_plugin_alerts = lambda *_args, **_kwargs: [
+            (0, "TIME", "0:00", "Countdown 0:00", QColor(255, 184, 0), "", "time", "done", "timer done", "click", 5)
+        ]
+
+        state = visual._fullscreen_overlay_state()
+
+        self.assertEqual(state["style"], "barrage")
+        self.assertEqual(state["alert_key"], "preview-barrage:1")
+
+    def test_scene_suppressed_tick_syncs_fullscreen_plugin_overlay(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.scene_suppressed = True
+        visual.hovered_key = "plugin"
+        visual.hover_armed_key = "plugin"
+        visual.left_stack_at = 1.0
+        calls: list[tuple[str, float | None]] = []
+        visual._ensure_fullscreen_plugin_barrage_messages = lambda now: calls.append(("ensure", now))
+        visual._sync_fullscreen_plugin_alert_overlay = lambda now: calls.append(("sync", now))
+        visual.update = lambda: calls.append(("update", None))
+
+        visual._handle_scene_suppressed_tick(12.0, 0.016)
+
+        self.assertIn(("ensure", 12.0), calls)
+        self.assertIn(("sync", 12.0), calls)
+        self.assertIn(("update", None), calls)
+        self.assertEqual(visual.hovered_key, "")
+        self.assertEqual(visual.hover_armed_key, "")
+        self.assertEqual(visual.left_stack_at, 0.0)
+
+    def test_fullscreen_plugin_alert_overlay_paints_on_its_own_screen_sized_viewport(self):
+        source = inspect.getsource(FullscreenPluginAlertOverlay.paintEvent)
+
+        self.assertIn("_paint_barrage_scene", source)
+        self.assertIn("QRectF(0.0, 0.0, float(self.width()), float(self.height()))", source)
+
+    def test_fullscreen_plugin_alert_overlay_masks_only_clickable_notification_regions(self):
+        source = inspect.getsource(FullscreenPluginAlertOverlay._apply_hit_mask)
+
+        self.assertIn("setMask", source)
+        self.assertIn("WA_TransparentForMouseEvents", source)
 
     def test_lyric_display_lines_preserve_explicit_newline(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -215,9 +884,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.no_lyrics_display_mode = "album_island"
         visual.album_island_cover_count = 7
         visual.album_island_cover_size = 34
+        visual.album_island_compact_cover_size = 28
+        visual.album_island_expanded_cover_size = 72
         visual.album_island_spacing = 140
         visual.album_island_secondary_style = "perspective_dim"
         visual.album_island_perspective_amount = 135
+        visual.listened_seconds_total = 7260.0
+        visual.album_history = [{"track_id": "a", "title": "A", "artist": "B"}]
         visual.compact_lyric_show_cover = False
 
         snapshot = visual.settings_snapshot()
@@ -237,9 +910,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(snapshot["v2_no_lyrics_display_mode"], "album_island")
         self.assertEqual(snapshot["v2_album_island_cover_count"], 7)
         self.assertEqual(snapshot["v2_album_island_cover_size"], 34)
+        self.assertEqual(snapshot["v2_album_island_compact_cover_size"], 28)
+        self.assertEqual(snapshot["v2_album_island_expanded_cover_size"], 72)
         self.assertEqual(snapshot["v2_album_island_spacing"], 140)
         self.assertEqual(snapshot["v2_album_island_secondary_style"], "perspective_dim")
         self.assertEqual(snapshot["v2_album_island_perspective_amount"], 135)
+        self.assertEqual(snapshot["v2_album_island_listened_seconds_total"], 7260.0)
+        self.assertEqual(snapshot["v2_album_island_history"][0]["track_id"], "a")
         self.assertFalse(snapshot["v2_compact_lyric_show_cover"])
 
     def test_location_tasker_settings_are_saved_in_snapshot(self):
@@ -499,6 +1176,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     def test_tasker_left_resize_handle_is_visible_only_on_tasker_hover_or_drag(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "tasker"
+        visual.expanded = False
         visual.hovered_key = ""
         visual.drag_press_key = ""
         visual.dragging = False
@@ -513,6 +1191,81 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.drag_press_key = "taskbar:left-handle"
         self.assertTrue(visual._taskbar_left_handle_visible())
 
+    def test_tasker_left_resize_handle_is_hidden_when_expanded(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = True
+        visual.hovered_key = "music"
+        visual.dragging = False
+        visual.drag_press_key = ""
+        visual.taskbar_left_handle_visible_until = time.monotonic() + 3.0
+
+        self.assertFalse(visual._taskbar_left_handle_visible())
+
+    def test_tasker_left_resize_handle_frame_matches_island_height(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        main_rect = QRectF(520.0, 1044.0, 360.0, 34.0)
+
+        handle = visual._taskbar_left_handle_rect(main_rect)
+        frame = visual._taskbar_left_handle_frame_rect(main_rect)
+
+        self.assertAlmostEqual(frame.height(), main_rect.height(), delta=0.01)
+        self.assertLessEqual(frame.left(), handle.left())
+        self.assertGreaterEqual(frame.right(), handle.right())
+
+    def test_tasker_left_resize_handle_frame_grows_from_island_edge(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        main_rect = QRectF(520.0, 1044.0, 360.0, 34.0)
+
+        frame = visual._taskbar_left_handle_frame_rect(main_rect)
+
+        self.assertLess(frame.left(), main_rect.left())
+        self.assertGreater(frame.right(), main_rect.left())
+
+    def test_tasker_left_resize_handle_is_painted_before_main_body(self):
+        source = inspect.getsource(IslandStackVisual.paintEvent)
+
+        handle_index = source.index("self._paint_taskbar_left_handle(painter, rect)")
+        music_index = source.index("self._paint_music(painter, rect, self.expanded)")
+
+        self.assertLess(handle_index, music_index)
+
+    def test_tasker_left_resize_handle_visibility_progress_fades_near_expiry(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.hovered_key = ""
+        visual.dragging = False
+        visual.drag_press_key = ""
+        visual.taskbar_left_handle_visible_until = 10.0
+
+        full = visual._taskbar_left_handle_visibility_progress(now=9.2)
+        fading = visual._taskbar_left_handle_visibility_progress(now=9.92)
+        gone = visual._taskbar_left_handle_visibility_progress(now=10.3)
+
+        self.assertGreater(full, fading)
+        self.assertGreater(fading, 0.0)
+        self.assertEqual(gone, 0.0)
+
+    def test_tasker_left_resize_handle_slide_progress_collapses_toward_island(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.hovered_key = ""
+        visual.dragging = False
+        visual.drag_press_key = ""
+        visual.taskbar_left_handle_visible_until = 10.0
+
+        full = visual._taskbar_left_handle_slide_progress(now=9.2)
+        sliding = visual._taskbar_left_handle_slide_progress(now=9.92)
+        gone = visual._taskbar_left_handle_slide_progress(now=10.3)
+
+        self.assertGreater(full, sliding)
+        self.assertGreater(sliding, 0.0)
+        self.assertEqual(gone, 0.0)
+
     def test_tasker_window_position_clamps_to_bottom_screen_boundary(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual._u = lambda value: float(value)
@@ -521,7 +1274,23 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         clamped = visual._clamp_taskbar_window_pos(new_pos, main_top=940.0, main_w=420.0, main_h=176.0, screen_geo=screen_geo)
 
-        self.assertLessEqual(clamped.y() + 940.0 + 176.0, screen_geo.bottom() - 6.0 + 1.0)
+        self.assertLessEqual(clamped.y() + 940.0 + 176.0, screen_geo.bottom() + 1.0)
+
+    def test_tasker_window_position_can_reach_left_and_right_screen_edges(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        screen_geo = QRect(0, 0, 1920, 1080)
+        main_top = 940.0
+        main_w = 420.0
+        main_h = 44.0
+        main_left = visual.width() / 2.0 - main_w / 2.0
+
+        left = visual._clamp_taskbar_window_pos(QPoint(-999, 900), main_top, main_w, main_h, screen_geo)
+        right = visual._clamp_taskbar_window_pos(QPoint(9999, 900), main_top, main_w, main_h, screen_geo)
+
+        self.assertEqual(left.x() + main_left, screen_geo.left())
+        self.assertEqual(right.x() + main_left + main_w, screen_geo.right() + 1.0)
 
     def test_tasker_compact_music_width_is_stable_across_content_width_changes(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -535,6 +1304,369 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual(narrow[0], wide[0])
         self.assertGreaterEqual(narrow[0], 360.0)
+
+    def test_tasker_cover_only_music_paints_album_cover_and_play_button(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.lyric_flow_style = "album_island"
+        visual.no_lyrics_display_mode = "text"
+        visual.media_is_playing = False
+        visual.music_button_rects = {}
+        visual._u = lambda value: float(value)
+        visual._paint_cover = lambda *_args, **_kwargs: None
+        image = QImage(120, 60, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_music_compact(painter, QRectF(10.0, 10.0, 58.0, 34.0))
+        painter.end()
+
+        self.assertEqual(set(visual.music_button_rects), {"music:toggle_play_pause"})
+        button = visual.music_button_rects["music:toggle_play_pause"]
+        self.assertGreater(button.center().x(), 36.0)
+
+    def test_tasker_cover_only_detects_crowded_medium_width(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.taskbar_selected_drop_zone = QRectF()
+        visual._u = lambda value: float(value)
+
+        self.assertTrue(visual._taskbar_cover_only_music_active(QRectF(10.0, 10.0, 118.0, 34.0)))
+
+    def test_tasker_hover_overlay_registers_compact_playback_controls(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.lyric_flow_style = "wave_stream"
+        visual.no_lyrics_display_mode = "text"
+        visual.lyrics = ["line"]
+        visual.media_is_playing = True
+        visual.hovered_key = "music"
+        visual.music_button_rects = {}
+        visual._u = lambda value: float(value)
+        visual._paint_cover = lambda *_args, **_kwargs: None
+        visual._paint_compact_lyric_viewport = lambda *_args, **_kwargs: None
+        visual.compact_lyric_show_cover = True
+        image = QImage(260, 70, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_music_compact(painter, QRectF(10.0, 10.0, 220.0, 34.0))
+        painter.end()
+
+        self.assertEqual(
+            set(visual.music_button_rects),
+            {"music:previous", "music:toggle_play_pause", "music:next"},
+        )
+
+    def test_tasker_hover_music_controls_are_large_opaque_right_side_buttons(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.lyric_flow_style = "wave_stream"
+        visual.no_lyrics_display_mode = "text"
+        visual.lyrics = ["line"]
+        visual.media_is_playing = True
+        visual.hovered_key = "music"
+        visual.music_button_rects = {}
+        visual._u = lambda value: float(value)
+        visual._paint_cover = lambda *_args, **_kwargs: None
+        visual._paint_compact_lyric_viewport = lambda *_args, **_kwargs: None
+        visual.compact_lyric_show_cover = True
+        painted: list[tuple[str, QRectF, int]] = []
+        visual._paint_music_control_button = lambda _painter, rect, command, fill_alpha, radius=None: painted.append(
+            (str(command), QRectF(rect), int(fill_alpha))
+        )
+        image = QImage(280, 70, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_music_compact(painter, QRectF(10.0, 10.0, 240.0, 34.0))
+        painter.end()
+
+        self.assertEqual([item[0] for item in painted], ["music:previous", "music:toggle_play_pause", "music:next"])
+        buttons = [item[1] for item in painted]
+        group = QRectF(buttons[0])
+        for button in buttons[1:]:
+            group = group.united(button)
+        self.assertGreater(group.center().x(), 10.0 + 240.0 * 0.68)
+        self.assertGreaterEqual(min(button.width() for button in buttons), 32.0)
+        self.assertGreaterEqual(min(item[2] for item in painted), 176)
+        self.assertGreater(visual.music_button_rects["music:next"].right(), 10.0 + 240.0 - 12.0)
+
+    def test_tasker_hover_music_controls_do_not_scrim_whole_lyric_area(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.hovered_key = "music"
+        visual._u = lambda value: float(value)
+        visual._taskbar_compact_active = lambda: True
+        visual._music_shell_radius = lambda _rect, _expanded=False: 8.0
+        visual._paint_music_control_button = lambda *_args, **_kwargs: None
+        image = QImage(280, 70, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_taskbar_music_hover_overlay(painter, QRectF(10.0, 10.0, 240.0, 34.0))
+        painter.end()
+
+        self.assertEqual(image.pixelColor(28, 27).alpha(), 0)
+
+    def test_music_control_icon_specs_use_svg_assets_and_theme_tone(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.media_is_playing = False
+        visual._pure_white_music_active = lambda: True
+
+        play = visual._music_control_icon_spec("music:toggle_play_pause")
+        previous = visual._music_control_icon_spec("music:previous")
+        next_icon = visual._music_control_icon_spec("music:next")
+
+        self.assertTrue(str(play["path"]).endswith("播放2.svg"))
+        self.assertTrue(play["path"].exists())
+        self.assertFalse(bool(play["mirrored"]))
+        self.assertTrue(str(previous["path"]).endswith("上一首.svg"))
+        self.assertTrue(previous["path"].exists())
+        self.assertFalse(bool(previous["mirrored"]))
+        self.assertTrue(str(next_icon["path"]).endswith("上一首.svg"))
+        self.assertTrue(bool(next_icon["mirrored"]))
+
+        visual.media_is_playing = True
+        pause = visual._music_control_icon_spec("music:toggle_play_pause")
+        self.assertTrue(str(pause["path"]).endswith("暂停.svg"))
+        self.assertTrue(pause["path"].exists())
+
+        visual._pure_white_music_active = lambda: False
+        dark_background_play = visual._music_control_icon_spec("music:toggle_play_pause")
+        self.assertTrue(str(dark_background_play["path"]).endswith("暂停 (1).svg"))
+        self.assertTrue(dark_background_play["path"].exists())
+
+    def test_tasker_hover_music_controls_do_not_auto_activate(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+
+        self.assertFalse(visual._hover_auto_activation_allowed("music:toggle_play_pause"))
+        self.assertFalse(visual._hover_auto_activation_allowed("music:previous"))
+        self.assertTrue(visual._hover_auto_activation_allowed("plugin"))
+
+    def test_music_control_click_suppresses_current_hover_auto_expand_until_leave(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_control_press_started_at = {}
+        visual.media_is_playing = False
+        visual.last_media_refresh_at = 1.0
+        visual.hovered_key = "music"
+        visual.hover_armed_key = "music"
+        visual.tasker_music_hover_auto_expand_suppressed = False
+        visual._send_playback_command_async = lambda _command: None
+        visual._pulse_stack = lambda: None
+        visual.update = lambda: None
+
+        visual._activate_key("music:toggle_play_pause")
+
+        self.assertTrue(visual.tasker_music_hover_auto_expand_suppressed)
+        self.assertEqual(visual.hover_armed_key, "")
+        self.assertFalse(visual._hover_auto_activation_allowed("music"))
+        self.assertTrue(visual._hover_auto_activation_allowed("plugin"))
+
+    def test_toggle_play_pause_records_elastic_animation(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_control_press_started_at = {}
+        visual.media_is_playing = False
+        visual.last_media_refresh_at = 1.0
+        visual._send_playback_command_async = lambda _command: None
+        visual._pulse_stack = lambda: None
+        visual.update = lambda: None
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=12.0):
+            visual._activate_key("music:toggle_play_pause")
+
+        self.assertEqual(visual.music_control_press_started_at["music:toggle_play_pause"], 12.0)
+        self.assertTrue(visual.media_is_playing)
+        self.assertEqual(visual.last_media_refresh_at, 0.0)
+
+    def test_music_control_elastic_scale_peaks_after_click(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_control_press_started_at = {"music:toggle_play_pause": 10.0}
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+
+        self.assertGreater(visual._music_control_elastic_scale("music:toggle_play_pause", now=10.08), 1.0)
+        self.assertEqual(visual._music_control_elastic_scale("music:toggle_play_pause", now=10.7), 1.0)
+
+    def test_mydockfinder_listener_switches_allowed_modes(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.mydockfinder_running = False
+        visual.manual_finder_available = False
+        visual._reset_location_runtime_state = lambda *args, **kwargs: None
+        visual._notify_settings_changed = lambda: None
+        visual._begin_surface_transition = lambda _reason: False
+        visual._hide_taskbar_drop_overlay = lambda: None
+        visual._force_super_topmost = lambda: None
+        visual.update = lambda: None
+
+        visual.set_mydockfinder_running(True, notify=False)
+
+        self.assertEqual(visual.location_mode, "free")
+        self.assertEqual(visual.available_location_modes(), ["free", "finder"])
+
+        visual.set_mydockfinder_running(False, notify=False)
+
+        self.assertEqual(visual.available_location_modes(), ["free", "tasker"])
+
+    def test_mydockfinder_listener_result_does_not_clear_manual_finder_availability(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "finder"
+        visual.finder_mode = True
+        visual.attach_to_real_finder = True
+        visual.mydockfinder_running = True
+        visual.manual_finder_available = True
+        visual._reset_location_runtime_state = lambda *args, **kwargs: None
+        visual._notify_settings_changed = lambda: None
+        visual._begin_surface_transition = lambda _reason: False
+        visual._hide_taskbar_drop_overlay = lambda: None
+        visual._force_super_topmost = lambda: None
+        visual.update = lambda: None
+
+        visual.set_mydockfinder_running(False, notify=False)
+
+        self.assertTrue(visual.manual_finder_available)
+        self.assertFalse(visual.mydockfinder_running)
+        self.assertEqual(visual.location_mode, "finder")
+        self.assertEqual(visual.available_location_modes(), ["free", "finder"])
+
+    def test_last_position_snapshot_does_not_store_mode(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.stack_center_ratio = 0.5
+        visual.saved_window_pos = (11, 22)
+        visual.last_window_position = None
+        visual.stack_direction = 1
+        visual.taskbar_corner_style = "win11"
+        visual.taskbar_left_handle_color = "#8E8E93"
+        visual.taskbar_manual_width = 0.0
+        visual.taskbar_position_ratio = 0.5
+        visual.expanded = False
+        visual.show_seconds = True
+        visual.persistent_plugin = True
+        visual.enabled_plugin_ids = {"time"}
+        visual.enabled_plugin_count = 1
+        visual.side_island_style = "standard"
+        visual.plugin_island_style = "standard"
+        visual.music_island_style = "standard"
+        visual.time_alarm_side_display = "note"
+        visual.music_playing = True
+        visual.music_auto_detect = False
+        visual.super_topmost_enabled = True
+        visual.auto_expand_bounds = True
+        visual.expand_direction = "auto"
+        visual.no_lyrics_text = "暂无歌词"
+        visual.lyric_offset_seconds = 0.0
+        visual.lyric_font_size = 18
+        visual.lyric_elastic_strength = 100
+        visual.lyric_elastic_mode = "both"
+        visual.lyric_word_spacing = 100
+        visual.enable_dual_line_lyrics = False
+        visual.dual_line_font_size = 12
+        visual.dual_line_secondary_weight = 72
+        visual.dual_line_secondary_spacing = 100
+        visual.compact_lyric_show_cover = True
+        visual.lyric_flow_style = "wave_stream"
+        visual.gelv_font_family = "Source Han Serif SC"
+        visual.gelv_primary_font_size = 22
+        visual.gelv_secondary_font_size = 12
+        visual.gelv_dual_line_font_size = 17
+        visual.gelv_initial_word_spacing = 220
+        visual.gelv_word_spacing = 320
+        visual.gelv_size_shift_enabled = True
+        visual.gelv_color_fill_enabled = False
+        visual.gelv_color_fill_fallback = "#00D7FF"
+        visual.wave_color_fill_enabled = False
+        visual.wave_color_fill_fallback = "#00D7FF"
+        visual.no_lyrics_display_mode = "text"
+        visual.album_island_cover_count = 5
+        visual.album_island_cover_size = 30
+        visual.album_island_compact_cover_size = 30
+        visual.album_island_expanded_cover_size = 72
+        visual.album_island_spacing = 112
+        visual.album_island_secondary_style = "perspective_dim"
+        visual.album_island_perspective_amount = 100
+        visual.listened_seconds_total = 0.0
+        visual.album_history = []
+        visual.music_ambience_style = "sea_level"
+        visual.ambient_intensity = 0.0
+        visual.music_flow_intensity = 0.74
+        visual.compact_duotone_balance = 50
+        visual.expanded_duotone_balance = 50
+        visual.ui_font_family = "PingFang SC"
+        visual.high_quality_font_rendering = False
+        visual.animation_fps = 60
+        visual.animation_speed = 1.0
+        visual.empty_bar_palette = "aurora"
+        visual.empty_bar_width = 92
+        visual.empty_bar_height = 14
+        visual.empty_bar_y_offset = 0
+        visual.empty_bar_opacity = 100
+        visual.empty_bar_custom_colors = ("#46D6FF", "#73FFA6", "#FF5A86")
+        visual.barrage_y_offset = 0
+        visual.barrage_font_size = 10
+        visual.barrage_speed = 100
+        visual.barrage_use_backdrop = True
+        visual.barrage_show_icon = True
+        visual.mydockfinder_path = ""
+        visual.mydockfinder_running = False
+        visual._serializable_album_history = lambda: []
+
+        visual.save_last_position(QPoint(100, 200))
+        snapshot = visual.settings_snapshot()
+
+        self.assertEqual(snapshot["v2_last_window_position"], {"x": 100, "y": 200})
+        self.assertNotIn("v2_last_location_mode", snapshot)
+
+    def test_free_drag_no_longer_auto_snaps_to_top_center(self):
+        source = inspect.getsource(IslandStackVisual._move_standalone_drag)
+
+        self.assertNotIn("_snap_top_center_window_pos", source)
+
+    def test_position_preset_top_center_moves_standalone_window(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 260
+        visual.location_mode = "free"
+        visual.expanded = False
+        visual.stack_direction = 1
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 420.0
+        visual._main_size_for_kind = lambda _kind, _stack_w: (300.0, 62.0)
+        visual._main_top_for_direction = lambda _kind, _main_h, _direction: 20.0
+        visual._notify_settings_changed = lambda: None
+        moves: list[QPoint] = []
+        visual.move = lambda pos: moves.append(QPoint(pos))
+
+        with patch("local.island_stack_visual.QGuiApplication.primaryScreen", return_value=FakeScreen()):
+            self.assertTrue(visual.apply_position_preset("top_center", notify=False))
+
+        self.assertTrue(moves)
+        main_left = visual.width() / 2.0 - 300.0 / 2.0
+        self.assertEqual(moves[-1].x() + main_left + 150.0, 960.0)
+        self.assertEqual(moves[-1].y() + 20.0, 8.0)
+
+    def test_tasker_drag_track_allows_bottom_corners(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_task_area_rect_for_screen = lambda _screen, _taskbar: QRectF(120.0, 1040.0, 1520.0, 40.0)
+
+        drag_track = visual._taskbar_drag_track_rect_for_screen(None, taskbar)
+
+        self.assertLessEqual(drag_track.left(), 0.0)
+        self.assertGreaterEqual(drag_track.right(), 1919.0)
 
     def test_tasker_follow_position_preserves_intended_width_when_track_detection_is_narrow(self):
         class FakeScreen:
@@ -831,6 +1963,49 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(moves)
         self.assertLessEqual(moves[-1].y() + 10.0 + 62.0, 1080.0)
 
+    def test_tasker_follow_hides_while_taskbar_is_auto_hidden_and_restores_when_visible(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_position_ratio = 0.5
+        visual.taskbar_manual_width = 0.0
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 260
+        visual.mapToGlobal = lambda _point: QPoint(840, 1040)
+        visual._taskbar_rect_for_screen = lambda _screen: None
+        visual._update_taskbar_material_for_screen = lambda *_args: None
+        visual._taskbar_stack_direction_for_rect = lambda *_args: -1
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 420.0
+        visual._main_size_for_taskbar_anchor = lambda _kind, _stack_w, _taskbar: (300.0, 62.0)
+        visual._main_top_for_direction = lambda *_args: 10.0
+        visual._move_taskbar_window_if_needed = lambda _pos: (_ for _ in ()).throw(AssertionError("hidden taskbar should not move visible island"))
+        visual.save_last_position = lambda _pos: None
+        calls: list[str] = []
+        visual.hide = lambda: calls.append("hide")
+        visual.show = lambda: calls.append("show")
+
+        screen = FakeScreen()
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=screen):
+            self.assertTrue(visual._refresh_taskbar_follow_position())
+
+        self.assertEqual(calls, ["hide"])
+        self.assertTrue(getattr(visual, "taskbar_hidden_by_follow", False))
+
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        moves: list[QPoint] = []
+        visual._move_taskbar_window_if_needed = lambda pos: moves.append(QPoint(pos)) or True
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=screen):
+            self.assertTrue(visual._refresh_taskbar_follow_position())
+
+        self.assertIn("show", calls)
+        self.assertTrue(moves)
+        self.assertFalse(getattr(visual, "taskbar_hidden_by_follow", True))
+
     def test_taskbar_expanded_material_tokens_follow_sampled_taskbar_color(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.taskbar_material_color = QColor(238, 240, 244)
@@ -852,7 +2027,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertNotEqual(model["glyph"], "张")
         self.assertNotEqual(model["outer"], QColor(0, 0, 0, 238))
 
-    def test_tasker_compact_album_island_uses_current_cover_without_side_slots(self):
+    def test_tasker_compact_album_island_uses_available_side_slots(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "tasker"
         visual.expanded = False
@@ -877,8 +2052,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         with patch("local.island_stack_visual.time.monotonic", return_value=1.08):
             slots = visual._album_island_slots(QRectF(0.0, 0.0, 260.0, 34.0), reserve_text=True)
 
-        self.assertEqual(len(slots), 1)
-        self.assertEqual(int(slots[0]["side"]), 0)
+        self.assertEqual([int(slot["side"]) for slot in slots], [-1, 0, 1])
 
     def test_taskbar_message_rails_cap_at_three_and_stay_inside_main_shell(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -1030,7 +2204,31 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(drop("message-dot:wechat"))
         self.assertFalse(drop("music"))
 
-    def test_tasker_motion_uses_finder_like_stable_response(self):
+    def test_tasker_compact_skips_floating_message_dot_backing(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual._u = lambda value: float(value)
+        main_rect = QRectF(40.0, 20.0, 220.0, 34.0)
+        dot_rect = QRectF(252.0, 26.0, 5.0, 24.0)
+        main_motion = SpringRect(main_rect)
+        main_motion.opacity = 1.0
+        dot_motion = SpringRect(dot_rect)
+        dot_motion.opacity = 1.0
+        message = Message("WeChat", "Alice", "new", QColor(75, 210, 110), QColor(75, 210, 110))
+        items = [
+            (StackVisual("music", IslandKind.MUSIC, main_rect, False, None, 10), main_motion),
+            (StackVisual("message-dot:wechat", IslandKind.MESSAGE, dot_rect, True, message, 14), dot_motion),
+        ]
+        image = QImage(320, 90, QImage.Format.Format_ARGB32)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+
+        visual._paint_dot_group_backing(painter, items)
+        painter.end()
+
+        self.assertEqual(image.pixelColor(254, 60).alpha(), 0)
+
+    def test_tasker_motion_uses_global_stable_response(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "tasker"
         visual.finder_mode = False
@@ -1038,8 +2236,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         params = getattr(visual, "_visual_motion_params", lambda _now: (0.34, 0.76))(10.0)
 
-        self.assertLessEqual(params[0], 0.22)
-        self.assertGreaterEqual(params[1], 0.88)
+        self.assertGreaterEqual(params[0], 0.28)
+        self.assertGreaterEqual(params[1], 0.76)
 
     def test_group_frame_target_reuses_tiny_tasker_jitter(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -1347,6 +2545,42 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(expanded_width, main_rect.width())
         self.assertLessEqual(clamped_width, track.width())
         self.assertGreaterEqual(clamped_width, 120.0)
+
+    def test_tasker_drag_uses_full_taskbar_track_so_bottom_corners_are_reachable(self):
+        class FakeScreen:
+            def geometry(self):
+                return QRect(0, 0, 1920, 1080)
+
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_manual_width = 0.0
+        visual._u = lambda value: float(value)
+        visual.width = lambda: 940
+        visual.height = lambda: 260
+        visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(360.0, 1040.0, 1200.0, 40.0)
+        visual._taskbar_drag_track_rect_for_screen = lambda _screen, _taskbar: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._update_taskbar_material_for_screen = lambda *_args: None
+        visual._taskbar_stack_direction_for_rect = lambda *_args: -1
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 420.0
+        visual._main_size_for_taskbar_anchor = lambda _kind, _stack_w, _taskbar: (240.0, 34.0)
+        visual._main_top_for_direction = lambda *_args: 10.0
+        visual.drag_press_main_offset = QPointF(120.0, 17.0)
+        visual.save_last_position = lambda _pos: None
+        moves: list[QPoint] = []
+        visual._move_taskbar_window_if_needed = lambda pos: moves.append(QPoint(pos)) or True
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            visual._move_taskbar_drag(QPoint(4, 1060))
+
+        self.assertTrue(moves)
+        self.assertLessEqual(visual.taskbar_selected_drop_zone.left(), 1.0)
+
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
+            visual._move_taskbar_drag(QPoint(1916, 1060))
+
+        self.assertGreaterEqual(visual.taskbar_selected_drop_zone.right(), 1919.0)
 
     def test_taskbar_drop_overlay_is_pure_drawn_without_text_label(self):
         self.assertFalse(hasattr(TaskbarDropOverlay, "LABEL"))
@@ -1666,6 +2900,71 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.taskbar_corner_style = "win10"
 
         self.assertEqual(visual._taskbar_panel_corner_policy(), "square")
+
+    def test_tasker_plugin_panel_shell_uses_windows_corner_radius(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_corner_style = "win11"
+        visual._u = lambda value: float(value)
+        visual.motions = {}
+        visual._enabled_plugin_samples = lambda: []
+        visual._plugin_theme_colors = lambda: {"muted": QColor(160, 160, 160)}
+        visual._paint_scrolling_text = lambda *_args, **_kwargs: None
+        captured = []
+        visual._paint_plugin_solid_shell = lambda _painter, shell, radius, folded=False: captured.append((QRectF(shell), radius, folded))
+        rect = QRectF(0.0, 0.0, 420.0, 188.0)
+
+        visual._paint_plugin_panel(None, rect)
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][1], visual._taskbar_corner_radius(rect.height()))
+        self.assertFalse(captured[0][2])
+
+    def test_tasker_plugin_panel_shell_respects_win10_square_corner_style(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_corner_style = "win10"
+        visual._u = lambda value: float(value)
+        visual.motions = {}
+        visual._enabled_plugin_samples = lambda: []
+        visual._plugin_theme_colors = lambda: {"muted": QColor(160, 160, 160)}
+        visual._paint_scrolling_text = lambda *_args, **_kwargs: None
+        captured = []
+        visual._paint_plugin_solid_shell = lambda _painter, _shell, radius, folded=False: captured.append(radius)
+
+        visual._paint_plugin_panel(None, QRectF(0.0, 0.0, 420.0, 188.0))
+
+        self.assertEqual(captured, [0.0])
+
+    def test_tasker_time_plugin_module_shell_uses_windows_corner_radius(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.taskbar_corner_style = "win11"
+        visual._u = lambda value: float(value)
+        visual._system_dark_mode = lambda: False
+        visual._time_reference_palette = lambda _theme, _color: {
+            "module": QColor(20, 20, 20),
+            "module_stroke": QColor(80, 80, 80),
+            "accent": QColor(255, 184, 0),
+        }
+        captured = []
+
+        class FakePainter:
+            def setPen(self, *_args):
+                pass
+
+            def setBrush(self, *_args):
+                pass
+
+            def drawRoundedRect(self, _rect, rx, ry):
+                captured.append((rx, ry))
+
+        rect = QRectF(0.0, 0.0, 160.0, 80.0)
+
+        visual._paint_time_module_shell(FakePainter(), rect, {})
+
+        expected = visual._taskbar_corner_radius(rect.height())
+        self.assertEqual(captured, [(expected, expected), (expected, expected)])
 
     def test_gelv_songscatter_font_family_is_source_han_serif_only(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -2725,7 +4024,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(len(visual.album_queue), 1)
         self.assertFalse(visual.album_queue[0]["album_art"].isNull())
 
-    def test_album_queue_from_track_stops_at_first_missing_future_cover(self):
+    def test_album_queue_from_track_skips_missing_future_cover_and_keeps_later_art(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         cover_bytes = self._png_bytes(QColor(230, 160, 80))
 
@@ -2743,8 +4042,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(missing_first, [])
-        self.assertEqual([entry["title"] for entry in missing_second], ["First"])
+        self.assertEqual([entry["title"] for entry in missing_first], ["Later"])
+        self.assertEqual([entry["title"] for entry in missing_second], ["First", "Later"])
 
     def test_light_time_module_shell_uses_neutral_border_not_orange_frame(self):
         class FakePainter:
@@ -3602,6 +4901,51 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         kept = visual.album_art.pixelColor(0, 0)
         self.assertEqual((kept.red(), kept.green(), kept.blue()), (210, 36, 44))
 
+    def test_message_refresh_black_placeholder_album_art_is_rejected_without_existing_cover(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.media_track_id = "old-track"
+        visual.track_title = "Song"
+        visual.artist = "Artist"
+        visual.media_position_sync_at = 10.0
+        visual.media_position_seconds = 12.0
+        visual.media_raw_position_seconds = 12.0
+        visual.media_raw_position_source = "windows-media"
+        visual.lyrics = ["line"]
+        visual.timed_lyrics = []
+        visual.messages = []
+        visual._seen_provider_message_keys = set()
+        visual.listened_seconds_total = 0.0
+        visual._scaled_album_art_cache = {}
+        visual.album_history = []
+        visual.album_queue = []
+        visual.album_island_transition_started_at = 0.0
+        visual.album_art = QImage()
+        visual._estimated_media_position = lambda _now: 12.0
+        visual._clear_lyric_metrics_cache = lambda: None
+        visual._sync_timed_lyrics = lambda *_args, **_kwargs: None
+
+        track = TrackData(
+            title="Song",
+            artist="Artist",
+            lyrics=("line",),
+            album_color=ColorToken(1, 2, 3),
+            secondary_color=ColorToken(4, 5, 6),
+            audio_frames=(AudioFrame(0.0, 0.0, 0.0),),
+            album_art_bytes=self._png_bytes(QColor(0, 0, 0)),
+            track_id="message-refresh",
+            position_seconds=12.0,
+        )
+
+        visual._apply_visual_data(
+            IslandVisualData(
+                track=track,
+                messages=(MessageData("WeChat", "Alice", "new", ColorToken(75, 210, 110), ColorToken(75, 210, 110)),),
+                plugins=(),
+            )
+        )
+
+        self.assertTrue(visual.album_art.isNull())
+
     def test_message_refresh_missing_album_art_does_not_clear_existing_cover_for_same_song(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.media_track_id = "old-track"
@@ -3648,6 +4992,121 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         kept = visual.album_art.pixelColor(0, 0)
         self.assertEqual((kept.red(), kept.green(), kept.blue()), (210, 36, 44))
+
+    def test_same_visible_track_missing_album_art_does_not_clear_existing_cover(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.media_track_id = "old-track"
+        visual.track_title = "Song"
+        visual.artist = "Artist"
+        visual.media_position_sync_at = 10.0
+        visual.media_position_seconds = 12.0
+        visual.media_raw_position_seconds = 12.0
+        visual.media_raw_position_source = "windows-media"
+        visual.lyrics = ["line"]
+        visual.timed_lyrics = []
+        visual.messages = []
+        visual._seen_provider_message_keys = set()
+        visual.listened_seconds_total = 0.0
+        visual._scaled_album_art_cache = {}
+        visual.album_history = []
+        visual.album_queue = []
+        visual.album_island_transition_started_at = 0.0
+        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
+        visual.album_art.fill(QColor(210, 36, 44))
+        visual._estimated_media_position = lambda _now: 12.0
+        visual._clear_lyric_metrics_cache = lambda: None
+        visual._sync_timed_lyrics = lambda *_args, **_kwargs: None
+
+        track = TrackData(
+            title="Song",
+            artist="Artist",
+            lyrics=("line",),
+            album_color=ColorToken(1, 2, 3),
+            secondary_color=ColorToken(4, 5, 6),
+            audio_frames=(AudioFrame(0.0, 0.0, 0.0),),
+            album_art_bytes=b"",
+            track_id="same-visible-title-refresh",
+            position_seconds=12.0,
+        )
+
+        visual._apply_visual_data(IslandVisualData(track=track, messages=(), plugins=()))
+
+        kept = visual.album_art.pixelColor(0, 0)
+        self.assertEqual((kept.red(), kept.green(), kept.blue()), (210, 36, 44))
+
+    def test_album_queue_from_track_skips_missing_art_without_blocking_later_covers(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        red = QImage(8, 8, QImage.Format.Format_ARGB32)
+        red.fill(QColor(230, 20, 20))
+        entries = [
+            AlbumQueueEntry(title="No Art", artist="A", album_art_bytes=b"", track_id="no-art"),
+            {"title": "With Art", "artist": "B", "album_art": red, "track_id": "with-art"},
+        ]
+
+        queue = visual._album_queue_from_track(entries)
+
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["track_id"], "with-art")
+
+    def test_tasker_album_island_uses_configured_cover_count(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual.location_mode = "tasker"
+        visual.expanded = False
+        visual.album_island_cover_count = 5
+        visual.album_island_compact_cover_size = 30
+        visual.album_island_expanded_cover_size = 72
+        visual.album_island_spacing = 100
+        visual.album_island_secondary_style = "shrink_dim"
+        visual.album_island_perspective_amount = 100
+        visual.album_island_transition_started_at = 0.0
+        visual.audio_started_at = 0.0
+        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
+        visual.album_art.fill(QColor(20, 80, 220))
+        visual.album_history = []
+        visual.album_queue = []
+        for index in range(2):
+            left = QImage(8, 8, QImage.Format.Format_ARGB32)
+            left.fill(QColor(20 + index, 40, 80))
+            right = QImage(8, 8, QImage.Format.Format_ARGB32)
+            right.fill(QColor(120 + index, 40, 80))
+            visual.album_history.append({"track_id": f"left-{index}", "album_art": left})
+            visual.album_queue.append({"track_id": f"right-{index}", "album_art": right})
+
+        slots = visual._album_island_slots(QRectF(0.0, 0.0, 220.0, 34.0))
+
+        self.assertEqual(len(slots), 5)
+        self.assertEqual([int(slot["side"]) for slot in slots], [-2, -1, 0, 1, 2])
+
+    def test_album_island_uses_expanded_cover_size_for_expanded_stage(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual.location_mode = "free"
+        visual.expanded = False
+        visual.album_island_cover_size = 30
+        visual.album_island_compact_cover_size = 26
+        visual.album_island_expanded_cover_size = 78
+
+        compact = visual._album_island_cover_px(QRectF(0.0, 0.0, 240.0, 42.0))
+        visual.expanded = True
+        expanded = visual._album_island_cover_px(QRectF(0.0, 0.0, 420.0, 122.0))
+
+        self.assertAlmostEqual(compact, 26.0, delta=0.01)
+        self.assertAlmostEqual(expanded, 78.0, delta=0.01)
+
+    def test_album_island_reset_clears_persistent_record(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.listened_seconds_total = 7210.0
+        visual.album_history = [{"track_id": "old"}]
+        visual.album_island_transition_started_at = 1.0
+        visual.update = lambda: None
+        visual._notify_settings_changed = lambda: None
+
+        visual.reset_album_island_record(notify=False)
+
+        self.assertEqual(visual.listened_seconds_total, 0.0)
+        self.assertEqual(visual.album_history, [])
+        self.assertEqual(visual.album_island_transition_started_at, 0.0)
 
     def test_music_ambience_accepts_color_fill_black_styles(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)

@@ -38,6 +38,13 @@ class PluginProviderTests(unittest.TestCase):
         self.assertGreaterEqual(plugin.color.green, 180)
         self.assertLessEqual(plugin.color.blue, 80)
 
+    def test_active_plugins_only_export_time_until_weather_and_agenda_are_ready(self):
+        provider = RealPluginProvider()
+
+        plugins = provider.plugins()
+
+        self.assertEqual([plugin.plugin_id for plugin in plugins], ["time"])
+
     def test_running_timer_exports_alert_copy(self):
         provider = RealPluginProvider(lambda key, default=None: "2099-01-01T00:00:00" if key == "v2_timer_end_at" else default)
 

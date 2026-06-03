@@ -259,6 +259,20 @@ class FakeLyricGeometryPositionReader(FakePositionReader):
         raise AssertionError("lyric click should use local geometry before slow immediate read")
 
 
+class FakeLyricClickProgressReader(FakePositionReader):
+    def __init__(self):
+        super().__init__()
+        self.geometry_calls = []
+
+    def position_from_lyric_click_point(self, point, timed_lyrics, duration_seconds):
+        self.geometry_calls.append((point, tuple(timed_lyrics), duration_seconds))
+        raise AssertionError("lyric click should be treated as a progress anchor read")
+
+    def read_immediate(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
+        self.immediate_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos, force_progress_image))
+        return NeteasePositionSample(170.0, 240.0, "netease-uia-progress", 0.88, sampled_at=time.monotonic())
+
+
 class AppearingLyricsStore(FakeLyricsStore):
     def __init__(self):
         self.calls = 0
@@ -335,6 +349,75 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIsNone(provider.get_audio_frame())
         self.assertFalse(provider.send_playback_command("next"))
         self.assertFalse(provider.seek_playback_position(12.0))
+
+    def test_windows_provider_starts_with_optional_music_attachments_cold(self):
+        calls = {"audio": 0, "netease": 0, "qq": 0, "pointer": 0}
+
+        class CountingAudioAnalyzer:
+            def __init__(self):
+                calls["audio"] += 1
+
+        class CountingNeteaseReader:
+            def __init__(self):
+                calls["netease"] += 1
+
+        class CountingQQReader:
+            def __init__(self):
+                calls["qq"] += 1
+
+        class QuietAuxProvider:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def plugins(self):
+                return ()
+
+            def messages(self):
+                return ()
+
+            def diagnostics(self):
+                return {}
+
+        original_audio = providers_module.LiveAudioAnalyzer
+        original_netease = providers_module.NeteasePositionReader
+        original_qq = providers_module.QQPositionReader
+        original_plugins = providers_module.RealPluginProvider
+        original_messages = providers_module.WindowsMessageDetector
+        original_start_loop = WindowsMediaProvider._start_loop
+        original_start_pointer = WindowsMediaProvider._start_global_pointer_sampler
+        providers_module.LiveAudioAnalyzer = CountingAudioAnalyzer
+        providers_module.NeteasePositionReader = CountingNeteaseReader
+        providers_module.QQPositionReader = CountingQQReader
+        providers_module.RealPluginProvider = QuietAuxProvider
+        providers_module.WindowsMessageDetector = QuietAuxProvider
+        WindowsMediaProvider._start_loop = lambda self: None
+
+        def count_pointer(self):
+            calls["pointer"] += 1
+
+        WindowsMediaProvider._start_global_pointer_sampler = count_pointer
+        try:
+            provider = WindowsMediaProvider(settings_getter=lambda key, default=None: {
+                "v2_music_app_profiles": {
+                    "netease": {"path": "", "sync_enabled": False},
+                    "qq": {"path": "", "sync_enabled": False},
+                },
+                "v2_music_auto_detect": False,
+                "v2_enable_live_audio_analysis": False,
+            }.get(key, default))
+        finally:
+            providers_module.LiveAudioAnalyzer = original_audio
+            providers_module.NeteasePositionReader = original_netease
+            providers_module.QQPositionReader = original_qq
+            providers_module.RealPluginProvider = original_plugins
+            providers_module.WindowsMessageDetector = original_messages
+            WindowsMediaProvider._start_loop = original_start_loop
+            WindowsMediaProvider._start_global_pointer_sampler = original_start_pointer
+
+        self.assertEqual(calls, {"audio": 0, "netease": 0, "qq": 0, "pointer": 0})
+        self.assertIsNone(provider.audio_analyzer)
+        self.assertIsNone(provider.netease_position)
+        self.assertIsNone(provider.qq_position)
 
     def test_background_zero_position_is_distrusted_but_interactive_is_not(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -486,6 +569,41 @@ class ProviderStateTests(unittest.TestCase):
 
         self.assertEqual(stabilized.track.position_seconds, 35.0)
 
+    def test_medium_background_player_progress_backstep_is_smoothed(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
+        provider._last_ready_at = 100.0
+        provider._last_data = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=50.0,
+                duration_seconds=180.0,
+                position_source="netease-uia-progress",
+                source_app_foreground=False,
+                position_interactive=False,
+            ),
+        )
+        incoming = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=51.0,
+                duration_seconds=180.0,
+                position_source="netease-uia-progress",
+                source_app_foreground=False,
+                position_interactive=False,
+            ),
+        )
+
+        stabilized = provider._stabilize_incoming_position(incoming, now=104.0)
+
+        self.assertAlmostEqual(stabilized.track.position_seconds, 54.0, delta=0.02)
+
     def test_select_media_session_prefers_playing_session_with_title(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         provider._media_session_count = 0
@@ -560,6 +678,179 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(provider._music_player_mode(), "netease_betterncm")
         self.assertEqual(provider._music_player_adapter_for("网易云音乐", "cloudmusic.exe"), "netease_betterncm")
         self.assertIs(provider._player_position_reader_for("netease_betterncm"), reader)
+
+    def test_music_player_adapter_requires_configured_profile_path_when_profiles_exist(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": True,
+            "v2_music_player_mode": "netease",
+            "v2_music_app_profiles": {
+                "netease": {"path": "", "sync_enabled": True},
+                "qq": {"path": "", "sync_enabled": True},
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("cloudmusic.exe", "cloudmusic.exe"), "system")
+        self.assertEqual(provider._music_player_adapter_for("QQ闊充箰", "QQMusic.exe"), "system")
+
+    def test_legacy_ncm_executable_path_can_activate_netease_profile(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._last_foreground_snapshot = {}
+        provider.settings_getter = lambda key, default=None: {
+            "v2_netease_betterncm_path": r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe",
+            "v2_music_app_profiles": {
+                "netease": {"path": "", "sync_enabled": True},
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("cloudmusic.exe", "cloudmusic.exe"), "netease")
+        self.assertTrue(provider._player_progress_plugin_enabled())
+
+    def test_profile_without_effective_path_is_not_reported_as_enabled(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_music_app_profiles": {
+                "netease": {"path": "", "sync_enabled": True},
+            },
+        }.get(key, default)
+
+        self.assertFalse(provider._player_progress_plugin_enabled())
+
+    def test_music_player_adapter_allows_configured_netease_profile_path(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": True,
+            "v2_music_player_mode": "netease",
+            "v2_music_app_profiles": {
+                "netease": {"path": r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe", "sync_enabled": True},
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("cloudmusic.exe", "cloudmusic.exe"), "netease")
+
+    def test_configured_netease_path_can_identify_generic_media_session_from_foreground_process(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakePositionReader()
+        provider.fallback = EmptyIslandDataProvider(empty_visual_data())
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+            "v2_music_app_profiles": {
+                "netease": {
+                    "path": r"A:\CloudMusic\cloudmusic.exe",
+                    "sync_enabled": True,
+                },
+            },
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._foreground_snapshot = lambda: {
+            "process_path": r"A:\CloudMusic\cloudmusic.exe",
+            "process": "cloudmusic.exe",
+            "title": "Cloud Music",
+            "class_name": "",
+        }
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("Unknown.Media.App", "Song", "Artist", True, 0.0, 180.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(provider._music_player_adapter, "netease")
+        self.assertEqual(len(reader.immediate_calls), 1)
+        self.assertEqual(data.track.position_source, "netease-uia-progress")
+
+    def test_music_player_adapter_allows_configured_qq_profile_path(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": True,
+            "v2_music_player_mode": "netease",
+            "v2_music_app_profiles": {
+                "qq": {"path": r"D:\Apps\Tencent\QQMusic\QQMusic.exe", "sync_enabled": True},
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("QQMusic.exe", "QQMusic.exe"), "qq")
+
+    def test_music_app_profiles_auto_match_detected_player_without_legacy_auto_toggle(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+            "v2_music_app_profiles": {
+                "netease": {"path": r"C:\Music\cloudmusic.exe", "sync_enabled": True},
+                "qq": {"path": r"C:\Music\QQMusic.exe", "sync_enabled": True},
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("QQMusic.exe", "QQMusic.exe"), "qq")
+
+    def test_betterncm_adapter_requires_enabled_netease_profile(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease_betterncm",
+            "v2_music_app_profiles": {
+                "netease": {
+                    "path": r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe",
+                    "sync_enabled": True,
+                    "betterncm_enabled": False,
+                },
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("cloudmusic.exe", "cloudmusic.exe"), "system")
+
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease_betterncm",
+            "v2_music_app_profiles": {
+                "netease": {
+                    "path": r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe",
+                    "sync_enabled": True,
+                    "betterncm_enabled": True,
+                },
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._music_player_adapter_for("cloudmusic.exe", "cloudmusic.exe"), "netease_betterncm")
+
+    def test_player_lyric_offset_comes_from_enabled_profile(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {
+            "v2_music_app_profiles": {
+                "netease": {"path": r"C:\Music\cloudmusic.exe", "sync_enabled": True, "lyric_offset_seconds": 0.75},
+                "qq": {"path": r"C:\Music\QQMusic.exe", "sync_enabled": True, "lyric_offset_seconds": -1.25},
+            },
+        }.get(key, default)
+
+        self.assertEqual(provider._lyric_offset_seconds_for_adapter("netease"), 0.75)
+        self.assertEqual(provider._lyric_offset_seconds_for_adapter("netease_betterncm"), 0.75)
+        self.assertEqual(provider._lyric_offset_seconds_for_adapter("qq"), -1.25)
+        self.assertEqual(provider._lyric_offset_seconds_for_adapter("system"), 0.0)
 
     def test_music_player_adapter_requires_selected_netease_source(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -736,7 +1027,7 @@ class ProviderStateTests(unittest.TestCase):
             )
         )
 
-    def test_recent_lyric_click_forces_immediate_player_anchor_read(self):
+    def test_recent_lyric_click_forces_immediate_progress_anchor_read(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeClickPositionReader()
         session = FakeSession("cloudmusic.exe", "Song", "Artist", True, 96.0, 240.0)
@@ -793,13 +1084,11 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIsNotNone(data)
         self.assertEqual(len(reader.immediate_calls), 1)
         self.assertEqual(reader.read_calls, [])
-        self.assertTrue(reader.immediate_calls[0][5])
-        self.assertEqual(reader.immediate_calls[0][6], (420, 260))
-        self.assertEqual(data.track.position_source, "netease-uia-lyrics")
-        self.assertAlmostEqual(data.track.position_seconds, 160.0, delta=0.25)
-        self.assertEqual(session.seek_requests, [1_600_000_000])
-        self.assertAlmostEqual(provider._local_seek_position_seconds, 160.0, delta=0.25)
-        self.assertEqual(provider._local_seek_track_id, "same-track")
+        self.assertFalse(reader.immediate_calls[0][5])
+        self.assertIsNone(reader.immediate_calls[0][6])
+        self.assertEqual(data.track.position_source, "netease-uia-progress")
+        self.assertAlmostEqual(data.track.position_seconds, 144.0, delta=0.25)
+        self.assertEqual(session.seek_requests, [])
 
     def test_cached_visual_data_samples_global_pointer_click(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -844,7 +1133,7 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(getattr(provider, "_global_recent_click_pos", None), (420, 260))
         self.assertGreater(float(getattr(provider, "_global_recent_click_at", 0.0) or 0.0), 0.0)
 
-    def test_global_lyric_click_forces_immediate_player_anchor_read_when_source_poll_misses_it(self):
+    def test_global_lyric_click_forces_immediate_progress_anchor_read_when_source_poll_misses_it(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeClickPositionReader()
         base = empty_visual_data()
@@ -903,10 +1192,10 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIsNotNone(data)
         self.assertEqual(len(reader.immediate_calls), 1)
         self.assertEqual(reader.read_calls, [])
-        self.assertTrue(reader.immediate_calls[0][5])
-        self.assertEqual(reader.immediate_calls[0][6], (420, 260))
-        self.assertEqual(data.track.position_source, "netease-uia-lyrics")
-        self.assertAlmostEqual(data.track.position_seconds, 160.0, delta=0.25)
+        self.assertFalse(reader.immediate_calls[0][5])
+        self.assertIsNone(reader.immediate_calls[0][6])
+        self.assertEqual(data.track.position_source, "netease-uia-progress")
+        self.assertAlmostEqual(data.track.position_seconds, 144.0, delta=0.25)
 
     def test_global_pointer_sampler_captures_click_between_media_refreshes(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -1278,10 +1567,19 @@ class ProviderStateTests(unittest.TestCase):
         self.assertAlmostEqual(data.track.position_seconds, 170.0, delta=0.25)
         self.assertEqual(provider._local_seek_track_id, data.track.track_id)
 
-    def test_current_read_prefetches_next_queue_track_lyrics(self):
+    def test_current_read_prefetches_next_queue_track_lyrics_after_current_lyrics_exist(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeQueuePositionReader()
-        lyrics_store = TrackingLyricsStore()
+
+        class CachedCurrentLyricsStore(TrackingLyricsStore):
+            def resolve_cached_or_local(self, title, artist, album_title="", duration_seconds=0.0):
+                self.local_calls.append((title, artist, album_title, duration_seconds))
+                if title == "Song":
+                    lines = (TimedLyricLine(0.0, "current line"),)
+                    return SimpleNamespace(timed_lyrics=lines, lyrics=("current line",), source="local:test")
+                return SimpleNamespace(timed_lyrics=(), lyrics=(), source="")
+
+        lyrics_store = CachedCurrentLyricsStore()
         base = empty_visual_data()
         provider.fallback = EmptyIslandDataProvider(base)
         provider.lyrics_store = lyrics_store
@@ -1367,6 +1665,29 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(data.track.album_queue[0].title, "Next Song")
         self.assertEqual(data.track.album_queue[0].album_art_bytes, cover_bytes)
 
+    def test_album_queue_entries_preserve_metadata_when_art_is_missing(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda key, default=None: {"v2_album_island_cover_count": 5}.get(key, default)
+        provider._queue_album_art_bytes = lambda track: b""
+
+        class MetadataOnlyQueueReader:
+            def upcoming_tracks(self, title, artist, count):
+                return (
+                    SimpleNamespace(
+                        title="Next Without Art",
+                        artist="Artist",
+                        album_title="Album",
+                        duration_seconds=180.0,
+                        album_art_url="",
+                    ),
+                )
+
+        entries = provider._album_queue_entries_from_player("Song", "Artist", MetadataOnlyQueueReader())
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].title, "Next Without Art")
+        self.assertEqual(entries[0].album_art_bytes, b"")
+
     def test_netease_current_read_prefetches_next_two_queue_track_lyrics(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeTwoStepQueuePositionReader()
@@ -1390,6 +1711,48 @@ class ProviderStateTests(unittest.TestCase):
                 ("Third Song", "Third Artist", "Third Album", 199.0),
             ],
         )
+
+    def test_current_lookup_blocks_automatic_netease_upcoming_lyric_prefetch(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakeTwoStepQueuePositionReader()
+        lyrics_store = TrackingLyricsStore()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = lyrics_store
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": True,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 12.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertEqual(reader.adjacent_calls, [])
+        self.assertEqual(lyrics_store.background_calls, [("Song", "Artist", "", 240.0)])
 
     def test_current_read_starts_lyric_lookup_before_thumbnail_read(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -2020,9 +2383,9 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIsNone(reader.immediate_calls[0][6])
         self.assertEqual(data.track.position_source, "netease-uia-progress")
 
-    def test_netease_lyric_click_applies_local_seek_before_slow_reader(self):
+    def test_netease_lyric_click_forces_progress_anchor_read_instead_of_local_row_seek(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
-        reader = FakeLyricGeometryPositionReader()
+        reader = FakeLyricClickProgressReader()
         session = FakeSession("cloudmusic.exe", "Song", "Artist", True, 96.0, 240.0)
         base = empty_visual_data()
         provider.fallback = EmptyIslandDataProvider(base)
@@ -2075,11 +2438,14 @@ class ProviderStateTests(unittest.TestCase):
         data = asyncio.run(provider._read_visual_data())
 
         self.assertIsNotNone(data)
-        self.assertEqual(reader.geometry_calls[0][0], (420, 260))
-        self.assertEqual(reader.immediate_calls, [])
-        self.assertEqual(data.track.position_source, "local-seek")
-        self.assertAlmostEqual(data.track.position_seconds, 160.0, delta=0.25)
-        self.assertEqual(session.seek_requests, [1_600_000_000])
+        self.assertEqual(reader.geometry_calls, [])
+        self.assertEqual(len(reader.immediate_calls), 1)
+        self.assertFalse(reader.immediate_calls[0][5])
+        self.assertIsNone(reader.immediate_calls[0][6])
+        self.assertTrue(reader.immediate_calls[0][7])
+        self.assertEqual(data.track.position_source, "netease-uia-progress")
+        self.assertAlmostEqual(data.track.position_seconds, 170.0, delta=0.25)
+        self.assertEqual(session.seek_requests, [])
 
     def test_background_lyric_time_sample_does_not_take_over_position(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)

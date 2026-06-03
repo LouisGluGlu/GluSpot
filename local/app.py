@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import traceback
+import ctypes
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -19,6 +20,146 @@ from local.island_stack_visual import IslandStackVisual
 from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES, SettingsManager
 from local.settings_window import SettingsWindow
 from local.ui_theme import set_theme_settings_getter
+
+
+MYDOCKFINDER_PROCESS_NAMES = {
+    "mydockfinder.exe",
+    "myfinder.exe",
+    "mydock.exe",
+    "dock.exe",
+    "dock_64.exe",
+    "dockmod.exe",
+    "dockmod64.exe",
+}
+
+
+def _normalized_executable_path(path: str) -> str:
+    return str(path or "").strip().strip('"').replace("/", "\\").casefold()
+
+
+def _mydockfinder_candidate_process_names(configured_path: str) -> set[str]:
+    configured = _normalized_executable_path(configured_path)
+    configured_name = configured.rsplit("\\", 1)[-1].casefold() if configured else ""
+    names = set(MYDOCKFINDER_PROCESS_NAMES)
+    if configured_name.endswith(".exe"):
+        names.add(configured_name)
+    return names
+
+
+def _running_process_snapshots_for_names(names: set[str]) -> list[tuple[str, str]]:
+    if sys.platform != "win32" or not names:
+        return []
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        TH32CS_SNAPPROCESS = 0x00000002
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("cntThreads", ctypes.c_ulong),
+                ("th32ParentProcessID", ctypes.c_ulong),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
+        kernel32.Process32FirstW.restype = ctypes.c_bool
+        kernel32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = ctypes.c_bool
+        kernel32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_ulong]
+        kernel32.QueryFullProcessImageNameW.restype = ctypes.c_bool
+        kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+        snapshots: list[tuple[str, str]] = []
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if snapshot == INVALID_HANDLE_VALUE:
+            return snapshots
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        try:
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return snapshots
+            lowered_names = {name.casefold() for name in names}
+            while True:
+                exe_name = str(entry.szExeFile or "")
+                if exe_name.casefold() in lowered_names:
+                    exe_path = ""
+                    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(entry.th32ProcessID))
+                    if handle:
+                        try:
+                            size = ctypes.c_ulong(32768)
+                            buffer = ctypes.create_unicode_buffer(size.value)
+                            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                                exe_path = buffer.value
+                        finally:
+                            kernel32.CloseHandle(handle)
+                    snapshots.append((exe_name, exe_path))
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return snapshots
+    except Exception:
+        return []
+
+
+def _mydockfinder_process_running(configured_path: str) -> bool:
+    return bool(_mydockfinder_process_diagnostics(configured_path).get("running"))
+
+
+def _mydockfinder_process_diagnostics(configured_path: str) -> dict[str, object]:
+    configured = _normalized_executable_path(configured_path)
+    configured_name = configured.rsplit("\\", 1)[-1].casefold() if configured else ""
+    configured_is_exe = configured_name.endswith(".exe")
+    configured_root = configured.rsplit("\\", 1)[0] if configured_is_exe and "\\" in configured else configured.rstrip("\\")
+    names = _mydockfinder_candidate_process_names(configured_path)
+    snapshots = _running_process_snapshots_for_names(names)
+    diagnostics: dict[str, object] = {
+        "configured_path": str(configured_path or "").strip().strip('"'),
+        "configured_name": configured_name,
+        "configured_root": configured_root,
+        "candidate_names": sorted(names),
+        "snapshots": [{"name": exe_name, "path": exe_path} for exe_name, exe_path in snapshots],
+        "running": False,
+        "matched_name": "",
+        "matched_path": "",
+        "reason": "No matching MyDockFinder process found",
+    }
+    configured_mentions_mydockfinder = "mydockfinder" in configured_root or configured_name in MYDOCKFINDER_PROCESS_NAMES
+    for exe_name, exe_path in snapshots:
+        name = str(exe_name or "").casefold()
+        path = _normalized_executable_path(exe_path)
+        if configured:
+            if path and path == configured:
+                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched configured executable path")
+                return diagnostics
+            if path and configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in MYDOCKFINDER_PROCESS_NAMES:
+                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched MyDockFinder runtime process inside configured folder")
+                return diagnostics
+            if path and not configured_is_exe and configured_root and path.startswith(configured_root + "\\"):
+                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched process inside configured folder")
+                return diagnostics
+            if not path and configured_name and name == configured_name:
+                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched configured process name without path access")
+                return diagnostics
+            if not path and configured_mentions_mydockfinder and name in MYDOCKFINDER_PROCESS_NAMES:
+                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched MyDockFinder process name without path access")
+                return diagnostics
+        elif name in MYDOCKFINDER_PROCESS_NAMES:
+            diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched known MyDockFinder process name")
+            return diagnostics
+    return diagnostics
 
 
 class SingleInstanceGuard:
@@ -117,6 +258,7 @@ class LocalIslandApp:
         self._apply_saved_settings()
         self.settings_window = SettingsWindow(self.window, self.settings)
         self.window.settings_changed_callback = self._save_visual_state
+        self._setup_mydockfinder_listener()
         self.tray = None
         self._setup_tray()
 
@@ -149,15 +291,15 @@ class LocalIslandApp:
         return "free"
 
     def _enabled_plugins_setting(self) -> list[str]:
-        known = ["time", "weather", "agenda"]
+        known = ["time"]
         raw = self.settings.get("v2_enabled_plugins", None)
         if isinstance(raw, (list, tuple, set)):
             enabled = {str(item or "").strip().casefold() for item in raw}
             return [plugin_id for plugin_id in known if plugin_id in enabled]
         try:
-            legacy_count = max(0, min(3, int(self.settings.get("v2_plugin_count", 3))))
+            legacy_count = max(0, min(1, int(self.settings.get("v2_plugin_count", 1))))
         except (TypeError, ValueError):
-            legacy_count = 3
+            legacy_count = 1
         return known[:legacy_count]
 
     def _apply_saved_settings(self):
@@ -166,12 +308,19 @@ class LocalIslandApp:
             self.settings.get("v2_window_pos", None),
             notify=False,
             stack_direction=self.settings.get("v2_stack_direction", 1),
+            last_window_position=self.settings.get("v2_last_window_position", None),
         )
+        self.window.position_preset = str(self.settings.get("v2_position_preset", "last") or "last")
         self.window.music_playing = bool(self.settings.get("v2_music_playing", True))
         self.window.music_auto_detect = bool(self.settings.get("v2_music_auto_detect", False))
         self.window.persistent_plugin = bool(self.settings.get("v2_persistent_plugin", True))
         self.window.set_super_topmost(bool(self.settings.get("v2_super_topmost", True)), notify=False)
+        mydockfinder_path = str(self.settings.get("v2_mydockfinder_path", "") or "")
+        self.window.set_mydockfinder_path(mydockfinder_path, notify=False)
+        mydockfinder_diagnostics = _mydockfinder_process_diagnostics(mydockfinder_path)
+        self.window.set_mydockfinder_diagnostics(mydockfinder_diagnostics, notify=False)
         self.window.set_manual_finder_available(bool(self.settings.get("v2_manual_mydockfinder", False)), notify=False)
+        self.window.set_mydockfinder_running(bool(mydockfinder_diagnostics.get("running")), notify=False)
         self.window.set_location_mode(self._location_mode_setting(), notify=False)
         self.window.set_taskbar_corner_style(str(self.settings.get("v2_taskbar_corner_style", "win11")), notify=False)
         self.window.set_taskbar_left_handle_color(str(self.settings.get("v2_taskbar_left_handle_color", "#8E8E93")), notify=False)
@@ -182,6 +331,12 @@ class LocalIslandApp:
         self.window.enabled_plugin_count = len(enabled_plugins)
         self.window.side_island_style = str(self.settings.get("v2_side_island_style", "standard") or "standard")
         self.window.plugin_island_style = str(self.settings.get("v2_plugin_island_style", "standard") or "standard")
+        self.window.set_plugin_fullscreen_alert_style(str(self.settings.get("v2_plugin_fullscreen_alert_style", "island") or "island"), notify=False)
+        self.window.set_plugin_fullscreen_alert_position(
+            x_offset=int(self.settings.get("v2_plugin_fullscreen_alert_x_offset", 0)),
+            y_offset=int(self.settings.get("v2_plugin_fullscreen_alert_y_offset", 0)),
+            notify=False,
+        )
         self.window.music_island_style = str(self.settings.get("v2_music_island_style", "standard") or "standard")
         self.window.time_alarm_side_display = str(self.settings.get("v2_time_alarm_side_display", "note") or "note")
         ambience_style = str(self.settings.get("v2_music_ambience_style", "sea_level") or "sea_level")
@@ -216,6 +371,7 @@ class LocalIslandApp:
             speed=int(self.settings.get("v2_barrage_speed", 100)),
             use_backdrop=bool(self.settings.get("v2_barrage_use_backdrop", True)),
             show_icon=bool(self.settings.get("v2_barrage_show_icon", True)),
+            display_mode=str(self.settings.get("v2_barrage_display_mode", "fullscreen") or "fullscreen"),
             notify=False,
         )
         self.window.set_auto_expand_bounds(bool(self.settings.get("v2_auto_expand_bounds", True)), notify=False)
@@ -255,10 +411,23 @@ class LocalIslandApp:
         self.window.set_no_lyrics_display_mode(str(self.settings.get("v2_no_lyrics_display_mode", "text")), notify=False)
         self.window.set_album_island_cover_count(int(self.settings.get("v2_album_island_cover_count", 5)), notify=False)
         self.window.set_album_island_cover_size(int(self.settings.get("v2_album_island_cover_size", 30)), notify=False)
+        self.window.set_album_island_compact_cover_size(
+            int(self.settings.get("v2_album_island_compact_cover_size", self.settings.get("v2_album_island_cover_size", 30))),
+            notify=False,
+        )
+        self.window.set_album_island_expanded_cover_size(int(self.settings.get("v2_album_island_expanded_cover_size", 72)), notify=False)
         self.window.set_album_island_spacing(int(self.settings.get("v2_album_island_spacing", 112)), notify=False)
         self.window.set_album_island_secondary_style(str(self.settings.get("v2_album_island_secondary_style", "perspective_dim")), notify=False)
         self.window.set_album_island_perspective_amount(int(self.settings.get("v2_album_island_perspective_amount", 100)), notify=False)
+        self.window.set_album_island_record(
+            float(self.settings.get("v2_album_island_listened_seconds_total", 0.0) or 0.0),
+            self.settings.get("v2_album_island_history", []),
+            notify=False,
+        )
         self.window.set_no_lyrics_text(str(self.settings.get("v2_no_lyrics_text", "暂无歌词")), notify=False)
+        position_preset = str(self.settings.get("v2_position_preset", "last") or "last")
+        if position_preset != "last":
+            self.window.apply_position_preset(position_preset, notify=False)
         self.window._set_plugin_focus(min(self.window.plugin_focus_target, max(0, self.window.enabled_plugin_count - 1)), immediate=True)
 
     def _save_visual_state(self, state: dict[str, object]):
@@ -268,6 +437,28 @@ class LocalIslandApp:
             self.settings.set(key, value)
         if hasattr(self, "settings_window"):
             self.settings_window.sync_from_widget()
+
+    def _setup_mydockfinder_listener(self):
+        self.mydockfinder_listener_timer = QTimer(self.app)
+        self.mydockfinder_listener_timer.timeout.connect(self._poll_mydockfinder_presence)
+        self._poll_mydockfinder_presence()
+        self.mydockfinder_listener_timer.start(2500)
+
+    def _poll_mydockfinder_presence(self):
+        path = str(self.settings.get("v2_mydockfinder_path", "") or "").strip().strip('"')
+        if str(getattr(self.window, "mydockfinder_path", "") or "") != path:
+            self.window.set_mydockfinder_path(path, notify=False)
+        diagnostics = _mydockfinder_process_diagnostics(path)
+        if hasattr(self.window, "set_mydockfinder_diagnostics"):
+            self.window.set_mydockfinder_diagnostics(diagnostics, notify=False)
+        else:
+            self.window.mydockfinder_diagnostics = diagnostics
+        running = bool(diagnostics.get("running"))
+        if bool(getattr(self.window, "mydockfinder_running", False)) == running:
+            if hasattr(self, "settings_window"):
+                self.settings_window.sync_from_widget()
+            return
+        self.window.set_mydockfinder_running(running, notify=True)
 
     def _setup_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():

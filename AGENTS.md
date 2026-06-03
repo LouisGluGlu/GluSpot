@@ -1,6 +1,6 @@
 # Project Notes
 
-Read `README.md`, `docs/PRD.md`, and `docs/ISSUES.md` first.
+Read `README.md` first. It is the canonical product, implementation, and pending-work document for this branch.
 
 The runnable app is `local/main.py`.
 

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+MUSIC_CONTROL_ICON_DIR = ROOT_DIR / "assets" / "music_controls"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -86,6 +87,7 @@ class Message:
     created_at: float = field(default_factory=time.monotonic)
     popup_until: float = field(default_factory=lambda: time.monotonic() + 5.0)
     barrage_started_at: float = 0.0
+    action_key: str = ""
 
 
 @dataclass
@@ -197,6 +199,441 @@ class TaskbarDropOverlay(QWidget):
         painter.end()
 
 
+class FullscreenPluginAlertOverlay(QWidget):
+    TRANSITION_SECONDS = 0.18
+
+    def __init__(self, owner):
+        super().__init__(None)
+        self.owner = owner
+        self.alert_state: dict[str, object] = {}
+        self.active_rects: dict[str, QRectF] = {}
+        self.press_key = ""
+        self.barrage_hovered = False
+        self.transition_mode = ""
+        self.transition_started_at = time.monotonic()
+        flags = (
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        try:
+            flags |= Qt.WindowType.WindowDoesNotAcceptFocus
+        except AttributeError:
+            pass
+        self.setWindowFlags(flags)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setMouseTracking(True)
+
+    def configure(self, state: dict[str, object], screen_rect: QRectF, now: float):
+        previous_key = self._state_key(self.alert_state)
+        next_state = dict(state or {})
+        next_key = self._state_key(next_state)
+        self.alert_state = next_state
+        target = QRectF(screen_rect).toAlignedRect()
+        if target.width() > 0 and target.height() > 0 and self.geometry() != target:
+            self.setGeometry(target)
+        if not self.isVisible():
+            self.transition_mode = "show"
+            self.transition_started_at = float(now)
+            self.show()
+        elif previous_key != next_key and self.transition_mode != "show":
+            self.transition_mode = "show"
+            self.transition_started_at = float(now)
+        self.raise_()
+        self._force_overlay_topmost()
+        self.update()
+
+    def _force_overlay_topmost(self):
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+            if hwnd <= 0:
+                return
+            user32 = ctypes.windll.user32
+            hwnd_topmost = ctypes.c_void_p(-1)
+            flags = 0x0001 | 0x0002 | 0x0010 | 0x0040  # NOSIZE, NOMOVE, NOACTIVATE, SHOWWINDOW
+            user32.SetWindowPos(ctypes.c_void_p(hwnd), hwnd_topmost, 0, 0, 0, 0, flags)
+        except Exception:
+            pass
+
+    def request_hide(self, now: float):
+        if not self.isVisible():
+            return
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        if self.transition_mode != "hide":
+            self.transition_mode = "hide"
+            self.transition_started_at = float(now)
+        self.update()
+
+    def _state_key(self, state: dict[str, object]) -> str:
+        return f"{state.get('style', '')}:{state.get('action_key', '')}:{state.get('alert_key', '')}"
+
+    def _u(self, value: float) -> float:
+        owner = getattr(self, "owner", None)
+        if owner is not None and hasattr(owner, "_u"):
+            try:
+                return float(owner._u(value))
+            except Exception:
+                pass
+        return float(value)
+
+    def _font(self, size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+        owner = getattr(self, "owner", None)
+        if owner is not None and hasattr(owner, "_font"):
+            try:
+                return owner._font(size, weight)
+            except Exception:
+                pass
+        font = QFont()
+        font.setPointSize(max(1, int(size)))
+        font.setWeight(weight)
+        return font
+
+    def _transition_opacity(self, now: float) -> tuple[float, bool]:
+        mode = str(getattr(self, "transition_mode", "") or "")
+        if mode not in {"show", "hide"}:
+            return (1.0, False)
+        owner = getattr(self, "owner", None)
+        duration = self.TRANSITION_SECONDS
+        if owner is not None and hasattr(owner, "_animation_duration"):
+            try:
+                duration = float(owner._animation_duration(self.TRANSITION_SECONDS))
+            except Exception:
+                duration = self.TRANSITION_SECONDS
+        elapsed = max(0.0, float(now) - float(getattr(self, "transition_started_at", now)))
+        if elapsed >= duration:
+            if mode == "hide":
+                return (0.0, True)
+            self.transition_mode = ""
+            return (1.0, False)
+        t = max(0.0, min(1.0, elapsed / max(0.01, duration)))
+        eased = 1.0 - (1.0 - t) ** 4
+        return ((1.0 - eased) if mode == "hide" else eased, False)
+
+    def _alert_tuple(self):
+        alert = self.alert_state.get("alert")
+        try:
+            _index, label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, priority = alert
+        except (TypeError, ValueError):
+            return None
+        return label, detail, summary, color, icon, plugin_id, status, alert_title, alert_body, priority
+
+    def _alert_text_parts(self) -> tuple[str, str]:
+        parts = self._alert_tuple()
+        if parts is None:
+            return ("Reminder", "Click to review")
+        label, detail, summary, _color, _icon, _plugin_id, status, alert_title, alert_body, _priority = parts
+        owner = getattr(self, "owner", None)
+        if owner is not None and hasattr(owner, "_plugin_alert_text_parts"):
+            try:
+                title, body = owner._plugin_alert_text_parts(label, detail, summary, status, alert_title, alert_body)
+                return (str(title or label or "Reminder"), str(body or summary or detail or "Click to review"))
+            except Exception:
+                pass
+        return (str(alert_title or label or "Reminder"), str(alert_body or summary or detail or "Click to review"))
+
+    def _accent_color(self) -> QColor:
+        parts = self._alert_tuple()
+        color = parts[3] if parts is not None else None
+        if isinstance(color, QColor) and color.isValid():
+            return QColor(color)
+        try:
+            candidate = QColor(color) if color is not None else QColor()
+        except Exception:
+            candidate = QColor()
+        if candidate.isValid():
+            return candidate
+        return QColor(255, 184, 0)
+
+    def _card_rect(self, style: str) -> QRectF:
+        width = float(max(300.0, min(430.0, self.width() - self._u(48.0))))
+        if style == "toast":
+            height = self._u(92.0)
+            x = max(self._u(24.0), self.width() - width - self._u(36.0))
+            y = self._u(36.0)
+            rect = QRectF(x, y, width, height)
+            return self._offset_card_rect(rect)
+        height = self._u(58.0)
+        x = (float(self.width()) - width) / 2.0
+        y = self._u(28.0)
+        rect = QRectF(x, y, width, height)
+        return self._offset_card_rect(rect)
+
+    def _offset_card_rect(self, rect: QRectF) -> QRectF:
+        owner = getattr(self, "owner", None)
+        try:
+            dx = float(getattr(owner, "plugin_fullscreen_alert_x_offset", 0) or 0)
+        except (TypeError, ValueError):
+            dx = 0.0
+        try:
+            dy = float(getattr(owner, "plugin_fullscreen_alert_y_offset", 0) or 0)
+        except (TypeError, ValueError):
+            dy = 0.0
+        moved = QRectF(rect).translated(dx, dy)
+        margin = self._u(8.0)
+        max_left = max(margin, float(self.width()) - moved.width() - margin)
+        max_top = max(margin, float(self.height()) - moved.height() - margin)
+        left = max(margin, min(max_left, moved.left()))
+        top = max(margin, min(max_top, moved.top()))
+        return QRectF(left, top, moved.width(), moved.height())
+
+    def _paint_card(self, painter: QPainter, rect: QRectF, style: str, opacity: float):
+        title, body = self._alert_text_parts()
+        accent = self._accent_color()
+        dark = app_dark_mode()
+        shell = QColor(18, 20, 24, int(226 * opacity)) if dark else QColor(248, 250, 252, int(232 * opacity))
+        border = QColor(255, 255, 255, int(34 * opacity)) if dark else QColor(20, 26, 36, int(28 * opacity))
+        text = QColor(246, 248, 255, int(238 * opacity)) if dark else QColor(22, 28, 40, int(238 * opacity))
+        muted = QColor(196, 202, 216, int(194 * opacity)) if dark else QColor(84, 96, 112, int(200 * opacity))
+        radius = min(rect.height() / 2.0 if style == "island" else self._u(18.0), self._u(22.0))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, int(72 * opacity)))
+        painter.drawRoundedRect(rect.translated(0.0, self._u(4.0)), radius, radius)
+        painter.setBrush(shell)
+        painter.drawRoundedRect(rect, radius, radius)
+        painter.setPen(QPen(border, self._u(1.0)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(self._u(0.5), self._u(0.5), -self._u(0.5), -self._u(0.5)), radius, radius)
+
+        icon = QRectF(rect.left() + self._u(14.0), rect.center().y() - self._u(15.0), self._u(30.0), self._u(30.0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), int(220 * opacity)))
+        painter.drawRoundedRect(icon, self._u(9.0), self._u(9.0))
+        painter.setFont(self._font(11, QFont.Weight.Bold))
+        painter.setPen(QColor(255, 255, 255, int(236 * opacity)))
+        painter.drawText(icon, Qt.AlignmentFlag.AlignCenter, title[:1].upper() or "!")
+
+        text_left = icon.right() + self._u(10.0)
+        action_w = self._u(74.0) if style == "toast" else 0.0
+        text_rect = QRectF(text_left, rect.top() + self._u(8.0), rect.right() - text_left - self._u(14.0) - action_w, rect.height() - self._u(16.0))
+        painter.setFont(self._font(11, QFont.Weight.DemiBold))
+        title_metrics = QFontMetrics(painter.font())
+        painter.setPen(text)
+        painter.drawText(
+            QRectF(text_rect.left(), text_rect.top(), text_rect.width(), self._u(20.0)),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            title_metrics.elidedText(title, Qt.TextElideMode.ElideRight, int(text_rect.width())),
+        )
+        painter.setFont(self._font(9, QFont.Weight.Medium))
+        body_metrics = QFontMetrics(painter.font())
+        painter.setPen(muted)
+        painter.drawText(
+            QRectF(text_rect.left(), text_rect.top() + self._u(21.0), text_rect.width(), self._u(22.0)),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            body_metrics.elidedText(body, Qt.TextElideMode.ElideRight, int(text_rect.width())),
+        )
+        if style == "toast":
+            action = QRectF(rect.right() - self._u(84.0), rect.center().y() - self._u(14.0), self._u(68.0), self._u(28.0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), int(38 * opacity)))
+            painter.drawRoundedRect(action, self._u(14.0), self._u(14.0))
+            painter.setFont(self._font(9, QFont.Weight.Bold))
+            painter.setPen(QColor(accent.red(), accent.green(), accent.blue(), int(228 * opacity)))
+            painter.drawText(action, Qt.AlignmentFlag.AlignCenter, "View")
+        painter.restore()
+
+    def _apply_hit_mask(self, rects: dict[str, QRectF]):
+        if not rects:
+            self.active_rects = {}
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.clearMask()
+            return
+        region = QRegion()
+        normalized: dict[str, QRectF] = {}
+        for key, rect in rects.items():
+            if not key:
+                continue
+            grown = QRectF(rect).adjusted(-self._u(3.0), -self._u(3.0), self._u(3.0), self._u(3.0))
+            if grown.width() <= 0 or grown.height() <= 0:
+                continue
+            normalized[str(key)] = grown
+            region = region.united(QRegion(grown.toAlignedRect()))
+        self.active_rects = normalized
+        if normalized:
+            self.setMask(region)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        else:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.clearMask()
+
+    def _action_key_at(self, point: QPointF) -> str:
+        for key, rect in getattr(self, "active_rects", {}).items():
+            if rect.contains(point):
+                return key
+        return ""
+
+    def paintEvent(self, event):
+        state = dict(getattr(self, "alert_state", {}) or {})
+        if not state:
+            return
+        now = time.monotonic()
+        opacity, hide_done = self._transition_opacity(now)
+        if hide_done:
+            self.hide()
+            self.active_rects = {}
+            self.alert_state = {}
+            self.barrage_hovered = False
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setOpacity(max(0.0, min(1.0, opacity)))
+        style = str(state.get("style", "island") or "island")
+        if style == "barrage":
+            owner = getattr(self, "owner", None)
+            if owner is not None and hasattr(owner, "_ensure_fullscreen_plugin_barrage_messages"):
+                owner._ensure_fullscreen_plugin_barrage_messages(now)
+            if owner is not None and hasattr(owner, "_paint_barrage_scene"):
+                viewport = QRectF(0.0, 0.0, float(self.width()), float(self.height()))
+                previous_space = bool(getattr(owner, "_barrage_painting_global_space", False))
+                owner._barrage_painting_global_space = True
+                try:
+                    rects = owner._paint_barrage_scene(painter, viewport)
+                finally:
+                    owner._barrage_painting_global_space = previous_space
+                self._apply_hit_mask(rects)
+        else:
+            rect = self._card_rect(style)
+            key = str(state.get("action_key", "") or "")
+            self._paint_card(painter, rect, style, opacity)
+            self._apply_hit_mask({key: rect} if key else {})
+        painter.end()
+
+    def mouseMoveEvent(self, event):
+        key = self._action_key_at(event.position())
+        self.barrage_hovered = bool(key and str(self.alert_state.get("style", "")) == "barrage")
+        owner = getattr(self, "owner", None)
+        if owner is not None:
+            owner.barrage_hovered = self.barrage_hovered
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.barrage_hovered = False
+        owner = getattr(self, "owner", None)
+        if owner is not None:
+            owner.barrage_hovered = False
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.press_key = self._action_key_at(event.position())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        key = self._action_key_at(event.position()) or self.press_key
+        self.press_key = ""
+        owner = getattr(self, "owner", None)
+        if key and owner is not None and hasattr(owner, "_activate_key"):
+            owner._activate_key(key)
+            self.request_hide(time.monotonic())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class BarrageOverlay(FullscreenPluginAlertOverlay):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.barrage_messages: list[Message] = []
+        self.overlay_clock = float(getattr(owner, "barrage_clock", 0.0) or 0.0)
+        self.last_frame_at = time.monotonic()
+        self.frame_timer = QTimer(self)
+        try:
+            interval = int(owner._timer_interval_ms()) if hasattr(owner, "_timer_interval_ms") else 16
+        except Exception:
+            interval = 16
+        self.frame_timer.setInterval(max(11, min(42, interval)))
+        self.frame_timer.timeout.connect(self._advance_barrage_frame)
+
+    def configure(self, state: dict[str, object], screen_rect: QRectF, now: float):
+        self._set_barrage_snapshot(state, now)
+        super().configure(state, screen_rect, now)
+        if not self.frame_timer.isActive():
+            self.last_frame_at = float(now)
+            self.frame_timer.start()
+
+    def request_hide(self, now: float):
+        super().request_hide(now)
+        if self.frame_timer.isActive() and not getattr(self, "barrage_messages", []):
+            self.frame_timer.stop()
+
+    def _set_barrage_snapshot(self, state: dict[str, object], now: float):
+        messages = state.get("messages", []) if isinstance(state, dict) else []
+        self.barrage_messages = list(messages or [])
+        owner = getattr(self, "owner", None)
+        try:
+            owner_clock = float(getattr(owner, "barrage_clock", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            owner_clock = 0.0
+        self.overlay_clock = max(float(getattr(self, "overlay_clock", owner_clock) or owner_clock), owner_clock)
+        self.last_frame_at = float(now)
+
+    def _advance_barrage_frame(self):
+        now = time.monotonic()
+        elapsed = max(0.001, min(0.2, now - float(getattr(self, "last_frame_at", now))))
+        self.last_frame_at = now
+        owner = getattr(self, "owner", None)
+        speed = 1.0
+        if owner is not None and hasattr(owner, "_animation_speed_factor"):
+            try:
+                speed = float(owner._animation_speed_factor())
+            except Exception:
+                speed = 1.0
+        if not getattr(self, "barrage_hovered", False):
+            self.overlay_clock = float(getattr(self, "overlay_clock", 0.0) or 0.0) + elapsed * max(0.1, min(4.0, speed))
+        if owner is not None and hasattr(owner, "_barrage_alive_messages_for_clock"):
+            self.barrage_messages = owner._barrage_alive_messages_for_clock(list(getattr(self, "barrage_messages", [])), self.overlay_clock)
+        if not self.barrage_messages:
+            self.request_hide(now)
+            return
+        self.update()
+
+    def paintEvent(self, event):
+        state = dict(getattr(self, "alert_state", {}) or {})
+        if not state:
+            return
+        now = time.monotonic()
+        opacity, hide_done = self._transition_opacity(now)
+        if hide_done:
+            self.hide()
+            self.active_rects = {}
+            self.alert_state = {}
+            self.barrage_hovered = False
+            return
+        owner = getattr(self, "owner", None)
+        if owner is None or not hasattr(owner, "_paint_barrage_scene"):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setOpacity(max(0.0, min(1.0, opacity)))
+        viewport = QRectF(0.0, 0.0, float(self.width()), float(self.height()))
+        previous_space = bool(getattr(owner, "_barrage_painting_global_space", False))
+        owner._barrage_painting_global_space = True
+        try:
+            rects = owner._paint_barrage_scene(
+                painter,
+                viewport,
+                active_messages=list(getattr(self, "barrage_messages", [])),
+                clock=float(getattr(self, "overlay_clock", getattr(owner, "barrage_clock", 0.0)) or 0.0),
+                prune=False,
+            )
+        finally:
+            owner._barrage_painting_global_space = previous_space
+        self._apply_hit_mask(rects)
+        painter.end()
+
+
 class IslandStackVisual(QWidget):
     VISUAL_SCALE = 0.75
     STACK_WIDTH = 560
@@ -240,6 +677,7 @@ class IslandStackVisual(QWidget):
         self.resize(int(round(self._standalone_canvas_width())), int(round(self._u(650))))
         self.stack_center_ratio = 0.5
         self.saved_window_pos: tuple[int, int] | None = None
+        self.last_window_position: tuple[int, int] | None = None
         self.drag_press_pos = QPointF()
         self.drag_press_global = QPoint()
         self.drag_press_window_pos = QPoint()
@@ -253,6 +691,7 @@ class IslandStackVisual(QWidget):
         self.topmost_reinforced_at = 0.0
         self.scene_suppressed = False
         self.scene_reason = ""
+        self.last_scene_probe_reason = ""
         self.scene_checked_at = 0.0
         self.scene_transition_mode = ""
         self.scene_transition_started_at = 0.0
@@ -300,10 +739,12 @@ class IslandStackVisual(QWidget):
         self.last_media_refresh_at = 0.0
         self.media_refresh_interval = 0.65
         self.music_button_rects: dict[str, QRectF] = {}
+        self.music_control_press_started_at: dict[str, float] = {}
+        self.tasker_music_hover_auto_expand_suppressed = False
         self.music_cover_rect = QRectF()
         self.persistent_plugin = True
-        self.enabled_plugin_count = 3
-        self.enabled_plugin_ids = {"time", "weather", "agenda"}
+        self.enabled_plugin_count = 1
+        self.enabled_plugin_ids = {"time"}
         self.show_seconds = True
         self.expanded = False
         self.plugin_panel_open = False
@@ -314,6 +755,15 @@ class IslandStackVisual(QWidget):
         self.plugin_alert_width = 168.0
         self.side_island_style = "standard"
         self.plugin_island_style = "standard"
+        self.plugin_fullscreen_alert_style = "island"
+        self.plugin_fullscreen_alert_x_offset = 0
+        self.plugin_fullscreen_alert_y_offset = 0
+        self.plugin_fullscreen_alert_preview_until = 0.0
+        self.fullscreen_plugin_barrage_messages: list[Message] = []
+        self.fullscreen_plugin_barrage_alert_key = ""
+        self.plugin_alert_overlay: FullscreenPluginAlertOverlay | None = None
+        self.barrage_overlay: BarrageOverlay | None = None
+        self.fullscreen_plugin_alert_overlay: FullscreenPluginAlertOverlay | None = None
         self.music_island_style = "standard"
         self.time_alarm_side_display = "note"
         self.pointer_pos = QPointF(0, 0)
@@ -358,6 +808,10 @@ class IslandStackVisual(QWidget):
         self.show_debug_overlay = False
         self.finder_material_refreshed_at = time.monotonic()
         self.manual_finder_available = False
+        self.mydockfinder_path = ""
+        self.mydockfinder_running = False
+        self.mydockfinder_diagnostics: dict[str, object] = {}
+        self.position_preset = "last"
         self.location_mode = "finder" if self.finder_mode else "free"
         self.taskbar_fusion_mode = "off"
         self.taskbar_recognition_threshold = 0.66
@@ -378,6 +832,7 @@ class IslandStackVisual(QWidget):
         self.last_taskbar_rect = QRectF()
         self.taskbar_follow_last_at = 0.0
         self.taskbar_follow_last_key: tuple[object, ...] | str = ""
+        self.taskbar_hidden_by_follow = False
         self.taskbar_follow_material_last_at = 0.0
         self.taskbar_preview_visible = False
         self.taskbar_preview_follow_taskbar = True
@@ -394,6 +849,8 @@ class IslandStackVisual(QWidget):
         self.empty_bar_custom_colors = ("#46D6FF", "#73FFA6", "#FF5A86")
         self.barrage_y_offset = 0
         self.last_barrage_preview_at = 0.0
+        self.barrage_preview_force_anytime_until = 0.0
+        self.barrage_display_mode = "fullscreen"
         self.barrage_font_size = 10
         self.barrage_speed = 100
         self.barrage_use_backdrop = True
@@ -426,6 +883,8 @@ class IslandStackVisual(QWidget):
         self.no_lyrics_display_mode = "text"
         self.album_island_cover_count = 5
         self.album_island_cover_size = 30
+        self.album_island_compact_cover_size = 30
+        self.album_island_expanded_cover_size = 72
         self.album_island_spacing = 112
         self.album_island_secondary_style = "perspective_dim"
         self.album_island_perspective_amount = 100
@@ -438,6 +897,7 @@ class IslandStackVisual(QWidget):
         self._lyric_layout_cache: dict[tuple[object, ...], LyricLayout] = {}
         self._representative_lyric_width_cache: dict[tuple[object, ...], float] = {}
         self._scaled_album_art_cache: dict[tuple[str, int, int], QImage] = {}
+        self._svg_renderer_cache: dict[str, QSvgRenderer] = {}
         self.font_shrink_scale = 1.0
         self.stack_direction = 1
         self.messages: list[Message] = []
@@ -609,6 +1069,7 @@ class IslandStackVisual(QWidget):
         self.media_position_confidence = incoming_position_confidence
         self.media_position_interactive = incoming_position_interactive
         self.media_source_foreground = bool(getattr(track, "source_app_foreground", False))
+        self.media_app_lyric_offset_seconds = max(-12.0, min(12.0, float(getattr(track, "lyric_offset_seconds", 0.0) or 0.0)))
         self.media_refresh_interval = 0.18 if frontstage_position else 0.65
         self.lyrics_source = track.lyrics_source
         had_timed_lyrics = bool(getattr(self, "timed_lyrics", ()))
@@ -649,20 +1110,20 @@ class IslandStackVisual(QWidget):
         image = QImage()
         cover_loaded = bool(track.album_art_bytes) and image.loadFromData(track.album_art_bytes) and not image.isNull()
         black_placeholder_loaded = cover_loaded and self._looks_like_black_album_placeholder(image)
+        reject_black_placeholder = bool(black_placeholder_loaded and (not track_changed or same_visible_track or message_refresh))
         has_existing_cover = not getattr(self, "album_art", QImage()).isNull()
         preserve_existing_cover = (
             cover_loaded
-            and black_placeholder_loaded
+            and reject_black_placeholder
             and has_existing_cover
             and (not track_changed or same_visible_track or message_refresh)
         )
         preserve_missing_cover = (
             not cover_loaded
             and has_existing_cover
-            and message_refresh
             and (not track_changed or same_visible_track)
         )
-        if preserve_existing_cover:
+        if reject_black_placeholder:
             cover_loaded = False
         if cover_loaded:
             self.album_art = self._bounded_album_image(image, self.CURRENT_ALBUM_ART_MAX_SIDE, smooth=True)
@@ -821,6 +1282,11 @@ class IslandStackVisual(QWidget):
             return min(duration, base)
         return base
 
+    def _effective_lyric_offset_seconds(self) -> float:
+        global_offset = float(getattr(self, "lyric_offset_seconds", 0.0) or 0.0)
+        app_offset = float(getattr(self, "media_app_lyric_offset_seconds", 0.0) or 0.0)
+        return max(-24.0, min(24.0, global_offset + app_offset))
+
     def _looks_like_seek_to_start(self, raw_position: float, previous_position: float, previous_raw_position: float | None) -> bool:
         if previous_raw_position is None:
             return False
@@ -834,7 +1300,7 @@ class IslandStackVisual(QWidget):
     def _sync_timed_lyrics(self, now: float, allow_backward: bool = False):
         if not self.timed_lyrics:
             return
-        position = max(0.0, self._estimated_media_position(now) + float(getattr(self, "lyric_offset_seconds", 0.0)))
+        position = max(0.0, self._estimated_media_position(now) + self._effective_lyric_offset_seconds())
         index = active_index_for_position(self.timed_lyrics, position)
         previous_index = int(getattr(self, "lyric_index", 0))
         if index < previous_index and bool(getattr(self, "media_is_playing", False)) and not allow_backward:
@@ -956,6 +1422,20 @@ class IslandStackVisual(QWidget):
         fps = max(24, min(90, int(getattr(self, "animation_fps", 60))))
         return max(11, int(round(1000 / fps)))
 
+    def _animation_speed_factor(self) -> float:
+        try:
+            speed = float(getattr(self, "animation_speed", 1.0))
+        except (TypeError, ValueError):
+            speed = 1.0
+        return max(0.1, min(4.0, speed))
+
+    def _animation_duration(self, seconds: float, minimum: float = 0.05) -> float:
+        try:
+            base = float(seconds)
+        except (TypeError, ValueError):
+            base = 0.0
+        return max(float(minimum), base / self._animation_speed_factor())
+
     def set_animation_fps(self, fps: int, notify: bool = True):
         self.animation_fps = max(24, min(90, int(fps)))
         if hasattr(self, "timer"):
@@ -1036,8 +1516,115 @@ class IslandStackVisual(QWidget):
     def _music_control_fill_color(self, alpha: int = 24) -> QColor:
         alpha = max(0, min(255, int(alpha)))
         if self._pure_white_music_active():
-            return QColor(0, 0, 0, max(18, min(76, alpha + 14)))
-        return QColor(255, 255, 255, alpha)
+            return QColor(246, 247, 248, alpha)
+        return QColor(18, 20, 24, alpha)
+
+    def _music_control_icon_spec(self, command: str) -> dict[str, object]:
+        command_key = str(command or "")
+        light_icon = not self._pure_white_music_active()
+        suffix = " (1)" if light_icon else ""
+        mirrored = False
+        if command_key == "music:toggle_play_pause":
+            name = "暂停" if bool(getattr(self, "media_is_playing", False)) else "播放2"
+        else:
+            name = "上一首"
+            mirrored = command_key == "music:next"
+        return {
+            "path": MUSIC_CONTROL_ICON_DIR / f"{name}{suffix}.svg",
+            "mirrored": mirrored,
+        }
+
+    def _music_control_fallback_label(self, command: str) -> str:
+        command_key = str(command or "")
+        if command_key == "music:previous":
+            return "\u23ee"
+        if command_key == "music:next":
+            return "\u23ed"
+        return "\u23f8" if bool(getattr(self, "media_is_playing", False)) else "\u25b6"
+
+    def _svg_renderer_for_path(self, path: str):
+        if QSvgRenderer is None:
+            return None
+        key = str(path or "")
+        if not key:
+            return None
+        cache = getattr(self, "_svg_renderer_cache", None)
+        if cache is None:
+            cache = {}
+            self._svg_renderer_cache = cache
+        renderer = cache.get(key)
+        if renderer is None:
+            try:
+                renderer = QSvgRenderer(key)
+            except Exception:
+                return None
+            if not renderer.isValid():
+                return None
+            cache[key] = renderer
+            while len(cache) > 16:
+                cache.pop(next(iter(cache)))
+        return renderer
+
+    def _paint_music_control_svg_icon(self, painter: QPainter, command: str, rect: QRectF) -> bool:
+        spec = self._music_control_icon_spec(command)
+        renderer = self._svg_renderer_for_path(str(spec["path"]))
+        if renderer is None:
+            return False
+        painter.save()
+        if bool(spec["mirrored"]):
+            center = rect.center()
+            painter.translate(center)
+            painter.scale(-1.0, 1.0)
+            renderer.render(painter, QRectF(-rect.width() / 2.0, -rect.height() / 2.0, rect.width(), rect.height()))
+        else:
+            renderer.render(painter, rect)
+        painter.restore()
+        return True
+
+    def _music_control_elastic_scale(self, command: str, now: float | None = None) -> float:
+        presses = getattr(self, "music_control_press_started_at", {}) or {}
+        started = presses.get(str(command or ""))
+        if started is None:
+            return 1.0
+        now = time.monotonic() if now is None else float(now)
+        try:
+            elapsed = now - float(started)
+        except (TypeError, ValueError):
+            return 1.0
+        duration = self._animation_duration(0.34)
+        if elapsed < 0.0:
+            return 1.0
+        if elapsed >= duration:
+            try:
+                presses.pop(str(command or ""), None)
+            except Exception:
+                pass
+            return 1.0
+        progress = max(0.0, min(1.0, elapsed / max(0.001, duration)))
+        overshoot = math.sin(progress * math.pi) * (1.0 - progress * 0.18)
+        return 1.0 + 0.105 * overshoot
+
+    def _paint_music_control_button(self, painter: QPainter, rect: QRectF, command: str, fill_alpha: int, radius: float | None = None):
+        scale = self._music_control_elastic_scale(command)
+        if scale != 1.0:
+            center = rect.center()
+            rect = QRectF(
+                center.x() - rect.width() * scale / 2.0,
+                center.y() - rect.height() * scale / 2.0,
+                rect.width() * scale,
+                rect.height() * scale,
+            )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._music_control_fill_color(fill_alpha))
+        corner = float(radius) if radius is not None else min(rect.height() / 2.0, self._u(10.0))
+        painter.drawRoundedRect(rect, corner, corner)
+        pad = max(self._u(3.0), min(self._u(7.0), rect.height() * 0.24))
+        icon_rect = rect.adjusted(pad, pad, -pad, -pad)
+        if self._paint_music_control_svg_icon(painter, command, icon_rect):
+            return
+        painter.setFont(QFont("Segoe UI Symbol", self._font_size(12), QFont.Weight.Medium))
+        painter.setPen(self._music_control_icon_color(232))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._music_control_fallback_label(command))
 
     def set_music_flow_intensity(self, value: float, notify: bool = True):
         try:
@@ -1316,6 +1903,30 @@ class IslandStackVisual(QWidget):
 
     def set_album_island_cover_size(self, size: int, notify: bool = True):
         self.album_island_cover_size = max(18, min(44, int(size)))
+        self.album_island_compact_cover_size = self.album_island_cover_size
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_album_island_compact_cover_size(self, size: int, notify: bool = True):
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 30
+        self.album_island_compact_cover_size = max(18, min(44, size))
+        self.album_island_cover_size = self.album_island_compact_cover_size
+        self._pulse_stack()
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_album_island_expanded_cover_size(self, size: int, notify: bool = True):
+        try:
+            size = int(size)
+        except (TypeError, ValueError):
+            size = 72
+        self.album_island_expanded_cover_size = max(36, min(96, size))
         self._pulse_stack()
         if notify:
             self._notify_settings_changed()
@@ -1349,6 +1960,38 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
         self.update()
 
+    def set_album_island_record(self, listened_seconds: float = 0.0, history=None, notify: bool = True):
+        try:
+            self.listened_seconds_total = max(0.0, float(listened_seconds))
+        except (TypeError, ValueError):
+            self.listened_seconds_total = 0.0
+        normalized: list[dict[str, object]] = []
+        for entry in list(history or [])[:6]:
+            if isinstance(entry, dict):
+                normalized_entry = {
+                    "track_id": str(entry.get("track_id", "") or ""),
+                    "title": str(entry.get("title", "") or ""),
+                    "artist": str(entry.get("artist", "") or ""),
+                    "album_title": str(entry.get("album_title", "") or ""),
+                }
+                image = self._album_art_from_entry(entry)
+                if not image.isNull():
+                    normalized_entry["album_art"] = image
+                normalized.append(normalized_entry)
+        self.album_history = normalized
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def reset_album_island_record(self, notify: bool = True):
+        self.listened_seconds_total = 0.0
+        self.album_history = []
+        self.album_island_transition_started_at = 0.0
+        self.album_island_transition_reason = ""
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
     def set_no_lyrics_text(self, text: str, notify: bool = True):
         old_text = getattr(self, "no_lyrics_text", "暂无歌词")
         text = " ".join(str(text or "暂无歌词").split())[:16] or "暂无歌词"
@@ -1370,10 +2013,11 @@ class IslandStackVisual(QWidget):
         speed: int | None = None,
         use_backdrop: bool | None = None,
         show_icon: bool | None = None,
+        display_mode: str | None = None,
         notify: bool = True,
     ):
         if y_offset is not None:
-            self.barrage_y_offset = max(0, min(240, int(y_offset)))
+            self.barrage_y_offset = max(0, min(self._barrage_max_y_offset(), int(y_offset)))
         if font_size is not None:
             self.barrage_font_size = max(8, min(20, int(font_size)))
         if speed is not None:
@@ -1382,6 +2026,8 @@ class IslandStackVisual(QWidget):
             self.barrage_use_backdrop = bool(use_backdrop)
         if show_icon is not None:
             self.barrage_show_icon = bool(show_icon)
+        if display_mode is not None:
+            self.barrage_display_mode = self._normalize_barrage_display_mode(display_mode)
         self.update()
         if notify:
             self._notify_settings_changed()
@@ -1404,7 +2050,12 @@ class IslandStackVisual(QWidget):
     def set_settings_window_active(self, active: bool):
         self.settings_window_active = bool(active)
         self.scene_checked_at = 0.0
-        self._update_scene_state(time.monotonic())
+        now = time.monotonic()
+        self._update_scene_state(now)
+        try:
+            self._sync_fullscreen_plugin_alert_overlay(now)
+        except Exception:
+            pass
         self.update()
 
     def _center_on_screen(self):
@@ -1420,8 +2071,9 @@ class IslandStackVisual(QWidget):
             standalone_width = int(round(self._standalone_canvas_width()))
             if self.width() != standalone_width:
                 self.resize(standalone_width, self.height())
-            if self.saved_window_pos is not None:
-                x, y = self.saved_window_pos
+            remembered_pos = self.saved_window_pos or getattr(self, "last_window_position", None)
+            if remembered_pos is not None:
+                x, y = remembered_pos
                 self.move(int(x), int(y))
             else:
                 self.move(geo.center().x() - self.width() // 2, geo.top() + int(round(self._u(14))))
@@ -1429,7 +2081,22 @@ class IslandStackVisual(QWidget):
     def _standalone_canvas_width(self) -> float:
         return self._u(1180.0)
 
-    def set_saved_placement(self, center_ratio=None, window_pos=None, notify: bool = True, stack_direction=None):
+    def _parse_window_position(self, value) -> tuple[int, int] | None:
+        if isinstance(value, QPoint):
+            return (int(value.x()), int(value.y()))
+        if isinstance(value, dict):
+            try:
+                return (int(value.get("x")), int(value.get("y")))
+            except (TypeError, ValueError):
+                return None
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return (int(value[0]), int(value[1]))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def set_saved_placement(self, center_ratio=None, window_pos=None, notify: bool = True, stack_direction=None, last_window_position=None):
         try:
             ratio = float(center_ratio)
         except (TypeError, ValueError):
@@ -1441,14 +2108,107 @@ class IslandStackVisual(QWidget):
         except (TypeError, ValueError):
             self.stack_direction = 1
 
-        parsed_pos = None
-        if isinstance(window_pos, (list, tuple)) and len(window_pos) >= 2:
-            try:
-                parsed_pos = (int(window_pos[0]), int(window_pos[1]))
-            except (TypeError, ValueError):
-                parsed_pos = None
+        parsed_pos = self._parse_window_position(window_pos)
+        parsed_last_pos = self._parse_window_position(last_window_position)
+        self.last_window_position = parsed_last_pos or parsed_pos
         self.saved_window_pos = parsed_pos
         self._center_on_screen()
+        if notify:
+            self._notify_settings_changed()
+
+    def set_plugin_fullscreen_alert_style(self, style: str, notify: bool = True):
+        value = str(style or "island").strip().lower()
+        if value not in {"island", "toast", "barrage"}:
+            value = "island"
+        previous = str(getattr(self, "plugin_fullscreen_alert_style", "island") or "island")
+        self.plugin_fullscreen_alert_style = value
+        if value != previous or value != "barrage":
+            self.fullscreen_plugin_barrage_alert_key = ""
+            self.fullscreen_plugin_barrage_messages = []
+        try:
+            self._sync_fullscreen_plugin_alert_overlay(time.monotonic())
+        except Exception:
+            pass
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_plugin_fullscreen_alert_position(
+        self,
+        *,
+        x_offset: int | None = None,
+        y_offset: int | None = None,
+        notify: bool = True,
+    ):
+        if x_offset is not None:
+            self.plugin_fullscreen_alert_x_offset = max(-2000, min(2000, int(x_offset)))
+        if y_offset is not None:
+            self.plugin_fullscreen_alert_y_offset = max(0, min(2000, int(y_offset)))
+        try:
+            self._sync_fullscreen_plugin_alert_overlay(time.monotonic())
+        except Exception:
+            pass
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def apply_position_preset(self, preset: str, notify: bool = True) -> bool:
+        value = str(preset or "last").strip().lower()
+        if value in {"", "custom"}:
+            value = "last"
+        allowed = {"last", "top_center", "top_left", "top_right", "bottom_left", "bottom_right"}
+        if value not in allowed:
+            value = "last"
+        self.position_preset = value
+        if value == "last":
+            if notify:
+                self._notify_settings_changed()
+            return False
+        if str(getattr(self, "location_mode", "free") or "free") == "tasker":
+            self.set_location_mode("free", notify=False)
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return False
+        geo = screen.geometry()
+        main_kind = self._main_kind()
+        stack_w = self._stack_target_width(main_kind)
+        main_w, main_h = self._main_size_for_kind(main_kind, stack_w)
+        direction = -1 if value.startswith("bottom_") else 1
+        self.stack_direction = direction
+        main_left = self.width() / 2.0 - main_w / 2.0
+        main_top = self._main_top_for_direction(main_kind, main_h, direction)
+        margin = self._u(8.0)
+        left = float(geo.left())
+        top = float(geo.top())
+        right = left + float(geo.width())
+        bottom = top + float(geo.height())
+        if value.endswith("_left"):
+            x = left + margin - main_left
+        elif value.endswith("_right"):
+            x = right - margin - main_left - main_w
+        else:
+            x = left + float(geo.width()) / 2.0 - main_left - main_w / 2.0
+        if value.startswith("bottom_"):
+            y = bottom - margin - main_top - main_h
+        else:
+            y = top + margin - main_top
+        new_pos = self._clamp_standalone_window_pos(x, y, main_left, main_top, main_w, main_h, geo)
+        self.move(new_pos)
+        self.save_last_position(new_pos)
+        if notify:
+            self._notify_settings_changed()
+        try:
+            self.update()
+        except RuntimeError:
+            pass
+        return True
+
+    def save_last_position(self, pos, notify: bool = False):
+        parsed = self._parse_window_position(pos)
+        if parsed is None:
+            return
+        self.last_window_position = parsed
+        self.saved_window_pos = parsed
         if notify:
             self._notify_settings_changed()
 
@@ -1501,7 +2261,7 @@ class IslandStackVisual(QWidget):
         now = time.monotonic()
         tick_dt = max(0.001, min(0.2, now - self.last_tick_at))
         self.last_tick_at = now
-        speed = max(0.1, min(4.0, float(getattr(self, "animation_speed", 1.0))))
+        speed = self._animation_speed_factor()
         anim_dt = tick_dt * speed
         self._refresh_media_data(now)
         self._update_scene_state(now)
@@ -1511,10 +2271,13 @@ class IslandStackVisual(QWidget):
             and self._taskbar_follow_refresh_due(now)
         ):
             self._refresh_taskbar_follow_position()
-        if self.scene_suppressed:
-            self.barrage_hovered = False
-        else:
-            self.barrage_hovered = self._point_in_barrage(self.pointer_pos)
+        self._ensure_fullscreen_plugin_barrage_messages(now)
+        self._sync_fullscreen_plugin_alert_overlay(now)
+        barrage_overlay = getattr(self, "barrage_overlay", None)
+        overlay_hovered = bool(getattr(barrage_overlay, "barrage_hovered", False))
+        self.barrage_hovered = overlay_hovered or (
+            not self.scene_suppressed and self._point_in_barrage(self.pointer_pos)
+        )
         if not self.barrage_hovered:
             self.barrage_clock += anim_dt
         if getattr(self, "super_topmost_enabled", True) and now - self.topmost_reinforced_at > 1.6:
@@ -1529,13 +2292,16 @@ class IslandStackVisual(QWidget):
                 self.lyric_changed_at = now
 
         if self.scene_suppressed:
-            self.hovered_key = ""
-            self.hover_armed_key = ""
-            self.left_stack_at = 0.0
-            self.update()
+            self._handle_scene_suppressed_tick(now, anim_dt)
             return
 
-        if self.hovered_key and not self.expanded and self.hover_armed_key == self.hovered_key and now - self.hover_started_at >= 1.0:
+        if (
+            self.hovered_key
+            and not self.expanded
+            and self.hover_armed_key == self.hovered_key
+            and now - self.hover_started_at >= 1.0
+            and self._hover_auto_activation_allowed(self.hovered_key)
+        ):
             self._activate_key(self.hovered_key)
             self.hover_armed_key = ""
         if (
@@ -1557,6 +2323,14 @@ class IslandStackVisual(QWidget):
         self.scroll_phase += 0.017 * speed
         self.ambient_phase += 0.024 * speed
         self._update_wave_values()
+        self.update()
+
+    def _handle_scene_suppressed_tick(self, now: float, anim_dt: float):
+        self._ensure_fullscreen_plugin_barrage_messages(now)
+        self._sync_fullscreen_plugin_alert_overlay(now)
+        self.hovered_key = ""
+        self.hover_armed_key = ""
+        self.left_stack_at = 0.0
         self.update()
 
     def _update_wave_values(self):
@@ -1641,6 +2415,7 @@ class IslandStackVisual(QWidget):
             return
         self.scene_checked_at = now
         suppressed, reason = self._detect_scene_suppression()
+        self.last_scene_probe_reason = str(reason or "")
         if self._taskbar_compact_active() and str(reason or "") in {"fullscreen", "maximized"}:
             suppressed = False
             reason = ""
@@ -1695,7 +2470,7 @@ class IslandStackVisual(QWidget):
         if mode not in ("hide", "show"):
             return 1.0, 1.0, False, 0.0
         elapsed = max(0.0, now - self.scene_transition_started_at)
-        duration = max(0.05, self.scene_transition_duration)
+        duration = self._animation_duration(self.scene_transition_duration)
         if elapsed >= duration:
             if mode == "hide":
                 return 0.0, 0.0, True, 1.0
@@ -1773,6 +2548,8 @@ class IslandStackVisual(QWidget):
 
     def _detect_scene_suppression(self) -> tuple[bool, str]:
         if getattr(self, "settings_window_active", False):
+            if self._barrage_preview_active():
+                return False, ""
             return True, "settings"
         if sys.platform != "win32":
             return False, ""
@@ -1887,6 +2664,306 @@ class IslandStackVisual(QWidget):
                 return True
         return False
 
+    def _barrage_viewport_rect(self) -> QRectF:
+        try:
+            screen = QGuiApplication.screenAt(self.mapToGlobal(QPoint(max(1, self.width() // 2), max(1, self.height() // 2)))) or QGuiApplication.primaryScreen()
+            if screen is not None:
+                return QRectF(screen.geometry())
+        except Exception:
+            pass
+        return QRectF(0.0, 0.0, float(max(1, self.width())), float(max(1, self.height())))
+
+    def _barrage_max_y_offset(self) -> int:
+        viewport = self._barrage_viewport_rect()
+        return max(0, int(round(viewport.height())) - 1)
+
+    def _barrage_travel_distance(self, content_width: float, viewport: QRectF | None = None) -> float:
+        viewport = QRectF(viewport) if viewport is not None else self._barrage_viewport_rect()
+        return max(float(self.width()), float(viewport.width())) + float(content_width) + self._u(140.0)
+
+    def _active_barrage_messages(self) -> list[Message]:
+        previews = list(getattr(self, "barrage_preview_messages", []))
+        fullscreen = list(getattr(self, "fullscreen_plugin_barrage_messages", []))
+        if self._barrage_preview_active(previews) and previews:
+            return previews + fullscreen
+        return list(getattr(self, "messages", [])) + previews + fullscreen
+
+    def _barrage_action_key_for_message(self, message: Message) -> str:
+        action_key = str(getattr(message, "action_key", "") or "").strip()
+        if action_key:
+            return action_key
+        return f"message:{self._message_key(message)}"
+
+    def _barrage_action_key_at(self, point: QPointF) -> str:
+        for key, rect in getattr(self, "barrage_rects", {}).items():
+            if rect.contains(point):
+                return str(key)
+        return ""
+
+    def _fullscreen_plugin_alert_style(self) -> str:
+        value = str(getattr(self, "plugin_fullscreen_alert_style", "island") or "island").strip().lower()
+        return value if value in {"island", "toast", "barrage"} else "island"
+
+    def _normalize_barrage_display_mode(self, mode: str) -> str:
+        value = str(mode or "fullscreen").strip().lower()
+        aliases = {
+            "any": "always",
+            "anytime": "always",
+            "all": "always",
+            "on": "always",
+            "full": "fullscreen",
+            "fullscreen_only": "fullscreen",
+            "only_fullscreen": "fullscreen",
+        }
+        value = aliases.get(value, value)
+        return value if value in {"always", "fullscreen"} else "fullscreen"
+
+    def _barrage_display_mode(self) -> str:
+        return self._normalize_barrage_display_mode(getattr(self, "barrage_display_mode", "fullscreen"))
+
+    def _fullscreen_plugin_alert_key(self, alert) -> str:
+        try:
+            _index, label, detail, summary, _color, _icon, plugin_id, status, alert_title, alert_body, priority = alert
+        except (TypeError, ValueError):
+            return ""
+        return "|".join(str(part or "") for part in (plugin_id, label, detail, summary, status, alert_title, alert_body, priority))
+
+    def _fullscreen_plugin_alert_action_key(self, alert) -> str:
+        try:
+            _index, label, _detail, _summary, _color, _icon, plugin_id, _status, _alert_title, _alert_body, _priority = alert
+        except (TypeError, ValueError):
+            return ""
+        target = str(plugin_id or label or "").strip().casefold()
+        return f"plugin-alert:{target}" if target else ""
+
+    def _fullscreen_plugin_alert_is_reminder(self, alert) -> bool:
+        try:
+            _index, label, _detail, _summary, _color, _icon, _plugin_id, status, alert_title, alert_body, _priority = alert
+        except (TypeError, ValueError):
+            return False
+        status_key = str(status or "").strip().lower()
+        if status_key in {"running", "loading", "soon", "paused", "normal", ""}:
+            return False
+        label_key = str(label or "").strip().upper()
+        if label_key == "TIME":
+            return status_key in {"done", "due", "alarm"}
+        return status_key in {"done", "due", "alarm", "error", "severe", "rain"} or bool(alert_title or alert_body)
+
+    def _plugin_fullscreen_alert_preview_active(self, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else float(now)
+        return now <= float(getattr(self, "plugin_fullscreen_alert_preview_until", 0.0) or 0.0)
+
+    def _plugin_fullscreen_alert_preview(self) -> tuple:
+        return (
+            0,
+            "TIME",
+            "提醒预览",
+            "设置预览",
+            QColor(255, 184, 0),
+            "",
+            "time",
+            "done",
+            "提醒预览",
+            "调整提醒样式与位置",
+            5,
+        )
+
+    def _fullscreen_plugin_alerts(self, limit: int = 1) -> list[tuple]:
+        if self._plugin_fullscreen_alert_preview_active():
+            return [self._plugin_fullscreen_alert_preview()][: max(0, int(limit))]
+        try:
+            alerts = self._active_plugin_alerts(max(4, int(limit) * 3), include_expanded=True)
+        except Exception:
+            alerts = []
+        out = [alert for alert in alerts if self._fullscreen_plugin_alert_is_reminder(alert)]
+        return out[: max(0, int(limit))]
+
+    def _fullscreen_overlay_context_active(self) -> bool:
+        if self._plugin_fullscreen_alert_preview_active():
+            return True
+        if getattr(self, "settings_window_active", False):
+            return True
+        if getattr(self, "scene_suppressed", False):
+            return True
+        reason = str(getattr(self, "last_scene_probe_reason", "") or getattr(self, "scene_reason", "") or "")
+        return reason in {"fullscreen", "maximized", "settings"}
+
+    def _fullscreen_plugin_alert_overlay_state(self) -> dict[str, object] | None:
+        if not self._fullscreen_overlay_context_active():
+            return None
+        alerts = self._fullscreen_plugin_alerts(1)
+        if not alerts:
+            return None
+        alert = alerts[0]
+        action_key = self._fullscreen_plugin_alert_action_key(alert)
+        if not action_key:
+            return None
+        return {
+            "style": self._fullscreen_plugin_alert_style(),
+            "alert": alert,
+            "action_key": action_key,
+            "alert_key": self._fullscreen_plugin_alert_key(alert),
+        }
+
+    def _plugin_alert_overlay_state(self) -> dict[str, object] | None:
+        state = self._fullscreen_plugin_alert_overlay_state()
+        if state is None:
+            return None
+        style = str(state.get("style", "island") or "island")
+        if style == "barrage":
+            return None
+        return state
+
+    def _barrage_alive_messages_for_clock(self, messages: list[Message], clock: float | None = None) -> list[Message]:
+        clock = float(getattr(self, "barrage_clock", 0.0)) if clock is None else float(clock)
+        return [
+            message
+            for message in messages
+            if clock - float(getattr(message, "barrage_started_at", 0.0) or 0.0) <= 14.0
+        ]
+
+    def _barrage_alive_messages(self, messages: list[Message]) -> list[Message]:
+        return self._barrage_alive_messages_for_clock(messages, float(getattr(self, "barrage_clock", 0.0)))
+
+    def _barrage_preview_active(self, previews: list[Message] | None = None, now: float | None = None) -> bool:
+        previews = list(getattr(self, "barrage_preview_messages", [])) if previews is None else list(previews)
+        if not previews:
+            return False
+        if getattr(self, "settings_window_active", False):
+            return True
+        now = time.monotonic() if now is None else float(now)
+        if now <= float(getattr(self, "barrage_preview_force_anytime_until", 0.0) or 0.0):
+            return True
+        return now - float(getattr(self, "last_barrage_preview_at", 0.0) or 0.0) <= 6.2
+
+    def _barrage_overlay_context_active(self, preview_active: bool = False) -> bool:
+        if preview_active:
+            return True
+        if self._barrage_display_mode() == "always":
+            return True
+        return self._fullscreen_overlay_context_active()
+
+    def _barrage_overlay_state(self, preview_only: bool = False) -> dict[str, object] | None:
+        previews = list(getattr(self, "barrage_preview_messages", []))
+        preview_active = self._barrage_preview_active(previews)
+        if preview_only and not preview_active:
+            return None
+        if preview_only:
+            active = previews
+        else:
+            if not self._barrage_overlay_context_active(preview_active):
+                return None
+            try:
+                active = self._active_barrage_messages()
+            except Exception:
+                active = []
+        alive = self._barrage_alive_messages(active)
+        if not alive:
+            return None
+        preview_prefix = "preview-" if preview_only or preview_active else ""
+        return {
+            "style": "barrage",
+            "alert": None,
+            "action_key": "",
+            "alert_key": f"{preview_prefix}barrage:{len(alive)}",
+            "messages": list(alive),
+            "clock": float(getattr(self, "barrage_clock", 0.0)),
+        }
+
+    def _fullscreen_barrage_overlay_state(self, preview_only: bool = False) -> dict[str, object] | None:
+        return self._barrage_overlay_state(preview_only=preview_only)
+
+    def _fullscreen_overlay_state(self) -> dict[str, object] | None:
+        preview = self._fullscreen_barrage_overlay_state(preview_only=True)
+        if preview is not None:
+            return preview
+        return self._fullscreen_plugin_alert_overlay_state() or self._fullscreen_barrage_overlay_state()
+
+    def _fullscreen_plugin_alert_screen_rect(self) -> QRectF:
+        try:
+            center = self.mapToGlobal(QPoint(max(1, self.width() // 2), max(1, self.height() // 2)))
+            screen = QGuiApplication.screenAt(center) or QGuiApplication.primaryScreen()
+            if screen is not None:
+                return QRectF(screen.geometry())
+        except Exception:
+            pass
+        return self._barrage_viewport_rect()
+
+    def _sync_plugin_alert_overlay(self, now: float):
+        overlay = getattr(self, "plugin_alert_overlay", None)
+        state = self._plugin_alert_overlay_state()
+        if state is None:
+            if overlay is not None:
+                overlay.request_hide(now)
+            return
+        if overlay is None:
+            overlay = FullscreenPluginAlertOverlay(self)
+            self.plugin_alert_overlay = overlay
+            self.fullscreen_plugin_alert_overlay = overlay
+        overlay.configure(state, self._fullscreen_plugin_alert_screen_rect(), now)
+
+    def _sync_barrage_overlay(self, now: float):
+        if self._fullscreen_plugin_alert_style() == "barrage":
+            self._ensure_fullscreen_plugin_barrage_messages(now)
+        overlay = getattr(self, "barrage_overlay", None)
+        state = self._barrage_overlay_state()
+        if state is None:
+            if overlay is not None:
+                overlay.request_hide(now)
+            return
+        if overlay is None:
+            overlay = BarrageOverlay(self)
+            self.barrage_overlay = overlay
+        overlay.configure(state, self._fullscreen_plugin_alert_screen_rect(), now)
+
+    def _sync_fullscreen_plugin_alert_overlay(self, now: float):
+        self._sync_plugin_alert_overlay(now)
+        self._sync_barrage_overlay(now)
+
+    def _fullscreen_plugin_alert_barrage_messages(self, repeat_count: int = 10, now: float | None = None) -> list[Message]:
+        now = time.monotonic() if now is None else float(now)
+        alerts = self._fullscreen_plugin_alerts(1)
+        if not alerts:
+            return []
+        try:
+            _index, label, detail, summary, color, _icon, plugin_id, status, alert_title, alert_body, _priority = alerts[0]
+        except (TypeError, ValueError):
+            return []
+        title, body = self._plugin_alert_text_parts(label, detail, summary, status, alert_title, alert_body)
+        text = str(body or summary or detail or title or label or "提醒")
+        sender = str(title or label or "提醒")
+        app = str(label or plugin_id or "PLUGIN")
+        action_key = f"plugin-alert:{str(plugin_id or label or '').strip().casefold()}"
+        avatar = QColor(color) if isinstance(color, QColor) else QColor(96, 186, 255)
+        messages: list[Message] = []
+        count = max(1, min(10, int(repeat_count)))
+        start_clock = float(getattr(self, "barrage_clock", 0.0))
+        if self._plugin_fullscreen_alert_preview_active(now):
+            start_clock -= 0.85
+        for index in range(count):
+            self.sample_index = int(getattr(self, "sample_index", 0)) + 1
+            message = Message(app, sender, text, avatar, avatar, serial=self.sample_index, action_key=action_key)
+            message.popup_until = now + 8.0
+            message.barrage_started_at = start_clock + index * 0.18
+            messages.append(message)
+        return messages
+
+    def _ensure_fullscreen_plugin_barrage_messages(self, now: float):
+        if not self._fullscreen_overlay_context_active() or self._fullscreen_plugin_alert_style() != "barrage":
+            self.fullscreen_plugin_barrage_alert_key = ""
+            self.fullscreen_plugin_barrage_messages = []
+            return
+        alerts = self._fullscreen_plugin_alerts(1)
+        if not alerts:
+            self.fullscreen_plugin_barrage_alert_key = ""
+            self.fullscreen_plugin_barrage_messages = []
+            return
+        key = self._fullscreen_plugin_alert_key(alerts[0])
+        if key and key == getattr(self, "fullscreen_plugin_barrage_alert_key", "") and getattr(self, "fullscreen_plugin_barrage_messages", []):
+            return
+        self.fullscreen_plugin_barrage_alert_key = key
+        self.fullscreen_plugin_barrage_messages = self._fullscreen_plugin_alert_barrage_messages(repeat_count=10, now=now)
+
     def add_message(self):
         if not self.message_samples:
             return
@@ -1904,6 +2981,7 @@ class IslandStackVisual(QWidget):
         if now - getattr(self, "last_barrage_preview_at", 0.0) < 0.18:
             return
         self.last_barrage_preview_at = now
+        self.barrage_preview_force_anytime_until = now + 6.2
         self.sample_index += 1
         message = Message(
             "预览",
@@ -1914,12 +2992,24 @@ class IslandStackVisual(QWidget):
             serial=self.sample_index,
         )
         message.popup_until = now + 1.0
-        message.barrage_started_at = self.barrage_clock
+        message.barrage_started_at = float(getattr(self, "barrage_clock", 0.0)) - 0.85
         self.barrage_preview_messages.insert(0, message)
         self.barrage_preview_messages = self.barrage_preview_messages[:3]
         if getattr(self, "settings_window_active", False):
             self.scene_checked_at = 0.0
             self._update_scene_state(now)
+        self._sync_barrage_overlay(now)
+        self.update()
+
+    def show_plugin_fullscreen_alert_preview(self):
+        now = time.monotonic()
+        self.plugin_fullscreen_alert_preview_until = now + 6.2
+        self.fullscreen_plugin_barrage_alert_key = ""
+        self.fullscreen_plugin_barrage_messages = []
+        try:
+            self._sync_fullscreen_plugin_alert_overlay(now)
+        except Exception:
+            pass
         self.update()
 
     def _enforce_stack_limit(self):
@@ -1982,8 +3072,8 @@ class IslandStackVisual(QWidget):
             self._pulse_stack()
             settings_changed = True
         elif key == Qt.Key.Key_0:
-            known_plugins = ["time", "weather", "agenda"]
-            next_count = (len(self._enabled_plugin_ids()) + 1) % 4
+            known_plugins = ["time"]
+            next_count = (len(self._enabled_plugin_ids()) + 1) % 2
             self.enabled_plugin_ids = set(known_plugins[:next_count])
             self.enabled_plugin_count = next_count
             self._set_plugin_focus(min(self.plugin_focus_target, max(0, next_count - 1)), immediate=True)
@@ -2017,13 +3107,18 @@ class IslandStackVisual(QWidget):
             "v2_persistent_plugin": self.persistent_plugin,
             "v2_location_mode": str(getattr(self, "location_mode", "finder" if self.finder_mode else "free")),
             "v2_finder_mode": self.finder_mode,
-            "v2_manual_mydockfinder": self.manual_finder_available,
+            "v2_manual_mydockfinder": bool(getattr(self, "manual_finder_available", False)),
+            "v2_mydockfinder_path": str(getattr(self, "mydockfinder_path", "") or ""),
+            "v2_position_preset": str(getattr(self, "position_preset", "last") or "last"),
             "v2_taskbar_corner_style": str(getattr(self, "taskbar_corner_style", "win11")),
             "v2_expanded": self.expanded,
             "v2_show_seconds": self.show_seconds,
             "v2_enabled_plugins": list(self._enabled_plugin_ids()),
             "v2_side_island_style": str(getattr(self, "side_island_style", "standard")),
             "v2_plugin_island_style": str(getattr(self, "plugin_island_style", "standard")),
+            "v2_plugin_fullscreen_alert_style": str(getattr(self, "plugin_fullscreen_alert_style", "island")),
+            "v2_plugin_fullscreen_alert_x_offset": int(getattr(self, "plugin_fullscreen_alert_x_offset", 0)),
+            "v2_plugin_fullscreen_alert_y_offset": int(getattr(self, "plugin_fullscreen_alert_y_offset", 0)),
             "v2_music_island_style": str(getattr(self, "music_island_style", "standard")),
             "v2_time_alarm_side_display": str(getattr(self, "time_alarm_side_display", "note")),
             "v2_ambient_intensity": self.ambient_intensity,
@@ -2043,12 +3138,19 @@ class IslandStackVisual(QWidget):
             "v2_empty_bar_custom_colors": list(getattr(self, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86"))),
             "v2_stack_center_ratio": round(float(self.stack_center_ratio), 5),
             "v2_window_pos": list(self.saved_window_pos) if self.saved_window_pos is not None else None,
+            "v2_last_window_position": (
+                {"x": int(getattr(self, "last_window_position")[0]), "y": int(getattr(self, "last_window_position")[1])}
+                if isinstance(getattr(self, "last_window_position", None), (list, tuple))
+                and len(getattr(self, "last_window_position", ())) >= 2
+                else None
+            ),
             "v2_stack_direction": int(getattr(self, "stack_direction", 1)),
             "v2_barrage_y_offset": int(self.barrage_y_offset),
             "v2_barrage_font_size": int(self.barrage_font_size),
             "v2_barrage_speed": int(getattr(self, "barrage_speed", 100)),
             "v2_barrage_use_backdrop": self.barrage_use_backdrop,
             "v2_barrage_show_icon": self.barrage_show_icon,
+            "v2_barrage_display_mode": self._barrage_display_mode(),
             "v2_auto_expand_bounds": self.auto_expand_bounds,
             "v2_expand_direction": self.expand_direction,
             "v2_lyric_offset_seconds": round(float(getattr(self, "lyric_offset_seconds", 0.0)), 3),
@@ -2076,9 +3178,13 @@ class IslandStackVisual(QWidget):
             "v2_no_lyrics_display_mode": str(getattr(self, "no_lyrics_display_mode", "text")),
             "v2_album_island_cover_count": int(getattr(self, "album_island_cover_count", 5)),
             "v2_album_island_cover_size": int(getattr(self, "album_island_cover_size", 30)),
+            "v2_album_island_compact_cover_size": int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30))),
+            "v2_album_island_expanded_cover_size": int(getattr(self, "album_island_expanded_cover_size", 72)),
             "v2_album_island_spacing": int(getattr(self, "album_island_spacing", 112)),
             "v2_album_island_secondary_style": str(getattr(self, "album_island_secondary_style", "perspective_dim")),
             "v2_album_island_perspective_amount": int(getattr(self, "album_island_perspective_amount", 100)),
+            "v2_album_island_listened_seconds_total": round(float(getattr(self, "listened_seconds_total", 0.0)), 3),
+            "v2_album_island_history": self._serializable_album_history(),
             "v2_no_lyrics_text": getattr(self, "no_lyrics_text", "暂无歌词"),
             "v2_super_topmost": bool(getattr(self, "super_topmost_enabled", True)),
         }
@@ -2109,7 +3215,7 @@ class IslandStackVisual(QWidget):
         pixmap = getattr(self, "surface_transition_pixmap", QPixmap())
         if pixmap.isNull():
             return
-        duration = max(0.05, float(getattr(self, "surface_transition_duration", 0.22)))
+        duration = self._animation_duration(float(getattr(self, "surface_transition_duration", 0.22)))
         elapsed = now - float(getattr(self, "surface_transition_started_at", now))
         if elapsed >= duration:
             self.surface_transition_pixmap = QPixmap()
@@ -2171,20 +3277,57 @@ class IslandStackVisual(QWidget):
         self._clear_mode_interaction_state(clear_drag_detach=clear_drag_detach)
         self.taskbar_follow_last_at = 0.0
         self.taskbar_follow_last_key = ""
+        self.taskbar_hidden_by_follow = False
         if clear_surface:
             self._clear_surface_transition()
 
-    def set_manual_finder_available(self, enabled: bool, notify: bool = True):
-        previous = bool(getattr(self, "manual_finder_available", False))
-        self.manual_finder_available = bool(enabled)
+    def _mydockfinder_available(self) -> bool:
+        return bool(getattr(self, "mydockfinder_running", False) or getattr(self, "manual_finder_available", False))
+
+    def _mydockfinder_root_path(self) -> Path:
+        raw = str(getattr(self, "mydockfinder_path", "") or "").strip().strip('"')
+        if not raw:
+            return Path(r"B:\SteamLibrary\steamapps\common\MyDockFinder")
+        path = Path(raw)
+        if path.suffix.lower() == ".exe":
+            return path.parent
+        return path
+
+    def available_location_modes(self) -> list[str]:
+        if self._mydockfinder_available():
+            return ["free", "finder"]
+        return ["free", "tasker"]
+
+    def set_mydockfinder_path(self, path: str, notify: bool = True):
+        self.mydockfinder_path = str(path or "").strip().strip('"')
+        if notify:
+            self._notify_settings_changed()
+
+    def set_mydockfinder_diagnostics(self, diagnostics: dict[str, object] | None, notify: bool = True):
+        self.mydockfinder_diagnostics = dict(diagnostics or {})
+        if notify:
+            self._notify_settings_changed()
+
+    def _reconcile_mydockfinder_availability(self, previous_available: bool, notify: bool = True):
         current_mode = str(getattr(self, "location_mode", "free") or "free")
         desired_mode = self._canonical_location_mode(current_mode)
         if desired_mode != current_mode:
             self.set_location_mode(desired_mode, notify=False)
-        elif previous != self.manual_finder_available:
+        elif bool(previous_available) != self._mydockfinder_available():
             self._reset_location_runtime_state(clear_surface=True)
         if notify:
             self._notify_settings_changed()
+        self.update()
+
+    def set_mydockfinder_running(self, running: bool, notify: bool = True):
+        previous_available = self._mydockfinder_available()
+        self.mydockfinder_running = bool(running)
+        self._reconcile_mydockfinder_availability(previous_available, notify=notify)
+
+    def set_manual_finder_available(self, enabled: bool, notify: bool = True):
+        previous_available = self._mydockfinder_available()
+        self.manual_finder_available = bool(enabled)
+        self._reconcile_mydockfinder_availability(previous_available, notify=notify)
 
     def _canonical_location_mode(self, mode: str) -> str:
         value = str(mode or "free").strip().lower()
@@ -2198,9 +3341,9 @@ class IslandStackVisual(QWidget):
         value = legacy.get(value, value)
         if value not in {"finder", "free", "tasker"}:
             value = "free"
-        if value == "finder" and not bool(getattr(self, "manual_finder_available", False)):
+        if value == "finder" and not self._mydockfinder_available():
             value = "free"
-        if value == "tasker" and bool(getattr(self, "manual_finder_available", False)):
+        if value == "tasker" and self._mydockfinder_available():
             value = "free"
         return value
 
@@ -2223,7 +3366,7 @@ class IslandStackVisual(QWidget):
             self.taskbar_fusion_mode = "off"
             self.taskbar_preview_visible = False
             try:
-                self.finder_material = read_finder_material(force_screen_sample=True, include_center=not self.isVisible())
+                self.finder_material = read_finder_material(self._mydockfinder_root_path(), force_screen_sample=True, include_center=not self.isVisible())
                 self.finder_material_refreshed_at = time.monotonic()
                 self._center_on_screen()
                 self._force_super_topmost()
@@ -2331,7 +3474,7 @@ class IslandStackVisual(QWidget):
         return (
             not bool(getattr(self, "finder_mode", False))
             and str(getattr(self, "location_mode", "free")) != "finder"
-            and not bool(getattr(self, "manual_finder_available", False))
+            and not self._mydockfinder_available()
         )
 
     def _should_show_taskbar_preview(self, lower_third_ratio: float) -> bool:
@@ -2695,6 +3838,20 @@ class IslandStackVisual(QWidget):
             return None
         shell_rect = self._windows_taskbar_rect_for_screen(screen)
         if shell_rect is not None and not shell_rect.isNull():
+            try:
+                geo = QRectF(screen.geometry())
+                available = QRectF(screen.availableGeometry())
+                full_available = (
+                    abs(available.left() - geo.left()) <= 1.0
+                    and abs(available.top() - geo.top()) <= 1.0
+                    and abs(available.width() - geo.width()) <= 1.0
+                    and abs(available.height() - geo.height()) <= 1.0
+                )
+                thickness = min(float(shell_rect.width()), float(shell_rect.height()))
+                if full_available and thickness <= max(self._u(6.0), 4.0):
+                    return None
+            except Exception:
+                pass
             return shell_rect
         geo = screen.geometry()
         available = screen.availableGeometry()
@@ -2857,8 +4014,29 @@ class IslandStackVisual(QWidget):
         gap = max(self._u(4.0), min(self._u(7.0), rect.height() * 0.16))
         return QRectF(rect.left() - gap - width, rect.center().y() - height / 2.0, width, height)
 
+    def _taskbar_left_handle_frame_rect(self, main_rect: QRectF) -> QRectF:
+        rect = QRectF(main_rect)
+        if rect.isNull():
+            return QRectF()
+        handle = self._taskbar_left_handle_rect(rect)
+        if handle.isNull():
+            return QRectF()
+        pad_x = max(self._u(4.0), handle.width() * 1.4)
+        overlap = max(self._u(5.0), min(self._u(9.0), rect.height() * 0.20))
+        right = rect.left() + overlap
+        left = handle.left() - pad_x
+        width = max(self._u(12.0), right - left)
+        return QRectF(
+            right - width,
+            rect.top(),
+            width,
+            rect.height(),
+        )
+
     def _taskbar_left_handle_visible(self) -> bool:
         if not self._taskbar_compact_active():
+            return False
+        if bool(getattr(self, "expanded", False)):
             return False
         try:
             if time.monotonic() <= float(getattr(self, "taskbar_left_handle_visible_until", 0.0) or 0.0):
@@ -2871,6 +4049,23 @@ class IslandStackVisual(QWidget):
         if key == "taskbar:left-handle":
             return True
         return key in {"music", "plugin", "message"} or key.startswith("message:")
+
+    def _taskbar_left_handle_visibility_progress(self, now: float | None = None) -> float:
+        if not self._taskbar_compact_active() or bool(getattr(self, "expanded", False)):
+            return 0.0
+        if bool(getattr(self, "dragging", False)) and str(getattr(self, "drag_press_key", "") or "") == "taskbar:left-handle":
+            return 1.0
+        key = str(getattr(self, "hovered_key", "") or "")
+        if key == "taskbar:left-handle" or key in {"music", "plugin", "message"} or key.startswith("message:"):
+            return 1.0
+        now = time.monotonic() if now is None else float(now)
+        remaining = float(getattr(self, "taskbar_left_handle_visible_until", 0.0) or 0.0) - now
+        if remaining <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, remaining / 0.9))
+
+    def _taskbar_left_handle_slide_progress(self, now: float | None = None) -> float:
+        return self._taskbar_left_handle_visibility_progress(now=now)
 
     def _extend_taskbar_left_handle_visibility(self, now: float | None = None):
         if not self._taskbar_compact_active():
@@ -2898,6 +4093,12 @@ class IslandStackVisual(QWidget):
             return QRectF(selected)
         zones = self._taskbar_drop_zones_for_screen(screen, desired_width=desired_width)
         return QRectF(zones[0]) if zones else QRectF()
+
+    def _taskbar_drag_track_rect_for_screen(self, screen, taskbar_rect: QRectF) -> QRectF:
+        taskbar = QRectF(taskbar_rect)
+        if taskbar.isNull():
+            return QRectF()
+        return taskbar
 
     def _taskbar_track_rect_for_screen(self, screen, taskbar_rect: QRectF) -> QRectF:
         taskbar = QRectF(taskbar_rect)
@@ -2995,6 +4196,23 @@ class IslandStackVisual(QWidget):
         self.move(target)
         return True
 
+    def _set_taskbar_follow_hidden(self, hidden: bool):
+        hidden = bool(hidden)
+        if hidden:
+            if not bool(getattr(self, "taskbar_hidden_by_follow", False)):
+                try:
+                    self.hide()
+                except Exception:
+                    pass
+            self.taskbar_hidden_by_follow = True
+            return
+        if bool(getattr(self, "taskbar_hidden_by_follow", False)):
+            self.taskbar_hidden_by_follow = False
+            try:
+                self.show()
+            except Exception:
+                pass
+
     def _refresh_taskbar_follow_position(self) -> bool:
         if not self._taskbar_compact_active():
             return False
@@ -3004,10 +4222,12 @@ class IslandStackVisual(QWidget):
             return False
         taskbar = self._taskbar_rect_for_screen(screen)
         if taskbar is None or taskbar.isNull():
-            taskbar = self._taskbar_hidden_fallback_rect_for_screen(screen)
-        if taskbar is None or taskbar.isNull():
-            return False
-        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+            self._set_taskbar_follow_hidden(True)
+            self.taskbar_follow_last_at = time.monotonic()
+            self.taskbar_follow_last_key = ("hidden", id(screen))
+            return True
+        self._set_taskbar_follow_hidden(False)
+        track = self._taskbar_drag_track_rect_for_screen(screen, taskbar)
         if track.isNull():
             track = QRectF(taskbar)
         screen_geo = screen.geometry()
@@ -3028,7 +4248,7 @@ class IslandStackVisual(QWidget):
         self.stack_direction = direction
         self.taskbar_selected_drop_zone = selected_zone
         self._move_taskbar_window_if_needed(new_pos)
-        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        self.save_last_position(new_pos)
         now = time.monotonic()
         self.taskbar_follow_last_at = now
         self.taskbar_follow_last_key = geometry_key
@@ -3107,7 +4327,7 @@ class IslandStackVisual(QWidget):
         taskbar = self._taskbar_rect_for_screen(screen)
         if taskbar is None or taskbar.isNull():
             return False
-        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+        track = self._taskbar_drag_track_rect_for_screen(screen, taskbar)
         if track.isNull():
             return False
         self.last_taskbar_rect = QRectF(taskbar)
@@ -3128,7 +4348,7 @@ class IslandStackVisual(QWidget):
         new_pos = QPoint(int(round(global_x)), int(round(global_y)))
         new_pos = self._clamp_taskbar_window_pos(new_pos, main_top, main_w, main_h, screen_geo)
         self._move_taskbar_window_if_needed(new_pos)
-        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        self.save_last_position(new_pos)
         return True
 
     def set_finder_mode(self, enabled: bool, notify: bool = True):
@@ -3167,6 +4387,8 @@ class IslandStackVisual(QWidget):
                     or getattr(self, "media_position_interactive", False)
                     or getattr(self, "media_position_source", "") == "interactive"
                 ),
+                "mydockfinder_running": bool(getattr(self, "mydockfinder_running", False)),
+                "mydockfinder_diagnostics": dict(getattr(self, "mydockfinder_diagnostics", {}) or {}),
                 "lyric_offset_seconds": getattr(self, "lyric_offset_seconds", 0.0),
                 "visible_lyric_index": lyric_index,
                 "visible_current_lyric": current_lyric,
@@ -3328,8 +4550,15 @@ class IslandStackVisual(QWidget):
             if command == "open_source":
                 self._open_music_source()
             else:
+                self.tasker_music_hover_auto_expand_suppressed = True
+                self.hover_armed_key = ""
                 self._send_playback_command_async(command)
                 if command == "toggle_play_pause":
+                    presses = getattr(self, "music_control_press_started_at", None)
+                    if presses is None:
+                        presses = {}
+                        self.music_control_press_started_at = presses
+                    presses[key] = time.monotonic()
                     self.media_is_playing = not self.media_is_playing
                 self.last_media_refresh_at = 0.0
         elif key.startswith("plugin-alert:"):
@@ -3358,8 +4587,20 @@ class IslandStackVisual(QWidget):
         elif key and not self.expanded:
             self._set_expanded(True)
         elif key and self.expanded:
-            self._set_expanded(False)
+                self._set_expanded(False)
         self._pulse_stack()
+
+    def _hover_auto_activation_allowed(self, key: str) -> bool:
+        key = str(key or "")
+        if not key:
+            return False
+        if key.startswith("music:"):
+            return False
+        if key == "music" and bool(getattr(self, "tasker_music_hover_auto_expand_suppressed", False)):
+            return False
+        if key == "taskbar:left-handle":
+            return False
+        return True
 
     def _open_plugin_manager(self):
         samples = self._enabled_plugin_samples()
@@ -3572,7 +4813,7 @@ class IslandStackVisual(QWidget):
         except (TypeError, ValueError):
             return None
         elapsed = max(0.0, time.monotonic() - started_at)
-        duration = 0.24
+        duration = self._animation_duration(0.24)
         if elapsed >= duration:
             self.plugin_time_module_animation = {}
             return None
@@ -4137,7 +5378,7 @@ class IslandStackVisual(QWidget):
         self._pulse_stack()
 
     def _finder_attach_allowed(self) -> bool:
-        return bool(getattr(self, "manual_finder_available", False))
+        return self._mydockfinder_available()
 
     def _should_attach_to_finder(self, global_pos: QPoint, delta: QPoint) -> bool:
         if not self._finder_attach_allowed() or delta.y() >= 0:
@@ -4164,7 +5405,7 @@ class IslandStackVisual(QWidget):
         self.taskbar_fusion_mode = "off"
         self.taskbar_preview_visible = False
         self._hide_taskbar_drop_overlay()
-        self.finder_material = read_finder_material(force_screen_sample=True, include_center=True)
+        self.finder_material = read_finder_material(self._mydockfinder_root_path(), force_screen_sample=True, include_center=True)
         self.finder_material_refreshed_at = time.monotonic()
         self.resize(geo.width(), self.height())
         self.move(geo.left(), geo.top())
@@ -4241,7 +5482,7 @@ class IslandStackVisual(QWidget):
             new_pos = QPoint(new_x, new_y)
         self.move(new_pos)
         self._restore_motion_global_rects_after_move()
-        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        self.save_last_position(new_pos)
 
     def _taskbar_drag_should_stay_on_track(self, global_pos: QPoint) -> bool:
         screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
@@ -4259,7 +5500,7 @@ class IslandStackVisual(QWidget):
         if taskbar is None or taskbar.isNull():
             return
         self.last_taskbar_rect = QRectF(taskbar)
-        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+        track = self._taskbar_drag_track_rect_for_screen(screen, taskbar)
         if track.isNull():
             return
         direction = self._taskbar_stack_direction_for_rect(taskbar, screen.geometry())
@@ -4277,7 +5518,7 @@ class IslandStackVisual(QWidget):
         new_pos = QPoint(int(round(center_x - self.width() / 2.0)), int(round(center_y - main_top - main_h / 2.0)))
         new_pos = self._clamp_taskbar_window_pos(new_pos, main_top, main_w, main_h, screen.geometry())
         self._move_taskbar_window_if_needed(new_pos)
-        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        self.save_last_position(new_pos)
         self._update_taskbar_material_for_screen(screen, taskbar)
 
     def _resize_taskbar_from_left_handle(self, global_pos: QPoint):
@@ -4288,7 +5529,7 @@ class IslandStackVisual(QWidget):
         if taskbar is None or taskbar.isNull():
             return
         self.last_taskbar_rect = QRectF(taskbar)
-        track = self._taskbar_track_rect_for_screen(screen, taskbar)
+        track = self._taskbar_drag_track_rect_for_screen(screen, taskbar)
         if track.isNull():
             return
         main_rect = QRectF(getattr(self, "drag_press_main_global_rect", QRectF()))
@@ -4318,7 +5559,7 @@ class IslandStackVisual(QWidget):
         new_pos = QPoint(int(round(center_x - self.width() / 2.0)), int(round(center_y - main_top - main_h / 2.0)))
         new_pos = self._clamp_taskbar_window_pos(new_pos, main_top, main_w, main_h, screen.geometry())
         self._move_taskbar_window_if_needed(new_pos)
-        self.saved_window_pos = (int(new_pos.x()), int(new_pos.y()))
+        self.save_last_position(new_pos)
         self._update_taskbar_material_for_screen(screen, taskbar)
 
     def _clamp_taskbar_window_pos(
@@ -4334,15 +5575,21 @@ class IslandStackVisual(QWidget):
         except Exception:
             window_w = float(main_w)
         main_left = window_w / 2.0 - float(main_w) / 2.0
-        return self._clamp_standalone_window_pos(
-            float(new_pos.x()),
-            float(new_pos.y()),
-            main_left,
-            float(main_top),
-            float(main_w),
-            float(main_h),
-            screen_geo,
-        )
+        left = float(screen_geo.left())
+        top = float(screen_geo.top())
+        right = left + float(screen_geo.width())
+        bottom = top + float(screen_geo.height())
+        x = float(new_pos.x())
+        y = float(new_pos.y())
+        min_x = left - main_left
+        max_x = right - main_left - float(main_w)
+        min_y = top - float(main_top)
+        max_y = bottom - float(main_top) - float(main_h)
+        if min_x <= max_x:
+            x = max(min_x, min(max_x, x))
+        if min_y <= max_y:
+            y = max(min_y, min(max_y, y))
+        return QPoint(int(round(x)), int(round(y)))
 
     def _clamp_standalone_window_pos(
         self,
@@ -4378,7 +5625,7 @@ class IslandStackVisual(QWidget):
         if self.finder_mode:
             self.saved_window_pos = None
         elif self.saved_window_pos is None:
-            self.saved_window_pos = (int(self.x()), int(self.y()))
+            self.save_last_position(QPoint(int(self.x()), int(self.y())))
         self._notify_settings_changed()
 
     def mousePressEvent(self, event):
@@ -4413,7 +5660,10 @@ class IslandStackVisual(QWidget):
         self.drag_candidate = True
         self.dragging = False
         self.hover_armed_key = ""
-        self.hovered_key = ""
+        if str(self.drag_press_key or "").startswith("music:"):
+            self.hovered_key = self.drag_press_key
+        else:
+            self.hovered_key = ""
         self.update()
 
     def mouseDoubleClickEvent(self, event):
@@ -4454,11 +5704,39 @@ class IslandStackVisual(QWidget):
     def leaveEvent(self, event):
         self.hovered_key = ""
         self.hover_armed_key = ""
+        self.tasker_music_hover_auto_expand_suppressed = False
         self.barrage_hovered = False
         self.pointer_pos = QPointF(-1, -1)
         if self.expanded:
             self.left_stack_at = time.monotonic()
         super().leaveEvent(event)
+
+    def closeEvent(self, event):
+        overlays = [
+            getattr(self, "plugin_alert_overlay", None),
+            getattr(self, "barrage_overlay", None),
+            getattr(self, "fullscreen_plugin_alert_overlay", None),
+        ]
+        seen: set[int] = set()
+        for overlay in overlays:
+            if overlay is None:
+                continue
+            try:
+                identity = int(overlay.winId())
+            except Exception:
+                identity = id(overlay)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            try:
+                overlay.hide()
+                overlay.deleteLater()
+            except Exception:
+                pass
+        self.plugin_alert_overlay = None
+        self.barrage_overlay = None
+        self.fullscreen_plugin_alert_overlay = None
+        super().closeEvent(event)
 
     def changeEvent(self, event):
         if is_theme_change_event(event):
@@ -4480,6 +5758,10 @@ class IslandStackVisual(QWidget):
                 and handle.adjusted(-self._u(5.0), -self._u(5.0), self._u(5.0), self._u(5.0)).contains(point)
             ):
                 return "taskbar:left-handle"
+            if not bool(getattr(self, "expanded", False)):
+                for key, rect in getattr(self, "music_button_rects", {}).items():
+                    if rect.contains(point):
+                        return key
         if self.expanded and self._main_kind() == IslandKind.MUSIC:
             if getattr(self, "music_cover_rect", QRectF()).contains(point):
                 return "music:open_source"
@@ -4554,7 +5836,7 @@ class IslandStackVisual(QWidget):
 
     def _plugin_focus_progress(self, now: float) -> float:
         elapsed = now - self.plugin_focus_changed_at
-        progress = max(0.0, min(1.0, elapsed / 0.26))
+        progress = max(0.0, min(1.0, elapsed / self._animation_duration(0.26)))
         return progress * progress * (3.0 - 2.0 * progress)
 
     def _active_plugin_focus(self, now: float) -> int:
@@ -4911,7 +6193,7 @@ class IslandStackVisual(QWidget):
         current_index = int(getattr(self, "lyric_index", 0))
         previous_index = int(getattr(self, "prev_lyric_index", current_index))
         changed_at = float(getattr(self, "lyric_changed_at", now))
-        duration = 0.42
+        duration = self._animation_duration(0.42)
         elapsed = max(0.0, min(1.0, (now - changed_at) / duration))
         transitioning = previous_index != current_index and elapsed < 1.0
         if transitioning:
@@ -5040,7 +6322,7 @@ class IslandStackVisual(QWidget):
         timed = getattr(self, "timed_lyrics", []) or []
         index = int(getattr(self, "lyric_index", 0))
         if timed and 0 <= index < len(timed):
-            position = max(0.0, self._estimated_media_position(now) + float(getattr(self, "lyric_offset_seconds", 0.0)))
+            position = max(0.0, self._estimated_media_position(now) + self._effective_lyric_offset_seconds())
             start = float(timed[index][0])
             if index + 1 < len(timed):
                 end = float(timed[index + 1][0])
@@ -5083,8 +6365,6 @@ class IslandStackVisual(QWidget):
         count = int(getattr(self, "album_island_cover_count", 5))
         if count not in (3, 5, 7):
             count = 5
-        if self._taskbar_compact_active() and not bool(getattr(self, "expanded", False)):
-            count = 1
         center = count // 2
         stage = QRectF(rect)
         transition = self._album_island_transition_progress()
@@ -5173,13 +6453,20 @@ class IslandStackVisual(QWidget):
         return images
 
     def _album_island_cover_px(self, stage: QRectF) -> float:
-        configured = max(18, min(44, int(getattr(self, "album_island_cover_size", 30))))
-        return min(self._u(float(configured)), stage.height() * 0.84)
+        expanded_stage = bool(getattr(self, "expanded", False)) or float(stage.height()) >= self._u(86.0)
+        if expanded_stage:
+            fallback = int(getattr(self, "album_island_cover_size", 30))
+            configured = max(36, min(96, int(getattr(self, "album_island_expanded_cover_size", max(72, fallback)))))
+        else:
+            configured = max(18, min(44, int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30)))))
+        return min(self._u(float(configured)), stage.height() * 0.84 if not expanded_stage else stage.height() * 0.92)
 
     def _album_island_step_px(self, cover: float, stage: QRectF, side_capacity: int) -> float:
         spacing = max(48, min(170, int(getattr(self, "album_island_spacing", 112))))
         desired = cover * (spacing / 100.0)
         max_step = stage.width() / max(1.0, side_capacity * 2.0 + 1.0)
+        if self._taskbar_compact_active() and not bool(getattr(self, "expanded", False)):
+            return max(cover * 0.58, min(desired, max_step * 1.04))
         return max(cover * 0.72, min(desired, max_step * 1.18))
 
     def _album_island_transition_progress(self, now: float | None = None) -> float:
@@ -5196,7 +6483,7 @@ class IslandStackVisual(QWidget):
         if count not in (3, 5, 7):
             count = 5
         side_capacity = count // 2
-        cover = self._u(float(max(18, min(44, int(getattr(self, "album_island_cover_size", 30))))))
+        cover = self._u(float(max(18, min(44, int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30)))))))
         step = cover * (max(48, min(170, int(getattr(self, "album_island_spacing", 112)))) / 100.0)
         history_count = min(side_capacity, len(self._album_island_entries_with_art(getattr(self, "album_history", []) or [])))
         queue_count = min(side_capacity, len(self._album_island_entries_with_art(getattr(self, "album_queue", []) or [])))
@@ -5219,13 +6506,23 @@ class IslandStackVisual(QWidget):
         for entry in list(entries or [])[:6]:
             image = self._album_art_from_entry(entry)
             if image.isNull():
-                break
+                continue
+            if isinstance(entry, dict):
+                track_id = str(entry.get("track_id", "") or "")
+                title = str(entry.get("title", "") or "")
+                artist = str(entry.get("artist", "") or "")
+                album_title = str(entry.get("album_title", "") or "")
+            else:
+                track_id = str(getattr(entry, "track_id", "") or "")
+                title = str(getattr(entry, "title", "") or "")
+                artist = str(getattr(entry, "artist", "") or "")
+                album_title = str(getattr(entry, "album_title", "") or "")
             queue.append(
                 {
-                    "track_id": str(getattr(entry, "track_id", "") or ""),
-                    "title": str(getattr(entry, "title", "") or ""),
-                    "artist": str(getattr(entry, "artist", "") or ""),
-                    "album_title": str(getattr(entry, "album_title", "") or ""),
+                    "track_id": track_id,
+                    "title": title,
+                    "artist": artist,
+                    "album_title": album_title,
                     "album_art": image,
                 }
             )
@@ -5257,6 +6554,29 @@ class IslandStackVisual(QWidget):
         seconds = max(0.0, float(getattr(self, "listened_seconds_total", 0.0)))
         hours = int(seconds / 3600.0)
         return f"您已听歌 {hours} 小时"
+
+    def _serializable_album_history(self) -> list[dict[str, str]]:
+        history: list[dict[str, str]] = []
+        for entry in list(getattr(self, "album_history", []) or [])[:6]:
+            if isinstance(entry, dict):
+                history.append(
+                    {
+                        "track_id": str(entry.get("track_id", "") or ""),
+                        "title": str(entry.get("title", "") or ""),
+                        "artist": str(entry.get("artist", "") or ""),
+                        "album_title": str(entry.get("album_title", "") or ""),
+                    }
+                )
+            else:
+                history.append(
+                    {
+                        "track_id": str(getattr(entry, "track_id", "") or ""),
+                        "title": str(getattr(entry, "title", "") or ""),
+                        "artist": str(getattr(entry, "artist", "") or ""),
+                        "album_title": str(getattr(entry, "album_title", "") or ""),
+                    }
+                )
+        return history
 
     def _current_album_history_entry(self) -> dict[str, object]:
         return {
@@ -5312,7 +6632,7 @@ class IslandStackVisual(QWidget):
     def _current_lyric_display_lines(self) -> list[str]:
         if not self.lyrics:
             return []
-        index = self.lyric_index % len(self.lyrics)
+        index = int(getattr(self, "lyric_index", 0)) % len(self.lyrics)
         return self._lyric_display_lines(self.lyrics[index])
 
     def _has_current_two_line_lyric(self) -> bool:
@@ -5416,8 +6736,13 @@ class IslandStackVisual(QWidget):
         selected = QRectF(getattr(self, "taskbar_selected_drop_zone", QRectF()))
         if not selected.isNull() and selected.width() < self._u(120.0):
             return True
-        if rect is not None and not rect.isNull() and rect.width() <= rect.height() + self._u(18.0):
-            return True
+        if rect is not None and not rect.isNull():
+            crowded_threshold = max(
+                rect.height() + self._u(24.0),
+                min(self._u(150.0), self._taskbar_default_music_width() * 0.32),
+            )
+            if rect.width() <= crowded_threshold:
+                return True
         return False
 
     def _music_shell_radius(self, rect: QRectF, expanded: bool) -> float:
@@ -5428,6 +6753,26 @@ class IslandStackVisual(QWidget):
                 taskbar_height = rect.height()
             return self._taskbar_corner_radius(min(float(rect.height()), float(taskbar_height)))
         return self._u(30.0) if expanded else rect.height() / 2.0
+
+    def _taskbar_synced_corner_radius(self, rect: QRectF) -> float:
+        if rect.isNull():
+            return 0.0
+        try:
+            taskbar_height = self._taskbar_height()
+        except Exception:
+            taskbar_height = rect.height()
+        height = min(float(rect.height()), float(taskbar_height))
+        return min(float(rect.width()) / 2.0, float(rect.height()) / 2.0, self._taskbar_corner_radius(height))
+
+    def _plugin_panel_shell_radius(self, rect: QRectF) -> float:
+        if self._taskbar_compact_active():
+            return self._taskbar_synced_corner_radius(rect)
+        return min(self._u(26.0), rect.height() / 4.0)
+
+    def _plugin_panel_module_radius(self, rect: QRectF, fallback: float) -> float:
+        if self._taskbar_compact_active():
+            return self._taskbar_synced_corner_radius(rect)
+        return float(fallback)
 
     def _current_screen_geometry(self):
         screen = QGuiApplication.screenAt(self.mapToGlobal(QPoint(self.width() // 2, self.height() // 2))) or QGuiApplication.primaryScreen()
@@ -6181,7 +7526,7 @@ class IslandStackVisual(QWidget):
         if self.finder_mode:
             return (0.19 if now < self.stack_bounce_until else 0.24, 0.84)
         if self._taskbar_compact_active():
-            return (0.16 if now < self.stack_bounce_until else 0.20, 0.90)
+            return (0.28 if now < self.stack_bounce_until else 0.34, 0.82)
         return (0.28 if now < self.stack_bounce_until else 0.34, 0.76)
 
     def paintEvent(self, event):
@@ -6192,7 +7537,7 @@ class IslandStackVisual(QWidget):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         now = time.monotonic()
-        dt = (now - self.last_frame_at) * max(0.1, min(4.0, float(getattr(self, "animation_speed", 1.0))))
+        dt = (now - self.last_frame_at) * self._animation_speed_factor()
         self.last_frame_at = now
 
         self._paint_stage(painter)
@@ -6201,8 +7546,13 @@ class IslandStackVisual(QWidget):
         transition_scale, transition_opacity, scene_hidden, transition_edge_progress = self._scene_transition_params(now)
         if scene_hidden:
             self.group_frame_mask_path = None
-            barrage_rects = self._paint_barrage_scene(painter)
-            self.barrage_rects = barrage_rects
+            self._sync_fullscreen_plugin_alert_overlay(now)
+            overlay = getattr(self, "barrage_overlay", None)
+            if overlay is None or not overlay.isVisible():
+                barrage_rects = self._paint_barrage_scene(painter)
+                self.barrage_rects = barrage_rects
+            else:
+                self.barrage_rects = {}
             self.clearMask()
             if self.show_debug_overlay:
                 self._paint_help(painter)
@@ -6263,6 +7613,8 @@ class IslandStackVisual(QWidget):
             rect = QRectF(motion.rect)
             if visual.key == self.hovered_key and now < self.hover_bounce_until:
                 rect = self._hover_rect(rect, now)
+            if visual.z_index == 10 and self._taskbar_compact_active():
+                self._paint_taskbar_left_handle(painter, rect)
             if visual.kind == IslandKind.MUSIC:
                 self._paint_music(painter, rect, self.expanded)
             elif visual.kind == IslandKind.PLUGIN:
@@ -6275,8 +7627,6 @@ class IslandStackVisual(QWidget):
                 self._paint_message(painter, rect, visual.message, visual.folded)
             else:
                 self._paint_thin_bar(painter, rect)
-            if visual.z_index == 10 and self._taskbar_compact_active():
-                self._paint_taskbar_left_handle(painter, rect)
             painter.restore()
 
         self.barrage_rects = {}
@@ -6326,16 +7676,22 @@ class IslandStackVisual(QWidget):
     def _paint_taskbar_drop_hint(self, painter: QPainter):
         self._sync_taskbar_drop_overlay()
 
-    def _paint_barrage_scene(self, painter: QPainter) -> dict[str, QRectF]:
+    def _paint_barrage_scene(
+        self,
+        painter: QPainter,
+        viewport: QRectF | None = None,
+        *,
+        active_messages: list[Message] | None = None,
+        clock: float | None = None,
+        prune: bool = True,
+    ) -> dict[str, QRectF]:
         now = time.monotonic()
-        previews = list(getattr(self, "barrage_preview_messages", []))
-        if getattr(self, "settings_window_active", False) and previews:
-            active = previews
-        else:
-            active = list(self.messages) + previews
+        viewport = QRectF(viewport) if viewport is not None else self._barrage_viewport_rect()
+        active = list(self._active_barrage_messages() if active_messages is None else active_messages)
         active.sort(key=lambda message: (message.barrage_started_at, message.serial))
         if not active:
             return {}
+        paint_clock = float(getattr(self, "barrage_clock", 0.0)) if clock is None else float(clock)
 
         font_size = max(8, min(20, int(getattr(self, "barrage_font_size", 10))))
         font = self._font(font_size, QFont.Weight.Bold)
@@ -6344,7 +7700,8 @@ class IslandStackVisual(QWidget):
         rects: dict[str, QRectF] = {}
         lane_count = max(1, min(6, len(active)))
         lane_height = max(self._u(26.0), float(metrics.height()) + self._u(12.0))
-        start_y = float(getattr(self, "barrage_y_offset", 0))
+        max_start_y = max(0.0, viewport.height() - lane_height)
+        start_y = max(0.0, min(max_start_y, float(getattr(self, "barrage_y_offset", 0))))
         lane_available_at = [0.0] * lane_count
         speed_scale = max(0.4, min(2.2, float(getattr(self, "barrage_speed", 100)) / 100.0))
 
@@ -6353,7 +7710,7 @@ class IslandStackVisual(QWidget):
             icon_space = self._u(24.0) if getattr(self, "barrage_show_icon", True) else 0.0
             content_w = text_w + self._u(26.0) + icon_space
             content_h = max(self._u(24.0), float(metrics.height()) + self._u(10.0))
-            travel = self.width() + content_w + self._u(140.0)
+            travel = self._barrage_travel_distance(content_w, viewport)
             base_speed = max(self._u(160.0), 150.0 + content_w * 0.14) * speed_scale
             duration = max(2.8 / speed_scale, travel / base_speed)
             return content_w, content_h, travel, duration, travel / duration
@@ -6363,28 +7720,32 @@ class IslandStackVisual(QWidget):
             content_w, content_h, travel, duration, speed = barrage_metrics(text)
             lane = min(range(lane_count), key=lambda i: max(message.barrage_started_at, lane_available_at[i]))
             effective_start = max(message.barrage_started_at, lane_available_at[lane])
-            progress = max(0.0, min(1.4, (self.barrage_clock - effective_start) / duration))
-            if self.barrage_clock < effective_start:
+            progress = max(0.0, min(1.4, (paint_clock - effective_start) / duration))
+            if paint_clock < effective_start:
                 continue
-            x = self.width() + self._u(22.0) - progress * travel
+            x = viewport.right() + self._u(22.0) - progress * travel
             if x < -content_w - self._u(120.0):
                 continue
 
             lane_available_at[lane] = effective_start + (content_w + self._u(92.0)) / max(1.0, speed)
             y = start_y + lane * lane_height
             text_rect = QRectF(x, y, content_w, content_h)
-            rects[self._message_key(message)] = text_rect.adjusted(-self._u(10.0), -self._u(8.0), self._u(12.0), self._u(8.0))
+            rects[self._barrage_action_key_for_message(message)] = text_rect.adjusted(-self._u(10.0), -self._u(8.0), self._u(12.0), self._u(8.0))
             self._paint_barrage_text(painter, text_rect, text, message, font, metrics)
 
         def preview_alive(message: Message) -> bool:
             content_w, _content_h, travel, duration, _speed = barrage_metrics(self._barrage_text(message))
-            progress = max(0.0, (self.barrage_clock - message.barrage_started_at) / max(0.01, duration))
-            x = self.width() + self._u(22.0) - progress * travel
+            progress = max(0.0, (paint_clock - message.barrage_started_at) / max(0.01, duration))
+            x = viewport.right() + self._u(22.0) - progress * travel
             return x >= -content_w - self._u(120.0)
 
-        self.barrage_preview_messages = [
-            message for message in getattr(self, "barrage_preview_messages", []) if preview_alive(message)
-        ][:3]
+        if prune:
+            self.barrage_preview_messages = [
+                message for message in getattr(self, "barrage_preview_messages", []) if preview_alive(message)
+            ][:3]
+            self.fullscreen_plugin_barrage_messages = [
+                message for message in getattr(self, "fullscreen_plugin_barrage_messages", []) if preview_alive(message)
+            ][:10]
         return rects
 
     def _barrage_text(self, message: Message) -> str:
@@ -6453,7 +7814,11 @@ class IslandStackVisual(QWidget):
 
     def _sample_background_luma(self, rect: QRectF) -> float:
         try:
-            center = self.mapToGlobal(QPoint(int(round(rect.center().x())), int(round(rect.center().y()))))
+            local_center = QPoint(int(round(rect.center().x())), int(round(rect.center().y())))
+            if getattr(self, "_barrage_painting_global_space", False):
+                center = local_center
+            else:
+                center = self.mapToGlobal(local_center)
             screen = QGuiApplication.screenAt(center) or QGuiApplication.primaryScreen()
             if not screen:
                 return 0.5
@@ -6659,7 +8024,7 @@ class IslandStackVisual(QWidget):
             self.group_frame_motion = SpringRect(target)
             self.group_frame_motion.opacity = 1.0
         else:
-            self.group_frame_motion.step(target, 1.0, dt, response=0.18, damping=0.86)
+            self.group_frame_motion.step(target, 1.0, dt, response=0.32, damping=0.84)
         self.group_frame_mode_key = mode_key
 
         frame = self.group_frame_motion.rect
@@ -6846,6 +8211,8 @@ class IslandStackVisual(QWidget):
         return QRectF(left - self._u(8.0), top - self._u(5.0), right - left + self._u(16.0), bottom - top + self._u(9.0))
 
     def _paint_dot_group_backing(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]]):
+        if self._taskbar_compact_active():
+            return
         dots = [(visual, motion.rect) for visual, motion in items if visual.kind == IslandKind.MESSAGE and visual.folded and motion.opacity > 0.08]
         if not dots:
             return
@@ -8052,15 +9419,14 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_music_compact(self, painter: QPainter, rect: QRectF):
+        self.music_button_rects = {}
+        if self._taskbar_cover_only_music_active(rect):
+            self._paint_taskbar_cover_only_music(painter, rect)
+            return
         if self._should_paint_album_island():
             self.music_cover_rect = QRectF()
             self._paint_album_island_compact(painter, rect)
-            return
-        if self._taskbar_cover_only_music_active(rect):
-            cover_size = max(self._u(24.0), min(rect.width(), rect.height()) - self._u(6.0))
-            cover = QRectF(rect.center().x() - cover_size / 2.0, rect.center().y() - cover_size / 2.0, cover_size, cover_size)
-            self.music_cover_rect = QRectF(cover)
-            self._paint_cover(painter, cover, self._compact_cover_radius(rect, False))
+            self._paint_taskbar_music_hover_overlay(painter, rect)
             return
         two_line = self._has_current_two_line_lyric() and not self._gelv_enabled()
         top_padding = self._u(7 if two_line else 3)
@@ -8075,6 +9441,50 @@ class IslandStackVisual(QWidget):
             text_left = rect.left() + self._u(10.0)
         text_rect = QRectF(text_left, rect.top() + top_padding, rect.right() - text_left - self._u(25), rect.height() - top_padding - bottom_padding)
         self._paint_compact_lyric_viewport(painter, text_rect)
+        self._paint_taskbar_music_hover_overlay(painter, rect)
+
+    def _paint_taskbar_cover_only_music(self, painter: QPainter, rect: QRectF):
+        pad = max(self._u(2.0), rect.height() * 0.08)
+        button_size = max(self._u(20.0), min(rect.height() - pad * 2.0, rect.width() * 0.40))
+        cover_size = max(self._u(22.0), min(rect.height() - pad * 2.0, rect.width() - button_size - pad * 3.0))
+        cover = QRectF(rect.left() + pad, rect.center().y() - cover_size / 2.0, cover_size, cover_size)
+        button = QRectF(rect.right() - pad - button_size, rect.center().y() - button_size / 2.0, button_size, button_size)
+        if button.left() <= cover.right() + pad:
+            cover_size = max(self._u(18.0), button.left() - pad - cover.left())
+            cover = QRectF(cover.left(), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
+        self.music_cover_rect = QRectF(cover)
+        self.music_button_rects = {"music:toggle_play_pause": QRectF(button)}
+        self._paint_cover(painter, cover, self._compact_cover_radius(rect, False))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        radius = min(button.height() / 2.0, self._u(9.0))
+        self._paint_music_control_button(painter, button, "music:toggle_play_pause", 36, radius=radius)
+        painter.restore()
+
+    def _taskbar_music_hover_overlay_active(self) -> bool:
+        if not self._taskbar_compact_active() or bool(getattr(self, "expanded", False)):
+            return False
+        key = str(getattr(self, "hovered_key", "") or "")
+        return key == "music" or key.startswith("music:")
+
+    def _paint_taskbar_music_hover_overlay(self, painter: QPainter, rect: QRectF):
+        if not self._taskbar_music_hover_overlay_active() or rect.isNull():
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        button_size = max(self._u(32.0), min(self._u(38.0), rect.height() - self._u(2.0)))
+        gap = max(self._u(5.0), min(self._u(8.0), rect.width() * 0.03))
+        group_w = button_size * 3.0 + gap * 2.0
+        side_pad = max(self._u(5.0), min(self._u(8.0), rect.width() * 0.028))
+        x = rect.right() - side_pad - group_w
+        commands = ["music:previous", "music:toggle_play_pause", "music:next"]
+        self.music_button_rects = {}
+        for index, command in enumerate(commands):
+            br = QRectF(x + index * (button_size + gap), rect.center().y() - button_size / 2.0, button_size, button_size)
+            self.music_button_rects[command] = QRectF(br)
+            radius = min(br.height() / 2.0, self._u(12.0))
+            self._paint_music_control_button(painter, br, command, 206 if index != 1 else 226, radius=radius)
+        painter.restore()
 
     def _paint_compact_lyric_viewport(self, painter: QPainter, rect: QRectF):
         painter.save()
@@ -8091,7 +9501,7 @@ class IslandStackVisual(QWidget):
         if not lines:
             painter.restore()
             return
-        index = self.lyric_index % len(lines)
+        index = int(getattr(self, "lyric_index", 0)) % len(lines)
         phase = self._lyric_phase(time.monotonic())
         compact_size = max(12, min(20, int(getattr(self, "lyric_font_size", 18)) - 2))
         display_lines = self._lyric_display_lines(lines[index])
@@ -8330,19 +9740,13 @@ class IslandStackVisual(QWidget):
         self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, self._music_meta_text_color(135), False)
 
         controls_x = rect.right() - margin - controls_w
-        labels = ["⏮", "⏸" if self.media_is_playing else "▶", "⏭"]
         commands = ["music:previous", "music:toggle_play_pause", "music:next"]
         self.music_button_rects = {}
-        for i, label in enumerate(labels):
+        for i, command in enumerate(commands):
             button_size = self._u(36)
             br = QRectF(controls_x + i * self._u(45), cover.center().y() - button_size / 2.0, button_size, button_size)
-            self.music_button_rects[commands[i]] = QRectF(br)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._music_control_fill_color(24 if i != 1 else 36))
-            painter.drawRoundedRect(br, self._u(13), self._u(13))
-            painter.setFont(QFont("Segoe UI Symbol", self._font_size(14), QFont.Weight.Medium))
-            painter.setPen(self._music_control_icon_color(232))
-            painter.drawText(br, Qt.AlignmentFlag.AlignCenter, label)
+            self.music_button_rects[command] = QRectF(br)
+            self._paint_music_control_button(painter, br, command, 24 if i != 1 else 36, radius=self._u(13))
 
         viewport = QRectF(rect.left() + self._u(22), cover.bottom() + self._u(10), rect.width() - self._u(44), rect.bottom() - cover.bottom() - self._u(28))
         self._paint_lyric_viewport(painter, viewport)
@@ -8359,18 +9763,12 @@ class IslandStackVisual(QWidget):
         self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, self._music_meta_text_color(132), False)
 
         controls_x = rect.right() - margin - controls_w
-        labels = ["\u23ee", "\u23f8" if self.media_is_playing else "\u25b6", "\u23ed"]
         commands = ["music:previous", "music:toggle_play_pause", "music:next"]
-        for i, label in enumerate(labels):
+        for i, command in enumerate(commands):
             button_size = self._u(34.0)
             br = QRectF(controls_x + i * self._u(44.0), rect.top() + self._u(19.0), button_size, button_size)
-            self.music_button_rects[commands[i]] = QRectF(br)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._music_control_fill_color(22 if i != 1 else 34))
-            painter.drawRoundedRect(br, self._u(12.0), self._u(12.0))
-            painter.setFont(QFont("Segoe UI Symbol", self._font_size(14), QFont.Weight.Medium))
-            painter.setPen(self._music_control_icon_color(232))
-            painter.drawText(br, Qt.AlignmentFlag.AlignCenter, label)
+            self.music_button_rects[command] = QRectF(br)
+            self._paint_music_control_button(painter, br, command, 22 if i != 1 else 34, radius=self._u(12.0))
 
         stage = QRectF(rect.left() + margin, rect.top() + self._u(58.0), rect.width() - margin * 2.0, rect.height() - self._u(76.0))
         raw_slots = self._album_island_slots(stage, reserve_text=True)
@@ -8383,6 +9781,7 @@ class IslandStackVisual(QWidget):
     def _lyric_transition_progress(self, duration: float = 0.52) -> tuple[float, float]:
         if getattr(self, "lyric_transition_kind", "") == "seek":
             duration = max(duration, 0.46)
+        duration = self._animation_duration(duration)
         elapsed = max(0.0, min(1.0, (time.monotonic() - self.lyric_changed_at) / max(0.001, duration)))
         eased = elapsed * elapsed * (3.0 - 2.0 * elapsed)
         if elapsed >= 1.0 and getattr(self, "lyric_transition_kind", ""):
@@ -8391,7 +9790,7 @@ class IslandStackVisual(QWidget):
         return elapsed, eased
 
     def _lyric_phase(self, now: float) -> dict[str, float]:
-        position = self._estimated_media_position(now) + float(getattr(self, "lyric_offset_seconds", 0.0))
+        position = self._estimated_media_position(now) + self._effective_lyric_offset_seconds()
         phase = lyric_phase_for_index(
             self.timed_lyrics,
             self.lyric_index,
@@ -8646,7 +10045,7 @@ class IslandStackVisual(QWidget):
 
     def _paint_plugin_panel(self, painter: QPainter, rect: QRectF):
         shell_rect = self._plugin_panel_shell_rect(rect)
-        radius = min(self._u(26.0), shell_rect.height() / 4.0)
+        radius = self._plugin_panel_shell_radius(shell_rect)
         self._paint_plugin_solid_shell(painter, shell_rect, radius, folded=False)
         plugins = [
             (
@@ -8913,12 +10312,10 @@ class IslandStackVisual(QWidget):
         return layout
 
     def _paint_svg_icon(self, painter: QPainter, path: str, rect: QRectF) -> bool:
-        if QSvgRenderer is None:
+        renderer = self._svg_renderer_for_path(str(path))
+        if renderer is None:
             return False
         try:
-            renderer = QSvgRenderer(str(path))
-            if not renderer.isValid():
-                return False
             renderer.render(painter, rect)
             return True
         except Exception:
@@ -9468,7 +10865,7 @@ class IslandStackVisual(QWidget):
         except (TypeError, ValueError):
             return 0.0
         elapsed = max(0.0, time.monotonic() - started_at)
-        duration = 0.26
+        duration = self._animation_duration(0.26)
         if elapsed >= duration:
             self.plugin_alarm_editor_page_animation = {}
             return 0.0
@@ -9489,7 +10886,7 @@ class IslandStackVisual(QWidget):
         except (TypeError, ValueError):
             return 0.0
         elapsed = max(0.0, time.monotonic() - started_at)
-        duration = 0.22
+        duration = self._animation_duration(0.22)
         if elapsed >= duration:
             animations.pop(str(field), None)
             return 0.0
@@ -10022,7 +11419,7 @@ class IslandStackVisual(QWidget):
         emphasized: bool = False,
         reserve_action: bool = False,
     ):
-        radius = min(self._u(15.0), rect.height() * 0.28)
+        radius = self._plugin_panel_module_radius(rect, min(self._u(15.0), rect.height() * 0.28))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(theme["cell_active"] if emphasized else theme["cell"])
         painter.drawRoundedRect(rect, radius, radius)
@@ -10074,7 +11471,7 @@ class IslandStackVisual(QWidget):
 
     def _paint_time_module_shell(self, painter: QPainter, rect: QRectF, theme: dict[str, QColor], active: bool = False):
         ref = self._time_reference_palette(theme, QColor(255, 184, 0))
-        radius = min(self._u(16.0), rect.height() * 0.26)
+        radius = self._plugin_panel_module_radius(rect, min(self._u(16.0), rect.height() * 0.26))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(ref["module"])
         painter.drawRoundedRect(rect, radius, radius)
@@ -10783,14 +12180,62 @@ class IslandStackVisual(QWidget):
             rect.translate(offset * self._u(18.0), 0.0)
         return rect
 
+    def _taskbar_left_handle_frame_tokens(self) -> dict[str, QColor]:
+        tokens = self._taskbar_material_frame_tokens()
+        base = QColor(getattr(self, "taskbar_material_color", QColor()))
+        light = bool(getattr(self, "taskbar_material_is_light", False))
+        if base.isValid():
+            light = light or self._taskbar_material_is_light(base)
+        bias_top = -10 if light else 8
+        bias_mid = -18 if light else 2
+        bias_bottom = -28 if light else -10
+
+        def shifted(color: QColor, bias: int, alpha: int) -> QColor:
+            return QColor(
+                max(0, min(255, color.red() + bias)),
+                max(0, min(255, color.green() + bias)),
+                max(0, min(255, color.blue() + bias)),
+                alpha,
+            )
+
+        return {
+            "fill_top": shifted(tokens["fill_top"], bias_top, 226),
+            "fill_mid": shifted(tokens["fill_mid"], bias_mid, 232),
+            "fill_bottom": shifted(tokens["fill_bottom"], bias_bottom, 238),
+            "stroke": QColor(tokens["stroke"].red(), tokens["stroke"].green(), tokens["stroke"].blue(), 42 if light else 34),
+        }
+
     def _paint_taskbar_left_handle(self, painter: QPainter, main_rect: QRectF):
         handle = self._taskbar_left_handle_rect(main_rect)
         self.taskbar_left_handle_rect = QRectF(handle)
-        if handle.isNull() or not self._taskbar_left_handle_visible():
+        progress = self._taskbar_left_handle_slide_progress()
+        if handle.isNull() or progress <= 0.01:
             return
+        frame = self._taskbar_left_handle_frame_rect(main_rect)
+        rect = QRectF(main_rect)
+        slide_target_x = rect.left() - frame.width() * 0.18 if not frame.isNull() else handle.right()
+        slide_delta = max(0.0, slide_target_x - (frame.left() if not frame.isNull() else handle.left()))
+        if slide_delta > 0.0 and progress < 1.0:
+            shift = slide_delta * (1.0 - progress)
+            handle.translate(shift, 0.0)
+            frame.translate(shift, 0.0)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setOpacity(max(0.28, min(1.0, progress * 1.35)))
         painter.setPen(Qt.PenStyle.NoPen)
+        if not frame.isNull():
+            tokens = self._taskbar_left_handle_frame_tokens()
+            material = QLinearGradient(frame.topLeft(), frame.bottomLeft())
+            material.setColorAt(0.0, tokens["fill_top"])
+            material.setColorAt(0.44, tokens["fill_mid"])
+            material.setColorAt(1.0, tokens["fill_bottom"])
+            radius = min(frame.width() / 2.0, self._taskbar_corner_radius(frame.height()))
+            painter.setBrush(material)
+            painter.drawRoundedRect(frame, radius, radius)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(tokens["stroke"], self._u(1.0)))
+            painter.drawRoundedRect(frame.adjusted(self._u(0.5), self._u(0.5), -self._u(0.5), -self._u(0.5)), max(0.0, radius - self._u(0.5)), max(0.0, radius - self._u(0.5)))
+            painter.setPen(Qt.PenStyle.NoPen)
         color = self._taskbar_left_handle_color()
         painter.setBrush(color)
         painter.drawRoundedRect(handle, handle.width() / 2.0, handle.width() / 2.0)
@@ -11827,7 +13272,7 @@ class IslandStackVisual(QWidget):
 
         painter.save()
         painter.setClipPath(path)
-        phase = (time.monotonic() * 0.46 * max(0.1, min(4.0, float(getattr(self, "animation_speed", 1.0))))) % 1.0
+        phase = (time.monotonic() * 0.46 * self._animation_speed_factor()) % 1.0
         span = bar.width() * 0.78
         center = bar.left() - span + phase * (bar.width() + span * 2.0)
         stream = QLinearGradient(center - span, bar.top(), center + span, bar.top())
