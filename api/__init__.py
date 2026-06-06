@@ -1,2 +1,1 @@
-"""Data provider layer for gpt-island."""
-
+"""Data provider layer for GluSpot."""

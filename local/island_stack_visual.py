@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Local visual renderer for Island Stack V2.
+Local visual renderer for GluSpot.
 
 Controls:
   M       Toggle music island
@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import ctypes
+import hashlib
 import unicodedata
 from datetime import datetime, timedelta
 from ctypes import wintypes
@@ -32,6 +33,7 @@ from enum import Enum
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MUSIC_CONTROL_ICON_DIR = ROOT_DIR / "assets" / "music_controls"
+TIME_REMINDER_ICON_DIR = ROOT_DIR / "assets" / "logos"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -62,8 +64,10 @@ from PySide6.QtWidgets import QApplication, QWidget
 from api.lyric_timeline import active_index_for_position, lyric_phase_for_index
 from api.models import IslandVisualData
 from api.providers import EmptyIslandDataProvider
+from local.branding import APP_NAME
 from local.mydockfinder import FinderGlassMaterial, read_finder_material
-from local.ui_theme import app_dark_mode, is_theme_change_event
+from local.settings_store import DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES
+from local.ui_theme import app_dark_mode, is_theme_change_event, music_ambience_style_for_theme
 
 
 class IslandKind(Enum):
@@ -72,6 +76,8 @@ class IslandKind(Enum):
     PLUGIN_PANEL = "plugin_panel"
     PLUGIN_ALERT = "plugin_alert"
     MESSAGE = "message"
+    EMPTY_TEXT = "empty_text"
+    TIME = "time"
     THIN_BAR = "thin_bar"
 
 
@@ -86,6 +92,7 @@ class Message:
     serial: int = 0
     created_at: float = field(default_factory=time.monotonic)
     popup_until: float = field(default_factory=lambda: time.monotonic() + 5.0)
+    expires_at: float = 0.0
     barrage_started_at: float = 0.0
     action_key: str = ""
 
@@ -639,7 +646,6 @@ class IslandStackVisual(QWidget):
     STACK_WIDTH = 560
     DEFAULT_FONT_FAMILY = "PingFang SC"
     GELV_FONT_FAMILY = "Source Han Serif SC"
-    GELV_FONT_CHOICES = ("Source Han Serif SC", "PingFang SC")
     _source_han_serif_loaded = False
     CHINESE_FONT_FALLBACKS = (
         "PingFang SC",
@@ -647,6 +653,7 @@ class IslandStackVisual(QWidget):
     )
     MUSIC_AMBIENCE_STYLES = ("sea_level", "duotone_full", "pure_black", "bilateral_diffraction", "pure_white")
     COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "bilateral_diffraction", "pure_white")
+    COLOR_FILL_BLOCKED_AMBIENCE_STYLES = {"sea_level", "duotone_full"}
     LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "album_island")
     ALBUM_ISLAND_SECONDARY_STYLES = ("shrink_dim", "perspective_dim")
     CURRENT_ALBUM_ART_MAX_SIDE = 384
@@ -654,6 +661,8 @@ class IslandStackVisual(QWidget):
     SCALED_ALBUM_ART_CACHE_LIMIT = 3
     LYRIC_LAYOUT_CACHE_LIMIT = 40
     REPRESENTATIVE_WIDTH_CACHE_LIMIT = 8
+    STABLE_RENDER_FPS = 30
+    FRAME_INTERVAL_TOLERANCE_SECONDS = 0.002
     TASKBAR_FOLLOW_REFRESH_INTERVAL = 0.28
     TASKBAR_FOLLOW_MATERIAL_REFRESH_INTERVAL = 0.50
 
@@ -664,7 +673,7 @@ class IslandStackVisual(QWidget):
         self.finder_material: FinderGlassMaterial = read_finder_material(include_center=True)
         self.finder_mode = bool(self.finder_material.available)
         self.attach_to_real_finder = self.finder_mode
-        self.setWindowTitle("Island Stack V2")
+        self.setWindowTitle(APP_NAME)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -678,6 +687,7 @@ class IslandStackVisual(QWidget):
         self.stack_center_ratio = 0.5
         self.saved_window_pos: tuple[int, int] | None = None
         self.last_window_position: tuple[int, int] | None = None
+        self._restoring_position = False
         self.drag_press_pos = QPointF()
         self.drag_press_global = QPoint()
         self.drag_press_window_pos = QPoint()
@@ -730,12 +740,20 @@ class IslandStackVisual(QWidget):
         self.listened_seconds_total = 0.0
         self.album_history: list[dict[str, object]] = []
         self.album_queue: list[dict[str, object]] = []
+        self.album_queue_signature = ""
         self.album_island_transition_started_at = 0.0
         self.album_island_transition_reason = ""
         self.album_island_transition_direction = 1
+        self.music_surface_transition_started_at = 0.0
+        self.music_surface_transition_duration = 0.62
+        self.music_surface_transition_mode = ""
+        self.music_surface_transition_direction = 1
+        self.music_surface_transition_from = (QColor(), QColor())
+        self.music_surface_transition_to = (QColor(), QColor())
         self.lyrics_source = ""
         self.timed_lyrics: list[tuple[float, str]] = []
         self.album_art = QImage()
+        self.album_art_signature = ""
         self.last_media_refresh_at = 0.0
         self.media_refresh_interval = 0.65
         self.music_button_rects: dict[str, QRectF] = {}
@@ -811,6 +829,7 @@ class IslandStackVisual(QWidget):
         self.mydockfinder_path = ""
         self.mydockfinder_running = False
         self.mydockfinder_diagnostics: dict[str, object] = {}
+        self.mydockfinder_listener_process_names = tuple(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES)
         self.position_preset = "last"
         self.location_mode = "finder" if self.finder_mode else "free"
         self.taskbar_fusion_mode = "off"
@@ -841,6 +860,8 @@ class IslandStackVisual(QWidget):
         self.high_quality_font_rendering = False
         self.animation_fps = 60
         self.animation_speed = 1.0
+        self.empty_island_display_mode = "visible_bar"
+        self.no_music_island_priority = "plugin"
         self.empty_bar_palette = "aurora"
         self.empty_bar_width = 92
         self.empty_bar_height = 14
@@ -877,8 +898,8 @@ class IslandStackVisual(QWidget):
         self.gelv_dual_line_font_size = 17
         self.gelv_initial_word_spacing = 220
         self.gelv_word_spacing = 320
-        self.gelv_size_shift_enabled = True
         self.gelv_color_fill_enabled = False
+        self.gelv_word_fill_enabled = False
         self.gelv_color_fill_fallback = "#00D7FF"
         self.no_lyrics_display_mode = "text"
         self.album_island_cover_count = 5
@@ -897,6 +918,7 @@ class IslandStackVisual(QWidget):
         self._lyric_layout_cache: dict[tuple[object, ...], LyricLayout] = {}
         self._representative_lyric_width_cache: dict[tuple[object, ...], float] = {}
         self._scaled_album_art_cache: dict[tuple[str, int, int], QImage] = {}
+        self._album_image_signature_cache: dict[int, str] = {}
         self._svg_renderer_cache: dict[str, QSvgRenderer] = {}
         self.font_shrink_scale = 1.0
         self.stack_direction = 1
@@ -913,9 +935,12 @@ class IslandStackVisual(QWidget):
         self.ambient_phase = random.random() * 10.0
         self.ambient_intensity = 0.0
         self.music_ambience_style = "sea_level"
+        self._last_theme_follow_dark = None
+        self._last_theme_follow_checked_at = 0.0
         self.music_flow_intensity = 0.74
         self.compact_duotone_balance = 50
         self.expanded_duotone_balance = 50
+        self.diffraction_frequency = 0.30
 
         self.message_samples = [
             (
@@ -951,9 +976,12 @@ class IslandStackVisual(QWidget):
         self.group_frame_target_rect = QRectF()
         self.group_frame_target_mode_key = ""
         self.group_frame_mask_path: QPainterPath | None = None
+        self.taskbar_notification_frame_motion: SpringRect | None = None
+        self.taskbar_notification_frame_rect = QRectF()
         self.finder_hover_rect = QRectF()
         self.last_mask_rect = QRectF()
         self.last_frame_at = time.monotonic()
+        self.last_render_update_at = self.last_frame_at
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -964,13 +992,23 @@ class IslandStackVisual(QWidget):
             QTimer.singleShot(650, self.add_message)
             QTimer.singleShot(1300, self.add_message)
 
-    def _apply_visual_data(self, visual_data: IslandVisualData, initial: bool = False):
+    def _apply_visual_data(self, visual_data: IslandVisualData, initial: bool = False) -> bool:
         now = time.monotonic()
         track = visual_data.track
         previous_track_id = getattr(self, "media_track_id", "")
         previous_title = str(getattr(self, "track_title", "") or "")
         previous_artist = str(getattr(self, "artist", "") or "")
         previous_lyrics = tuple(getattr(self, "lyrics", ()))
+        previous_album_art_key = getattr(self, "album_art", QImage()).cacheKey()
+        previous_plugin_samples = tuple(getattr(self, "plugin_samples", ()))
+        previous_messages = tuple(
+            (
+                str(getattr(message, "app", "") or ""),
+                str(getattr(message, "sender", "") or ""),
+                str(getattr(message, "text", "") or ""),
+            )
+            for message in getattr(self, "messages", ())
+        )
         previous_album_island = bool(self._should_paint_album_island()) if hasattr(self, "lyrics") else False
         incoming_track_id = track.track_id or f"{track.source_app}:{track.title}:{track.artist}"
         track_changed = initial or incoming_track_id != previous_track_id
@@ -983,6 +1021,8 @@ class IslandStackVisual(QWidget):
         self.artist = track.artist
         self.album_color = QColor(*track.album_color.rgba())
         self.secondary_color = QColor(*track.secondary_color.rgba())
+        if track_changed and str(getattr(self, "music_surface_transition_mode", "") or "") == "white_bridge":
+            self._retarget_white_bridge_to_current_album()
         self.audio_frames = list(track.audio_frames)
         incoming_is_playing = bool(track.is_playing)
         incoming_position = max(0.0, float(track.position_seconds))
@@ -1100,15 +1140,28 @@ class IslandStackVisual(QWidget):
             self.lyrics = ["正在播放"]
         if tuple(self.lyrics) != previous_lyrics:
             self._clear_lyric_metrics_cache()
-        if flow_direction >= 0 or not getattr(self, "album_queue", None):
+        queue_signature = self._album_queue_signature(getattr(track, "album_queue", ()))
+        queue_changed = queue_signature != str(getattr(self, "album_queue_signature", "") or "")
+        if (flow_direction >= 0 or not getattr(self, "album_queue", None)) and (track_changed or queue_changed or not getattr(self, "album_queue", None)):
             self.album_queue = self._album_queue_from_track(getattr(track, "album_queue", ()))
+            self.album_queue_signature = queue_signature
         current_album_island = bool(self._should_paint_album_island())
         if current_album_island and (track_changed or current_album_island != previous_album_island):
             self.album_island_transition_started_at = now
             self.album_island_transition_reason = "track" if track_changed else "mode"
             self.album_island_transition_direction = flow_direction
         image = QImage()
-        cover_loaded = bool(track.album_art_bytes) and image.loadFromData(track.album_art_bytes) and not image.isNull()
+        art_signature = self._album_art_bytes_signature(track.album_art_bytes)
+        cover_reused = bool(
+            art_signature
+            and art_signature == str(getattr(self, "album_art_signature", "") or "")
+            and not getattr(self, "album_art", QImage()).isNull()
+        )
+        cover_loaded = False
+        if cover_reused:
+            cover_loaded = True
+        elif track.album_art_bytes:
+            cover_loaded = image.loadFromData(track.album_art_bytes) and not image.isNull()
         black_placeholder_loaded = cover_loaded and self._looks_like_black_album_placeholder(image)
         reject_black_placeholder = bool(black_placeholder_loaded and (not track_changed or same_visible_track or message_refresh))
         has_existing_cover = not getattr(self, "album_art", QImage()).isNull()
@@ -1125,11 +1178,13 @@ class IslandStackVisual(QWidget):
         )
         if reject_black_placeholder:
             cover_loaded = False
-        if cover_loaded:
+        if cover_loaded and not cover_reused:
             self.album_art = self._bounded_album_image(image, self.CURRENT_ALBUM_ART_MAX_SIDE, smooth=True)
+            self.album_art_signature = art_signature
             self._scaled_album_art_cache.clear()
         elif track_changed and not preserve_existing_cover and not preserve_missing_cover:
             self.album_art = QImage()
+            self.album_art_signature = ""
             self._scaled_album_art_cache.clear()
         if track_changed:
             self.lyric_index = 0 if self.timed_lyrics else min(1, len(self.lyrics) - 1)
@@ -1137,6 +1192,24 @@ class IslandStackVisual(QWidget):
             self.lyric_changed_at = now
             self.audio_started_at = now
         self._sync_timed_lyrics(now, allow_backward=timed_lyrics_appeared)
+        current_messages = tuple(
+            (
+                str(getattr(message, "app", "") or ""),
+                str(getattr(message, "sender", "") or ""),
+                str(getattr(message, "text", "") or ""),
+            )
+            for message in getattr(self, "messages", ())
+        )
+        return bool(
+            track_changed
+            or self.track_title != previous_title
+            or self.artist != previous_artist
+            or tuple(getattr(self, "lyrics", ())) != previous_lyrics
+            or timed_lyrics_appeared
+            or previous_plugin_samples != tuple(getattr(self, "plugin_samples", ()))
+            or previous_messages != current_messages
+            or getattr(self, "album_art", QImage()).cacheKey() != previous_album_art_key
+        )
 
     def _looks_like_black_album_placeholder(self, image: QImage) -> bool:
         if image.isNull():
@@ -1217,6 +1290,8 @@ class IslandStackVisual(QWidget):
                 avatar_image=avatar_image,
                 serial=len(self._seen_provider_message_keys),
             )
+            if self._is_transient_new_message_summary(msg):
+                msg.expires_at = time.monotonic() + 20.0
             self.messages = [
                 existing for existing in self.messages
                 if str(getattr(existing, "app", "") or "").strip().casefold() != app_key
@@ -1224,6 +1299,18 @@ class IslandStackVisual(QWidget):
             msg.barrage_started_at = float(getattr(self, "barrage_clock", 0.0)) + 0.05 * len(self.messages)
             self.messages.insert(0, msg)
         self.messages = self.messages[:8]
+
+    def _is_transient_new_message_summary(self, message: Message) -> bool:
+        text = str(getattr(message, "text", "") or "").strip()
+        return bool(text in {"收到新消息", "新消息"} or re.fullmatch(r"\d{1,4}\s*(?:条|條)\s*新消息", text))
+
+    def _prune_expired_messages(self, now: float | None = None):
+        now = time.monotonic() if now is None else float(now)
+        self.messages = [
+            message
+            for message in getattr(self, "messages", [])
+            if not (float(getattr(message, "expires_at", 0.0) or 0.0) > 0.0 and now >= float(getattr(message, "expires_at", 0.0) or 0.0))
+        ]
 
     def _coalesced_timed_lyrics(self, timed_lyrics: list[tuple[float, str]]) -> list[tuple[float, str]]:
         if not timed_lyrics:
@@ -1262,15 +1349,15 @@ class IslandStackVisual(QWidget):
         flush()
         return merged
 
-    def _refresh_media_data(self, now: float):
+    def _refresh_media_data(self, now: float) -> bool:
         if now - getattr(self, "last_media_refresh_at", 0.0) < getattr(self, "media_refresh_interval", 0.65):
-            return
+            return False
         self.last_media_refresh_at = now
         try:
             visual_data = self.data_provider.get_visual_data()
         except Exception:
-            return
-        self._apply_visual_data(visual_data)
+            return False
+        return bool(self._apply_visual_data(visual_data))
 
     def _estimated_media_position(self, now: float) -> float:
         base = max(0.0, float(getattr(self, "media_position_seconds", 0.0)))
@@ -1348,11 +1435,8 @@ class IslandStackVisual(QWidget):
         return families
 
     def _gelv_font_families(self) -> list[str]:
-        selected = str(getattr(self, "gelv_font_family", self.GELV_FONT_FAMILY) or self.GELV_FONT_FAMILY).strip()
-        if selected not in self.GELV_FONT_CHOICES:
-            selected = self.GELV_FONT_FAMILY
-        families = [selected]
-        for family in self.GELV_FONT_CHOICES:
+        families = [self.GELV_FONT_FAMILY]
+        for family in (self.DEFAULT_FONT_FAMILY,):
             if family not in families:
                 families.append(family)
         return families
@@ -1422,6 +1506,122 @@ class IslandStackVisual(QWidget):
         fps = max(24, min(90, int(getattr(self, "animation_fps", 60))))
         return max(11, int(round(1000 / fps)))
 
+    def _stable_render_interval_ms(self) -> int:
+        return self._timer_interval_ms()
+
+    def _render_interval_seconds(self, active_animation: bool) -> float:
+        interval_ms = self._timer_interval_ms() if active_animation else self._stable_render_interval_ms()
+        return max(0.001, interval_ms / 1000.0)
+
+    def _retune_frame_timer(self, active_animation: bool):
+        timer = getattr(self, "timer", None)
+        if timer is None:
+            return
+        target = self._timer_interval_ms() if active_animation else self._stable_render_interval_ms()
+        try:
+            if int(timer.interval()) != int(target):
+                timer.start(int(target))
+        except RuntimeError:
+            pass
+
+    def _animation_started_active(self, started_at: float, duration: float, now: float) -> bool:
+        try:
+            started = float(started_at or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if started <= 0.0:
+            return False
+        return now - started < self._animation_duration(duration)
+
+    def _animation_dict_active(self, animation: object, now: float, duration: float) -> bool:
+        if not isinstance(animation, dict) or not animation:
+            return False
+        try:
+            started_at = float(animation.get("started_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return self._animation_started_active(started_at, duration, now)
+
+    def _alarm_spin_animations_active(self, now: float) -> bool:
+        animations = getattr(self, "plugin_alarm_editor_spin_animations", {})
+        if not isinstance(animations, dict) or not animations:
+            return False
+        return any(self._animation_dict_active(animation, now, 0.22) for animation in animations.values())
+
+    def _has_active_visual_animation(self, now: float) -> bool:
+        if bool(getattr(self, "media_is_playing", False)):
+            return True
+        if bool(getattr(self, "finder_mode", False)):
+            return True
+        if bool(getattr(self, "drag_candidate", False)) or bool(getattr(self, "dragging", False)):
+            return True
+        if bool(getattr(self, "barrage_hovered", False)):
+            return True
+        if now < float(getattr(self, "hover_bounce_until", 0.0) or 0.0):
+            return True
+        if now < float(getattr(self, "stack_bounce_until", 0.0) or 0.0):
+            return True
+        if now < float(getattr(self, "taskbar_left_handle_visible_until", 0.0) or 0.0):
+            return True
+        if str(getattr(self, "scene_transition_mode", "") or "") in {"hide", "show"}:
+            if self._animation_started_active(
+                getattr(self, "scene_transition_started_at", 0.0),
+                float(getattr(self, "scene_transition_duration", 0.18) or 0.18),
+                now,
+            ):
+                return True
+        pixmap = getattr(self, "surface_transition_pixmap", QPixmap())
+        if hasattr(pixmap, "isNull") and not pixmap.isNull():
+            if self._animation_started_active(
+                getattr(self, "surface_transition_started_at", 0.0),
+                float(getattr(self, "surface_transition_duration", 0.22) or 0.22),
+                now,
+            ):
+                return True
+        if str(getattr(self, "music_surface_transition_mode", "") or ""):
+            if self._transition_progress_for_surface(now) < 1.0:
+                return True
+        if int(getattr(self, "prev_lyric_index", 0)) != int(getattr(self, "lyric_index", 0)):
+            if self._animation_started_active(getattr(self, "lyric_changed_at", 0.0), 0.52, now):
+                return True
+        if str(getattr(self, "lyric_transition_kind", "") or ""):
+            if self._animation_started_active(getattr(self, "lyric_changed_at", 0.0), 0.52, now):
+                return True
+        try:
+            if self._should_paint_album_island() and self._album_island_transition_progress(now) < 1.0:
+                return True
+        except Exception:
+            pass
+        if self._animation_dict_active(getattr(self, "plugin_time_module_animation", {}), now, 0.28):
+            return True
+        if self._animation_dict_active(getattr(self, "plugin_alarm_editor_page_animation", {}), now, 0.24):
+            return True
+        if self._animation_dict_active(getattr(self, "plugin_alarm_editor_reflow_animation", {}), now, 0.24):
+            return True
+        if self._alarm_spin_animations_active(now):
+            return True
+        control_presses = getattr(self, "music_control_press_started_at", {})
+        if isinstance(control_presses, dict):
+            for started_at in control_presses.values():
+                if self._animation_started_active(started_at, 0.42, now):
+                    return True
+        return False
+
+    def _render_frame_due(self, now: float, active_animation: bool) -> bool:
+        try:
+            last_render = float(getattr(self, "last_render_update_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            last_render = 0.0
+        if last_render <= 0.0:
+            return True
+        elapsed = now - last_render
+        interval = self._render_interval_seconds(active_animation)
+        tolerance = float(getattr(self, "FRAME_INTERVAL_TOLERANCE_SECONDS", 0.0) or 0.0)
+        return elapsed + tolerance >= interval
+
+    def _mark_render_frame(self, now: float):
+        self.last_render_update_at = float(now)
+
     def _animation_speed_factor(self) -> float:
         try:
             speed = float(getattr(self, "animation_speed", 1.0))
@@ -1453,31 +1653,70 @@ class IslandStackVisual(QWidget):
         if notify:
             self._notify_settings_changed()
 
+    def set_empty_island_display_mode(self, mode: str, notify: bool = True):
+        self.empty_island_display_mode = self._normalize_empty_island_display_mode(mode)
+        self._pulse_stack()
+        self.update()
+        if notify:
+            self._notify_settings_changed()
+
+    def set_no_music_island_priority(self, priority: str, notify: bool = True):
+        self.no_music_island_priority = self._normalize_no_music_island_priority(priority)
+        self._pulse_stack()
+        self.update()
+        if notify:
+            self._notify_settings_changed()
+
     def set_music_ambience_style(self, style: str, notify: bool = True):
         style = str(style or "sea_level").lower()
         if style in ("album_mist", "xiaomi_duotone"):
             style = "sea_level"
         if style not in self.MUSIC_AMBIENCE_STYLES:
             style = "sea_level"
-        if self._active_lyric_color_fill_paints_background(style) and style not in self.COLOR_FILL_AMBIENCE_STYLES and not self._taskbar_compact_active():
-            style = "pure_black"
         self.music_ambience_style = style
         self.update()
         if notify:
             self._notify_settings_changed()
 
+    def _sync_music_background_to_theme(self, force: bool = False):
+        getter = getattr(self, "settings_getter", None)
+        enabled = False
+        if callable(getter):
+            try:
+                enabled = bool(getter("v2_music_background_follow_theme", False))
+            except Exception:
+                enabled = False
+        if not enabled:
+            return False
+        current_style = str(getattr(self, "music_ambience_style", "sea_level") or "sea_level")
+        if current_style not in {"pure_black", "pure_white"}:
+            return False
+        now = time.monotonic()
+        if not force and now - float(getattr(self, "_last_theme_follow_checked_at", 0.0) or 0.0) < 2.0:
+            return False
+        self._last_theme_follow_checked_at = now
+        dark = app_dark_mode(getter if callable(getter) else None)
+        if not force and dark == getattr(self, "_last_theme_follow_dark", None):
+            return False
+        self._last_theme_follow_dark = dark
+        target_style = music_ambience_style_for_theme(dark, current_style, follow_enabled=enabled)
+        if target_style == current_style:
+            return False
+        self.set_music_ambience_style(target_style, notify=False)
+        setter = getattr(self, "settings_setter", None)
+        if callable(setter):
+            try:
+                setter("v2_music_ambience_style", target_style)
+            except Exception:
+                pass
+        self._notify_settings_changed()
+        return True
+
     def _coerce_music_ambience_for_color_fill(self):
-        if self._taskbar_compact_active():
-            return
-        if self._gelv_enabled():
-            return
-        if str(getattr(self, "music_ambience_style", "sea_level")) not in self.COLOR_FILL_AMBIENCE_STYLES:
-            self.music_ambience_style = "pure_black"
+        return
 
     def _effective_music_ambience_style(self) -> str:
         style = str(getattr(self, "music_ambience_style", "sea_level") or "sea_level")
-        if self._active_lyric_color_fill_paints_background(style) and style not in self.COLOR_FILL_AMBIENCE_STYLES and not self._taskbar_compact_active():
-            return "pure_black"
         if style == "sea_level" and self._taskbar_compact_active() and bool(getattr(self, "taskbar_material_is_light", False)):
             return "pure_white"
         return style if style in self.MUSIC_AMBIENCE_STYLES else "sea_level"
@@ -1645,6 +1884,16 @@ class IslandStackVisual(QWidget):
         if notify:
             self._notify_settings_changed()
 
+    def set_diffraction_frequency(self, value: float, notify: bool = True):
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            amount = 0.30
+        self.diffraction_frequency = max(0.0, min(1.0, amount))
+        self.update()
+        if notify:
+            self._notify_settings_changed()
+
     def set_high_quality_font_rendering(self, enabled: bool, notify: bool = True):
         self.high_quality_font_rendering = bool(enabled)
         self._clear_lyric_metrics_cache()
@@ -1791,10 +2040,8 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
         self.update()
 
-    def set_gelv_font_family(self, family: str, notify: bool = True):
-        family = str(family or self.GELV_FONT_FAMILY).strip()
-        if family not in self.GELV_FONT_CHOICES:
-            family = self.GELV_FONT_FAMILY
+    def set_gelv_font_family(self, _family: str, notify: bool = True):
+        family = self.GELV_FONT_FAMILY
         self.gelv_font_family = family
         self._clear_lyric_metrics_cache()
         self._pulse_stack()
@@ -1842,18 +2089,14 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
         self.update()
 
-    def set_gelv_size_shift_enabled(self, enabled: bool, notify: bool = True):
-        self.gelv_size_shift_enabled = bool(enabled)
-        self._clear_lyric_metrics_cache()
-        self._pulse_stack()
+    def set_gelv_color_fill_enabled(self, enabled: bool, notify: bool = True):
+        self.gelv_color_fill_enabled = bool(enabled) and self._lyric_color_fill_background_available()
         if notify:
             self._notify_settings_changed()
         self.update()
 
-    def set_gelv_color_fill_enabled(self, enabled: bool, notify: bool = True):
-        self.gelv_color_fill_enabled = bool(enabled)
-        if self._gelv_enabled() and self.gelv_color_fill_enabled:
-            self._coerce_music_ambience_for_color_fill()
+    def set_gelv_word_fill_enabled(self, enabled: bool, notify: bool = True):
+        self.gelv_word_fill_enabled = bool(enabled)
         if notify:
             self._notify_settings_changed()
         self.update()
@@ -1866,9 +2109,7 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def set_wave_color_fill_enabled(self, enabled: bool, notify: bool = True):
-        self.wave_color_fill_enabled = bool(enabled)
-        if not self._gelv_enabled() and self.wave_color_fill_enabled:
-            self._coerce_music_ambience_for_color_fill()
+        self.wave_color_fill_enabled = bool(enabled) and self._lyric_color_fill_background_available()
         if notify:
             self._notify_settings_changed()
         self.update()
@@ -2063,20 +2304,24 @@ class IslandStackVisual(QWidget):
         if not screen:
             return
         geo = screen.geometry()
-        if getattr(self, "attach_to_real_finder", False):
-            self.resize(geo.width(), self.height())
-            self.move(geo.left(), geo.top())
-            self._force_super_topmost()
-        else:
-            standalone_width = int(round(self._standalone_canvas_width()))
-            if self.width() != standalone_width:
-                self.resize(standalone_width, self.height())
-            remembered_pos = self.saved_window_pos or getattr(self, "last_window_position", None)
-            if remembered_pos is not None:
-                x, y = remembered_pos
-                self.move(int(x), int(y))
+        self._restoring_position = True
+        try:
+            if getattr(self, "attach_to_real_finder", False):
+                self.resize(geo.width(), self.height())
+                self.move(geo.left(), geo.top())
+                self._force_super_topmost()
             else:
-                self.move(geo.center().x() - self.width() // 2, geo.top() + int(round(self._u(14))))
+                standalone_width = int(round(self._standalone_canvas_width()))
+                if self.width() != standalone_width:
+                    self.resize(standalone_width, self.height())
+                remembered_pos = self.saved_window_pos or getattr(self, "last_window_position", None)
+                if remembered_pos is not None:
+                    x, y = remembered_pos
+                    self.move(int(x), int(y))
+                else:
+                    self.move(geo.center().x() - self.width() // 2, geo.top() + int(round(self._u(14))))
+        finally:
+            self._restoring_position = False
 
     def _standalone_canvas_width(self) -> float:
         return self._u(1180.0)
@@ -2161,6 +2406,19 @@ class IslandStackVisual(QWidget):
             value = "last"
         self.position_preset = value
         if value == "last":
+            remembered_pos = getattr(self, "last_window_position", None) or getattr(self, "saved_window_pos", None)
+            parsed_pos = self._parse_window_position(remembered_pos)
+            if parsed_pos is not None and str(getattr(self, "location_mode", "free") or "free") != "finder":
+                new_pos = QPoint(int(parsed_pos[0]), int(parsed_pos[1]))
+                self.move(new_pos)
+                self.save_last_position(new_pos)
+                if notify:
+                    self._notify_settings_changed()
+                try:
+                    self.update()
+                except RuntimeError:
+                    pass
+                return True
             if notify:
                 self._notify_settings_changed()
             return False
@@ -2210,6 +2468,24 @@ class IslandStackVisual(QWidget):
         self.last_window_position = parsed
         self.saved_window_pos = parsed
         if notify:
+            self._notify_settings_changed()
+
+    def _remember_current_window_position(self) -> bool:
+        if bool(getattr(self, "_restoring_position", False)):
+            return False
+        if str(getattr(self, "location_mode", "free") or "free") == "finder" or bool(getattr(self, "finder_mode", False)):
+            return False
+        try:
+            pos = self.pos()
+        except Exception:
+            return False
+        previous = getattr(self, "last_window_position", None)
+        self.save_last_position(pos)
+        return previous != getattr(self, "last_window_position", None)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if self._remember_current_window_position():
             self._notify_settings_changed()
 
     def set_super_topmost(self, enabled: bool, notify: bool = True):
@@ -2263,8 +2539,10 @@ class IslandStackVisual(QWidget):
         self.last_tick_at = now
         speed = self._animation_speed_factor()
         anim_dt = tick_dt * speed
-        self._refresh_media_data(now)
+        visual_data_changed = bool(self._sync_music_background_to_theme())
+        visual_data_changed = bool(self._refresh_media_data(now)) or visual_data_changed
         self._update_scene_state(now)
+        self._prune_expired_messages(now)
         if (
             self._taskbar_compact_active()
             and not bool(getattr(self, "drag_candidate", False))
@@ -2318,11 +2596,17 @@ class IslandStackVisual(QWidget):
             self._pulse_stack()
         if self._maybe_trigger_alarm_row_long_press(now):
             self.update()
+            self._mark_render_frame(now)
             return
 
+        active_animation = self._has_active_visual_animation(now)
+        self._retune_frame_timer(active_animation)
+        if not visual_data_changed and not self._render_frame_due(now, active_animation):
+            return
         self.scroll_phase += 0.017 * speed
         self.ambient_phase += 0.024 * speed
         self._update_wave_values()
+        self._mark_render_frame(now)
         self.update()
 
     def _handle_scene_suppressed_tick(self, now: float, anim_dt: float):
@@ -2331,6 +2615,11 @@ class IslandStackVisual(QWidget):
         self.hovered_key = ""
         self.hover_armed_key = ""
         self.left_stack_at = 0.0
+        active_animation = self._has_active_visual_animation(now)
+        self._retune_frame_timer(active_animation)
+        if not self._render_frame_due(now, active_animation):
+            return
+        self._mark_render_frame(now)
         self.update()
 
     def _update_wave_values(self):
@@ -3109,6 +3398,7 @@ class IslandStackVisual(QWidget):
             "v2_finder_mode": self.finder_mode,
             "v2_manual_mydockfinder": bool(getattr(self, "manual_finder_available", False)),
             "v2_mydockfinder_path": str(getattr(self, "mydockfinder_path", "") or ""),
+            "v2_mydockfinder_listener_process_names": list(getattr(self, "mydockfinder_listener_process_names", DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES)),
             "v2_position_preset": str(getattr(self, "position_preset", "last") or "last"),
             "v2_taskbar_corner_style": str(getattr(self, "taskbar_corner_style", "win11")),
             "v2_expanded": self.expanded,
@@ -3126,10 +3416,13 @@ class IslandStackVisual(QWidget):
             "v2_music_flow_intensity": round(float(getattr(self, "music_flow_intensity", 0.74)), 3),
             "v2_compact_duotone_balance": int(getattr(self, "compact_duotone_balance", 50)),
             "v2_expanded_duotone_balance": int(getattr(self, "expanded_duotone_balance", 50)),
+            "v2_diffraction_frequency": round(float(getattr(self, "diffraction_frequency", 0.30)), 3),
             "v2_font_family": self.ui_font_family,
             "v2_high_quality_font_rendering": bool(getattr(self, "high_quality_font_rendering", False)),
             "v2_animation_fps": self.animation_fps,
             "v2_animation_speed": self.animation_speed,
+            "v2_empty_island_display_mode": self._empty_island_display_mode(),
+            "v2_no_music_island_priority": self._no_music_island_priority(),
             "v2_empty_bar_palette": self.empty_bar_palette,
             "v2_empty_bar_width": int(getattr(self, "empty_bar_width", 92)),
             "v2_empty_bar_height": int(getattr(self, "empty_bar_height", 14)),
@@ -3166,14 +3459,14 @@ class IslandStackVisual(QWidget):
             "v2_wave_color_fill_enabled": bool(getattr(self, "wave_color_fill_enabled", False)),
             "v2_wave_color_fill_fallback": str(getattr(self, "wave_color_fill_fallback", "#00D7FF")),
             "v2_lyric_flow_style": str(getattr(self, "lyric_flow_style", "wave_stream")),
-            "v2_gelv_font_family": str(getattr(self, "gelv_font_family", self.GELV_FONT_FAMILY)),
+            "v2_gelv_font_family": self.GELV_FONT_FAMILY,
             "v2_gelv_primary_font_size": int(getattr(self, "gelv_primary_font_size", 22)),
             "v2_gelv_secondary_font_size": int(getattr(self, "gelv_secondary_font_size", 12)),
             "v2_gelv_dual_line_font_size": int(getattr(self, "gelv_dual_line_font_size", 17)),
             "v2_gelv_initial_word_spacing": int(getattr(self, "gelv_initial_word_spacing", 220)),
             "v2_gelv_word_spacing": int(getattr(self, "gelv_word_spacing", 320)),
-            "v2_gelv_size_shift_enabled": bool(getattr(self, "gelv_size_shift_enabled", True)),
             "v2_gelv_color_fill_enabled": bool(getattr(self, "gelv_color_fill_enabled", False)),
+            "v2_gelv_word_fill_enabled": bool(getattr(self, "gelv_word_fill_enabled", False)),
             "v2_gelv_color_fill_fallback": str(getattr(self, "gelv_color_fill_fallback", "#00D7FF")),
             "v2_no_lyrics_display_mode": str(getattr(self, "no_lyrics_display_mode", "text")),
             "v2_album_island_cover_count": int(getattr(self, "album_island_cover_count", 5)),
@@ -3256,6 +3549,8 @@ class IslandStackVisual(QWidget):
         self.group_frame_target_rect = QRectF()
         self.group_frame_target_mode_key = ""
         self.group_frame_mask_path = None
+        self.taskbar_notification_frame_motion = None
+        self.taskbar_notification_frame_rect = QRectF()
         self.finder_hover_rect = QRectF()
         self.interaction_mask_active = False
         self.last_mask_rect = QRectF()
@@ -3300,6 +3595,11 @@ class IslandStackVisual(QWidget):
 
     def set_mydockfinder_path(self, path: str, notify: bool = True):
         self.mydockfinder_path = str(path or "").strip().strip('"')
+        if notify:
+            self._notify_settings_changed()
+
+    def set_mydockfinder_listener_process_names(self, names, notify: bool = True):
+        self.mydockfinder_listener_process_names = tuple(str(name or "").strip().casefold() for name in (names or ()) if str(name or "").strip())
         if notify:
             self._notify_settings_changed()
 
@@ -5037,6 +5337,64 @@ class IslandStackVisual(QWidget):
         label, detail, summary, color, icon = plugin[:5]
         return label, detail, summary, color, icon, "", "normal", "", "", 50, 0.0
 
+    def _normalize_empty_island_display_mode(self, mode: str) -> str:
+        value = str(mode or "visible_bar").strip().casefold().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "hidden": "visible_bar",
+            "hide": "visible_bar",
+            "hidden_bar": "visible_bar",
+            "bar": "visible_bar",
+            "thin_bar": "visible_bar",
+            "visible": "visible_bar",
+            "show_bar": "visible_bar",
+            "field": "text",
+            "specified": "text",
+            "specified_text": "text",
+            "clock": "time",
+        }
+        value = aliases.get(value, value)
+        return value if value in {"visible_bar", "text", "time"} else "visible_bar"
+
+    def _empty_island_display_mode(self) -> str:
+        return self._normalize_empty_island_display_mode(getattr(self, "empty_island_display_mode", "visible_bar"))
+
+    def _normalize_no_music_island_priority(self, priority: str) -> str:
+        value = str(priority or "plugin").strip().casefold().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "plugin_island": "plugin",
+            "plugins": "plugin",
+            "plugin_panel": "plugin",
+            "empty_island": "empty",
+            "empty_mode": "empty",
+            "no_island": "empty",
+            "none": "empty",
+        }
+        value = aliases.get(value, value)
+        return value if value in {"plugin", "empty"} else "plugin"
+
+    def _no_music_island_priority(self) -> str:
+        return self._normalize_no_music_island_priority(getattr(self, "no_music_island_priority", "plugin"))
+
+    def _empty_island_can_display(self) -> bool:
+        if self._music_enabled_for_stack():
+            return False
+        if not self._plugin_enabled():
+            return True
+        return self._no_music_island_priority() == "empty"
+
+    def _empty_music_text_active(self) -> bool:
+        return self._empty_island_display_mode() == "text" and self._empty_island_can_display()
+
+    def _empty_time_mode_active(self) -> bool:
+        return self._empty_island_display_mode() == "time" and self._empty_island_can_display()
+
+    def _empty_text_display_text(self) -> str:
+        return str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip() or "暂无歌词"
+
+    def _empty_time_text(self) -> str:
+        now = datetime.now().astimezone()
+        return now.strftime("%H:%M:%S" if bool(getattr(self, "show_seconds", True)) else "%H:%M")
+
     def _enabled_plugin_ids(self) -> list[str]:
         raw = getattr(self, "enabled_plugin_ids", None)
         known = ["time", "weather", "agenda"]
@@ -5740,6 +6098,7 @@ class IslandStackVisual(QWidget):
 
     def changeEvent(self, event):
         if is_theme_change_event(event):
+            self._sync_music_background_to_theme(force=True)
             self.update()
         super().changeEvent(event)
 
@@ -5909,10 +6268,13 @@ class IslandStackVisual(QWidget):
             identity_w = max(title_w, artist_w * 0.88)
             content_w = identity_w if instrumental else max(identity_w, lyric_w * 0.82)
             required = self._u(58 + 16 + 15 + 132 + 48) + content_w
-            return max(self._u(470.0), min(self._u(760.0), required))
+            if self._should_paint_album_island():
+                stage_w = self._album_island_preferred_stage_width(expanded=True)
+                required = max(required, stage_w + self._u(36.0))
+            return max(self._u(470.0), min(self._u(1280.0), required))
 
         if self._should_paint_album_island():
-            stage_w = self._album_island_preferred_stage_width()
+            stage_w = self._album_island_preferred_stage_width(expanded=False)
             required = self._u(9 + 30 + 12 + 25) + stage_w
             return max(self._u(300.0), min(self._u(760.0), required))
 
@@ -6015,6 +6377,8 @@ class IslandStackVisual(QWidget):
         return value
 
     def _is_instrumental_track(self) -> bool:
+        if self._empty_music_text_active():
+            return False
         if len(self.lyrics) > 1:
             return False
         lines = [self._clean_lyric_for_width(line).lower() for line in self.lyrics]
@@ -6026,6 +6390,8 @@ class IslandStackVisual(QWidget):
         return any(marker in marker_text for marker in markers)
 
     def _compact_music_text(self) -> str:
+        if self._empty_music_text_active():
+            return str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip() or "暂无歌词"
         if self._is_instrumental_track():
             title = self.track_title.strip()
             artist = self.artist.strip()
@@ -6039,7 +6405,7 @@ class IslandStackVisual(QWidget):
         text = str(lyric or "").strip()
         if not text:
             return []
-        allow_dual_line = bool(getattr(self, "enable_dual_line_lyrics", False))
+        allow_dual_line = self._dual_line_lyrics_allowed()
         if "\n" in text:
             lines = [" ".join(part.split()) for part in text.splitlines()]
             lines = [line for line in lines if line]
@@ -6065,16 +6431,33 @@ class IslandStackVisual(QWidget):
     def _gelv_enabled(self) -> bool:
         return str(getattr(self, "lyric_flow_style", "wave_stream")) == "gelv_songscatter"
 
+    def _lyric_color_fill_background_available(self) -> bool:
+        return str(getattr(self, "music_ambience_style", "sea_level") or "sea_level") not in self.COLOR_FILL_BLOCKED_AMBIENCE_STYLES
+
+    def _gelv_color_fill_available(self) -> bool:
+        return self._lyric_color_fill_background_available()
+
+    def _gelv_color_theme_enabled(self) -> bool:
+        return bool(getattr(self, "gelv_color_fill_enabled", False)) and self._gelv_color_fill_available()
+
+    def _gelv_word_fill_enabled(self) -> bool:
+        return bool(getattr(self, "gelv_word_fill_enabled", False))
+
     def _active_lyric_color_fill_enabled(self) -> bool:
         style = str(getattr(self, "lyric_flow_style", "wave_stream"))
         if style == "gelv_songscatter":
-            return bool(getattr(self, "gelv_color_fill_enabled", False))
-        return bool(getattr(self, "wave_color_fill_enabled", False))
+            return self._gelv_color_theme_enabled()
+        if style == "wave_stream":
+            return bool(getattr(self, "wave_color_fill_enabled", False)) and self._lyric_color_fill_background_available()
+        return False
 
     def _active_lyric_fill_color(self) -> QColor:
         if self._gelv_enabled():
             return self._gelv_fill_color()
         return self._wave_fill_color()
+
+    def _dual_line_lyrics_allowed(self) -> bool:
+        return bool(getattr(self, "enable_dual_line_lyrics", False)) and not self._taskbar_compact_active()
 
     def _gelv_line_sizes(self, taskbar: bool = False) -> tuple[int, int]:
         active = max(14, min(30, int(getattr(self, "gelv_primary_font_size", 22))))
@@ -6104,15 +6487,17 @@ class IslandStackVisual(QWidget):
         if line_count <= 1:
             content_px = self._gelv_line_pixel_height(active_size, expanded=False)
             return max(46.0, min(64.0, content_px / self.VISUAL_SCALE + 9.0))
-        second_size = self._gelv_dual_line_size(taskbar=False) if (
-            self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()
-        ) else secondary_size
+        explicit_dual = self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()
+        second_size = self._gelv_dual_line_size(taskbar=False) if explicit_dual else secondary_size
         line_heights = [
             self._gelv_line_pixel_height(size, expanded=False)
             for size in (active_size, second_size)[:line_count]
         ]
         content_px = sum(line_heights) + self._u(1.0) * max(0, line_count - 1)
-        return max(46.0, min(82.0, content_px / self.VISUAL_SCALE + 9.0))
+        height = max(46.0, min(82.0, content_px / self.VISUAL_SCALE + 9.0))
+        if not explicit_dual:
+            height = min(height, 68.0)
+        return height
 
     def _album_island_compact_music_height(self) -> float:
         cover = max(18, min(44, int(getattr(self, "album_island_cover_size", 30))))
@@ -6125,7 +6510,7 @@ class IslandStackVisual(QWidget):
         index = int(getattr(self, "lyric_index", 0)) % len(lyrics)
         active = str(lyrics[index] or "").strip()
         active_lines = [line.strip() for line in active.splitlines() if line.strip()]
-        dual_enabled = bool(getattr(self, "enable_dual_line_lyrics", False))
+        dual_enabled = self._dual_line_lyrics_allowed()
         active_primary = active_lines[0] if active_lines else active
         if dual_enabled and len(active_lines) > 1:
             return active_lines[:2]
@@ -6140,7 +6525,7 @@ class IslandStackVisual(QWidget):
 
     def _gelv_current_dual_line(self) -> bool:
         lyrics = getattr(self, "lyrics", None) or []
-        if not lyrics or not bool(getattr(self, "enable_dual_line_lyrics", False)):
+        if not lyrics or not self._dual_line_lyrics_allowed():
             return False
         index = int(getattr(self, "lyric_index", 0)) % len(lyrics)
         active = str(lyrics[index] or "")
@@ -6148,7 +6533,7 @@ class IslandStackVisual(QWidget):
 
     def _gelv_current_mixed_language_line(self) -> bool:
         lyrics = getattr(self, "lyrics", None) or []
-        if not lyrics or not bool(getattr(self, "enable_dual_line_lyrics", False)):
+        if not lyrics or not self._dual_line_lyrics_allowed():
             return False
         index = int(getattr(self, "lyric_index", 0)) % len(lyrics)
         return self._gelv_split_mixed_language_line(str(lyrics[index] or "")) is not None
@@ -6198,7 +6583,6 @@ class IslandStackVisual(QWidget):
         transitioning = previous_index != current_index and elapsed < 1.0
         if transitioning:
             eased = 1.0 - (1.0 - elapsed) ** 4
-            size_mix = eased if bool(getattr(self, "gelv_size_shift_enabled", True)) else 1.0
             return {
                 "progress": elapsed,
                 "eased": eased,
@@ -6206,7 +6590,7 @@ class IslandStackVisual(QWidget):
                 "in_alpha": max(0.18, eased),
                 "out_y_offset": 0.0,
                 "current_y_offset": 0.0,
-                "current_size_mix": size_mix,
+                "current_size_mix": 1.0,
             }
         return {
             "progress": 1.0,
@@ -6236,16 +6620,17 @@ class IslandStackVisual(QWidget):
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if lines:
             return lines[0]
-        mixed = self._gelv_split_mixed_language_line(text) if bool(getattr(self, "enable_dual_line_lyrics", False)) else None
+        mixed = self._gelv_split_mixed_language_line(text) if self._dual_line_lyrics_allowed() else None
         return mixed[0] if mixed is not None else text
 
     def _gelv_line_rects(self, rect: QRectF, expanded: bool = False, now: float | None = None) -> list[dict[str, object]]:
         lines = self._gelv_display_lines()
         if not lines:
             return []
-        active_size, secondary_size = self._gelv_line_sizes(taskbar=False)
+        taskbar = self._taskbar_compact_active() and not expanded
+        active_size, secondary_size = self._gelv_line_sizes(taskbar=taskbar)
         dual = self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()
-        dual_line_size = self._gelv_dual_line_size(taskbar=False)
+        dual_line_size = self._gelv_dual_line_size(taskbar=taskbar)
         state = self._gelv_transition_state(now)
         size_mix = max(0.0, min(1.0, float(state.get("current_size_mix", 1.0))))
         incoming_size = secondary_size + (active_size - secondary_size) * size_mix
@@ -6257,10 +6642,27 @@ class IslandStackVisual(QWidget):
             sizes = [incoming_size, secondary_size]
             actives = [True, False]
             stable_sizes = [active_size, secondary_size]
-        gap = self._u(8.0 if expanded else 1.0)
+        gap = self._u(8.0 if expanded else (0.0 if taskbar else 1.0))
         line_heights = [self._gelv_line_pixel_height(size, expanded=expanded) for size in stable_sizes[: len(lines)]]
         total_h = sum(line_heights) + gap * max(0, len(line_heights) - 1)
+        if taskbar and len(line_heights) > 1 and rect.height() > 0.0 and total_h > rect.height():
+            count = len(line_heights)
+            available_h = max(1.0, rect.height() - gap * max(0, count - 1))
+            scale = max(0.50, min(1.0, available_h / max(1.0, sum(line_heights))))
+            sizes = [max(8.0, float(size) * scale) for size in sizes]
+            stable_sizes = [max(8.0, float(size) * scale) for size in stable_sizes]
+            line_heights = [self._gelv_line_pixel_height(size, expanded=False) for size in stable_sizes[: len(lines)]]
+            total_h = sum(line_heights) + gap * max(0, len(line_heights) - 1)
+            if total_h > rect.height():
+                fit_scale = max(0.1, rect.height() / max(1.0, total_h))
+                line_heights = [max(1.0, height * fit_scale) for height in line_heights]
+                total_h = sum(line_heights) + gap * max(0, len(line_heights) - 1)
+            if len(sizes) > 1:
+                secondary_limit = max(6.0, float(sizes[0]) - 7.0)
+                sizes[1] = min(float(sizes[1]), secondary_limit)
         y = rect.center().y() - total_h / 2.0
+        if taskbar:
+            y = max(rect.top(), min(y, rect.bottom() - total_h))
         rows: list[dict[str, object]] = []
         for index, text in enumerate(lines[:2]):
             row = QRectF(rect.left(), y, rect.width(), line_heights[index])
@@ -6269,9 +6671,10 @@ class IslandStackVisual(QWidget):
                 "rect": row,
                 "size": sizes[index],
                 "active": actives[index],
-                "opacity": 1.0,
+                "opacity": 0.58 if taskbar and index > 0 else 1.0,
                 "color_fill": index == 0,
-                "progress_fill": dual and index == 1,
+                "progress_fill": False,
+                "allow_word_fill": index == 0,
                 "spacing_percent": None if index == 0 or (dual and index == 1) else 100,
                 "transition_out": False,
             })
@@ -6294,7 +6697,6 @@ class IslandStackVisual(QWidget):
             rows[1]["rect"] = entering_next
             rows[1]["opacity"] = max(0.42, eased)
         if out_alpha > 0.001 and previous_index != current_index and previous_text and rows:
-            out_size_lift = 1.6 * (1.0 - float(state.get("eased", 1.0))) if bool(getattr(self, "gelv_size_shift_enabled", True)) else 0.0
             out_rect = QRectF(rows[0]["rect"])
             if moving_switch:
                 eased = max(0.0, min(1.0, float(state.get("eased", 1.0))))
@@ -6305,7 +6707,7 @@ class IslandStackVisual(QWidget):
             out_row.update({
                 "text": previous_text,
                 "rect": out_rect,
-                "size": active_size + out_size_lift,
+                "size": active_size,
                 "opacity": out_alpha,
                 "color_fill": True,
                 "spacing_percent": None,
@@ -6349,6 +6751,8 @@ class IslandStackVisual(QWidget):
         return self._lyric_fill_color("wave_color_fill_fallback")
 
     def _should_paint_album_island(self) -> bool:
+        if self._empty_music_text_active():
+            return False
         if str(getattr(self, "lyric_flow_style", "wave_stream")) == "album_island":
             return True
         if str(getattr(self, "no_lyrics_display_mode", "text")) != "album_island":
@@ -6370,7 +6774,7 @@ class IslandStackVisual(QWidget):
         transition = self._album_island_transition_progress()
         eased_transition = 1.0 - (1.0 - transition) ** 4
         history_entries = self._album_island_entries_with_art(getattr(self, "album_history", []) or [])
-        queue_entries = self._album_island_entries_with_art(
+        queue_entries = self._album_island_queue_slot_sources(
             getattr(self, "album_queue", []) or getattr(self, "album_recommendations", []) or []
         )
         left_count = min(center, len(history_entries))
@@ -6413,10 +6817,14 @@ class IslandStackVisual(QWidget):
             y = center_y - size / 2.0 + distance * stage.height() * 0.020
             if side == 0:
                 album_art = QImage(getattr(self, "album_art", QImage()))
+                placeholder = False
             elif side < 0:
                 album_art = history_entries[abs(side) - 1]
+                placeholder = False
             else:
-                album_art = queue_entries[side - 1]
+                queue_source = queue_entries[side - 1]
+                album_art = QImage(queue_source.get("album_art", QImage()))
+                placeholder = bool(queue_source.get("placeholder", False))
             slots.append(
                 {
                     "index": side + center,
@@ -6428,6 +6836,7 @@ class IslandStackVisual(QWidget):
                     "tilt": tilt,
                     "perspective": perspective,
                     "album_art": album_art,
+                    "placeholder": placeholder,
                 }
             )
         if slots:
@@ -6446,11 +6855,65 @@ class IslandStackVisual(QWidget):
 
     def _album_island_entries_with_art(self, entries) -> list[QImage]:
         images: list[QImage] = []
+        current_signatures = self._current_album_art_signatures()
+        seen_signatures: set[str] = set()
         for entry in list(entries or [])[:6]:
             image = self._album_art_from_entry(entry)
             if not image.isNull():
+                signatures = self._entry_album_art_signatures(entry, image)
+                if signatures & current_signatures:
+                    continue
+                if signatures:
+                    if signatures & seen_signatures:
+                        continue
+                    seen_signatures.update(signatures)
                 images.append(image)
         return images
+
+    def _album_island_queue_entries_with_art(self, entries) -> list[QImage]:
+        return [
+            QImage(source["album_art"])
+            for source in self._album_island_queue_slot_sources(entries)
+            if not bool(source.get("placeholder", False))
+        ]
+
+    def _album_queue_entry_has_identity(self, entry) -> bool:
+        if isinstance(entry, dict):
+            values = (
+                entry.get("track_id"),
+                entry.get("title"),
+                entry.get("artist"),
+                entry.get("album_title"),
+            )
+        else:
+            values = (
+                getattr(entry, "track_id", ""),
+                getattr(entry, "title", ""),
+                getattr(entry, "artist", ""),
+                getattr(entry, "album_title", ""),
+            )
+        return any(str(value or "").strip() for value in values)
+
+    def _album_island_queue_slot_sources(self, entries) -> list[dict[str, object]]:
+        sources: list[dict[str, object]] = []
+        current_signatures = self._current_album_art_signatures()
+        seen_signatures: set[str] = set()
+        for entry in list(entries or [])[:6]:
+            if self._entry_matches_current_track(entry):
+                continue
+            image = self._album_art_from_entry(entry)
+            placeholder = image.isNull() and self._album_queue_entry_has_identity(entry)
+            if image.isNull() and not placeholder:
+                continue
+            signatures = self._entry_album_art_signatures(entry, image)
+            if signatures & current_signatures:
+                continue
+            if not placeholder and signatures:
+                if signatures & seen_signatures:
+                    continue
+                seen_signatures.update(signatures)
+            sources.append({"album_art": image, "placeholder": placeholder})
+        return sources
 
     def _album_island_cover_px(self, stage: QRectF) -> float:
         expanded_stage = bool(getattr(self, "expanded", False)) or float(stage.height()) >= self._u(86.0)
@@ -6478,18 +6941,26 @@ class IslandStackVisual(QWidget):
             return 1.0
         return max(0.0, min(1.0, (now - started_at) / 0.62))
 
-    def _album_island_preferred_stage_width(self) -> float:
+    def _album_island_configured_cover_px(self, expanded: bool = False) -> float:
+        if expanded:
+            fallback = int(getattr(self, "album_island_cover_size", 30))
+            configured = max(36, min(96, int(getattr(self, "album_island_expanded_cover_size", max(72, fallback)))))
+        else:
+            configured = max(18, min(44, int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30)))))
+        return self._u(float(configured))
+
+    def _album_island_preferred_stage_width(self, expanded: bool = False) -> float:
         count = int(getattr(self, "album_island_cover_count", 5))
         if count not in (3, 5, 7):
             count = 5
         side_capacity = count // 2
-        cover = self._u(float(max(18, min(44, int(getattr(self, "album_island_compact_cover_size", getattr(self, "album_island_cover_size", 30)))))))
+        cover = self._album_island_configured_cover_px(expanded=expanded)
         step = cover * (max(48, min(170, int(getattr(self, "album_island_spacing", 112)))) / 100.0)
         history_count = min(side_capacity, len(self._album_island_entries_with_art(getattr(self, "album_history", []) or [])))
-        queue_count = min(side_capacity, len(self._album_island_entries_with_art(getattr(self, "album_queue", []) or [])))
-        text_w = self._u(112.0) if queue_count <= 0 else 0.0
+        queue_count = min(side_capacity, len(self._album_island_queue_slot_sources(getattr(self, "album_queue", []) or [])))
+        text_w = self._u(184.0 if expanded else 112.0) if queue_count <= 0 else 0.0
         span = cover + step * (history_count + queue_count) + text_w + self._u(24.0)
-        minimum = self._u(164.0 if queue_count <= 0 else 132.0)
+        minimum = self._u((300.0 if queue_count <= 0 else 240.0) if expanded else (164.0 if queue_count <= 0 else 132.0))
         return max(minimum, span)
 
     def _album_island_art_for_side(self, side: int, center: int) -> QImage:
@@ -6503,10 +6974,22 @@ class IslandStackVisual(QWidget):
 
     def _album_queue_from_track(self, entries) -> list[dict[str, object]]:
         queue: list[dict[str, object]] = []
+        current_signatures = self._current_album_art_signatures()
+        seen_signatures: set[str] = set()
         for entry in list(entries or [])[:6]:
-            image = self._album_art_from_entry(entry)
-            if image.isNull():
+            if self._entry_matches_current_track(entry):
                 continue
+            image = self._album_art_from_entry(entry)
+            placeholder = image.isNull() and self._album_queue_entry_has_identity(entry)
+            if image.isNull() and not placeholder:
+                continue
+            signatures = self._entry_album_art_signatures(entry, image)
+            if signatures & current_signatures:
+                continue
+            if not placeholder and signatures:
+                if signatures & seen_signatures:
+                    continue
+                seen_signatures.update(signatures)
             if isinstance(entry, dict):
                 track_id = str(entry.get("track_id", "") or "")
                 title = str(entry.get("title", "") or "")
@@ -6517,6 +7000,8 @@ class IslandStackVisual(QWidget):
                 title = str(getattr(entry, "title", "") or "")
                 artist = str(getattr(entry, "artist", "") or "")
                 album_title = str(getattr(entry, "album_title", "") or "")
+            album_color = self._entry_color_token(entry, "album_color")
+            secondary_color = self._entry_color_token(entry, "secondary_color")
             queue.append(
                 {
                     "track_id": track_id,
@@ -6524,9 +7009,130 @@ class IslandStackVisual(QWidget):
                     "artist": artist,
                     "album_title": album_title,
                     "album_art": image,
+                    "placeholder": placeholder,
+                    "album_art_signature": self._preferred_album_art_signature(signatures),
+                    "album_color": album_color,
+                    "secondary_color": secondary_color,
                 }
             )
         return queue
+
+    def _entry_color_token(self, entry, key: str) -> QColor:
+        value = entry.get(key) if isinstance(entry, dict) else getattr(entry, key, None)
+        if isinstance(value, QColor):
+            return QColor(value)
+        if hasattr(value, "rgba"):
+            try:
+                return QColor(*value.rgba())
+            except Exception:
+                return QColor()
+        if isinstance(value, (tuple, list)) and len(value) >= 3:
+            try:
+                alpha = int(value[3]) if len(value) >= 4 else 255
+                return QColor(int(value[0]), int(value[1]), int(value[2]), alpha)
+            except Exception:
+                return QColor()
+        if isinstance(value, str):
+            color = QColor(value)
+            return color if color.isValid() else QColor()
+        return QColor()
+
+    def _album_queue_signature(self, entries) -> str:
+        parts: list[str] = []
+        for entry in list(entries or [])[:6]:
+            if isinstance(entry, dict):
+                values = (
+                    entry.get("track_id", ""),
+                    entry.get("title", ""),
+                    entry.get("artist", ""),
+                    entry.get("album_title", ""),
+                    self._album_entry_art_signature(entry.get("album_art_bytes") or entry.get("image_bytes")),
+                    str(getattr(entry.get("album_art") or entry.get("image"), "cacheKey", lambda: "")()),
+                )
+            else:
+                values = (
+                    getattr(entry, "track_id", ""),
+                    getattr(entry, "title", ""),
+                    getattr(entry, "artist", ""),
+                    getattr(entry, "album_title", ""),
+                    self._album_entry_art_signature(getattr(entry, "album_art_bytes", b"") or getattr(entry, "image_bytes", b"")),
+                    str(getattr(getattr(entry, "album_art", None), "cacheKey", lambda: "")()),
+                )
+            parts.append("\0".join(str(value or "") for value in values))
+        return "\1".join(parts)
+
+    def _album_entry_art_signature(self, data) -> str:
+        if isinstance(data, bytes) and data:
+            return self._album_art_bytes_signature(data)
+        return ""
+
+    def _album_art_bytes_signature(self, data) -> str:
+        if not isinstance(data, bytes) or not data:
+            return ""
+        return hashlib.blake2b(data, digest_size=8).hexdigest()
+
+    def _preferred_album_art_signature(self, signatures: set[str]) -> str:
+        return next(iter(sorted(signature for signature in signatures if signature)), "")
+
+    def _current_album_art_signatures(self) -> set[str]:
+        signatures: set[str] = set()
+        stored = str(getattr(self, "album_art_signature", "") or "")
+        if stored:
+            signatures.add(stored)
+        image_signature = self._album_image_content_signature(QImage(getattr(self, "album_art", QImage())))
+        if image_signature:
+            signatures.add(image_signature)
+        return signatures
+
+    def _entry_album_art_signatures(self, entry, image: QImage | None = None) -> set[str]:
+        signatures: set[str] = set()
+        stored = ""
+        data = b""
+        if isinstance(entry, dict):
+            stored = str(entry.get("album_art_signature", "") or entry.get("image_signature", "") or "")
+            data = entry.get("album_art_bytes") or entry.get("image_bytes") or b""
+        else:
+            stored = str(getattr(entry, "album_art_signature", "") or getattr(entry, "image_signature", "") or "")
+            data = getattr(entry, "album_art_bytes", b"") or getattr(entry, "image_bytes", b"") or b""
+        if stored:
+            signatures.add(stored)
+        byte_signature = self._album_entry_art_signature(data)
+        if byte_signature:
+            signatures.add(byte_signature)
+        if isinstance(image, QImage) and not image.isNull():
+            image_signature = self._album_image_content_signature(image)
+            if image_signature:
+                signatures.add(image_signature)
+        return signatures
+
+    def _album_image_content_signature(self, image: QImage) -> str:
+        if not isinstance(image, QImage) or image.isNull():
+            return ""
+        cache_key = int(image.cacheKey())
+        cache = getattr(self, "_album_image_signature_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._album_image_signature_cache = cache
+        cached = cache.get(cache_key)
+        if isinstance(cached, str) and cached:
+            return cached
+        scaled = image.convertToFormat(QImage.Format.Format_ARGB32).scaled(
+            16,
+            16,
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        digest = hashlib.blake2b(digest_size=8)
+        digest.update(bytes((scaled.width() & 0xFF, scaled.height() & 0xFF)))
+        for y in range(scaled.height()):
+            for x in range(scaled.width()):
+                color = QColor(scaled.pixel(x, y))
+                digest.update(bytes((color.red(), color.green(), color.blue(), color.alpha())))
+        signature = digest.hexdigest()
+        cache[cache_key] = signature
+        while len(cache) > 48:
+            cache.pop(next(iter(cache)))
+        return signature
 
     def _album_art_from_entry(self, entry) -> QImage:
         if isinstance(entry, QImage):
@@ -6584,6 +7190,8 @@ class IslandStackVisual(QWidget):
             "title": str(getattr(self, "track_title", "") or ""),
             "artist": str(getattr(self, "artist", "") or ""),
             "album_art": self._bounded_album_image(getattr(self, "album_art", QImage()), self.STORED_ALBUM_ART_MAX_SIDE),
+            "album_color": QColor(getattr(self, "album_color", QColor())),
+            "secondary_color": QColor(getattr(self, "secondary_color", QColor())),
         }
 
     def _entry_matches_track_id(self, entry, track_id: str) -> bool:
@@ -6594,23 +7202,55 @@ class IslandStackVisual(QWidget):
             candidate = str(getattr(entry, "track_id", "") or "")
         return bool(candidate) and candidate == str(track_id or "")
 
+    def _entry_matches_current_track(self, entry) -> bool:
+        current_track_id = str(getattr(self, "media_track_id", "") or "")
+        if current_track_id and self._entry_matches_track_id(entry, current_track_id):
+            return True
+        if isinstance(entry, dict):
+            title = str(entry.get("title", "") or "")
+            artist = str(entry.get("artist", "") or "")
+        else:
+            title = str(getattr(entry, "title", "") or "")
+            artist = str(getattr(entry, "artist", "") or "")
+        current_title = str(getattr(self, "track_title", "") or "")
+        current_artist = str(getattr(self, "artist", "") or "")
+        if not title or not current_title:
+            return False
+        return (
+            self._normalized_track_identity(title) == self._normalized_track_identity(current_title)
+            and self._normalized_track_identity(artist) == self._normalized_track_identity(current_artist)
+        )
+
+    def _normalized_track_identity(self, value: str) -> str:
+        text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        return re.sub(r"[\s\-_./\\|·・•:：;；,，'\"“”‘’()（）\[\]【】]+", "", text)
+
     def _prepare_album_flow_for_track_change(self, incoming_track_id: str) -> int:
         incoming_track_id = str(incoming_track_id or "")
         history = list(getattr(self, "album_history", []) or [])
         queue = list(getattr(self, "album_queue", []) or [])
         previous_id = str(getattr(self, "media_track_id", "") or "")
         if previous_id and incoming_track_id and previous_id != incoming_track_id:
+            queue_index = next(
+                (index for index, entry in enumerate(queue) if self._entry_matches_track_id(entry, incoming_track_id)),
+                -1,
+            )
             history_index = next(
                 (index for index, entry in enumerate(history) if self._entry_matches_track_id(entry, incoming_track_id)),
                 -1,
             )
             current_entry = self._current_album_history_entry()
+            if queue_index >= 0:
+                self._begin_music_surface_transition(queue[queue_index], direction=1, mode="queued")
             if history_index >= 0:
+                self._begin_music_surface_transition(history[history_index], direction=-1, mode="history")
                 history.pop(history_index)
                 queue = [current_entry] + [entry for entry in queue if not self._entry_matches_track_id(entry, previous_id)]
                 self.album_history = history[:6]
                 self.album_queue = queue[:6]
                 return -1
+            if queue_index < 0:
+                self._begin_music_surface_transition(None, direction=1, mode="white_bridge")
             history.insert(0, current_entry)
         self.album_history = history[:6]
         return 1
@@ -6648,6 +7288,10 @@ class IslandStackVisual(QWidget):
     def _stack_target_width(self, main_kind: IslandKind) -> float:
         if main_kind == IslandKind.MUSIC:
             return self._music_target_width(self.expanded)
+        if main_kind == IslandKind.EMPTY_TEXT:
+            return self._empty_text_island_size()[0]
+        if main_kind == IslandKind.TIME:
+            return self._empty_time_island_size()[0]
         return self._u(float(self.STACK_WIDTH))
 
     def _taskbar_compact_active(self) -> bool:
@@ -6821,6 +7465,67 @@ class IslandStackVisual(QWidget):
         min_width = max(self._u(120.0), target_width * 0.5)
         return max(min_width, min(target_width, limit if limit > 0 else min_width))
 
+    def _empty_bar_orientation(self) -> str:
+        return "vertical" if str(getattr(self, "location_mode", "") or "").strip().casefold() == "tasker" else "horizontal"
+
+    def _empty_bar_size(self) -> tuple[float, float]:
+        if self._empty_bar_orientation() == "vertical":
+            return self._u(7.0), self._u(44.0)
+        return self._u(122.0), self._u(12.0)
+
+    def _color_luminance(self, color: QColor) -> float:
+        if color is None or not color.isValid():
+            return 0.0
+        return 0.2126 * color.redF() + 0.7152 * color.greenF() + 0.0722 * color.blueF()
+
+    def _empty_bar_surrounding_is_light(self) -> bool:
+        base = QColor()
+        if self._empty_bar_orientation() == "vertical":
+            base = QColor(getattr(self, "taskbar_material_color", QColor()))
+            if base.isValid():
+                return bool(getattr(self, "taskbar_material_is_light", False)) or self._color_luminance(base) >= 0.62
+        finder_material = getattr(self, "finder_material", None)
+        if bool(getattr(self, "finder_mode", False)) and finder_material is not None:
+            candidates = [
+                QColor(getattr(finder_material, "mid_color", QColor())),
+                QColor(getattr(finder_material, "top_color", QColor())),
+                QColor(getattr(finder_material, "bottom_color", QColor())),
+            ]
+            valid = [color for color in candidates if color.isValid()]
+            if valid:
+                return sum(self._color_luminance(color) for color in valid) / len(valid) >= 0.62
+        return not self._system_dark_mode()
+
+    def _empty_bar_color(self) -> QColor:
+        return QColor(30, 32, 36) if self._empty_bar_surrounding_is_light() else QColor(246, 248, 252)
+
+    def _empty_bar_alpha(self) -> int:
+        return 214
+
+    def _empty_text_island_font(self) -> QFont:
+        return self._font(14, QFont.Weight.Bold, shrink=False)
+
+    def _empty_time_island_font(self) -> QFont:
+        return self._font(15, QFont.Weight.Bold, shrink=False)
+
+    def _empty_text_island_colors(self) -> tuple[QColor, QColor]:
+        return QColor(8, 9, 11), QColor(246, 248, 252)
+
+    def _empty_time_island_colors(self) -> tuple[QColor, QColor]:
+        return QColor(8, 9, 11), QColor(246, 248, 252)
+
+    def _empty_text_island_size(self, max_width: float | None = None) -> tuple[float, float]:
+        text = self._empty_text_display_text()
+        metrics = QFontMetrics(self._empty_text_island_font())
+        width = float(metrics.horizontalAdvance(text)) + self._u(36.0)
+        return max(self._u(56.0), width), self._u(40.0)
+
+    def _empty_time_island_size(self, max_width: float | None = None) -> tuple[float, float]:
+        text = self._empty_time_text()
+        metrics = QFontMetrics(self._empty_time_island_font())
+        width = float(metrics.horizontalAdvance(text)) + self._u(34.0)
+        return max(self._u(74.0), width), self._u(40.0)
+
     def _main_size_for_kind(self, main_kind: IslandKind, stack_w: float) -> tuple[float, float]:
         if main_kind == IslandKind.MUSIC:
             if self.expanded:
@@ -6843,7 +7548,11 @@ class IslandStackVisual(QWidget):
         if main_kind == IslandKind.MESSAGE:
             width = stack_w if self.expanded else min(self._u(430.0), stack_w)
             return self._taskbar_width_with_manual(width), self._u(48.0)
-        return float(getattr(self, "empty_bar_width", 92)), float(getattr(self, "empty_bar_height", 14))
+        if main_kind == IslandKind.EMPTY_TEXT:
+            return self._empty_text_island_size(stack_w)
+        if main_kind == IslandKind.TIME:
+            return self._empty_time_island_size(stack_w)
+        return self._empty_bar_size()
 
     def _time_panel_breakpoint(self) -> float:
         return self._u(560.0)
@@ -6870,12 +7579,14 @@ class IslandStackVisual(QWidget):
         return self._u(236.0)
 
     def _plugin_panel_visible(self) -> bool:
+        if self._empty_time_mode_active():
+            return False
         return bool(self.expanded and self._plugin_enabled() and getattr(self, "plugin_panel_open", False))
 
     def _main_top_for_direction(self, main_kind: IslandKind, main_h: float, direction: int) -> float:
         top_y = self._finder_stack_top_y()
         if main_kind == IslandKind.THIN_BAR:
-            top_y = max(0.0, top_y - self._u(2.0) - 2.0 + float(getattr(self, "empty_bar_y_offset", 0)))
+            top_y = max(0.0, top_y - self._u(2.0) - 2.0)
         if self.finder_mode or direction >= 0:
             return top_y
         return max(0.0, self.height() - top_y - main_h)
@@ -6970,6 +7681,12 @@ class IslandStackVisual(QWidget):
         elif main_kind == IslandKind.PLUGIN:
             main_key = "plugin"
             message = None
+        elif main_kind == IslandKind.EMPTY_TEXT:
+            main_key = "empty-text"
+            message = None
+        elif main_kind == IslandKind.TIME:
+            main_key = "time"
+            message = None
         elif main_kind == IslandKind.MESSAGE:
             message = self.messages[0]
             main_key = f"message:{self._message_key(message)}"
@@ -6982,7 +7699,8 @@ class IslandStackVisual(QWidget):
         visuals.append(StackVisual(main_key, main_kind, main_rect, False, message, 10))
         cursor_edge = main_rect.bottom() + gap if direction >= 0 else main_rect.top() - gap
 
-        taskbar_overlay_alert = self._taskbar_main_overlay_alert()
+        taskbar_side_notifications = self._taskbar_compact_active() and not self.expanded
+        taskbar_overlay_alert = None if taskbar_side_notifications else self._taskbar_main_overlay_alert()
         overlay_plugin_id = ""
         if taskbar_overlay_alert is not None:
             try:
@@ -6991,17 +7709,30 @@ class IslandStackVisual(QWidget):
                 overlay_plugin_id = "time"
             visuals.append(StackVisual(f"taskbar-overlay:{overlay_plugin_id}", IslandKind.PLUGIN_ALERT, self._taskbar_main_overlay_rect(main_rect, taskbar_overlay_alert), False, None, 12))
 
-        plugin_alerts = self._active_plugin_alerts(2)
+        notification_limit = 3 if taskbar_side_notifications else 2
+        plugin_alerts = self._active_plugin_alerts(notification_limit)
         if overlay_plugin_id:
             overlay_base = overlay_plugin_id.split(":", 1)[0].casefold()
             plugin_alerts = [
                 alert for alert in plugin_alerts
                 if str(alert[6] or "").split(":", 1)[0].casefold() != overlay_base
             ]
+
+        if main_kind == IslandKind.MESSAGE:
+            candidate_dot_messages = self.messages[1 : 1 + self._folded_message_limit(main_kind)]
+        else:
+            candidate_dot_messages = self.messages[: self._folded_message_limit(main_kind)]
+        if taskbar_side_notifications:
+            dot_messages = candidate_dot_messages[: max(0, notification_limit - len(plugin_alerts))]
+            side_notification_total = len(plugin_alerts) + len(dot_messages)
+        else:
+            dot_messages = candidate_dot_messages
+            side_notification_total = len(plugin_alerts)
+
         if plugin_alerts:
             for alert_slot, plugin_alert in enumerate(plugin_alerts):
                 _index, _label, _detail, _summary, _color, _icon, plugin_id, _status, _alert_title, _alert_body, _alert_priority = plugin_alert
-                alert_rect = self._plugin_alert_rect(main_rect, alert_slot, len(plugin_alerts))
+                alert_rect = self._plugin_alert_rect(main_rect, alert_slot, side_notification_total)
                 visuals.append(StackVisual(f"plugin-alert:{plugin_id}", IslandKind.PLUGIN_ALERT, alert_rect, False, None, 8))
 
         panel_visible = self._plugin_panel_visible()
@@ -7028,13 +7759,11 @@ class IslandStackVisual(QWidget):
                 visuals.append(StackVisual(key, IslandKind.MESSAGE, rect, False, msg, max(1, 6 - index)))
             return visuals
 
-        if main_kind == IslandKind.MESSAGE:
-            dot_messages = self.messages[1 : 1 + self._folded_message_limit(main_kind)]
-        else:
-            dot_messages = self.messages[: self._folded_message_limit(main_kind)]
         for dot_index, msg in enumerate(dot_messages):
             key = f"message-dot:{self._message_key(msg)}"
-            rect = self._message_dot_rect(main_rect, dot_index, len(dot_messages), direction)
+            slot_index = len(plugin_alerts) + dot_index if taskbar_side_notifications else dot_index
+            slot_count = side_notification_total if taskbar_side_notifications else len(dot_messages)
+            rect = self._message_dot_rect(main_rect, slot_index, slot_count, direction)
             z_index = 14 - dot_index if self._taskbar_compact_active() else 5 - dot_index
             visuals.append(StackVisual(key, IslandKind.MESSAGE, rect, True, msg, z_index))
 
@@ -7055,7 +7784,7 @@ class IslandStackVisual(QWidget):
                 if main_kind == IslandKind.MESSAGE and self.messages and msg is self.messages[0]:
                     continue
                 popup_candidates.append(msg)
-            popup_limit = 0 if main_kind == IslandKind.MESSAGE else 1
+            popup_limit = 0 if main_kind == IslandKind.MESSAGE or taskbar_side_notifications else 1
             for index, msg in enumerate(popup_candidates[:popup_limit]):
                 key = f"message:{self._message_key(msg)}"
                 pop_width = main_w if main_kind != IslandKind.THIN_BAR else self._u(430)
@@ -7074,20 +7803,14 @@ class IslandStackVisual(QWidget):
             if style == "block":
                 rail_w = max(self._u(30.0), min(self._u(42.0), main_rect.height() * 0.90))
                 rail_h = rail_w
-                gap = self._u(4.0)
             else:
                 rail_w = max(self._u(4.0), min(self._u(7.0), main_rect.height() * 0.16))
                 rail_h = max(self._u(22.0), main_rect.height() * 0.72)
-                gap = 0.0
+            gap = self._taskbar_notification_outer_gap()
             row_gap = self._u(4.0)
             total = max(1, int(total))
             slot = max(0, min(int(slot), total - 1))
-            side = "right" if slot % 2 == 0 else "left"
-            side_index = slot // 2
-            if side == "right":
-                x = main_rect.right() + gap + side_index * (rail_w + row_gap)
-            else:
-                x = main_rect.left() - gap - rail_w - side_index * (rail_w + row_gap)
+            x = main_rect.right() + gap + slot * (rail_w + row_gap)
             y = main_rect.center().y() - rail_h / 2.0
             return QRectF(x, y, rail_w, rail_h)
 
@@ -7387,27 +8110,49 @@ class IslandStackVisual(QWidget):
     def _main_kind(self) -> IslandKind:
         if self._music_enabled_for_stack():
             return IslandKind.MUSIC
-        if self._plugin_enabled():
+        plugin_enabled = self._plugin_enabled()
+        if plugin_enabled and self._no_music_island_priority() == "plugin":
+            return IslandKind.PLUGIN
+        if self._empty_music_text_active():
+            return IslandKind.EMPTY_TEXT
+        if self._empty_time_mode_active():
+            return IslandKind.TIME
+        if plugin_enabled and self._empty_island_display_mode() == "visible_bar" and self._no_music_island_priority() == "empty":
+            return IslandKind.THIN_BAR
+        if plugin_enabled:
             return IslandKind.PLUGIN
         if self.messages:
             return IslandKind.MESSAGE
         return IslandKind.THIN_BAR
 
-    def _music_enabled_for_stack(self) -> bool:
-        if not self.music_playing:
-            return False
-        if not bool(getattr(self, "music_auto_detect", False)):
-            return True
+    def _live_audio_detected_for_stack(self) -> bool:
         has_audio = bool(getattr(self, "live_audio_available", False))
         if not has_audio:
             try:
-                has_audio = bool(getattr(self.data_provider, "has_live_audio", lambda: False)())
+                provider = getattr(self, "data_provider", None)
+                has_audio = bool(getattr(provider, "has_live_audio", lambda: False)())
             except Exception:
                 has_audio = False
         return has_audio
 
+    def _paused_media_available_for_stack(self) -> bool:
+        if bool(getattr(self, "media_is_playing", True)):
+            return False
+        if str(getattr(self, "track_title", "") or "").strip():
+            return True
+        if str(getattr(self, "artist", "") or "").strip():
+            return True
+        return bool(getattr(self, "lyrics", None) or [])
+
+    def _music_enabled_for_stack(self) -> bool:
+        if not bool(getattr(self, "music_playing", False)):
+            return False
+        if not bool(getattr(self, "music_auto_detect", False)):
+            return True
+        return self._live_audio_detected_for_stack() or self._paused_media_available_for_stack()
+
     def _plugin_enabled(self) -> bool:
-        return self.persistent_plugin and len(self._enabled_plugin_ids()) > 0
+        return bool(getattr(self, "persistent_plugin", False)) and len(self._enabled_plugin_ids()) > 0
 
     def _folded_message_limit(self, main_kind: IslandKind) -> int:
         if self._taskbar_compact_active():
@@ -7440,19 +8185,21 @@ class IslandStackVisual(QWidget):
             gap = self._u(3.0)
             width = max(self._u(4.0), min(self._u(6.0), main_rect.height() * 0.15))
             height = max(self._u(20.0), main_rect.height() * 0.72)
-        side = "right" if slot % 2 == 0 else "left"
-        side_index = slot // 2
         if self._taskbar_compact_active():
-            if side == "right":
-                x = main_rect.right() - gap - width - side_index * (width + row_gap)
-            else:
-                x = main_rect.left() + gap + side_index * (width + row_gap)
-        elif side == "right":
-            x = main_rect.right() + gap + side_index * (width + row_gap)
+            gap = self._taskbar_notification_outer_gap()
+            x = main_rect.right() + gap + slot * (width + row_gap)
         else:
-            x = main_rect.left() - gap - width - side_index * (width + row_gap)
+            side = "right" if slot % 2 == 0 else "left"
+            side_index = slot // 2
+            if side == "right":
+                x = main_rect.right() + gap + side_index * (width + row_gap)
+            else:
+                x = main_rect.left() - gap - width - side_index * (width + row_gap)
         y = main_rect.center().y() - height / 2.0
         return QRectF(x, y, width, height)
+
+    def _taskbar_notification_outer_gap(self) -> float:
+        return self._u(9.0)
 
     def _message_dot_rect(self, main_rect: QRectF, index: int, count: int, direction: int = 1) -> QRectF:
         if self._taskbar_compact_active():
@@ -7625,6 +8372,10 @@ class IslandStackVisual(QWidget):
                 self._paint_plugin_alert(painter, rect, visual.key)
             elif visual.kind == IslandKind.MESSAGE and visual.message:
                 self._paint_message(painter, rect, visual.message, visual.folded)
+            elif visual.kind == IslandKind.EMPTY_TEXT:
+                self._paint_empty_text_island(painter, rect)
+            elif visual.kind == IslandKind.TIME:
+                self._paint_empty_time_island(painter, rect)
             else:
                 self._paint_thin_bar(painter, rect)
             painter.restore()
@@ -7980,11 +8731,107 @@ class IslandStackVisual(QWidget):
                 abs(previous.right() - target.right()),
                 abs(previous.bottom() - target.bottom()),
             )
-            if edge_delta <= self._u(2.5):
+            threshold = self._u(6.0 if mode_key == "finder" else 2.5)
+            if edge_delta <= threshold:
                 return previous
         self.group_frame_target_rect = QRectF(target)
         self.group_frame_target_mode_key = mode_key
         return target
+
+    def _taskbar_material_frame_radius(self, frame: QRectF) -> float:
+        if self._taskbar_panel_corner_policy() == "square":
+            return 0.0
+        return min(self._u(10.0), frame.height() * 0.12)
+
+    def _paint_taskbar_material_frame(self, painter: QPainter, frame: QRectF, shell: QPainterPath | None = None) -> QPainterPath:
+        radius = self._taskbar_material_frame_radius(frame)
+        shell = QPainterPath(shell) if shell is not None else self._rounded_path(frame, radius)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        shadow = QRectF(frame).adjusted(-self._u(8.0), -self._u(8.0), self._u(8.0), self._u(10.0))
+        shadow_gradient = QRadialGradient(shadow.center(), max(shadow.width(), shadow.height()) * 0.58)
+        tokens = self._taskbar_material_frame_tokens()
+        shadow_color = tokens["shadow"]
+        shadow_gradient.setColorAt(0.0, shadow_color)
+        shadow_gradient.setColorAt(0.70, QColor(0, 0, 0, 28))
+        shadow_gradient.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(shadow_gradient)
+        painter.drawRoundedRect(shadow, radius + self._u(10.0), radius + self._u(10.0))
+
+        material = QLinearGradient(frame.topLeft(), frame.bottomLeft())
+        material.setColorAt(0.0, tokens["fill_top"])
+        material.setColorAt(0.42, tokens["fill_mid"])
+        material.setColorAt(1.0, tokens["fill_bottom"])
+        painter.fillPath(shell, material)
+        painter.setPen(QPen(tokens["stroke"], self._u(1.0)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(shell)
+        painter.restore()
+        return shell
+
+    def _taskbar_right_extension_path(self, rect: QRectF, radius: float) -> QPainterPath:
+        corner = max(0.0, min(float(radius), rect.width() * 0.5, rect.height() * 0.5))
+        path = QPainterPath()
+        path.moveTo(rect.left(), rect.top())
+        path.lineTo(rect.right() - corner, rect.top())
+        if corner > 0.0:
+            path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + corner)
+        else:
+            path.lineTo(rect.right(), rect.top())
+        path.lineTo(rect.right(), rect.bottom() - corner)
+        if corner > 0.0:
+            path.quadTo(rect.right(), rect.bottom(), rect.right() - corner, rect.bottom())
+        else:
+            path.lineTo(rect.right(), rect.bottom())
+        path.lineTo(rect.left(), rect.bottom())
+        path.closeSubpath()
+        return path
+
+    def _reset_taskbar_notification_frame_state(self):
+        self.taskbar_notification_frame_motion = None
+        self.taskbar_notification_frame_rect = QRectF()
+
+    def _is_taskbar_notification_visual(self, visual: StackVisual) -> bool:
+        if not self._taskbar_compact_active() or bool(getattr(self, "expanded", False)):
+            return False
+        if visual.kind == IslandKind.PLUGIN_ALERT and str(visual.key).startswith("plugin-alert:"):
+            return True
+        return visual.kind == IslandKind.MESSAGE and visual.folded and str(visual.key).startswith("message-dot:")
+
+    def _taskbar_notification_frame_target(self, items: list[tuple[StackVisual, SpringRect]]) -> QRectF:
+        main_rect = QRectF()
+        notification_rects: list[QRectF] = []
+        for visual, motion in items:
+            rect = QRectF(visual.rect)
+            if motion.opacity <= 0.08 or rect.width() <= 2 or rect.height() <= 2:
+                continue
+            if visual.z_index == 10:
+                main_rect = rect
+            elif self._is_taskbar_notification_visual(visual):
+                notification_rects.append(rect)
+        if main_rect.isNull() or not notification_rects:
+            return QRectF()
+        right = max(rect.right() for rect in notification_rects) + self._u(3.0)
+        left = main_rect.right() - self._u(18.0)
+        return QRectF(left, main_rect.top(), max(self._u(4.0), right - left), main_rect.height())
+
+    def _paint_taskbar_notification_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
+        target = self._taskbar_notification_frame_target(items)
+        if target.isNull():
+            self._reset_taskbar_notification_frame_state()
+            return
+        motion = getattr(self, "taskbar_notification_frame_motion", None)
+        if motion is None:
+            motion = SpringRect(target)
+            motion.opacity = 1.0
+            self.taskbar_notification_frame_motion = motion
+        else:
+            motion.step(target, 1.0, dt, response=0.30, damping=0.84)
+        frame = QRectF(motion.rect)
+        self.taskbar_notification_frame_rect = frame
+        shell = self._taskbar_right_extension_path(frame, self._taskbar_material_frame_radius(frame))
+        self._paint_taskbar_material_frame(painter, frame, shell)
 
     def _paint_taskbar_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
         visible_rects = []
@@ -8028,36 +8875,17 @@ class IslandStackVisual(QWidget):
         self.group_frame_mode_key = mode_key
 
         frame = self.group_frame_motion.rect
-        radius = 0.0 if self._taskbar_panel_corner_policy() == "square" else min(self._u(10.0), frame.height() * 0.12)
-        shell = self._rounded_path(frame, radius)
+        shell = self._rounded_path(frame, self._taskbar_material_frame_radius(frame))
         self.group_frame_mask_path = QPainterPath(shell)
         self.finder_hover_rect = frame.adjusted(-self._u(8.0), -self._u(6.0), self._u(8.0), self._u(8.0))
-
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        shadow = QRectF(frame).adjusted(-self._u(8.0), -self._u(8.0), self._u(8.0), self._u(10.0))
-        shadow_gradient = QRadialGradient(shadow.center(), max(shadow.width(), shadow.height()) * 0.58)
-        tokens = self._taskbar_material_frame_tokens()
-        shadow_color = tokens["shadow"]
-        shadow_gradient.setColorAt(0.0, shadow_color)
-        shadow_gradient.setColorAt(0.70, QColor(0, 0, 0, 28))
-        shadow_gradient.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setBrush(shadow_gradient)
-        painter.drawRoundedRect(shadow, radius + self._u(10.0), radius + self._u(10.0))
-
-        material = QLinearGradient(frame.topLeft(), frame.bottomLeft())
-        material.setColorAt(0.0, tokens["fill_top"])
-        material.setColorAt(0.42, tokens["fill_mid"])
-        material.setColorAt(1.0, tokens["fill_bottom"])
-        painter.fillPath(shell, material)
-        painter.setPen(QPen(tokens["stroke"], self._u(1.0)))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(shell)
-        painter.restore()
+        self._paint_taskbar_material_frame(painter, frame)
 
     def _paint_myfinder_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
         if not self.finder_mode:
+            if self._taskbar_compact_active() and not bool(getattr(self, "expanded", False)):
+                self._paint_taskbar_notification_frame(painter, items, dt)
+            else:
+                self._reset_taskbar_notification_frame_state()
             if self._taskbar_uses_expanded_material_frame():
                 self._paint_taskbar_group_frame(painter, items, dt)
             else:
@@ -8321,6 +9149,7 @@ class IslandStackVisual(QWidget):
             if ambience_style != "duotone_full":
                 self._paint_music_blur_mask(painter, rect, radius, expanded)
             self._paint_music_light_wave(painter, rect, radius, expanded)
+        self._paint_music_surface_transition_wash(painter, rect, radius, expanded)
         if expanded:
             self._paint_music_expanded(painter, rect)
         else:
@@ -8346,6 +9175,42 @@ class IslandStackVisual(QWidget):
         sheen.setColorAt(1.0, QColor(225, 229, 235, 54))
         painter.setBrush(sheen)
         painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), max(1.0, radius - self._u(0.8)), max(1.0, radius - self._u(0.8)))
+        painter.restore()
+
+    def _paint_music_surface_transition_wash(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
+        mode = str(getattr(self, "music_surface_transition_mode", "") or "")
+        started_at = float(getattr(self, "music_surface_transition_started_at", 0.0) or 0.0)
+        if not mode or started_at <= 0.0:
+            return
+        progress = self._transition_progress_for_surface()
+        if progress >= 1.0 and not str(getattr(self, "music_surface_transition_mode", "") or ""):
+            return
+        primary, secondary = self._current_music_surface_colors()
+        bridge = self._mix_color(primary, secondary, 0.50)
+        white_mode = mode in {"white_bridge", "white_to_album"}
+        base_alpha = 238 if white_mode else (178 if expanded else 158)
+        direction = -1 if int(getattr(self, "music_surface_transition_direction", 1) or 1) < 0 else 1
+        start_x = rect.left() if direction >= 0 else rect.right()
+        end_x = rect.right() if direction >= 0 else rect.left()
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setClipPath(self._rounded_path(rect, radius))
+        fill = QLinearGradient(start_x, rect.top(), end_x, rect.bottom())
+        fill.setColorAt(0.00, QColor(primary.red(), primary.green(), primary.blue(), base_alpha))
+        fill.setColorAt(0.52, QColor(bridge.red(), bridge.green(), bridge.blue(), max(72, int(base_alpha * 0.86))))
+        fill.setColorAt(1.00, QColor(secondary.red(), secondary.green(), secondary.blue(), max(58, int(base_alpha * 0.74))))
+        painter.fillRect(rect, fill)
+
+        band_progress = max(0.0, min(1.0, progress))
+        band_center = rect.left() + rect.width() * band_progress if direction >= 0 else rect.right() - rect.width() * band_progress
+        band_width = rect.width() * (0.34 if white_mode else 0.24)
+        band = QLinearGradient(band_center - band_width, 0, band_center + band_width, 0)
+        band.setColorAt(0.00, QColor(255, 255, 255, 0))
+        band.setColorAt(0.48, QColor(255, 255, 255, 76 if white_mode else 34))
+        band.setColorAt(1.00, QColor(255, 255, 255, 0))
+        painter.fillRect(rect, band)
         painter.restore()
 
     def _compact_cover_rect(self, rect: QRectF) -> QRectF:
@@ -8412,7 +9277,8 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _dominant_album_color(self) -> QColor:
-        return self._safe_wave_color(self.album_color)
+        primary, _secondary = self._current_music_surface_colors()
+        return self._safe_wave_color(primary)
 
     def _safe_wave_color(self, color: QColor) -> QColor:
         hue, sat, val, _alpha = color.getHsvF()
@@ -8467,24 +9333,33 @@ class IslandStackVisual(QWidget):
     def _time_reference_palette(self, theme: dict[str, QColor], color: QColor) -> dict[str, QColor]:
         if not self._system_dark_mode():
             return {
-                "surface": QColor(246, 246, 248, 255),
-                "surface_lowest": QColor(238, 239, 242, 255),
-                "module": QColor(255, 255, 255, 255),
-                "module_active": QColor(248, 250, 255, 255),
-                "module_stroke": QColor(214, 216, 222, 220),
-                "handle": QColor(226, 229, 235, 255),
-                "divider": QColor(196, 200, 210, 190),
-                "accent": QColor(255, 184, 0, 255),
-                "accent_soft": QColor(255, 184, 0, 20),
-                "accent_track": QColor(255, 184, 0, 54),
-                "control_stroke": QColor(218, 154, 18, 170),
+                "surface": QColor(241, 242, 246, 255),
+                "surface_lowest": QColor(232, 234, 240, 255),
+                "module": QColor(255, 255, 252, 255),
+                "module_active": QColor(255, 248, 226, 255),
+                "module_stroke": QColor(184, 188, 198, 230),
+                "handle": QColor(211, 216, 226, 255),
+                "divider": QColor(178, 184, 196, 200),
+                "accent": QColor(222, 142, 0, 255),
+                "accent_soft": QColor(255, 184, 0, 34),
+                "accent_track": QColor(222, 142, 0, 76),
+                "control_stroke": QColor(184, 116, 0, 210),
                 "active": QColor(2, 170, 74, 255),
-                "text": QColor(24, 24, 27, 242),
-                "muted": QColor(92, 92, 100, 220),
-                "muted_dim": QColor(128, 128, 136, 170),
+                "text": QColor(22, 24, 28, 244),
+                "muted": QColor(66, 70, 78, 224),
+                "muted_dim": QColor(104, 110, 122, 184),
                 "thumb": QColor(255, 255, 255, 246),
-                "off_track": QColor(232, 234, 238, 230),
-                "note_stroke": QColor(142, 150, 164, 185),
+                "off_track": QColor(224, 228, 236, 236),
+                "note_stroke": QColor(124, 134, 150, 195),
+                "compact_cell": QColor(255, 255, 252, 248),
+                "compact_cell_active": QColor(255, 248, 226, 255),
+                "compact_stroke": QColor(178, 184, 196, 210),
+                "compact_time_chip": QColor(34, 36, 40, 238),
+                "compact_time_text": QColor(255, 184, 0, 255),
+                "compact_chip": QColor(246, 248, 252, 245),
+                "compact_chip_done": QColor(206, 132, 0, 255),
+                "compact_chip_text": QColor(206, 132, 0, 245),
+                "compact_done_text": QColor(255, 255, 248, 246),
             }
         return {
             "surface": QColor(19, 19, 19, 255),
@@ -8505,11 +9380,21 @@ class IslandStackVisual(QWidget):
             "thumb": QColor(245, 244, 241, 246),
             "off_track": QColor(19, 19, 19, 230),
             "note_stroke": QColor(142, 150, 164, 185),
+            "compact_cell": QColor(42, 42, 42, 226),
+            "compact_cell_active": QColor(54, 54, 54, 242),
+            "compact_stroke": QColor(170, 170, 170, 150),
+            "compact_time_chip": QColor(20, 20, 20, 235),
+            "compact_time_text": QColor(255, 184, 0, 255),
+            "compact_chip": QColor(26, 26, 26, 235),
+            "compact_chip_done": QColor(255, 184, 0, 255),
+            "compact_chip_text": QColor(255, 184, 0, 245),
+            "compact_done_text": QColor(34, 24, 0, 245),
         }
 
     def _accent_pair(self) -> tuple[QColor, QColor]:
         base = self._dominant_album_color()
-        companion = self._safe_wave_color(self.secondary_color)
+        _primary, secondary = self._current_music_surface_colors()
+        companion = self._safe_wave_color(secondary)
         base_hue, base_sat, _base_val, _base_alpha = base.getHsvF()
         companion_hue, companion_sat, _companion_val, _companion_alpha = companion.getHsvF()
         if base_hue < 0 or base_sat < 0.12:
@@ -8581,9 +9466,113 @@ class IslandStackVisual(QWidget):
         lightness = max(0.30, min(0.66, lightness + lightness_boost))
         return QColor.fromHslF(hue, saturation, lightness, 1.0)
 
+    def _transition_progress_for_surface(self, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else float(now)
+        started_at = float(getattr(self, "music_surface_transition_started_at", 0.0) or 0.0)
+        if started_at <= 0.0:
+            return 1.0
+        duration = max(0.18, float(getattr(self, "music_surface_transition_duration", 0.62) or 0.62))
+        elapsed = max(0.0, min(1.0, (now - started_at) / duration))
+        eased = 1.0 - (1.0 - elapsed) ** 4
+        if elapsed >= 1.0:
+            self.music_surface_transition_started_at = 0.0
+            self.music_surface_transition_mode = ""
+        return eased
+
+    def _music_surface_waiting_for_loaded_lyrics(self) -> bool:
+        if getattr(self, "timed_lyrics", None):
+            return False
+        lyrics = [str(line or "").strip() for line in getattr(self, "lyrics", []) or [] if str(line or "").strip()]
+        if not lyrics:
+            return True
+        loading_markers = {"查找歌词中", "寻找歌词中", "加载歌词中"}
+        return len(lyrics) == 1 and lyrics[0] in loading_markers
+
+    def _current_music_surface_colors(self, now: float | None = None) -> tuple[QColor, QColor]:
+        current = (
+            QColor(getattr(self, "album_color", QColor(58, 68, 88))),
+            QColor(getattr(self, "secondary_color", QColor(34, 44, 62))),
+        )
+        started_at = float(getattr(self, "music_surface_transition_started_at", 0.0) or 0.0)
+        if started_at <= 0.0:
+            return current
+        start_primary, start_secondary = getattr(self, "music_surface_transition_from", (QColor(), QColor()))
+        target_primary, target_secondary = getattr(self, "music_surface_transition_to", current)
+        start_primary = QColor(start_primary) if isinstance(start_primary, QColor) and start_primary.isValid() else current[0]
+        start_secondary = QColor(start_secondary) if isinstance(start_secondary, QColor) and start_secondary.isValid() else current[1]
+        target_primary = QColor(target_primary) if isinstance(target_primary, QColor) and target_primary.isValid() else current[0]
+        target_secondary = QColor(target_secondary) if isinstance(target_secondary, QColor) and target_secondary.isValid() else current[1]
+        progress = self._transition_progress_for_surface(now)
+        return (
+            self._mix_color(start_primary, target_primary, progress),
+            self._mix_color(start_secondary, target_secondary, progress),
+        )
+
+    def _begin_music_surface_transition(self, target_entry, direction: int = 1, mode: str = "queued"):
+        start_primary = QColor(getattr(self, "album_color", QColor(58, 68, 88)))
+        start_secondary = QColor(getattr(self, "secondary_color", QColor(34, 44, 62)))
+        target_primary = self._entry_color_token(target_entry, "album_color") if target_entry is not None else QColor()
+        target_secondary = self._entry_color_token(target_entry, "secondary_color") if target_entry is not None else QColor()
+        if not target_primary.isValid() and target_entry is not None:
+            image = self._album_art_from_entry(target_entry)
+            if not image.isNull():
+                target_primary = self._safe_wave_color(self._dominant_color_from_image(image))
+                target_secondary = self._related_color_from_qcolor(target_primary, 0.12)
+        bridge = str(mode or "") == "white_bridge" or not target_primary.isValid()
+        if bridge:
+            target_primary = QColor(245, 247, 250)
+            target_secondary = QColor(228, 233, 241)
+            mode = "white_bridge"
+        elif not target_secondary.isValid():
+            target_secondary = self._related_color_from_qcolor(target_primary, 0.12)
+        self.music_surface_transition_from = (start_primary, start_secondary)
+        self.music_surface_transition_to = (target_primary, target_secondary)
+        self.music_surface_transition_started_at = time.monotonic()
+        self.music_surface_transition_duration = max(0.42, min(0.82, float(getattr(self, "album_island_transition_duration", 0.62) or 0.62)))
+        self.music_surface_transition_direction = -1 if direction < 0 else 1
+        self.music_surface_transition_mode = str(mode or "queued")
+
+    def _retarget_white_bridge_to_current_album(self):
+        target_primary = QColor(getattr(self, "album_color", QColor(58, 68, 88)))
+        target_secondary = QColor(getattr(self, "secondary_color", QColor(34, 44, 62)))
+        self.music_surface_transition_from = (QColor(245, 247, 250), QColor(228, 233, 241))
+        self.music_surface_transition_to = (target_primary, target_secondary)
+        self.music_surface_transition_started_at = time.monotonic()
+        self.music_surface_transition_duration = max(0.42, min(0.72, float(getattr(self, "album_island_transition_duration", 0.62) or 0.62)))
+        self.music_surface_transition_mode = "white_to_album"
+
+    def _related_color_from_qcolor(self, color: QColor, lightness_delta: float = 0.10) -> QColor:
+        hue, saturation, lightness, _alpha = color.getHslF()
+        if hue < 0:
+            hue = 0.58
+        related_color = QColor.fromHslF(hue, max(0.28, min(0.78, saturation + 0.08)), max(0.28, min(0.72, lightness + lightness_delta)), 1.0)
+        return related_color
+
+    def _dominant_color_from_image(self, image: QImage) -> QColor:
+        if image.isNull():
+            return QColor()
+        scaled = image.scaled(16, 16, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+        buckets: dict[tuple[int, int, int], tuple[int, int, int, int]] = {}
+        for y in range(scaled.height()):
+            for x in range(scaled.width()):
+                color = QColor(scaled.pixel(x, y))
+                if color.alpha() < 32:
+                    continue
+                hue, saturation, value, _alpha = color.getHsvF()
+                if hue < 0 or value < 0.12:
+                    continue
+                key = (int(hue * 12), int(saturation * 4), int(value * 4))
+                r, g, b, count = buckets.get(key, (0, 0, 0, 0))
+                buckets[key] = (r + color.red(), g + color.green(), b + color.blue(), count + 1)
+        if not buckets:
+            return QColor()
+        r, g, b, count = max(buckets.values(), key=lambda item: item[3])
+        return QColor(r // max(1, count), g // max(1, count), b // max(1, count))
+
     def _album_mist_palette(self) -> tuple[QColor, QColor, QColor]:
-        primary = self._ambient_mist_color(self.album_color, 0.18, 0.03)
-        secondary = self._ambient_mist_color(self.secondary_color, 0.20, 0.04)
+        album_color, secondary_color = self._current_music_surface_colors()
+        primary = self._ambient_mist_color(album_color, 0.18, 0.03)
+        secondary = self._ambient_mist_color(secondary_color, 0.20, 0.04)
         bridge = self._mix_color(primary, secondary, 0.50)
         return primary, self._ambient_mist_color(bridge, 0.16, 0.03), secondary
 
@@ -8598,7 +9587,8 @@ class IslandStackVisual(QWidget):
         return max(0.0, min(1.0, float(getattr(self, "music_flow_intensity", 0.74))))
 
     def _xiaomi_duotone_palette(self) -> tuple[QColor, QColor, QColor]:
-        base = self._safe_wave_color(self.album_color)
+        album_color, _secondary_color = self._current_music_surface_colors()
+        base = self._safe_wave_color(album_color)
         hue, sat, val, _alpha = base.getHsvF()
         if hue < 0:
             hue = 0.78
@@ -8617,8 +9607,9 @@ class IslandStackVisual(QWidget):
         return self._full_duotone_palette_for_state(bool(getattr(self, "expanded", False)))
 
     def _full_duotone_palette_for_state(self, expanded: bool) -> tuple[QColor, QColor, QColor]:
-        base = self._safe_wave_color(self.album_color)
-        companion = self._safe_wave_color(self.secondary_color)
+        album_color, secondary_color = self._current_music_surface_colors()
+        base = self._safe_wave_color(album_color)
+        companion = self._safe_wave_color(secondary_color)
         hue, sat, val, _alpha = base.getHsvF()
         comp_hue, comp_sat, comp_val, _comp_alpha = companion.getHsvF()
         if hue < 0:
@@ -8671,6 +9662,12 @@ class IslandStackVisual(QWidget):
         painter.drawEllipse(QRectF(-1.0, -1.0, 2.0, 2.0))
         painter.restore()
 
+    def _diffraction_frequency_amount(self) -> float:
+        return max(0.0, min(1.0, float(getattr(self, "diffraction_frequency", 0.30))))
+
+    def _bilateral_diffraction_ring_count(self) -> int:
+        return max(5, min(12, int(round(5 + self._diffraction_frequency_amount() * 7))))
+
     def _paint_bilateral_diffraction_ambience(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
         painter.save()
         inset = self._u(1.2)
@@ -8685,6 +9682,8 @@ class IslandStackVisual(QWidget):
         bridge = self._mix_color(fill, secondary, 0.46)
         low, mid, high = self._audio_bands()
         intensity, boost, size_boost, opacity_boost = self._ambient_boost()
+        frequency = self._diffraction_frequency_amount()
+        inward_offset = rect.width() * (0.035 + boost * (0.19 if expanded else 0.14))
         flow = 0.42 + self._music_flow_amount() * 0.58
         if not bool(getattr(self, "media_is_playing", True)):
             intensity *= 0.76
@@ -8713,6 +9712,7 @@ class IslandStackVisual(QWidget):
         )
         for side, side_color, halo_color, band, seed in side_specs:
             side_x = rect.left() - rect.width() * (0.055 if expanded else 0.115) if side < 0 else rect.right() + rect.width() * (0.055 if expanded else 0.115)
+            side_x -= side * inward_offset * 0.55
             side_y = rect.center().y() + self._u(7.0) * flow * math.sin(phase * 0.72 + seed)
             wash_alpha = self._mist_alpha((0.115 if expanded else 0.094) * opacity_boost + band * 0.028, intensity)
             if expanded:
@@ -8740,13 +9740,14 @@ class IslandStackVisual(QWidget):
                 int(wash_alpha * 0.44),
             )
 
-        ring_count = 7
+        ring_count = self._bilateral_diffraction_ring_count()
         for side, side_color, _halo_color, band, seed in side_specs:
             center_x = rect.left() - rect.width() * (0.030 if expanded else 0.130) if side < 0 else rect.right() + rect.width() * (0.030 if expanded else 0.130)
+            center_x -= side * inward_offset
             center_y = rect.center().y() + self._u(5.5) * flow * math.sin(phase * 0.60 + seed)
             for index in range(ring_count):
                 wave_sample = float(values[(index * 5 + (0 if side < 0 else 2)) % len(values)])
-                travel = (now * (0.075 + flow * 0.080) + index / ring_count + seed * 0.061) % 1.0
+                travel = (now * (0.060 + flow * 0.075 + frequency * 0.125) + index / ring_count + seed * 0.061) % 1.0
                 falloff = (1.0 - travel) ** 1.36
                 if expanded:
                     rx = rect.width() * (0.105 + travel * 0.42)
@@ -9423,6 +10424,11 @@ class IslandStackVisual(QWidget):
         if self._taskbar_cover_only_music_active(rect):
             self._paint_taskbar_cover_only_music(painter, rect)
             return
+        if self._empty_music_text_active():
+            self.music_cover_rect = QRectF()
+            text_rect = rect.adjusted(self._u(12.0), self._u(4.0), -self._u(12.0), -self._u(5.0))
+            self._paint_compact_lyric_viewport(painter, text_rect)
+            return
         if self._should_paint_album_island():
             self.music_cover_rect = QRectF()
             self._paint_album_island_compact(painter, rect)
@@ -9538,6 +10544,8 @@ class IslandStackVisual(QWidget):
                 color_fill=bool(row.get("color_fill", False)),
                 progress_fill=bool(row.get("progress_fill", False)),
                 spacing_percent=row.get("spacing_percent"),
+                allow_word_fill=bool(row.get("allow_word_fill", bool(row["active"]))),
+                word_backplate=bool(row["active"]),
             )
             painter.restore()
 
@@ -9546,7 +10554,7 @@ class IslandStackVisual(QWidget):
         progress = self._gelv_spacing_progress(now)
         self._paint_lyric_phase_pulse(painter, rect, self._lyric_phase(now))
         inner = rect.adjusted(self._u(18.0), self._u(16.0), -self._u(18.0), -self._u(16.0))
-        for row in self._gelv_line_rects(inner, expanded=True, now=now):
+        for row_index, row in enumerate(self._gelv_line_rects(inner, expanded=True, now=now)):
             opacity = max(0.0, min(1.0, float(row.get("opacity", 1.0))))
             if opacity <= 0.01:
                 continue
@@ -9562,6 +10570,8 @@ class IslandStackVisual(QWidget):
                 color_fill=bool(row.get("color_fill", False)),
                 progress_fill=bool(row.get("progress_fill", False)),
                 spacing_percent=row.get("spacing_percent"),
+                allow_word_fill=bool(row.get("allow_word_fill", row_index == 0)),
+                word_backplate=row_index == 0,
             )
             painter.restore()
 
@@ -9576,26 +10586,51 @@ class IslandStackVisual(QWidget):
         color_fill: bool = True,
         progress_fill: bool = False,
         spacing_percent: int | None = None,
+        allow_word_fill: bool = True,
+        word_backplate: bool = False,
     ):
         if not text:
             return
         spacing = int(spacing_percent) if spacing_percent is not None else self._gelv_spacing_percent(progress)
         layout = self._gelv_layout(text, size, spacing_percent=spacing)
         x = self._gelv_line_x(rect, text, size, progress, spacing_percent=spacing)
+        gelv_color_theme_active = color_fill and self._gelv_color_theme_enabled()
+        gelv_word_fill_active = bool(allow_word_fill) and bool(progress_fill or self._gelv_word_fill_enabled())
         if self._pure_white_music_active():
-            base = self._music_lyric_base_text_color(128 if active else 82)
-            live = self._music_lyric_text_color(245 if active else 156)
-        elif color_fill and bool(getattr(self, "gelv_color_fill_enabled", False)):
-            base = QColor(255, 255, 255, 120 if active else 82)
-            live = self._gelv_fill_color()
-            live.setAlpha(250 if active else 178)
-        elif progress_fill:
-            base = QColor(255, 255, 255, 128 if active else 82)
-            live = QColor(255, 255, 255, 245 if active else 156)
+            neutral_base = self._music_lyric_base_text_color(128 if active else 82)
+            neutral_live = self._music_lyric_text_color(245 if active else 156)
+            if gelv_color_theme_active:
+                live = self._gelv_fill_color()
+                live.setAlpha(250 if active else 178)
+                base = neutral_base if gelv_word_fill_active else QColor(live)
+            elif gelv_word_fill_active:
+                base = neutral_base
+                live = neutral_live
+            else:
+                base = QColor(neutral_live)
+                live = QColor(neutral_live)
         else:
-            base = QColor(255, 255, 255, 245 if active else 156)
-            live = QColor(base)
-        self._paint_gelv_songscatter_chunks(painter, rect, x, layout, size, base, live, progress, active)
+            neutral_base = QColor(255, 255, 255, 128 if active else 82)
+            neutral_live = QColor(255, 255, 255, 245 if active else 156)
+            if gelv_color_theme_active:
+                live = self._gelv_fill_color()
+                live.setAlpha(250 if active else 178)
+                base = neutral_base if gelv_word_fill_active else QColor(live)
+            elif gelv_word_fill_active:
+                base = neutral_base
+                live = neutral_live
+            else:
+                base = QColor(neutral_live)
+                live = QColor(neutral_live)
+        previous_backplate = getattr(self, "_current_word_backplate_enabled", False)
+        previous_word_fill = getattr(self, "_current_gelv_word_fill_enabled", True)
+        self._current_word_backplate_enabled = bool(word_backplate)
+        self._current_gelv_word_fill_enabled = bool(gelv_word_fill_active)
+        try:
+            self._paint_gelv_songscatter_chunks(painter, rect, x, layout, size, base, live, progress, active)
+        finally:
+            self._current_word_backplate_enabled = previous_backplate
+            self._current_gelv_word_fill_enabled = previous_word_fill
 
     def _paint_gelv_songscatter_chunks(
         self,
@@ -9614,15 +10649,20 @@ class IslandStackVisual(QWidget):
             return
         progress = max(0.0, min(1.0, float(progress)))
         live_width = max(0.0, min(layout.total_width, self._lyric_progress_width(layout, progress)))
+        word_fill = bool(getattr(self, "_current_gelv_word_fill_enabled", True))
         font = self._gelv_font(size, QFont.Weight.Normal)
         painter.setFont(font)
+        if bool(getattr(self, "_current_word_backplate_enabled", False)) and self._expanded_word_backplate_enabled():
+            self._paint_gelv_line_backlight(painter, rect, x, layout, progress)
         cursor = x
         for index, chunk in enumerate(chunks):
             width = layout.widths[index]
             if width <= 0.0:
                 cursor += width
                 continue
-            sung_amount = max(0.0, min(1.0, (live_width - (cursor - x)) / max(1.0, width)))
+            sung_amount = 1.0
+            if word_fill:
+                sung_amount = max(0.0, min(1.0, (live_width - (cursor - x)) / max(1.0, width)))
             chunk_color = self._mix_alpha_color(base_color, live_color, sung_amount)
             token_rect = QRectF(cursor, rect.top(), width, rect.height())
             painter.setPen(chunk_color)
@@ -9664,7 +10704,7 @@ class IslandStackVisual(QWidget):
     def _paint_album_island_slot(self, painter: QPainter, slot: dict[str, object], radius: float):
         rect = QRectF(slot["rect"])
         image = slot.get("album_art")
-        if not bool(slot.get("center")) and (not isinstance(image, QImage) or image.isNull()):
+        if not bool(slot.get("center")) and not bool(slot.get("placeholder", False)) and (not isinstance(image, QImage) or image.isNull()):
             return
         tilt = float(slot.get("tilt", 0.0) or 0.0)
         perspective = slot.get("perspective")
@@ -9719,11 +10759,21 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _compact_lyric_lines(self) -> list[str]:
+        if self._empty_music_text_active():
+            text = str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip() or "暂无歌词"
+            return [text]
         if self._is_instrumental_track():
             return [self._compact_music_text()]
         return [self._clean_lyric_for_width(line) or line for line in self.lyrics] or [self.track_title or self.artist or "正在播放"]
 
     def _paint_music_expanded(self, painter: QPainter, rect: QRectF):
+        if self._empty_music_text_active():
+            self.music_cover_rect = QRectF()
+            self.music_button_rects = {}
+            text = str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip() or "暂无歌词"
+            row = QRectF(rect.left() + self._u(22.0), rect.center().y() - self._u(18.0), rect.width() - self._u(44.0), self._u(36.0))
+            self._paint_scrolling_text(painter, row, text, 18, self._music_lyric_text_color(226), True, centered=True, centered_scroll=True)
+            return
         if self._should_paint_album_island():
             self.music_cover_rect = QRectF()
             self._paint_album_island_expanded(painter, rect)
@@ -10138,7 +11188,7 @@ class IslandStackVisual(QWidget):
         kind_key = str(kind or "").strip().lower()
         base = "\u95f9\u949f" if kind_key == "alarm" else "\u5012\u8ba1\u65f6"
         tone = "\u9ed1" if status_key in {"done", "due", "alarm"} else "\u9ec4"
-        return str(ROOT_DIR / "logos" / f"{base}{tone}.svg")
+        return str(TIME_REMINDER_ICON_DIR / f"{base}{tone}.svg")
 
     def _time_reminder_display_text(self, text: str, max_chars: int = 18) -> str:
         value = str(text or "").strip()
@@ -12130,8 +13180,9 @@ class IslandStackVisual(QWidget):
             self._paint_alarm_editor_caret(painter, rect, field, ref)
 
     def _paint_time_alarm_editor_action(self, painter: QPainter, rect: QRectF, text: str, ref: dict[str, QColor], primary: bool):
+        fill = QColor(255, 184, 0, 255) if primary else QColor(24, 24, 23, 245)
         painter.setPen(QPen(ref["accent"], self._u(1.1)))
-        painter.setBrush(ref["accent"] if primary else QColor(24, 24, 23, 245))
+        painter.setBrush(fill)
         painter.drawRoundedRect(rect, rect.height() / 2.0, rect.height() / 2.0)
         painter.setFont(self._font(12 if rect.height() >= self._u(30.0) else 10, QFont.Weight.Bold))
         painter.setPen(QColor(35, 24, 0, 245) if primary else ref["accent"])
@@ -12666,8 +13717,8 @@ class IslandStackVisual(QWidget):
         theme = self._plugin_theme_colors()
         ref = self._time_reference_palette(theme, color)
         radius = min(self._u(16.0), rect.height() / 2.0)
-        painter.setPen(QPen(QColor(170, 170, 170, 150 if active else 92), self._u(1.1)))
-        painter.setBrush(QColor(52, 52, 52, 238 if active else 214))
+        painter.setPen(QPen(ref["compact_stroke"], self._u(1.1)))
+        painter.setBrush(ref["compact_cell_active"] if active else ref["compact_cell"])
         painter.drawRoundedRect(rect, radius, radius)
         segments = self._time_compact_segments(detail, summary, status)
         if not segments:
@@ -12678,18 +13729,18 @@ class IslandStackVisual(QWidget):
         time_text = str(layout[0].get("text") or "")
         time_rect = QRectF(layout[0]["rect"])
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(26, 26, 26, 232))
+        painter.setBrush(ref["compact_time_chip"])
         painter.drawRoundedRect(time_rect, time_rect.height() / 2.0, time_rect.height() / 2.0)
         painter.setFont(self._font(12 if len(time_text) <= 5 else 9, QFont.Weight.Bold))
-        painter.setPen(ref["accent"])
+        painter.setPen(ref["compact_time_text"])
         painter.drawText(time_rect.adjusted(self._u(4.0), 0.0, -self._u(4.0), 0.0), Qt.AlignmentFlag.AlignCenter, time_text)
         for segment in layout[1:]:
             chip = QRectF(segment["rect"])
             seg_status = str(segment.get("status") or status).lower()
             done = seg_status in {"done", "due", "alarm-done"} or str(segment.get("text") or "") == "\u65f6\u95f4\u5230"
-            fill = ref["accent"] if done else QColor(24, 24, 24, 235)
-            text_color = QColor(34, 24, 0, 245) if done else ref["accent"]
-            painter.setPen(QPen(ref["accent"] if not done else ref["accent"], self._u(1.0)))
+            fill = ref["compact_chip_done"] if done else ref["compact_chip"]
+            text_color = ref["compact_done_text"] if done else ref["compact_chip_text"]
+            painter.setPen(QPen(ref["accent"], self._u(1.0)))
             painter.setBrush(fill)
             painter.drawRoundedRect(chip, chip.height() / 2.0, chip.height() / 2.0)
             icon_size = min(self._u(20.0), chip.height() - self._u(5.0))
@@ -13056,7 +14107,7 @@ class IslandStackVisual(QWidget):
         black_rect = QRectF(rect)
         color_rect = QRectF(rect.left(), rect.bottom() - color_h, rect.width(), color_h)
         return [
-            {"rect": black_rect, "color": QColor(0, 0, 0, 255)},
+            {"rect": black_rect, "color": QColor(0, 0, 0, 0)},
             {"rect": color_rect, "color": QColor(rail.red(), rail.green(), rail.blue(), 235)},
         ]
 
@@ -13230,70 +14281,69 @@ class IslandStackVisual(QWidget):
         self._paint_scrolling_text(painter, text_rect, msg.text, 10, QColor(255, 255, 255, 218), False)
         painter.restore()
 
-    def _empty_bar_colors(self) -> tuple[QColor, QColor, QColor]:
-        palettes = {
-            "cyan": (QColor(50, 224, 255), QColor(70, 154, 255), QColor(105, 255, 207)),
-            "violet": (QColor(144, 102, 255), QColor(66, 120, 255), QColor(236, 92, 255)),
-            "amber": (QColor(255, 205, 92), QColor(255, 126, 82), QColor(110, 224, 255)),
-            "rainbow": (QColor(255, 90, 134), QColor(78, 214, 255), QColor(112, 255, 166)),
-            "aurora": (QColor(80, 172, 255), QColor(118, 104, 255), QColor(76, 229, 255)),
-        }
-        if getattr(self, "empty_bar_palette", "aurora") == "custom":
-            colors = [QColor(value) for value in getattr(self, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86"))]
-            if all(color.isValid() for color in colors):
-                return colors[0], colors[1], colors[2]
-        return palettes.get(getattr(self, "empty_bar_palette", "aurora"), palettes["aurora"])
-
     def _paint_thin_bar(self, painter: QPainter, rect: QRectF):
         painter.save()
-        painter.setOpacity(painter.opacity() * max(0.1, min(1.0, float(getattr(self, "empty_bar_opacity", 100)) / 100.0)))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         bar = rect.adjusted(self._u(0.5), self._u(0.5), -self._u(0.5), -self._u(0.5))
-        radius = bar.height() / 2.0
+        radius = min(bar.width(), bar.height()) / 2.0
         painter.setPen(Qt.PenStyle.NoPen)
-        colors = self._empty_bar_colors()
         path = self._rounded_path(bar, radius)
+        fill = self._empty_bar_color()
+        fill.setAlpha(self._empty_bar_alpha())
+        glow = QColor(fill)
+        glow.setAlpha(40)
+        glow_rect = bar.adjusted(-self._u(1.4), -self._u(1.4), self._u(1.4), self._u(1.4))
+        painter.fillPath(self._rounded_path(glow_rect, min(glow_rect.width(), glow_rect.height()) / 2.0), glow)
+        painter.fillPath(path, fill)
 
-        glow_rect = bar.adjusted(-self._u(1.2), -self._u(1.2), self._u(1.2), self._u(1.2))
-        glow_path = self._rounded_path(glow_rect, glow_rect.height() / 2.0)
-        glow = QLinearGradient(glow_rect.left(), glow_rect.top(), glow_rect.right(), glow_rect.top())
-        glow.setColorAt(0.00, QColor(colors[0].red(), colors[0].green(), colors[0].blue(), 42))
-        glow.setColorAt(0.34, QColor(colors[2].red(), colors[2].green(), colors[2].blue(), 62))
-        glow.setColorAt(0.68, QColor(colors[1].red(), colors[1].green(), colors[1].blue(), 56))
-        glow.setColorAt(1.00, QColor(colors[0].red(), colors[0].green(), colors[0].blue(), 42))
-        painter.fillPath(glow_path, glow)
-
-        base = QLinearGradient(bar.left(), bar.top(), bar.right(), bar.bottom())
-        base.setColorAt(0.00, QColor(colors[0].red(), colors[0].green(), colors[0].blue(), 88))
-        base.setColorAt(0.30, QColor(colors[2].red(), colors[2].green(), colors[2].blue(), 124))
-        base.setColorAt(0.58, QColor(255, 255, 255, 108))
-        base.setColorAt(0.82, QColor(colors[1].red(), colors[1].green(), colors[1].blue(), 118))
-        base.setColorAt(1.00, QColor(colors[0].red(), colors[0].green(), colors[0].blue(), 74))
-        painter.fillPath(path, base)
-
-        painter.save()
-        painter.setClipPath(path)
-        phase = (time.monotonic() * 0.46 * self._animation_speed_factor()) % 1.0
-        span = bar.width() * 0.78
-        center = bar.left() - span + phase * (bar.width() + span * 2.0)
-        stream = QLinearGradient(center - span, bar.top(), center + span, bar.top())
-        stream.setColorAt(0.00, QColor(colors[0].red(), colors[0].green(), colors[0].blue(), 0))
-        stream.setColorAt(0.24, QColor(colors[2].red(), colors[2].green(), colors[2].blue(), 106))
-        stream.setColorAt(0.50, QColor(255, 255, 255, 138))
-        stream.setColorAt(0.72, QColor(colors[1].red(), colors[1].green(), colors[1].blue(), 96))
-        stream.setColorAt(1.00, QColor(colors[0].red(), colors[0].green(), colors[0].blue(), 0))
-        painter.fillRect(bar.adjusted(-span, 0.0, span, 0.0), stream)
-        painter.restore()
-
-        sheen = QLinearGradient(0, bar.top(), 0, bar.bottom())
-        sheen.setColorAt(0.00, QColor(255, 255, 255, 48))
-        sheen.setColorAt(0.46, QColor(255, 255, 255, 10))
-        sheen.setColorAt(1.00, QColor(255, 255, 255, 20))
-        painter.fillPath(path, sheen)
-
+        stroke = QColor(255, 255, 255, 52) if fill.lightness() < 128 else QColor(0, 0, 0, 40)
+        painter.setPen(QPen(stroke, self._u(1.0)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(255, 255, 255, 50), self._u(1.0)))
         painter.drawPath(path)
         painter.restore()
+
+    def _paint_black_empty_island(self, painter: QPainter, rect: QRectF, text: str, font: QFont, colors: tuple[QColor, QColor]):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        shell = rect.adjusted(self._u(0.5), self._u(0.5), -self._u(0.5), -self._u(0.5))
+        radius = shell.height() / 2.0
+        background, text_color = colors
+        shadow = QColor(background)
+        shadow.setAlpha(72)
+        shadow_rect = shell.adjusted(-self._u(1.2), -self._u(1.2), self._u(1.2), self._u(1.2))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(self._rounded_path(shadow_rect, shadow_rect.height() / 2.0), shadow)
+        painter.fillPath(self._rounded_path(shell, radius), background)
+        painter.setPen(QPen(QColor(255, 255, 255, 36), self._u(1.0)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(self._rounded_path(shell, radius))
+
+        text_rect = shell.adjusted(self._u(18.0), 0.0, -self._u(18.0), 0.0)
+        painter.setFont(font)
+        painter.setPen(text_color)
+        painter.save()
+        painter.setClipRect(text_rect)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
+        painter.restore()
+
+    def _paint_empty_text_island(self, painter: QPainter, rect: QRectF):
+        self._paint_black_empty_island(
+            painter,
+            rect,
+            self._empty_text_display_text(),
+            self._empty_text_island_font(),
+            self._empty_text_island_colors(),
+        )
+
+    def _paint_empty_time_island(self, painter: QPainter, rect: QRectF):
+        self._paint_black_empty_island(
+            painter,
+            rect,
+            self._empty_time_text(),
+            self._empty_time_island_font(),
+            self._empty_time_island_colors(),
+        )
 
     def _scrolling_text_x(self, rect: QRectF, text_w: float, centered: bool, centered_scroll: bool, focus_px: float | None = None) -> float:
         if text_w <= rect.width() - self._u(10):
@@ -13567,6 +14617,50 @@ class IslandStackVisual(QWidget):
             max(0, min(255, int(a.alpha() + (b.alpha() - a.alpha()) * amount) if alpha is None else alpha)),
         )
 
+    def _expanded_word_backplate_enabled(self) -> bool:
+        if not bool(getattr(self, "expanded", False)):
+            return False
+        return self._effective_music_ambience_style() in {"sea_level", "duotone_full"}
+
+    def _gelv_backlight_progress(self, progress: float, chunk_count: int) -> float:
+        chunk_count = max(1, int(chunk_count))
+        lag = min(0.045, 0.42 / float(chunk_count))
+        return max(0.0, min(1.0, float(progress) - lag))
+
+    def _paint_gelv_line_backlight(self, painter: QPainter, rect: QRectF, x: float, layout: LyricLayout, progress: float):
+        total_w = float(getattr(layout, "total_width", 0.0) or 0.0)
+        if total_w <= 1.0 or rect.width() <= 1.0 or rect.height() <= 1.0:
+            return
+        backlight_progress = self._gelv_backlight_progress(progress, len(layout.chunks))
+        glow_width = max(0.0, min(total_w, self._lyric_progress_width(layout, backlight_progress)))
+        amount = max(0.0, min(1.0, glow_width / max(1.0, total_w)))
+        if amount <= 0.03:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        color, companion = self._accent_pair()
+        center_y = rect.center().y() + self._u(0.6)
+        height = max(self._u(6.0), min(rect.height() * 0.42, self._u(14.0)))
+        right = x + glow_width
+        bar = QRectF(x, center_y - height / 2.0, glow_width, height)
+        outer = bar.adjusted(-self._u(1.8), -self._u(1.0), self._u(1.8), self._u(1.0))
+        mist = QLinearGradient(outer.left(), outer.center().y(), outer.right(), outer.center().y())
+        mist.setColorAt(0.00, QColor(255, 255, 255, int(5 + 9 * amount)))
+        mist.setColorAt(0.12, QColor(255, 255, 255, int(10 + 16 * amount)))
+        mist.setColorAt(0.72, QColor(color.red(), color.green(), color.blue(), int(7 + 12 * amount)))
+        mist.setColorAt(1.00, QColor(companion.red(), companion.green(), companion.blue(), 0))
+        painter.setBrush(mist)
+        painter.drawRoundedRect(outer, outer.height() / 2.0, outer.height() / 2.0)
+        core = QLinearGradient(bar.left(), bar.center().y(), max(bar.left() + 1.0, right), bar.center().y())
+        core.setColorAt(0.00, QColor(255, 255, 255, int(8 + 12 * amount)))
+        core.setColorAt(0.18, QColor(255, 255, 255, int(14 + 20 * amount)))
+        core.setColorAt(0.78, QColor(255, 255, 255, int(7 + 12 * amount)))
+        core.setColorAt(1.00, QColor(color.red(), color.green(), color.blue(), int(2 + 5 * amount)))
+        painter.setBrush(core)
+        painter.drawRoundedRect(bar, bar.height() / 2.0, bar.height() / 2.0)
+        painter.restore()
+
     def _paint_wave_stream_lyric_chunks(
         self,
         painter: QPainter,
@@ -13606,7 +14700,7 @@ class IslandStackVisual(QWidget):
             chunk_color = self._mix_alpha_color(base_color, live_color, sung_amount)
             chunk_color = self._mix_alpha_color(chunk_color, white, 0.22 * focus_strength, alpha=chunk_color.alpha())
             if glow:
-                chunk_color = QColor(255, 255, 255, max(0, min(255, int(24 + 38 * focus_strength))))
+                chunk_color = QColor(live_color.red(), live_color.green(), live_color.blue(), max(0, min(255, int(24 + 38 * focus_strength))))
 
             scale = scales[index]
             token_rect = QRectF(cursor, rect.top(), width, rect.height())
@@ -13646,43 +14740,49 @@ class IslandStackVisual(QWidget):
         x = self._scrolling_text_x(rect, text_w, centered, centered_scroll, focus_px=live_width)
         color, companion = self._accent_pair()
         pure_white = self._pure_white_music_active()
-        wave_fill_enabled = bool(getattr(self, "wave_color_fill_enabled", False)) and not pure_white
+        wave_fill_enabled = self._active_lyric_color_fill_enabled()
         if wave_fill_enabled:
             fill = self._wave_fill_color()
-            color = QColor(fill)
-            companion = QColor(fill).lighter(128)
-            base_color = self._mix_alpha_color(base_color, fill, 0.34, alpha=base_color.alpha())
+            if not pure_white:
+                color = QColor(fill)
+                companion = QColor(fill).lighter(128)
+                base_color = self._mix_alpha_color(base_color, fill, 0.34, alpha=base_color.alpha())
             live_color = QColor(fill.red(), fill.green(), fill.blue(), live_color.alpha())
 
         painter.save()
         painter.setClipRect(rect)
-        if text and confidence > 0.05 and not pure_white:
+        if text and confidence > 0.05:
             focus_x = x + max(0.0, min(text_w, live_width))
             focus_radius = self._u(42 + 22 * bloom)
             focus = QRadialGradient(QPointF(focus_x, rect.center().y()), focus_radius)
-            focus.setColorAt(0.0, QColor(255, 255, 255, int(38 + 30 * breath)))
-            focus.setColorAt(0.26, QColor(color.red(), color.green(), color.blue(), int(28 + 24 * confidence)))
-            focus.setColorAt(0.58, QColor(companion.red(), companion.green(), companion.blue(), int(18 + 12 * bloom)))
-            focus.setColorAt(1.0, QColor(companion.red(), companion.green(), companion.blue(), 0))
+            if pure_white:
+                focus.setColorAt(0.0, QColor(0, 0, 0, int(20 + 22 * breath)))
+                focus.setColorAt(0.35, QColor(0, 0, 0, int(14 + 16 * confidence)))
+                focus.setColorAt(1.0, QColor(0, 0, 0, 0))
+            else:
+                focus.setColorAt(0.0, QColor(255, 255, 255, int(38 + 30 * breath)))
+                focus.setColorAt(0.26, QColor(color.red(), color.green(), color.blue(), int(28 + 24 * confidence)))
+                focus.setColorAt(0.58, QColor(companion.red(), companion.green(), companion.blue(), int(18 + 12 * bloom)))
+                focus.setColorAt(1.0, QColor(companion.red(), companion.green(), companion.blue(), 0))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(focus)
             painter.drawEllipse(QPointF(focus_x, rect.center().y()), focus_radius, focus_radius * 0.48)
 
-        if not pure_white:
-            glow_alpha = int(30 + 28 * confidence + 18 * bloom)
-            self._paint_wave_stream_lyric_chunks(
-                painter,
-                rect.adjusted(-self._u(0.6), -self._u(0.4), self._u(0.6), self._u(0.4)),
-                x,
-                layout,
-                size,
-                bold,
-                QColor(255, 255, 255, glow_alpha),
-                QColor(255, 255, 255, glow_alpha),
-                progress,
-                confidence * 0.52,
-                glow=True,
-            )
+        glow_alpha = int((18 if pure_white else 30) + 28 * confidence + 18 * bloom)
+        glow_color = QColor(0, 0, 0, glow_alpha) if pure_white else QColor(255, 255, 255, glow_alpha)
+        self._paint_wave_stream_lyric_chunks(
+            painter,
+            rect.adjusted(-self._u(0.6), -self._u(0.4), self._u(0.6), self._u(0.4)),
+            x,
+            layout,
+            size,
+            bold,
+            glow_color,
+            glow_color,
+            progress,
+            confidence * 0.52,
+            glow=True,
+        )
 
         elastic_live = QColor(live_color.red(), live_color.green(), live_color.blue(), max(0, min(255, int(live_color.alpha() * (0.76 + 0.16 * bloom)))))
         self._paint_wave_stream_lyric_chunks(
@@ -13728,7 +14828,7 @@ class IslandStackVisual(QWidget):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Island Stack V2")
+    app.setApplicationName(APP_NAME)
     app.setFont(QFont(IslandStackVisual.best_available_font_family(IslandStackVisual.DEFAULT_FONT_FAMILY), 9))
     from api.fake_provider import FakeIslandDataProvider
 

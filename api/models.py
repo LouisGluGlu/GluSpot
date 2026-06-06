@@ -34,6 +34,8 @@ class AlbumQueueEntry:
     album_title: str = ""
     album_art_bytes: bytes = b""
     track_id: str = ""
+    album_color: ColorToken | None = None
+    secondary_color: ColorToken | None = None
 
 
 @dataclass(frozen=True)

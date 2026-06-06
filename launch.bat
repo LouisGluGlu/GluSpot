@@ -8,11 +8,11 @@ cd /d "%ROOT%" || exit /b 1
 
 set "LOGDIR=%ROOT%logs"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
-set "LOG=%LOGDIR%\gpt-island-%RANDOM%.log"
+set "LOG=%LOGDIR%\GluSpot-%RANDOM%.log"
 
 set "PYEXE=%ROOT%.venv\Scripts\python.exe"
 if not exist "%PYEXE%" (
-    echo gpt-island local environment is missing.
+    echo GluSpot local environment is missing.
     echo Please run setup-env.bat first, then launch again.
     echo Log: "%LOG%"
     pause
@@ -21,7 +21,7 @@ if not exist "%PYEXE%" (
 
 "%PYEXE%" -X utf8 -c "import PySide6, winsdk, soundcard, numpy, pywinauto, uiautomation, PIL" >nul 2>>"%LOG%"
 if errorlevel 1 (
-    echo gpt-island local environment is incomplete or broken.
+    echo GluSpot local environment is incomplete or broken.
     echo Please run setup-env.bat first, then launch again.
     echo Log: "%LOG%"
     pause

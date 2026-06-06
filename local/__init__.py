@@ -1,2 +1,1 @@
-"""Local desktop application shell for gpt-island."""
-
+"""Local desktop application shell for GluSpot."""

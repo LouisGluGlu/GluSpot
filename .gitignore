@@ -1,7 +1,12 @@
 .venv/
+.codex/
+.runtime/
 evri/
 __pycache__/
 *.py[cod]
 logs/
 build/
 release/
+lyrics/.source_hits.json
+lyrics/.generated/
+lyrics/*.lrc

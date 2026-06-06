@@ -55,6 +55,14 @@ class UiThemeTests(unittest.TestCase):
         self.assertTrue(ui_theme.app_dark_mode(settings_getter=settings, now=datetime_time(12, 0)))
         self.assertFalse(ui_theme.app_dark_mode(settings_getter=settings, now=datetime_time(18, 1)))
 
+    def test_music_background_follow_theme_maps_between_black_and_white(self):
+        self.assertEqual(ui_theme.music_ambience_style_for_theme(False, "pure_black", follow_enabled=True), "pure_white")
+        self.assertEqual(ui_theme.music_ambience_style_for_theme(True, "pure_white", follow_enabled=True), "pure_black")
+
+    def test_music_background_follow_theme_leaves_other_backgrounds_and_disabled_state_alone(self):
+        self.assertEqual(ui_theme.music_ambience_style_for_theme(False, "sea_level", follow_enabled=True), "sea_level")
+        self.assertEqual(ui_theme.music_ambience_style_for_theme(True, "pure_black", follow_enabled=False), "pure_black")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1023,6 +1023,31 @@ class NeteasePositionReaderTests(unittest.TestCase):
         self.assertFalse(reader.diagnostics()["refreshing"])
         self.assertEqual(reader.diagnostics()["last_source"], "netease-uia-lyrics")
 
+    def test_read_immediate_force_progress_image_refreshes_while_background_read_is_running(self):
+        reader = NeteasePositionReader()
+        calls = []
+
+        def progress(_title, _duration):
+            calls.append("progress")
+            return None
+
+        def progress_image(_title, _duration):
+            calls.append("image")
+            return NeteasePositionSample(172.0, 240.0, "netease-uia-progress", 0.90, sampled_at=100.0)
+
+        reader._position_from_visible_progress = progress
+        reader._position_from_visible_progress_image = progress_image
+        reader._last_track_key = "song\x00artist"
+        reader._last_sample = NeteasePositionSample(96.0, 240.0, "netease-uia-progress", 0.92, sampled_at=99.0)
+        reader._refreshing = True
+
+        sample = reader.read_immediate("Song", "Artist", (), 240.0, force_progress_image=True)
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.position_seconds, 172.0)
+        self.assertEqual(calls, ["progress", "image"])
+        self.assertFalse(reader.diagnostics()["refreshing"])
+
     def test_stale_background_refresh_cannot_overwrite_newer_immediate_sample(self):
         reader = NeteasePositionReader()
         reader._last_track_key = "song\x00artist"

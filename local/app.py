@@ -12,35 +12,39 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
 from api.providers import WindowsMediaProvider
+from local.branding import APP_NAME, local_app_data_dir, resolve_icon_paths
 from local.island_stack_visual import IslandStackVisual
-from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES, SettingsManager
+from local.settings_store import (
+    DEFAULT_MUSIC_AMBIENCE_VALUES,
+    DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
+    MYDOCKFINDER_LISTEN_PROCESS_CHOICES,
+    SettingsManager,
+    normalize_mydockfinder_listener_process_names,
+)
+from local.startup import StartupManager, build_startup_command, normalize_startup_mode
 from local.settings_window import SettingsWindow
 from local.ui_theme import set_theme_settings_getter
 
 
-MYDOCKFINDER_PROCESS_NAMES = {
-    "mydockfinder.exe",
-    "myfinder.exe",
-    "mydock.exe",
-    "dock.exe",
-    "dock_64.exe",
-    "dockmod.exe",
-    "dockmod64.exe",
-}
+MYDOCKFINDER_PROCESS_NAMES = {name for name, _label in MYDOCKFINDER_LISTEN_PROCESS_CHOICES}
 
 
 def _normalized_executable_path(path: str) -> str:
     return str(path or "").strip().strip('"').replace("/", "\\").casefold()
 
 
-def _mydockfinder_candidate_process_names(configured_path: str) -> set[str]:
+def _mydockfinder_listener_process_names(listener_process_names=None) -> tuple[str, ...]:
+    return normalize_mydockfinder_listener_process_names(listener_process_names)
+
+
+def _mydockfinder_candidate_process_names(configured_path: str, listener_process_names=None) -> set[str]:
     configured = _normalized_executable_path(configured_path)
     configured_name = configured.rsplit("\\", 1)[-1].casefold() if configured else ""
-    names = set(MYDOCKFINDER_PROCESS_NAMES)
+    names = set(_mydockfinder_listener_process_names(listener_process_names))
     if configured_name.endswith(".exe"):
         names.add(configured_name)
     return names
@@ -114,21 +118,23 @@ def _running_process_snapshots_for_names(names: set[str]) -> list[tuple[str, str
         return []
 
 
-def _mydockfinder_process_running(configured_path: str) -> bool:
-    return bool(_mydockfinder_process_diagnostics(configured_path).get("running"))
+def _mydockfinder_process_running(configured_path: str, listener_process_names=None) -> bool:
+    return bool(_mydockfinder_process_diagnostics(configured_path, listener_process_names=listener_process_names).get("running"))
 
 
-def _mydockfinder_process_diagnostics(configured_path: str) -> dict[str, object]:
+def _mydockfinder_process_diagnostics(configured_path: str, listener_process_names=None) -> dict[str, object]:
     configured = _normalized_executable_path(configured_path)
     configured_name = configured.rsplit("\\", 1)[-1].casefold() if configured else ""
     configured_is_exe = configured_name.endswith(".exe")
     configured_root = configured.rsplit("\\", 1)[0] if configured_is_exe and "\\" in configured else configured.rstrip("\\")
-    names = _mydockfinder_candidate_process_names(configured_path)
+    listener_names = set(_mydockfinder_listener_process_names(listener_process_names))
+    names = _mydockfinder_candidate_process_names(configured_path, listener_names)
     snapshots = _running_process_snapshots_for_names(names)
     diagnostics: dict[str, object] = {
         "configured_path": str(configured_path or "").strip().strip('"'),
         "configured_name": configured_name,
         "configured_root": configured_root,
+        "listener_process_names": sorted(listener_names),
         "candidate_names": sorted(names),
         "snapshots": [{"name": exe_name, "path": exe_path} for exe_name, exe_path in snapshots],
         "running": False,
@@ -144,19 +150,19 @@ def _mydockfinder_process_diagnostics(configured_path: str) -> dict[str, object]
             if path and path == configured:
                 diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched configured executable path")
                 return diagnostics
-            if path and configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in MYDOCKFINDER_PROCESS_NAMES:
+            if path and configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in names:
                 diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched MyDockFinder runtime process inside configured folder")
                 return diagnostics
-            if path and not configured_is_exe and configured_root and path.startswith(configured_root + "\\"):
+            if path and not configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in names:
                 diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched process inside configured folder")
                 return diagnostics
             if not path and configured_name and name == configured_name:
                 diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched configured process name without path access")
                 return diagnostics
-            if not path and configured_mentions_mydockfinder and name in MYDOCKFINDER_PROCESS_NAMES:
+            if not path and configured_mentions_mydockfinder and name in listener_names:
                 diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched MyDockFinder process name without path access")
                 return diagnostics
-        elif name in MYDOCKFINDER_PROCESS_NAMES:
+        elif name in names:
             diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched known MyDockFinder process name")
             return diagnostics
     return diagnostics
@@ -172,9 +178,9 @@ class SingleInstanceGuard:
         try:
             import msvcrt
 
-            lock_dir = os.path.join(os.environ.get("LOCALAPPDATA", ROOT_DIR), "gpt-island")
+            lock_dir = local_app_data_dir()
             os.makedirs(lock_dir, exist_ok=True)
-            self._file = open(os.path.join(lock_dir, "gpt-island.lock"), "a+b")
+            self._file = open(os.path.join(lock_dir, f"{APP_NAME}.lock"), "a+b")
             self._file.seek(0)
             self._file.write(b"0")
             self._file.flush()
@@ -242,21 +248,27 @@ class LocalIslandApp:
     def __init__(self, single_instance_guard: SingleInstanceGuard | None = None):
         self.single_instance_guard = single_instance_guard
         self.app = QApplication(sys.argv)
-        self.app.setApplicationName("gpt-island")
+        self.app.setApplicationName(APP_NAME)
         self.app.setQuitOnLastWindowClosed(False)
         self.watchdog = MainThreadWatchdog(self.app)
 
         self.settings = SettingsManager()
+        self.icon_paths = resolve_icon_paths(self.settings.get("v2_custom_icon_path", ""))
+        self.app.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         set_theme_settings_getter(self.settings.get)
         IslandStackVisual.load_source_han_serif_fonts()
         self.data_provider = WindowsMediaProvider(settings_getter=self.settings.get)
         app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", "PingFang SC")))
         self.app.setFont(QFont(app_font_family, 9))
         self.window = IslandStackVisual(data_provider=self.data_provider)
+        self.window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         self.window.settings_getter = self.settings.get
         self.window.settings_setter = self.settings.set
+        self._apply_startup_setting()
         self._apply_saved_settings()
         self.settings_window = SettingsWindow(self.window, self.settings)
+        self.settings_window.icon_changed_callback = self._apply_global_icon
+        self.settings_window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         self.window.settings_changed_callback = self._save_visual_state
         self._setup_mydockfinder_listener()
         self.tray = None
@@ -277,6 +289,7 @@ class LocalIslandApp:
             "music_flow_intensity": raw_values.get("music_flow_intensity", self.settings.get("v2_music_flow_intensity", defaults["music_flow_intensity"])),
             "compact_duotone_balance": raw_values.get("compact_duotone_balance", self.settings.get("v2_compact_duotone_balance", defaults["compact_duotone_balance"])),
             "expanded_duotone_balance": raw_values.get("expanded_duotone_balance", self.settings.get("v2_expanded_duotone_balance", defaults["expanded_duotone_balance"])),
+            "diffraction_frequency": raw_values.get("diffraction_frequency", self.settings.get("v2_diffraction_frequency", defaults["diffraction_frequency"])),
         }
 
     def _location_mode_setting(self) -> str:
@@ -302,6 +315,20 @@ class LocalIslandApp:
             legacy_count = 1
         return known[:legacy_count]
 
+    def _mydockfinder_listener_process_names_setting(self) -> tuple[str, ...]:
+        return _mydockfinder_listener_process_names(
+            self.settings.get(
+                "v2_mydockfinder_listener_process_names",
+                list(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES),
+            )
+        )
+
+    def _apply_startup_setting(self):
+        mode = normalize_startup_mode(str(self.settings.get("v2_startup_mode", "none") or "none"))
+        if mode == "none":
+            return
+        StartupManager().apply(mode, build_startup_command())
+
     def _apply_saved_settings(self):
         self.window.set_saved_placement(
             self.settings.get("v2_stack_center_ratio", 0.5),
@@ -317,7 +344,15 @@ class LocalIslandApp:
         self.window.set_super_topmost(bool(self.settings.get("v2_super_topmost", True)), notify=False)
         mydockfinder_path = str(self.settings.get("v2_mydockfinder_path", "") or "")
         self.window.set_mydockfinder_path(mydockfinder_path, notify=False)
-        mydockfinder_diagnostics = _mydockfinder_process_diagnostics(mydockfinder_path)
+        mydockfinder_listener_process_names = self._mydockfinder_listener_process_names_setting()
+        if hasattr(self.window, "set_mydockfinder_listener_process_names"):
+            self.window.set_mydockfinder_listener_process_names(mydockfinder_listener_process_names, notify=False)
+        else:
+            self.window.mydockfinder_listener_process_names = mydockfinder_listener_process_names
+        mydockfinder_diagnostics = _mydockfinder_process_diagnostics(
+            mydockfinder_path,
+            listener_process_names=mydockfinder_listener_process_names,
+        )
         self.window.set_mydockfinder_diagnostics(mydockfinder_diagnostics, notify=False)
         self.window.set_manual_finder_available(bool(self.settings.get("v2_manual_mydockfinder", False)), notify=False)
         self.window.set_mydockfinder_running(bool(mydockfinder_diagnostics.get("running")), notify=False)
@@ -349,10 +384,16 @@ class LocalIslandApp:
             expanded=int(ambience_values["expanded_duotone_balance"]),
             notify=False,
         )
+        self.window.set_diffraction_frequency(float(ambience_values["diffraction_frequency"]), notify=False)
         self.window.set_ui_font(str(self.settings.get("v2_font_family", "PingFang SC")), notify=False)
         self.window.set_high_quality_font_rendering(bool(self.settings.get("v2_high_quality_font_rendering", False)), notify=False)
         self.window.set_animation_fps(int(self.settings.get("v2_animation_fps", 60)), notify=False)
         self.window.set_animation_speed(float(self.settings.get("v2_animation_speed", 1.0)), notify=False)
+        self.window.set_empty_island_display_mode(str(self.settings.get("v2_empty_island_display_mode", "visible_bar")), notify=False)
+        if hasattr(self.window, "set_no_music_island_priority"):
+            self.window.set_no_music_island_priority(str(self.settings.get("v2_no_music_island_priority", "plugin")), notify=False)
+        else:
+            self.window.no_music_island_priority = str(self.settings.get("v2_no_music_island_priority", "plugin") or "plugin")
         self.window.set_empty_bar_palette(str(self.settings.get("v2_empty_bar_palette", "aurora")), notify=False)
         self.window.set_empty_bar_geometry(
             width=int(self.settings.get("v2_empty_bar_width", 92)),
@@ -389,14 +430,14 @@ class LocalIslandApp:
         self.window.set_wave_color_fill_enabled(bool(self.settings.get("v2_wave_color_fill_enabled", False)), notify=False)
         self.window.set_wave_color_fill_fallback(str(self.settings.get("v2_wave_color_fill_fallback", "#00D7FF")), notify=False)
         self.window.set_lyric_flow_style(str(self.settings.get("v2_lyric_flow_style", "wave_stream")), notify=False)
-        self.window.set_gelv_font_family(str(self.settings.get("v2_gelv_font_family", "Source Han Serif SC")), notify=False)
+        self.window.set_gelv_font_family(IslandStackVisual.GELV_FONT_FAMILY, notify=False)
         self.window.set_gelv_primary_font_size(int(self.settings.get("v2_gelv_primary_font_size", 22)), notify=False)
         self.window.set_gelv_secondary_font_size(int(self.settings.get("v2_gelv_secondary_font_size", 12)), notify=False)
         self.window.set_gelv_dual_line_font_size(int(self.settings.get("v2_gelv_dual_line_font_size", 17)), notify=False)
         self.window.set_gelv_initial_word_spacing(int(self.settings.get("v2_gelv_initial_word_spacing", 220)), notify=False)
         self.window.set_gelv_word_spacing(int(self.settings.get("v2_gelv_word_spacing", 320)), notify=False)
-        self.window.set_gelv_size_shift_enabled(bool(self.settings.get("v2_gelv_size_shift_enabled", True)), notify=False)
         self.window.set_gelv_color_fill_enabled(bool(self.settings.get("v2_gelv_color_fill_enabled", False)), notify=False)
+        self.window.set_gelv_word_fill_enabled(bool(self.settings.get("v2_gelv_word_fill_enabled", False)), notify=False)
         self.window.set_gelv_color_fill_fallback(str(self.settings.get("v2_gelv_color_fill_fallback", "#00D7FF")), notify=False)
         final_ambience_style = str(getattr(self.window, "music_ambience_style", ambience_style) or "sea_level")
         if final_ambience_style != ambience_style:
@@ -426,8 +467,7 @@ class LocalIslandApp:
         )
         self.window.set_no_lyrics_text(str(self.settings.get("v2_no_lyrics_text", "暂无歌词")), notify=False)
         position_preset = str(self.settings.get("v2_position_preset", "last") or "last")
-        if position_preset != "last":
-            self.window.apply_position_preset(position_preset, notify=False)
+        self.window.apply_position_preset(position_preset, notify=False)
         self.window._set_plugin_focus(min(self.window.plugin_focus_target, max(0, self.window.enabled_plugin_count - 1)), immediate=True)
 
     def _save_visual_state(self, state: dict[str, object]):
@@ -446,9 +486,15 @@ class LocalIslandApp:
 
     def _poll_mydockfinder_presence(self):
         path = str(self.settings.get("v2_mydockfinder_path", "") or "").strip().strip('"')
+        listener_process_names = self._mydockfinder_listener_process_names_setting()
         if str(getattr(self.window, "mydockfinder_path", "") or "") != path:
             self.window.set_mydockfinder_path(path, notify=False)
-        diagnostics = _mydockfinder_process_diagnostics(path)
+        if tuple(getattr(self.window, "mydockfinder_listener_process_names", ())) != listener_process_names:
+            if hasattr(self.window, "set_mydockfinder_listener_process_names"):
+                self.window.set_mydockfinder_listener_process_names(listener_process_names, notify=False)
+            else:
+                self.window.mydockfinder_listener_process_names = listener_process_names
+        diagnostics = _mydockfinder_process_diagnostics(path, listener_process_names=listener_process_names)
         if hasattr(self.window, "set_mydockfinder_diagnostics"):
             self.window.set_mydockfinder_diagnostics(diagnostics, notify=False)
         else:
@@ -464,12 +510,11 @@ class LocalIslandApp:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
 
-        icon = self.app.windowIcon()
-        if icon.isNull():
-            icon = self.app.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
-
-        self.tray = QSystemTrayIcon(icon, self.app)
-        self.tray.setToolTip("gpt-island")
+        icon_paths = resolve_icon_paths(self.settings.get("v2_custom_icon_path", ""))
+        self.tray = QSystemTrayIcon(QIcon(str(icon_paths.tray_icon)), self.app)
+        if self.tray.icon().isNull():
+            self.tray.setIcon(self.app.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.tray.setToolTip(APP_NAME)
 
         menu = QMenu()
 
@@ -491,6 +536,19 @@ class LocalIslandApp:
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
+    def _apply_global_icon(self, custom_icon_path: str | None = None):
+        self.icon_paths = resolve_icon_paths(custom_icon_path if custom_icon_path is not None else self.settings.get("v2_custom_icon_path", ""))
+        app_icon = QIcon(str(self.icon_paths.app_icon))
+        self.app.setWindowIcon(app_icon)
+        self.window.setWindowIcon(app_icon)
+        if hasattr(self, "settings_window"):
+            self.settings_window.setWindowIcon(app_icon)
+        if getattr(self, "tray", None) is not None:
+            tray_icon = QIcon(str(self.icon_paths.tray_icon))
+            if tray_icon.isNull():
+                tray_icon = self.app.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+            self.tray.setIcon(tray_icon)
+
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.toggle_window()
@@ -508,10 +566,20 @@ class LocalIslandApp:
             self.window.raise_()
             self.window.activateWindow()
 
+    def _flush_visual_state_now(self):
+        try:
+            snapshot = self.window.settings_snapshot()
+        except Exception:
+            snapshot = {}
+        if isinstance(snapshot, dict):
+            for key, value in snapshot.items():
+                self.settings.set(key, value)
+        self.settings.save_now()
+
     def quit(self):
         if self.tray:
             self.tray.hide()
-        self.settings.save_now()
+        self._flush_visual_state_now()
         self.settings_window.close()
         self.window.close()
         if self.single_instance_guard is not None:

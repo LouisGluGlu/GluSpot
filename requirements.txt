@@ -5,3 +5,4 @@ numpy>=1.26.0
 pywinauto>=0.6.9
 uiautomation>=2.0.20
 Pillow>=10.0.0
+pyinstaller>=6.0

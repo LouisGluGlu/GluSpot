@@ -110,6 +110,13 @@ def app_dark_mode(settings_getter: Callable[[str, object], object] | None = None
         return False
 
 
+def music_ambience_style_for_theme(dark: bool, current_style: str, follow_enabled: bool) -> str:
+    style = str(current_style or "sea_level")
+    if not follow_enabled or style not in {"pure_black", "pure_white"}:
+        return style
+    return "pure_black" if bool(dark) else "pure_white"
+
+
 def theme_change_event_types() -> tuple[QEvent.Type, ...]:
     return THEME_CHANGE_EVENT_TYPES
 

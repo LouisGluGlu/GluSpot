@@ -4,7 +4,7 @@ import unittest
 
 from PySide6.QtWidgets import QApplication
 
-from local.no_wheel_widgets import NoWheelComboBox, NoWheelSpinBox
+from local.no_wheel_widgets import NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
 
 
 class FakeWheelEvent:
@@ -31,6 +31,13 @@ class NoWheelWidgetsTests(unittest.TestCase):
         event = FakeWheelEvent()
 
         NoWheelSpinBox().wheelEvent(event)
+
+        self.assertTrue(event.ignored)
+
+    def test_slider_ignores_wheel_event(self):
+        event = FakeWheelEvent()
+
+        NoWheelSlider().wheelEvent(event)
 
         self.assertTrue(event.ignored)
 

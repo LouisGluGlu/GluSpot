@@ -4,34 +4,41 @@ import unittest
 from unittest.mock import patch
 
 from local.app import _mydockfinder_process_diagnostics, _mydockfinder_process_running
+from local.settings_store import DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES
 
 
 class MyDockFinderListenerTests(unittest.TestCase):
-    def test_steam_mydockfinder_runtime_processes_are_detected_without_configured_path(self):
+    def test_default_mydockfinder_listener_scans_only_dock_process_without_configured_path(self):
         with patch(
             "local.app._running_process_snapshots_for_names",
             return_value=[
                 (
-                    "Dock_64.exe",
-                    r"B:\SteamLibrary\steamapps\common\MyDockFinder\dock_64.exe",
-                ),
-                (
-                    "Dockmod.exe",
-                    r"B:\SteamLibrary\steamapps\common\MyDockFinder\dockmod.exe",
-                ),
-                (
-                    "Dockmod64.exe",
-                    r"B:\SteamLibrary\steamapps\common\MyDockFinder\Dockmod64.exe",
+                    "dock.exe",
+                    r"B:\SteamLibrary\steamapps\common\MyDockFinder\dock.exe",
                 ),
             ],
         ):
             diagnostics = _mydockfinder_process_diagnostics("")
 
         self.assertTrue(diagnostics["running"])
-        self.assertIn("dock_64.exe", diagnostics["candidate_names"])
-        self.assertIn("dockmod.exe", diagnostics["candidate_names"])
-        self.assertIn("dockmod64.exe", diagnostics["candidate_names"])
-        self.assertEqual(diagnostics["matched_name"], "Dock_64.exe")
+        self.assertEqual(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES, ("dock.exe",))
+        self.assertEqual(diagnostics["candidate_names"], ["dock.exe"])
+        self.assertEqual(diagnostics["matched_name"], "dock.exe")
+
+    def test_default_listener_ignores_stale_mydock_service_process(self):
+        with patch(
+            "local.app._running_process_snapshots_for_names",
+            return_value=[
+                (
+                    "Mydock.exe",
+                    "",
+                )
+            ],
+        ):
+            diagnostics = _mydockfinder_process_diagnostics("")
+
+        self.assertFalse(diagnostics["running"])
+        self.assertNotIn("mydock.exe", diagnostics["candidate_names"])
 
     def test_configured_steam_folder_matches_dockmod_runtime_process(self):
         with patch(
@@ -43,7 +50,10 @@ class MyDockFinderListenerTests(unittest.TestCase):
                 )
             ],
         ):
-            running = _mydockfinder_process_running(r"B:\SteamLibrary\steamapps\common\MyDockFinder")
+            running = _mydockfinder_process_running(
+                r"B:\SteamLibrary\steamapps\common\MyDockFinder",
+                listener_process_names=("dockmod64.exe",),
+            )
 
         self.assertTrue(running)
 
@@ -57,7 +67,10 @@ class MyDockFinderListenerTests(unittest.TestCase):
                 )
             ],
         ):
-            running = _mydockfinder_process_running(r"C:\Program Files\MyDockFinder")
+            running = _mydockfinder_process_running(
+                r"C:\Program Files\MyDockFinder",
+                listener_process_names=("mydockfinder.exe",),
+            )
 
         self.assertTrue(running)
 
@@ -75,7 +88,7 @@ class MyDockFinderListenerTests(unittest.TestCase):
 
         self.assertTrue(running)
 
-    def test_configured_dock_launcher_matches_mydock_runtime_process_without_path_access(self):
+    def test_configured_dock_launcher_does_not_match_mydock_runtime_process_without_path_access_by_default(self):
         with patch(
             "local.app._running_process_snapshots_for_names",
             return_value=[
@@ -86,6 +99,23 @@ class MyDockFinderListenerTests(unittest.TestCase):
             ],
         ):
             running = _mydockfinder_process_running(r"B:\SteamLibrary\steamapps\common\MyDockFinder\dock.exe")
+
+        self.assertFalse(running)
+
+    def test_user_selected_mydock_listener_can_match_mydock_runtime_process_without_path_access(self):
+        with patch(
+            "local.app._running_process_snapshots_for_names",
+            return_value=[
+                (
+                    "Mydock.exe",
+                    "",
+                )
+            ],
+        ):
+            running = _mydockfinder_process_running(
+                r"B:\SteamLibrary\steamapps\common\MyDockFinder\dock.exe",
+                listener_process_names=("dock.exe", "mydock.exe"),
+            )
 
         self.assertTrue(running)
 
@@ -99,7 +129,10 @@ class MyDockFinderListenerTests(unittest.TestCase):
                 )
             ],
         ):
-            diagnostics = _mydockfinder_process_diagnostics(r"B:\SteamLibrary\steamapps\common\MyDockFinder\dock.exe")
+            diagnostics = _mydockfinder_process_diagnostics(
+                r"B:\SteamLibrary\steamapps\common\MyDockFinder\dock.exe",
+                listener_process_names=("mydock.exe",),
+            )
 
         self.assertTrue(diagnostics["running"])
         self.assertIn("mydock.exe", diagnostics["candidate_names"])

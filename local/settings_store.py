@@ -3,13 +3,15 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from local.branding import APP_NAME, app_data_dir, legacy_app_data_dirs, settings_file_for
 
-APP_NAME = "DynamicIsland"
-APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.dirname(__file__)), APP_NAME)
-SETTINGS_FILE = os.path.join(APP_DATA_DIR, "settings.json")
+
+APP_DATA_DIR = app_data_dir()
+SETTINGS_FILE = settings_file_for()
 
 DEFAULT_MUSIC_AMBIENCE_VALUES = {
     "sea_level": {
@@ -17,30 +19,35 @@ DEFAULT_MUSIC_AMBIENCE_VALUES = {
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
+        "diffraction_frequency": 0.30,
     },
     "duotone_full": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
+        "diffraction_frequency": 0.30,
     },
     "pure_black": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
+        "diffraction_frequency": 0.30,
     },
     "bilateral_diffraction": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
+        "diffraction_frequency": 0.30,
     },
     "pure_white": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
+        "diffraction_frequency": 0.30,
     },
 }
 
@@ -69,7 +76,36 @@ DEFAULT_MUSIC_APP_PROFILES = {
     },
 }
 
+MYDOCKFINDER_LISTEN_PROCESS_CHOICES = (
+    ("dock.exe", "dock.exe"),
+    ("dock_64.exe", "dock_64.exe"),
+    ("dockmod.exe", "dockmod.exe"),
+    ("dockmod64.exe", "dockmod64.exe"),
+    ("mydockfinder.exe", "MyDockFinder.exe"),
+    ("myfinder.exe", "MyFinder.exe"),
+    ("mydock.exe", "Mydock.exe"),
+)
+
+DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES = ("dock.exe",)
+
+
+def normalize_mydockfinder_listener_process_names(listener_process_names=None) -> tuple[str, ...]:
+    if listener_process_names is None:
+        raw_names = DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES
+    elif isinstance(listener_process_names, str):
+        raw_names = listener_process_names.replace(";", ",").split(",")
+    else:
+        try:
+            raw_names = list(listener_process_names)
+        except TypeError:
+            raw_names = ()
+    selected = {str(name or "").strip().casefold() for name in raw_names}
+    return tuple(name for name, _label in MYDOCKFINDER_LISTEN_PROCESS_CHOICES if name in selected)
+
+
 DEFAULT_SETTINGS = {
+    "v2_startup_mode": "none",
+    "v2_custom_icon_path": "",
     "v2_music_playing": True,
     "v2_music_auto_detect": False,
     "v2_persistent_plugin": True,
@@ -78,6 +114,7 @@ DEFAULT_SETTINGS = {
     "v2_finder_mode": None,
     "v2_manual_mydockfinder": False,
     "v2_mydockfinder_path": "",
+    "v2_mydockfinder_listener_process_names": list(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES),
     "v2_taskbar_corner_style": "win11",
     "v2_taskbar_left_handle_color": "#8E8E93",
     "v2_expanded": False,
@@ -95,6 +132,7 @@ DEFAULT_SETTINGS = {
     "v2_music_flow_intensity": 0.74,
     "v2_compact_duotone_balance": 50,
     "v2_expanded_duotone_balance": 50,
+    "v2_diffraction_frequency": 0.30,
     "v2_music_ambience_values": copy.deepcopy(DEFAULT_MUSIC_AMBIENCE_VALUES),
     "v2_enable_player_progress_plugin": False,
     "v2_player_progress_auto_detect": False,
@@ -108,8 +146,8 @@ DEFAULT_SETTINGS = {
     "v2_gelv_dual_line_font_size": 17,
     "v2_gelv_initial_word_spacing": 220,
     "v2_gelv_word_spacing": 320,
-    "v2_gelv_size_shift_enabled": True,
     "v2_gelv_color_fill_enabled": False,
+    "v2_gelv_word_fill_enabled": False,
     "v2_gelv_color_fill_fallback": "#00D7FF",
     "v2_wave_color_fill_enabled": False,
     "v2_wave_color_fill_fallback": "#00D7FF",
@@ -126,12 +164,15 @@ DEFAULT_SETTINGS = {
     "v2_theme_mode": "system",
     "v2_theme_dark_start": "22:00",
     "v2_theme_dark_end": "07:00",
+    "v2_music_background_follow_theme": False,
     "v2_font_family": "PingFang SC",
     "v2_settings_font_family": "PingFang SC",
     "v2_imported_settings_fonts": [],
     "v2_high_quality_font_rendering": False,
     "v2_animation_fps": 60,
     "v2_animation_speed": 1.0,
+    "v2_empty_island_display_mode": "visible_bar",
+    "v2_no_music_island_priority": "plugin",
     "v2_empty_bar_palette": "aurora",
     "v2_empty_bar_width": 92,
     "v2_empty_bar_height": 14,
@@ -180,7 +221,9 @@ DEFAULT_SETTINGS = {
     "v2_enable_wechat_notification": True,
     "v2_enable_wechat_detail_notification": False,
     "v2_enable_qq_notification": False,
+    "v2_enable_qq_detail_notification": False,
     "v2_enable_dingtalk_notification": False,
+    "v2_enable_dingtalk_detail_notification": False,
 }
 
 
@@ -195,10 +238,24 @@ class SettingsManager(QObject):
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._do_save)
         self._ensure_dir()
+        self._import_legacy_settings_if_needed()
         self.load()
 
     def _ensure_dir(self):
         os.makedirs(APP_DATA_DIR, exist_ok=True)
+
+    def _import_legacy_settings_if_needed(self):
+        if os.path.exists(SETTINGS_FILE):
+            return
+        for legacy_dir in legacy_app_data_dirs():
+            legacy_file = os.path.join(legacy_dir, "settings.json")
+            if not os.path.exists(legacy_file):
+                continue
+            try:
+                shutil.copy2(legacy_file, SETTINGS_FILE)
+            except OSError:
+                return
+            return
 
     def load(self):
         if not os.path.exists(SETTINGS_FILE):

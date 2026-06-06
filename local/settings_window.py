@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainterPath, QRegion
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, QSize, QStringListModel, Qt, QTimer, QUrl, QVariantAnimation
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
     QComboBox,
+    QCompleter,
     QDialog,
     QFileDialog,
     QFrame,
@@ -30,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from local.ios_widgets import IosSwitch
+from local.branding import APP_NAME, install_custom_icon, resolve_icon_paths
 from local.mac_style import (
     mac_preferences_stylesheet,
     mac_preferences_theme,
@@ -37,9 +41,16 @@ from local.mac_style import (
     mac_sidebar_icon_colors,
     mac_traffic_lights,
 )
-from local.no_wheel_widgets import NoWheelComboBox, NoWheelSpinBox
-from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES, DEFAULT_MUSIC_APP_PROFILES
-from local.ui_theme import is_theme_change_event, style_combo_popup
+from local.no_wheel_widgets import NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
+from local.settings_store import (
+    DEFAULT_MUSIC_AMBIENCE_VALUES,
+    DEFAULT_MUSIC_APP_PROFILES,
+    DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
+    MYDOCKFINDER_LISTEN_PROCESS_CHOICES,
+    normalize_mydockfinder_listener_process_names,
+)
+from local.startup import StartupManager, build_startup_command, normalize_startup_mode
+from local.ui_theme import app_dark_mode, is_theme_change_event, music_ambience_style_for_theme, style_combo_popup
 
 
 class ColorButton(QPushButton):
@@ -71,6 +82,373 @@ class ColorButton(QPushButton):
             self._callback()
 
 
+class StatusLamp(QWidget):
+    def __init__(self, active: bool, text: str = "", parent=None):
+        super().__init__(parent)
+        self._active = bool(active)
+        self._text = str(text or "")
+        self.setObjectName("StatusLamp")
+        self.setFixedSize(8, 8)
+        self.setToolTip(self._text)
+
+    def set_active(self, active: bool, text: str = ""):
+        self._active = bool(active)
+        self._text = str(text or "")
+        self.setToolTip(self._text)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_lamp(painter)
+        painter.end()
+
+    def _paint_lamp(self, painter: QPainter):
+        rect = QRectF(self.rect()).adjusted(0.8, 0.8, -0.8, -0.8)
+        base = QColor("#1fc95b" if self._active else "#ff453a")
+        shadow = QColor(base)
+        shadow.setAlpha(80 if self._active else 64)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(shadow)
+        painter.drawEllipse(rect.adjusted(-0.6, -0.6, 0.6, 0.6))
+
+        radial = QRadialGradient(rect.center().x() - rect.width() * 0.25, rect.center().y() - rect.height() * 0.32, rect.width() * 0.78)
+        highlight = QColor("#f5fff7" if self._active else "#fff1ef")
+        highlight.setAlpha(235)
+        edge = QColor(base.darker(150))
+        edge.setAlpha(245)
+        radial.setColorAt(0.0, highlight)
+        radial.setColorAt(0.28, base.lighter(118))
+        radial.setColorAt(1.0, edge)
+        painter.setBrush(radial)
+        painter.drawEllipse(rect)
+
+        gleam = QRectF(rect.left() + rect.width() * 0.2, rect.top() + rect.height() * 0.15, rect.width() * 0.34, rect.height() * 0.26)
+        painter.setBrush(QColor(255, 255, 255, 190))
+        painter.drawEllipse(gleam)
+
+
+class MusicAmbiencePreview(QWidget):
+    DEFAULT_VALUES = {
+        "ambient_intensity": 0.62,
+        "music_flow_intensity": 0.74,
+        "compact_duotone_balance": 58,
+        "expanded_duotone_balance": 58,
+        "diffraction_frequency": 0.46,
+    }
+    VALID_STYLES = {"sea_level", "duotone_full", "bilateral_diffraction", "pure_black", "pure_white"}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._style = "sea_level"
+        self._values = dict(self.DEFAULT_VALUES)
+        self._album_color = QColor("#16BCFF")
+        self._secondary_color = QColor("#FF3A94")
+        self._playing = True
+        self.setObjectName("MusicAmbiencePreview")
+        self.setFixedHeight(58)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def sizeHint(self) -> QSize:
+        return QSize(320, 58)
+
+    def set_preview_state(
+        self,
+        style: str,
+        values: dict[str, object] | None = None,
+        album_color: QColor | str | None = None,
+        secondary_color: QColor | str | None = None,
+        playing: bool = True,
+    ):
+        style = str(style or "sea_level")
+        self._style = style if style in self.VALID_STYLES else "sea_level"
+        merged = dict(self.DEFAULT_VALUES)
+        if isinstance(values, dict):
+            for key in merged:
+                if key in values:
+                    merged[key] = values[key]
+        self._values = merged
+        self._album_color = self._safe_color(album_color, "#16BCFF")
+        self._secondary_color = self._safe_color(secondary_color, "#FF3A94")
+        self._playing = bool(playing)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(7.0, 5.0, -7.0, -5.0)
+        radius = min(20.0, rect.height() * 0.42)
+        painter.setPen(Qt.PenStyle.NoPen)
+        shadow = QColor(0, 0, 0, 42)
+        painter.setBrush(shadow)
+        painter.drawRoundedRect(rect.adjusted(0.0, 2.0, 0.0, 3.0), radius, radius)
+
+        style = self._style
+        if style == "pure_white":
+            self._paint_pure_white(painter, rect, radius)
+        elif style == "pure_black":
+            self._paint_pure_black(painter, rect, radius)
+        elif style == "bilateral_diffraction":
+            self._paint_bilateral_diffraction(painter, rect, radius)
+        elif style == "duotone_full":
+            self._paint_full_duotone(painter, rect, radius)
+        else:
+            self._paint_sea_level(painter, rect, radius)
+        self._paint_preview_content(painter, rect, radius, style)
+        self._paint_border(painter, rect, radius, style == "pure_white")
+        painter.end()
+
+    def _paint_sea_level(self, painter: QPainter, rect: QRectF, radius: float):
+        path = self._rounded_path(rect, radius)
+        painter.fillPath(path, self._dark_body_gradient(rect))
+        painter.save()
+        painter.setClipPath(path)
+        album = self._album_color.lighter(120)
+        secondary = self._secondary_color.lighter(118)
+        bridge = self._mix_color(album, secondary, 0.45)
+        intensity = self._float_value("ambient_intensity", 0.62)
+        flow = self._float_value("music_flow_intensity", 0.74)
+
+        horizon_y = rect.top() + rect.height() * 0.50
+        sea = QLinearGradient(0, rect.top(), 0, rect.bottom())
+        sea.setColorAt(0.00, QColor(album.red(), album.green(), album.blue(), 0))
+        sea.setColorAt(0.44, QColor(bridge.red(), bridge.green(), bridge.blue(), int(42 + 62 * intensity)))
+        sea.setColorAt(0.70, QColor(album.red(), album.green(), album.blue(), int(74 + 78 * intensity)))
+        sea.setColorAt(1.00, QColor(secondary.red(), secondary.green(), secondary.blue(), int(42 + 58 * intensity)))
+        painter.fillRect(rect, sea)
+
+        phase = 0.65 + flow * 1.8
+        wave = QPainterPath(QPointF(rect.left(), horizon_y))
+        count = 18
+        for index in range(count + 1):
+            progress = index / count
+            x = rect.left() + rect.width() * progress
+            y = horizon_y + math.sin(progress * math.tau * 1.4 + phase) * rect.height() * 0.045
+            wave.lineTo(QPointF(x, y))
+        wave.lineTo(QPointF(rect.right(), rect.bottom()))
+        wave.lineTo(QPointF(rect.left(), rect.bottom()))
+        wave.closeSubpath()
+        wave_color = QColor(album.red(), album.green(), album.blue(), int(92 + 66 * intensity))
+        painter.fillPath(wave, wave_color)
+        painter.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
+        painter.drawLine(QPointF(rect.left() + 18, horizon_y), QPointF(rect.right() - 18, horizon_y + 1.0))
+        painter.restore()
+
+    def _paint_full_duotone(self, painter: QPainter, rect: QRectF, radius: float):
+        path = self._rounded_path(rect, radius)
+        painter.save()
+        painter.setClipPath(path)
+        album = self._album_color.lighter(126)
+        secondary = self._secondary_color.lighter(116)
+        bridge = self._mix_color(album, secondary, 0.50)
+        balance = max(0.24, min(0.76, self._percent_value("compact_duotone_balance", 58.0) / 100.0))
+
+        base = QLinearGradient(0, rect.top(), 0, rect.bottom())
+        base.setColorAt(0.00, QColor(secondary.red(), secondary.green(), secondary.blue(), 230))
+        base.setColorAt(max(0.10, balance - 0.08), QColor(secondary.red(), secondary.green(), secondary.blue(), 218))
+        base.setColorAt(balance, QColor(bridge.red(), bridge.green(), bridge.blue(), 238))
+        base.setColorAt(min(0.92, balance + 0.10), QColor(album.red(), album.green(), album.blue(), 226))
+        base.setColorAt(1.00, QColor(album.red(), album.green(), album.blue(), 238))
+        painter.fillRect(rect, base)
+
+        flow = self._float_value("music_flow_intensity", 0.74)
+        self._paint_mist(painter, QPointF(rect.left() + rect.width() * 0.22, rect.top() + rect.height() * 0.36), rect.width() * (0.33 + flow * 0.10), rect.height() * 0.72, secondary, 82)
+        self._paint_mist(painter, QPointF(rect.left() + rect.width() * 0.80, rect.top() + rect.height() * 0.72), rect.width() * (0.34 + flow * 0.09), rect.height() * 0.70, album, 90)
+        self._paint_mist(painter, QPointF(rect.center().x(), rect.center().y()), rect.width() * 0.30, rect.height() * 0.52, bridge, 52)
+        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
+        sheen.setColorAt(0.00, QColor(255, 255, 255, 22))
+        sheen.setColorAt(0.44, QColor(255, 255, 255, 0))
+        sheen.setColorAt(1.00, QColor(255, 255, 255, 18))
+        painter.fillRect(rect, sheen)
+        painter.restore()
+
+    def _paint_bilateral_diffraction(self, painter: QPainter, rect: QRectF, radius: float):
+        path = self._rounded_path(rect, radius)
+        painter.fillPath(path, QColor(0, 0, 0, 255))
+        painter.save()
+        painter.setClipPath(path)
+        album = self._album_color.lighter(132)
+        secondary = self._secondary_color.lighter(125)
+        frequency = self._float_value("diffraction_frequency", 0.46)
+        intensity = self._float_value("ambient_intensity", 0.62)
+        ring_count = max(5, min(12, int(round(5 + frequency * 7))))
+
+        left_center = QPointF(rect.left() + rect.width() * 0.06, rect.center().y())
+        right_center = QPointF(rect.right() - rect.width() * 0.06, rect.center().y())
+        self._paint_mist(painter, left_center, rect.width() * 0.36, rect.height() * 1.18, album, int(72 + intensity * 80))
+        self._paint_mist(painter, right_center, rect.width() * 0.36, rect.height() * 1.18, secondary, int(72 + intensity * 80))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for index in range(ring_count):
+            progress = index / max(1, ring_count - 1)
+            alpha = int((92 - progress * 58) * (0.68 + intensity * 0.32))
+            width = rect.width() * (0.18 + progress * 0.48)
+            height = rect.height() * (0.36 + progress * 1.05)
+            painter.setPen(QPen(QColor(album.red(), album.green(), album.blue(), alpha), 1.0))
+            painter.drawEllipse(QRectF(left_center.x() - width * 0.5, left_center.y() - height * 0.5, width, height))
+            painter.setPen(QPen(QColor(secondary.red(), secondary.green(), secondary.blue(), alpha), 1.0))
+            painter.drawEllipse(QRectF(right_center.x() - width * 0.5, right_center.y() - height * 0.5, width, height))
+        center = QLinearGradient(rect.left(), rect.center().y(), rect.right(), rect.center().y())
+        center.setColorAt(0.00, QColor(album.red(), album.green(), album.blue(), 64))
+        center.setColorAt(0.50, QColor(255, 255, 255, 18))
+        center.setColorAt(1.00, QColor(secondary.red(), secondary.green(), secondary.blue(), 64))
+        painter.fillRect(rect.adjusted(0, rect.height() * 0.40, 0, -rect.height() * 0.40), center)
+        painter.restore()
+
+    def _paint_pure_black(self, painter: QPainter, rect: QRectF, radius: float):
+        path = self._rounded_path(rect, radius)
+        painter.fillPath(path, QColor(0, 0, 0, 255))
+        painter.save()
+        painter.setClipPath(path)
+        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
+        sheen.setColorAt(0.00, QColor(255, 255, 255, 18))
+        sheen.setColorAt(0.38, QColor(255, 255, 255, 4))
+        sheen.setColorAt(1.00, QColor(255, 255, 255, 10))
+        painter.fillRect(rect, sheen)
+        painter.setPen(QPen(QColor(255, 255, 255, 26), 1.0))
+        painter.drawLine(QPointF(rect.left() + 18, rect.top() + 9), QPointF(rect.right() - 18, rect.top() + 9))
+        painter.restore()
+
+    def _paint_pure_white(self, painter: QPainter, rect: QRectF, radius: float):
+        path = self._rounded_path(rect, radius)
+        base = QLinearGradient(0, rect.top(), 0, rect.bottom())
+        base.setColorAt(0.0, QColor(255, 255, 255, 255))
+        base.setColorAt(0.62, QColor(247, 249, 252, 255))
+        base.setColorAt(1.0, QColor(231, 236, 244, 255))
+        painter.fillPath(path, base)
+        painter.save()
+        painter.setClipPath(path)
+        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
+        sheen.setColorAt(0.00, QColor(255, 255, 255, 92))
+        sheen.setColorAt(0.58, QColor(225, 229, 236, 18))
+        sheen.setColorAt(1.00, QColor(188, 196, 210, 34))
+        painter.fillRect(rect, sheen)
+        painter.restore()
+
+    def _paint_preview_content(self, painter: QPainter, rect: QRectF, radius: float, style: str):
+        light = style == "pure_white"
+        text = QColor(28, 30, 34, 210) if light else QColor(255, 255, 255, 224)
+        muted = QColor(74, 82, 96, 160) if light else QColor(255, 255, 255, 112)
+        cover = QRectF(rect.left() + 12.0, rect.center().y() - 15.0, 30.0, 30.0)
+        cover_gradient = QLinearGradient(cover.topLeft(), cover.bottomRight())
+        cover_gradient.setColorAt(0.0, self._album_color.lighter(132))
+        cover_gradient.setColorAt(1.0, self._secondary_color.lighter(116))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(cover_gradient)
+        painter.drawRoundedRect(cover, 8.0, 8.0)
+        painter.setPen(QPen(QColor(255, 255, 255, 62) if not light else QColor(0, 0, 0, 20), 1.0))
+        painter.drawRoundedRect(cover.adjusted(0.5, 0.5, -0.5, -0.5), 7.5, 7.5)
+
+        text_left = cover.right() + 11.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(text)
+        painter.drawRoundedRect(QRectF(text_left, rect.top() + 14.0, rect.width() * 0.30, 5.5), 2.7, 2.7)
+        painter.setBrush(muted)
+        painter.drawRoundedRect(QRectF(text_left, rect.top() + 26.0, rect.width() * 0.22, 4.5), 2.2, 2.2)
+
+        control_color = QColor(255, 255, 255, 194) if not light else QColor(32, 36, 44, 152)
+        painter.setBrush(control_color)
+        center_x = rect.right() - 51.0
+        for index, height in enumerate((8.0, 15.0, 11.0)):
+            bar = QRectF(center_x + index * 7.0, rect.center().y() - height / 2.0, 3.0, height)
+            painter.drawRoundedRect(bar, 1.5, 1.5)
+        painter.setBrush(QColor(255, 255, 255, 68) if not light else QColor(0, 0, 0, 34))
+        painter.drawRoundedRect(QRectF(rect.right() - 22.0, rect.center().y() - 9.0, 8.0, 18.0), 4.0, 4.0)
+
+    def _paint_border(self, painter: QPainter, rect: QRectF, radius: float, light: bool):
+        stroke = QColor(255, 255, 255, 46) if not light else QColor(170, 176, 188, 82)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(stroke, 1.0))
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
+
+    def _paint_mist(self, painter: QPainter, center: QPointF, radius_x: float, radius_y: float, color: QColor, alpha: int):
+        painter.save()
+        painter.translate(center)
+        painter.scale(max(1.0, radius_x), max(1.0, radius_y))
+        glow = QRadialGradient(QPointF(0.0, 0.0), 1.0)
+        glow.setColorAt(0.00, QColor(color.red(), color.green(), color.blue(), int(alpha * 0.58)))
+        glow.setColorAt(0.28, QColor(color.red(), color.green(), color.blue(), int(alpha * 0.38)))
+        glow.setColorAt(0.64, QColor(color.red(), color.green(), color.blue(), int(alpha * 0.14)))
+        glow.setColorAt(1.00, QColor(color.red(), color.green(), color.blue(), 0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawEllipse(QRectF(-1.0, -1.0, 2.0, 2.0))
+        painter.restore()
+
+    def _dark_body_gradient(self, rect: QRectF) -> QLinearGradient:
+        body = QLinearGradient(0, rect.top(), 0, rect.bottom())
+        body.setColorAt(0.00, QColor(4, 8, 18, 255))
+        body.setColorAt(0.46, QColor(7, 13, 26, 255))
+        body.setColorAt(1.00, QColor(13, 24, 44, 255))
+        return body
+
+    def _rounded_path(self, rect: QRectF, radius: float) -> QPainterPath:
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        return path
+
+    def _float_value(self, key: str, fallback: float) -> float:
+        try:
+            return max(0.0, min(1.0, float(self._values.get(key, fallback))))
+        except (TypeError, ValueError):
+            return fallback
+
+    def _percent_value(self, key: str, fallback: float) -> float:
+        try:
+            value = float(self._values.get(key, fallback))
+        except (TypeError, ValueError):
+            value = fallback
+        if value <= 1.0:
+            value *= 100.0
+        return max(0.0, min(100.0, value))
+
+    def _safe_color(self, value: QColor | str | None, fallback: str) -> QColor:
+        color = QColor(value) if value is not None else QColor(fallback)
+        return color if color.isValid() else QColor(fallback)
+
+    def _mix_color(self, first: QColor, second: QColor, amount: float) -> QColor:
+        amount = max(0.0, min(1.0, amount))
+        return QColor(
+            int(first.red() + (second.red() - first.red()) * amount),
+            int(first.green() + (second.green() - first.green()) * amount),
+            int(first.blue() + (second.blue() - first.blue()) * amount),
+        )
+
+
+class SmoothScrollArea(QScrollArea):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scroll_mode_name = "ScrollPerPixel"
+        self._scroll_target = 0
+        self._last_wheel_at = 0.0
+        self._scroll_animation = QVariantAnimation(self)
+        self._scroll_animation.valueChanged.connect(self._apply_scroll_value)
+
+    def wheelEvent(self, event):
+        bar = self.verticalScrollBar()
+        delta = int(event.pixelDelta().y() or event.angleDelta().y())
+        if delta == 0 or bar.maximum() <= bar.minimum():
+            event.ignore()
+            return
+        now = time.monotonic()
+        continuous = now - self._last_wheel_at < 0.18
+        self._last_wheel_at = now
+        start = int(bar.value())
+        if not self._scroll_animation.state() == QVariantAnimation.State.Running:
+            self._scroll_target = start
+        step = -delta if event.pixelDelta().y() else int(-delta / 120 * 62)
+        self._scroll_target = max(bar.minimum(), min(bar.maximum(), self._scroll_target + step))
+        self._scroll_animation.stop()
+        self._scroll_animation.setStartValue(start)
+        self._scroll_animation.setEndValue(self._scroll_target)
+        self._scroll_animation.setDuration(135 if continuous else 245)
+        self._scroll_animation.setEasingCurve(QEasingCurve.Type.OutQuint)
+        self._scroll_animation.start()
+        event.accept()
+
+    def _apply_scroll_value(self, value):
+        self.verticalScrollBar().setValue(int(value))
+
+
 class SettingsWindow(QDialog):
     FONT_CHOICES = (
         "PingFang SC",
@@ -82,27 +460,33 @@ class SettingsWindow(QDialog):
         "Source Han Serif SC": ("Source Han Serif SC", "SimSun", "Microsoft YaHei UI", "Segoe UI"),
     }
 
-    EMPTY_BAR_PALETTES = (
-        ("aurora", "极光"),
-        ("cyan", "青蓝"),
-        ("violet", "紫蓝"),
-        ("amber", "暖金"),
-        ("rainbow", "彩虹"),
-        ("custom", "自定义三色"),
+    EMPTY_ISLAND_DISPLAY_MODES = (
+        ("横条/竖条", "visible_bar"),
+        ("指定字段", "text"),
+        ("时间", "time"),
+    )
+    NO_MUSIC_ISLAND_PRIORITIES = (
+        ("插件岛", "plugin"),
+        ("无岛模式", "empty"),
     )
 
     MUSIC_AMBIENCE_STYLES = (
         ("海平面", "sea_level"),
         ("整岛双色", "duotone_full"),
-        ("纯黑", "pure_black"),
         ("双侧衍射", "bilateral_diffraction"),
-        ("纯白", "pure_white"),
+        ("黑色", "pure_black"),
+        ("白色", "pure_white"),
     )
+    COLOR_FILL_BLOCKED_BACKGROUND_STYLES = {"sea_level", "duotone_full"}
+    COLOR_FILL_BLOCKED_REASON = "海平面与整岛双色背景下不可用"
 
-    MUSIC_ISLAND_STYLES = (
-        ("当前样式", "standard"),
-        ("预留样式 A", "scheme_a"),
-    )
+    SETTINGS_SIDEBAR_ICON_FILES = {
+        "基础设置": {"dark": "基础设置（白）.svg", "light": "基础设置 (黑).svg"},
+        "媒体控制": {"dark": "媒体控制（白）.svg", "light": "媒体控制（黑）.svg"},
+        "插件设置": {"dark": "插件设置（白）.svg", "light": "插件设置（黑）.svg"},
+        "通知设置": {"dark": "通知设置（白）.svg", "light": "通知设置（黑）.svg"},
+        "关于我": {"dark": "关于我（白）.svg", "light": "关于我（黑）.svg"},
+    }
 
     SIDE_ISLAND_STYLES = (
         ("当前胶囊", "standard"),
@@ -168,6 +552,12 @@ class SettingsWindow(QDialog):
         ("自定时间", "schedule"),
     )
 
+    STARTUP_MODES = (
+        ("无", "none"),
+        ("Windows 启动项", "registry"),
+        ("计划任务（推荐）", "task"),
+    )
+
     LYRIC_ELASTIC_MODES = (
         ("双侧悦动", "both"),
         ("左侧轻推", "left"),
@@ -177,11 +567,6 @@ class SettingsWindow(QDialog):
         ("波光逐流", "wave_stream"),
         ("格律宋散", "gelv_songscatter"),
         ("专辑岛", "album_island"),
-    )
-
-    GELV_FONT_CHOICES = (
-        ("思源宋体", "Source Han Serif SC"),
-        ("PingFang", "PingFang SC"),
     )
 
     NO_LYRICS_DISPLAY_MODES = (
@@ -220,8 +605,8 @@ class SettingsWindow(QDialog):
         ("Win10 直角", "win10"),
     )
 
-    COMPACT_ROW_VPAD = 8
-    APPEARANCE_ROW_VPAD = 4
+    COMPACT_ROW_VPAD = 10
+    APPEARANCE_ROW_VPAD = 6
     APPEARANCE_LABEL_WIDTH = 100
 
     def __init__(self, island_widget: QWidget, settings_manager=None, parent=None):
@@ -230,8 +615,8 @@ class SettingsWindow(QDialog):
         self.settings = settings_manager
         self._plugin_page_index = 2
         self._barrage_adjust_generation = 0
-        self._barrage_page_index = 4
-        self._diagnostics_page_index = 5
+        self._barrage_page_index = 3
+        self._diagnostics_page_index = 4
         self._diagnostic_labels: dict[str, QLabel] = {}
         self._detail_panels: list[tuple[QPushButton, QFrame]] = []
         self._applying_theme = False
@@ -240,7 +625,16 @@ class SettingsWindow(QDialog):
         self._row_vpad_override: int | None = None
         self._row_label_width_override: int | None = None
         self._compact_card_active = False
-        self.setWindowTitle("gpt-island 设置")
+        self._active_search_page = None
+        self._settings_pages: list[dict[str, object]] = []
+        self._section_labels: list[tuple[QLabel, int, int]] = []
+        self._settings_search_entries: list[dict[str, object]] = []
+        self._settings_search_entry_seq = 0
+        self._last_settings_page_index = 0
+        self._settings_search_page_index = -1
+        self._settings_search_completer_model: QStringListModel | None = None
+        self.icon_changed_callback = None
+        self.setWindowTitle(f"{APP_NAME} 设置")
         self.setMinimumSize(688, 496)
         self.setWindowFlags(
             (self.windowFlags() | Qt.WindowType.FramelessWindowHint)
@@ -264,7 +658,16 @@ class SettingsWindow(QDialog):
             self._applying_theme = False
 
     def _section_style(self, top: int = 12, bottom: int = 8) -> str:
-        return f"font-size: 15px; font-weight: 700; color: {self._theme()['text']}; padding: {top}px 0 {bottom}px 0;"
+        return f"font-size: 15px; font-weight: 700; color: {self._theme()['section_text']}; padding: {top}px 0 {bottom}px 0;"
+
+    def _register_section_label(self, label: QLabel, top: int = 12, bottom: int = 8) -> QLabel:
+        self._section_labels.append((label, int(top), int(bottom)))
+        label.setStyleSheet(self._section_style(top, bottom))
+        return label
+
+    def _refresh_section_labels(self):
+        for label, top, bottom in getattr(self, "_section_labels", []):
+            label.setStyleSheet(self._section_style(top, bottom))
 
     def _hint_style(self, top: int = 2, bottom: int = 8) -> str:
         return f"color: {self._theme()['muted']}; padding: {top}px 0 {bottom}px 0;"
@@ -275,6 +678,9 @@ class SettingsWindow(QDialog):
             return
         if is_theme_change_event(event):
             self._apply_theme()
+            self._refresh_section_labels()
+            self._refresh_settings_sidebar_icons()
+            self._sync_music_background_to_theme()
             for combo in self.findChildren(QComboBox):
                 self._style_combo_popup(combo)
         super().changeEvent(event)
@@ -291,6 +697,59 @@ class SettingsWindow(QDialog):
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 14.0, 14.0)
         self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def _settings_dark_mode(self) -> bool:
+        getter = self.settings.get if self.settings is not None and hasattr(self.settings, "get") else None
+        return app_dark_mode(getter)
+
+    def _settings_sidebar_icon_path(self, title: str) -> Path | None:
+        files = self.SETTINGS_SIDEBAR_ICON_FILES.get(str(title or ""))
+        if not files:
+            return None
+        theme_key = "dark" if self._settings_dark_mode() else "light"
+        filename = files.get(theme_key)
+        if not filename:
+            return None
+        return Path(__file__).resolve().parents[1] / "assets" / "seeting" / filename
+
+    def _settings_sidebar_icon(self, title: str, fallback_icon: QIcon) -> tuple[QIcon, str]:
+        path = self._settings_sidebar_icon_path(title)
+        if path is not None and path.exists():
+            return QIcon(str(path)), str(path)
+        return fallback_icon, ""
+
+    def _refresh_settings_sidebar_icons(self):
+        if not getattr(self, "_settings_pages", None):
+            return
+        for page in self._settings_pages:
+            fallback = page.get("fallback_icon")
+            if not isinstance(fallback, QIcon):
+                fallback = page.get("icon")
+            if not isinstance(fallback, QIcon):
+                continue
+            icon, icon_path = self._settings_sidebar_icon(str(page.get("title", "")), fallback)
+            page["icon"] = icon
+            page["icon_path"] = icon_path
+        for entry in self._settings_search_entries:
+            try:
+                page_index = int(entry.get("page_index", -1))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= page_index < len(self._settings_pages):
+                entry["icon"] = self._settings_pages[page_index].get("icon")
+        if hasattr(self, "nav"):
+            for row in range(self.nav.count()):
+                item = self.nav.item(row)
+                if item is None:
+                    continue
+                try:
+                    page_index = int(item.data(Qt.ItemDataRole.UserRole))
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= page_index < len(self._settings_pages):
+                    icon = self._settings_pages[page_index].get("icon")
+                    if isinstance(icon, QIcon):
+                        item.setIcon(icon)
 
     def _build_ui(self):
         self._apply_theme()
@@ -319,12 +778,20 @@ class SettingsWindow(QDialog):
         self.search_input = QLineEdit()
         self.search_input.setObjectName("MacSearch")
         self.search_input.setPlaceholderText("搜索")
+        self._settings_search_completer_model = QStringListModel(self)
+        self.search_completer = QCompleter(self._settings_search_completer_model, self.search_input)
+        self.search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.search_completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self.search_completer.setMaxVisibleItems(8)
+        self.search_completer.activated.connect(self._apply_settings_search_suggestion)
+        self.search_input.setCompleter(self.search_completer)
         self.search_input.textChanged.connect(self._filter_settings_nav)
         side_layout.addWidget(self.search_input)
 
         self.nav = QListWidget()
         self.nav.setObjectName("MacSidebarList")
         self.nav.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.nav.setIconSize(QSize(24, 24))
         side_layout.addWidget(self.nav, 1)
         root.addWidget(side)
 
@@ -351,41 +818,396 @@ class SettingsWindow(QDialog):
         root.addWidget(content, 1)
 
         pages = (
-            ("位置", self._placement_page()),
-            ("媒体播放", self._media_page()),
-            ("插件", self._plugins_page()),
-            ("外观", self._appearance_page()),
-            ("弹幕", self._barrage_page()),
-            ("诊断", self._diagnostics_page()),
+            ("基础设置", self._basic_settings_page()),
+            ("媒体控制", self._media_page()),
+            ("插件设置", self._plugins_page()),
+            ("通知设置", self._notification_page()),
+            ("关于我", self._about_page()),
         )
         colors = mac_sidebar_icon_colors()
         for index, (name, page) in enumerate(pages):
-            self.nav.addItem(QListWidgetItem(mac_sidebar_icon(colors[index % len(colors)], name[:1]), name))
+            fallback_icon = mac_sidebar_icon(colors[index % len(colors)], name[:1])
+            icon, icon_path = self._settings_sidebar_icon(name, fallback_icon)
             self.stack.addWidget(page)
+            self._settings_pages.append({"title": name, "page": page, "icon": icon, "fallback_icon": fallback_icon, "icon_path": str(icon_path)})
+            self._register_settings_search_entry(name, page, terms=(name,), page=page, page_index=index, priority=12)
+            for entry in getattr(page, "_settings_search_entries", []):
+                entry["page_index"] = index
+                entry["page_title"] = name
+                entry["icon"] = icon
+                if entry not in self._settings_search_entries:
+                    self._settings_search_entries.append(entry)
+        self.settings_search_page = self._create_settings_search_page()
+        self._settings_search_page_index = self.stack.addWidget(self.settings_search_page)
         self.nav.currentRowChanged.connect(self._select_settings_page)
+        self._rebuild_settings_nav("")
         self.nav.setCurrentRow(0)
 
+    def _create_settings_search_page(self) -> QScrollArea:
+        scroll = SmoothScrollArea()
+        scroll.setObjectName("MacContentScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.verticalScrollBar().setSingleStep(24)
+        page = QWidget()
+        page.setObjectName("MacScrollBody")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 14, 24, 22)
+        layout.setSpacing(12)
+        scroll.setWidget(page)
+        self.settings_search_results_layout = layout
+        return scroll
+
     def _select_settings_page(self, row: int):
-        if row < 0 or row >= self.stack.count():
+        item = self.nav.item(row) if row >= 0 else None
+        page_index = item.data(Qt.ItemDataRole.UserRole) if item is not None else row
+        try:
+            page_index = int(page_index)
+        except (TypeError, ValueError):
             return
-        self.stack.setCurrentIndex(row)
-        item = self.nav.item(row)
-        if item is not None:
-            self.title_label.setText(item.text())
-        self._settings_page_changed(row)
+        if page_index < 0 or page_index >= len(getattr(self, "_settings_pages", [])):
+            return
+        self._last_settings_page_index = page_index
+        self.stack.setCurrentIndex(page_index)
+        self.title_label.setText(str(self._settings_pages[page_index].get("title", "")))
+        entry_id = item.data(Qt.ItemDataRole.UserRole + 1) if item is not None else None
+        if entry_id:
+            QTimer.singleShot(0, lambda page_index=page_index, entry_id=str(entry_id): self._scroll_to_search_entry(page_index, entry_id))
+        self._settings_page_changed(page_index)
 
     def _filter_settings_nav(self, text: str):
-        query = str(text or "").strip().lower()
-        first_visible = -1
-        for row in range(self.nav.count()):
-            item = self.nav.item(row)
-            hidden = bool(query and query not in item.text().lower())
-            item.setHidden(hidden)
-            if not hidden and first_visible < 0:
-                first_visible = row
-        current = self.nav.currentItem()
-        if first_visible >= 0 and current is not None and current.isHidden():
-            self.nav.setCurrentRow(first_visible)
+        query = str(text or "").strip()
+        self._update_settings_search_suggestions(query)
+        if query:
+            self._show_settings_search_results(query)
+        else:
+            self._restore_settings_page_after_search()
+
+    def _register_settings_search_entry(
+        self,
+        title: str,
+        widget: QWidget | None,
+        terms=(),
+        page: QWidget | None = None,
+        page_index: int | None = None,
+        priority: int = 0,
+    ):
+        search_page = page or getattr(self, "_active_search_page", None)
+        if search_page is None:
+            return
+        self._settings_search_entry_seq += 1
+        term_values = [str(title or "")]
+        for term in terms or ():
+            text = str(term or "").strip()
+            if text:
+                term_values.append(text)
+        entry = {
+            "id": f"settings-search-{self._settings_search_entry_seq}",
+            "title": str(title or "").strip(),
+            "terms": tuple(dict.fromkeys(term_values)),
+            "widget": widget,
+            "page": search_page,
+            "page_index": page_index,
+            "page_title": "",
+            "icon": None,
+            "order": self._settings_search_entry_seq,
+            "priority": int(priority),
+        }
+        entries = getattr(search_page, "_settings_search_entries", None)
+        if entries is None:
+            entries = []
+            search_page._settings_search_entries = entries
+        entries.append(entry)
+        if page_index is not None:
+            self._settings_search_entries.append(entry)
+
+    def _settings_search_widget_terms(self, widget: QWidget | None) -> list[str]:
+        if widget is None:
+            return []
+        terms: list[str] = []
+
+        def add_text(value):
+            text = str(value or "").strip()
+            if text:
+                terms.append(text)
+
+        if isinstance(widget, QComboBox):
+            for index in range(widget.count()):
+                add_text(widget.itemText(index))
+                add_text(widget.itemData(index))
+        elif isinstance(widget, QLineEdit):
+            add_text(widget.placeholderText())
+            add_text(widget.text())
+        elif isinstance(widget, IosSwitch):
+            add_text(getattr(widget, "_text", ""))
+        elif isinstance(widget, (QLabel, QPushButton)):
+            add_text(widget.text())
+        for child in widget.findChildren(QWidget):
+            if isinstance(child, QComboBox):
+                for index in range(child.count()):
+                    add_text(child.itemText(index))
+                    add_text(child.itemData(index))
+            elif isinstance(child, QLineEdit):
+                add_text(child.placeholderText())
+                add_text(child.text())
+            elif isinstance(child, IosSwitch):
+                add_text(getattr(child, "_text", ""))
+            elif isinstance(child, (QLabel, QPushButton)):
+                add_text(child.text())
+        return terms
+
+    def _normalize_settings_search_text(self, text: str) -> str:
+        skip = set(" \t\r\n:_-—–·/\\|,.，。:：;；()（）[]【】{}<>《》\"'`")
+        return "".join(char.casefold() for char in str(text or "") if char not in skip)
+
+    def _settings_search_subsequence_score(self, query: str, target: str) -> int:
+        positions: list[int] = []
+        start = 0
+        for char in query:
+            found = target.find(char, start)
+            if found < 0:
+                return 0
+            positions.append(found)
+            start = found + 1
+        if not positions:
+            return 0
+        spread = positions[-1] - positions[0] + 1
+        adjacent = sum(1 for left, right in zip(positions, positions[1:]) if right == left + 1)
+        return max(1, 4800 - spread * 18 + adjacent * 42 - len(target))
+
+    def _settings_search_score(self, query: str, target: str) -> int:
+        query_norm = self._normalize_settings_search_text(query)
+        target_norm = self._normalize_settings_search_text(target)
+        if not query_norm or not target_norm:
+            return 0
+        if query_norm == target_norm:
+            return 10000
+        if target_norm.startswith(query_norm):
+            return 9000 - len(target_norm)
+        contains_at = target_norm.find(query_norm)
+        if contains_at >= 0:
+            return 8200 - contains_at * 24 - len(target_norm)
+        return self._settings_search_subsequence_score(query_norm, target_norm)
+
+    def _settings_search_matches(self, query: str) -> list[dict[str, object]]:
+        matches: list[tuple[int, int, int, dict[str, object]]] = []
+        for entry in getattr(self, "_settings_search_entries", []):
+            page_index = entry.get("page_index")
+            if page_index is None:
+                continue
+            score = 0
+            for term in entry.get("terms", ()):
+                score = max(score, self._settings_search_score(query, str(term)))
+            if score <= 0:
+                continue
+            score += int(entry.get("priority", 0) or 0)
+            matches.append((score, -int(entry.get("order", 0) or 0), -int(page_index), entry))
+        matches.sort(key=lambda item: (-item[0], -item[1], -item[2]))
+        return [entry for _score, _order, _page, entry in matches]
+
+    def _settings_search_suggestions(self, query: str, limit: int = 8) -> list[str]:
+        query = str(query or "").strip()
+        if not query:
+            return []
+        candidates: dict[str, tuple[int, int, int, str]] = {}
+        for entry in getattr(self, "_settings_search_entries", []):
+            priority = int(entry.get("priority", 0) or 0)
+            order = int(entry.get("order", 0) or 0)
+            for term in entry.get("terms", ()):
+                text = str(term or "").strip()
+                if not text:
+                    continue
+                score = self._settings_search_score(query, text)
+                if score <= 0:
+                    continue
+                normalized = self._normalize_settings_search_text(text)
+                ranked = (score + priority, -len(text), -order, text)
+                if normalized not in candidates or ranked > candidates[normalized]:
+                    candidates[normalized] = ranked
+        ranked_terms = sorted(candidates.values(), key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+        return [text for _score, _length, _order, text in ranked_terms[:limit]]
+
+    def _update_settings_search_suggestions(self, query: str):
+        model = getattr(self, "_settings_search_completer_model", None)
+        if model is None:
+            return
+        suggestions = self._settings_search_suggestions(query)
+        model.setStringList(suggestions)
+        completer = getattr(self, "search_completer", None)
+        if query and suggestions and completer is not None and self.search_input.hasFocus():
+            completer.complete()
+
+    def _apply_settings_search_suggestion(self, suggestion):
+        text = suggestion.data() if hasattr(suggestion, "data") else suggestion
+        text = str(text or "").strip()
+        if text:
+            self.search_input.setText(text)
+            self.search_input.setFocus()
+
+    def _settings_search_best_term(self, entry: dict[str, object], query: str) -> str:
+        ranked: list[tuple[int, int, str]] = []
+        for term in entry.get("terms", ()):
+            text = str(term or "").strip()
+            if not text:
+                continue
+            score = self._settings_search_score(query, text)
+            if score > 0:
+                ranked.append((score, -len(text), text))
+        if not ranked:
+            return ""
+        ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        return ranked[0][2]
+
+    def _clear_settings_search_results(self):
+        layout = getattr(self, "settings_search_results_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _populate_settings_search_results(self, query: str, matches: list[dict[str, object]]):
+        layout = getattr(self, "settings_search_results_layout", None)
+        if layout is None:
+            return
+        self._clear_settings_search_results()
+        summary = QLabel(f"找到 {len(matches)} 个相关设置项")
+        summary.setObjectName("SearchResultSummary")
+        layout.addWidget(summary)
+        if not matches:
+            empty = QLabel("没有匹配的设置项")
+            empty.setObjectName("SearchResultEmpty")
+            layout.addWidget(empty)
+            layout.addStretch(1)
+            return
+        for entry in matches:
+            row = QFrame()
+            row.setObjectName("SearchResultRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(12, 9, 10, 9)
+            row_layout.setSpacing(10)
+
+            text_box = QVBoxLayout()
+            text_box.setContentsMargins(0, 0, 0, 0)
+            text_box.setSpacing(2)
+            title_label = QLabel(str(entry.get("title", "")))
+            title_label.setObjectName("SearchResultTitle")
+            title_label.setWordWrap(True)
+            best_term = self._settings_search_best_term(entry, query)
+            page_title = str(entry.get("page_title", "") or "")
+            if best_term and best_term != title_label.text():
+                meta_text = f"{page_title} · {best_term}" if page_title else best_term
+            else:
+                meta_text = page_title
+            meta_label = QLabel(meta_text)
+            meta_label.setObjectName("SearchResultMeta")
+            meta_label.setWordWrap(True)
+            text_box.addWidget(title_label)
+            if meta_text:
+                text_box.addWidget(meta_label)
+            row_layout.addLayout(text_box, 1)
+
+            open_button = QPushButton("打开")
+            open_button.setObjectName("SearchResultAction")
+            entry_id = str(entry.get("id", ""))
+            open_button.clicked.connect(lambda _checked=False, item_id=entry_id: self._activate_settings_search_entry(item_id))
+            row_layout.addWidget(open_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            layout.addWidget(row)
+        layout.addStretch(1)
+
+    def _show_settings_search_results(self, query: str):
+        current_page = self.stack.currentIndex() if hasattr(self, "stack") else -1
+        if 0 <= current_page < len(getattr(self, "_settings_pages", [])):
+            self._last_settings_page_index = current_page
+        matches = self._settings_search_matches(query)
+        self._populate_settings_search_results(query, matches)
+        if getattr(self, "settings_search_page", None) is not None:
+            self.stack.setCurrentWidget(self.settings_search_page)
+        self.title_label.setText("搜索结果")
+
+    def _sync_settings_nav_to_page(self, page_index: int):
+        if not hasattr(self, "nav"):
+            return
+        self.nav.blockSignals(True)
+        try:
+            for row in range(self.nav.count()):
+                item = self.nav.item(row)
+                if item is not None and item.data(Qt.ItemDataRole.UserRole) == page_index:
+                    self.nav.setCurrentRow(row)
+                    break
+        finally:
+            self.nav.blockSignals(False)
+
+    def _restore_settings_page_after_search(self):
+        current_page = self.stack.currentIndex() if hasattr(self, "stack") else -1
+        if 0 <= current_page < len(getattr(self, "_settings_pages", [])):
+            page_index = current_page
+        else:
+            page_index = int(getattr(self, "_last_settings_page_index", 0) or 0)
+        page_index = max(0, min(page_index, len(getattr(self, "_settings_pages", [])) - 1))
+        self._clear_settings_search_results()
+        self._sync_settings_nav_to_page(page_index)
+        self.stack.setCurrentIndex(page_index)
+        self.title_label.setText(str(self._settings_pages[page_index].get("title", "")))
+        self._last_settings_page_index = page_index
+        self._settings_page_changed(page_index)
+
+    def _activate_settings_search_entry(self, entry_id: str):
+        entry = next((item for item in self._settings_search_entries if str(item.get("id", "")) == str(entry_id)), None)
+        if entry is None:
+            return
+        try:
+            page_index = int(entry.get("page_index", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if page_index < 0 or page_index >= len(getattr(self, "_settings_pages", [])):
+            return
+        self._last_settings_page_index = page_index
+        self._sync_settings_nav_to_page(page_index)
+        self.stack.setCurrentIndex(page_index)
+        self.title_label.setText(str(self._settings_pages[page_index].get("title", "")))
+        self._settings_page_changed(page_index)
+        QTimer.singleShot(0, lambda page_index=page_index, entry_id=str(entry_id): self._scroll_to_search_entry(page_index, entry_id))
+
+    def _rebuild_settings_nav(self, query: str = ""):
+        current_page = self.stack.currentIndex() if hasattr(self, "stack") else 0
+        if current_page < 0 or current_page >= len(getattr(self, "_settings_pages", [])):
+            current_page = int(getattr(self, "_last_settings_page_index", 0) or 0)
+        self.nav.blockSignals(True)
+        self.nav.clear()
+        for page_index, page in enumerate(getattr(self, "_settings_pages", [])):
+            item = QListWidgetItem(page.get("icon"), str(page.get("title", "")))
+            item.setData(Qt.ItemDataRole.UserRole, page_index)
+            item.setData(Qt.ItemDataRole.UserRole + 1, "")
+            self.nav.addItem(item)
+        target_row = max(0, min(self.nav.count() - 1, current_page))
+        self.nav.blockSignals(False)
+        if self.nav.count() > 0:
+            self.nav.setCurrentRow(target_row)
+
+    def _scroll_to_search_entry(self, page_index: int, entry_id: str):
+        if page_index < 0 or page_index >= self.stack.count():
+            return
+        page = self.stack.widget(page_index)
+        if not isinstance(page, QScrollArea):
+            return
+        entry = next((item for item in self._settings_search_entries if str(item.get("id", "")) == str(entry_id)), None)
+        if entry is None:
+            return
+        widget = entry.get("widget")
+        body = page.widget()
+        if not isinstance(widget, QWidget) or body is None:
+            return
+        try:
+            y = widget.mapTo(body, widget.rect().topLeft()).y()
+        except RuntimeError:
+            return
+        page.verticalScrollBar().setValue(max(0, y - 16))
 
     def _is_window_drag_area(self, point) -> bool:
         if point.y() > 44 and point.x() > 157:
@@ -418,17 +1240,23 @@ class SettingsWindow(QDialog):
         super().mouseReleaseEvent(event)
 
     def _page(self, title: str) -> QWidget:
-        scroll = QScrollArea()
+        scroll = SmoothScrollArea()
         scroll.setObjectName("MacContentScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.verticalScrollBar().setSingleStep(24)
         page = QWidget()
         page.setObjectName("MacScrollBody")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(18, 12, 22, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 14, 24, 22)
+        layout.setSpacing(14)
         scroll.setWidget(page)
         scroll._content_layout = layout
+        scroll._settings_search_title = title
+        scroll._settings_search_entries = []
+        self._active_search_page = scroll
         return scroll
 
     def _row_vpad(self) -> int:
@@ -449,8 +1277,8 @@ class SettingsWindow(QDialog):
         self._compact_card_active = True
         layout = getattr(page, "_content_layout", None)
         if layout is not None:
-            layout.setContentsMargins(12, 6, 14, 12)
-            layout.setSpacing(7)
+            layout.setContentsMargins(14, 8, 16, 14)
+            layout.setSpacing(10)
 
     def _end_compact_appearance_page(self):
         self._row_vpad_override = None
@@ -463,10 +1291,10 @@ class SettingsWindow(QDialog):
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         layout = QVBoxLayout(card)
         if getattr(self, "_compact_card_active", False):
-            layout.setContentsMargins(10, 5, 10, 5)
+            layout.setContentsMargins(12, 7, 12, 7)
         else:
-            layout.setContentsMargins(14, 8, 14, 8)
-        layout.setSpacing(0)
+            layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(3 if getattr(self, "_compact_card_active", False) else 4)
         parent_layout.addWidget(card)
         return card
 
@@ -474,17 +1302,19 @@ class SettingsWindow(QDialog):
         row = QWidget()
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
-        row_layout.setSpacing(10 if getattr(self, "_compact_card_active", False) else 12)
+        row_layout.setSpacing(12 if getattr(self, "_compact_card_active", False) else 14)
         label = QLabel(title)
         label.setObjectName("RowTitle")
         label.setMinimumWidth(self._row_label_width())
-        control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
+        if control.sizePolicy().horizontalPolicy() != QSizePolicy.Policy.Ignored:
+            control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
         row_layout.addWidget(label, 0)
         row_layout.addWidget(control, 1)
         layout.addWidget(row)
+        self._register_settings_search_entry(title, row, terms=self._settings_search_widget_terms(control), priority=8)
         return row
 
-    def _path_picker_row(self, layout: QVBoxLayout, title: str, line_edit: QLineEdit, browse_callback):
+    def _path_picker_row(self, layout: QVBoxLayout, title: str, line_edit: QLineEdit, browse_callback, stacked: bool = False):
         container = QWidget()
         container_layout = QHBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -495,18 +1325,113 @@ class SettingsWindow(QDialog):
         browse_button.clicked.connect(browse_callback)
         container_layout.addWidget(line_edit, 1)
         container_layout.addWidget(browse_button, 0)
-        self._row(layout, title, container)
-        return browse_button
+        if not stacked:
+            self._row(layout, title, container)
+            return browse_button
+
+        row = QWidget()
+        row.setObjectName("PathPickerRowStacked")
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
+        row_layout.setSpacing(7)
+        label = QLabel(title)
+        label.setObjectName("RowTitle")
+        row_layout.addWidget(label)
+        row_layout.addWidget(container)
+        layout.addWidget(row)
+        self._register_settings_search_entry(title, row, terms=self._settings_search_widget_terms(container), priority=8)
+        return row
+
+    def _section_label(self, text: str, top: int = 12, bottom: int = 8) -> QLabel:
+        label = QLabel(text)
+        self._register_section_label(label, top, bottom)
+        self._register_settings_search_entry(text, label, terms=(text,), priority=3)
+        return label
+
+    def _readonly_value(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("Value")
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        return label
+
+    def _diagnostic_value_label(self) -> QLabel:
+        label = QLabel("-")
+        label.setObjectName("DiagnosticValue")
+        label.setWordWrap(True)
+        label.setMinimumWidth(0)
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        return label
+
+    def _status_indicator(self, active: bool, text: str = "") -> StatusLamp:
+        return StatusLamp(active, text or ("可用" if active else "不可用"))
+
+    def _set_status_indicator(self, lamp: StatusLamp, active: bool, text: str = ""):
+        lamp.set_active(active, text or ("可用" if active else "不可用"))
+
+    def _set_switch_enabled(self, switch: IosSwitch | None, enabled: bool, reason: str = ""):
+        if switch is None:
+            return
+        if isinstance(switch, IosSwitch):
+            switch.set_unavailable_reason("" if enabled else reason)
+        switch.setEnabled(enabled)
+
+    def _set_switch_checked(self, switch: IosSwitch | None, checked: bool):
+        if switch is None:
+            return
+        switch.blockSignals(True)
+        switch.setChecked(bool(checked))
+        switch.blockSignals(False)
+
+    def _set_island_bool_setting(self, attr: str, value: bool):
+        setter = getattr(self.island_widget, f"set_{attr}", None)
+        if callable(setter):
+            setter(bool(value), notify=False)
+        else:
+            setattr(self.island_widget, attr, bool(value))
+            if hasattr(self.island_widget, "update"):
+                self.island_widget.update()
+
+    def _disable_color_fill_setting(self, checkbox: IosSwitch | None, attr: str, setting_key: str):
+        self._set_switch_checked(checkbox, False)
+        if bool(getattr(self.island_widget, attr, False)):
+            self._set_island_bool_setting(attr, False)
+        self._save(setting_key, False)
+
+    def _indicator_row(self, layout: QVBoxLayout, title: str, indicator: StatusLamp, control: QWidget):
+        row_widget = QWidget()
+        grid = QGridLayout(row_widget)
+        grid.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
+        grid.setHorizontalSpacing(10 if getattr(self, "_compact_card_active", False) else 12)
+        grid.setVerticalSpacing(2)
+        grid.setColumnMinimumWidth(0, 12)
+        grid.setColumnMinimumWidth(1, self._row_label_width())
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 0)
+        grid.setColumnStretch(2, 1)
+        label = QLabel(title)
+        label.setObjectName("RowTitle")
+        label.setFixedWidth(self._row_label_width())
+        control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
+        grid.addWidget(indicator, 0, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        grid.addWidget(label, 0, 1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if control.maximumWidth() < 100000:
+            grid.addWidget(control, 0, 2, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        else:
+            grid.addWidget(control, 0, 2)
+        layout.addWidget(row_widget)
+        self._register_settings_search_entry(title, row_widget, terms=self._settings_search_widget_terms(control), priority=8)
+        return row_widget
 
     def _control_group(self, layout: QVBoxLayout) -> QFrame:
         group = QFrame()
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(0, 0, 0, 0)
-        group_layout.setSpacing(0)
+        group_layout.setSpacing(2)
         layout.addWidget(group)
         return group
 
-    def _detail_panel(self, layout: QVBoxLayout, title: str) -> tuple[QFrame, QVBoxLayout, QPushButton]:
+    def _detail_panel(self, layout: QVBoxLayout, title: str, indicator: StatusLamp | None = None) -> tuple[QFrame, QVBoxLayout, QPushButton]:
         panel = QFrame()
         panel.setObjectName("DetailPanel")
         panel_layout = QVBoxLayout(panel)
@@ -518,13 +1443,23 @@ class SettingsWindow(QDialog):
         toggle.setCheckable(True)
         toggle.setProperty("detail_title", title)
         toggle.setText(f"{title} 详细设置")
-        panel_layout.addWidget(toggle)
+        if indicator is None:
+            panel_layout.addWidget(toggle)
+        else:
+            header = QWidget()
+            header.setObjectName("DetailToggleRow")
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(0, 0, 0, 0)
+            header_layout.setSpacing(8)
+            header_layout.addWidget(indicator, 0, Qt.AlignmentFlag.AlignVCenter)
+            header_layout.addWidget(toggle, 1)
+            panel_layout.addWidget(header)
 
         body = QFrame()
         body.setObjectName("DetailBody")
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(0, 2, 0, 0)
-        body_layout.setSpacing(0)
+        body_layout.setContentsMargins(10, 8, 10, 8)
+        body_layout.setSpacing(4)
         body.setVisible(False)
         panel_layout.addWidget(body)
 
@@ -536,6 +1471,7 @@ class SettingsWindow(QDialog):
         toggle.toggled.connect(update_open_state)
         layout.addWidget(panel)
         self._detail_panels.append((toggle, body))
+        self._register_settings_search_entry(title, panel, terms=(toggle.text(),), priority=6)
         return panel, body_layout, toggle
 
     def _set_detail_panel_title(self, toggle: QPushButton, title: str):
@@ -577,7 +1513,8 @@ class SettingsWindow(QDialog):
 
     def _build_music_app_profile_panel(self, layout: QVBoxLayout, service: str, label: str, placeholder: str):
         profile = self._music_app_profile(service)
-        panel, body_layout, _toggle = self._detail_panel(layout, label)
+        indicator = self._status_indicator(bool(profile.get("sync_enabled", False)), self._music_app_profile_status_text(service))
+        panel, body_layout, _toggle = self._detail_panel(layout, label, indicator=indicator)
         sync_check = self._check(
             "启用同步插件",
             bool(profile.get("sync_enabled", False)),
@@ -611,6 +1548,7 @@ class SettingsWindow(QDialog):
             "sync": sync_check,
             "path": path_input,
             "status": status_label,
+            "indicator": indicator,
             "offset": offset_slider,
         }
         if service == "netease":
@@ -680,8 +1618,12 @@ class SettingsWindow(QDialog):
             self.music_sync_status.setText(self._music_sync_summary_text())
         for service, controls in getattr(self, "music_app_profile_controls", {}).items():
             status = controls.get("status")
+            status_text = self._music_app_profile_status_text(service)
             if status is not None:
-                status.setText(self._music_app_profile_status_text(service))
+                status.setText(status_text)
+            indicator = controls.get("indicator")
+            if indicator is not None:
+                self._set_status_indicator(indicator, bool(self._music_app_profile(service).get("sync_enabled", False)), status_text)
 
     def _collapse_detail_panels(self):
         for toggle, body in getattr(self, "_detail_panels", []):
@@ -698,51 +1640,37 @@ class SettingsWindow(QDialog):
         frame.setStyleSheet("QFrame { border-radius: 8px; background: #111827; border: 1px solid #e5e7eb; }")
         return frame
 
-    def _color_buttons_row(self, layout: QVBoxLayout, title: str, colors) -> list[ColorButton]:
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
-        row_layout.setSpacing(10)
-        label = QLabel(title)
-        label.setObjectName("RowTitle")
-        label.setMinimumWidth(self._row_label_width())
-        row_layout.addWidget(label, 0)
-        buttons = [ColorButton(str(color), self._set_empty_bar_custom_colors) for color in list(colors)[:3]]
-        while len(buttons) < 3:
-            buttons.append(ColorButton(("#46D6FF", "#73FFA6", "#FF5A86")[len(buttons)], self._set_empty_bar_custom_colors))
-        for button in buttons:
-            row_layout.addWidget(button)
-        row_layout.addStretch(1)
-        layout.addWidget(row)
-        return buttons
-
     def _check(self, text: str, checked: bool, callback) -> IosSwitch:
         box = IosSwitch(text, checked)
         box.setChecked(checked)
         box.toggled.connect(callback)
+        self._register_settings_search_entry(text, box, terms=(text,), priority=7)
         return box
 
     def _slider_row(self, layout: QVBoxLayout, title: str, minimum: int, maximum: int, value: int, callback, suffix: str = "") -> QSlider:
         row = QWidget()
         grid = QGridLayout(row)
         grid.setContentsMargins(0, self._row_vpad(), 0, self._row_vpad())
-        grid.setHorizontalSpacing(10 if getattr(self, "_compact_card_active", False) else 12)
+        grid.setHorizontalSpacing(12 if getattr(self, "_compact_card_active", False) else 14)
+        grid.setVerticalSpacing(6)
         title_label = QLabel(title)
         title_label.setObjectName("RowTitle")
         value_label = QLabel(f"{value}{suffix}")
         value_label.setObjectName("Value")
         value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        slider = QSlider(Qt.Orientation.Horizontal)
+        slider = NoWheelSlider(Qt.Orientation.Horizontal)
         slider.setRange(minimum, maximum)
         slider.setValue(value)
         slider._value_label = value_label
         slider._value_suffix = suffix
+        slider._title_label = title_label
         slider.valueChanged.connect(lambda v: value_label.setText(f"{v}{suffix}"))
         slider.valueChanged.connect(callback)
         grid.addWidget(title_label, 0, 0)
         grid.addWidget(value_label, 0, 1)
         grid.addWidget(slider, 1, 0, 1, 2)
         layout.addWidget(row)
+        self._register_settings_search_entry(title, row, terms=(title, f"{minimum}", f"{maximum}", value_label.text()), priority=8)
         return slider
 
     def _combo(self, items: list[tuple[str, object]], current, callback) -> QComboBox:
@@ -776,6 +1704,20 @@ class SettingsWindow(QDialog):
             return [("Free", "free"), ("Finder", "finder")]
         return [("Free", "free"), ("Tasker", "tasker")]
 
+    def _location_mode_label(self) -> str:
+        current = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")) or "free")
+        labels = {value: label for label, value in self.LOCATION_MODES}
+        return labels.get(current, "Free")
+
+    def _mydockfinder_listener_process_names_setting(self) -> tuple[str, ...]:
+        raw = getattr(self.island_widget, "mydockfinder_listener_process_names", None)
+        if raw is None:
+            raw = self._setting_value(
+                "v2_mydockfinder_listener_process_names",
+                list(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES),
+            )
+        return normalize_mydockfinder_listener_process_names(raw)
+
     def _mydockfinder_status_text(self) -> str:
         running = bool(getattr(self.island_widget, "mydockfinder_running", False))
         diagnostics = getattr(self.island_widget, "mydockfinder_diagnostics", {}) or {}
@@ -792,11 +1734,186 @@ class SettingsWindow(QDialog):
             candidate_text = "、".join(str(item) for item in list(candidates)[:6])
         else:
             candidate_text = str(candidates or "")
+        if not candidate_text:
+            candidate_text = "、".join(self._mydockfinder_listener_process_names_setting())
         if not configured:
-            return "未填写应用位置。监听会扫描常见 MyDockFinder / MyFinder 进程。"
+            return f"未填写应用位置。监听会扫描已勾选进程：{candidate_text or '无'}。"
         if candidate_text:
             return f"未检测到。已扫描：{candidate_text}。{reason or '请确认 MyDockFinder 已启动。'}"
         return f"未检测到。{reason or '请确认 MyDockFinder 已启动。'}"
+
+    def _mydockfinder_process_checklist(self) -> QWidget:
+        selected = set(self._mydockfinder_listener_process_names_setting())
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        group: dict[str, IosSwitch] = {}
+        for process_name, label in MYDOCKFINDER_LISTEN_PROCESS_CHOICES:
+            checkbox = self._check(
+                label,
+                process_name in selected,
+                lambda enabled, name=process_name: self._set_mydockfinder_listener_process(name, enabled),
+            )
+            group[process_name] = checkbox
+            layout.addWidget(checkbox)
+        if not hasattr(self, "mydockfinder_process_checkbox_groups"):
+            self.mydockfinder_process_checkbox_groups = []
+        self.mydockfinder_process_checkbox_groups.append(group)
+        self.mydockfinder_process_checkboxes = group
+        return container
+
+    def _sync_mydockfinder_process_checkboxes(self):
+        selected = set(self._mydockfinder_listener_process_names_setting())
+        for group in getattr(self, "mydockfinder_process_checkbox_groups", []):
+            for process_name, checkbox in group.items():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(process_name in selected)
+                checkbox.blockSignals(False)
+
+    def _basic_settings_page(self) -> QWidget:
+        page = self._page("基础设置")
+        layout: QVBoxLayout = page._content_layout
+        self._begin_compact_appearance_page(page)
+
+        interface_card = self._card(layout)
+        c = interface_card.layout()
+        c.addWidget(self._section_label("界面设置", 2, 6))
+        self.theme_mode = self._combo(
+            list(self.THEME_MODES),
+            str(self._setting_value("v2_theme_mode", "system") or "system"),
+            self._set_theme_mode,
+        )
+        self._row(c, "界面模式", self.theme_mode)
+        self.startup_mode = self._combo(
+            list(self.STARTUP_MODES),
+            normalize_startup_mode(str(self._setting_value("v2_startup_mode", "none") or "none")),
+            self._set_startup_mode,
+        )
+        self.startup_mode.setToolTip("计划任务更适合随用户登录启动；服务模式不适合带界面的托盘应用。")
+        self._row(c, "开机启动", self.startup_mode)
+        self.theme_dark_start = QLineEdit(str(self._setting_value("v2_theme_dark_start", "22:00") or "22:00"))
+        self.theme_dark_start.setPlaceholderText("22:00")
+        self.theme_dark_start.editingFinished.connect(self._set_theme_dark_start)
+        self._row(c, "深色开始", self.theme_dark_start)
+        self.theme_dark_end = QLineEdit(str(self._setting_value("v2_theme_dark_end", "07:00") or "07:00"))
+        self.theme_dark_end.setPlaceholderText("07:00")
+        self.theme_dark_end.editingFinished.connect(self._set_theme_dark_end)
+        self._row(c, "深色结束", self.theme_dark_end)
+        self.music_background_follow_theme_checkbox = self._check(
+            "音乐岛跟随界面颜色",
+            bool(self._setting_value("v2_music_background_follow_theme", False)),
+            self._set_music_background_follow_theme,
+        )
+        c.addWidget(self.music_background_follow_theme_checkbox)
+        c.addWidget(self._section_label("字体设置", 12, 6))
+        self.settings_font_combo = self._combo(
+            self._settings_font_items(),
+            str(self._setting_value("v2_settings_font_family", self.FONT_CHOICES[0]) or self.FONT_CHOICES[0]),
+            self._set_settings_font_family,
+        )
+        self._row(c, "设置字体", self.settings_font_combo)
+        self.settings_font_status = QLabel("")
+        self.settings_font_status.setObjectName("Muted")
+        self._row(c, "实际字体", self.settings_font_status)
+        self.import_settings_font_button = QPushButton("导入字体")
+        self.import_settings_font_button.clicked.connect(self._import_settings_font)
+        self._row(c, "字体导入", self.import_settings_font_button)
+        self.high_quality_font_checkbox = self._check("高质量字体渲染", bool(getattr(self.island_widget, "high_quality_font_rendering", False)), self._set_high_quality_font_rendering)
+        c.addWidget(self.high_quality_font_checkbox)
+        self.high_quality_font_checkbox.hide()
+
+        enable_card = self._card(layout)
+        e = enable_card.layout()
+        e.addWidget(self._section_label("岛屿启用", 2, 6))
+        self.music_checkbox = self._check("音乐岛启用", bool(getattr(self.island_widget, "music_playing", True)), self._set_music_playing)
+        self.plugin_checkbox = self._check("插件岛启用", bool(getattr(self.island_widget, "persistent_plugin", True)), self._set_persistent_plugin)
+        e.addWidget(self.music_checkbox)
+        e.addWidget(self.plugin_checkbox)
+
+        empty_card = self._card(layout)
+        ep = empty_card.layout()
+        ep.addWidget(self._section_label("无岛显示", 2, 6))
+        self.empty_island_display_mode = self._combo(
+            list(self.EMPTY_ISLAND_DISPLAY_MODES),
+            str(getattr(self.island_widget, "empty_island_display_mode", self._setting_value("v2_empty_island_display_mode", "visible_bar"))),
+            self._set_empty_island_display_mode,
+        )
+        self._row(ep, "无岛显示", self.empty_island_display_mode)
+        self.no_music_island_priority = self._combo(
+            list(self.NO_MUSIC_ISLAND_PRIORITIES),
+            str(getattr(self.island_widget, "no_music_island_priority", self._setting_value("v2_no_music_island_priority", "plugin"))),
+            self._set_no_music_island_priority,
+        )
+        self._row(ep, "无音乐岛时优先", self.no_music_island_priority)
+        self.empty_time_seconds_checkbox = self._check("显示秒数", bool(getattr(self.island_widget, "show_seconds", True)), self._set_show_seconds)
+        self.empty_time_seconds_row = self._row(ep, "时间显秒", self.empty_time_seconds_checkbox)
+        self.animation_speed = self._combo(list(self.ANIMATION_SPEEDS), float(getattr(self.island_widget, "animation_speed", 1.0)), self._set_animation_speed)
+        self._row(ep, "动画倍速", self.animation_speed)
+        self.fps_slider = self._slider_row(ep, "动画帧率", 24, 90, max(24, min(90, int(getattr(self.island_widget, "animation_fps", 60)))), self._set_animation_fps, " FPS")
+        if self.fps_slider.parentWidget():
+            self.fps_slider.parentWidget().hide()
+        self.font_combo = None
+        self._update_empty_island_time_seconds_visibility()
+
+        position_card = self._card(layout)
+        p = position_card.layout()
+        p.addWidget(self._section_label("位置与监听", 2, 6))
+        self.location_mode = self._readonly_value(self._location_mode_label())
+        self._row(p, "位置模式", self.location_mode)
+        self.position_preset = self._combo(
+            list(self.POSITION_PRESETS),
+            str(getattr(self.island_widget, "position_preset", self._setting_value("v2_position_preset", "last")) or "last"),
+            self._set_position_preset,
+        )
+        self._row(p, "位置预设", self.position_preset)
+        self.mydockfinder_status_indicator = self._status_indicator(bool(getattr(self.island_widget, "mydockfinder_running", False)), "已检测" if bool(getattr(self.island_widget, "mydockfinder_running", False)) else "未检测")
+        self.mydockfinder_status_label = QLabel(self._mydockfinder_status_text())
+        self.mydockfinder_status_label.setObjectName("Muted")
+        self.mydockfinder_status_label.setWordWrap(True)
+        self._indicator_row(p, "MyDockFinder 监听", self.mydockfinder_status_indicator, self.mydockfinder_status_label)
+        self.mydockfinder_path_input = QLineEdit(str(getattr(self.island_widget, "mydockfinder_path", self._setting_value("v2_mydockfinder_path", "")) or ""))
+        self.mydockfinder_path_input.setPlaceholderText(r"C:\Program Files\MyDockFinder\MyDockFinder.exe")
+        self.mydockfinder_path_input.editingFinished.connect(self._set_mydockfinder_path)
+        self.mydockfinder_path_row = self._path_picker_row(
+            p,
+            "MyDockFinder 应用位置",
+            self.mydockfinder_path_input,
+            self._browse_mydockfinder_path,
+            stacked=True,
+        )
+        _panel, listener_layout, self.mydockfinder_listener_detail_toggle = self._detail_panel(p, "MyDockFinder 监听进程")
+        self.mydockfinder_listener_detail_body = self._detail_panels[-1][1]
+        listener_layout.addWidget(self._mydockfinder_process_checklist())
+        p.addWidget(self._section_label("任务栏设置", 12, 6))
+        self.taskbar_corner_style = self._combo(
+            list(self.TASKBAR_CORNER_STYLES),
+            str(getattr(self.island_widget, "taskbar_corner_style", self._setting_value("v2_taskbar_corner_style", "win11"))),
+            self._set_taskbar_corner_style,
+        )
+        self.taskbar_corner_status = self._status_indicator(False, "不可选")
+        self._indicator_row(p, "Tasker 圆角", self.taskbar_corner_status, self.taskbar_corner_style)
+        self.taskbar_left_handle_color = ColorButton(
+            str(getattr(self.island_widget, "taskbar_left_handle_color", self._setting_value("v2_taskbar_left_handle_color", "#8E8E93"))),
+            self._set_taskbar_left_handle_color,
+        )
+        self.taskbar_left_handle_status = self._status_indicator(False, "不可选")
+        self._indicator_row(p, "Tasker 左侧竖线", self.taskbar_left_handle_status, self.taskbar_left_handle_color)
+        self.super_topmost_checkbox = self._check("灵动岛超级置顶", bool(getattr(self.island_widget, "super_topmost_enabled", True)), self._set_super_topmost)
+        p.addWidget(self.super_topmost_checkbox)
+        self.expanded_checkbox = self._check("默认展开", bool(getattr(self.island_widget, "expanded", False)), self._set_expanded)
+        p.addWidget(self.expanded_checkbox)
+        self.auto_bounds_checkbox = self._check("自动识别上下边界", bool(getattr(self.island_widget, "auto_expand_bounds", True)), self._set_auto_expand_bounds)
+        p.addWidget(self.auto_bounds_checkbox)
+        self.expand_direction = self._combo([("自动", "auto"), ("向下", "down"), ("向上", "up")], str(getattr(self.island_widget, "expand_direction", "auto")), self._set_expand_direction)
+        self._row(p, "展开方向", self.expand_direction)
+
+        self._update_taskbar_controls()
+        self._update_music_ambience_controls()
+        self._update_previews()
+        self._end_compact_appearance_page()
+        layout.addStretch(1)
+        return page
 
     def _placement_page(self) -> QWidget:
         page = self._page("位置")
@@ -822,7 +1939,7 @@ class SettingsWindow(QDialog):
             bool(getattr(self.island_widget, "mydockfinder_running", False)),
             lambda _enabled=False: None,
         )
-        self.mydockfinder_listener_checkbox.setEnabled(False)
+        self._set_switch_enabled(self.mydockfinder_listener_checkbox, False, "自动检测状态，只读")
         c.addWidget(self.mydockfinder_listener_checkbox)
         self.mydockfinder_status_label = QLabel(self._mydockfinder_status_text())
         self.mydockfinder_status_label.setObjectName("Muted")
@@ -831,7 +1948,11 @@ class SettingsWindow(QDialog):
         self.mydockfinder_path_input = QLineEdit(str(getattr(self.island_widget, "mydockfinder_path", self._setting_value("v2_mydockfinder_path", "")) or ""))
         self.mydockfinder_path_input.setPlaceholderText(r"C:\Program Files\MyDockFinder\MyDockFinder.exe")
         self.mydockfinder_path_input.editingFinished.connect(self._set_mydockfinder_path)
-        self._path_picker_row(c, "MyDockFinder 应用位置", self.mydockfinder_path_input, self._browse_mydockfinder_path)
+        self.mydockfinder_path_row = self._path_picker_row(c, "MyDockFinder 应用位置", self.mydockfinder_path_input, self._browse_mydockfinder_path, stacked=True)
+        _panel, listener_layout, self.mydockfinder_listener_detail_toggle = self._detail_panel(c, "MyDockFinder 监听进程")
+        self.mydockfinder_listener_detail_body = self._detail_panels[-1][1]
+        listener_layout.addWidget(self._mydockfinder_process_checklist())
+        c.addWidget(self._section_label("任务栏设置", 16, 2))
         self.taskbar_corner_style = self._combo(
             list(self.TASKBAR_CORNER_STYLES),
             str(getattr(self.island_widget, "taskbar_corner_style", self._setting_value("v2_taskbar_corner_style", "win11"))),
@@ -852,7 +1973,7 @@ class SettingsWindow(QDialog):
         self._row(c, "展开方向", self.expand_direction)
 
         message_title = QLabel("消息识别")
-        message_title.setStyleSheet(self._section_style(16, 2))
+        self._register_section_label(message_title, 16, 2)
         c.addWidget(message_title)
         self.message_detection_checkbox = self._check("消息识别总开关", bool(self._setting_value("v2_enable_message_detection", True)), self._set_message_detection)
         c.addWidget(self.message_detection_checkbox)
@@ -877,13 +1998,11 @@ class SettingsWindow(QDialog):
         card = self._card(layout)
         c = card.layout()
 
-        self.music_checkbox = self._check("音乐岛", bool(getattr(self.island_widget, "music_playing", True)), self._set_music_playing)
         self.music_auto_checkbox = self._check("音乐岛自动识别：无音频时隐藏", bool(getattr(self.island_widget, "music_auto_detect", False)), self._set_music_auto_detect)
-        c.addWidget(self.music_checkbox)
         c.addWidget(self.music_auto_checkbox)
 
         app_profile_title = QLabel("音乐软件监听")
-        app_profile_title.setStyleSheet(self._section_style(2, 8))
+        self._register_section_label(app_profile_title, 2, 8)
         c.addWidget(app_profile_title)
         self.music_sync_status = QLabel(self._music_sync_summary_text())
         self.music_sync_status.setObjectName("Muted")
@@ -919,8 +2038,23 @@ class SettingsWindow(QDialog):
             self._build_music_app_profile_panel(c, service, label, placeholder)
         self._update_player_progress_controls()
 
+        background_title = QLabel("音乐岛背景")
+        self._register_section_label(background_title, 12, 8)
+        c.addWidget(background_title)
+        self.music_ambience_style = self._combo(list(self.MUSIC_AMBIENCE_STYLES), str(getattr(self.island_widget, "music_ambience_style", "sea_level")), self._set_music_ambience_style)
+        self._row(c, "背景样式", self.music_ambience_style)
+        self.music_preview = MusicAmbiencePreview(self)
+        c.addWidget(self.music_preview)
+        self._music_ambience_controls, music_ambience_layout, self._music_ambience_detail_toggle = self._detail_panel(c, "音乐岛背景")
+        self.wave_slider = self._slider_row(music_ambience_layout, "饱和光强度", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
+        self.music_flow_slider = self._slider_row(music_ambience_layout, "流光浮动强度", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
+        self.compact_duotone_balance = self._slider_row(music_ambience_layout, "收缩双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50)))), self._set_compact_duotone_balance, "%")
+        self.expanded_duotone_balance = self._slider_row(music_ambience_layout, "展开双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "expanded_duotone_balance", 50)))), self._set_expanded_duotone_balance, "%")
+        self.diffraction_frequency_slider = self._slider_row(music_ambience_layout, "衍射频率", 0, 100, max(0, min(100, int(getattr(self.island_widget, "diffraction_frequency", self._setting_value("v2_diffraction_frequency", 0.30)) * 100))), self._set_diffraction_frequency, "%")
+        self._update_music_ambience_controls()
+
         lyric_title = QLabel("歌词显示")
-        lyric_title.setStyleSheet(self._section_style(12, 8))
+        self._register_section_label(lyric_title, 12, 8)
         c.addWidget(lyric_title)
         self.no_lyrics_input = QLineEdit(str(getattr(self.island_widget, "no_lyrics_text", "暂无歌词")))
         self.no_lyrics_input.setMaxLength(16)
@@ -934,25 +2068,12 @@ class SettingsWindow(QDialog):
             self._set_lyric_flow_style,
         )
         self._row(c, "文字流转", self.lyric_flow_style)
-        self.lyric_offset = self._slider_row(c, "歌词偏移", -12000, 12000, int(round(float(getattr(self.island_widget, "lyric_offset_seconds", 0.0)) * 1000)), self._set_lyric_offset, " ms")
 
         self._gelv_controls, gelv_layout, self._gelv_detail_toggle = self._detail_panel(c, "格律宋散")
-        self.gelv_font_family = self._combo(
-            list(self.GELV_FONT_CHOICES),
-            str(getattr(self.island_widget, "gelv_font_family", self._setting_value("v2_gelv_font_family", "Source Han Serif SC"))),
-            self._set_gelv_font_family,
-        )
-        self._row(gelv_layout, "格律字体", self.gelv_font_family)
         self.gelv_primary_font_size = self._slider_row(gelv_layout, "格律主行字号", 14, 30, max(14, min(30, int(getattr(self.island_widget, "gelv_primary_font_size", self._setting_value("v2_gelv_primary_font_size", 22))))), self._set_gelv_primary_font_size, " px")
         self.gelv_secondary_font_size = self._slider_row(gelv_layout, "格律次行字号", 8, 24, max(8, min(24, int(getattr(self.island_widget, "gelv_secondary_font_size", self._setting_value("v2_gelv_secondary_font_size", 12))))), self._set_gelv_secondary_font_size, " px")
         self.gelv_initial_word_spacing = self._slider_row(gelv_layout, "格律初始间距", 100, 320, max(100, min(320, int(getattr(self.island_widget, "gelv_initial_word_spacing", self._setting_value("v2_gelv_initial_word_spacing", 220))))), self._set_gelv_initial_word_spacing, "%")
         self.gelv_word_spacing = self._slider_row(gelv_layout, "格律散开间距", 100, 420, max(100, min(420, int(getattr(self.island_widget, "gelv_word_spacing", self._setting_value("v2_gelv_word_spacing", 320))))), self._set_gelv_word_spacing, "%")
-        self.gelv_size_shift_checkbox = self._check(
-            "格律字号变化",
-            bool(getattr(self.island_widget, "gelv_size_shift_enabled", True)),
-            self._set_gelv_size_shift_enabled,
-        )
-        gelv_layout.addWidget(self.gelv_size_shift_checkbox)
         self.gelv_compact_cover_checkbox = self._check(
             "收缩态显示专辑封面",
             bool(getattr(self.island_widget, "compact_lyric_show_cover", self._setting_value("v2_compact_lyric_show_cover", True))),
@@ -960,11 +2081,12 @@ class SettingsWindow(QDialog):
         )
         gelv_layout.addWidget(self.gelv_compact_cover_checkbox)
         self.gelv_dual_line_checkbox = self._check(
-            "格律双语显示",
+            "",
             bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)),
             self._set_dual_line_lyrics,
         )
-        gelv_layout.addWidget(self.gelv_dual_line_checkbox)
+        self.gelv_dual_line_indicator = self._status_indicator(True, "可用")
+        self._indicator_row(gelv_layout, "格律双语显示", self.gelv_dual_line_indicator, self.gelv_dual_line_checkbox)
         self.gelv_dual_line_font_size = self._slider_row(
             gelv_layout,
             "同行歌词字号",
@@ -975,11 +2097,18 @@ class SettingsWindow(QDialog):
             " px",
         )
         self.gelv_color_fill_checkbox = self._check(
-            "逐字染色",
+            "",
             bool(getattr(self.island_widget, "gelv_color_fill_enabled", False)),
             self._set_gelv_color_fill_enabled,
         )
-        gelv_layout.addWidget(self.gelv_color_fill_checkbox)
+        self.gelv_color_fill_indicator = self._status_indicator(True, "可用")
+        self._indicator_row(gelv_layout, "炫彩主题", self.gelv_color_fill_indicator, self.gelv_color_fill_checkbox)
+        self.gelv_word_fill_checkbox = self._check(
+            "逐字染色",
+            bool(getattr(self.island_widget, "gelv_word_fill_enabled", self._setting_value("v2_gelv_word_fill_enabled", False))),
+            self._set_gelv_word_fill_enabled,
+        )
+        gelv_layout.addWidget(self.gelv_word_fill_checkbox)
         self.gelv_color_fill_fallback = ColorButton(
             str(getattr(self.island_widget, "gelv_color_fill_fallback", "#00D7FF")),
             self._set_gelv_color_fill_fallback,
@@ -991,22 +2120,24 @@ class SettingsWindow(QDialog):
         self.lyric_elastic_strength = self._slider_row(wave_layout, "悦动强度", 0, 160, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100)))), self._set_lyric_elastic_strength, "%")
         self.lyric_word_spacing = self._slider_row(wave_layout, "字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100)))), self._set_lyric_word_spacing, "%")
         self.wave_color_fill_checkbox = self._check(
-            "波光逐字染色",
+            "逐字染色",
             bool(getattr(self.island_widget, "wave_color_fill_enabled", False)),
             self._set_wave_color_fill_enabled,
         )
-        wave_layout.addWidget(self.wave_color_fill_checkbox)
+        self.wave_color_fill_indicator = self._status_indicator(True, "可用")
+        self._indicator_row(wave_layout, "逐字染色", self.wave_color_fill_indicator, self.wave_color_fill_checkbox)
         self.wave_color_fill_fallback = ColorButton(
             str(getattr(self.island_widget, "wave_color_fill_fallback", "#00D7FF")),
             self._set_wave_color_fill_fallback,
         )
-        self._row(wave_layout, "波光染色默认色", self.wave_color_fill_fallback)
+        self._row(wave_layout, "染色默认色", self.wave_color_fill_fallback)
         self.dual_line_lyrics_checkbox = self._check(
-            "允许双行歌词",
+            "",
             bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)),
             self._set_dual_line_lyrics,
         )
-        wave_layout.addWidget(self.dual_line_lyrics_checkbox)
+        self.wave_dual_line_indicator = self._status_indicator(True, "可用")
+        self._indicator_row(wave_layout, "允许双行歌词", self.wave_dual_line_indicator, self.dual_line_lyrics_checkbox)
         self.dual_line_font_size = self._slider_row(wave_layout, "双语字号", 8, 20, max(8, min(20, int(getattr(self.island_widget, "dual_line_font_size", self._setting_value("v2_dual_line_font_size", 12))))), self._set_dual_line_font_size, " px")
         self.dual_line_secondary_weight = self._slider_row(wave_layout, "次行字重", 40, 100, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72)))), self._set_dual_line_secondary_weight, "%")
         self.dual_line_secondary_spacing = self._slider_row(wave_layout, "次行字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "dual_line_secondary_spacing", 100)))), self._set_dual_line_secondary_spacing, "%")
@@ -1092,10 +2223,12 @@ class SettingsWindow(QDialog):
         reset_album_record.clicked.connect(self._reset_album_island_record)
         album_layout.addWidget(reset_album_record)
 
-        hint = QLabel("会根据当前播放器优先选择歌词源，并缓存到项目 lyrics 目录；也可手动放入 .lrc 文件。")
+        hint = QLabel("会根据当前播放器优先选择歌词源；线上歌词会写入用户缓存，本地 .lrc 可继续手动放入项目 lyrics 目录。")
         hint.setWordWrap(True)
         hint.setStyleSheet(self._hint_style(2, 8))
         c.addWidget(hint)
+
+        self._update_previews()
         self._update_lyric_flow_controls()
         c.addStretch(1)
         layout.addStretch(1)
@@ -1134,25 +2267,26 @@ class SettingsWindow(QDialog):
         self.theme_dark_end.setPlaceholderText("07:00")
         self.theme_dark_end.editingFinished.connect(self._set_theme_dark_end)
         self._row(c, "深色结束", self.theme_dark_end)
+        self.music_background_follow_theme_checkbox = self._check(
+            "音乐岛跟随界面颜色",
+            bool(self._setting_value("v2_music_background_follow_theme", False)),
+            self._set_music_background_follow_theme,
+        )
+        c.addWidget(self.music_background_follow_theme_checkbox)
 
         self.high_quality_font_checkbox = self._check("高质量字体渲染", bool(getattr(self.island_widget, "high_quality_font_rendering", False)), self._set_high_quality_font_rendering)
         c.addWidget(self.high_quality_font_checkbox)
         self.high_quality_font_checkbox.hide()
         self.music_ambience_style = self._combo(list(self.MUSIC_AMBIENCE_STYLES), str(getattr(self.island_widget, "music_ambience_style", "sea_level")), self._set_music_ambience_style)
         self._row(c, "音乐岛背景样式", self.music_ambience_style)
-        self.music_island_style = self._combo(
-            list(self.MUSIC_ISLAND_STYLES),
-            str(getattr(self.island_widget, "music_island_style", self._setting_value("v2_music_island_style", "standard")) or "standard"),
-            self._set_music_island_style,
-        )
-        self._row(c, "音乐岛样式", self.music_island_style)
-        self.music_preview = self._preview_frame(38)
+        self.music_preview = MusicAmbiencePreview(self)
         c.addWidget(self.music_preview)
         self._music_ambience_controls, music_ambience_layout, self._music_ambience_detail_toggle = self._detail_panel(c, "音乐岛背景样式")
-        self.wave_slider = self._slider_row(music_ambience_layout, "氛围光增强", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
-        self.music_flow_slider = self._slider_row(music_ambience_layout, "流光浮动", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
+        self.wave_slider = self._slider_row(music_ambience_layout, "饱和光强度", 0, 100, max(0, min(100, int(getattr(self.island_widget, "ambient_intensity", 0.0) * 100))), self._set_wave_intensity, "%")
+        self.music_flow_slider = self._slider_row(music_ambience_layout, "流光浮动强度", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
         self.compact_duotone_balance = self._slider_row(music_ambience_layout, "收缩双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50)))), self._set_compact_duotone_balance, "%")
         self.expanded_duotone_balance = self._slider_row(music_ambience_layout, "展开双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "expanded_duotone_balance", 50)))), self._set_expanded_duotone_balance, "%")
+        self.diffraction_frequency_slider = self._slider_row(music_ambience_layout, "衍射频率", 0, 100, max(0, min(100, int(getattr(self.island_widget, "diffraction_frequency", self._setting_value("v2_diffraction_frequency", 0.30)) * 100))), self._set_diffraction_frequency, "%")
         self.fps_slider = self._slider_row(c, "动画帧率", 24, 90, max(24, min(90, int(getattr(self.island_widget, "animation_fps", 60)))), self._set_animation_fps, " FPS")
         self.animation_speed = self._combo(list(self.ANIMATION_SPEEDS), float(getattr(self.island_widget, "animation_speed", 1.0)), self._set_animation_speed)
         self._row(c, "动画倍速", self.animation_speed)
@@ -1162,15 +2296,12 @@ class SettingsWindow(QDialog):
 
         self.font_combo = None
 
-        self.empty_palette = self._combo([(label, key) for key, label in self.EMPTY_BAR_PALETTES], str(getattr(self.island_widget, "empty_bar_palette", "aurora")), self._set_empty_bar_palette)
-        self._row(c, "空态流光", self.empty_palette)
-        self.empty_preview = self._preview_frame(22)
-        c.addWidget(self.empty_preview)
-        self.empty_bar_width = self._slider_row(c, "横条长度", 70, 260, int(getattr(self.island_widget, "empty_bar_width", 92)), self._set_empty_bar_width, " px")
-        self.empty_bar_height = self._slider_row(c, "横条粗细", 8, 28, int(getattr(self.island_widget, "empty_bar_height", 14)), self._set_empty_bar_height, " px")
-        self.empty_bar_y_offset = self._slider_row(c, "横条位置", -80, 160, int(getattr(self.island_widget, "empty_bar_y_offset", 0)), self._set_empty_bar_y_offset, " px")
-        self.empty_bar_opacity = self._slider_row(c, "横条不透明度", 10, 100, int(getattr(self.island_widget, "empty_bar_opacity", 100)), self._set_empty_bar_opacity, "%")
-        self.custom_color_inputs = self._color_buttons_row(c, "自定义颜色", getattr(self.island_widget, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86")))
+        self.empty_island_display_mode = self._combo(
+            list(self.EMPTY_ISLAND_DISPLAY_MODES),
+            str(getattr(self.island_widget, "empty_island_display_mode", self._setting_value("v2_empty_island_display_mode", "visible_bar"))),
+            self._set_empty_island_display_mode,
+        )
+        self._row(c, "无岛显示", self.empty_island_display_mode)
         self._update_music_ambience_controls()
         self._update_previews()
         self._end_compact_appearance_page()
@@ -1183,14 +2314,12 @@ class SettingsWindow(QDialog):
 
         general = self._card(layout)
         g = general.layout()
-        self.plugin_checkbox = self._check("插件岛", bool(getattr(self.island_widget, "persistent_plugin", True)), self._set_persistent_plugin)
-        g.addWidget(self.plugin_checkbox)
         enabled_plugins = self._enabled_plugins_setting()
         self.plugin_time_enabled = self._check("时间插件", "time" in enabled_plugins, self._set_enabled_plugins_from_checks)
         self.plugin_weather_enabled = self._check("天气插件（待开发）", False, self._set_enabled_plugins_from_checks)
         self.plugin_agenda_enabled = self._check("日程插件（待开发）", False, self._set_enabled_plugins_from_checks)
-        self.plugin_weather_enabled.setEnabled(False)
-        self.plugin_agenda_enabled.setEnabled(False)
+        self._set_switch_enabled(self.plugin_weather_enabled, False, "当前版本保留入口，暂不可启用")
+        self._set_switch_enabled(self.plugin_agenda_enabled, False, "当前版本保留入口，暂不可启用")
         g.addWidget(self.plugin_time_enabled)
         g.addWidget(self.plugin_weather_enabled)
         g.addWidget(self.plugin_agenda_enabled)
@@ -1233,14 +2362,15 @@ class SettingsWindow(QDialog):
             self._set_plugin_fullscreen_alert_y_offset,
             " px",
         )
-        self.seconds_checkbox = self._check("时间显示秒数", bool(getattr(self.island_widget, "show_seconds", True)), self._set_show_seconds)
-        g.addWidget(self.seconds_checkbox)
 
         time_title = QLabel("时间 / 计时器")
         time_title.setObjectName("Section")
         layout.addWidget(time_title)
         time_card = self._card(layout)
         t = time_card.layout()
+        self.time_seconds_checkbox = self._check("显示秒数", bool(getattr(self.island_widget, "show_seconds", True)), self._set_show_seconds)
+        self.seconds_checkbox = self.time_seconds_checkbox
+        self._row(t, "时间显秒", self.time_seconds_checkbox)
         self.plugin_timezone = self._combo(
             list(self.TIMEZONES),
             str(self._setting_value("v2_plugin_timezone", "local") or "local"),
@@ -1341,6 +2471,168 @@ class SettingsWindow(QDialog):
         self._row(a, "待做清单", QLabel("课表读取录入"))
         self._row(a, "提醒路线", QLabel("课表提醒功能"))
 
+        layout.addStretch(1)
+        return page
+
+    def _notification_page(self) -> QWidget:
+        page = self._page("通知设置")
+        layout: QVBoxLayout = page._content_layout
+
+        message_card = self._card(layout)
+        m = message_card.layout()
+        m.addWidget(self._section_label("消息识别", 2, 8))
+        self.message_detection_checkbox = self._check("消息识别总开关", bool(self._setting_value("v2_enable_message_detection", True)), self._set_message_detection)
+        m.addWidget(self.message_detection_checkbox)
+
+        self.wechat_notification_checkbox = self._check("微信新消息通知", bool(self._setting_value("v2_enable_wechat_notification", True)), self._set_wechat_notification)
+        self.wechat_detail_checkbox = self._check("微信详细消息通知", bool(self._setting_value("v2_enable_wechat_detail_notification", False)), self._set_wechat_detail_notification)
+        self.qq_notification_checkbox = self._check("QQ新消息通知", bool(self._setting_value("v2_enable_qq_notification", False)), self._set_qq_notification)
+        self.qq_detail_checkbox = self._check("QQ详细消息通知（待适配）", bool(self._setting_value("v2_enable_qq_detail_notification", False)), self._set_qq_detail_notification)
+        self.dingtalk_notification_checkbox = self._check("钉钉新消息通知", bool(self._setting_value("v2_enable_dingtalk_notification", False)), self._set_dingtalk_notification)
+        self.dingtalk_detail_checkbox = self._check("钉钉详细消息通知（待适配）", bool(self._setting_value("v2_enable_dingtalk_detail_notification", False)), self._set_dingtalk_detail_notification)
+        for widget in (
+            self.wechat_notification_checkbox,
+            self.wechat_detail_checkbox,
+            self.qq_notification_checkbox,
+            self.qq_detail_checkbox,
+            self.dingtalk_notification_checkbox,
+            self.dingtalk_detail_checkbox,
+        ):
+            m.addWidget(widget)
+
+        barrage_card = self._card(layout)
+        b = barrage_card.layout()
+        b.addWidget(self._section_label("弹幕场景", 2, 8))
+        self.barrage_display_mode = self._combo(
+            list(self.BARRAGE_DISPLAY_MODES),
+            str(getattr(self.island_widget, "barrage_display_mode", self._setting_value("v2_barrage_display_mode", "fullscreen")) or "fullscreen"),
+            self._set_barrage_display_mode,
+        )
+        self._row(b, "弹幕场景", self.barrage_display_mode)
+        b.addWidget(self._section_label("弹幕位置设置", 12, 8))
+        self.barrage_y_offset = self._slider_row(
+            b,
+            "弹幕位置",
+            0,
+            self._barrage_position_max(),
+            max(0, min(self._barrage_position_max(), int(getattr(self.island_widget, "barrage_y_offset", 0)))),
+            self._set_barrage_y_offset,
+            " px",
+        )
+        b.addWidget(self._section_label("弹幕样式设置", 12, 8))
+        self.barrage_font_size = self._slider_row(b, "弹幕字号", 8, 20, int(getattr(self.island_widget, "barrage_font_size", 10)), self._set_barrage_font_size, " px")
+        self.barrage_speed = self._slider_row(b, "弹幕速度", 40, 220, int(getattr(self.island_widget, "barrage_speed", 100)), self._set_barrage_speed, "%")
+        self.barrage_backdrop = self._check("弹幕背景遮罩", bool(getattr(self.island_widget, "barrage_use_backdrop", True)), self._set_barrage_backdrop)
+        self.barrage_icon = self._check("显示通知图标", bool(getattr(self.island_widget, "barrage_show_icon", True)), self._set_barrage_icon)
+        b.addWidget(self.barrage_backdrop)
+        b.addWidget(self.barrage_icon)
+
+        self._update_message_controls()
+        layout.addStretch(1)
+        return page
+
+    def _about_page(self) -> QWidget:
+        page = self._page("关于我")
+        layout: QVBoxLayout = page._content_layout
+
+        account_card = self._card(layout)
+        a = account_card.layout()
+        user_id = str(self._setting_value("v2_user_id", "") or Path.home().name or "local-user")
+        self._row(a, "用户 ID", self._readonly_value(user_id))
+        self._row(a, "作者信息", self._readonly_value(APP_NAME))
+
+        icon_card = self._card(layout)
+        icon_layout = icon_card.layout()
+        self.app_icon_preview = QLabel()
+        self.app_icon_preview.setObjectName("AppIconPreview")
+        self.app_icon_preview.setFixedSize(58, 58)
+        self.app_icon_preview.setScaledContents(False)
+        self._row(icon_layout, "全局图标", self.app_icon_preview)
+        self.custom_icon_path_label = self._readonly_value("")
+        self._row(icon_layout, "当前图标", self.custom_icon_path_label)
+        icon_buttons = QWidget()
+        icon_buttons_layout = QHBoxLayout(icon_buttons)
+        icon_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        icon_buttons_layout.setSpacing(8)
+        choose_icon = QPushButton("上传图标")
+        choose_icon.setObjectName("Primary")
+        choose_icon.clicked.connect(self._choose_custom_icon)
+        reset_icon = QPushButton("恢复默认")
+        reset_icon.clicked.connect(self._reset_custom_icon)
+        icon_buttons_layout.addWidget(choose_icon)
+        icon_buttons_layout.addWidget(reset_icon)
+        icon_buttons_layout.addStretch(1)
+        self._row(icon_layout, "图标设置", icon_buttons)
+        self._sync_icon_preview()
+
+        location_card = self._card(layout)
+        l = location_card.layout()
+        app_location = str(Path(__file__).resolve().parents[1])
+        self.app_location_label = self._readonly_value(app_location)
+        self._row(l, "应用位置", self.app_location_label)
+        open_location = QPushButton("打开位置")
+        open_location.clicked.connect(self._open_app_location)
+        self._row(l, "浏览", open_location)
+
+        diagnostic_card = self._card(layout)
+        d = diagnostic_card.layout()
+        self._diagnostic_labels = {}
+        _panel, diagnostic_layout, _toggle = self._detail_panel(d, "软件诊断")
+        for key, title in (
+            ("provider_status", "媒体状态"),
+            ("winsdk_loaded", "Windows 媒体 SDK"),
+            ("music_player_mode", "进度识别服务"),
+            ("player_progress_plugin_enabled", "进度插件"),
+            ("player_progress_auto_detect", "插件自动识别"),
+            ("music_player_adapter", "当前适配器"),
+            ("mydockfinder_running", "MyDockFinder 监听"),
+            ("mydockfinder_match", "MyDockFinder 命中"),
+            ("mydockfinder_reason", "MyDockFinder 诊断"),
+            ("media_session_count", "Windows 媒体会话"),
+            ("media_session_candidates", "媒体会话候选"),
+            ("source_app", "来源应用"),
+            ("track_title", "歌曲标题"),
+            ("track_artist", "歌曲作者"),
+            ("track_id", "Track ID"),
+            ("position_seconds", "当前位置"),
+            ("position_source", "位置来源"),
+            ("position_confidence", "位置置信度"),
+            ("estimated_position_seconds", "估算位置"),
+            ("duration_seconds", "歌曲时长"),
+            ("lyric_offset_seconds", "歌词偏移"),
+            ("lyrics_source", "歌词来源"),
+            ("timed_lyrics_count", "带时间歌词数"),
+            ("visible_lyric_index", "当前歌词索引"),
+            ("visible_current_lyric", "当前歌词"),
+            ("lyric_phase_progress", "歌词进度"),
+            ("lyric_phase_span", "歌词跨度"),
+            ("lyric_phase_source", "同步来源"),
+            ("netease_position", "网易云锚点"),
+            ("qq_position", "QQ进度"),
+            ("audio_status", "音频采集"),
+            ("audio_has_recent_frame", "实时音频帧"),
+            ("audio_last_error", "音频错误"),
+            ("message_cached", "消息缓存"),
+            ("message_notification_access", "通知权限"),
+            ("message_notification_apps", "通知应用"),
+            ("message_detection_enabled", "消息识别总开关"),
+            ("wechat_notification_enabled", "微信新消息通知"),
+            ("wechat_detail_notification_enabled", "微信详细消息通知"),
+            ("qq_notification_enabled", "QQ 消息"),
+            ("dingtalk_notification_enabled", "钉钉消息"),
+            ("message_wechat", "微信 UIA"),
+            ("message_wechat_native", "微信窗口句柄"),
+            ("message_wechat_items", "微信会话样本"),
+            ("message_wechat_error", "微信识别错误"),
+        ):
+            label = self._diagnostic_value_label()
+            self._diagnostic_labels[key] = label
+            self._row(diagnostic_layout, title, label)
+        refresh = QPushButton("刷新诊断")
+        refresh.setObjectName("Primary")
+        refresh.clicked.connect(self._refresh_diagnostics)
+        diagnostic_layout.addWidget(refresh)
+        self._refresh_diagnostics()
         layout.addStretch(1)
         return page
 
@@ -1488,8 +2780,7 @@ class SettingsWindow(QDialog):
             ("message_wechat_items", "微信会话样本"),
             ("message_wechat_error", "微信识别错误"),
         ):
-            label = QLabel("-")
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label = self._diagnostic_value_label()
             self._diagnostic_labels[key] = label
             self._row(c, title, label)
         refresh = QPushButton("刷新诊断")
@@ -1515,13 +2806,17 @@ class SettingsWindow(QDialog):
             (self.wechat_notification_checkbox, bool(self._setting_value("v2_enable_wechat_notification", True))),
             (self.wechat_detail_checkbox, bool(self._setting_value("v2_enable_wechat_detail_notification", False))),
             (self.qq_notification_checkbox, bool(self._setting_value("v2_enable_qq_notification", False))),
+            (self.qq_detail_checkbox, bool(self._setting_value("v2_enable_qq_detail_notification", False))),
             (self.dingtalk_notification_checkbox, bool(self._setting_value("v2_enable_dingtalk_notification", False))),
+            (self.dingtalk_detail_checkbox, bool(self._setting_value("v2_enable_dingtalk_detail_notification", False))),
             (self.player_progress_plugin_checkbox, bool(self._setting_value("v2_enable_player_progress_plugin", False))),
             (self.player_progress_auto_detect_checkbox, bool(self._setting_value("v2_player_progress_auto_detect", False))),
+            (self.music_background_follow_theme_checkbox, bool(self._setting_value("v2_music_background_follow_theme", False))),
             (self.dual_line_lyrics_checkbox, bool(getattr(self.island_widget, "enable_dual_line_lyrics", False))),
-            (self.mydockfinder_listener_checkbox, bool(getattr(self.island_widget, "mydockfinder_running", False))),
             (self.expanded_checkbox, bool(getattr(self.island_widget, "expanded", False))),
             (self.seconds_checkbox, bool(getattr(self.island_widget, "show_seconds", True))),
+            (self.time_seconds_checkbox, bool(getattr(self.island_widget, "show_seconds", True))),
+            (self.empty_time_seconds_checkbox, bool(getattr(self.island_widget, "show_seconds", True))),
             (self.weather_use_location, bool(self._setting_value("v2_weather_use_location", True))),
             (self.high_quality_font_checkbox, bool(getattr(self.island_widget, "high_quality_font_rendering", False))),
             (self.auto_bounds_checkbox, bool(getattr(self.island_widget, "auto_expand_bounds", True))),
@@ -1541,10 +2836,6 @@ class SettingsWindow(QDialog):
             (self.compact_duotone_balance, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50))))),
             (self.expanded_duotone_balance, max(0, min(100, int(getattr(self.island_widget, "expanded_duotone_balance", 50))))),
             (self.fps_slider, max(24, min(90, int(getattr(self.island_widget, "animation_fps", 60))))),
-            (self.empty_bar_width, int(getattr(self.island_widget, "empty_bar_width", 92))),
-            (self.empty_bar_height, int(getattr(self.island_widget, "empty_bar_height", 14))),
-            (self.empty_bar_y_offset, int(getattr(self.island_widget, "empty_bar_y_offset", 0))),
-            (self.empty_bar_opacity, int(getattr(self.island_widget, "empty_bar_opacity", 100))),
             (
                 self.plugin_fullscreen_alert_x_offset,
                 max(
@@ -1559,7 +2850,6 @@ class SettingsWindow(QDialog):
             (self.barrage_y_offset, int(getattr(self.island_widget, "barrage_y_offset", 0))),
             (self.barrage_font_size, int(getattr(self.island_widget, "barrage_font_size", 10))),
             (self.barrage_speed, int(getattr(self.island_widget, "barrage_speed", 100))),
-            (self.lyric_offset, int(round(float(getattr(self.island_widget, "lyric_offset_seconds", 0.0)) * 1000))),
             (self.lyric_font_size, max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18))))),
             (self.gelv_primary_font_size, max(14, min(30, int(getattr(self.island_widget, "gelv_primary_font_size", self._setting_value("v2_gelv_primary_font_size", 22)))))),
             (self.gelv_secondary_font_size, max(8, min(24, int(getattr(self.island_widget, "gelv_secondary_font_size", self._setting_value("v2_gelv_secondary_font_size", 12)))))),
@@ -1587,9 +2877,22 @@ class SettingsWindow(QDialog):
             self.font_combo.blockSignals(False)
         if hasattr(self, "settings_font_combo"):
             self._refresh_settings_font_combo()
-        self._set_combo_data(self.empty_palette, str(getattr(self.island_widget, "empty_bar_palette", "aurora")))
+        if hasattr(self, "empty_island_display_mode"):
+            self._set_combo_data(
+                self.empty_island_display_mode,
+                str(getattr(self.island_widget, "empty_island_display_mode", self._setting_value("v2_empty_island_display_mode", "visible_bar"))),
+            )
+            self._update_empty_island_time_seconds_visibility()
+        if hasattr(self, "no_music_island_priority"):
+            self._set_combo_data(
+                self.no_music_island_priority,
+                str(getattr(self.island_widget, "no_music_island_priority", self._setting_value("v2_no_music_island_priority", "plugin"))),
+            )
         self._refresh_location_mode_options()
-        self._set_combo_data(self.location_mode, str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free"))))
+        if isinstance(getattr(self, "location_mode", None), QComboBox):
+            self._set_combo_data(self.location_mode, str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free"))))
+        elif hasattr(self, "location_mode"):
+            self.location_mode.setText(self._location_mode_label())
         if hasattr(self, "position_preset"):
             self._set_combo_data(self.position_preset, str(getattr(self.island_widget, "position_preset", self._setting_value("v2_position_preset", "last")) or "last"))
         if hasattr(self, "plugin_fullscreen_alert_style"):
@@ -1603,10 +2906,10 @@ class SettingsWindow(QDialog):
             self.mydockfinder_path_input.blockSignals(False)
         if hasattr(self, "mydockfinder_status_label"):
             self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
+        self._sync_mydockfinder_process_checkboxes()
         self._set_combo_data(self.expand_direction, str(getattr(self.island_widget, "expand_direction", "auto")))
         self._set_combo_data(self.animation_speed, float(getattr(self.island_widget, "animation_speed", 1.0)))
         self._set_combo_data(self.music_ambience_style, str(getattr(self.island_widget, "music_ambience_style", "sea_level")))
-        self._set_combo_data(self.music_island_style, str(getattr(self.island_widget, "music_island_style", self._setting_value("v2_music_island_style", "standard")) or "standard"))
         self._set_combo_data(self.side_island_style, str(getattr(self.island_widget, "side_island_style", self._setting_value("v2_side_island_style", "standard")) or "standard"))
         self._set_combo_data(self.plugin_island_style, str(getattr(self.island_widget, "plugin_island_style", self._setting_value("v2_plugin_island_style", "standard")) or "standard"))
         self._set_combo_data(self.time_alarm_side_display, str(getattr(self.island_widget, "time_alarm_side_display", self._setting_value("v2_time_alarm_side_display", "note")) or "note"))
@@ -1617,6 +2920,9 @@ class SettingsWindow(QDialog):
         self.gelv_color_fill_checkbox.blockSignals(True)
         self.gelv_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "gelv_color_fill_enabled", False)))
         self.gelv_color_fill_checkbox.blockSignals(False)
+        self.gelv_word_fill_checkbox.blockSignals(True)
+        self.gelv_word_fill_checkbox.setChecked(bool(getattr(self.island_widget, "gelv_word_fill_enabled", self._setting_value("v2_gelv_word_fill_enabled", False))))
+        self.gelv_word_fill_checkbox.blockSignals(False)
         self.wave_color_fill_checkbox.blockSignals(True)
         self.wave_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "wave_color_fill_enabled", False)))
         self.wave_color_fill_checkbox.blockSignals(False)
@@ -1627,7 +2933,6 @@ class SettingsWindow(QDialog):
             checkbox.blockSignals(True)
             checkbox.setChecked(compact_cover)
             checkbox.blockSignals(False)
-        self._set_combo_data(self.gelv_font_family, str(getattr(self.island_widget, "gelv_font_family", self._setting_value("v2_gelv_font_family", "Source Han Serif SC"))))
         self.gelv_color_fill_fallback.set_color(str(getattr(self.island_widget, "gelv_color_fill_fallback", self._setting_value("v2_gelv_color_fill_fallback", "#00D7FF"))))
         self.wave_color_fill_fallback.set_color(str(getattr(self.island_widget, "wave_color_fill_fallback", self._setting_value("v2_wave_color_fill_fallback", "#00D7FF"))))
         self._set_combo_data(self.no_lyrics_display_mode, str(getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))))
@@ -1680,17 +2985,6 @@ class SettingsWindow(QDialog):
             self.theme_dark_end.blockSignals(True)
             self.theme_dark_end.setText(str(self._setting_value("v2_theme_dark_end", "07:00") or "07:00"))
             self.theme_dark_end.blockSignals(False)
-        colors = list(getattr(self.island_widget, "empty_bar_custom_colors", ("#46D6FF", "#73FFA6", "#FF5A86")))
-        for edit, value in zip(self.custom_color_inputs, colors):
-            if hasattr(edit, "set_color"):
-                edit.set_color(str(value))
-            else:
-                edit.blockSignals(True)
-                edit.setText(str(value))
-                edit.blockSignals(False)
-        self.lyric_offset.blockSignals(True)
-        self.lyric_offset.setValue(int(round(float(getattr(self.island_widget, "lyric_offset_seconds", 0.0)) * 1000)))
-        self.lyric_offset.blockSignals(False)
         self.lyric_font_size.blockSignals(True)
         self.lyric_font_size.setValue(max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18)))))
         self.lyric_font_size.blockSignals(False)
@@ -1733,10 +3027,6 @@ class SettingsWindow(QDialog):
             self.gelv_dual_line_checkbox.blockSignals(True)
             self.gelv_dual_line_checkbox.setChecked(bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)))
             self.gelv_dual_line_checkbox.blockSignals(False)
-        if hasattr(self, "gelv_size_shift_checkbox"):
-            self.gelv_size_shift_checkbox.blockSignals(True)
-            self.gelv_size_shift_checkbox.setChecked(bool(getattr(self.island_widget, "gelv_size_shift_enabled", True)))
-            self.gelv_size_shift_checkbox.blockSignals(False)
         self.dual_line_secondary_weight.blockSignals(True)
         self.dual_line_secondary_weight.setValue(max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72)))))
         self.dual_line_secondary_weight.blockSignals(False)
@@ -1757,7 +3047,7 @@ class SettingsWindow(QDialog):
         enabled = bool(getattr(self, "player_progress_plugin_checkbox", None) and self.player_progress_plugin_checkbox.isChecked())
         auto_detect = bool(getattr(self, "player_progress_auto_detect_checkbox", None) and self.player_progress_auto_detect_checkbox.isChecked())
         if hasattr(self, "player_progress_auto_detect_checkbox"):
-            self.player_progress_auto_detect_checkbox.setEnabled(enabled)
+            self._set_switch_enabled(self.player_progress_auto_detect_checkbox, enabled, "需先开启播放器进度插件")
         if hasattr(self, "music_player_mode"):
             self.music_player_mode.setEnabled(enabled and not auto_detect)
         self._update_music_app_profile_statuses()
@@ -1795,10 +3085,23 @@ class SettingsWindow(QDialog):
 
     def _update_message_controls(self):
         enabled = bool(getattr(self, "message_detection_checkbox", None) and self.message_detection_checkbox.isChecked())
-        for name in ("wechat_notification_checkbox", "wechat_detail_checkbox", "qq_notification_checkbox", "dingtalk_notification_checkbox"):
+        for name in ("wechat_notification_checkbox", "qq_notification_checkbox", "dingtalk_notification_checkbox"):
             widget = getattr(self, name, None)
             if widget is not None:
-                widget.setEnabled(enabled)
+                self._set_switch_enabled(widget, enabled, "需先开启消息通知总开关")
+        if hasattr(self, "wechat_detail_checkbox"):
+            self._set_switch_enabled(self.wechat_detail_checkbox, enabled and bool(self.wechat_notification_checkbox.isChecked()), "需先开启微信通知")
+        if hasattr(self, "qq_detail_checkbox"):
+            self._set_switch_enabled(self.qq_detail_checkbox, enabled and bool(self.qq_notification_checkbox.isChecked()), "需先开启 QQ 通知")
+        if hasattr(self, "dingtalk_detail_checkbox"):
+            self._set_switch_enabled(self.dingtalk_detail_checkbox, enabled and bool(self.dingtalk_notification_checkbox.isChecked()), "需先开启钉钉通知")
+
+    def _dual_line_lyrics_available_for_settings(self) -> bool:
+        location = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")) or "free")
+        return location != "tasker"
+
+    def _dual_line_lyrics_status_text(self) -> str:
+        return "可用" if self._dual_line_lyrics_available_for_settings() else "Tasker 模式下不可用"
 
     def _update_lyric_flow_controls(self):
         style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")))
@@ -1814,37 +3117,79 @@ class SettingsWindow(QDialog):
                 getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))
             ) == "album_island"
             self._album_island_controls.setVisible(album_mode)
-        if hasattr(self, "lyric_offset") and self.lyric_offset.parentWidget() is not None:
-            self.lyric_offset.parentWidget().setVisible(not album_flow)
         if hasattr(self, "no_lyrics_display_mode_row"):
             self.no_lyrics_display_mode_row.setVisible(not album_flow)
         for widget in (
-            getattr(self, "gelv_font_family", None),
             getattr(self, "gelv_primary_font_size", None),
             getattr(self, "gelv_secondary_font_size", None),
             getattr(self, "gelv_dual_line_font_size", None),
             getattr(self, "gelv_initial_word_spacing", None),
             getattr(self, "gelv_word_spacing", None),
-            getattr(self, "gelv_size_shift_checkbox", None),
             getattr(self, "gelv_compact_cover_checkbox", None),
-            getattr(self, "gelv_dual_line_checkbox", None),
-            getattr(self, "gelv_color_fill_checkbox", None),
-            getattr(self, "gelv_color_fill_fallback", None),
+            getattr(self, "gelv_word_fill_checkbox", None),
         ):
             if widget is not None:
                 widget.setEnabled(gelv)
+        dual_line_available = self._dual_line_lyrics_available_for_settings()
+        dual_line_status = self._dual_line_lyrics_status_text()
+        if hasattr(self, "gelv_dual_line_checkbox"):
+            self._set_switch_enabled(
+                self.gelv_dual_line_checkbox,
+                gelv and dual_line_available,
+                dual_line_status,
+            )
+        if hasattr(self, "gelv_dual_line_indicator"):
+            self._set_status_indicator(self.gelv_dual_line_indicator, dual_line_available, dual_line_status)
+        gelv_color_fill_available = self._gelv_color_fill_available_for_settings()
+        gelv_color_fill_blocked = gelv and not self._color_fill_background_available_for_settings()
+        color_fill_reason = self._color_fill_unavailable_reason()
+        if hasattr(self, "gelv_color_fill_checkbox"):
+            if gelv_color_fill_blocked:
+                self._disable_color_fill_setting(
+                    self.gelv_color_fill_checkbox,
+                    "gelv_color_fill_enabled",
+                    "v2_gelv_color_fill_enabled",
+                )
+            self._set_switch_enabled(self.gelv_color_fill_checkbox, gelv_color_fill_available, color_fill_reason)
+        if hasattr(self, "gelv_color_fill_fallback"):
+            self.gelv_color_fill_fallback.setEnabled(gelv_color_fill_available)
+        if hasattr(self, "gelv_color_fill_indicator"):
+            self._set_status_indicator(
+                self.gelv_color_fill_indicator,
+                gelv_color_fill_available,
+                "可用" if gelv_color_fill_available else color_fill_reason,
+            )
         if hasattr(self, "gelv_dual_line_font_size"):
             dual_enabled = bool(getattr(self.island_widget, "enable_dual_line_lyrics", False))
-            self.gelv_dual_line_font_size.setEnabled(gelv and dual_enabled)
-        for widget in (
-            getattr(self, "wave_color_fill_checkbox", None),
-            getattr(self, "wave_color_fill_fallback", None),
-            getattr(self, "wave_compact_cover_checkbox", None),
-        ):
-            if widget is not None:
-                widget.setEnabled(wave)
+            self.gelv_dual_line_font_size.setEnabled(gelv and dual_enabled and dual_line_available)
+        wave_color_fill_available = self._wave_color_fill_available_for_settings()
+        wave_color_fill_blocked = wave and not self._color_fill_background_available_for_settings()
+        if hasattr(self, "wave_color_fill_checkbox"):
+            if wave_color_fill_blocked:
+                self._disable_color_fill_setting(
+                    self.wave_color_fill_checkbox,
+                    "wave_color_fill_enabled",
+                    "v2_wave_color_fill_enabled",
+                )
+            self._set_switch_enabled(self.wave_color_fill_checkbox, wave_color_fill_available, color_fill_reason)
+        if hasattr(self, "wave_color_fill_fallback"):
+            self.wave_color_fill_fallback.setEnabled(wave_color_fill_available)
+        if hasattr(self, "wave_color_fill_indicator"):
+            self._set_status_indicator(
+                self.wave_color_fill_indicator,
+                wave_color_fill_available,
+                "可用" if wave_color_fill_available else color_fill_reason,
+            )
+        if hasattr(self, "wave_compact_cover_checkbox"):
+            self._set_switch_enabled(self.wave_compact_cover_checkbox, wave, "")
         if hasattr(self, "dual_line_lyrics_checkbox"):
-            self.dual_line_lyrics_checkbox.setEnabled(wave)
+            self._set_switch_enabled(
+                self.dual_line_lyrics_checkbox,
+                wave and dual_line_available,
+                dual_line_status,
+            )
+        if hasattr(self, "wave_dual_line_indicator"):
+            self._set_status_indicator(self.wave_dual_line_indicator, dual_line_available, dual_line_status)
         dual_enabled = bool(getattr(self.island_widget, "enable_dual_line_lyrics", False))
         for widget in (
             getattr(self, "dual_line_font_size", None),
@@ -1852,7 +3197,7 @@ class SettingsWindow(QDialog):
             getattr(self, "dual_line_secondary_spacing", None),
         ):
             if widget is not None:
-                widget.setEnabled(wave and dual_enabled)
+                widget.setEnabled(wave and dual_enabled and dual_line_available)
         album_mode = str(
             getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))
         ) == "album_island" or album_flow
@@ -1876,8 +3221,30 @@ class SettingsWindow(QDialog):
             return bool(checker())
         style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")))
         if style == "gelv_songscatter":
-            return bool(getattr(self.island_widget, "gelv_color_fill_enabled", False))
-        return bool(getattr(self.island_widget, "wave_color_fill_enabled", False))
+            return self._gelv_color_fill_available_for_settings() and bool(getattr(self.island_widget, "gelv_color_fill_enabled", False))
+        if style == "wave_stream":
+            return self._wave_color_fill_available_for_settings() and bool(getattr(self.island_widget, "wave_color_fill_enabled", False))
+        return False
+
+    def _color_fill_background_available_for_settings(self) -> bool:
+        return self._current_music_ambience_style() not in self.COLOR_FILL_BLOCKED_BACKGROUND_STYLES
+
+    def _color_fill_unavailable_reason(self) -> str:
+        if not self._color_fill_background_available_for_settings():
+            return self.COLOR_FILL_BLOCKED_REASON
+        return "当前文字流样式下不可用"
+
+    def _gelv_color_fill_available_for_settings(self) -> bool:
+        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")) or "wave_stream")
+        if style != "gelv_songscatter":
+            return False
+        return self._color_fill_background_available_for_settings()
+
+    def _wave_color_fill_available_for_settings(self) -> bool:
+        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")) or "wave_stream")
+        if style != "wave_stream":
+            return False
+        return self._color_fill_background_available_for_settings()
 
     def _music_ambience_values(self) -> dict[str, dict[str, float | int]]:
         values = {style: dict(defaults) for style, defaults in DEFAULT_MUSIC_AMBIENCE_VALUES.items()}
@@ -1892,6 +3259,7 @@ class SettingsWindow(QDialog):
                         "music_flow_intensity": style_values.get("music_flow_intensity", values[style]["music_flow_intensity"]),
                         "compact_duotone_balance": style_values.get("compact_duotone_balance", values[style]["compact_duotone_balance"]),
                         "expanded_duotone_balance": style_values.get("expanded_duotone_balance", values[style]["expanded_duotone_balance"]),
+                        "diffraction_frequency": style_values.get("diffraction_frequency", values[style]["diffraction_frequency"]),
                     }
                 )
         return values
@@ -1906,10 +3274,11 @@ class SettingsWindow(QDialog):
             "music_flow_intensity": max(0.0, min(1.0, int(self.music_flow_slider.value()) / 100.0)),
             "compact_duotone_balance": max(0, min(100, int(self.compact_duotone_balance.value()))),
             "expanded_duotone_balance": max(0, min(100, int(self.expanded_duotone_balance.value()))),
+            "diffraction_frequency": max(0.0, min(1.0, int(self.diffraction_frequency_slider.value()) / 100.0)),
         }
 
     def _save_music_ambience_values_for_style(self, style: str | None = None):
-        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance")):
+        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance", "diffraction_frequency_slider")):
             return
         style = style or self._current_music_ambience_style()
         if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
@@ -1926,6 +3295,7 @@ class SettingsWindow(QDialog):
         self._save("v2_music_flow_intensity", float(values["music_flow_intensity"]))
         self._save("v2_compact_duotone_balance", int(values["compact_duotone_balance"]))
         self._save("v2_expanded_duotone_balance", int(values["expanded_duotone_balance"]))
+        self._save("v2_diffraction_frequency", float(values["diffraction_frequency"]))
 
     def _apply_music_ambience_values_for_style(self, style: str):
         values = self._music_ambience_values().get(style, DEFAULT_MUSIC_AMBIENCE_VALUES["sea_level"])
@@ -1933,6 +3303,7 @@ class SettingsWindow(QDialog):
         flow = max(0.0, min(1.0, float(values.get("music_flow_intensity", 0.74))))
         compact = max(0, min(100, int(values.get("compact_duotone_balance", 50))))
         expanded = max(0, min(100, int(values.get("expanded_duotone_balance", 50))))
+        diffraction_frequency = max(0.0, min(1.0, float(values.get("diffraction_frequency", 0.30))))
         self.island_widget.ambient_intensity = ambient
         if hasattr(self.island_widget, "set_music_flow_intensity"):
             self.island_widget.set_music_flow_intensity(flow, notify=False)
@@ -1943,17 +3314,23 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.compact_duotone_balance = compact
             self.island_widget.expanded_duotone_balance = expanded
+        if hasattr(self.island_widget, "set_diffraction_frequency"):
+            self.island_widget.set_diffraction_frequency(diffraction_frequency, notify=False)
+        else:
+            self.island_widget.diffraction_frequency = diffraction_frequency
         if hasattr(self, "wave_slider"):
             self._set_slider_value(self.wave_slider, int(round(ambient * 100)))
             self._set_slider_value(self.music_flow_slider, int(round(flow * 100)))
             self._set_slider_value(self.compact_duotone_balance, compact)
             self._set_slider_value(self.expanded_duotone_balance, expanded)
+            self._set_slider_value(self.diffraction_frequency_slider, int(round(diffraction_frequency * 100)))
         self._save_legacy_music_ambience_values(
             {
                 "ambient_intensity": ambient,
                 "music_flow_intensity": flow,
                 "compact_duotone_balance": compact,
                 "expanded_duotone_balance": expanded,
+                "diffraction_frequency": diffraction_frequency,
             }
         )
         if hasattr(self.island_widget, "update"):
@@ -1980,15 +3357,29 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.music_ambience_style, current_style)
         if hasattr(self, "_music_ambience_detail_toggle"):
             self._set_detail_panel_title(self._music_ambience_detail_toggle, f"{self.music_ambience_style.currentText()}背景")
+        self._update_music_ambience_control_visibility(current_style)
+
+    def _set_slider_row_visible(self, slider: QSlider, visible: bool, title: str | None = None):
+        row = slider.parentWidget()
+        if row is not None:
+            row.setVisible(bool(visible))
+        title_label = getattr(slider, "_title_label", None)
+        if title is not None and title_label is not None:
+            title_label.setText(title)
+
+    def _update_music_ambience_control_visibility(self, style: str):
+        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance", "diffraction_frequency_slider")):
+            return
+        style = str(style or "sea_level")
+        if hasattr(self, "_music_ambience_controls"):
+            self._music_ambience_controls.setVisible(style not in {"pure_black", "pure_white"})
+        self._set_slider_row_visible(self.wave_slider, style in {"sea_level", "duotone_full", "bilateral_diffraction"}, "衍射强度" if style == "bilateral_diffraction" else "饱和光强度")
+        self._set_slider_row_visible(self.music_flow_slider, style == "sea_level", "流光浮动强度")
+        self._set_slider_row_visible(self.compact_duotone_balance, style == "duotone_full", "双色占比")
+        self._set_slider_row_visible(self.expanded_duotone_balance, False)
+        self._set_slider_row_visible(self.diffraction_frequency_slider, style == "bilateral_diffraction", "衍射频率")
 
     def _music_background_options_allowed(self) -> set[str]:
-        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")) or "wave_stream")
-        active_fill = self._active_color_fill_enabled_for_settings()
-        tasker = str(getattr(self.island_widget, "location_mode", "free") or "free") == "tasker"
-        if tasker or style == "gelv_songscatter":
-            return set(DEFAULT_MUSIC_AMBIENCE_VALUES)
-        if active_fill:
-            return {"pure_black", "bilateral_diffraction", "pure_white"}
         return set(DEFAULT_MUSIC_AMBIENCE_VALUES)
 
     def _set_combo_text(self, combo: QComboBox, text: str):
@@ -2007,47 +3398,59 @@ class SettingsWindow(QDialog):
         combo.blockSignals(False)
 
     def _update_previews(self):
-        if hasattr(self, "music_preview"):
-            if str(getattr(self.island_widget, "music_ambience_style", "sea_level")) == "sea_level":
-                bg = "qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #122036, stop:0.48 #27B8FF, stop:1 #B143FF)"
-            else:
-                bg = "qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7A1DFF, stop:0.48 #25D5FF, stop:1 #FF4E90)"
-            self.music_preview.setStyleSheet(f"QFrame {{ border-radius: 12px; border: 1px solid #e5e7eb; background: {bg}; }}")
-        if hasattr(self, "empty_preview"):
-            colors = self._empty_bar_preview_colors()
-            bg = f"qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {colors[0]}, stop:0.5 {colors[1]}, stop:1 {colors[2]})"
-            self.empty_preview.setStyleSheet(f"QFrame {{ border-radius: 12px; border: 1px solid #e5e7eb; background: {bg}; }}")
-
-    def _empty_bar_preview_colors(self) -> list[str]:
-        key = str(self.empty_palette.currentData() if hasattr(self, "empty_palette") else getattr(self.island_widget, "empty_bar_palette", "aurora") or "aurora")
-        palettes = {
-            "cyan": ["#32E0FF", "#469AFF", "#69FFCF"],
-            "violet": ["#9066FF", "#4278FF", "#EC5CFF"],
-            "amber": ["#FFCD5C", "#FF7E52", "#6EE0FF"],
-            "rainbow": ["#FF5A86", "#4ED6FF", "#70FFA6"],
-            "aurora": ["#50ACFF", "#7668FF", "#4CE5FF"],
-        }
-        if key == "custom":
-            return self._current_custom_colors()
-        return palettes.get(key, palettes["aurora"])
-
-    def _current_custom_colors(self) -> list[str]:
-        colors = []
-        for widget in getattr(self, "custom_color_inputs", []):
-            if hasattr(widget, "color"):
-                colors.append(widget.color())
-            else:
-                colors.append(str(widget.text()).strip())
-        while len(colors) < 3:
-            colors.append(("#46D6FF", "#73FFA6", "#FF5A86")[len(colors)])
-        return colors[:3]
+        preview = getattr(self, "music_preview", None)
+        if isinstance(preview, MusicAmbiencePreview):
+            style = self._current_music_ambience_style()
+            values = self._music_ambience_values().get(style, DEFAULT_MUSIC_AMBIENCE_VALUES["sea_level"])
+            album_color = QColor(getattr(self.island_widget, "album_color", QColor("#16BCFF")))
+            secondary_color = QColor(getattr(self.island_widget, "secondary_color", QColor("#FF3A94")))
+            preview.set_preview_state(
+                style,
+                values,
+                album_color=album_color,
+                secondary_color=secondary_color,
+                playing=bool(getattr(self.island_widget, "media_is_playing", True)),
+            )
 
     def _save(self, key: str, value):
         if self.settings:
             self.settings.set(key, value)
 
+    def _set_music_background_style_for_theme(self, style: str) -> bool:
+        if style == self._current_music_ambience_style():
+            return False
+        if hasattr(self.island_widget, "set_music_ambience_style"):
+            self.island_widget.set_music_ambience_style(style, notify=False)
+        else:
+            self.island_widget.music_ambience_style = style
+            if hasattr(self.island_widget, "update"):
+                self.island_widget.update()
+        self._save("v2_music_ambience_style", style)
+        if hasattr(self, "music_ambience_style"):
+            self._set_combo_data(self.music_ambience_style, style)
+            self._apply_music_ambience_values_for_style(style)
+            self._update_music_ambience_controls()
+        self._update_lyric_flow_controls()
+        self._update_previews()
+        return True
+
+    def _sync_music_background_to_theme(self) -> bool:
+        enabled = bool(self._setting_value("v2_music_background_follow_theme", False))
+        current_style = self._current_music_ambience_style()
+        target_style = music_ambience_style_for_theme(
+            self._settings_dark_mode(),
+            current_style,
+            follow_enabled=enabled,
+        )
+        if target_style == current_style:
+            return False
+        return self._set_music_background_style_for_theme(target_style)
+
     def _refresh_theme_after_setting_change(self):
         self._apply_theme()
+        self._refresh_section_labels()
+        self._refresh_settings_sidebar_icons()
+        self._sync_music_background_to_theme()
         for combo in self.findChildren(QComboBox):
             self._style_combo_popup(combo)
         for switch in self.findChildren(IosSwitch):
@@ -2278,8 +3681,11 @@ class SettingsWindow(QDialog):
         remain = int(round(seconds - minutes * 60))
         return f"{minutes}:{remain:02d}"
 
+    def _current_settings_page_index(self) -> int:
+        return int(self.stack.currentIndex()) if hasattr(self, "stack") else -1
+
     def _begin_barrage_adjust_preview(self):
-        if self.nav.currentRow() != self._barrage_page_index:
+        if self._current_settings_page_index() != self._barrage_page_index:
             return
         self._barrage_adjust_generation += 1
         generation = self._barrage_adjust_generation
@@ -2293,7 +3699,7 @@ class SettingsWindow(QDialog):
         QTimer.singleShot(6000, release)
 
     def _begin_plugin_alert_adjust_preview(self):
-        if self.nav.currentRow() != self._plugin_page_index:
+        if self._current_settings_page_index() != self._plugin_page_index:
             return
         if hasattr(self.island_widget, "show_plugin_fullscreen_alert_preview"):
             self.island_widget.show_plugin_fullscreen_alert_preview()
@@ -2327,6 +3733,8 @@ class SettingsWindow(QDialog):
         self._touch()
 
     def _set_location_mode(self, _index: int = -1):
+        if not isinstance(getattr(self, "location_mode", None), QComboBox):
+            return
         mode = str(self.location_mode.currentData() or "free")
         if hasattr(self.island_widget, "set_location_mode"):
             self.island_widget.set_location_mode(mode, notify=False)
@@ -2340,6 +3748,7 @@ class SettingsWindow(QDialog):
         self._refresh_location_mode_options()
         self._set_combo_data(self.location_mode, mode)
         self._update_taskbar_controls()
+        self._update_lyric_flow_controls()
         self._touch()
 
     def _set_position_preset(self, _index: int = -1):
@@ -2354,6 +3763,7 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.position_preset, preset)
         self._refresh_location_mode_options()
         self._update_taskbar_controls()
+        self._update_lyric_flow_controls()
         self._touch()
 
     def _set_taskbar_corner_style(self, _index: int = -1):
@@ -2382,6 +3792,9 @@ class SettingsWindow(QDialog):
         if not hasattr(self, "location_mode"):
             return
         current = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")))
+        if not isinstance(self.location_mode, QComboBox):
+            self.location_mode.setText(self._location_mode_label())
+            return
         items = self._location_mode_items()
         self.location_mode.blockSignals(True)
         self.location_mode.clear()
@@ -2400,16 +3813,30 @@ class SettingsWindow(QDialog):
 
     def _update_taskbar_controls(self):
         location = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")) or "free")
-        mydockfinder_available = bool(
+        mydockfinder_running = bool(
             getattr(self.island_widget, "_mydockfinder_available", lambda: bool(getattr(self.island_widget, "mydockfinder_running", False)))()
         )
-        tasker_available = location != "finder" and not mydockfinder_available
+        tasker_available = location != "finder" and not mydockfinder_running
         for widget in (
             getattr(self, "taskbar_corner_style", None),
             getattr(self, "taskbar_left_handle_color", None),
         ):
             if widget is not None:
                 widget.setEnabled(tasker_available)
+        for indicator in (
+            getattr(self, "taskbar_corner_status", None),
+            getattr(self, "taskbar_left_handle_status", None),
+        ):
+            if indicator is not None:
+                self._set_status_indicator(indicator, tasker_available, "可选" if tasker_available else "不可选")
+        if hasattr(self, "mydockfinder_status_indicator"):
+            self._set_status_indicator(
+                self.mydockfinder_status_indicator,
+                mydockfinder_running,
+                "已检测" if mydockfinder_running else "未检测",
+            )
+        if hasattr(self, "location_mode") and not isinstance(self.location_mode, QComboBox):
+            self.location_mode.setText(self._location_mode_label())
 
     def _browse_mydockfinder_path(self, _checked: bool = False):
         path, _selected_filter = QFileDialog.getOpenFileName(
@@ -2433,7 +3860,74 @@ class SettingsWindow(QDialog):
         self._save("v2_mydockfinder_path", value)
         if hasattr(self, "mydockfinder_status_label"):
             self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
+        self._update_taskbar_controls()
         self._touch()
+
+    def _set_mydockfinder_listener_process(self, process_name: str, enabled: bool):
+        normalized = normalize_mydockfinder_listener_process_names((process_name,))
+        if not normalized:
+            return
+        process_name = normalized[0]
+        selected = set(self._mydockfinder_listener_process_names_setting())
+        if enabled:
+            selected.add(process_name)
+        else:
+            selected.discard(process_name)
+        ordered = list(normalize_mydockfinder_listener_process_names(selected))
+        if hasattr(self.island_widget, "set_mydockfinder_listener_process_names"):
+            self.island_widget.set_mydockfinder_listener_process_names(ordered, notify=False)
+        else:
+            self.island_widget.mydockfinder_listener_process_names = tuple(ordered)
+        self._save("v2_mydockfinder_listener_process_names", ordered)
+        self._sync_mydockfinder_process_checkboxes()
+        if hasattr(self, "mydockfinder_status_label"):
+            self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
+        self._update_taskbar_controls()
+        self._touch()
+
+    def _open_app_location(self, _checked: bool = False):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1])))
+
+    def _sync_icon_preview(self):
+        icon_paths = resolve_icon_paths(self._setting_value("v2_custom_icon_path", ""))
+        label = getattr(self, "custom_icon_path_label", None)
+        if label is not None:
+            custom_path = str(self._setting_value("v2_custom_icon_path", "") or "").strip()
+            label.setText(custom_path or "默认图标")
+        preview = getattr(self, "app_icon_preview", None)
+        if preview is not None:
+            pixmap = QPixmap(str(icon_paths.preview_icon))
+            if not pixmap.isNull():
+                preview.setPixmap(pixmap.scaled(58, 58, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+
+    def _choose_custom_icon(self, _checked: bool = False):
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "上传图标",
+            "",
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.webp *.ico);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            installed = install_custom_icon(path)
+        except Exception as exc:
+            if hasattr(self, "custom_icon_path_label"):
+                self.custom_icon_path_label.setText(f"图标导入失败：{exc}")
+            return
+        ico_path = str(installed.get("ico_path", "") or "")
+        self._save("v2_custom_icon_path", ico_path)
+        self._sync_icon_preview()
+        callback = getattr(self, "icon_changed_callback", None)
+        if callable(callback):
+            callback(ico_path)
+
+    def _reset_custom_icon(self, _checked: bool = False):
+        self._save("v2_custom_icon_path", "")
+        self._sync_icon_preview()
+        callback = getattr(self, "icon_changed_callback", None)
+        if callable(callback):
+            callback("")
 
     def _set_message_detection(self, enabled: bool):
         self._save("v2_enable_message_detection", bool(enabled))
@@ -2443,21 +3937,67 @@ class SettingsWindow(QDialog):
 
     def _set_wechat_notification(self, enabled: bool):
         self._save("v2_enable_wechat_notification", bool(enabled))
+        if not enabled and hasattr(self, "wechat_detail_checkbox") and self.wechat_detail_checkbox.isChecked():
+            self.wechat_detail_checkbox.blockSignals(True)
+            self.wechat_detail_checkbox.setChecked(False)
+            self.wechat_detail_checkbox.blockSignals(False)
+            self._save("v2_enable_wechat_detail_notification", False)
+        self._update_message_controls()
         self._refresh_diagnostics()
         self._touch()
 
     def _set_wechat_detail_notification(self, enabled: bool):
-        self._save("v2_enable_wechat_detail_notification", bool(enabled))
+        enabled = bool(enabled and getattr(self, "wechat_notification_checkbox", None) and self.wechat_notification_checkbox.isChecked())
+        if hasattr(self, "wechat_detail_checkbox") and self.wechat_detail_checkbox.isChecked() != enabled:
+            self.wechat_detail_checkbox.blockSignals(True)
+            self.wechat_detail_checkbox.setChecked(enabled)
+            self.wechat_detail_checkbox.blockSignals(False)
+        self._save("v2_enable_wechat_detail_notification", enabled)
+        self._update_message_controls()
         self._refresh_diagnostics()
         self._touch()
 
     def _set_qq_notification(self, enabled: bool):
         self._save("v2_enable_qq_notification", bool(enabled))
+        if not enabled and hasattr(self, "qq_detail_checkbox") and self.qq_detail_checkbox.isChecked():
+            self.qq_detail_checkbox.blockSignals(True)
+            self.qq_detail_checkbox.setChecked(False)
+            self.qq_detail_checkbox.blockSignals(False)
+            self._save("v2_enable_qq_detail_notification", False)
+        self._update_message_controls()
+        self._refresh_diagnostics()
+        self._touch()
+
+    def _set_qq_detail_notification(self, enabled: bool):
+        enabled = bool(enabled and getattr(self, "qq_notification_checkbox", None) and self.qq_notification_checkbox.isChecked())
+        if hasattr(self, "qq_detail_checkbox") and self.qq_detail_checkbox.isChecked() != enabled:
+            self.qq_detail_checkbox.blockSignals(True)
+            self.qq_detail_checkbox.setChecked(enabled)
+            self.qq_detail_checkbox.blockSignals(False)
+        self._save("v2_enable_qq_detail_notification", enabled)
+        self._update_message_controls()
         self._refresh_diagnostics()
         self._touch()
 
     def _set_dingtalk_notification(self, enabled: bool):
         self._save("v2_enable_dingtalk_notification", bool(enabled))
+        if not enabled and hasattr(self, "dingtalk_detail_checkbox") and self.dingtalk_detail_checkbox.isChecked():
+            self.dingtalk_detail_checkbox.blockSignals(True)
+            self.dingtalk_detail_checkbox.setChecked(False)
+            self.dingtalk_detail_checkbox.blockSignals(False)
+            self._save("v2_enable_dingtalk_detail_notification", False)
+        self._update_message_controls()
+        self._refresh_diagnostics()
+        self._touch()
+
+    def _set_dingtalk_detail_notification(self, enabled: bool):
+        enabled = bool(enabled and getattr(self, "dingtalk_notification_checkbox", None) and self.dingtalk_notification_checkbox.isChecked())
+        if hasattr(self, "dingtalk_detail_checkbox") and self.dingtalk_detail_checkbox.isChecked() != enabled:
+            self.dingtalk_detail_checkbox.blockSignals(True)
+            self.dingtalk_detail_checkbox.setChecked(enabled)
+            self.dingtalk_detail_checkbox.blockSignals(False)
+        self._save("v2_enable_dingtalk_detail_notification", enabled)
+        self._update_message_controls()
         self._refresh_diagnostics()
         self._touch()
 
@@ -2487,6 +4027,13 @@ class SettingsWindow(QDialog):
     def _set_show_seconds(self, enabled: bool):
         self.island_widget.show_seconds = enabled
         self._save("v2_show_seconds", enabled)
+        for checkbox_name in ("seconds_checkbox", "time_seconds_checkbox", "empty_time_seconds_checkbox"):
+            checkbox = getattr(self, checkbox_name, None)
+            if checkbox is None:
+                continue
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(enabled))
+            checkbox.blockSignals(False)
         self._touch()
 
     def _set_high_quality_font_rendering(self, enabled: bool):
@@ -2532,6 +4079,19 @@ class SettingsWindow(QDialog):
             mode = "system"
         self._save("v2_theme_mode", mode)
         self._refresh_theme_after_setting_change()
+
+    def _set_music_background_follow_theme(self, enabled: bool):
+        self._save("v2_music_background_follow_theme", bool(enabled))
+        self._sync_music_background_to_theme()
+
+    def _set_startup_mode(self, _index: int = -1):
+        mode = normalize_startup_mode(str(self.startup_mode.currentData() or "none"))
+        previous = normalize_startup_mode(str(self._setting_value("v2_startup_mode", "none") or "none"))
+        applied = StartupManager().apply(mode, build_startup_command())
+        if not applied:
+            self._set_combo_data(self.startup_mode, previous)
+            return
+        self._save("v2_startup_mode", mode)
 
     def _normalize_theme_time(self, value: str, fallback: str) -> str:
         text = str(value or "").strip()
@@ -2591,36 +4151,43 @@ class SettingsWindow(QDialog):
 
     def _set_gelv_color_fill_enabled(self, enabled: bool):
         enabled = bool(enabled)
-        if hasattr(self.island_widget, "set_gelv_color_fill_enabled"):
-            self.island_widget.set_gelv_color_fill_enabled(enabled, notify=False)
-        else:
-            self.island_widget.gelv_color_fill_enabled = enabled
-            self.island_widget.update()
+        if enabled and not self._gelv_color_fill_available_for_settings():
+            enabled = False
+        self._set_island_bool_setting("gelv_color_fill_enabled", enabled)
+        self._set_switch_checked(getattr(self, "gelv_color_fill_checkbox", None), enabled)
         self._save("v2_gelv_color_fill_enabled", enabled)
         if hasattr(self, "music_ambience_style"):
             actual_style = self._current_music_ambience_style()
             self._save("v2_music_ambience_style", actual_style)
             self._apply_music_ambience_values_for_style(actual_style)
             self._update_music_ambience_controls()
+        self._update_lyric_flow_controls()
+        self._touch()
+
+    def _set_gelv_word_fill_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        self._set_island_bool_setting("gelv_word_fill_enabled", enabled)
+        self._set_switch_checked(getattr(self, "gelv_word_fill_checkbox", None), enabled)
+        self._save("v2_gelv_word_fill_enabled", enabled)
         self._touch()
 
     def _set_wave_color_fill_enabled(self, enabled: bool):
         enabled = bool(enabled)
-        if hasattr(self.island_widget, "set_wave_color_fill_enabled"):
-            self.island_widget.set_wave_color_fill_enabled(enabled, notify=False)
-        else:
-            self.island_widget.wave_color_fill_enabled = enabled
-            self.island_widget.update()
+        if enabled and not self._wave_color_fill_available_for_settings():
+            enabled = False
+        self._set_island_bool_setting("wave_color_fill_enabled", enabled)
+        self._set_switch_checked(getattr(self, "wave_color_fill_checkbox", None), enabled)
         self._save("v2_wave_color_fill_enabled", enabled)
         if hasattr(self, "music_ambience_style"):
             actual_style = self._current_music_ambience_style()
             self._save("v2_music_ambience_style", actual_style)
             self._apply_music_ambience_values_for_style(actual_style)
             self._update_music_ambience_controls()
+        self._update_lyric_flow_controls()
         self._touch()
 
     def _set_gelv_font_family(self, _index: int = -1):
-        family = str(self.gelv_font_family.currentData() or "Source Han Serif SC")
+        family = "Source Han Serif SC"
         if hasattr(self.island_widget, "set_gelv_font_family"):
             self.island_widget.set_gelv_font_family(family, notify=False)
         else:
@@ -2677,16 +4244,6 @@ class SettingsWindow(QDialog):
             self.island_widget.gelv_word_spacing = spacing
             self.island_widget.update()
         self._save("v2_gelv_word_spacing", spacing)
-        self._touch()
-
-    def _set_gelv_size_shift_enabled(self, enabled: bool):
-        enabled = bool(enabled)
-        if hasattr(self.island_widget, "set_gelv_size_shift_enabled"):
-            self.island_widget.set_gelv_size_shift_enabled(enabled, notify=False)
-        else:
-            self.island_widget.gelv_size_shift_enabled = enabled
-            self.island_widget.update()
-        self._save("v2_gelv_size_shift_enabled", enabled)
         self._touch()
 
     def _set_compact_lyric_show_cover(self, enabled: bool):
@@ -3016,14 +4573,9 @@ class SettingsWindow(QDialog):
         self._set_combo_data(self.music_ambience_style, actual_style)
         self._apply_music_ambience_values_for_style(actual_style)
         self._update_music_ambience_controls()
+        self._update_lyric_flow_controls()
         self._collapse_detail_panels()
         self._update_previews()
-
-    def _set_music_island_style(self, _index: int = -1):
-        style = str(self.music_island_style.currentData() or "standard")
-        self.island_widget.music_island_style = style
-        self._save("v2_music_island_style", style)
-        self._touch()
 
     def _set_music_flow_intensity(self, value: int):
         intensity = max(0.0, min(1.0, value / 100.0))
@@ -3036,14 +4588,32 @@ class SettingsWindow(QDialog):
         self._save_music_ambience_values_for_style()
         self._update_previews()
 
+    def _set_diffraction_frequency(self, value: int):
+        amount = max(0.0, min(1.0, value / 100.0))
+        if hasattr(self.island_widget, "set_diffraction_frequency"):
+            self.island_widget.set_diffraction_frequency(amount, notify=False)
+        else:
+            self.island_widget.diffraction_frequency = amount
+            self.island_widget.update()
+        self._save("v2_diffraction_frequency", amount)
+        self._save_music_ambience_values_for_style()
+        self._update_previews()
+
     def _set_compact_duotone_balance(self, value: int):
         value = max(0, min(100, int(value)))
+        expanded_value = value if self._current_music_ambience_style() == "duotone_full" else None
         if hasattr(self.island_widget, "set_duotone_balance"):
-            self.island_widget.set_duotone_balance(compact=value, notify=False)
+            self.island_widget.set_duotone_balance(compact=value, expanded=expanded_value, notify=False)
         else:
             self.island_widget.compact_duotone_balance = value
+            if expanded_value is not None:
+                self.island_widget.expanded_duotone_balance = expanded_value
             self.island_widget.update()
+        if expanded_value is not None and hasattr(self, "expanded_duotone_balance"):
+            self._set_slider_value(self.expanded_duotone_balance, expanded_value)
         self._save("v2_compact_duotone_balance", value)
+        if expanded_value is not None:
+            self._save("v2_expanded_duotone_balance", expanded_value)
         self._save_music_ambience_values_for_style()
         self._update_previews()
 
@@ -3334,62 +4904,39 @@ class SettingsWindow(QDialog):
             self.island_widget.set_animation_speed(value, notify=False)
         self._save("v2_animation_speed", value)
 
-    def _set_empty_bar_palette(self, _index: int = -1):
-        key = self.empty_palette.currentData() or "aurora"
-        if hasattr(self.island_widget, "set_empty_bar_palette"):
-            self.island_widget.set_empty_bar_palette(key, notify=False)
-        else:
-            self.island_widget.empty_bar_palette = key
-            self.island_widget.update()
-        self._save("v2_empty_bar_palette", key)
-        self._update_previews()
+    def _current_empty_island_display_mode(self) -> str:
+        if hasattr(self, "empty_island_display_mode"):
+            return str(self.empty_island_display_mode.currentData() or "visible_bar")
+        return str(getattr(self.island_widget, "empty_island_display_mode", self._setting_value("v2_empty_island_display_mode", "visible_bar")) or "visible_bar")
 
-    def _set_empty_bar_width(self, value: int):
-        if hasattr(self.island_widget, "set_empty_bar_geometry"):
-            self.island_widget.set_empty_bar_geometry(width=value, notify=False)
-        else:
-            self.island_widget.empty_bar_width = value
-            self.island_widget.update()
-        self._save("v2_empty_bar_width", value)
-        self._update_previews()
+    def _update_empty_island_time_seconds_visibility(self):
+        mode = self._current_empty_island_display_mode()
+        row = getattr(self, "empty_time_seconds_row", None)
+        if row is not None:
+            row.setVisible(mode == "time")
 
-    def _set_empty_bar_height(self, value: int):
-        if hasattr(self.island_widget, "set_empty_bar_geometry"):
-            self.island_widget.set_empty_bar_geometry(height=value, notify=False)
+    def _set_empty_island_display_mode(self, _index: int = -1):
+        mode = str(self.empty_island_display_mode.currentData() or "visible_bar")
+        if hasattr(self.island_widget, "set_empty_island_display_mode"):
+            self.island_widget.set_empty_island_display_mode(mode, notify=False)
+            mode = str(getattr(self.island_widget, "empty_island_display_mode", mode))
         else:
-            self.island_widget.empty_bar_height = value
+            self.island_widget.empty_island_display_mode = mode
             self.island_widget.update()
-        self._save("v2_empty_bar_height", value)
-        self._update_previews()
+        self._save("v2_empty_island_display_mode", mode)
+        self._update_empty_island_time_seconds_visibility()
+        self._touch()
 
-    def _set_empty_bar_y_offset(self, value: int):
-        if hasattr(self.island_widget, "set_empty_bar_geometry"):
-            self.island_widget.set_empty_bar_geometry(y_offset=value, notify=False)
+    def _set_no_music_island_priority(self, _index: int = -1):
+        priority = str(self.no_music_island_priority.currentData() or "plugin")
+        if hasattr(self.island_widget, "set_no_music_island_priority"):
+            self.island_widget.set_no_music_island_priority(priority, notify=False)
+            priority = str(getattr(self.island_widget, "no_music_island_priority", priority))
         else:
-            self.island_widget.empty_bar_y_offset = value
+            self.island_widget.no_music_island_priority = priority
             self.island_widget.update()
-        self._save("v2_empty_bar_y_offset", value)
-        self._update_previews()
-
-    def _set_empty_bar_opacity(self, value: int):
-        if hasattr(self.island_widget, "set_empty_bar_geometry"):
-            self.island_widget.set_empty_bar_geometry(opacity=value, notify=False)
-        else:
-            self.island_widget.empty_bar_opacity = value
-            self.island_widget.update()
-        self._save("v2_empty_bar_opacity", value)
-        self._update_previews()
-
-    def _set_empty_bar_custom_colors(self):
-        colors = self._current_custom_colors()
-        if hasattr(self.island_widget, "set_empty_bar_custom_colors"):
-            self.island_widget.set_empty_bar_custom_colors(colors, notify=False)
-            colors = list(getattr(self.island_widget, "empty_bar_custom_colors", colors))
-        else:
-            self.island_widget.empty_bar_custom_colors = tuple(colors)
-            self.island_widget.update()
-        self._save("v2_empty_bar_custom_colors", colors)
-        self._update_previews()
+        self._save("v2_no_music_island_priority", priority)
+        self._touch()
 
     def _add_message(self):
         self.island_widget.add_message()

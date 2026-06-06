@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 
+import api.message_detector as message_detector_module
 from api.message_detector import WeChatSessionCandidate, WindowCandidate, WindowsMessageDetector
+from api.models import ColorToken, MessageData
 
 
 class FakeWeChatItem:
@@ -32,15 +34,73 @@ class MessageDetectorTests(unittest.TestCase):
 
         self.assertIsNone(detector._message_from_candidate(candidate))
 
-    def test_extracts_wechat_system_notification_text(self):
+    def test_wechat_system_notification_defaults_to_new_message_summary(self):
         detector = WindowsMessageDetector()
 
         message = detector._message_from_notification_parts("微信", "Tencent.WeChat", ("张三", "晚上开会吗？"))
 
         self.assertIsNotNone(message)
         self.assertEqual(message.app, "微信")
-        self.assertEqual(message.sender, "张三")
-        self.assertEqual(message.text, "晚上开会吗？")
+        self.assertEqual(message.sender, "微信")
+        self.assertEqual(message.text, "收到新消息")
+
+    def test_wechat_system_notification_is_detail_trigger_not_detail_payload(self):
+        def settings(key, default=None):
+            if key == "v2_enable_wechat_detail_notification":
+                return True
+            return default
+
+        detector = WindowsMessageDetector(settings)
+
+        message = detector._message_from_notification_parts("微信", "Tencent.WeChat", ("张三", "晚上开会吗？"))
+
+        self.assertIsNotNone(message)
+        self.assertEqual(message.sender, "微信")
+        self.assertEqual(message.text, "收到新消息")
+
+    def test_wechat_detail_mode_requires_new_notification_mode(self):
+        def settings(key, default=None):
+            if key == "v2_enable_wechat_notification":
+                return False
+            if key == "v2_enable_wechat_detail_notification":
+                return True
+            return default
+
+        detector = WindowsMessageDetector(settings)
+
+        self.assertFalse(detector._wechat_detail_enabled())
+
+    def test_wechat_notification_trigger_replaces_summary_when_detail_scan_succeeds(self):
+        def settings(key, default=None):
+            if key == "v2_enable_wechat_detail_notification":
+                return True
+            return default
+
+        detector = WindowsMessageDetector(settings)
+        color = ColorToken(75, 210, 110)
+        summary = MessageData(app="微信", sender="微信", text="收到新消息", name_color=color, avatar_color=color)
+        detail = MessageData(app="微信", sender="张三", text="晚上开会吗？", name_color=color, avatar_color=color)
+        calls = []
+
+        detector._notification_messages = lambda now: [summary]
+
+        def wechat_messages(now, force_detail=False, suppress_summary=False):
+            calls.append((force_detail, suppress_summary))
+            return [detail]
+
+        detector._wechat_messages = wechat_messages
+        detector._last_candidate_poll_at = 10.0
+        original_platform = message_detector_module.sys.platform
+        message_detector_module.sys.platform = "win32"
+        try:
+            detector._poll_windows(10.0)
+        finally:
+            message_detector_module.sys.platform = original_platform
+
+        with detector._lock:
+            stored = tuple(detector._messages)
+        self.assertEqual(calls, [(True, True)])
+        self.assertEqual([(message.sender, message.text) for message in stored], [("张三", "晚上开会吗？")])
 
     def test_extracts_wechat_session_unread_message(self):
         detector = WindowsMessageDetector()

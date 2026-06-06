@@ -144,7 +144,7 @@ class NeteasePositionReader:
                 self._last_read_at = 0.0
                 self._refreshing = False
                 self._refresh_token = 0
-            force_sync = bool(interactive or allow_lyric_anchor)
+            force_sync = bool(interactive or allow_lyric_anchor or force_progress_image)
             if self._refreshing and not force_sync:
                 return self._last_sample
             self._last_read_at = now

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton
 
@@ -15,13 +15,17 @@ def mac_preferences_theme(dark: bool | None = None) -> dict[str, str]:
             "window": "#1f1f21",
             "sidebar": "#2a2a2c",
             "sidebar_border": "#3a3a3c",
+            "sidebar_text": "#f5f5f7",
+            "sidebar_hover": "rgba(255, 255, 255, 42)",
             "content": "#1f1f21",
             "titlebar": "#242426",
             "card": "#2c2c2e",
             "card_border": "#3a3a3c",
+            "detail_body": "#242426",
             "search": "#343436",
             "search_border": "#464649",
             "text": "#f5f5f7",
+            "section_text": "#f5f5f7",
             "muted": "#b8b8be",
             "secondary": "#8e8e93",
             "disabled_text": "#6f6f75",
@@ -33,16 +37,20 @@ def mac_preferences_theme(dark: bool | None = None) -> dict[str, str]:
             "accent": "#0a84ff",
         }
     return {
-        "window": "#ececec",
-        "sidebar": "#c9c9c9",
-        "sidebar_border": "#b7b7b7",
-        "content": "#f2f2f2",
-        "titlebar": "#efefef",
-        "card": "#e9e9e9",
-        "card_border": "#dddddd",
-        "search": "#bbbbbb",
-        "search_border": "#b0b0b0",
+        "window": "#ededf0",
+        "sidebar": "#e1e1e5",
+        "sidebar_border": "#c9c9d0",
+        "sidebar_text": "#1d1d1f",
+        "sidebar_hover": "rgba(36, 36, 38, 26)",
+        "content": "#f4f4f7",
+        "titlebar": "#f0f0f3",
+        "card": "#fbfbfd",
+        "card_border": "#d8d8df",
+        "detail_body": "#ececf1",
+        "search": "#f7f7f9",
+        "search_border": "#c5c5cc",
         "text": "#1d1d1f",
+        "section_text": "#111113",
         "muted": "#5f6368",
         "secondary": "#8e8e93",
         "disabled_text": "#a0a0a5",
@@ -69,13 +77,20 @@ def mac_sidebar_icon_colors() -> tuple[str, ...]:
 
 
 class MacTrafficButton(QPushButton):
+    COLORS = {
+        "MacTrafficRed": "#ff5f57",
+        "MacTrafficYellow": "#ffbd2e",
+        "MacTrafficGreen": "#28c840",
+    }
+
     def __init__(self, object_name: str, tooltip: str, symbol: str, parent=None):
         super().__init__(parent)
         self._symbol = symbol
         self._hovered = False
+        self._color = QColor(self.COLORS.get(object_name, "#8e8e93"))
         self.setObjectName(object_name)
         self.setToolTip(tooltip)
-        self.setFixedSize(12, 12)
+        self.setFixedSize(10, 10)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -90,23 +105,49 @@ class MacTrafficButton(QPushButton):
         super().leaveEvent(event)
 
     def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self._hovered:
-            return
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.setPen(QColor(70, 50, 46, 210))
-        painter.setFont(QFont("Segoe UI Symbol", 7, QFont.Weight.Bold))
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._symbol)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QColor(0, 0, 0, 36))
+        painter.setBrush(self._color)
+        painter.drawEllipse(rect)
+
+        highlight = QColor(255, 255, 255, 72 if self._hovered else 48)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(highlight)
+        painter.drawEllipse(QRectF(rect.left() + 2.0, rect.top() + 1.6, 3.2, 2.4))
+
+        if self._hovered:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setPen(QColor(70, 50, 46, 210))
+            painter.setFont(QFont("Segoe UI Symbol", 6, QFont.Weight.Bold))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._symbol)
         painter.end()
 
 
+class MacTrafficCapsule(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MacTrafficCapsule")
+        self.setProperty("legacyObjectName", "MacTrafficLights")
+        self.setFixedSize(48, 18)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(QColor(255, 255, 255, 72))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 10, 10)
+        painter.end()
+        super().paintEvent(event)
+
+
 def mac_traffic_lights(window=None) -> QFrame:
-    traffic = QFrame()
-    traffic.setObjectName("MacTrafficLights")
+    traffic = MacTrafficCapsule()
     layout = QHBoxLayout(traffic)
-    layout.setContentsMargins(2, 2, 0, 2)
-    layout.setSpacing(8)
+    layout.setContentsMargins(5, 4, 5, 4)
+    layout.setSpacing(4)
     controls = (
         ("MacTrafficRed", "关闭", "×", lambda: window.close() if window is not None else None),
         ("MacTrafficYellow", "最小化", "−", lambda: window.showMinimized() if window is not None else None),
@@ -177,21 +218,20 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         QWidget#MacSidebarHeader {{
             background: transparent;
         }}
-        QFrame#MacTrafficLights {{
+        QFrame#MacTrafficLights, QFrame#MacTrafficCapsule {{
             background: transparent;
             border: 0;
         }}
         QPushButton#MacTrafficRed, QPushButton#MacTrafficYellow, QPushButton#MacTrafficGreen {{
-            min-width: 12px;
-            max-width: 12px;
-            min-height: 12px;
-            max-height: 12px;
-            border-radius: 6px;
+            min-width: 10px;
+            max-width: 10px;
+            min-height: 10px;
+            max-height: 10px;
+            border-radius: 5px;
+            background: transparent;
+            border: 0;
             padding: 0;
         }}
-        QPushButton#MacTrafficRed {{ background: #ff5f57; border: 1px solid rgba(0, 0, 0, 28); }}
-        QPushButton#MacTrafficYellow {{ background: #ffbd2e; border: 1px solid rgba(0, 0, 0, 28); }}
-        QPushButton#MacTrafficGreen {{ background: #28c840; border: 1px solid rgba(0, 0, 0, 28); }}
         QLineEdit#MacSearch {{
             min-height: 24px;
             border: 1px solid {t["search_border"]};
@@ -206,21 +246,21 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         }}
         QListWidget#MacSidebarList {{
             background: transparent;
-            color: {t["text"]};
+            color: {t["sidebar_text"]};
             border: 0;
             outline: 0;
             padding: 6px 8px 10px 8px;
             font-size: 13px;
         }}
         QListWidget#MacSidebarList::item {{
-            min-height: 24px;
+            min-height: 30px;
             border-radius: 5px;
-            padding: 4px 8px;
+            padding: 5px 8px;
             margin: 1px 0;
-            color: {t["text"]};
+            color: {t["sidebar_text"]};
         }}
         QListWidget#MacSidebarList::item:hover {{
-            background: rgba(255, 255, 255, 42);
+            background: {t["sidebar_hover"]};
         }}
         QListWidget#MacSidebarList::item:selected {{
             background: {t["accent"]};
@@ -254,6 +294,35 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         QFrame#MacCard QWidget {{
             background: transparent;
         }}
+        QFrame#DetailPanel {{
+            background: transparent;
+            border: 0;
+        }}
+        QPushButton#DetailToggle {{
+            text-align: left;
+            min-height: 26px;
+            border-radius: 7px;
+            padding: 2px 10px;
+            background: {t["control"]};
+            border: 1px solid {t["card_border"]};
+            color: {t["text"]};
+        }}
+        QPushButton#DetailToggle:hover {{
+            background: {t["control_hover"]};
+        }}
+        QPushButton#DetailToggle:checked {{
+            background: {t["control_hover"]};
+            border-color: {t["accent"]};
+        }}
+        QFrame#DetailBody {{
+            background: {t["detail_body"]};
+            border: 1px solid {t["card_border"]};
+            border-radius: 8px;
+            margin-top: 5px;
+        }}
+        QFrame#DetailBody QWidget {{
+            background: transparent;
+        }}
         QLabel {{
             background: transparent;
             color: {t["text"]};
@@ -269,7 +338,7 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             font-size: 12px;
         }}
         QLabel#Section {{
-            color: {t["muted"]};
+            color: {t["section_text"]};
             font-size: 12px;
             font-weight: 600;
             padding: 14px 0 6px 2px;
@@ -278,7 +347,30 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             font-size: 13px;
             color: {t["text"]};
         }}
-        QLabel#Value, QLabel#Muted {{
+        QLabel#SearchResultSummary {{
+            color: {t["muted"]};
+            font-size: 12px;
+            padding: 2px 0 6px 2px;
+        }}
+        QFrame#SearchResultRow {{
+            background: {t["card"]};
+            border: 1px solid {t["card_border"]};
+            border-radius: 8px;
+        }}
+        QLabel#SearchResultTitle {{
+            color: {t["text"]};
+            font-size: 13px;
+            font-weight: 500;
+        }}
+        QLabel#SearchResultMeta, QLabel#SearchResultEmpty {{
+            color: {t["muted"]};
+            font-size: 12px;
+        }}
+        QPushButton#SearchResultAction {{
+            min-width: 48px;
+            padding: 0 11px;
+        }}
+        QLabel#Value, QLabel#Muted, QLabel#DiagnosticValue {{
             color: {t["muted"]};
             font-size: 12px;
         }}
@@ -345,16 +437,20 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
         }}
         QScrollBar:vertical {{
             background: transparent;
-            width: 10px;
-            margin: 8px 2px 8px 2px;
+            width: 12px;
+            margin: 8px 3px 8px 3px;
         }}
         QScrollBar::handle:vertical {{
-            background: {t["scroll"]};
+            background: rgba(118, 118, 124, 168);
             border-radius: 5px;
-            min-height: 36px;
+            min-height: 44px;
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             height: 0;
+        }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: transparent;
+            border: 0;
         }}
         QComboBox QAbstractItemView {{
             background: {t["control"]};

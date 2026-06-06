@@ -42,6 +42,7 @@ class WeChatSessionCandidate:
 
 
 class WindowsMessageDetector:
+    WECHAT_NEW_MESSAGE_TEXT = "收到新消息"
     APP_HINTS = (
         (("wechat", "weixin", "微信", "wxwork", "tencent.wechat", "tencentwechat"), "微信", ColorToken(75, 210, 110)),
         (("qq", "tim"), "QQ", ColorToken(80, 170, 255)),
@@ -166,6 +167,12 @@ class WindowsMessageDetector:
                 force_detail=has_wechat_notification,
                 suppress_summary=has_wechat_notification,
             )
+            if wechat_messages and has_wechat_notification:
+                notification_messages = [
+                    message
+                    for message in notification_messages
+                    if not self._is_wechat_notification_summary(message)
+                ]
         messages: list[MessageData] = []
         messages.extend(notification_messages)
         messages.extend(wechat_messages)
@@ -198,7 +205,7 @@ class WindowsMessageDetector:
         return bool(self.settings_getter("v2_enable_wechat_notification", True))
 
     def _wechat_detail_enabled(self) -> bool:
-        return bool(self.settings_getter("v2_enable_wechat_detail_notification", False))
+        return bool(self._wechat_notification_enabled() and self.settings_getter("v2_enable_wechat_detail_notification", False))
 
     def _qq_notification_enabled(self) -> bool:
         return bool(self.settings_getter("v2_enable_qq_notification", False))
@@ -339,6 +346,8 @@ class WindowsMessageDetector:
             return None
         if not self._message_app_enabled(app_name):
             return None
+        if self._is_wechat_app_name(app_name):
+            return self._wechat_notification_summary(color)
         content = [piece for piece in self._clean_pieces(texts) if not self._is_noise(piece, app_name)]
         content = [piece for piece in content if piece.casefold() != app_name.casefold()]
         if not content:
@@ -350,6 +359,16 @@ class WindowsMessageDetector:
         if self._is_noise(text, app_name):
             return None
         return MessageData(app=app_name, sender=sender, text=text[:96], name_color=color, avatar_color=color)
+
+    def _wechat_notification_summary(self, color: ColorToken) -> MessageData:
+        return MessageData(app="微信", sender="微信", text=self.WECHAT_NEW_MESSAGE_TEXT, name_color=color, avatar_color=color)
+
+    def _is_wechat_notification_summary(self, message: MessageData) -> bool:
+        return (
+            self._is_wechat_app_name(getattr(message, "app", ""))
+            and getattr(message, "sender", "") == "微信"
+            and getattr(message, "text", "") == self.WECHAT_NEW_MESSAGE_TEXT
+        )
 
     def _collect_candidates(self) -> list[WindowCandidate]:
         candidates = []

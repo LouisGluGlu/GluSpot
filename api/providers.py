@@ -182,7 +182,11 @@ class WindowsMediaProvider:
         self._global_pointer_thread = None
         self._raw_source_app_user_model_id = ""
         self._music_player_adapter = "system"
+        self._last_confirmed_music_player_adapter = "system"
+        self._last_confirmed_music_player_adapter_until = 0.0
+        self._last_confirmed_music_player_source_key = ""
         self._recent_skip_command_at = 0.0
+        self._player_anchor_fast_refresh_until = 0.0
         self._last_raw_timeline_track_id = ""
         self._last_raw_timeline_position: float | None = None
         self._last_raw_timeline_at = 0.0
@@ -219,11 +223,26 @@ class WindowsMediaProvider:
         return self._cached_or_status_visual(now)
 
     def _current_refresh_interval(self, now: float) -> float:
+        if self._music_player_adapter in {"netease", "netease_betterncm", "qq"}:
+            fast_until = float(getattr(self, "_player_anchor_fast_refresh_until", 0.0) or 0.0)
+            if fast_until > 0.0 and now <= fast_until:
+                return 0.12
         if self._music_player_adapter in {"netease", "netease_betterncm", "qq"} and (
             self._source_app_interactive or (self._source_app_foreground_at and now - self._source_app_foreground_at <= 3.5)
         ):
             return 0.14
         return self._refresh_interval
+
+    def _mark_player_anchor_fast_refresh(self, now: float | None = None, duration: float = 1.35):
+        anchor_at = time.monotonic() if now is None else float(now)
+        try:
+            span = max(0.25, min(3.0, float(duration)))
+        except (TypeError, ValueError):
+            span = 1.35
+        self._player_anchor_fast_refresh_until = max(
+            float(getattr(self, "_player_anchor_fast_refresh_until", 0.0) or 0.0),
+            anchor_at + span,
+        )
 
     def _consume_refresh_future(self, now: float):
         future = self._refresh_future
@@ -344,6 +363,8 @@ class WindowsMediaProvider:
                 last_track = self._last_data.track
                 if last_track.is_playing or self.has_live_audio():
                     grace_seconds = 18.0
+                elif str(last_track.title or last_track.artist).strip():
+                    grace_seconds = 10.0
             if self._last_data is not None and now - self._last_ready_at < grace_seconds:
                 return replace(self._project_visual_position(self._last_data, now, self._last_ready_at), messages=messages, plugins=plugins)
             return replace(NO_SESSION_VISUAL_DATA, messages=messages, plugins=plugins)
@@ -618,7 +639,7 @@ class WindowsMediaProvider:
         if url in cache:
             return cache[url]
         try:
-            request = Request(url, headers={"User-Agent": "gpt-island/1.0"})
+            request = Request(url, headers={"User-Agent": "GluSpot/1.0"})
             with urlopen(request, timeout=1.2) as response:
                 content = response.read(512 * 1024)
         except Exception:
@@ -629,11 +650,11 @@ class WindowsMediaProvider:
                 cache.pop(next(iter(cache)))
         return bytes(content)
 
-    def _ensure_lyrics_lookup_started(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0):
+    def _ensure_lyrics_lookup_started(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0, allow_background: bool = True):
         lyrics_match = self.lyrics_store.resolve_cached_or_local(title, artist, album_title, duration_seconds)
         lyrics_lookup_pending = self.lyrics_store.is_lookup_pending(title, artist, album_title, duration_seconds)
         lookup_started = False
-        if not lyrics_match.timed_lyrics and not lyrics_match.lyrics and not lyrics_lookup_pending:
+        if allow_background and not lyrics_match.timed_lyrics and not lyrics_match.lyrics and not lyrics_lookup_pending:
             lookup_started = bool(self.lyrics_store.resolve_in_background(title, artist, album_title, duration_seconds))
             lyrics_lookup_pending = lookup_started
         elif self._dual_line_lyrics_enabled() and lyrics_match.timed_lyrics and not self._has_multiline_lyrics(lyrics_match.timed_lyrics):
@@ -908,12 +929,24 @@ class WindowsMediaProvider:
         same_track_as_previous = previous_track is not None and previous_track.track_id == track_key
         previous_position = max(0.0, float(previous_track.position_seconds)) if previous_track is not None else 0.0
         previous_duration = max(0.0, float(previous_track.duration_seconds)) if previous_track is not None else 0.0
-        lyrics_match, lyrics_lookup_pending, _lyrics_lookup_started = self._ensure_lyrics_lookup_started(title, artist, album_title, duration_seconds)
+        preserve_previous_lyrics = bool(same_track_as_previous and previous_track is not None and previous_track.timed_lyrics)
+        lyrics_match, lyrics_lookup_pending, _lyrics_lookup_started = self._ensure_lyrics_lookup_started(
+            title,
+            artist,
+            album_title,
+            duration_seconds,
+            allow_background=not preserve_previous_lyrics,
+        )
         album_art = await self._read_thumbnail(properties, track_key)
         album_color, secondary_color = self._colors_from_art(album_art, fallback_track.album_color, fallback_track.secondary_color)
         timed_lyrics = lyrics_match.timed_lyrics
         lyrics_source = lyrics_match.source
         lyrics = lyrics_match.lyrics or tuple(line.text for line in timed_lyrics) or (("查找歌词中",) if lyrics_lookup_pending else ("暂无歌词",))
+        if preserve_previous_lyrics and previous_track is not None and not timed_lyrics:
+            timed_lyrics = previous_track.timed_lyrics
+            lyrics = previous_track.lyrics or tuple(line.text for line in timed_lyrics)
+            lyrics_source = previous_track.lyrics_source
+            lyrics_lookup_pending = False
         if self._should_prefetch_upcoming_lyrics(track_key, lyrics_match, lyrics_lookup_pending, _lyrics_lookup_started):
             if self._is_netease_adapter(player_adapter):
                 self._prefetch_netease_upcoming_lyrics(title, artist, player_position_reader, count=2)
@@ -1017,7 +1050,7 @@ class WindowsMediaProvider:
         recent_skip_command = 0.0 <= read_at - float(getattr(self, "_recent_skip_command_at", 0.0) or 0.0) <= 2.8
         lyric_click_as_progress_anchor = (
             self._is_netease_adapter(player_adapter)
-            and source_app_foreground
+            and source_app_interactive
             and recent_lyric_click
             and recent_click_pos is not None
             and bool(timed_lyrics)
@@ -1064,6 +1097,7 @@ class WindowsMediaProvider:
             allow_lyric_click_anchor = False
             lyric_click_pos = None
             if same_track_as_previous or previous_track is None:
+                self._mark_player_anchor_fast_refresh(read_at)
                 position_seconds = max(0.0, float(progress_point_position))
                 if duration_seconds > 0.0:
                     position_seconds = min(duration_seconds, position_seconds)
@@ -1074,7 +1108,7 @@ class WindowsMediaProvider:
                 local_seek_estimate = position_seconds
         force_player_anchor_read = (
             player_adapter in {"netease", "qq"}
-            and source_app_foreground
+            and (source_app_foreground or lyric_click_as_progress_anchor)
             and (recent_source_pointer or recent_global_pointer or lyric_click_as_progress_anchor)
             and not lyric_click_local_applied
         )
@@ -1084,9 +1118,10 @@ class WindowsMediaProvider:
             and previous_track is not None
             and not same_track_as_previous
         )
-        netease_lyrics_loaded_anchor_read = (
-            self._is_netease_adapter(player_adapter)
-            and self._should_sync_netease_after_lyrics_loaded(track_key, previous_track, timed_lyrics)
+        lyrics_loaded_anchor_read = (
+            player_position_reader is not None
+            and player_adapter in {"netease", "netease_betterncm", "qq"}
+            and self._should_sync_after_lyrics_loaded(track_key, previous_track, timed_lyrics)
             and not lyric_click_local_applied
         )
         should_read_player_anchor = player_position_reader is not None and bool(title)
@@ -1096,17 +1131,20 @@ class WindowsMediaProvider:
                 previous_track is None
                 or track_change_anchor_read
                 or force_player_anchor_read
-                or netease_lyrics_loaded_anchor_read
+                or lyrics_loaded_anchor_read
                 or recent_skip_command
             )
             force_progress_image = bool(
                 previous_track is None
                 or track_change_anchor_read
                 or force_player_anchor_read
+                or lyrics_loaded_anchor_read
                 or lyric_click_as_progress_anchor
                 or recent_skip_command
             )
             if use_immediate_reader:
+                if force_player_anchor_read or track_change_anchor_read or lyrics_loaded_anchor_read or recent_skip_command:
+                    self._mark_player_anchor_fast_refresh(read_at)
                 player_sample = read_immediate(
                     title,
                     artist,
@@ -1167,8 +1205,10 @@ class WindowsMediaProvider:
                         position_seconds,
                         projected_player_position,
                         fresh_player_anchor,
-                        user_initiated=force_player_anchor_read or track_change_anchor_read or netease_lyrics_loaded_anchor_read,
+                        user_initiated=force_player_anchor_read or track_change_anchor_read or lyrics_loaded_anchor_read,
                     ):
+                        if player_sample_source == f"{source_prefix}-uia-progress":
+                            self._mark_player_anchor_fast_refresh(read_at)
                         position_seconds = projected_player_position
                         position_source = player_sample.source
                         position_confidence = player_sample.confidence
@@ -1637,19 +1677,25 @@ class WindowsMediaProvider:
     def _is_netease_adapter(self, player_adapter: str) -> bool:
         return str(player_adapter or "").strip().casefold() in {"netease", "netease_betterncm"}
 
-    def _should_sync_netease_after_lyrics_loaded(self, track_key: str, previous_track: TrackData | None, timed_lyrics) -> bool:
+    def _should_sync_after_lyrics_loaded(self, track_key: str, previous_track: TrackData | None, timed_lyrics) -> bool:
         if not track_key or not timed_lyrics or previous_track is None:
             return False
         if previous_track.track_id != track_key or previous_track.timed_lyrics:
             return False
-        synced = getattr(self, "_netease_lyric_sync_track_ids", None)
+        synced = getattr(self, "_lyrics_loaded_sync_track_ids", None)
+        if not isinstance(synced, set):
+            synced = getattr(self, "_netease_lyric_sync_track_ids", None)
         if not isinstance(synced, set):
             synced = set()
-            self._netease_lyric_sync_track_ids = synced
+        self._lyrics_loaded_sync_track_ids = synced
+        self._netease_lyric_sync_track_ids = synced
         if track_key in synced:
             return False
         synced.add(track_key)
         return True
+
+    def _should_sync_netease_after_lyrics_loaded(self, track_key: str, previous_track: TrackData | None, timed_lyrics) -> bool:
+        return self._should_sync_after_lyrics_loaded(track_key, previous_track, timed_lyrics)
 
     def _player_position_reader_for(self, service: str):
         service = str(service or "").strip().casefold()
@@ -2001,7 +2047,7 @@ class WindowsMediaProvider:
             elif self._music_player_source_matches(mode, source_app, raw_source_app):
                 candidate = mode
             if candidate != "system" and self._music_app_profile_allows_adapter(candidate, source_app, raw_source_app):
-                return candidate
+                return self._remember_confirmed_music_player_adapter(candidate, source_app, raw_source_app)
             if candidate != "system":
                 return "system"
             path_candidates = []
@@ -2014,7 +2060,10 @@ class WindowsMediaProvider:
                     continue
                 seen.add(path_candidate)
                 if self._music_app_profile_allows_adapter(path_candidate, source_app, raw_source_app):
-                    return path_candidate
+                    return self._remember_confirmed_music_player_adapter(path_candidate, source_app, raw_source_app)
+            sticky = self._sticky_music_player_adapter_for(source_app, raw_source_app, detected)
+            if sticky != "system":
+                return sticky
             return "system"
         if not self._player_progress_plugin_enabled():
             if detected in {"netease", "qq"}:
@@ -2031,6 +2080,46 @@ class WindowsMediaProvider:
         if self._music_player_source_matches(mode, source_app, raw_source_app):
             return mode
         return "system"
+
+    def _remember_confirmed_music_player_adapter(self, adapter: str, source_app: str, raw_source_app: str) -> str:
+        adapter = str(adapter or "system").strip().casefold()
+        if adapter != "system":
+            self._last_confirmed_music_player_adapter = adapter
+            self._last_confirmed_music_player_adapter_until = time.monotonic() + 8.0
+            self._last_confirmed_music_player_source_key = self._music_player_session_hint_key(source_app, raw_source_app)
+        return adapter
+
+    def _sticky_music_player_adapter_for(self, source_app: str, raw_source_app: str, detected: str) -> str:
+        if str(detected or "system").strip().casefold() != "system":
+            return "system"
+        adapter = str(getattr(self, "_last_confirmed_music_player_adapter", "system") or "system").strip().casefold()
+        if adapter == "system":
+            return "system"
+        until = float(getattr(self, "_last_confirmed_music_player_adapter_until", 0.0) or 0.0)
+        if time.monotonic() > until:
+            return "system"
+        current_key = self._music_player_session_hint_key(source_app, raw_source_app)
+        previous_key = str(getattr(self, "_last_confirmed_music_player_source_key", "") or "")
+        if current_key and previous_key and current_key != previous_key:
+            return "system"
+        if not self._music_app_profile_sticky_enabled(adapter):
+            return "system"
+        return adapter
+
+    def _music_player_session_hint_key(self, source_app: str, raw_source_app: str) -> str:
+        return self._stable_text_key(f"{source_app}\0{raw_source_app}")
+
+    def _music_app_profile_sticky_enabled(self, service: str) -> bool:
+        profiles = self._music_app_profiles()
+        if profiles is None:
+            return True
+        profile = self._music_app_profile(service) or {}
+        if not bool(profile.get("sync_enabled", False)):
+            return False
+        service = str(service or "").strip().casefold()
+        if service == "netease_betterncm" and not bool(profile.get("betterncm_enabled", False)):
+            return False
+        return bool(self._effective_music_app_profile_path(service, profile))
 
     def _consume_recent_click_anchor(self, click_pos: tuple[int, int] | None):
         if click_pos is None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QComboBox, QSpinBox
+from PySide6.QtWidgets import QComboBox, QSlider, QSpinBox
 
 
 class NoWheelComboBox(QComboBox):
@@ -9,5 +9,10 @@ class NoWheelComboBox(QComboBox):
 
 
 class NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoWheelSlider(QSlider):
     def wheelEvent(self, event):
         event.ignore()

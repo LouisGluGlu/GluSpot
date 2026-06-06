@@ -22,8 +22,11 @@ class MacStyleTests(unittest.TestCase):
     def test_mac_theme_has_preferences_regions(self):
         theme = mac_preferences_theme(False)
 
-        self.assertEqual(theme["sidebar"], "#c9c9c9")
-        self.assertEqual(theme["content"], "#f2f2f2")
+        self.assertEqual(theme["sidebar"], "#e1e1e5")
+        self.assertEqual(theme["content"], "#f4f4f7")
+        self.assertEqual(theme["sidebar_text"], "#1d1d1f")
+        self.assertEqual(theme["section_text"], "#111113")
+        self.assertEqual(theme["detail_body"], "#ececf1")
         self.assertEqual(theme["accent"], "#0a84ff")
 
     def test_dark_mac_theme_has_preferences_regions(self):

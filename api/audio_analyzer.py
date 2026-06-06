@@ -78,7 +78,7 @@ class LiveAudioAnalyzer:
             data = data.mean(axis=1)
         data = data - float(np.mean(data))
         if float(np.max(np.abs(data))) < 0.00008:
-            return AudioFrame(0.0, 0.0, 0.0)
+            return None
         window = np.hanning(len(data))
         spectrum = np.abs(np.fft.rfft(data * window))
         freqs = np.fft.rfftfreq(len(data), 1.0 / sample_rate)
