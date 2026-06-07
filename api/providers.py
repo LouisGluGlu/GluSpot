@@ -1052,7 +1052,6 @@ class WindowsMediaProvider:
             self._is_netease_adapter(player_adapter)
             and source_app_interactive
             and recent_lyric_click
-            and recent_click_pos is not None
             and bool(timed_lyrics)
         )
         allow_lyric_click_anchor = False
@@ -1144,7 +1143,7 @@ class WindowsMediaProvider:
             )
             if use_immediate_reader:
                 if force_player_anchor_read or track_change_anchor_read or lyrics_loaded_anchor_read or recent_skip_command:
-                    self._mark_player_anchor_fast_refresh(read_at)
+                    self._mark_player_anchor_fast_refresh(read_at, duration=2.6 if lyric_click_as_progress_anchor else 1.35)
                 player_sample = read_immediate(
                     title,
                     artist,
