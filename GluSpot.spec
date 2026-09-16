@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(SPECPATH)
-APP_VERSION = "6.4"
+APP_VERSION = "6.402"
 
 datas = [
     (str(ROOT / "assets"), "assets"),

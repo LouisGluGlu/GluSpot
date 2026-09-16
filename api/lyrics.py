@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
 import os
 import re
+import sys
 import threading
 import time
 import unicodedata
 from collections import OrderedDict
+from ctypes import wintypes
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -26,6 +29,56 @@ YRC_WORD_RE = re.compile(r"\(\d+\s*,\s*\d+(?:\s*,\s*\d+)?\)")
 JSONP_RE = re.compile(r"^[A-Za-z_][\w.]*\((.*)\)\s*;?\s*$", re.S)
 METADATA_RE = re.compile(r"^\[(?:ar|ti|al|by|offset|length|re|ve|kana|language):.*\]$", re.I)
 ONLINE_SOURCE_ORDER = ("netease", "qq", "lrclib")
+TRADITIONAL_TO_SIMPLIFIED_FALLBACK = str.maketrans(
+    {
+        "後": "后",
+        "來": "来",
+        "風": "风",
+        "裏": "里",
+        "裡": "里",
+        "妳": "你",
+        "雲": "云",
+        "愛": "爱",
+        "聽": "听",
+        "說": "说",
+        "夢": "梦",
+        "臺": "台",
+        "台": "台",
+        "門": "门",
+        "開": "开",
+        "關": "关",
+        "萬": "万",
+        "與": "与",
+        "為": "为",
+        "麼": "么",
+        "歲": "岁",
+        "時": "时",
+        "間": "间",
+        "會": "会",
+        "無": "无",
+        "還": "还",
+        "點": "点",
+        "聲": "声",
+        "誰": "谁",
+        "獨": "独",
+        "遠": "远",
+        "邊": "边",
+        "顏": "颜",
+        "難": "难",
+        "記": "记",
+        "憶": "忆",
+        "終": "终",
+        "輕": "轻",
+        "過": "过",
+        "長": "长",
+        "舊": "旧",
+        "別": "别",
+        "葉": "叶",
+        "華": "华",
+        "淚": "泪",
+    }
+)
+SIMPLIFIED_TO_TRADITIONAL_FALLBACK = str.maketrans({value: key for key, value in TRADITIONAL_TO_SIMPLIFIED_FALLBACK.items()})
 
 
 @dataclass(frozen=True)
@@ -45,7 +98,7 @@ class LocalLyricsStore:
     PERSISTED_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
     GENERATED_CACHE_DIR_ENV = "GLUSPOT_LYRICS_CACHE_DIR"
 
-    def __init__(self, root: Path | None = None, request_timeout: float = 4.5, generated_root: Path | None = None):
+    def __init__(self, root: Path | None = None, request_timeout: float = 4.5, generated_root: Path | None = None, settings_getter=None):
         root_provided = root is not None
         self.root = Path(root) if root_provided else Path(__file__).resolve().parents[1] / "lyrics"
         if generated_root is not None:
@@ -70,6 +123,7 @@ class LocalLyricsStore:
         self._local_miss_cache: OrderedDict[str, tuple[tuple[str, int], ...]] = OrderedDict()
         self._lyric_index_cache: dict[str, tuple[int, dict[str, tuple[Path, ...]]]] = {}
         self._lyric_index_lock = threading.Lock()
+        self.settings_getter = settings_getter or (lambda _key, default=None: default)
 
     @classmethod
     def _default_generated_root(cls, source_root: Path) -> Path:
@@ -400,8 +454,43 @@ class LocalLyricsStore:
         return value
 
     def _cache_key(self, title: str, artist: str, album_title: str, duration_seconds: float) -> str:
-        raw = f"{title}\0{artist}"
+        raw = f"{title}\0{artist}\0{self._cache_preference_key()}"
         return raw.casefold()
+
+    def _setting_value(self, key: str, default=None):
+        getter = getattr(self, "settings_getter", None)
+        if not callable(getter):
+            return default
+        try:
+            return getter(key, default)
+        except Exception:
+            return default
+
+    def _cache_preference_key(self) -> str:
+        dual = "dual" if self._dual_line_lyrics_enabled() else "single"
+        return f"{dual}|{self._dual_line_secondary_source()}|{self._lyric_chinese_conversion_mode()}"
+
+    def _dual_line_lyrics_enabled(self) -> bool:
+        if bool(self._setting_value("v2_enable_dual_line_lyrics", False)):
+            return True
+        style = str(self._setting_value("v2_lyric_flow_style", "") or "").strip().casefold()
+        return style == "ember_fade" and bool(self._setting_value("v2_ember_dual_line_enabled", False))
+
+    def _dual_line_secondary_source(self) -> str:
+        value = str(self._setting_value("v2_dual_line_secondary_source", "translation") or "translation").strip().casefold()
+        if value in {"transliteration", "romanization", "romaji", "phonetic", "roma"}:
+            return "transliteration"
+        if value in {"none", "off", "disabled"}:
+            return "none"
+        return "translation"
+
+    def _lyric_chinese_conversion_mode(self) -> str:
+        value = str(self._setting_value("v2_lyric_chinese_conversion", "off") or "off").strip().casefold()
+        if value in {"simplified", "to_simplified", "hans", "zh-hans", "zh_cn", "zh-cn"}:
+            return "simplified"
+        if value in {"traditional", "to_traditional", "hant", "zh-hant", "zh_tw", "zh-tw"}:
+            return "traditional"
+        return "off"
 
     def _store_cache(self, key: str, match: LyricsMatch):
         with self._cache_lock:
@@ -595,7 +684,7 @@ class LocalLyricsStore:
                 timed = self._merge_timed_lyric_sources(timed_groups)
                 if not self._lyrics_have_vocal_content(tuple(line.text for line in timed)):
                     return None
-                return LyricsMatch(timed, tuple(line.text for line in timed), source)
+                return self._finalize_lyrics_match(LyricsMatch(timed, tuple(line.text for line in timed), source))
             plain_lines: list[str] = []
             for _timed, plain in parsed:
                 plain_lines.extend(plain)
@@ -604,7 +693,7 @@ class LocalLyricsStore:
                 if not self._lyrics_have_vocal_content(plain):
                     return None
                 synth = self._synthesize_timed_lyrics(plain)
-                return LyricsMatch(synth, plain, source)
+                return self._finalize_lyrics_match(LyricsMatch(synth, plain, source))
             return None
         if not text:
             return None
@@ -612,12 +701,12 @@ class LocalLyricsStore:
         if timed:
             if not self._lyrics_have_vocal_content(tuple(line.text for line in timed)):
                 return None
-            return LyricsMatch(timed, tuple(line.text for line in timed), source)
+            return self._finalize_lyrics_match(LyricsMatch(timed, tuple(line.text for line in timed), source))
         if plain:
             if not self._lyrics_have_vocal_content(plain):
                 return None
             synth = self._synthesize_timed_lyrics(plain)
-            return LyricsMatch(synth, plain, source)
+            return self._finalize_lyrics_match(LyricsMatch(synth, plain, source))
         return None
 
     def _lyrics_have_vocal_content(self, lines: tuple[str, ...]) -> bool:
@@ -638,6 +727,54 @@ class LocalLyricsStore:
         if re.fullmatch(r"(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.:]\d{1,3})?", cleaned):
             return True
         return bool(re.fullmatch(r"[\d.,:：/\\\-+_~·•|()[\]{}<>]+", cleaned))
+
+    def _finalize_lyrics_match(self, match: LyricsMatch) -> LyricsMatch:
+        mode = self._lyric_chinese_conversion_mode()
+        if mode == "off":
+            return match
+        timed = tuple(
+            TimedLyricLine(line.time_seconds, self._convert_chinese_text(str(line.text or ""), mode))
+            for line in match.timed_lyrics
+        )
+        plain = tuple(self._convert_chinese_text(line, mode) for line in match.lyrics)
+        return LyricsMatch(timed, plain, match.source)
+
+    def _convert_chinese_text(self, text: str, mode: str) -> str:
+        value = str(text or "")
+        if not value or mode not in {"simplified", "traditional"}:
+            return value
+        converted = self._windows_convert_chinese_text(value, mode)
+        table = TRADITIONAL_TO_SIMPLIFIED_FALLBACK if mode == "simplified" else SIMPLIFIED_TO_TRADITIONAL_FALLBACK
+        return (converted or value).translate(table)
+
+    def _windows_convert_chinese_text(self, text: str, mode: str) -> str:
+        if sys.platform != "win32" or not text:
+            return ""
+        try:
+            LCMAP_SIMPLIFIED_CHINESE = 0x02000000
+            LCMAP_TRADITIONAL_CHINESE = 0x04000000
+            flags = LCMAP_SIMPLIFIED_CHINESE if mode == "simplified" else LCMAP_TRADITIONAL_CHINESE
+            locale = "zh-CN" if mode == "simplified" else "zh-TW"
+            kernel32 = ctypes.windll.kernel32
+            src_len = len(text)
+            dest_len = src_len * 2 + 8
+            dest = ctypes.create_unicode_buffer(dest_len)
+            result = kernel32.LCMapStringEx(
+                wintypes.LPCWSTR(locale),
+                wintypes.DWORD(flags),
+                wintypes.LPCWSTR(text),
+                ctypes.c_int(src_len),
+                dest,
+                ctypes.c_int(dest_len),
+                None,
+                None,
+                wintypes.LPARAM(0),
+            )
+            if int(result) <= 0:
+                return ""
+            return dest.value
+        except Exception:
+            return ""
 
     def _merge_timed_lyric_sources(self, sources: list[tuple[TimedLyricLine, ...]]) -> tuple[TimedLyricLine, ...]:
         merged: list[TimedLyricLine] = []
@@ -693,7 +830,11 @@ class LocalLyricsStore:
             return ()
 
         timed, plain = self._parse_lrc_text(text)
-        return timed or self._synthesize_timed_lyrics(plain)
+        lines = timed or self._synthesize_timed_lyrics(plain)
+        mode = self._lyric_chinese_conversion_mode()
+        if mode == "off":
+            return lines
+        return tuple(TimedLyricLine(line.time_seconds, self._convert_chinese_text(line.text, mode)) for line in lines)
 
     def _persist_match(self, title: str, artist: str, album_title: str, match: LyricsMatch, overwrite: bool = False):
         if not match.lyrics:
@@ -796,12 +937,14 @@ class LocalLyricsStore:
             return None
         lyric_payload = self._fetch_json(
             "https://music.163.com/api/song/lyric",
-            params={"id": str(song_id), "lv": "1", "kv": "1", "tv": "-1"},
+            params={"id": str(song_id), "lv": "1", "kv": "1", "tv": "-1", "rv": "1"},
             headers=self._netease_headers(),
         )
         lyric_text = self._extract_netease_lyric_text(
             lyric_payload,
             prefer_original=self._prefers_original_lyrics(title, artist),
+            secondary_source=self._dual_line_secondary_source(),
+            prefer_secondary=self._dual_line_lyrics_enabled(),
         )
         return self._lyrics_match_from_text(lyric_text, "netease")
 
@@ -999,7 +1142,13 @@ class LocalLyricsStore:
         cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text))
         return latin_count >= 3 and cjk_count == 0
 
-    def _extract_netease_lyric_text(self, payload: Any, prefer_original: bool = False) -> str | tuple[str, ...]:
+    def _extract_netease_lyric_text(
+        self,
+        payload: Any,
+        prefer_original: bool = False,
+        secondary_source: str = "translation",
+        prefer_secondary: bool = False,
+    ) -> str | tuple[str, ...]:
         if not isinstance(payload, dict):
             return ""
         timed_sources: list[str] = []
@@ -1010,7 +1159,14 @@ class LocalLyricsStore:
                 if isinstance(lyric, str) and lyric.strip():
                     timed_sources.append(lyric)
                     break
-        if prefer_original:
+        secondary_mode = str(secondary_source or "translation").strip().casefold()
+        if secondary_mode in {"transliteration", "romanization", "romaji", "phonetic", "roma"}:
+            secondary_keys = ("romalrc", "romaLrc", "romalyrics", "yromalrc")
+        elif secondary_mode in {"none", "off", "disabled"}:
+            secondary_keys = ()
+        else:
+            secondary_keys = ("tlyric", "ytlrc")
+        if prefer_original and not prefer_secondary:
             if timed_sources:
                 return timed_sources[0]
             for key in ("yrc", "klyric"):
@@ -1023,7 +1179,7 @@ class LocalLyricsStore:
             if isinstance(lyric, str) and lyric.strip():
                 return lyric
             return ""
-        for key in ("tlyric", "ytlrc"):
+        for key in secondary_keys:
             value = payload.get(key)
             if isinstance(value, dict):
                 lyric = value.get("lyric") or value.get("text")

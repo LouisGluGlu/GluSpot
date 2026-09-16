@@ -16,11 +16,11 @@ if not exist "%PYEXE%" (
 
 "%PYEXE%" -X utf8 -m PyInstaller --noconfirm --clean --workpath "%ROOT%build\pyinstaller" --distpath "%ROOT%release" "%ROOT%GluSpot.spec"
 if errorlevel 1 (
-    echo GluSpot 6.4 build failed.
+    echo GluSpot 6.402 build failed.
     pause
     exit /b 1
 )
 
-echo GluSpot 6.4 build is ready:
-echo "%ROOT%release\GluSpot-6.4\GluSpot.exe"
+echo GluSpot 6.402 build is ready:
+echo "%ROOT%release\GluSpot-6.402\GluSpot.exe"
 pause

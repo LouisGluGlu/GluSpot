@@ -33,6 +33,24 @@ from local.ui_theme import set_theme_settings_getter
 MYDOCKFINDER_PROCESS_NAMES = {name for name, _label in MYDOCKFINDER_LISTEN_PROCESS_CHOICES}
 
 
+def _set_windows_process_identity(app_id: str = APP_NAME) -> bool:
+    if sys.platform != "win32":
+        return False
+    value = str(app_id or APP_NAME).strip() or APP_NAME
+    applied = False
+    try:
+        result = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(value)
+        applied = int(result) == 0
+    except Exception:
+        applied = False
+    try:
+        ctypes.windll.kernel32.SetConsoleTitleW(value)
+        applied = True
+    except Exception:
+        pass
+    return applied
+
+
 def _normalized_executable_path(path: str) -> str:
     return str(path or "").strip().strip('"').replace("/", "\\").casefold()
 
@@ -247,6 +265,7 @@ class MainThreadWatchdog:
 class LocalIslandApp:
     def __init__(self, single_instance_guard: SingleInstanceGuard | None = None):
         self.single_instance_guard = single_instance_guard
+        _set_windows_process_identity()
         self.app = QApplication(sys.argv)
         self.app.setApplicationName(APP_NAME)
         self.app.setQuitOnLastWindowClosed(False)
@@ -256,9 +275,9 @@ class LocalIslandApp:
         self.icon_paths = resolve_icon_paths(self.settings.get("v2_custom_icon_path", ""))
         self.app.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         set_theme_settings_getter(self.settings.get)
-        IslandStackVisual.load_source_han_serif_fonts()
+        IslandStackVisual.load_embedded_lyric_fonts()
         self.data_provider = WindowsMediaProvider(settings_getter=self.settings.get)
-        app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", "PingFang SC")))
+        app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)))
         self.app.setFont(QFont(app_font_family, 9))
         self.window = IslandStackVisual(data_provider=self.data_provider)
         self.window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
@@ -294,23 +313,23 @@ class LocalIslandApp:
 
     def _location_mode_setting(self) -> str:
         value = str(self.settings.get("v2_location_mode", "") or "").strip().lower()
-        if value in {"finder", "free", "tasker"}:
+        if value in {"finder", "free", "top", "tasker", "stick"}:
             return value
         legacy_taskbar = str(self.settings.get("v2_taskbar_fusion_mode", "") or "").strip().lower()
         if legacy_taskbar in {"compact", "expanded"}:
             return "tasker"
         if self.settings.get("v2_finder_mode", None) is True:
             return "finder"
-        return "free"
+        return "top"
 
     def _enabled_plugins_setting(self) -> list[str]:
-        known = ["time"]
+        known = ["time", "weather", "agenda"]
         raw = self.settings.get("v2_enabled_plugins", None)
         if isinstance(raw, (list, tuple, set)):
             enabled = {str(item or "").strip().casefold() for item in raw}
             return [plugin_id for plugin_id in known if plugin_id in enabled]
         try:
-            legacy_count = max(0, min(1, int(self.settings.get("v2_plugin_count", 1))))
+            legacy_count = max(0, min(len(known), int(self.settings.get("v2_plugin_count", 1))))
         except (TypeError, ValueError):
             legacy_count = 1
         return known[:legacy_count]
@@ -355,9 +374,16 @@ class LocalIslandApp:
         )
         self.window.set_mydockfinder_diagnostics(mydockfinder_diagnostics, notify=False)
         self.window.set_manual_finder_available(bool(self.settings.get("v2_manual_mydockfinder", False)), notify=False)
+        self.window.set_top_notch_height_mode(str(self.settings.get("v2_top_notch_height_mode", "standard")), notify=False)
         self.window.set_mydockfinder_running(bool(mydockfinder_diagnostics.get("running")), notify=False)
         self.window.set_location_mode(self._location_mode_setting(), notify=False)
         self.window.set_taskbar_corner_style(str(self.settings.get("v2_taskbar_corner_style", "win11")), notify=False)
+        self.window.set_taskbar_auto_hide_mode(str(self.settings.get("v2_taskbar_auto_hide_mode", "auto")), notify=False)
+        if hasattr(self.window, "set_tasker_follow_taskbar_color"):
+            self.window.set_tasker_follow_taskbar_color(bool(self.settings.get("v2_tasker_follow_taskbar_color", False)), notify=False)
+        else:
+            self.window.tasker_follow_taskbar_color = bool(self.settings.get("v2_tasker_follow_taskbar_color", False))
+        self.window.music_background_follow_previous_style = str(self.settings.get("v2_music_background_follow_previous_style", "") or "")
         self.window.set_taskbar_left_handle_color(str(self.settings.get("v2_taskbar_left_handle_color", "#8E8E93")), notify=False)
         self.window.expanded = bool(self.settings.get("v2_expanded", False))
         self.window.show_seconds = bool(self.settings.get("v2_show_seconds", True))
@@ -366,17 +392,29 @@ class LocalIslandApp:
         self.window.enabled_plugin_count = len(enabled_plugins)
         self.window.side_island_style = str(self.settings.get("v2_side_island_style", "standard") or "standard")
         self.window.plugin_island_style = str(self.settings.get("v2_plugin_island_style", "standard") or "standard")
-        self.window.set_plugin_fullscreen_alert_style(str(self.settings.get("v2_plugin_fullscreen_alert_style", "island") or "island"), notify=False)
+        self.window.set_plugin_fullscreen_alert_style(str(self.settings.get("v2_plugin_fullscreen_alert_style", "toast") or "toast"), notify=False)
         self.window.set_plugin_fullscreen_alert_position(
             x_offset=int(self.settings.get("v2_plugin_fullscreen_alert_x_offset", 0)),
             y_offset=int(self.settings.get("v2_plugin_fullscreen_alert_y_offset", 0)),
             notify=False,
         )
         self.window.music_island_style = str(self.settings.get("v2_music_island_style", "standard") or "standard")
+        self.window.set_music_expanded_layout_style(
+            str(self.settings.get("v2_music_expanded_layout_style", "standard") or "standard"),
+            notify=False,
+        )
         self.window.time_alarm_side_display = str(self.settings.get("v2_time_alarm_side_display", "note") or "note")
         ambience_style = str(self.settings.get("v2_music_ambience_style", "sea_level") or "sea_level")
         ambience_values = self._music_ambience_values_for_style(ambience_style)
         self.window.ambient_intensity = max(0.0, min(1.0, float(ambience_values["ambient_intensity"])))
+        self.window.set_music_reactive_background_enabled(
+            bool(self.settings.get("v2_music_reactive_background_enabled", False)),
+            notify=False,
+        )
+        self.window.set_music_reactive_background_intensity(
+            int(self.settings.get("v2_music_reactive_background_intensity", 55)),
+            notify=False,
+        )
         self.window.set_music_ambience_style(ambience_style, notify=False)
         self.window.set_music_flow_intensity(float(ambience_values["music_flow_intensity"]), notify=False)
         self.window.set_duotone_balance(
@@ -385,9 +423,40 @@ class LocalIslandApp:
             notify=False,
         )
         self.window.set_diffraction_frequency(float(ambience_values["diffraction_frequency"]), notify=False)
-        self.window.set_ui_font(str(self.settings.get("v2_font_family", "PingFang SC")), notify=False)
+        if hasattr(self.window, "set_solid_album_background_fallback"):
+            self.window.set_solid_album_background_fallback(
+                str(self.settings.get("v2_solid_album_background_fallback", "#16BCFF") or "#16BCFF"),
+                notify=False,
+            )
+        if hasattr(self.window, "set_yaoguang_outer_color"):
+            self.window.set_yaoguang_outer_color(
+                str(self.settings.get("v2_yaoguang_outer_color", "#6C35F2") or "#6C35F2"),
+                notify=False,
+            )
+        if hasattr(self.window, "set_yaoguang_blur_strength"):
+            self.window.set_yaoguang_blur_strength(
+                int(self.settings.get("v2_yaoguang_blur_strength", 58)),
+                notify=False,
+            )
+        if hasattr(self.window, "set_yaoguang_color_source"):
+            self.window.set_yaoguang_color_source(
+                str(self.settings.get("v2_yaoguang_color_source", "custom") or "custom"),
+                notify=False,
+            )
+        if hasattr(self.window, "set_yaoguang_album_inverse_enabled"):
+            self.window.set_yaoguang_album_inverse_enabled(
+                bool(self.settings.get("v2_yaoguang_album_inverse_enabled", False)),
+                notify=False,
+            )
+        if hasattr(self.window, "set_yaoguang_height_mode"):
+            self.window.set_yaoguang_height_mode(
+                str(self.settings.get("v2_yaoguang_height_mode", "regular") or "regular"),
+                notify=False,
+            )
+        self.window.set_ui_font(str(self.settings.get("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)), notify=False)
         self.window.set_high_quality_font_rendering(bool(self.settings.get("v2_high_quality_font_rendering", False)), notify=False)
         self.window.set_animation_fps(int(self.settings.get("v2_animation_fps", 60)), notify=False)
+        self.window.set_lyric_animation_fps(int(self.settings.get("v2_lyric_animation_fps", 60)), notify=False)
         self.window.set_animation_speed(float(self.settings.get("v2_animation_speed", 1.0)), notify=False)
         self.window.set_empty_island_display_mode(str(self.settings.get("v2_empty_island_display_mode", "visible_bar")), notify=False)
         if hasattr(self.window, "set_no_music_island_priority"):
@@ -427,8 +496,9 @@ class LocalIslandApp:
         self.window.set_dual_line_secondary_weight(int(self.settings.get("v2_dual_line_secondary_weight", 72)), notify=False)
         self.window.set_dual_line_secondary_spacing(int(self.settings.get("v2_dual_line_secondary_spacing", 100)), notify=False)
         self.window.set_compact_lyric_show_cover(bool(self.settings.get("v2_compact_lyric_show_cover", True)), notify=False)
+        self.window.set_wave_font_weight(str(self.settings.get("v2_wave_font_weight", "bold")), notify=False)
+        self.window.set_wave_word_fill_enabled(bool(self.settings.get("v2_wave_word_fill_enabled", False)), notify=False)
         self.window.set_wave_color_fill_enabled(bool(self.settings.get("v2_wave_color_fill_enabled", False)), notify=False)
-        self.window.set_wave_color_fill_fallback(str(self.settings.get("v2_wave_color_fill_fallback", "#00D7FF")), notify=False)
         self.window.set_lyric_flow_style(str(self.settings.get("v2_lyric_flow_style", "wave_stream")), notify=False)
         self.window.set_gelv_font_family(IslandStackVisual.GELV_FONT_FAMILY, notify=False)
         self.window.set_gelv_primary_font_size(int(self.settings.get("v2_gelv_primary_font_size", 22)), notify=False)
@@ -438,7 +508,19 @@ class LocalIslandApp:
         self.window.set_gelv_word_spacing(int(self.settings.get("v2_gelv_word_spacing", 320)), notify=False)
         self.window.set_gelv_color_fill_enabled(bool(self.settings.get("v2_gelv_color_fill_enabled", False)), notify=False)
         self.window.set_gelv_word_fill_enabled(bool(self.settings.get("v2_gelv_word_fill_enabled", False)), notify=False)
-        self.window.set_gelv_color_fill_fallback(str(self.settings.get("v2_gelv_color_fill_fallback", "#00D7FF")), notify=False)
+        self.window.set_ember_font_weight(str(self.settings.get("v2_ember_font_weight", "normal")), notify=False)
+        self.window.set_ember_font_size(int(self.settings.get("v2_ember_font_size", 18)), notify=False)
+        self.window.set_ember_line_mode(str(self.settings.get("v2_ember_line_mode", "split")), notify=False)
+        self.window.set_ember_dual_line_enabled(bool(self.settings.get("v2_ember_dual_line_enabled", False)), notify=False)
+        self.window.set_ember_italic_enabled(bool(self.settings.get("v2_ember_italic_enabled", False)), notify=False)
+        self.window.set_ember_show_cover(bool(self.settings.get("v2_ember_show_cover", True)), notify=False)
+        self.window.set_ember_word_fill_enabled(bool(self.settings.get("v2_ember_word_fill_enabled", True)), notify=False)
+        self.window.set_ember_color_fill_enabled(bool(self.settings.get("v2_ember_color_fill_enabled", False)), notify=False)
+        self.window.set_ember_back_gray_mix(int(self.settings.get("v2_ember_back_gray_mix", 62)), notify=False)
+        self.window.set_ember_color_back_gray_mix(int(self.settings.get("v2_ember_color_back_gray_mix", 0)), notify=False)
+        self.window.set_ember_back_opacity(int(self.settings.get("v2_ember_back_opacity", 58)), notify=False)
+        self.window.set_ember_blur_panel_strength(int(self.settings.get("v2_ember_blur_panel_strength", 18)), notify=False)
+        self.window.set_ember_lyric_offset_seconds(float(self.settings.get("v2_ember_lyric_offset_seconds", 0.0)), notify=False)
         final_ambience_style = str(getattr(self.window, "music_ambience_style", ambience_style) or "sea_level")
         if final_ambience_style != ambience_style:
             final_ambience_values = self._music_ambience_values_for_style(final_ambience_style)

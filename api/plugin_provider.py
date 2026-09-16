@@ -91,9 +91,27 @@ class RealPluginProvider:
         self._weather_lock = threading.Lock()
 
     def plugins(self) -> tuple[PluginData, ...]:
-        return (
-            self._time_plugin(),
-        )
+        enabled = set(self._enabled_plugin_ids())
+        plugins: list[PluginData] = []
+        if "time" in enabled:
+            plugins.append(self._time_plugin())
+        if "weather" in enabled:
+            plugins.append(self._weather_plugin())
+        if "agenda" in enabled:
+            plugins.append(self._schedule_plugin())
+        return tuple(plugins)
+
+    def _enabled_plugin_ids(self) -> tuple[str, ...]:
+        known = ("time", "weather", "agenda")
+        raw = self._setting("v2_enabled_plugins", ["time"])
+        if isinstance(raw, (list, tuple, set)):
+            enabled = {str(item or "").strip().casefold() for item in raw}
+            return tuple(plugin_id for plugin_id in known if plugin_id in enabled)
+        try:
+            legacy_count = max(0, min(len(known), int(self._setting("v2_plugin_count", 1))))
+        except (TypeError, ValueError):
+            legacy_count = 1
+        return known[:legacy_count]
 
     def diagnostics(self) -> dict[str, object]:
         now = self._plugin_now()

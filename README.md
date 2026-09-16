@@ -7,12 +7,12 @@ This README is the canonical product, implementation, release-readiness, and pen
 ## Current Status
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.4`.
+- Current test-build version: `6.402`.
 - Development state: internal alpha / test build, not ready for paid Steam release.
 - Runnable app: `local/main.py`, or `launch.bat`.
 - Main UI surface: the V2 island only.
 - Test baseline command: `python -m unittest discover tests -v`.
-- Release blocker level: the 6.4 Windows test package can be built, but signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
+- Release blocker level: the 6.402 Windows test package can be built, but signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
 
 ## Run
 
@@ -22,7 +22,7 @@ If dependencies are missing, run `setup-env.bat` once, then launch again. Runtim
 
 ## Windows Test Build
 
-GluSpot 6.4 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
+GluSpot 6.402 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
 
 Build from the project root:
 
@@ -33,12 +33,12 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.4\GluSpot.exe
+release\GluSpot-6.402\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It is not an installer, does not include Steamworks ownership validation, and should not be treated as a public release artifact.
 
-Known 6.4 test-build caveats:
+Known 6.402 test-build caveats:
 
 - PyInstaller reports optional missing modules from Unix-only Python paths, NumPy/Pillow optional helpers, and setuptools internals; these are expected in a Windows GUI package unless a runtime feature proves otherwise.
 - PyInstaller also reports missing `UIAutomationClient_VC140_X64.dll` / `UIAutomationClient_VC140_X86.dll` from the `uiautomation` dependency. The build still completes, but WeChat/QQ/DingTalk detail-detection paths should be checked on a real desktop.
@@ -56,12 +56,14 @@ Known 6.4 test-build caveats:
 ## Naming And Assets
 
 - `GluSpot` is the product name, app name, startup task/app ID, runtime lock namespace, and settings namespace.
-- The current app version is `6.4`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
+- The current app version is `6.402`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
 - `assets/brand/` stores the generated GluSpot PNG and ICO brand assets.
 - User-selected global icons are copied into the GluSpot settings data directory under `icons/` and saved as PNG plus ICO.
 - `assets/logos/` stores TIME reminder SVG assets. The old root-level `logos/` folder has been removed.
 - `assets/music_controls/` stores SVG playback control assets.
-- `assets/fonts/SourceHanSerifSC/` stores the embedded Source Han Serif SC font used by the Gelv lyric style.
+- `assets/fonts/AlibabaPuHuiTi/` stores the embedded Alibaba PuHuiTi Bold/Heavy fonts used by the Wave Stream lyric style and settings UI.
+- `assets/fonts/NotoSerifSC/` stores the embedded Noto Serif SC ExtraBold font used by the Gelv lyric style.
+- `assets/fonts/JiangChengXieSong/` stores the embedded JiangCheng XieSong 700W/900W fonts used by the Ember Fade lyric style and settings UI.
 - Old settings directories are retained only as migration aliases so existing user settings can be copied into the GluSpot settings directory on first launch.
 
 ## Startup
@@ -90,7 +92,7 @@ The settings window is organized into:
 
 - Basic settings: theme mode, startup mode, placement, Tasker/MyDockFinder controls, empty-island behavior, font and animation options.
 - Media control: player mode, app profiles, BetterNCM path, lyric style, album island, lyric offsets, and ambience controls.
-- Plugin settings: TIME controls, weather settings, fullscreen plugin alert style, and reserved agenda controls.
+- Plugin settings: TIME controls, weather settings, fullscreen plugin alert style, and agenda JSON/ICS controls.
 - Notification settings: barrage and message notification controls.
 - About: diagnostics and local project location.
 
@@ -101,11 +103,13 @@ Settings UI style lives mainly in `local/settings_window.py` and `local/mac_styl
 - `Free`: normal floating island.
 - `Finder`: used only when MyDockFinder is detected or explicitly available. Finder material may frame the island, but the island shell stays its own opaque V2 rendering path.
 - `Tasker`: Windows taskbar fusion. The island follows the taskbar, including taskbar auto-hide. Fullscreen detection must not make Tasker disappear.
+- `Stick`: internal auto-hide-taskbar placement. When Windows taskbar auto-hide is enabled, dragging the island to the bottom edge pins the free-style island just above the taskbar instead of entering Tasker.
 
 MyDockFinder and Tasker are mutually exclusive:
 
 - MyDockFinder running: allowed modes are `Free` and `Finder`.
-- MyDockFinder not running: allowed modes are `Free` and `Tasker`.
+- MyDockFinder not running: allowed modes are `Free` and `Tasker`; `Stick` can be reached only from the auto-hide-taskbar bottom-edge drag gesture.
+- MyDockFinder detection has priority over taskbar auto-hide recognition, because Finder-style shells can hide the Windows taskbar themselves.
 
 ## Tasker Rules
 
@@ -115,6 +119,8 @@ MyDockFinder and Tasker are mutually exclusive:
 - Tasker compact layout can shrink down to album-cover mode when the taskbar is crowded.
 - Tasker material and expanded outer frame should sample the taskbar style, not a generic wallpaper crop.
 - Tasker mode keeps island visibility separate from fullscreen, plugin alerts, and barrage.
+- With taskbar auto-hide disabled, dragging the island to the taskbar enters `Tasker`, and dragging Tasker out returns to `Free`.
+- With taskbar auto-hide enabled, the center prompt enters `Tasker`, while the bottom edge enters `Stick`.
 
 ## Barrage And Fullscreen Alerts
 
@@ -145,17 +151,20 @@ Current implementation:
 ## Visual Styles
 
 - Music island background styles should remain available in Free, Finder, and Tasker.
-- Current ambience styles include `sea_level`, `duotone_full`, `pure_black`, `bilateral_diffraction`, and `pure_white`.
+- Current ambience styles include `sea_level`, `duotone_full`, `yaoguang`, `pure_black`, `bilateral_diffraction`, and `pure_white`.
+- `yaoguang` is a generated blurred layered-rectangle background: the user can use a custom color, extract the saturated album color, or use the album inverse color. The crisp black outer frame stays unblurred and even-width, while blur strength applies only to the inner color layers. Compact mode uses equal-height inner color bands; expanded mode keeps the nested layered-rectangle model. It is treated as a light lyric surface, so text and controls default to black.
 - Pure white and pure black styles must adapt lyric and metadata text colors.
-- `wave_stream` and `gelv_songscatter` stay separate lyric-flow styles.
-- `gelv_songscatter` uses Source Han Serif SC when available, with PingFang SC fallback.
+- `wave_stream`, `gelv_songscatter`, and `ember_fade` stay separate lyric-flow styles.
+- `wave_stream` uses embedded Alibaba PuHuiTi Bold by default, with Heavy selectable from the detailed lyric settings.
+- `gelv_songscatter` uses embedded Noto Serif SC ExtraBold, with embedded Alibaba PuHuiTi fallback.
+- `ember_fade` uses embedded JiangCheng XieSong 700W by default, with 900W selectable for both text layers from the detailed lyric settings, optional extra italic slant, split-line or scrolling lyric modes, dual-line display that forces scrolling mode, an independent album-cover toggle, sparse spacing, blur-fade per-word lyric progression, neutral-background color fill, adjustable rear-layer gray/opacity, colored-background rear-layer gray support for sea-level, full-duotone, and solid-album ambience, a tunable blur panel between text layers, and a positive style-local lyric offset.
 - Album island mode is the no-lyrics/instrumental fallback and supports compact and expanded size settings.
 
 ## Plugins And Notifications
 
 - TIME is the default enabled plugin surface.
-- Weather provider code exists and uses Open-Meteo without an API key by default; it still needs real-world QA before release.
-- Agenda provider code can read local JSON/ICS-like schedule data, but the settings page still marks agenda as reserved / not ready for normal users.
+- Weather can be enabled from plugin settings and uses Open-Meteo without an API key by default; it still needs real-world QA before release.
+- Agenda can be enabled from plugin settings and can read local JSON/ICS-like schedule data; it still needs real-world QA before release.
 - Countdown and alarm due states must keep separate identities.
 - Fullscreen plugin reminders can be shown as island-style card, toast card, or barrage burst.
 - Barrage notifications may be clickable only through masked clickable regions; normal rolling barrage should remain non-intrusive.
@@ -163,7 +172,7 @@ Current implementation:
 
 ## Completeness Assessment
 
-Version 6.4 is suitable for a controlled desktop test pass, not for public release.
+Version 6.402 is suitable for a controlled desktop test pass, not for public release.
 
 | Area | Assessment | Notes |
 | --- | --- | --- |
@@ -172,7 +181,7 @@ Version 6.4 is suitable for a controlled desktop test pass, not for public relea
 | Media and lyric integration | Partially complete | Generic Windows media is the baseline. NetEase, BetterNCM, QQ, Qishui, and Kugou paths are optional profile attachments that still need real-app QA. |
 | Plugins and notifications | Partially complete | TIME is the active default. Weather and agenda code exist, but both still need real-world validation before normal-user enablement. |
 | Settings and startup | Mostly complete for alpha | Settings pages and startup modes exist. Clean-account startup and first-launch migration still need manual verification. |
-| Packaging | Test-build complete | `build-exe.bat` produces `release\GluSpot-6.4\GluSpot.exe`; signing, installer/update behavior, and distribution hardening are pending. |
+| Packaging | Test-build complete | `build-exe.bat` produces `release\GluSpot-6.402\GluSpot.exe`; signing, installer/update behavior, and distribution hardening are pending. |
 | Release operations | Incomplete | Steamworks, SteamPipe, crash/support diagnostics, copyright/data audit, and multi-machine QA remain blockers. |
 
 Overall project completeness: about 75% for an internal alpha/testable Windows desktop app, about 45% for a public paid Windows release, and about 30% for a Steam-ready release pipeline.
@@ -182,7 +191,7 @@ Overall project completeness: about 75% for an internal alpha/testable Windows d
 Current assessment:
 
 - Stability: strong automated behavior coverage, but not enough manual desktop coverage for a public paid release.
-- Completeness: suitable for internal alpha or controlled 6.4 test builds; not Steam-ready yet.
+- Completeness: suitable for internal alpha or controlled 6.402 test builds; not Steam-ready yet.
 - Performance: animation and adapter controls exist, but cold-start time, memory use, CPU use, FPS stability, and long-running behavior still need measured reports.
 
 Steam release requirements still pending:
@@ -199,14 +208,14 @@ Steam release requirements still pending:
 
 - Moved generated brand icons into `assets/brand/`.
 - Moved TIME reminder SVGs into `assets/logos/`.
-- Added GluSpot 6.4 version constants, Windows executable version metadata, and PyInstaller test-build packaging.
+- Added GluSpot 6.402 version constants, Windows executable version metadata, and PyInstaller test-build packaging.
 - Added user-selectable startup modes: none, registry, and scheduled task.
 - Split barrage overlay from plugin alert overlay so preview, fullscreen alerts, and Tasker island visibility no longer block each other.
 - Fixed Tasker fullscreen barrage generation when Tasker keeps the island visible.
 - Kept barrage preview usable from settings without forcing island suppression.
 - Added bounded lyric cache pruning support and indexed local lyric filename matching for the `lyrics/` library.
 - Reduced album-island refresh stalls by reusing unchanged queue art and current cover decoding, and by filtering duplicate current-track queue entries.
-- Added a short fast-refresh window for NetEase/QQ progress anchors after user interaction so lyric-click progress reads settle faster.
+- Restored NetEase/QQ lyric follow to the lightweight reader baseline from the preferred reference copy: timed lyrics enable normal player-position polling, while click hit-tests, forced screenshot anchors, and post-click retry bursts stay out of the default refresh path.
 - Added regression tests for separated overlay rules, MyDockFinder listener behavior, no-wheel controls, message detection, provider state, startup modes, and settings structure.
 
 ## Pending Work
@@ -215,7 +224,7 @@ Steam release requirements still pending:
 - Manually verify startup modes on a clean Windows user account.
 - Manually verify barrage preview in the settings panel on a real desktop.
 - Manually verify plugin fullscreen alert styles in fullscreen, maximized, windowed, and Tasker modes.
-- Improve fullscreen barrage acknowledgement UX: decide whether click-to-confirm is enough or whether a dismiss affordance is needed.
+- Manually verify weather and agenda plugin flows with real location data, JSON schedules, and ICS schedules.
 - Continue diagnosing MyDockFinder listener reliability on real installed paths.
 - Finish Tasker outer-frame material sampling and animation smoothness against real Windows 10 and Windows 11 taskbars.
 - Verify NetEase, BetterNCM, QQ, Qishui, and Kugou lyric/progress sync behavior with configured app paths only.
@@ -245,7 +254,7 @@ Steam release requirements still pending:
 - `assets/logos/`: TIME reminder SVG assets.
 - `assets/music_controls/`: playback control SVG assets.
 - `GluSpot.spec`: PyInstaller `onedir` test-build definition.
-- `build-exe.bat`: repeatable Windows test-build command for version 6.4.
+- `build-exe.bat`: repeatable Windows test-build command for version 6.402.
 - `packaging/windows/version_info.txt`: Windows executable version metadata.
 - `tests/`: behavior tests.
 

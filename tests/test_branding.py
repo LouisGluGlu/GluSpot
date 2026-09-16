@@ -4,6 +4,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 class BrandingTests(unittest.TestCase):
@@ -11,7 +13,7 @@ class BrandingTests(unittest.TestCase):
         from local.branding import APP_ICON_PATH, APP_NAME, APP_VERSION, TRAY_ICON_PATH
 
         self.assertEqual(APP_NAME, "GluSpot")
-        self.assertEqual(APP_VERSION, "6.4")
+        self.assertEqual(APP_VERSION, "6.402")
         self.assertEqual(APP_ICON_PATH.name, "gluspot-card-center.ico")
         self.assertEqual(TRAY_ICON_PATH.name, "gluspot.ico")
         self.assertTrue(APP_ICON_PATH.exists())
@@ -112,6 +114,25 @@ class BrandingTests(unittest.TestCase):
         self.assertIn("QSystemTrayIcon(QIcon(str(icon_paths.tray_icon))", source)
         self.assertIn("setApplicationName(APP_NAME)", source)
         self.assertIn("setToolTip(APP_NAME)", source)
+
+    def test_windows_process_identity_uses_gluspot_app_id(self):
+        import local.app as app_module
+
+        calls: list[tuple[str, str]] = []
+        fake_windll = SimpleNamespace(
+            shell32=SimpleNamespace(
+                SetCurrentProcessExplicitAppUserModelID=lambda value: calls.append(("app_id", value)) or 0,
+            ),
+            kernel32=SimpleNamespace(
+                SetConsoleTitleW=lambda value: calls.append(("console", value)) or 1,
+            ),
+        )
+
+        with patch.object(app_module.sys, "platform", "win32"), patch.object(app_module.ctypes, "windll", fake_windll, create=True):
+            self.assertTrue(app_module._set_windows_process_identity())
+
+        self.assertIn(("app_id", "GluSpot"), calls)
+        self.assertIn(("console", "GluSpot"), calls)
 
 
 if __name__ == "__main__":

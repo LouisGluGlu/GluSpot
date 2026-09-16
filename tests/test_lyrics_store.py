@@ -11,6 +11,26 @@ from api.models import TimedLyricLine
 
 
 class LyricsStoreTests(unittest.TestCase):
+    def test_ember_dual_line_setting_enables_dual_line_lyric_enrichment_for_ember_style(self):
+        store = LocalLyricsStore.__new__(LocalLyricsStore)
+        store.settings_getter = lambda key, default=None: {
+            "v2_enable_dual_line_lyrics": False,
+            "v2_lyric_flow_style": "ember_fade",
+            "v2_ember_dual_line_enabled": True,
+        }.get(key, default)
+
+        self.assertTrue(store._dual_line_lyrics_enabled())
+
+    def test_ember_dual_line_setting_does_not_enable_other_lyric_styles(self):
+        store = LocalLyricsStore.__new__(LocalLyricsStore)
+        store.settings_getter = lambda key, default=None: {
+            "v2_enable_dual_line_lyrics": False,
+            "v2_lyric_flow_style": "wave_stream",
+            "v2_ember_dual_line_enabled": True,
+        }.get(key, default)
+
+        self.assertFalse(store._dual_line_lyrics_enabled())
+
     def test_cache_key_ignores_duration_jitter(self):
         with tempfile.TemporaryDirectory() as root:
             store = LocalLyricsStore(Path(root))
@@ -130,6 +150,36 @@ class LyricsStoreTests(unittest.TestCase):
             )
 
         self.assertEqual(lyric_text, "")
+
+    def test_netease_dual_line_can_prefer_transliteration(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+
+            lyric_text = store._extract_netease_lyric_text(
+                {
+                    "lrc": {"lyric": "[00:01.00]\u3055\u304f\u3089"},
+                    "tlyric": {"lyric": "[00:01.00]\u6a31\u82b1"},
+                    "romalrc": {"lyric": "[00:01.00]sakura"},
+                },
+                secondary_source="transliteration",
+            )
+            match = store._lyrics_match_from_text(lyric_text, "netease")
+
+        self.assertIsInstance(lyric_text, tuple)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.timed_lyrics[0].text, "\u3055\u304f\u3089\nsakura")
+
+    def test_lyrics_match_can_convert_traditional_chinese_to_simplified(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(
+                Path(root),
+                settings_getter=lambda key, default=None: "simplified" if key == "v2_lyric_chinese_conversion" else default,
+            )
+
+            match = store._lyrics_match_from_text("[00:01.00]\u5f8c\u4f86\u98a8\u88e1\u6709\u59b3", "local")
+
+        self.assertIsNotNone(match)
+        self.assertEqual(match.timed_lyrics[0].text, "\u540e\u6765\u98ce\u91cc\u6709\u4f60")
 
     def test_lyrics_match_rejects_timestamp_only_content(self):
         with tempfile.TemporaryDirectory() as root:

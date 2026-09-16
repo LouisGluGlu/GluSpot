@@ -10,6 +10,7 @@ import threading
 import time
 from ctypes import wintypes
 from dataclasses import replace
+from pathlib import Path
 from typing import Literal
 from urllib.request import Request, urlopen
 
@@ -35,9 +36,15 @@ PROJECTED_POSITION_SOURCES = {
     "netease-uia-progress",
     "netease-uia-lyrics",
     "qq-uia-progress",
+    "qq-uia-lyrics",
 }
 STABILIZED_LOCAL_POSITION_SOURCES = {"local-estimate", "local-background", "local-seek", "interactive-hold"}
 STABILIZED_PLAYER_POSITION_SOURCES = {"netease-uia-progress", "qq-uia-progress"}
+PLAYER_POSITION_ADAPTERS = {"netease", "netease_betterncm", "qq"}
+LYRICS_FOUND_PROGRESS_RETRY_DELAY_SECONDS = 5.0
+LYRICS_FOUND_PROGRESS_RETRY_WINDOW_SECONDS = 7.2
+PLAYER_ANCHOR_FAST_REFRESH_MAX_SECONDS = 5.5
+AUDIO_ANALYZER_RETRY_DELAY_SECONDS = 12.0
 
 MediaManager = None
 PlaybackStatus = None
@@ -143,7 +150,10 @@ class WindowsMediaProvider:
         if fallback is None:
             fallback = EmptyIslandDataProvider()
         self.fallback = fallback
-        self.lyrics_store = LocalLyricsStore()
+        try:
+            self.lyrics_store = LocalLyricsStore(settings_getter=settings_getter)
+        except OSError:
+            self.lyrics_store = LocalLyricsStore(root=Path(__file__).resolve().parents[1] / "lyrics", settings_getter=settings_getter)
         self._loop = None
         self._thread = None
         self._manager = None
@@ -163,23 +173,6 @@ class WindowsMediaProvider:
         self._source_app_foreground = False
         self._source_app_interactive = False
         self._source_app_foreground_at = 0.0
-        self._source_app_left_down = False
-        self._source_app_left_down_at = 0.0
-        self._source_app_left_down_pos: tuple[int, int] | None = None
-        self._source_app_left_down_started_in_foreground = False
-        self._source_app_recent_click_at = 0.0
-        self._source_app_recent_click_pos: tuple[int, int] | None = None
-        self._source_app_recent_pointer_at = 0.0
-        self._global_left_down = False
-        self._global_left_down_at = 0.0
-        self._global_left_down_pos: tuple[int, int] | None = None
-        self._global_recent_click_at = 0.0
-        self._global_recent_click_pos: tuple[int, int] | None = None
-        self._global_recent_pointer_at = 0.0
-        self._global_recent_pointer_pos: tuple[int, int] | None = None
-        self._global_pointer_lock = threading.Lock()
-        self._global_pointer_stop = threading.Event()
-        self._global_pointer_thread = None
         self._raw_source_app_user_model_id = ""
         self._music_player_adapter = "system"
         self._last_confirmed_music_player_adapter = "system"
@@ -187,6 +180,9 @@ class WindowsMediaProvider:
         self._last_confirmed_music_player_source_key = ""
         self._recent_skip_command_at = 0.0
         self._player_anchor_fast_refresh_until = 0.0
+        self._lyrics_found_progress_retry_track_id = ""
+        self._lyrics_found_progress_retry_not_before = 0.0
+        self._lyrics_found_progress_retry_until = 0.0
         self._last_raw_timeline_track_id = ""
         self._last_raw_timeline_position: float | None = None
         self._last_raw_timeline_at = 0.0
@@ -198,6 +194,8 @@ class WindowsMediaProvider:
         self._media_session_error = ""
         self._selected_media_session_index = -1
         self.audio_analyzer: LiveAudioAnalyzer | None = None
+        self._audio_analyzer_retry_not_before = 0.0
+        self._audio_analyzer_last_error = ""
         self.netease_position: NeteasePositionReader | None = None
         self.qq_position: QQPositionReader | None = None
         self.plugin_provider = RealPluginProvider(settings_getter)
@@ -208,10 +206,10 @@ class WindowsMediaProvider:
         now = time.monotonic()
         if self._loop is None:
             return self.fallback.get_visual_data()
-        self._record_global_pointer_state(now)
         self._consume_refresh_future(now)
         refresh_interval = self._current_refresh_interval(now)
-        if self._last_data is not None and now - self._last_refresh_at < refresh_interval:
+        force_anchor_refresh = self._lyrics_found_progress_retry_cached_refresh_due(now)
+        if self._last_data is not None and not force_anchor_refresh and now - self._last_refresh_at < refresh_interval:
             projected = self._project_visual_position(self._last_data, now, self._last_ready_at)
             return replace(projected, messages=self.message_detector.messages(), plugins=self.plugin_provider.plugins())
         self._last_refresh_at = now
@@ -223,26 +221,56 @@ class WindowsMediaProvider:
         return self._cached_or_status_visual(now)
 
     def _current_refresh_interval(self, now: float) -> float:
-        if self._music_player_adapter in {"netease", "netease_betterncm", "qq"}:
+        interval = float(getattr(self, "_refresh_interval", 0.55) or 0.55)
+        if self._supports_player_position_adapter(self._music_player_adapter):
             fast_until = float(getattr(self, "_player_anchor_fast_refresh_until", 0.0) or 0.0)
             if fast_until > 0.0 and now <= fast_until:
-                return 0.12
-        if self._music_player_adapter in {"netease", "netease_betterncm", "qq"} and (
+                interval = min(interval, 0.12)
+        if self._supports_player_position_adapter(self._music_player_adapter) and (
             self._source_app_interactive or (self._source_app_foreground_at and now - self._source_app_foreground_at <= 3.5)
         ):
-            return 0.14
-        return self._refresh_interval
+            interval = min(interval, 0.14)
+        lyrics_found_retry_interval = self._lyrics_found_progress_retry_refresh_interval(now)
+        if lyrics_found_retry_interval is not None:
+            interval = min(interval, lyrics_found_retry_interval)
+        return max(0.05, interval)
 
     def _mark_player_anchor_fast_refresh(self, now: float | None = None, duration: float = 1.35):
         anchor_at = time.monotonic() if now is None else float(now)
         try:
-            span = max(0.25, min(3.0, float(duration)))
+            span = max(0.25, min(PLAYER_ANCHOR_FAST_REFRESH_MAX_SECONDS, float(duration)))
         except (TypeError, ValueError):
             span = 1.35
         self._player_anchor_fast_refresh_until = max(
             float(getattr(self, "_player_anchor_fast_refresh_until", 0.0) or 0.0),
             anchor_at + span,
         )
+
+    def _schedule_lyrics_found_progress_retry(self, track_id: str, now: float):
+        if not track_id:
+            return
+        anchor_at = float(now)
+        self._lyrics_found_progress_retry_track_id = str(track_id)
+        self._lyrics_found_progress_retry_not_before = anchor_at + LYRICS_FOUND_PROGRESS_RETRY_DELAY_SECONDS
+        self._lyrics_found_progress_retry_until = anchor_at + LYRICS_FOUND_PROGRESS_RETRY_WINDOW_SECONDS
+
+    def _lyrics_found_progress_retry_due(self, track_id: str, now: float) -> bool:
+        if not track_id or str(getattr(self, "_lyrics_found_progress_retry_track_id", "") or "") != str(track_id):
+            return False
+        not_before = float(getattr(self, "_lyrics_found_progress_retry_not_before", 0.0) or 0.0)
+        retry_until = float(getattr(self, "_lyrics_found_progress_retry_until", 0.0) or 0.0)
+        current = float(now)
+        if retry_until <= 0.0 or current > retry_until:
+            self._clear_lyrics_found_progress_retry(track_id)
+            return False
+        return current >= not_before
+
+    def _clear_lyrics_found_progress_retry(self, track_id: str = ""):
+        if track_id and str(getattr(self, "_lyrics_found_progress_retry_track_id", "") or "") not in {"", str(track_id)}:
+            return
+        self._lyrics_found_progress_retry_track_id = ""
+        self._lyrics_found_progress_retry_not_before = 0.0
+        self._lyrics_found_progress_retry_until = 0.0
 
     def _consume_refresh_future(self, now: float):
         future = self._refresh_future
@@ -378,32 +406,140 @@ class WindowsMediaProvider:
         if audio_analyzer is None:
             return None
         track = self._last_data.track if self._last_data is not None else None
-        live_audio = audio_analyzer.has_recent_real_frame()
+        try:
+            live_audio = audio_analyzer.has_recent_real_frame()
+        except Exception as exc:
+            self._release_audio_analyzer(f"audio-frame-check-failed: {self._brief_error(exc)}", cooldown=True)
+            return None
         if not live_audio:
             return None
-        return audio_analyzer.get_frame(
-            is_playing=True if track is None else track.is_playing,
-            position_seconds=0.0 if track is None else track.position_seconds,
-        )
+        try:
+            return audio_analyzer.get_frame(
+                is_playing=True if track is None else track.is_playing,
+                position_seconds=0.0 if track is None else track.position_seconds,
+            )
+        except Exception as exc:
+            self._release_audio_analyzer(f"audio-frame-read-failed: {self._brief_error(exc)}", cooldown=True)
+            return None
 
     def has_live_audio(self) -> bool:
         audio_analyzer = self._ensure_audio_analyzer_if_requested()
-        return False if audio_analyzer is None else audio_analyzer.has_recent_real_frame()
+        if audio_analyzer is None:
+            return False
+        try:
+            return audio_analyzer.has_recent_real_frame()
+        except Exception as exc:
+            self._release_audio_analyzer(f"audio-live-check-failed: {self._brief_error(exc)}", cooldown=True)
+            return False
 
     def _live_audio_requested(self) -> bool:
         settings_getter = getattr(self, "settings_getter", None)
         if not callable(settings_getter):
             return False
-        return bool(settings_getter("v2_music_auto_detect", False) or settings_getter("v2_enable_live_audio_analysis", False))
+        # Auto-hiding the music island must remain a metadata-only feature.
+        # Opening a WASAPI loopback stream here can reconfigure Bluetooth
+        # endpoints (notably AirPods) and audibly degrade playback quality.
+        # Loopback capture is reserved for features that explicitly request
+        # live audio analysis.
+        return bool(
+            settings_getter("v2_enable_live_audio_analysis", False)
+            or settings_getter("v2_music_reactive_background_enabled", False)
+        )
 
     def _ensure_audio_analyzer_if_requested(self) -> LiveAudioAnalyzer | None:
         if not self._live_audio_requested():
+            self._release_audio_analyzer("disabled", cooldown=False)
+            return None
+        now = time.monotonic()
+        retry_not_before = float(getattr(self, "_audio_analyzer_retry_not_before", 0.0) or 0.0)
+        if retry_not_before > now:
             return None
         analyzer = getattr(self, "audio_analyzer", None)
+        if analyzer is not None and self._audio_analyzer_unavailable(analyzer):
+            self._release_audio_analyzer(self._audio_analyzer_error(analyzer) or "audio analyzer unavailable", cooldown=True, now=now)
+            return None
         if analyzer is None:
-            analyzer = LiveAudioAnalyzer()
+            try:
+                analyzer = LiveAudioAnalyzer()
+            except Exception as exc:
+                self.audio_analyzer = None
+                self._audio_analyzer_last_error = self._brief_error(exc)
+                self._audio_analyzer_retry_not_before = now + AUDIO_ANALYZER_RETRY_DELAY_SECONDS
+                return None
             self.audio_analyzer = analyzer
+            self._audio_analyzer_last_error = ""
         return analyzer
+
+    def _audio_analyzer_unavailable(self, analyzer: object) -> bool:
+        diagnostics = self._safe_audio_analyzer_diagnostics(analyzer)
+        status = str(diagnostics.get("status", "") or "").strip().casefold()
+        running = bool(diagnostics.get("running", True))
+        has_recent_frame = bool(diagnostics.get("has_recent_frame", False))
+        return status in {"unavailable", "failed", "stopped"} and not running and not has_recent_frame
+
+    def _audio_analyzer_error(self, analyzer: object) -> str:
+        diagnostics = self._safe_audio_analyzer_diagnostics(analyzer)
+        last_error = str(diagnostics.get("last_error", "") or "").strip()
+        status = str(diagnostics.get("status", "") or "").strip()
+        return last_error or status
+
+    def _safe_audio_analyzer_diagnostics(self, analyzer: object) -> dict[str, object]:
+        diagnostics_fn = getattr(analyzer, "diagnostics", None)
+        if not callable(diagnostics_fn):
+            return {}
+        try:
+            diagnostics = diagnostics_fn()
+        except Exception as exc:
+            return {"status": "error", "running": False, "has_recent_frame": False, "last_error": self._brief_error(exc)}
+        return diagnostics if isinstance(diagnostics, dict) else {}
+
+    def _release_audio_analyzer(self, reason: str = "", cooldown: bool = False, now: float | None = None):
+        analyzer = getattr(self, "audio_analyzer", None)
+        if analyzer is not None:
+            stop = getattr(analyzer, "stop", None)
+            if callable(stop):
+                try:
+                    stop()
+                except Exception as exc:
+                    reason = f"{reason}; stop-failed: {self._brief_error(exc)}" if reason else f"stop-failed: {self._brief_error(exc)}"
+        self.audio_analyzer = None
+        if reason and reason != "disabled":
+            self._audio_analyzer_last_error = str(reason)
+        elif reason == "disabled":
+            self._audio_analyzer_last_error = ""
+        if cooldown:
+            current = time.monotonic() if now is None else float(now)
+            self._audio_analyzer_retry_not_before = current + AUDIO_ANALYZER_RETRY_DELAY_SECONDS
+        else:
+            self._audio_analyzer_retry_not_before = 0.0
+
+    def _audio_diagnostics(self) -> dict[str, object]:
+        analyzer = getattr(self, "audio_analyzer", None)
+        if analyzer is not None:
+            diagnostics = self._safe_audio_analyzer_diagnostics(analyzer)
+            if diagnostics:
+                return diagnostics
+        now = time.monotonic()
+        retry_not_before = float(getattr(self, "_audio_analyzer_retry_not_before", 0.0) or 0.0)
+        last_error = str(getattr(self, "_audio_analyzer_last_error", "") or "")
+        if self._live_audio_requested():
+            if retry_not_before > now:
+                return {
+                    "status": "cooldown",
+                    "running": False,
+                    "has_recent_frame": False,
+                    "last_real_frame_age": None,
+                    "last_error": last_error,
+                    "retry_in_seconds": round(retry_not_before - now, 3),
+                }
+            return {
+                "status": "not started",
+                "running": False,
+                "has_recent_frame": False,
+                "last_real_frame_age": None,
+                "last_error": last_error,
+            }
+        return {"status": "not enabled", "running": False, "has_recent_frame": False, "last_real_frame_age": None, "last_error": ""}
 
     def _cold_attachment_diagnostics(self, service: str) -> dict[str, object]:
         return {
@@ -454,7 +590,7 @@ class WindowsMediaProvider:
             "raw_timeline_age": None if self._last_raw_timeline_at <= 0.0 else round(time.monotonic() - self._last_raw_timeline_at, 3),
             "lyrics_source": "" if track is None else track.lyrics_source,
             "timed_lyrics_count": 0 if track is None else len(track.timed_lyrics),
-            "audio": self.audio_analyzer.diagnostics() if self.audio_analyzer is not None else {"status": "not enabled", "running": False, "has_recent_frame": False, "last_error": ""},
+            "audio": self._audio_diagnostics(),
             "netease_position": self.netease_position.diagnostics() if self.netease_position is not None else self._cold_attachment_diagnostics("netease"),
             "qq_position": self.qq_position.diagnostics() if self.qq_position is not None else self._cold_attachment_diagnostics("qq"),
             "plugins": self.plugin_provider.diagnostics(),
@@ -705,17 +841,6 @@ class WindowsMediaProvider:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _start_global_pointer_sampler(self):
-        if sys.platform != "win32":
-            return
-        thread = threading.Thread(target=self._run_global_pointer_sampler, name="GlobalPointerSampler", daemon=True)
-        self._global_pointer_thread = thread
-        thread.start()
-
-    def _run_global_pointer_sampler(self):
-        while not self._global_pointer_stop.wait(0.025):
-            self._sample_global_pointer_once(time.monotonic())
-
     def _run(self, coro):
         if self._loop is None:
             return None
@@ -881,13 +1006,13 @@ class WindowsMediaProvider:
         source_app_foreground = self._is_source_app_foreground(source_app, raw_source_app)
         player_adapter = self._music_player_adapter_for(source_app, raw_source_app)
         player_position_reader = self._player_position_reader_for(player_adapter)
-        self._record_source_app_pointer_state(source_app_foreground, read_at)
         if source_app_foreground:
             self._source_app_foreground_at = read_at
         source_app_interactive = source_app_foreground or (
             self._source_app_foreground_at > 0.0 and read_at - self._source_app_foreground_at <= 3.5
         )
-        adapter_interactive = player_adapter in {"netease", "qq"} and source_app_interactive
+        adapter_interactive = self._supports_player_position_adapter(player_adapter) and source_app_interactive
+        raw_timeline_interactive = adapter_interactive and source_app_foreground
         foreground_metadata = self._foreground_track_metadata(player_adapter, source_app_foreground)
         player_window_track = None
         if foreground_metadata is not None:
@@ -927,6 +1052,14 @@ class WindowsMediaProvider:
         if previous_track is not None and self._same_track_metadata(previous_track, title, artist):
             track_key = previous_track.track_id
         same_track_as_previous = previous_track is not None and previous_track.track_id == track_key
+        if previous_track is not None and not same_track_as_previous:
+            self._clear_lyrics_found_progress_retry()
+            synced = getattr(self, "_lyrics_loaded_sync_track_ids", None)
+            if isinstance(synced, set):
+                synced.discard(track_key)
+            legacy_synced = getattr(self, "_netease_lyric_sync_track_ids", None)
+            if isinstance(legacy_synced, set):
+                legacy_synced.discard(track_key)
         previous_position = max(0.0, float(previous_track.position_seconds)) if previous_track is not None else 0.0
         previous_duration = max(0.0, float(previous_track.duration_seconds)) if previous_track is not None else 0.0
         preserve_previous_lyrics = bool(same_track_as_previous and previous_track is not None and previous_track.timed_lyrics)
@@ -1000,17 +1133,18 @@ class WindowsMediaProvider:
                 self._local_seek_position_seconds = None
                 self._local_seek_at = 0.0
                 self._local_seek_track_id = ""
-            if position_source != "local-seek" and adapter_interactive:
+            if position_source != "local-seek" and raw_timeline_interactive:
                 interactive_position = self._interactive_position_from_raw(
                     raw_timeline_position,
                     previous_position,
                     previous_raw_timeline_position,
+                    protect_stale_foreground_backstep=source_app_foreground,
                 )
                 if interactive_position is not None:
                     position_seconds, position_source, interactive_confidence = interactive_position
                     position_confidence = max(position_confidence, interactive_confidence)
-            elif player_adapter in {"netease", "qq"} and position_source != "local-seek" and self._should_distrust_background_position(
-                adapter_interactive,
+            elif self._supports_player_position_adapter(player_adapter) and position_source != "local-seek" and self._should_distrust_background_position(
+                raw_timeline_interactive,
                 is_playing,
                 raw_timeline_position,
                 previous_position,
@@ -1022,7 +1156,7 @@ class WindowsMediaProvider:
                 position_seconds = estimated_position
                 position_source = "local-background"
                 position_confidence = max(position_confidence, 0.46)
-            if player_adapter in {"netease", "qq"} and position_seconds <= 0.0 and (is_playing or previous_position > 0.0 or previous_track.position_source == "local-estimate"):
+            if self._supports_player_position_adapter(player_adapter) and position_seconds <= 0.0 and (is_playing or previous_position > 0.0 or previous_track.position_source == "local-estimate"):
                 elapsed = max(0.0, time.monotonic() - float(self._last_ready_at or time.monotonic()))
                 estimated_position = previous_position + (elapsed if is_playing else 0.0)
                 if duration_seconds > 0.0:
@@ -1034,137 +1168,15 @@ class WindowsMediaProvider:
             self._local_seek_position_seconds = None
             self._local_seek_at = 0.0
             self._local_seek_track_id = ""
-        recent_source_pointer = self._source_app_recent_pointer_activity(read_at)
-        recent_global_pointer = self._global_recent_pointer_activity(read_at)
-        recent_click_pos = self._source_app_recent_click_position(read_at)
-        if recent_click_pos is None and source_app_foreground:
-            recent_click_pos = self._global_recent_click_position(read_at)
-        recent_pointer_pos = self._source_app_recent_pointer_position(read_at)
-        if recent_pointer_pos is None and source_app_foreground:
-            recent_pointer_pos = self._global_recent_pointer_position(read_at)
-        if recent_pointer_pos is None:
-            recent_pointer_pos = recent_click_pos
-        recent_lyric_click = self._source_app_recent_click(read_at) or (
-            source_app_foreground and self._global_recent_click(read_at)
-        )
-        recent_skip_command = 0.0 <= read_at - float(getattr(self, "_recent_skip_command_at", 0.0) or 0.0) <= 2.8
-        lyric_click_as_progress_anchor = (
-            self._is_netease_adapter(player_adapter)
-            and source_app_interactive
-            and recent_lyric_click
-            and bool(timed_lyrics)
-        )
-        allow_lyric_click_anchor = False
-        lyric_click_pos = recent_click_pos if allow_lyric_click_anchor else None
-        lyric_click_local_sample = None
-        lyric_click_local_applied = False
-        lyric_click_geometry_reader = getattr(player_position_reader, "position_from_lyric_click_point", None)
-        if allow_lyric_click_anchor and callable(lyric_click_geometry_reader):
-            try:
-                lyric_click_local_sample = lyric_click_geometry_reader(lyric_click_pos, timed_lyrics, duration_seconds)
-            except Exception:
-                lyric_click_local_sample = None
-        if lyric_click_local_sample is not None and (same_track_as_previous or previous_track is None):
-            lyric_click_pos = None
-            allow_lyric_click_anchor = False
-            position_seconds = max(0.0, float(lyric_click_local_sample.position_seconds))
-            if duration_seconds > 0.0:
-                position_seconds = min(duration_seconds, position_seconds)
-            position_source = "local-seek"
-            position_confidence = max(position_confidence, float(getattr(lyric_click_local_sample, "confidence", 0.0) or 0.0), 0.68)
-            self._remember_local_seek_for_track(track_key, position_seconds, duration_seconds)
-            await self._seek_session_position(session, position_seconds)
-            self._consume_recent_click_anchor(recent_click_pos)
-            local_seek_active = True
-            local_seek_estimate = position_seconds
-            lyric_click_local_applied = True
-        progress_point_position = None
-        progress_point_reader = getattr(player_position_reader, "position_from_progress_point", None)
-        if (
-            callable(progress_point_reader)
-            and player_adapter in {"netease", "qq"}
-            and source_app_foreground
-            and recent_pointer_pos is not None
-            and duration_seconds > 0.0
-            and (recent_source_pointer or recent_global_pointer or recent_lyric_click)
-        ):
-            try:
-                progress_point_position = progress_point_reader(recent_pointer_pos, duration_seconds)
-            except Exception:
-                progress_point_position = None
-        if progress_point_position is not None:
-            allow_lyric_click_anchor = False
-            lyric_click_pos = None
-            if same_track_as_previous or previous_track is None:
-                self._mark_player_anchor_fast_refresh(read_at)
-                position_seconds = max(0.0, float(progress_point_position))
-                if duration_seconds > 0.0:
-                    position_seconds = min(duration_seconds, position_seconds)
-                position_source = "local-seek"
-                position_confidence = max(position_confidence, 0.68)
-                self._remember_local_seek_for_track(track_key, position_seconds, duration_seconds)
-                local_seek_active = True
-                local_seek_estimate = position_seconds
-        force_player_anchor_read = (
-            player_adapter in {"netease", "qq"}
-            and (source_app_foreground or lyric_click_as_progress_anchor)
-            and (recent_source_pointer or recent_global_pointer or lyric_click_as_progress_anchor)
-            and not lyric_click_local_applied
-        )
-        track_change_anchor_read = (
-            player_adapter in {"netease", "qq"}
-            and (source_app_foreground or recent_skip_command)
-            and previous_track is not None
-            and not same_track_as_previous
-        )
-        lyrics_loaded_anchor_read = (
-            player_position_reader is not None
-            and player_adapter in {"netease", "netease_betterncm", "qq"}
-            and self._should_sync_after_lyrics_loaded(track_key, previous_track, timed_lyrics)
-            and not lyric_click_local_applied
-        )
-        should_read_player_anchor = player_position_reader is not None and bool(title)
+        should_read_player_anchor = player_position_reader is not None and bool(timed_lyrics)
         if should_read_player_anchor:
-            read_immediate = getattr(player_position_reader, "read_immediate", None)
-            use_immediate_reader = callable(read_immediate) and (
-                previous_track is None
-                or track_change_anchor_read
-                or force_player_anchor_read
-                or lyrics_loaded_anchor_read
-                or recent_skip_command
+            player_sample = player_position_reader.read(
+                title,
+                artist,
+                timed_lyrics,
+                duration_seconds,
+                interactive=source_app_interactive,
             )
-            force_progress_image = bool(
-                previous_track is None
-                or track_change_anchor_read
-                or force_player_anchor_read
-                or lyrics_loaded_anchor_read
-                or lyric_click_as_progress_anchor
-                or recent_skip_command
-            )
-            if use_immediate_reader:
-                if force_player_anchor_read or track_change_anchor_read or lyrics_loaded_anchor_read or recent_skip_command:
-                    self._mark_player_anchor_fast_refresh(read_at, duration=2.6 if lyric_click_as_progress_anchor else 1.35)
-                player_sample = read_immediate(
-                    title,
-                    artist,
-                    timed_lyrics,
-                    duration_seconds,
-                    interactive=source_app_interactive,
-                    allow_lyric_anchor=allow_lyric_click_anchor,
-                    click_pos=lyric_click_pos,
-                    force_progress_image=force_progress_image,
-                )
-            else:
-                player_sample = player_position_reader.read(
-                    title,
-                    artist,
-                    timed_lyrics,
-                    duration_seconds,
-                    interactive=source_app_interactive,
-                    allow_lyric_anchor=allow_lyric_click_anchor,
-                    click_pos=lyric_click_pos,
-                    force_progress_image=force_progress_image,
-                )
             if player_sample is not None:
                 if duration_seconds <= 0.0 and player_sample.duration_seconds > 0.0:
                     duration_seconds = player_sample.duration_seconds
@@ -1176,51 +1188,23 @@ class WindowsMediaProvider:
                     projected_player_position = float(player_sample.position_seconds)
                     if is_playing:
                         projected_player_position += max(0.0, player_sample_age)
-                    if player_sample_source == f"{source_prefix}-uia-progress":
-                        projected_player_position += self._player_seek_correction_seconds(
-                            player_adapter,
-                            source_app_interactive,
-                            is_playing,
-                            raw_timeline_position,
-                            previous_raw_timeline_position,
-                            previous_position,
-                        )
+                    projected_player_position += self._player_seek_correction_seconds(
+                        player_adapter,
+                        source_app_interactive,
+                        is_playing,
+                        raw_timeline_position,
+                        previous_raw_timeline_position,
+                        previous_position,
+                    )
                     if duration_seconds > 0.0:
                         projected_player_position = min(duration_seconds, projected_player_position)
-                    if (
-                        local_seek_active
-                        and player_sample_source == f"{source_prefix}-uia-progress"
-                        and abs(projected_player_position - local_seek_estimate) > 2.5
+                    player_disagrees = abs(projected_player_position - float(position_seconds)) >= 1.25
+                    if self._should_use_player_sample(source_prefix, player_sample_source, player_sample_age, is_playing) and (
+                        position_seconds <= 0.0 or (fresh_player_anchor and player_disagrees)
                     ):
-                        player_sample_follows_recent_seek = False
-                    else:
-                        player_sample_follows_recent_seek = True
-                    if player_sample_follows_recent_seek and self._should_apply_player_sample(
-                        source_prefix,
-                        player_sample_source,
-                        player_sample_age,
-                        is_playing,
-                        source_app_interactive,
-                        position_seconds,
-                        projected_player_position,
-                        fresh_player_anchor,
-                        user_initiated=force_player_anchor_read or track_change_anchor_read or lyrics_loaded_anchor_read,
-                    ):
-                        if player_sample_source == f"{source_prefix}-uia-progress":
-                            self._mark_player_anchor_fast_refresh(read_at)
                         position_seconds = projected_player_position
                         position_source = player_sample.source
                         position_confidence = player_sample.confidence
-                        if (
-                            player_sample_source == f"{source_prefix}-uia-lyrics"
-                            and allow_lyric_click_anchor
-                            and source_app_foreground
-                        ):
-                            self._remember_local_seek_for_track(track_key, projected_player_position, duration_seconds)
-                            await self._seek_session_position(session, projected_player_position)
-                            self._consume_recent_click_anchor(lyric_click_pos)
-        if recent_skip_command and not same_track_as_previous:
-            self._recent_skip_command_at = 0.0
         if not title and not artist:
             self._provider_status = "no_session"
             return None
@@ -1359,6 +1343,8 @@ class WindowsMediaProvider:
         title, artist = metadata
         if self._same_track_metadata(track, title, artist):
             return data
+        if track.timed_lyrics or track.lyrics:
+            return data
         track_key = self._track_key(track.source_app, title, artist, "", 0.0)
         reader = self._player_position_reader_for(player_adapter)
         reset = getattr(reader, "reset", None)
@@ -1407,16 +1393,43 @@ class WindowsMediaProvider:
         raw_timeline_position: float,
         previous_position: float,
         previous_raw_timeline_position: float | None,
+        protect_stale_foreground_backstep: bool = False,
     ) -> tuple[float, str, float] | None:
         raw_position = max(0.0, float(raw_timeline_position))
         previous_position = max(0.0, float(previous_position))
         if raw_position > 0.0:
+            if protect_stale_foreground_backstep and self._looks_like_stale_foreground_raw_position(
+                raw_position,
+                previous_position,
+                previous_raw_timeline_position,
+            ):
+                return previous_position, "interactive-hold", 0.64
             return raw_position, "interactive", 0.86
         if self._looks_like_seek_to_start(raw_position, previous_position, previous_raw_timeline_position):
             return 0.0, "interactive", 0.82
         if previous_position > 0.0:
             return previous_position, "interactive-hold", 0.64
         return None
+
+    def _looks_like_stale_foreground_raw_position(
+        self,
+        raw_position: float,
+        previous_position: float,
+        previous_raw_timeline_position: float | None,
+    ) -> bool:
+        raw_position = max(0.0, float(raw_position))
+        previous_position = max(0.0, float(previous_position))
+        if previous_position <= 0.5 or raw_position + 1.25 >= previous_position:
+            return False
+        if previous_raw_timeline_position is None:
+            return True
+        previous_raw = max(0.0, float(previous_raw_timeline_position))
+        if previous_raw <= 0.0:
+            return True
+        backward_seek_threshold = max(2.5, min(12.0, previous_position * 0.04))
+        if previous_raw - raw_position >= backward_seek_threshold:
+            return False
+        return True
 
     def _looks_like_seek_to_start(
         self,
@@ -1671,16 +1684,50 @@ class WindowsMediaProvider:
         settings_getter = getattr(self, "settings_getter", None)
         if not callable(settings_getter):
             return False
-        return bool(settings_getter("v2_enable_dual_line_lyrics", False))
+        if bool(settings_getter("v2_enable_dual_line_lyrics", False)):
+            return True
+        style = str(settings_getter("v2_lyric_flow_style", "") or "").strip().casefold()
+        return style == "ember_fade" and bool(settings_getter("v2_ember_dual_line_enabled", False))
 
     def _is_netease_adapter(self, player_adapter: str) -> bool:
         return str(player_adapter or "").strip().casefold() in {"netease", "netease_betterncm"}
 
-    def _should_sync_after_lyrics_loaded(self, track_key: str, previous_track: TrackData | None, timed_lyrics) -> bool:
-        if not track_key or not timed_lyrics or previous_track is None:
+    def _supports_player_position_adapter(self, player_adapter: str) -> bool:
+        return str(player_adapter or "").strip().casefold() in PLAYER_POSITION_ADAPTERS
+
+    def _lyrics_found_progress_retry_cached_refresh_due(self, now: float) -> bool:
+        track_id = str(getattr(self, "_lyrics_found_progress_retry_track_id", "") or "").strip()
+        if not track_id:
             return False
-        if previous_track.track_id != track_key or previous_track.timed_lyrics:
+        not_before = float(getattr(self, "_lyrics_found_progress_retry_not_before", 0.0) or 0.0)
+        retry_until = float(getattr(self, "_lyrics_found_progress_retry_until", 0.0) or 0.0)
+        current = float(now)
+        return retry_until > 0.0 and not_before > 0.0 and not_before <= current <= retry_until
+
+    def _lyrics_found_progress_retry_refresh_interval(self, now: float) -> float | None:
+        track_id = str(getattr(self, "_lyrics_found_progress_retry_track_id", "") or "").strip()
+        if not track_id:
+            return None
+        not_before = float(getattr(self, "_lyrics_found_progress_retry_not_before", 0.0) or 0.0)
+        retry_until = float(getattr(self, "_lyrics_found_progress_retry_until", 0.0) or 0.0)
+        current = float(now)
+        if retry_until <= 0.0 or current > retry_until:
+            self._clear_lyrics_found_progress_retry(track_id)
+            return None
+        if current >= not_before:
+            return 0.05
+        try:
+            refresh_anchor = float(getattr(self, "_last_refresh_at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            refresh_anchor = current
+        return max(0.05, not_before - refresh_anchor)
+
+    def _should_sync_after_lyrics_loaded(self, track_key: str, previous_track: TrackData | None, timed_lyrics, now: float | None = None) -> bool:
+        if not track_key or not timed_lyrics:
             return False
+        current = time.monotonic() if now is None else float(now)
+        if self._lyrics_found_progress_retry_due(track_key, current):
+            return True
         synced = getattr(self, "_lyrics_loaded_sync_track_ids", None)
         if not isinstance(synced, set):
             synced = getattr(self, "_netease_lyric_sync_track_ids", None)
@@ -1690,8 +1737,12 @@ class WindowsMediaProvider:
         self._netease_lyric_sync_track_ids = synced
         if track_key in synced:
             return False
+        if previous_track is not None and previous_track.track_id == track_key and previous_track.timed_lyrics:
+            synced.add(track_key)
+            return False
         synced.add(track_key)
-        return True
+        self._schedule_lyrics_found_progress_retry(track_key, current)
+        return False
 
     def _should_sync_netease_after_lyrics_loaded(self, track_key: str, previous_track: TrackData | None, timed_lyrics) -> bool:
         return self._should_sync_after_lyrics_loaded(track_key, previous_track, timed_lyrics)
@@ -1772,54 +1823,9 @@ class WindowsMediaProvider:
         source_prefix = str(source_prefix or "").strip().casefold()
         if sample_source == f"{source_prefix}-uia-progress":
             return 0.0 <= float(sample_age) <= 1.5
-        return False
-
-    def _should_use_click_seek_sample(self, source_prefix: str, sample_source: str, sample_age: float, is_playing: bool) -> bool:
-        source_prefix = str(source_prefix or "").strip().casefold()
         if sample_source == f"{source_prefix}-uia-lyrics":
-            return bool(is_playing) and 0.0 <= float(sample_age) <= 0.9
+            return bool(is_playing) and 0.0 <= float(sample_age) <= 0.75
         return False
-
-    def _should_apply_player_sample(
-        self,
-        source_prefix: str,
-        sample_source: str,
-        sample_age: float,
-        is_playing: bool,
-        source_app_interactive: bool,
-        current_position: float,
-        projected_sample_position: float,
-        fresh_player_anchor: bool,
-        user_initiated: bool = False,
-    ) -> bool:
-        current_position = max(0.0, float(current_position))
-        projected_sample_position = max(0.0, float(projected_sample_position))
-        sample_source = str(sample_source or "").strip().casefold()
-        source_prefix = str(source_prefix or "").strip().casefold()
-        if sample_source == f"{source_prefix}-uia-lyrics":
-            if not self._should_use_click_seek_sample(source_prefix, sample_source, sample_age, is_playing):
-                return False
-            if not source_app_interactive or not fresh_player_anchor:
-                return False
-            if current_position <= 0.0:
-                return True
-            return abs(projected_sample_position - current_position) >= 0.30
-        if not self._should_use_player_sample(source_prefix, sample_source, sample_age, is_playing):
-            return False
-        if current_position <= 0.0:
-            return True
-        if sample_source == f"{source_prefix}-uia-progress" and source_app_interactive:
-            if not user_initiated and projected_sample_position < current_position - 0.85:
-                return False
-            return abs(projected_sample_position - current_position) >= 0.30
-        if user_initiated and sample_source == f"{source_prefix}-uia-progress" and fresh_player_anchor:
-            return True
-        if not fresh_player_anchor:
-            return False
-        return abs(projected_sample_position - current_position) >= 1.25
-
-    def _should_use_netease_sample(self, sample_source: str, sample_age: float, is_playing: bool) -> bool:
-        return self._should_use_player_sample("netease", sample_source, sample_age, is_playing)
 
     def _player_seek_correction_seconds(
         self,
@@ -1840,192 +1846,6 @@ class WindowsMediaProvider:
         if raw_delta < max(0.85, float(previous_position) * 0.08):
             return 0.0
         return 1.5
-
-    def _record_source_app_pointer_state(self, source_app_foreground: bool, now: float):
-        try:
-            user32 = ctypes.windll.user32
-            state = int(user32.GetAsyncKeyState(0x01))
-            down = bool(state & 0x8000)
-            pressed_since_last = bool(state & 0x0001)
-            point = wintypes.POINT()
-            if not user32.GetCursorPos(ctypes.byref(point)):
-                point = None
-        except Exception:
-            return
-        pos = None if point is None else (int(point.x), int(point.y))
-        was_down = bool(getattr(self, "_source_app_left_down", False))
-        if pressed_since_last and source_app_foreground:
-            self._source_app_recent_pointer_at = now
-            self._source_app_recent_pointer_pos = pos
-            if not down:
-                self._source_app_recent_click_at = now
-                self._source_app_recent_click_pos = pos
-        if down and not was_down:
-            if source_app_foreground:
-                self._source_app_recent_pointer_at = now
-                self._source_app_recent_pointer_pos = pos
-                self._source_app_recent_click_at = 0.0
-                self._source_app_recent_click_pos = None
-            self._source_app_left_down_at = now
-            self._source_app_left_down_pos = pos
-            self._source_app_left_down_started_in_foreground = bool(source_app_foreground)
-        elif not down and was_down:
-            start = getattr(self, "_source_app_left_down_pos", None)
-            duration = max(0.0, now - float(getattr(self, "_source_app_left_down_at", now)))
-            distance = 0.0
-            if start is not None and pos is not None:
-                distance = math.hypot(float(pos[0] - start[0]), float(pos[1] - start[1]))
-            if (
-                bool(getattr(self, "_source_app_left_down_started_in_foreground", False))
-                and source_app_foreground
-            ):
-                self._source_app_recent_pointer_at = now
-                self._source_app_recent_pointer_pos = pos or start
-                if duration <= 0.65 and distance <= 18.0:
-                    self._source_app_recent_click_at = now
-                    self._source_app_recent_click_pos = pos or start
-                else:
-                    self._source_app_recent_click_at = 0.0
-                    self._source_app_recent_click_pos = None
-            self._source_app_left_down_pos = None
-            self._source_app_left_down_started_in_foreground = False
-        self._source_app_left_down = down
-
-    def _record_global_pointer_state(self, now: float):
-        self._sample_global_pointer_once(now)
-
-    def _sample_global_pointer_once(self, now: float):
-        try:
-            user32 = ctypes.windll.user32
-            state = int(user32.GetAsyncKeyState(0x01))
-            down = bool(state & 0x8000)
-            pressed_since_last = bool(state & 0x0001)
-            point = wintypes.POINT()
-            if not user32.GetCursorPos(ctypes.byref(point)):
-                point = None
-        except Exception:
-            return
-        pos = None if point is None else (int(point.x), int(point.y))
-        lock = getattr(self, "_global_pointer_lock", None)
-        if lock is None:
-            lock = threading.Lock()
-            self._global_pointer_lock = lock
-        with lock:
-            was_down = bool(getattr(self, "_global_left_down", False))
-            if pressed_since_last:
-                self._global_recent_pointer_at = now
-                self._global_recent_pointer_pos = pos
-                if not down:
-                    self._global_recent_click_at = now
-                    self._global_recent_click_pos = pos
-            if down and not was_down:
-                self._global_recent_pointer_at = now
-                self._global_recent_pointer_pos = pos
-                self._global_recent_click_at = 0.0
-                self._global_recent_click_pos = None
-                self._global_left_down_at = now
-                self._global_left_down_pos = pos
-            elif not down and was_down:
-                start = getattr(self, "_global_left_down_pos", None)
-                duration = max(0.0, now - float(getattr(self, "_global_left_down_at", now)))
-                distance = 0.0
-                if start is not None and pos is not None:
-                    distance = math.hypot(float(pos[0] - start[0]), float(pos[1] - start[1]))
-                self._global_recent_pointer_at = now
-                self._global_recent_pointer_pos = pos or start
-                if duration <= 0.65 and distance <= 18.0:
-                    self._global_recent_click_at = now
-                    self._global_recent_click_pos = pos or start
-                else:
-                    self._global_recent_click_at = 0.0
-                    self._global_recent_click_pos = None
-                self._global_left_down_pos = None
-            self._global_left_down = down
-
-    def _source_app_recent_click(self, now: float) -> bool:
-        click_at = float(getattr(self, "_source_app_recent_click_at", 0.0) or 0.0)
-        return click_at > 0.0 and 0.0 <= now - click_at <= 1.8
-
-    def _source_app_recent_click_position(self, now: float) -> tuple[int, int] | None:
-        if not self._source_app_recent_click(now):
-            return None
-        pos = getattr(self, "_source_app_recent_click_pos", None)
-        if not isinstance(pos, tuple) or len(pos) != 2:
-            return None
-        try:
-            return int(pos[0]), int(pos[1])
-        except Exception:
-            return None
-
-    def _source_app_recent_pointer_position(self, now: float) -> tuple[int, int] | None:
-        if not self._source_app_recent_pointer_activity(now):
-            return None
-        pos = getattr(self, "_source_app_recent_pointer_pos", None)
-        if not isinstance(pos, tuple) or len(pos) != 2:
-            return None
-        try:
-            return int(pos[0]), int(pos[1])
-        except Exception:
-            return None
-
-    def _global_recent_click(self, now: float) -> bool:
-        lock = getattr(self, "_global_pointer_lock", None)
-        if lock is None:
-            click_at = float(getattr(self, "_global_recent_click_at", 0.0) or 0.0)
-        else:
-            with lock:
-                click_at = float(getattr(self, "_global_recent_click_at", 0.0) or 0.0)
-        return click_at > 0.0 and 0.0 <= now - click_at <= 1.8
-
-    def _global_recent_click_position(self, now: float) -> tuple[int, int] | None:
-        if not self._global_recent_click(now):
-            return None
-        lock = getattr(self, "_global_pointer_lock", None)
-        if lock is None:
-            pos = getattr(self, "_global_recent_click_pos", None)
-        else:
-            with lock:
-                pos = getattr(self, "_global_recent_click_pos", None)
-        if not isinstance(pos, tuple) or len(pos) != 2:
-            return None
-        try:
-            return int(pos[0]), int(pos[1])
-        except Exception:
-            return None
-
-    def _global_recent_pointer_position(self, now: float) -> tuple[int, int] | None:
-        if not self._global_recent_pointer_activity(now):
-            return None
-        lock = getattr(self, "_global_pointer_lock", None)
-        if lock is None:
-            pos = getattr(self, "_global_recent_pointer_pos", None)
-        else:
-            with lock:
-                pos = getattr(self, "_global_recent_pointer_pos", None)
-        if not isinstance(pos, tuple) or len(pos) != 2:
-            return None
-        try:
-            return int(pos[0]), int(pos[1])
-        except Exception:
-            return None
-
-    def _source_app_recent_pointer_activity(self, now: float) -> bool:
-        pointer_at = float(getattr(self, "_source_app_recent_pointer_at", 0.0) or 0.0)
-        click_at = float(getattr(self, "_source_app_recent_click_at", 0.0) or 0.0)
-        activity_at = max(pointer_at, click_at)
-        return activity_at > 0.0 and 0.0 <= now - activity_at <= 1.8
-
-    def _global_recent_pointer_activity(self, now: float) -> bool:
-        lock = getattr(self, "_global_pointer_lock", None)
-        if lock is None:
-            pointer_at = float(getattr(self, "_global_recent_pointer_at", 0.0) or 0.0)
-            click_at = float(getattr(self, "_global_recent_click_at", 0.0) or 0.0)
-        else:
-            with lock:
-                pointer_at = float(getattr(self, "_global_recent_pointer_at", 0.0) or 0.0)
-                click_at = float(getattr(self, "_global_recent_click_at", 0.0) or 0.0)
-        activity_at = max(pointer_at, click_at)
-        return activity_at > 0.0 and 0.0 <= now - activity_at <= 1.8
 
     def _detect_music_player_service(self, source_app: str, raw_source_app: str = "") -> str:
         for service in ("netease", "qishui", "qq", "kugou"):
@@ -2119,20 +1939,6 @@ class WindowsMediaProvider:
         if service == "netease_betterncm" and not bool(profile.get("betterncm_enabled", False)):
             return False
         return bool(self._effective_music_app_profile_path(service, profile))
-
-    def _consume_recent_click_anchor(self, click_pos: tuple[int, int] | None):
-        if click_pos is None:
-            return
-        self._source_app_recent_click_at = 0.0
-        self._source_app_recent_click_pos = None
-        lock = getattr(self, "_global_pointer_lock", None)
-        if lock is None:
-            self._global_recent_click_at = 0.0
-            self._global_recent_click_pos = None
-        else:
-            with lock:
-                self._global_recent_click_at = 0.0
-                self._global_recent_click_pos = None
 
     def _is_playing(self, playback) -> bool:
         try:

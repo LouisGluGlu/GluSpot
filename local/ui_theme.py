@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from datetime import datetime, time as clock_time
 from typing import Callable
 
@@ -110,11 +111,80 @@ def app_dark_mode(settings_getter: Callable[[str, object], object] | None = None
         return False
 
 
-def music_ambience_style_for_theme(dark: bool, current_style: str, follow_enabled: bool) -> str:
+LIGHT_MUSIC_AMBIENCE_STYLES = {"pure_white", "yaoguang"}
+
+
+@dataclass(frozen=True)
+class MusicBackgroundFollowPlan:
+    style_changed: bool
+    target_style: str
+    previous_style_to_save: str | None = None
+    notify_settings: bool = False
+
+
+def music_ambience_theme_category(style: str) -> str:
+    return "light" if str(style or "").strip().lower() in LIGHT_MUSIC_AMBIENCE_STYLES else "dark"
+
+
+def music_ambience_style_for_theme(
+    dark: bool,
+    current_style: str,
+    follow_enabled: bool,
+    previous_dark_style: str | None = None,
+) -> str:
     style = str(current_style or "sea_level")
-    if not follow_enabled or style not in {"pure_black", "pure_white"}:
+    if not follow_enabled:
         return style
-    return "pure_black" if bool(dark) else "pure_white"
+    if bool(dark):
+        if music_ambience_theme_category(style) == "light":
+            previous = str(previous_dark_style or "").strip().lower()
+            return previous if previous and music_ambience_theme_category(previous) == "dark" else "pure_black"
+        return style
+    return "pure_white" if music_ambience_theme_category(style) == "dark" else style
+
+
+def music_background_light_sync_plan(
+    *,
+    light: bool,
+    enabled: bool,
+    current_style: str,
+    previous_dark_style: str | None = None,
+    allowed_styles: object = None,
+) -> MusicBackgroundFollowPlan:
+    current = str(current_style or "sea_level").strip().lower()
+    if allowed_styles is not None:
+        allowed = {str(style or "").strip().lower() for style in allowed_styles}
+        if current not in allowed:
+            current = "sea_level"
+    previous = str(previous_dark_style or "").strip().lower()
+    if not bool(enabled):
+        return MusicBackgroundFollowPlan(style_changed=False, target_style=current)
+
+    target = music_ambience_style_for_theme(
+        not bool(light),
+        current,
+        follow_enabled=True,
+        previous_dark_style=previous,
+    )
+    if target == current:
+        previous_style_to_save = "" if not bool(light) and previous else None
+        return MusicBackgroundFollowPlan(
+            style_changed=False,
+            target_style=target,
+            previous_style_to_save=previous_style_to_save,
+        )
+
+    previous_style_to_save = None
+    if bool(light) and music_ambience_theme_category(current) == "dark":
+        previous_style_to_save = current
+    if not bool(light):
+        previous_style_to_save = ""
+    return MusicBackgroundFollowPlan(
+        style_changed=True,
+        target_style=target,
+        previous_style_to_save=previous_style_to_save,
+        notify_settings=True,
+    )
 
 
 def theme_change_event_types() -> tuple[QEvent.Type, ...]:

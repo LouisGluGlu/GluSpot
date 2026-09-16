@@ -38,6 +38,14 @@ class LiveAudioAnalyzer:
             "last_error": self._last_error,
         }
 
+    def stop(self):
+        self._running = False
+        if self._status != "unavailable":
+            self._status = "stopped"
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
+
     def _start_capture(self):
         self._running = True
         self._status = "starting"

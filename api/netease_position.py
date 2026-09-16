@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from api.lyric_timeline import active_index_for_position
 from api.models import TimedLyricLine
 
 
@@ -81,9 +80,6 @@ class NeteasePositionReader:
         timed_lyrics: Sequence[TimedLyricLine],
         duration_seconds: float,
         interactive: bool = False,
-        allow_lyric_anchor: bool = False,
-        click_pos: tuple[int, int] | None = None,
-        force_progress_image: bool = False,
     ) -> NeteasePositionSample | None:
         now = time.monotonic()
         track_key = f"{self._normalize_text(title)}\0{self._normalize_text(artist)}"
@@ -98,7 +94,7 @@ class NeteasePositionReader:
             sample = self._last_sample
             min_interval = 0.25 if interactive else self._min_read_interval
             due = now - self._last_read_at >= min_interval
-            should_refresh = due and not self._refreshing and bool(title)
+            should_refresh = due and not self._refreshing and bool(timed_lyrics) and bool(title)
             if should_refresh:
                 self._last_read_at = now
                 self._refreshing = True
@@ -113,58 +109,13 @@ class NeteasePositionReader:
                         tuple(timed_lyrics),
                         float(duration_seconds),
                         bool(interactive),
-                        bool(allow_lyric_anchor),
-                        click_pos,
                         refresh_token,
-                        bool(force_progress_image),
                     ),
                     name=f"{self._service_name.title()}PositionReader",
                     daemon=True,
                 )
                 thread.start()
             return sample
-
-    def read_immediate(
-        self,
-        title: str,
-        artist: str,
-        timed_lyrics: Sequence[TimedLyricLine],
-        duration_seconds: float,
-        interactive: bool = False,
-        allow_lyric_anchor: bool = False,
-        click_pos: tuple[int, int] | None = None,
-        force_progress_image: bool = False,
-    ) -> NeteasePositionSample | None:
-        track_key = f"{self._normalize_text(title)}\0{self._normalize_text(artist)}"
-        now = time.monotonic()
-        with self._lock:
-            if track_key != self._last_track_key:
-                self._last_track_key = track_key
-                self._last_sample = None
-                self._last_read_at = 0.0
-                self._refreshing = False
-                self._refresh_token = 0
-            force_sync = bool(interactive or allow_lyric_anchor or force_progress_image)
-            if self._refreshing and not force_sync:
-                return self._last_sample
-            self._last_read_at = now
-            self._refreshing = True
-            self._refresh_token += 1
-            refresh_token = self._refresh_token
-        self._refresh_sample(
-            track_key,
-            title,
-            artist,
-            tuple(timed_lyrics),
-            float(duration_seconds),
-            bool(interactive),
-            bool(allow_lyric_anchor),
-            click_pos,
-            refresh_token,
-            bool(force_progress_image),
-        )
-        with self._lock:
-            return self._last_sample
 
     def diagnostics(self) -> dict[str, object]:
         with self._lock:
@@ -258,26 +209,6 @@ class NeteasePositionReader:
             return max(0.0, min(duration, duration * max(0.0, min(1.0, fraction))))
         return None
 
-    def position_from_lyric_click_point(
-        self,
-        point: tuple[int, int],
-        timed_lyrics: Sequence[TimedLyricLine],
-        duration_seconds: float,
-    ) -> NeteasePositionSample | None:
-        try:
-            from pywinauto import Desktop
-        except Exception as exc:
-            self._pywinauto_available = False
-            self._last_error = f"pywinauto unavailable: {exc}"
-            return None
-        self._pywinauto_available = True
-        try:
-            windows = self._netease_windows(Desktop(backend="uia"), "", require_title=False)
-        except Exception as exc:
-            self._last_error = f"uia lyric click geometry read failed: {exc}"
-            return None
-        return self._position_from_click_geometry(windows, timed_lyrics, duration_seconds, point)
-
     def adjacent_track(self, title: str, artist: str, direction: str) -> QueueTrack | None:
         step = -1 if str(direction or "").strip().casefold() == "previous" else 1
         for path in self._queue_paths():
@@ -320,23 +251,16 @@ class NeteasePositionReader:
         timed_lyrics: tuple[TimedLyricLine, ...],
         duration_seconds: float,
         interactive: bool = False,
-        allow_lyric_anchor: bool = False,
-        click_pos: tuple[int, int] | None = None,
         refresh_token: int | None = None,
-        force_progress_image: bool = False,
     ):
         try:
             duration = duration_seconds
             if duration <= 0.0:
                 duration = self._duration_from_local_queue(title, artist)
 
-            sample = None
-            if interactive and allow_lyric_anchor:
-                sample = self._position_from_visible_lyrics(title, artist, timed_lyrics, duration, click_pos=click_pos)
+            sample = self._position_from_visible_progress(title, duration)
             if sample is None:
-                sample = self._position_from_visible_progress(title, duration)
-            if sample is None and force_progress_image:
-                sample = self._position_from_visible_progress_image(title, duration)
+                sample = self._position_from_visible_lyrics(title, artist, timed_lyrics, duration)
             with self._lock:
                 if track_key != self._last_track_key:
                     return
@@ -374,25 +298,16 @@ class NeteasePositionReader:
         try:
             windows = self._netease_windows(Desktop(backend="uia"), title, require_title=False)
             texts = self._visible_texts(windows)
-            time_controls = self._visible_time_controls(windows)
         except Exception as exc:
             self._last_error = f"uia progress read failed: {exc}"
             return None
         position, duration = self._progress_from_texts(texts, duration_seconds)
-        source_detail = "combined-text"
-        if position is None:
-            position, duration = self._progress_from_time_controls(time_controls, duration_seconds)
-            source_detail = "bottom-time-pair"
-        if position is None:
-            position, duration = self._progress_from_loose_time_controls(time_controls, duration_seconds)
-            source_detail = "loose-bottom-time-pair"
         self._last_progress_probe = {
             "windows": len(windows),
             "texts": len(texts),
-            "time_controls": len(time_controls),
             "duration_hint": round(float(duration_seconds), 3),
             "matched": position is not None,
-            "mode": "" if position is None else source_detail,
+            "mode": "" if position is None else "text",
         }
         if position is None:
             return None
@@ -404,446 +319,12 @@ class NeteasePositionReader:
             sampled_at=time.monotonic(),
         )
 
-    def _position_from_visible_progress_image(self, title: str, duration_seconds: float) -> NeteasePositionSample | None:
-        if duration_seconds <= 0.0:
-            return None
-        try:
-            from pywinauto import Desktop
-        except Exception as exc:
-            self._pywinauto_available = False
-            self._last_error = f"pywinauto unavailable: {exc}"
-            return None
-        self._pywinauto_available = True
-        try:
-            windows = self._netease_windows(Desktop(backend="uia"), title, require_title=False)
-        except Exception as exc:
-            self._last_error = f"uia image window read failed: {exc}"
-            return None
-        for window in windows[:2]:
-            try:
-                image = window.capture_as_image()
-            except Exception:
-                continue
-            sample = self._position_from_progress_image(image, duration_seconds)
-            if sample is not None:
-                return sample
-        return None
-
-    def _position_from_progress_image(self, image, duration_seconds: float) -> NeteasePositionSample | None:
-        duration = max(0.0, float(duration_seconds))
-        if duration <= 0.0:
-            return None
-        fraction = self._progress_fraction_from_image(image)
-        if fraction is None:
-            return None
-        self._last_progress_probe = {
-            "matched": True,
-            "mode": "image-bottom-bar",
-            "duration_hint": round(duration, 3),
-            "fraction": round(float(fraction), 4),
-        }
-        return NeteasePositionSample(
-            position_seconds=max(0.0, min(duration, duration * float(fraction))),
-            duration_seconds=duration,
-            source=f"{self._source_prefix}-uia-progress",
-            confidence=0.74,
-            sampled_at=time.monotonic(),
-        )
-
-    def _progress_fraction_from_image(self, image) -> float | None:
-        try:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
-        except Exception:
-            return None
-        if width < 160 or height < 140:
-            return None
-        try:
-            import numpy as np
-        except Exception:
-            return self._progress_fraction_from_image_slow(rgb)
-        try:
-            rgb_array = np.asarray(rgb, dtype=np.int16)
-        except Exception:
-            return self._progress_fraction_from_image_slow(rgb)
-        if rgb_array.ndim != 3 or rgb_array.shape[0] != height or rgb_array.shape[1] != width or rgb_array.shape[2] < 3:
-            return self._progress_fraction_from_image_slow(rgb)
-        red_fraction = self._netease_red_progress_fraction_from_array(rgb_array)
-        if red_fraction is not None:
-            return red_fraction
-        min_run = max(80, int(width * 0.06))
-        max_start = max(16, int(width * 0.04))
-        best: tuple[float, int, int, int] | None = None
-        y_start = int(height * 0.62)
-        y_end = int(height * 0.94)
-        values = rgb_array[:, :, :3].mean(axis=2)
-        color_range = rgb_array[:, :, :3].max(axis=2) - rgb_array[:, :, :3].min(axis=2)
-        for y in range(y_start, y_end):
-            y_above = max(0, y - 2)
-            y_below = min(height - 1, y + 2)
-            neighbor_value = (values[y_above] + values[y_below]) / 2.0
-            row_mask = (values[y] > 45.0) & ((values[y] - neighbor_value) > 14.0) & (color_range[y] <= 48)
-            if not row_mask.any():
-                continue
-            indices = np.flatnonzero(row_mask)
-            if indices.size == 0:
-                continue
-            split_points = np.where(np.diff(indices) > 1)[0] + 1
-            for segment in np.split(indices, split_points):
-                if segment.size == 0:
-                    continue
-                start = int(segment[0])
-                end = int(segment[-1])
-                run = end - start + 1
-                if run < min_run:
-                    continue
-                if run > width * 0.96:
-                    continue
-                if start > max_start:
-                    continue
-                score = float(run) + (float(y) / float(height)) * 24.0
-                if best is None or score > best[0]:
-                    best = (score, y, start, end)
-        if best is None:
-            return self._netease_red_progress_fraction_from_image_slow(rgb)
-        _score, y, start, end = best
-        thumb_center = self._progress_thumb_center_from_array(rgb_array, values, y, end)
-        if thumb_center is not None:
-            end = thumb_center
-        elif self._looks_like_panel_separator(rgb_array, values, y, start, end):
-            return None
-        return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
-
-    def _netease_red_progress_fraction_from_array(self, rgb_array) -> float | None:
-        try:
-            import numpy as np
-        except Exception:
-            return None
-        height, width = rgb_array.shape[:2]
-        if width < 220 or height < 160:
-            return None
-        red = rgb_array[:, :, 0]
-        green = rgb_array[:, :, 1]
-        blue = rgb_array[:, :, 2]
-        red_mask = (red >= 190) & (green <= 150) & (blue <= 165) & ((red - green) >= 45) & ((red - blue) >= 40)
-        track_mask = (red >= 205) & (green >= 205) & (blue >= 205) & ((rgb_array[:, :, :3].max(axis=2) - rgb_array[:, :, :3].min(axis=2)) <= 34)
-        y_start = int(height * 0.70)
-        y_end = int(height * 0.96)
-        min_red_run = max(80, int(width * 0.055))
-        best: tuple[float, int, int, int] | None = None
-        for y in range(y_start, y_end):
-            mask = red_mask[y]
-            if not mask.any():
-                continue
-            indices = np.flatnonzero(mask)
-            split_points = np.where(np.diff(indices) > 1)[0] + 1
-            for segment in np.split(indices, split_points):
-                if segment.size == 0:
-                    continue
-                start = int(segment[0])
-                end = int(segment[-1])
-                run = end - start + 1
-                if run < min_red_run or run > width * 0.90:
-                    continue
-                if start > max(6, int(width * 0.05)):
-                    continue
-                track_start = min(width - 1, end + 1)
-                track_end = min(width, end + max(60, int(width * 0.16)))
-                if track_end <= track_start:
-                    continue
-                track_ratio = float(track_mask[y, track_start:track_end].mean())
-                preview_red = self._has_red_preview_after_thumb(red_mask[y], end, width)
-                if track_ratio < 0.35 and not preview_red:
-                    continue
-                score = float(run) + track_ratio * 120.0 + (float(y) / float(height)) * 18.0
-                if best is None or score > best[0]:
-                    best = (score, y, start, end)
-        if best is None:
-            return None
-        _score, _y, _start, end = best
-        if self._looks_like_red_panel_separator(rgb_array, _y, _start, end):
-            return None
-        return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
-
-    def _looks_like_red_panel_separator(self, rgb_array, y: int, start: int, end: int) -> bool:
-        try:
-            import numpy as np
-        except Exception:
-            return False
-        height, width = rgb_array.shape[:2]
-        if end - start + 1 < max(160, int(width * 0.18)):
-            return False
-        start = max(0, int(start))
-        end = min(width - 1, int(end))
-        red_thickness = 0
-        for offset in (-2, -1, 0, 1, 2):
-            yy = max(0, min(height - 1, int(y) + offset))
-            row = rgb_array[yy, start : end + 1, :3]
-            if row.size == 0:
-                continue
-            red = row[:, 0]
-            green = row[:, 1]
-            blue = row[:, 2]
-            red_ratio = float(((red >= 190) & (green <= 150) & (blue <= 165) & ((red - green) >= 45) & ((red - blue) >= 40)).mean())
-            if red_ratio >= 0.62:
-                red_thickness += 1
-        if red_thickness >= 2:
-            return False
-        for offset in (1, 2, 3):
-            yy = min(height - 1, int(y) + offset)
-            row = rgb_array[yy, start : end + 1, :3]
-            if row.size == 0:
-                continue
-            values = row.mean(axis=1)
-            color_range = row.max(axis=1) - row.min(axis=1)
-            if float(((values >= 245.0) & (color_range <= 18)).mean()) >= 0.82:
-                return True
-        return False
-
-    def _has_red_preview_after_thumb(self, row_mask, end: int, width: int) -> bool:
-        try:
-            start = min(width, int(end) + 2)
-            stop = min(width, int(end) + max(12, int(width * 0.025)))
-            if stop <= start:
-                return False
-            return bool(row_mask[start:stop].any())
-        except Exception:
-            return False
-
-    def _progress_fraction_from_image_slow(self, image) -> float | None:
-        try:
-            width, height = image.size
-        except Exception:
-            try:
-                width, height = image.convert("RGB").size
-            except Exception:
-                return None
-        rgb = image.convert("RGB")
-        min_run = max(80, int(width * 0.06))
-        max_start = max(16, int(width * 0.04))
-        best: tuple[float, int, int, int] | None = None
-        y_start = int(height * 0.62)
-        y_end = int(height * 0.94)
-        for y in range(y_start, y_end):
-            points: list[int] = []
-            y_above = max(0, y - 2)
-            y_below = min(height - 1, y + 2)
-            for x in range(width):
-                r, g, b = rgb.getpixel((x, y))
-                value = (r + g + b) / 3.0
-                ar, ag, ab = rgb.getpixel((x, y_above))
-                br, bg, bb = rgb.getpixel((x, y_below))
-                neighbor_value = ((ar + ag + ab) / 3.0 + (br + bg + bb) / 3.0) / 2.0
-                if value > 45.0 and value - neighbor_value > 14.0 and max(r, g, b) - min(r, g, b) <= 48:
-                    points.append(x)
-            if not points:
-                continue
-            start = prev = points[0]
-            runs: list[tuple[int, int]] = []
-            for x in points[1:]:
-                if x <= prev + 2:
-                    prev = x
-                    continue
-                if prev - start + 1 >= min_run:
-                    runs.append((start, prev))
-                start = prev = x
-            if prev - start + 1 >= min_run:
-                runs.append((start, prev))
-            for start, end in runs:
-                run = end - start + 1
-                if run > width * 0.96:
-                    continue
-                if start > max_start:
-                    continue
-                score = float(run) + (float(y) / float(height)) * 24.0
-                if best is None or score > best[0]:
-                    best = (score, y, start, end)
-        if best is None:
-            return self._netease_red_progress_fraction_from_image_slow(rgb)
-        _score, _y, _start, end = best
-        return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
-
-    def _netease_red_progress_fraction_from_image_slow(self, image) -> float | None:
-        try:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
-        except Exception:
-            return None
-        if width < 220 or height < 160:
-            return None
-        y_start = int(height * 0.70)
-        y_end = int(height * 0.96)
-        min_red_run = max(80, int(width * 0.055))
-        best: tuple[float, int, int, int] | None = None
-        for y in range(y_start, y_end):
-            points: list[int] = []
-            for x in range(width):
-                r, g, b = rgb.getpixel((x, y))
-                if r >= 190 and g <= 150 and b <= 165 and r - g >= 45 and r - b >= 40:
-                    points.append(x)
-            if not points:
-                continue
-            start = prev = points[0]
-            runs: list[tuple[int, int]] = []
-            for x in points[1:]:
-                if x <= prev + 1:
-                    prev = x
-                    continue
-                if prev - start + 1 >= min_red_run:
-                    runs.append((start, prev))
-                start = prev = x
-            if prev - start + 1 >= min_red_run:
-                runs.append((start, prev))
-            for start, end in runs:
-                run = end - start + 1
-                if run > width * 0.90 or start > max(6, int(width * 0.05)):
-                    continue
-                track_start = min(width - 1, end + 1)
-                track_end = min(width, end + max(60, int(width * 0.16)))
-                if track_end <= track_start:
-                    continue
-                track_hits = 0
-                track_total = 0
-                for tx in range(track_start, track_end):
-                    r, g, b = rgb.getpixel((tx, y))
-                    track_total += 1
-                    if min(r, g, b) >= 205 and max(r, g, b) - min(r, g, b) <= 34:
-                        track_hits += 1
-                track_ratio = track_hits / max(1, track_total)
-                preview_red = self._has_red_preview_after_thumb_slow(rgb, y, end, width)
-                if track_ratio < 0.35 and not preview_red:
-                    continue
-                score = float(run) + track_ratio * 120.0 + (float(y) / float(height)) * 18.0
-                if best is None or score > best[0]:
-                    best = (score, y, start, end)
-        if best is None:
-            return None
-        _score, _y, _start, end = best
-        if self._looks_like_red_panel_separator_slow(rgb, _y, _start, end):
-            return None
-        return max(0.0, min(1.0, float(end) / max(1.0, float(width - 1))))
-
-    def _has_red_preview_after_thumb_slow(self, rgb, y: int, end: int, width: int) -> bool:
-        start = min(width, int(end) + 2)
-        stop = min(width, int(end) + max(12, int(width * 0.025)))
-        for x in range(start, stop):
-            r, g, b = rgb.getpixel((x, y))
-            if r >= 190 and g <= 150 and b <= 165 and r - g >= 45 and r - b >= 40:
-                return True
-        return False
-
-    def _looks_like_red_panel_separator_slow(self, image, y: int, start: int, end: int) -> bool:
-        try:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
-        except Exception:
-            return False
-        if end - start + 1 < max(160, int(width * 0.18)):
-            return False
-        start = max(0, int(start))
-        end = min(width - 1, int(end))
-        total = max(1, end - start + 1)
-        red_thickness = 0
-        for offset in (-2, -1, 0, 1, 2):
-            yy = max(0, min(height - 1, int(y) + offset))
-            hits = 0
-            for x in range(start, end + 1):
-                r, g, b = rgb.getpixel((x, yy))
-                if r >= 190 and g <= 150 and b <= 165 and r - g >= 45 and r - b >= 40:
-                    hits += 1
-            if hits / total >= 0.62:
-                red_thickness += 1
-        if red_thickness >= 2:
-            return False
-        for offset in (1, 2, 3):
-            yy = min(height - 1, int(y) + offset)
-            hits = 0
-            for x in range(start, end + 1):
-                r, g, b = rgb.getpixel((x, yy))
-                if (r + g + b) / 3.0 >= 245.0 and max(r, g, b) - min(r, g, b) <= 18:
-                    hits += 1
-            if hits / total >= 0.82:
-                return True
-        return False
-
-    def _progress_thumb_center_from_array(self, rgb_array, values, y: int, progress_end: int | None = None) -> int | None:
-        try:
-            import numpy as np
-        except Exception:
-            return None
-        height, width = values.shape
-        y_min = max(0, int(y) - 16)
-        y_max = min(height, int(y) + 17)
-        band = rgb_array[y_min:y_max, :, :3]
-        band_values = values[y_min:y_max, :]
-        if band.size == 0:
-            return None
-        bright_mask = (band_values >= 205.0) & ((band.max(axis=2) - band.min(axis=2)) <= 44)
-        if not bright_mask.any():
-            return None
-        coords_y, coords_x = np.nonzero(bright_mask)
-        if coords_x.size == 0:
-            return None
-        candidates: list[tuple[float, int]] = []
-        for x in np.unique(coords_x):
-            column_y = coords_y[coords_x == x]
-            height_run = int(column_y.max() - column_y.min() + 1)
-            if height_run < 8:
-                continue
-            x_min = max(0, int(x) - 12)
-            x_max = min(width, int(x) + 13)
-            area = bright_mask[:, x_min:x_max]
-            area_count = int(area.sum())
-            if area_count < 56:
-                continue
-            center_y = float(column_y.mean()) + y_min
-            vertical_score = 1.0 - min(1.0, abs(center_y - float(y)) / 18.0)
-            score = float(area_count) + vertical_score * 80.0
-            candidates.append((score, int(x)))
-        if not candidates:
-            return None
-        candidates.sort(reverse=True)
-        center_x = candidates[0][1]
-        if progress_end is not None and center_x > int(progress_end) + max(96, int(width * 0.09)):
-            return None
-        return center_x
-
-    def _looks_like_panel_separator(self, rgb_array, values, y: int, start: int, end: int) -> bool:
-        try:
-            import numpy as np
-        except Exception:
-            return False
-        height, width = values.shape
-        if end - start + 1 < max(120, int(width * 0.18)):
-            return False
-        start = max(0, int(start))
-        end = min(width - 1, int(end))
-        y = max(0, min(height - 1, int(y)))
-        row = rgb_array[y, start : end + 1, :3]
-        if row.size == 0:
-            return False
-        row_values = values[y, start : end + 1]
-        if float(row_values.mean()) < 220.0 or float(row_values.std()) > 10.0:
-            return False
-        above_y = max(0, y - 2)
-        below_y = min(height - 1, y + 2)
-        above = rgb_array[above_y, start : end + 1, :3]
-        below = rgb_array[below_y, start : end + 1, :3]
-        above_values = values[above_y, start : end + 1]
-        below_values = values[below_y, start : end + 1]
-        above_color_range = above.max(axis=1) - above.min(axis=1)
-        below_color_range = below.max(axis=1) - below.min(axis=1)
-        above_neutral = ((above_values > 190.0) & (above_color_range <= 60)).mean()
-        below_neutral = ((below_values > 190.0) & (below_color_range <= 60)).mean()
-        return max(float(above_neutral), float(below_neutral)) >= 0.70
-
     def _position_from_visible_lyrics(
         self,
         title: str,
         artist: str,
         timed_lyrics: Sequence[TimedLyricLine],
         duration_seconds: float,
-        click_pos: tuple[int, int] | None = None,
     ) -> NeteasePositionSample | None:
         if not timed_lyrics:
             return None
@@ -855,26 +336,11 @@ class NeteasePositionReader:
             return None
         self._pywinauto_available = True
 
-        if click_pos is not None:
-            try:
-                windows = self._netease_windows(Desktop(backend="uia"), title, require_title=False)
-            except Exception:
-                windows = []
-            sample = self._position_from_click_geometry(windows, timed_lyrics, duration_seconds, click_pos)
-            if sample is not None:
-                return sample
-
         try:
-            rows = self._visible_lyric_rows(Desktop(backend="uia"), title, require_title=click_pos is None)
+            rows = self._visible_lyric_rows(Desktop(backend="uia"), title, require_title=True)
         except Exception as exc:
             self._last_error = f"uia read failed: {exc}"
             return None
-        if not rows:
-            try:
-                windows = self._netease_windows(Desktop(backend="uia"), title, require_title=False)
-            except Exception:
-                windows = []
-            return self._position_from_click_geometry(windows, timed_lyrics, duration_seconds, click_pos)
 
         indexed = self._lyric_index_map(timed_lyrics)
         candidates: list[tuple[float, int, str, float, float]] = []
@@ -888,23 +354,14 @@ class NeteasePositionReader:
             height = float(row.get("max_text_height", 0.0))
             top = float(row.get("top", 0.0))
             rank_bonus = max(0.0, 1.0 - row_index * 0.08)
-            if click_pos is not None:
-                click_score = self._lyric_row_click_score(row, click_pos)
-                if click_score is None:
-                    continue
-                score = click_score + rank_bonus
-            else:
-                score = height * 2.2 + rank_bonus
+            score = height * 2.2 + rank_bonus
             candidates.append((score, lyric_index, text, top, height))
 
         if not candidates:
             return None
         candidates.sort(reverse=True)
         _score, lyric_index, lyric_text, _top, _height = candidates[0]
-        if click_pos is not None:
-            position = max(0.0, float(timed_lyrics[lyric_index].time_seconds))
-        else:
-            position = self._estimated_anchor_position(timed_lyrics, lyric_index)
+        position = self._estimated_anchor_position(timed_lyrics, lyric_index)
         return NeteasePositionSample(
             position_seconds=position,
             duration_seconds=max(0.0, duration_seconds),
@@ -914,59 +371,6 @@ class NeteasePositionReader:
             lyric_text=lyric_text,
             sampled_at=time.monotonic(),
         )
-
-    def _position_from_click_geometry(
-        self,
-        windows: Sequence[object],
-        timed_lyrics: Sequence[TimedLyricLine],
-        duration_seconds: float,
-        click_pos: tuple[int, int] | None,
-    ) -> NeteasePositionSample | None:
-        if click_pos is None or not timed_lyrics:
-            return None
-        previous = self._last_sample
-        if previous is None or float(previous.position_seconds) <= 0.0:
-            return None
-        try:
-            click_x, click_y = int(click_pos[0]), int(click_pos[1])
-        except Exception:
-            return None
-        lyric_pairs = tuple((float(line.time_seconds), str(line.text)) for line in timed_lyrics)
-        current_index = active_index_for_position(lyric_pairs, float(previous.position_seconds))
-        for window in list(windows)[:2]:
-            try:
-                rect = window.rectangle()
-                left = self._rect_value(rect, "left")
-                top = self._rect_value(rect, "top")
-                right = self._rect_value(rect, "right")
-                bottom = self._rect_value(rect, "bottom")
-            except Exception:
-                continue
-            width = right - left
-            height = bottom - top
-            if width <= 240.0 or height <= 240.0:
-                continue
-            if click_x < left or click_x > right or click_y < top or click_y > bottom:
-                continue
-            lyric_top = top + height * 0.15
-            lyric_bottom = bottom - height * 0.18
-            if click_y < lyric_top or click_y > lyric_bottom:
-                continue
-            center_y = top + height * 0.50
-            row_gap = max(64.0, min(118.0, height * 0.115))
-            offset = int(round((click_y - center_y) / row_gap))
-            target_index = max(0, min(len(timed_lyrics) - 1, current_index + offset))
-            position = max(0.0, float(timed_lyrics[target_index].time_seconds))
-            return NeteasePositionSample(
-                position_seconds=position,
-                duration_seconds=max(0.0, duration_seconds),
-                source=f"{self._source_prefix}-uia-lyrics",
-                confidence=0.62,
-                lyric_index=target_index,
-                lyric_text=str(timed_lyrics[target_index].text),
-                sampled_at=time.monotonic(),
-            )
-        return None
 
     def _position_from_visible_lyric_time_anchor(
         self,
@@ -1221,60 +625,6 @@ class NeteasePositionReader:
             )
         return result
 
-    def _lyric_row_click_score(
-        self,
-        row: dict[str, object],
-        click_pos: tuple[int, int],
-    ) -> float | None:
-        try:
-            click_x = float(click_pos[0])
-            click_y = float(click_pos[1])
-            top = float(row.get("top", 0.0) or 0.0)
-            bottom = float(row.get("bottom", 0.0) or 0.0)
-        except Exception:
-            return None
-        if bottom <= top:
-            return None
-        height = max(1.0, bottom - top)
-        container_top = float(row.get("container_top", top) or top)
-        container_bottom = float(row.get("container_bottom", bottom) or bottom)
-        if container_bottom > container_top and not (container_top - 12.0 <= click_y <= container_bottom + 12.0):
-            return None
-
-        left = float(row.get("left", 0.0) or 0.0)
-        right = float(row.get("right", 0.0) or 0.0)
-        container_left = float(row.get("container_left", 0.0) or 0.0)
-        container_right = float(row.get("container_right", 0.0) or 0.0)
-        if right <= left:
-            left = container_left
-            right = container_right
-        horizontal_penalty = 0.0
-        if right > left:
-            x_pad = max(32.0, min(120.0, (right - left) * 0.18))
-            in_text_band = left - x_pad <= click_x <= right + x_pad
-            in_container_band = False
-            if container_right > container_left:
-                container_pad = max(16.0, min(80.0, (container_right - container_left) * 0.08))
-                in_container_band = container_left - container_pad <= click_x <= container_right + container_pad
-            if not in_text_band and not in_container_band:
-                return None
-            if click_x < left:
-                horizontal_penalty = left - click_x
-            elif click_x > right:
-                horizontal_penalty = click_x - right
-                if in_container_band and not in_text_band:
-                    horizontal_penalty *= 0.35
-
-        center_y = (top + bottom) / 2.0
-        vertical_distance = abs(click_y - center_y)
-        y_pad = max(10.0, min(34.0, height * 0.75))
-        if top - y_pad <= click_y <= bottom + y_pad:
-            return 1000.0 - vertical_distance - horizontal_penalty * 0.03
-        nearest_band = max(22.0, min(46.0, height * 1.15))
-        if vertical_distance <= nearest_band:
-            return 800.0 - vertical_distance - horizontal_penalty * 0.03
-        return None
-
     def _netease_windows(self, desktop, title: str, require_title: bool) -> list:
         windows = []
         normalized_title = self._normalize_text(title)
@@ -1296,6 +646,54 @@ class NeteasePositionReader:
             windows.append(window)
         return windows
 
+    def _visible_text_snapshot(self, windows: Sequence[object]) -> list[dict[str, object]]:
+        values: list[dict[str, object]] = []
+        for window_index, window in enumerate(list(windows)[:3]):
+            try:
+                controls = window.descendants(control_type="Text")
+            except Exception:
+                continue
+            try:
+                window_rect = window.rectangle()
+            except Exception:
+                window_rect = None
+            window_left = self._rect_value(window_rect, "left") if window_rect is not None else 0.0
+            window_top = self._rect_value(window_rect, "top") if window_rect is not None else 0.0
+            window_right = self._rect_value(window_rect, "right") if window_rect is not None else 0.0
+            window_bottom = self._rect_value(window_rect, "bottom") if window_rect is not None else 0.0
+            for control in controls[:240]:
+                try:
+                    text = str(control.window_text() or "").strip()
+                except Exception:
+                    continue
+                if not text:
+                    continue
+                item: dict[str, object] = {"text": text, "window_index": window_index}
+                if window_rect is not None:
+                    try:
+                        rect = control.rectangle()
+                        left = self._rect_value(rect, "left")
+                        top = self._rect_value(rect, "top")
+                        right = self._rect_value(rect, "right")
+                        bottom = self._rect_value(rect, "bottom")
+                    except Exception:
+                        left = top = right = bottom = 0.0
+                    if right > left and bottom > top:
+                        item.update(
+                            {
+                                "left": left,
+                                "top": top,
+                                "right": right,
+                                "bottom": bottom,
+                                "window_left": window_left,
+                                "window_top": window_top,
+                                "window_right": window_right,
+                                "window_bottom": window_bottom,
+                            }
+                        )
+                values.append(item)
+        return values
+
     def _visible_texts(self, windows: Sequence[object]) -> list[str]:
         values: list[str] = []
         for window in list(windows)[:3]:
@@ -1313,45 +711,31 @@ class NeteasePositionReader:
         return values
 
     def _visible_time_controls(self, windows: Sequence[object]) -> list[dict[str, float | str | int]]:
+        return self._time_controls_from_text_snapshot(self._visible_text_snapshot(windows))
+
+    def _time_controls_from_text_snapshot(self, snapshot: Sequence[dict[str, object]]) -> list[dict[str, float | str | int]]:
         values: list[dict[str, float | str | int]] = []
-        for window_index, window in enumerate(list(windows)[:3]):
-            try:
-                controls = window.descendants(control_type="Text")
-                window_rect = window.rectangle()
-            except Exception:
+        for item in snapshot:
+            text = str(item.get("text", "") or "").strip()
+            if self._parse_time_text(text) is None:
                 continue
-            window_left = self._rect_value(window_rect, "left")
-            window_top = self._rect_value(window_rect, "top")
-            window_right = self._rect_value(window_rect, "right")
-            window_bottom = self._rect_value(window_rect, "bottom")
-            for control in controls[:240]:
-                try:
-                    text = str(control.window_text() or "").strip()
-                    rect = control.rectangle()
-                except Exception:
-                    continue
-                if self._parse_time_text(text) is None:
-                    continue
-                left = self._rect_value(rect, "left")
-                top = self._rect_value(rect, "top")
-                right = self._rect_value(rect, "right")
-                bottom = self._rect_value(rect, "bottom")
-                if right <= left or bottom <= top:
-                    continue
-                values.append(
-                    {
-                        "text": text,
-                        "left": left,
-                        "top": top,
-                        "right": right,
-                        "bottom": bottom,
-                        "window_left": window_left,
-                        "window_top": window_top,
-                        "window_right": window_right,
-                        "window_bottom": window_bottom,
-                        "window_index": window_index,
-                    }
-                )
+            required = ("left", "top", "right", "bottom", "window_left", "window_top", "window_right", "window_bottom")
+            if any(key not in item for key in required):
+                continue
+            values.append(
+                {
+                    "text": text,
+                    "left": float(item["left"]),
+                    "top": float(item["top"]),
+                    "right": float(item["right"]),
+                    "bottom": float(item["bottom"]),
+                    "window_left": float(item["window_left"]),
+                    "window_top": float(item["window_top"]),
+                    "window_right": float(item["window_right"]),
+                    "window_bottom": float(item["window_bottom"]),
+                    "window_index": int(item.get("window_index", 0) or 0),
+                }
+            )
         return values
 
     def _progress_from_texts(self, texts: Sequence[str], duration_seconds: float) -> tuple[float | None, float | None]:
@@ -1367,7 +751,26 @@ class NeteasePositionReader:
                 continue
             return max(0.0, current), max(0.0, duration)
 
-        return None, None
+        time_values: list[float] = []
+        for text in texts:
+            parsed = self._parse_time_text(str(text or "").strip())
+            if parsed is not None:
+                time_values.append(parsed)
+        if len(time_values) < 2:
+            return None, None
+        duration = max(time_values)
+        if duration_seconds > 0.0:
+            duration = duration_seconds
+        candidates = [value for value in time_values if value <= duration + 2.0]
+        if len(candidates) < 2:
+            return None, None
+        current_candidates = [value for value in candidates if value < duration - 1.0]
+        if not current_candidates:
+            return None, None
+        current = current_candidates[-1]
+        if duration_seconds > 0.0 and duration > 0.0 and current > duration + 2.0:
+            return None, None
+        return max(0.0, current), max(0.0, duration)
 
     def _progress_from_time_controls(
         self,
