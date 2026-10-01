@@ -35,6 +35,10 @@ class _Controller:
         self.calls.append(("select", identity))
         return not self.closed
 
+    def set_volume(self, identity, volume):
+        self.calls.append(("set_volume", identity, volume))
+        return not self.closed
+
     def stop_cast(self):
         self.calls.append(("stop_cast",))
         return not self.closed
@@ -91,7 +95,7 @@ class AudioRouteProviderTests(unittest.TestCase):
         factory.assert_called_once()
         self.assertEqual(controller.calls, [])
 
-    def test_previously_saved_identity_and_latency_are_reused_without_randomness(self):
+    def test_previously_saved_identity_is_reused_but_manual_delay_is_migrated_to_automatic(self):
         provider, saved = self._provider({"v2_airplay_sender_id": "02:aa:BB:01:02:03",
                                            "v2_homepod_lyric_delay_seconds": 2.3})
         with patch("api.providers.secrets.token_bytes") as random, \
@@ -99,8 +103,8 @@ class AudioRouteProviderTests(unittest.TestCase):
             controller = provider.start_audio_outputs()
         random.assert_not_called()
         self.assertEqual(controller.options["source_id"], "02:aa:BB:01:02:03")
-        self.assertEqual(controller.options["latency_seconds"], 2.3)
-        self.assertFalse(controller.options["auto_latency_enabled"])
+        self.assertEqual(controller.options["latency_seconds"], 1.5)
+        self.assertTrue(controller.options["auto_latency_enabled"])
         self.assertEqual(saved["v2_airplay_sender_id"], "02:aa:BB:01:02:03")
 
     def test_invalid_settings_identity_is_replaced_before_helper_can_use_it(self):
@@ -153,35 +157,38 @@ class AudioRouteProviderTests(unittest.TestCase):
         self.assertTrue(provider.select_audio_output(123))
         self.assertTrue(provider.add_homepod("192.0.2.4", 7001))
         self.assertTrue(provider.stop_audio_cast())
+        self.assertTrue(provider.set_audio_output_volume("headphones", 0.72))
         self.assertEqual(controller.calls, [("refresh",), ("select", "123"),
-                                            ("add_homepod", "192.0.2.4", 7001), ("stop_cast",)])
+                                            ("add_homepod", "192.0.2.4", 7001), ("stop_cast",),
+                                            ("set_volume", "headphones", 0.72)])
 
-    def test_latency_is_normalized_and_saved_before_delegating(self):
+    def test_legacy_manual_delay_is_rejected_without_starting_or_saving_a_worker(self):
         provider, saved = self._provider()
-        controller = provider._audio_route_controller = _Controller()
-        for raw, expected in ((2.5, 2.5), (-1, 0), (99, 5), (float("nan"), 1.5), (None, 1.5)):
-            with self.subTest(raw=raw):
-                self.assertTrue(provider.set_audio_output_latency(raw))
-                self.assertEqual(saved["v2_homepod_lyric_delay_seconds"], expected)
-                self.assertFalse(saved["v2_homepod_auto_lyric_delay"])
-                self.assertEqual(controller.calls[-1], ("set_latency", expected))
+        with patch("api.audio_route_controller.AudioRouteController") as factory:
+            for raw in (2.5, -1, 99, float("nan"), None):
+                self.assertFalse(provider.set_audio_output_latency(raw))
+            self.assertFalse(provider.set_audio_output_auto_latency(False))
+        factory.assert_not_called()
+        self.assertEqual(saved, {})
 
-    def test_auto_latency_preference_is_saved_and_reused(self):
-        provider, saved = self._provider({"v2_homepod_lyric_delay_seconds": 2.3})
+    def test_legacy_automatic_false_is_ignored_and_automatic_true_is_idempotent(self):
+        provider, saved = self._provider({"v2_homepod_lyric_delay_seconds": 2.3,
+                                         "v2_homepod_auto_lyric_delay": False})
         with patch("api.audio_route_controller.AudioRouteController", side_effect=_Controller):
             controller = provider.start_audio_outputs()
-        self.assertFalse(controller.options["auto_latency_enabled"])
+        self.assertTrue(controller.options["auto_latency_enabled"])
+        self.assertEqual(controller.options["latency_seconds"], 1.5)
         self.assertTrue(provider.set_audio_output_auto_latency(True))
-        self.assertTrue(saved["v2_homepod_auto_lyric_delay"])
         self.assertEqual(controller.calls[-1], ("set_auto_latency", True))
+        self.assertFalse(saved["v2_homepod_auto_lyric_delay"])
 
-    def test_disabling_automation_saves_current_compensation_for_next_launch(self):
+    def test_disabling_automation_cannot_save_current_compensation_as_manual(self):
         provider, saved = self._provider()
         controller = provider._audio_route_controller = _Controller()
         controller.result = replace(controller.result, state="casting", cast_latency_seconds=1.525)
-        self.assertTrue(provider.set_audio_output_auto_latency(False))
-        self.assertFalse(saved["v2_homepod_auto_lyric_delay"])
-        self.assertEqual(saved["v2_homepod_lyric_delay_seconds"], 1.525)
+        self.assertFalse(provider.set_audio_output_auto_latency(False))
+        self.assertEqual(saved, {})
+        self.assertEqual(controller.calls, [])
 
     def test_shutdown_without_start_and_repeated_shutdown_do_not_create_controller(self):
         provider, _saved = self._provider()
@@ -202,6 +209,7 @@ class AudioRouteProviderTests(unittest.TestCase):
         self.assertFalse(provider.refresh_audio_outputs())
         self.assertFalse(provider.select_audio_output("speakers"))
         self.assertFalse(provider.stop_audio_cast())
+        self.assertFalse(provider.set_audio_output_volume("speakers", 0.3))
 
     def test_shutdown_before_first_start_prevents_late_controller_creation(self):
         provider, saved = self._provider()
@@ -244,6 +252,7 @@ class AudioRouteProviderTests(unittest.TestCase):
         self.assertFalse(provider.refresh_audio_outputs())
         self.assertFalse(provider.select_audio_output("speakers"))
         self.assertFalse(provider.stop_audio_cast())
+        self.assertFalse(provider.set_audio_output_volume("speakers", 0.3))
 
 
 if __name__ == "__main__":

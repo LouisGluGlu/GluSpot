@@ -3,8 +3,198 @@
 #define main upstreamCoreTestMain
 #include "../../third_party/airplay2-sender-cpp/test/core_tests.cpp"
 #undef main
+#include <limits>
 
 namespace {
+size_t volumeRequests(const FakeReceiver& receiver);
+// The original fake receiver intentionally does not implement GET_PARAMETER.
+// Replace only that reply using its independently derived encrypted channel.
+void replyVolume(Rig& rig, int code, const std::string& body = {}, int overrideSeq = -1) {
+    const auto oldRequests = rig.rx.requests.size();
+    const auto ignoredReply = rig.rx.onControlBytes(rig.io.takeTcp(RaopTcp::Control));
+    REQUIRE(!ignoredReply.empty() && rig.rx.requests.size() == oldRequests + 1,
+            "one bounded encrypted volume request reaches the receiver");
+    const auto& request = rig.rx.requests.back();
+    const auto seq = overrideSeq >= 0 ? std::to_string(overrideSeq) : request.h("cseq");
+    const auto reply = "RTSP/1.0 " + std::to_string(code) + " Result\r\nCSeq: " + seq
+        + "\r\nContent-Type: text/parameters\r\nContent-Length: "
+        + std::to_string(body.size()) + "\r\n\r\n" + body;
+    --rig.rx.ctrlOutCtr;
+    rig.sender->onTcpData(RaopTcp::Control,
+        spanOf(encryptFrames(rig.rx.ctrlOut, rig.rx.ctrlOutCtr, reply)));
+}
+
+void testReceiverVolumeReadAckAndCoalescing() {
+    g_test = "GluSpot actual receiver volume and coalesced acknowledged writes";
+    Rig rig;
+    rig.sender->setPreserveReceiverVolume(true);
+    CHECK(!rig.sender->requestReceiverVolume(), "cannot query volume before connected");
+    runAp2Handshake(rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    REQUIRE(rig.launchedOk && *rig.launchedOk, "AP2 volume test launches");
+    CHECK(!rig.sender->diagnostics().receiverVolumeKnown, "missing receiver read never invents 50 percent");
+    CHECK(rig.sender->requestReceiverVolume() && !rig.sender->requestReceiverVolume(),
+          "only one current volume query may occupy the response FIFO");
+    replyVolume(rig, 200, "volume: -21.000000\r\n");
+    const auto* get = rig.rx.last("GET_PARAMETER");
+    REQUIRE(get, "volume read uses GET_PARAMETER");
+    CHECK(get->body == "volume\r\n" && get->h("content-type") == "text/parameters",
+          "volume query uses receiver text parameter grammar");
+    auto d = rig.sender->diagnostics();
+    CHECK(d.receiverVolumeKnown && std::abs(d.receiverVolumePct - 30.0) < 1e-8 &&
+          d.receiverVolumeSource == "receiver_read" && !d.receiverVolumePending,
+          "actual -21 dB receiver response maps to 30 percent");
+    rig.sender->setVolume(55);
+    for (int pct = 1; pct <= 100; ++pct) rig.sender->setVolume(pct);
+    d = rig.sender->diagnostics();
+    CHECK(d.receiverVolumePending && std::abs(d.receiverVolumePct - 30.0) < 1e-8,
+          "sending a slider value does not fake a receiver acknowledgement");
+    replyVolume(rig, 200);
+    CHECK(rig.rx.last("SET_PARAMETER")->body == "volume: -13.500000",
+          "first explicit 55 percent uses the existing dB mapping");
+    d = rig.sender->diagnostics();
+    CHECK(d.receiverVolumeKnown && std::abs(d.receiverVolumePct - 55.0) < 1e-8 && d.receiverVolumePending,
+          "matching 200 confirms first value while newest queued request is pending");
+    replyVolume(rig, 200);
+    CHECK(rig.rx.last("SET_PARAMETER")->body == "volume: 0.000000" &&
+          rig.rx.count("SET_PARAMETER") == 2 && !rig.sender->diagnostics().receiverVolumePending,
+          "100 slider updates coalesce into only first and latest requests");
+    rig.sender->setVolume(0);
+    replyVolume(rig, 200);
+    d = rig.sender->diagnostics();
+    CHECK(d.receiverVolumeKnown && d.receiverVolumePct == 0 && d.receiverVolumeSource == "receiver_ack" &&
+          rig.rx.last("SET_PARAMETER")->body == "volume: -144.000000",
+          "zero uses the receiver mute sentinel and is confirmed only on reply");
+    rig.sender->setVolume(75);
+    replyVolume(rig, 500);
+    d = rig.sender->diagnostics();
+    CHECK(d.receiverVolumeKnown && d.receiverVolumePct == 0 && d.lastVolumeCode == 500,
+          "receiver rejection retains prior confirmed mute instead of requested 75 percent");
+    rig.sender->setVolume(12.3456789);
+    const auto bare = "RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+    rig.sender->onTcpData(RaopTcp::Control, spanOf(encryptFrames(rig.rx.ctrlOut, rig.rx.ctrlOutCtr, bare)));
+    CHECK(rig.sender->diagnostics().receiverVolumePct == 0 && rig.sender->diagnostics().receiverVolumePending,
+          "a bare 200 without matching CSeq never confirms receiver volume");
+    replyVolume(rig, 200);
+    CHECK(rig.rx.last("SET_PARAMETER")->body == "volume: -26.296296" &&
+          std::abs(rig.sender->diagnostics().receiverVolumePct - 12.34568) < 1e-8,
+          "decimal slider round-trip confirms the rounded dB level actually sent");
+    rig.sender->setVolume(std::numeric_limits<double>::quiet_NaN());
+    rig.sender->setVolume(std::numeric_limits<double>::infinity());
+    CHECK(rig.io.takeTcp(RaopTcp::Control).empty(), "non-finite values send no command");
+    rig.sender->stop();
+    rig.exchange();
+    CHECK(!rig.sender->requestReceiverVolume(), "stopped sender never reads a stale receiver");
+    rig.rx = FakeReceiver{};
+    runAp2Handshake(rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    CHECK(!rig.sender->diagnostics().receiverVolumeKnown && volumeRequests(rig.rx) == 0,
+          "new receiver never inherits prior slider state or previous actual volume");
+}
+
+void testReceiverVolumeUnknownTimeoutAndLateResponses() {
+    g_test = "GluSpot volume unknown and bounded timeout isolation";
+    Rig rig;
+    rig.sender->setPreserveReceiverVolume(true);
+    runAp2Handshake(rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    rig.sender->requestReceiverVolume();
+    replyVolume(rig, 501);
+    CHECK(!rig.sender->diagnostics().receiverVolumeKnown && rig.sender->active(),
+          "unsupported read stays unknown and does not interrupt audio");
+    for (const auto& body : {"volume: nan\r\n", "volume: -50\r\n", "volume: 2\r\n",
+                            "volume: -15garbage\r\n", "no-volume: -15\r\n"}) {
+        rig.sender->requestReceiverVolume();
+        replyVolume(rig, 200, body);
+        CHECK(!rig.sender->diagnostics().receiverVolumeKnown,
+              "malformed or out-of-range receiver values never become slider defaults");
+    }
+    rig.sender->requestReceiverVolume();
+    replyVolume(rig, 200, "volume: -144\r\n");
+    CHECK(rig.sender->diagnostics().receiverVolumeKnown && rig.sender->diagnostics().receiverVolumePct == 0,
+          "receiver-reported mute is an actual zero value");
+    rig.sender->setVolume(20);
+    const auto ignoredReply = rig.rx.onControlBytes(rig.io.takeTcp(RaopTcp::Control));
+    REQUIRE(!ignoredReply.empty(), "write reaches receiver but its response is withheld");
+    const auto oldSeq = rig.rx.last("SET_PARAMETER")->h("cseq");
+    --rig.rx.ctrlOutCtr;
+    rig.advance(3000);
+    auto d = rig.sender->diagnostics();
+    CHECK(d.receiverVolumeKnown && d.receiverVolumePct == 0 && d.lastVolumeCode == 0 &&
+          !d.receiverVolumePending && rig.sender->active(),
+          "unanswered write retains prior confirmed mute after three seconds without stopping playback");
+    rig.exchange();  // Keep-alive remains independently matched after timeout.
+    rig.sender->setVolume(80);
+    const auto newRequest = rig.io.takeTcp(RaopTcp::Control);
+    const auto reply = rig.rx.onControlBytes(newRequest);
+    REQUIRE(!reply.empty(), "new write may proceed after retired timeout");
+    --rig.rx.ctrlOutCtr;
+    const auto late = "RTSP/1.0 200 OK\r\nCSeq: " + oldSeq + "\r\nContent-Length: 0\r\n\r\n";
+    rig.sender->onTcpData(RaopTcp::Control, spanOf(encryptFrames(rig.rx.ctrlOut, rig.rx.ctrlOutCtr, late)));
+    CHECK(rig.sender->diagnostics().receiverVolumeKnown && rig.sender->diagnostics().receiverVolumePct == 0 &&
+          rig.sender->diagnostics().receiverVolumePending,
+          "late acknowledgement retains prior confirmed mute and never confirms a different newer slider command");
+    const auto matched = "RTSP/1.0 200 OK\r\nCSeq: " + rig.rx.last("SET_PARAMETER")->h("cseq")
+        + "\r\nContent-Length: 0\r\n\r\n";
+    rig.sender->onTcpData(RaopTcp::Control, spanOf(encryptFrames(rig.rx.ctrlOut, rig.rx.ctrlOutCtr, matched)));
+    CHECK(rig.sender->diagnostics().receiverVolumeKnown &&
+          std::abs(rig.sender->diagnostics().receiverVolumePct - 80.0) < 1e-8,
+          "only current CSeq 200 confirms the newer value");
+}
+
+void testReceiverInitialVolumeInfo() {
+    g_test = "GluSpot preserves and reads initialVolume capability";
+    Rig rig;
+    rig.sender->setPreserveReceiverVolume(true);
+    rig.rx.mode = FakeReceiver::Mode::Ap2Transient;
+    rig.sender->setAuth(RaopDeviceInfo::Auth::HapTransient, true, "atv-1", "", "");
+    rig.sender->start(rig.peerIp, 7000, "Living Room");
+    rig.connectControl();
+    for (int i = 0; i < 16; ++i) {
+        auto out = rig.io.takeTcp(RaopTcp::Control);
+        if (out.empty()) break;
+        auto reply = rig.rx.onControlBytes(out);
+        const auto& request = rig.rx.requests.back();
+        if (request.method == "GET" && request.uri == "/info") {
+            airplay::bplist::Dict info;
+            info.emplace_back("initialVolume", airplay::bplist::Value::real(-18));
+            const auto body = strOf(airplay::bplist::encode(airplay::bplist::Value::object(std::move(info))));
+            const auto plain = "RTSP/1.0 200 OK\r\nCSeq: " + request.h("cseq")
+                + "\r\nContent-Type: application/x-apple-binary-plist\r\nContent-Length: "
+                + std::to_string(body.size()) + "\r\n\r\n" + body;
+            --rig.rx.ctrlOutCtr;
+            reply = encryptFrames(rig.rx.ctrlOut, rig.rx.ctrlOutCtr, plain);
+        }
+        rig.sender->onTcpData(RaopTcp::Control, spanOf(reply));
+    }
+    const auto d = rig.sender->diagnostics();
+    CHECK(rig.launchedOk && *rig.launchedOk && d.receiverVolumeKnown &&
+          std::abs(d.receiverVolumePct - 40.0) < 1e-8 && d.receiverVolumeSource == "receiver_info",
+          "receiver capability initialVolume -18 dB supplies actual 40 percent");
+    CHECK(volumeRequests(rig.rx) == 0, "reading initial volume never overwrites receiver on connection");
+    rig.sender->requestReceiverVolume();
+    replyVolume(rig, 501);
+    CHECK(rig.sender->diagnostics().receiverVolumeKnown &&
+          std::abs(rig.sender->diagnostics().receiverVolumePct - 40.0) < 1e-8,
+          "unsupported GET preserves actual capability evidence instead of making up a level");
+
+    rig.rx.evOut = airplay::hkdfSha512("Events-Salt", "Events-Write-Encryption-Key", rig.rx.sharedSecret, 32);
+    rig.rx.evIn = airplay::hkdfSha512("Events-Salt", "Events-Read-Encryption-Key", rig.rx.sharedSecret, 32);
+    rig.sender->onTcpConnected(RaopTcp::Event, {rig.localIp, 50001}, {rig.peerIp, 7001});
+    airplay::bplist::Dict value;
+    value.emplace_back("initialVolume", airplay::bplist::Value::real(-24));
+    airplay::bplist::Dict event;
+    event.emplace_back("type", airplay::bplist::Value::str("updateInfo"));
+    event.emplace_back("value", airplay::bplist::Value::object(std::move(value)));
+    const auto body = strOf(airplay::bplist::encode(airplay::bplist::Value::object(std::move(event))));
+    const auto request = "POST /command RTSP/1.0\r\nCSeq: 91\r\nContent-Type: application/x-apple-binary-plist\r\nContent-Length: "
+        + std::to_string(body.size()) + "\r\n\r\n" + body;
+    rig.sender->onTcpData(RaopTcp::Event, spanOf(rig.rx.pushEvent(request)));
+    CHECK(rig.sender->diagnostics().receiverVolumeKnown &&
+          std::abs(rig.sender->diagnostics().receiverVolumePct - 20.0) < 1e-8,
+          "authenticated updateInfo reports external receiver changes without an implicit write");
+    CHECK(rig.rx.readEventReplies(rig.io.takeTcp(RaopTcp::Event)) ==
+          "RTSP/1.0 200 OK\r\nServer: AirTunes/550.10\r\nCSeq: 91\r\n\r\n",
+          "receiver volume event retains the independently decrypted minimal event acknowledgement");
+}
+
 size_t volumeRequests(const FakeReceiver& receiver) {
     return size_t(std::count_if(receiver.requests.begin(), receiver.requests.end(),
         [](const Request& request) {
@@ -172,6 +362,9 @@ void testUnansweredFeedbackIsBoundedAndRecoverable() {
 }  // namespace
 
 int main() {
+    testReceiverVolumeReadAckAndCoalescing();
+    testReceiverVolumeUnknownTimeoutAndLateResponses();
+    testReceiverInitialVolumeInfo();
     testPreserveReceiverVolume();
     testExplicitVolumeDuringHandshake();
     testTransientSessionPastReceiverWatchdog();

@@ -134,6 +134,9 @@ class EmptyIslandDataProvider:
     def select_audio_output(self, device_id: str) -> bool:
         return False
 
+    def set_audio_output_volume(self, device_id: str, volume: float) -> bool:
+        return False
+
     def stop_audio_cast(self) -> bool:
         return False
 
@@ -296,9 +299,7 @@ class WindowsMediaProvider:
                     if callable(setter):
                         setter("v2_airplay_sender_id", source_id)
                 self._audio_route_controller = AudioRouteController(
-                    latency_seconds=self.settings_getter("v2_homepod_lyric_delay_seconds", 1.5), source_id=source_id,
-                    auto_latency_enabled=self.settings_getter("v2_homepod_auto_lyric_delay",
-                        self.settings_getter("v2_homepod_lyric_delay_seconds", 1.5) == 1.5))
+                    latency_seconds=1.5, source_id=source_id, auto_latency_enabled=True)
         return self._audio_route_controller
 
     def get_audio_route_snapshot(self) -> AudioRouteSnapshot:
@@ -311,6 +312,10 @@ class WindowsMediaProvider:
     def select_audio_output(self, device_id: str) -> bool:
         return self.start_audio_outputs().select(str(device_id))
 
+    def set_audio_output_volume(self, device_id: str, volume: float) -> bool:
+        """Queue a real device volume change; published snapshots confirm it."""
+        return self.start_audio_outputs().set_volume(str(device_id), volume)
+
     def stop_audio_cast(self) -> bool:
         controller = getattr(self, "_audio_route_controller", None)
         return controller.stop_cast() if controller is not None else False
@@ -319,24 +324,12 @@ class WindowsMediaProvider:
         return self.start_audio_outputs().add_homepod(host, port)
 
     def set_audio_output_latency(self, seconds: float) -> bool:
-        controller = self.start_audio_outputs()
-        value = controller._normalize_latency(seconds)
-        setter = getattr(self, "settings_setter", None)
-        if callable(setter):
-            setter("v2_homepod_lyric_delay_seconds", value)
-            setter("v2_homepod_auto_lyric_delay", False)
-        return controller.set_latency(value)
+        # Kept for older callers; manual output-delay settings no longer own
+        # runtime compensation and must not be persisted or start a worker.
+        return False
 
     def set_audio_output_auto_latency(self, enabled: bool) -> bool:
-        controller = self.start_audio_outputs()
-        enabled = bool(enabled)
-        setter = getattr(self, "settings_setter", None)
-        if callable(setter):
-            setter("v2_homepod_auto_lyric_delay", enabled)
-            current = controller.snapshot()
-            if not enabled and current.state == "casting":
-                setter("v2_homepod_lyric_delay_seconds", current.cast_latency_seconds)
-        return controller.set_auto_latency(enabled)
+        return enabled is True and self.start_audio_outputs().set_auto_latency(True)
 
     def close_audio_outputs(self):
         lock = getattr(self, "_audio_route_init_lock", None)

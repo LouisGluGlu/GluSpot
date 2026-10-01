@@ -2,6 +2,7 @@
 #include "pcm_convert.h"
 #include "endpoint_mute_guard.h"
 #include "timing_estimate.h"
+#include "helper_commands.h"
 #include "raop_loop.h"
 #include "raop_sender.h"
 #include "ring_buffer.h"
@@ -59,6 +60,19 @@ void muteStatus(const std::string& phase, const std::string& endpoint, bool orig
               << ",\"applied\":" << (applied ? "true" : "false") << "}\n" << std::flush;
 }
 
+std::string receiverVolumeJson(const fxchain::RaopDiagnostics& d) {
+    std::ostringstream out;
+    out << "{\"volume\":";
+    if (d.receiverVolumeKnown) out << d.receiverVolumePct / 100.0;
+    else out << "null";
+    out << ",\"known\":" << (d.receiverVolumeKnown ? "true" : "false")
+        << ",\"source\":" << jsonString(d.receiverVolumeSource)
+        << ",\"operation\":" << jsonString(d.receiverVolumeOperation)
+        << ",\"pending\":" << (d.receiverVolumePending ? "true" : "false")
+        << ",\"last_code\":" << d.lastVolumeCode << '}';
+    return out.str();
+}
+
 void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64_t dropped,
                     uint64_t discontinuities, gluspot::BufferTimingTracker& timing, bool streaming) {
     const auto d = sender.diagnostics();
@@ -85,7 +99,8 @@ void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64
               << ",\"estimated_delay_ms\":" << estimate.delayMs()
               << ",\"protocol_buffer_ms\":" << estimate.protocolBufferMs
               << ",\"input_queue_ms\":" << estimate.inputQueueMs
-              << ",\"valid\":" << (estimate.valid ? "true" : "false") << "}}\n" << std::flush;
+              << ",\"valid\":" << (estimate.valid ? "true" : "false")
+              << "},\"receiver_volume\":" << receiverVolumeJson(d) << "}\n" << std::flush;
 }
 
 std::wstring wide(const std::string& text) {
@@ -240,16 +255,19 @@ private:
 
 // The Python parent owns a pipe. Poll it instead of keeping a blocked input
 // thread alive after a network error. EOF also ends the casting session.
-bool stopFromStdin(std::string& pending) {
+bool commandsFromStdin(std::string& pending, fxchain::RaopSender& sender, bool authenticated) {
     const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     if (!input || input == INVALID_HANDLE_VALUE || GetFileType(input) != FILE_TYPE_PIPE) return false;
     DWORD count = 0;
     if (!PeekNamedPipe(input, nullptr, 0, nullptr, &count, nullptr))
         return GetLastError() == ERROR_BROKEN_PIPE;
-    while (count) {
+    std::optional<double> latestVolume;
+    DWORD budget = 4096;  // A slider flood must yield to the audio pacer.
+    while (count && budget) {
         char buffer[256]; DWORD read = 0;
-        if (!ReadFile(input, buffer, std::min<DWORD>(count, sizeof(buffer)), &read, nullptr) || !read)
+        if (!ReadFile(input, buffer, std::min<DWORD>({count, sizeof(buffer), budget}), &read, nullptr) || !read)
             return true;
+        budget -= read;
         pending.append(buffer, read);
         if (pending.size() > 1024) return true;
         size_t newline;
@@ -257,9 +275,11 @@ bool stopFromStdin(std::string& pending) {
             std::string line = pending.substr(0, newline);
             pending.erase(0, newline + 1);
             if (line == "stop" || line == "stop\r") return true;
+            if (auto volume = gluspot::volumeCommand(line)) latestVolume = volume;
         }
         if (!PeekNamedPipe(input, nullptr, 0, nullptr, &count, nullptr)) return true;
     }
+    if (latestVolume && authenticated) sender.setVolume(*latestVolume * 100.0);
     return false;
 }
 }  // namespace
@@ -360,8 +380,10 @@ int wmain(int argc, wchar_t** argv) {
         auto statsDeadline = std::chrono::steady_clock::now() + 500ms;
         gluspot::BufferTimingTracker timing;
         auto muteDeadline = std::chrono::steady_clock::now() + 250ms;
+        auto volumeDeadline = std::chrono::steady_clock::now();
+        uint64_t volumeRevision = ~uint64_t(0);
         std::string pending;
-        while (!failed && !interrupted && !stopFromStdin(pending)) {
+        while (!failed && !interrupted && !commandsFromStdin(pending, sender, authenticated)) {
             loop.pump(sender, 20ms);
             if (failed) break;
             const auto error = capture.error();
@@ -379,6 +401,16 @@ int wmain(int argc, wchar_t** argv) {
             }
             if (authenticated && capture.frames.load() && !reportedStreaming) {
                 reportedStreaming = true; status("streaming");
+            }
+            if (authenticated && std::chrono::steady_clock::now() >= volumeDeadline) {
+                sender.requestReceiverVolume();
+                volumeDeadline = std::chrono::steady_clock::now() + 5s;
+            }
+            const auto d = sender.diagnostics();
+            if (authenticated && d.receiverVolumeRevision != volumeRevision) {
+                volumeRevision = d.receiverVolumeRevision;
+                std::cout << "{\"event\":\"receiver_volume\",\"receiver_volume\":"
+                          << receiverVolumeJson(d) << "}\n" << std::flush;
             }
             if (authenticated && std::chrono::steady_clock::now() >= statsDeadline) {
                 transportStats(sender, capture.frames.load(), capture.droppedSamples.load(),

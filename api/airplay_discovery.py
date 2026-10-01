@@ -33,7 +33,11 @@ def receiver_from_service(info, service_type: str) -> AudioRouteDevice | None:
     device_id = properties.get("deviceid", raop_id).replace(":", "").replace("-", "").upper()
     identity = device_id or host
     model = properties.get("model", properties.get("am", ""))
-    kind = "homepod" if "homepod" in model.casefold() or model.casefold().startswith("audioaccessory") else "airplay"
+    model_key = model.strip().casefold()
+    if model_key in {"audioaccessory5,1", "homepod mini"}:
+        kind = "homepod-mini"
+    else:
+        kind = "homepod" if "homepod" in model_key or model_key.startswith("audioaccessory") else "airplay"
     port = int(info.port)
     if not 1 <= port <= 65535:
         return None

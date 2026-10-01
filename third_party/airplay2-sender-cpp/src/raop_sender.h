@@ -74,6 +74,12 @@ struct RaopDiagnostics {
     uint32_t inputSampleRate = 0;
     uint32_t protocolLatencyFrames = 0, receiverLatencyFrames = 0;
     bool receiverLatencyReported = false;
+    double receiverVolumePct = 0;
+    bool receiverVolumeKnown = false, receiverVolumePending = false;
+    std::string receiverVolumeSource = "unknown";
+    std::string receiverVolumeOperation = "unknown";
+    int lastVolumeCode = 0;
+    uint64_t receiverVolumeRevision = 0;
     std::string lastError;
 };
 
@@ -162,6 +168,9 @@ public:
     // the pyatv pct_to_dbfs mapping). AP2 sends 0 dB automatically at launch
     // unless setPreserveReceiverVolume(true) was selected before start().
     void setVolume(double pct);
+    // GluSpot read-only GET_PARAMETER; a missing/unsupported read stays unknown.
+    // Both reads and writes are bounded to one in-flight volume transaction.
+    bool requestReceiverVolume();
 
     // Now-playing metadata pushed to the receiver via DMAP-tagged
     // SET_PARAMETER (title/artist/album) + the cover as image/jpeg|png.
@@ -231,7 +240,12 @@ private:
     void writeRtsp_(const std::string& data);
     void onEventReadyRead_(std::span<const uint8_t> bytes);   // #90/#109 decrypt + 200-OK the event channel
     void onRtspReadyRead_(std::span<const uint8_t> bytes);
-    void handleResponse_(const std::string& method, int code, const Headers& headers);
+    void handleResponse_(const std::string& method, int code, const Headers& headers,
+                         const std::string& body);
+    void sendVolumeRequest_();
+    void updateReceiverVolume_(double db, const std::string& source);
+    void clearReceiverVolume_();
+    void checkVolumeTimeout_();
     void fail_(const std::string& why);
 
     // Handshake steps
@@ -344,6 +358,7 @@ private:
     std::string eventEncBuf_;     // raw (still-encrypted) bytes from the receiver
     std::string eventPlainBuf_;   // decrypted RTSP request stream
     std::deque<std::string> pendingMethods_;   // FIFO: request -> response routing
+    std::deque<int> pendingCseqs_;  // GluSpot: match replies, including late volume responses.
     int         cseq_ = 0;
     uint32_t    sessionId_ = 0;          // RTSP URI id; doubles as RTP SSRC
     std::string dacpId_;                 // DACP-ID / Client-Instance header
@@ -370,6 +385,10 @@ private:
     uint16_t seq_ = 0;           // RTP sequence number
     bool     firstAudio_ = true; // marker bit on the first audio packet
     double   pendingVolumeDb_ = kNoVolume;   // setVolume before RECORD
+    bool volumeWriteQueued_ = false;
+    int volumeRequestCseq_ = -1;
+    double volumeWireDb_ = kNoVolume;
+    Clock::time_point volumeDeadline_{};
 
     // -- input conditioning (device rate -> 44.1 kHz) -----------------
     RingBuffer<int16_t>* ring_ = nullptr;

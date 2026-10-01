@@ -71,6 +71,24 @@ and active. stdout is flushed newline-delimited JSON (UTF-8); stderr carries
 upstream diagnostic logs. The parent sends a newline-terminated `stop` through
 stdin. Closing stdin also stops the session. Ctrl+C is supported interactively.
 
+After `waiting_audio`, the parent may send one newline-delimited JSON command:
+
+```json
+{"command":"set_volume","volume":0.35}
+```
+
+`volume` is finite and normalized to 0–1. This is an explicit receiver change,
+not a Windows capture endpoint change. It reuses the sender's existing
+`SET_PARAMETER volume` mapping: nonzero 0–100% maps to -30–0 dB; zero uses
+the -144 dB mute sentinel. The capture endpoint stays muted in exclusive mode.
+Connecting never supplies a default 50% or implicitly changes receiver volume.
+The native stdin drain keeps only the latest level per bounded 4096-byte poll;
+the sender keeps one pending read/write transaction plus the newest queued
+explicit value. Each volume transaction times out after three seconds without
+stopping audio, and late responses are matched by CSeq rather than confirming
+a different newer command. Invalid commands are ignored; `stop` and pipe EOF
+retain their existing meanings.
+
 Events:
 
 - `connecting`: capture format validated, networking begins.
@@ -110,6 +128,26 @@ Events:
   `restored` follows checked restoration. Each carries `endpoint_id`,
   `original_muted` and `applied`. The parent must retain this state and restore
   through the endpoint backend after a failed or forced helper termination.
+- `receiver_volume`: carries a bounded `receiver_volume` object also included
+  in `stats`: `volume` (normalized or null), `known`, `source`, `operation`,
+  `pending`, and `last_code`. A current value comes only from `/info`
+  `initialVolume`, an authenticated `/command` `updateInfo.value.initialVolume`
+  (`receiver_info`), `GET_PARAMETER volume` (`receiver_read`), or a matching
+  `SET_PARAMETER` 200 response (`receiver_ack`). Sending a command does not
+  confirm it. `operation` is `info`, `read` or `set`; `last_code=0` means no
+  response rather than a fabricated HTTP status. Unsupported reads retain any
+  existing actual receiver evidence; absent evidence, malformed values and
+  timeouts are unknown. Rejected writes retain the previous confirmed value.
+  The helper queries the receiver after authentication and every five seconds
+  while connected; one unanswered volume request cannot grow the response
+  queue. Level reads do not change the receiver or local mute state.
+
+`AirPlayProcess.set_volume(0..1)` is called on the audio controller worker and
+returns only pipe/enqueue success. `receiver_volume()` returns the latest
+actual read or acknowledged level, or `None` when unknown/disconnected.
+`receiver_volume_state()` returns the state above; old helpers without volume
+events remain unknown. State is fenced per process/session, and normal errors,
+stop or forced termination cannot make an old receiver control a new session.
 
 Exit codes: 0 clean stop, 1 runtime failure, 2 invalid arguments. Connection is
 bounded to 20 seconds. The network poll maximum is 20 ms, capture stop wait is
@@ -145,3 +183,7 @@ drivers. A driver that suppresses loopback after mute needs a different capture
 path; raising receiver volume does not solve it. Other HomePod firmware/access
 settings and networks, sustained playback, sleep/reconnect and audible latency
 still need hardware verification before a release.
+Receiver volume read, write and external-change handling were verified with
+the cryptographic fake receiver and actual helper command grammar only. The
+new control path has not been exercised on a physical HomePod; the earlier
+90-second audio pass does not verify these new volume controls.

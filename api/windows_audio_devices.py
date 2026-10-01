@@ -19,6 +19,8 @@ Changing a default cannot force an external player's pinned stream to migrate.
 from __future__ import annotations
 
 import ctypes
+import math
+import re
 import sys
 import threading
 import uuid
@@ -32,6 +34,8 @@ class AudioOutputDevice:
     kind: str = "device"
     is_bluetooth: bool = False
     is_default: bool = False
+    volume: float | None = None
+    volume_muted: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,12 +81,31 @@ class WindowsAudioDevices:
                 if not endpoint.id or endpoint.id in seen:
                     continue
                 seen.add(endpoint.id)
+                volume, muted = None, False
+                try:
+                    read_volume = getattr(adapter, "get_endpoint_volume", None)
+                    if callable(read_volume):
+                        volume = self._validate_volume(read_volume(endpoint.id))
+                        muted = bool(adapter.get_endpoint_mute(endpoint.id))
+                except (OSError, ValueError, RuntimeError, NotImplementedError):
+                    # An endpoint can vanish or lack volume support while the
+                    # output list itself remains valid. Unknown is not zero.
+                    volume, muted = None, False
+                kind = {1: "speaker", 3: "headphones", 5: "headset"}.get(endpoint.form_factor, "device")
+                if kind in {"headphones", "headset"} and re.search(
+                    r"\bAirPods\s+Pro\b", endpoint.name or "", re.IGNORECASE,
+                ):
+                    # Explicit model text selects a glyph only. The PnP
+                    # container remains the authority for Bluetooth transport.
+                    kind = "airpods-pro"
                 result.append(AudioOutputDevice(
                     id=endpoint.id,
                     name=endpoint.name or "音频设备",
-                    kind={1: "speaker", 3: "headphones", 5: "headset"}.get(endpoint.form_factor, "device"),
+                    kind=kind,
                     is_bluetooth=endpoint.is_bluetooth,
                     is_default=endpoint.id == default_id,
+                    volume=volume,
+                    volume_muted=muted,
                 ))
             return tuple(result)
 
@@ -118,6 +141,36 @@ class WindowsAudioDevices:
                 raise RuntimeError("Audio endpoint mute requires Windows")
             return bool(adapter.get_endpoint_mute(device_id))
 
+    def get_endpoint_volume(self, device_id: str) -> float:
+        """Read one render endpoint's master scalar without changing mute."""
+        self._validate_endpoint_id(device_id)
+        with self._lock:
+            adapter = self._backend()
+            if adapter is None:
+                raise RuntimeError("Audio endpoint volume requires Windows")
+            return self._validate_volume(adapter.get_endpoint_volume(device_id))
+
+    def set_endpoint_volume(self, device_id: str, volume: float) -> float:
+        """Set and confirm master volume; never select, mute or unmute.
+
+        A cast source remains muted even when its remembered scalar changes.
+        The returned value is Windows readback, allowing small hardware steps.
+        """
+        self._validate_endpoint_id(device_id)
+        value = self._validate_volume(volume)
+        with self._lock:
+            adapter = self._backend()
+            if adapter is None:
+                raise RuntimeError("Audio endpoint volume requires Windows")
+            actual = self._validate_volume(adapter.get_endpoint_volume(device_id))
+            if math.isclose(actual, value, abs_tol=1e-6):
+                return actual
+            adapter.set_endpoint_volume(device_id, value)
+            actual = self._validate_volume(adapter.get_endpoint_volume(device_id))
+            if not math.isclose(actual, value, abs_tol=0.005):
+                raise RuntimeError("Windows did not confirm the selected endpoint volume")
+            return actual
+
     def set_endpoint_mute(self, device_id: str, muted: bool) -> None:
         """Set/confirm mute only; master/channel volumes remain unchanged.
 
@@ -142,6 +195,18 @@ class WindowsAudioDevices:
     def _validate_endpoint_id(device_id):
         if not isinstance(device_id, str) or not device_id or "\0" in device_id:
             raise ValueError("A valid output endpoint ID is required")
+
+    @staticmethod
+    def _validate_volume(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("Audio endpoint volume must be a scalar from 0 to 1")
+        try:
+            value = float(value)
+        except OverflowError as exc:
+            raise ValueError("Audio endpoint volume must be a scalar from 0 to 1") from exc
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValueError("Audio endpoint volume must be a scalar from 0 to 1")
+        return value
 
 
 _DWORD = ctypes.c_uint32
@@ -277,7 +342,7 @@ class _WindowsCoreAudioAdapter:
         _check(_call(enumerator, 5, (ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p)),
                      device_id, ctypes.byref(device)), "IMMDeviceEnumerator.GetDevice")
         scope.own(device)
-        # IAudioEndpointVolume also exists on capture devices. Do not mute one.
+        # IAudioEndpointVolume also exists on capture devices. Never alter one.
         direction = ctypes.c_void_p()
         _check(_call(device, 0, (ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)),
                      ctypes.byref(_GUID.from_string("1be09788-6894-4089-8586-9a2a6c265ac5")),
@@ -287,7 +352,7 @@ class _WindowsCoreAudioAdapter:
         _check(_call(direction, 3, (ctypes.POINTER(ctypes.c_int),), ctypes.byref(flow)),
                "IMMEndpoint.GetDataFlow")
         if flow.value != 0:  # eRender
-            raise ValueError("Audio endpoint mute requires a render endpoint")
+            raise ValueError("Audio endpoint controls require a render endpoint")
         volume = ctypes.c_void_p()
         _check(_call(device, 3, (ctypes.POINTER(_GUID), _DWORD, ctypes.c_void_p,
                                ctypes.POINTER(ctypes.c_void_p)),
@@ -308,6 +373,20 @@ class _WindowsCoreAudioAdapter:
             volume = self._endpoint_volume(scope, device_id)
             _check(_call(volume, 14, (ctypes.c_int32, ctypes.c_void_p), int(muted), None),
                    "IAudioEndpointVolume.SetMute")
+
+    def get_endpoint_volume(self, device_id):
+        with _ComScope(self._ole32) as scope:
+            volume = self._endpoint_volume(scope, device_id)
+            value = ctypes.c_float()
+            _check(_call(volume, 9, (ctypes.POINTER(ctypes.c_float),), ctypes.byref(value)),
+                   "IAudioEndpointVolume.GetMasterVolumeLevelScalar")
+            return float(value.value)
+
+    def set_endpoint_volume(self, device_id, value):
+        with _ComScope(self._ole32) as scope:
+            volume = self._endpoint_volume(scope, device_id)
+            _check(_call(volume, 7, (ctypes.c_float, ctypes.c_void_p), value, None),
+                   "IAudioEndpointVolume.SetMasterVolumeLevelScalar")
 
     def _property(self, store, key):
         value = _PROPVARIANT()

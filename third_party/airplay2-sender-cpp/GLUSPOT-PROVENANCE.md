@@ -57,7 +57,39 @@ last error, and separate RTP timeline versus reported receiver latency).
 Only one unanswered feedback occupies the method FIFO; later timer firings are
 counted rather than appended without limit. Diagnostics do not change receiver
 volume or the existing 66150-frame RTP latency. Native helper JSON emits these
-statistics every five seconds and once before stop; no audio or key is logged.
+statistics every 500 ms and once before stop; no audio or key is logged.
+
+Local modification (2026-10-02): `src/raop_sender.h/.cpp` expose actual
+receiver-volume evidence in the existing diagnostics. The helper's explicit
+slider reuses `setVolume()` and its original -30..0 dB / -144 mute mapping.
+`requestReceiverVolume()` uses a read-only `GET_PARAMETER` text request. Missing
+or unsupported volume has no invented default. `/info.initialVolume` and the
+authenticated event channel's `updateInfo.value.initialVolume` are also read
+when present; source units/type/range must pass validation. An explicit write
+is confirmed only by its matching `SET_PARAMETER` 200 response, and failed
+writes retain the prior confirmed state. One volume read/write may be pending,
+with one latest explicit slider value coalesced; a three-second timeout retires
+the transaction, and CSeq-based response matching ignores delayed acknowledgements
+instead of applying them to newer commands. Volume protocol failures do not
+stop the cast or affect the capture endpoint mute guard. The pure protocol
+fixtures cover read, missing/malformed level, capability/event values, receiver
+mute, write acknowledgement/rejection, coalescing, timeout and late response.
+
+Protocol references checked, used as interface evidence without source copying:
+
+- OpenAirPlay receiver pinned `6c343d3679ddb561c61566985acaaf587d0a3bd3`,
+  `ap2-receiver.py:636` documents the read-only `GET_PARAMETER` volume text
+  response: <https://github.com/openairplay/airplay2-receiver/blob/6c343d3679ddb561c61566985acaaf587d0a3bd3/ap2-receiver.py>.
+- pyatv protocol notes pinned `b277a4c8222ecdcbaab8a24e3e713ca44765adb4`
+  show an authenticated `updateInfo` with `initialVolume: -20.0`:
+  <https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/docs/documentation/protocols.md>.
+
+`test/loop_tests.cpp` now echoes the request's CSeq as RTSP requires. Its old
+independent counter started at one while the sender started at zero; prior
+FIFO-only matching masked that fixture error. This is separate from its
+existing deterministic malformed-hostname change. The original imported hash
+manifest remains untouched. The sender's preserved-volume default, pairing
+crypto, audio payload and fixed 66150-frame timeline remain unchanged.
 
 The Apache-2.0 license and NOTICE apply to the upstream sender core. The
 transport includes MIT-licensed pyatv attribution, preserved in
