@@ -172,12 +172,17 @@ void fakeReceiver(sock_t listenFd, FakeResult* r, bool closeAfterRecord) {
 
     uint16_t senderCtl = 0, senderTim = 0;
     std::string buf, method;
-    int cseq = 0;
+    auto responseCseq = [](const std::string& request) {
+        const size_t start = request.find("CSeq:");
+        if (start == std::string::npos) return std::string();
+        const size_t first = request.find_first_not_of(" \t", start + 5);
+        const size_t end = request.find("\r\n", first);
+        return first == std::string::npos ? std::string() : request.substr(first, end - first);
+    };
     for (;;) {
         const std::string req = recvRequest(cli, buf, method, 5000);
         if (req.empty()) break;
-        ++cseq;
-        std::string reply = "RTSP/1.0 200 OK\r\nCSeq: " + std::to_string(cseq) + "\r\n";
+        std::string reply = "RTSP/1.0 200 OK\r\nCSeq: " + responseCseq(req) + "\r\n";
         if (method == "ANNOUNCE" && req.find("c=IN IP4 127.0.0.1") != std::string::npos) r->announceSawLoopback = true;
         if (method == "SETUP") {
             auto grab = [&](const char* key) -> uint16_t {
@@ -236,8 +241,7 @@ void fakeReceiver(sock_t listenFd, FakeResult* r, bool closeAfterRecord) {
     for (;;) {
         const std::string req = recvRequest(cli, buf, method, 5000);
         if (req.empty()) { r->sawEof = true; break; }
-        ++cseq;
-        sendAll(cli, "RTSP/1.0 200 OK\r\nCSeq: " + std::to_string(cseq) + "\r\n\r\n");
+        sendAll(cli, "RTSP/1.0 200 OK\r\nCSeq: " + responseCseq(req) + "\r\n\r\n");
         if (method == "TEARDOWN") r->sawTeardown = true;
     }
     sockClose(cli);

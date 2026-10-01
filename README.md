@@ -7,12 +7,12 @@ This README is the canonical product, implementation, release-readiness, and pen
 ## Current Status
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.404`.
+- Current test-build version: `6.405`.
 - Development state: internal alpha / test build, not ready for paid Steam release.
 - Runnable app: `local/main.py`, or `launch.bat`.
 - Main UI surface: the V2 island only.
 - Test baseline command: `python -m unittest discover tests -v`.
-- Release blocker level: the 6.404 Windows test package can be built, but signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
+- Release blocker level: the 6.405 Windows test package and frozen acceptance checks passed; signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
 
 ## Run
 
@@ -22,7 +22,7 @@ If dependencies are missing, run `setup-env.bat` once, then launch again. Runtim
 
 ## Windows Test Build
 
-GluSpot 6.404 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
+GluSpot 6.405 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
 
 Build from the project root:
 
@@ -33,14 +33,14 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.404\GluSpot.exe
+release\GluSpot-6.405\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It is not an installer, does not include Steamworks ownership validation, and should not be treated as a public release artifact.
 
-`GluSpot-6.404` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
+`GluSpot-6.405` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
 
-Known 6.404 test-build caveats:
+Known 6.405 test-build caveats:
 
 - PyInstaller reports optional missing modules from Unix-only Python paths, NumPy/Pillow optional helpers, and setuptools internals; these are expected in a Windows GUI package unless a runtime feature proves otherwise.
 - PyInstaller also reports missing `UIAutomationClient_VC140_X64.dll` / `UIAutomationClient_VC140_X86.dll` from the `uiautomation` dependency. The build still completes, but WeChat/QQ/DingTalk detail-detection paths should be checked on a real desktop.
@@ -58,11 +58,12 @@ Known 6.404 test-build caveats:
 ## Naming And Assets
 
 - `GluSpot` is the product name, app name, startup task/app ID, runtime lock namespace, and settings namespace.
-- The current app version is `6.404`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
+- The current app version is `6.405`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
 - `assets/brand/` stores the generated GluSpot PNG and ICO brand assets.
 - User-selected global icons are copied into the GluSpot settings data directory under `icons/` and saved as PNG plus ICO.
 - `assets/logos/` stores TIME reminder SVG assets. The old root-level `logos/` folder has been removed.
 - `assets/music_controls/` stores SVG playback control assets.
+- `assets/audio_outputs/` stores the user-supplied output-link, speaker, HomePod, HomePod mini, and AirPods Pro SVG assets. Device models are selected from provider evidence; unidentified receivers and headphones retain generic symbols.
 - `assets/fonts/AlibabaPuHuiTi/` stores the embedded Alibaba PuHuiTi Bold/Heavy fonts used by the Wave Stream lyric style and settings UI.
 - `assets/fonts/NotoSerifSC/` stores the embedded Noto Serif SC ExtraBold font used by the Gelv lyric style.
 - `assets/fonts/JiangChengXieSong/` stores the embedded JiangCheng XieSong 700W/900W fonts used by the Ember Fade lyric style and settings UI.
@@ -86,11 +87,11 @@ GluSpot is a Windows music island with plugin reminders, message notifications, 
 
 The music surface should feel like a compact live object: album art, playback controls, lyrics, and album-color ambience remain readable in compact, expanded, Finder, Free, and Tasker placement modes.
 
-The lyric target is Apple-like live lyric motion, not a visible progress bar. Actual unit timestamps drive the reading front when a source supplies them. Reading classification is song-wide: if any surviving row has genuine unit timing, both `金标读字` and `低感知方案` read the entire song, estimating missing unit timing from that row's original interval rather than switching paint modes mid-song. If no row has genuine timing, gold mode estimates reading and low-perception mode switches whole lines while retaining the visual-line spring. One timestamp covering multiple spoken words or CJK graphemes counts as row timing, even when the file uses an enhanced-LRC word marker. Plain lyrics with synthetic row times appear one row at a time in either mode. The strategy is shared by full-screen, windowed, and island music views. In gold mode, an OBO badge beside the full-screen/windowed top-right mode control has a dark background and white text until at least one surviving row has genuine unit timing, when its text turns gold. Low-perception mode hides the badge. It follows the control's idle hide animation; the island has no badge.
+The lyric target is Apple-like live lyric motion, not a visible progress bar. Actual unit timestamps drive the reading front when a source supplies them. Reading classification is song-wide: if any surviving row has genuine unit timing, both `金标读字` and `低感知方案` read the entire song, estimating missing unit timing from that row's original interval rather than switching paint modes mid-song. If no row has genuine timing, gold mode estimates reading and low-perception mode switches whole lines while retaining the visual-line spring. One timestamp covering multiple spoken words or CJK graphemes counts as row timing, even when the file uses an enhanced-LRC word marker. Plain lyrics with synthetic row times appear one row at a time in either mode. The strategy is shared by full-screen, windowed, and island music views. In gold mode, the OBO indicator appears as a white β on a dark circle beside the full-screen/windowed top-right mode control; genuine unit timing turns its ink and ring gold. Low-perception mode hides the badge. It follows the control's idle hide animation; the island has no badge.
 
 ## Settings Surface
 
-The full-screen and windowed music pages share a top-right “翻译” control with the existing dual-line setting and island view. Its dimensions, gaps, idle-hide motion, and round corners match the mode control. Enabled uses a pale-white button with cutout lettering; disabled uses the existing dark control treatment. It sits left of OBO in gold mode, or directly left of the mode control in low-perception mode.
+The full-screen and windowed music pages share four compact circular controls: output link, translation, the gold reading strategy's β badge, and the existing window/island destination. The output button uses a pale face and blue link while its chooser is open. Translation follows the existing dual-line setting and island view; enabled uses a pale face with a transparent 文/A cutout. The β badge is white until a surviving row has genuine unit timing, then gains gold ink and a gold ring; low-perception mode hides it. Their dimensions, gaps, idle-hide motion, hit targets, and snapshot transition behavior remain shared.
 
 The full-screen lyrics page includes a Cantonese secondary-content card: phonetics first (Jyutping, default) or translation first, falling back to the available alternative. Source-provided phonetics are preferred; missing phonetics can be generated once using ToJyutping 3.2.0, with bounded per-text caching outside paint. Identification requires language metadata, supplied Jyutping, or distinctive Cantonese vocabulary. Standard written Chinese without reliable language evidence is not guessed from the artist. Both supplied secondary candidates, explicit language evidence and original unit times survive generated-cache persistence and source enrichment, including while translation is disabled; priority changes do not require a new online lookup. Untimed labeled companions stay within their original paragraph and never become separate synthetic lyric rows. The packaged dependency includes its dictionary and BSD-2-Clause license metadata.
 
@@ -98,7 +99,7 @@ The settings window is organized into:
 
 - Basic settings: theme mode, startup mode, placement, Tasker/MyDockFinder controls, empty-island behavior, font and animation options.
 - Media control: player mode, app profiles, BetterNCM path, lyric style, album island, lyric offsets, and ambience controls.
-- Full-screen lyrics: `金标读字` / `低感知方案` reading strategy shared by all music views, the large music page's four-level reading lift (half-height default), continuous color-gradient width, sparse-highlight threshold, intro cleanup, and bilingual display. The remaining page controls also apply to the windowed music page; island lyric-style controls remain in Media control. The OBO (one by one) mark appears beside the full-screen/windowed top-right mode control in gold mode, uses gold text when any surviving row has genuine unit timing, and hides with that control.
+- Full-screen lyrics: `金标读字` / `低感知方案` reading strategy shared by all music views, the large music page's four-level reading lift (half-height default), continuous color-gradient width, sparse-highlight threshold, intro cleanup, and bilingual display. The remaining page controls also apply to the windowed music page; island lyric-style controls remain in Media control. The OBO (one by one) indicator is drawn as β beside the top-right mode control in gold mode, uses gold ink and a ring when any surviving row has genuine unit timing, and hides with that control.
 - Plugin settings: TIME controls, weather settings, fullscreen plugin alert style, and agenda JSON/ICS controls.
 - Notification settings: barrage and message notification controls.
 - About: diagnostics, local project location, and music cache management. “清理封面并重试” discards downloaded covers, memory results and failure records; “清理在线歌词” discards generated online lyrics and restarts lookup. Both preserve manual lyrics, settings, offsets, playback position and audio-device state. Cleanup runs in the background and reports removed files, bytes and any failures.
@@ -159,9 +160,13 @@ Downloaded artwork uses `%LOCALAPPDATA%/GluSpot/cache/album_art` (or `GLUSPOT_AL
 
 ## Audio Output Devices And HomePod
 
-The full-screen/windowed music pages now include an **输出** chooser. It lists active Windows speakers and already connected Bluetooth outputs, confirms console/multimedia default changes, discovers HomePod on the local IPv4 network, and supports manual HomePod IP entry. Newly available local devices show a brief connection animation. Bluetooth pairing stays in Windows; players with a fixed/exclusive output may need their own output changed. Device enumeration does not open a microphone or loopback stream.
+The full-screen/windowed music pages include an output-link chooser. It lists active Windows speakers and already connected Bluetooth outputs, confirms console/multimedia default changes, and discovers HomePod on the local IPv4 network. A top-right **＋** opens a temporary manual-IP dialog when discovery is unavailable; the chooser has no permanent IP field or **更多选项** section. Newly available local devices show a brief connection animation. Bluetooth pairing stays in Windows; players with a fixed/exclusive output may need their own output changed. Device enumeration does not open a microphone or loopback stream.
 
-Single HomePod casting uses an independent native WASAPI capture → bounded PCM ring → AirPlay 2 sender. This forwards the selected computer output's system mix, including other apps. After HomePod authenticates, that local output is muted; stop/error/exit restores its original mute state without changing volume. The parent restores owned mute after an abnormal helper termination; an explicit external unmute ends the cast. M6 loopback was verified to preserve real PCM while muted, but other drivers still require validation. It does not install a virtual output driver or implement multiroom/Bluetooth synchronization. Connection, authenticated waiting, flowing audio and errors are reported separately; changing the source endpoint or exiting stops the helper. Casting is started only by selecting a receiver, never automatically at launch. During casting, **歌词延后** provides an adjustable 0–5 second display delay without changing player progress or applying that delay to lyric Seek commands. The compact chooser follows the music page's cached backdrop and font; **更多选项** holds manual IP and lyric delay controls.
+Single HomePod casting uses an independent native WASAPI capture → bounded PCM ring → AirPlay 2 sender. This forwards the selected computer output's system mix, including other apps. After HomePod authenticates, that local output is muted; stop/error/exit restores its original mute state without changing volume. The parent restores owned mute after an abnormal helper termination; an explicit external unmute ends the cast. M6 loopback was verified to preserve real PCM while muted, but other drivers still require validation. It does not install a virtual output driver or implement multiroom/Bluetooth synchronization. Connection, authenticated waiting, flowing audio and errors are reported separately; changing the source endpoint or exiting stops the helper. Casting is started only by selecting a receiver, never automatically at launch.
+
+Casting now keeps display compensation fully automatic. It starts from the existing 1.5-second protocol buffer and gradually follows clean sender-buffer evidence; older stored manual delay/automation values are ignored and cannot disable the automatic path. There is no manual delay slider or automation switch in the chooser. Compensation does not alter player progress or lyric Seek commands and is not a measurement of HomePod's acoustic output.
+
+Each device row can show its confirmed volume and an inline slider. Windows outputs use native endpoint volume with readback. The active authenticated HomePod exposes volume only after receiver information, a volume read, or an acknowledged command supplies evidence; an unknown volume remains unavailable. Dragging a slider does not select another device, change the capture source, or release local mute ownership. Receiver failures are reported without tearing down a healthy cast. The compact chooser uses the music page's font and a cached half-size blurred crop of its content with a neutral veil; capture excludes children and refreshes at most once per second; device icons preserve the supplied SVG proportions and alpha. Native Qt fixture rendering and automated protocol tests cover these behaviors. HomePod volume control has not yet been checked on physical hardware in 6.405, and multi-song audible lyric alignment still needs listening QA.
 
 The Apache-2.0 sender is pinned with provenance and notices; restricted AirSonic/AirFlash code is not incorporated. `python-zeroconf` remains an unmodified, replaceable LGPL discovery dependency with source and notices included in the Windows package. `build-exe.bat` builds/tests the native helper before packaging; CMake and a Windows C++20 toolchain are now required for test builds. See [audio routing behavior and evidence](docs/audio-routing.md) and [native helper build instructions](native/airplay_sender/README.md). The repeatable 30-second disconnect came from missing transient-authentication event keys: encrypted HomePod requests were discarded instead of acknowledged. On October 1, the fixed controller cast from Bluetooth M6 to HomePod mini “起居室” for 90.06 seconds without interruption, muted/restored M6 and acknowledged real encrypted events. The user confirmed only HomePod was audible and delay was acceptable. The existing 1.5-second RTP timeline setting is retained; this is not a measured universal latency floor. Multi-hour playback, other drivers/firmware and sleep/reconnect still need hardware verification before release.
 
@@ -189,7 +194,7 @@ The Apache-2.0 sender is pinned with provenance and notices; restricted AirSonic
 
 ## Completeness Assessment
 
-Version 6.404 is suitable for a controlled desktop test pass, not for public release.
+Version 6.405 is suitable for a controlled desktop test pass, not for public release.
 
 | Area | Assessment | Notes |
 | --- | --- | --- |
@@ -198,7 +203,7 @@ Version 6.404 is suitable for a controlled desktop test pass, not for public rel
 | Media and lyric integration | Partially complete | Generic Windows media is the baseline. NetEase, BetterNCM, QQ, Qishui, and Kugou paths are optional profile attachments that still need real-app QA. |
 | Plugins and notifications | Partially complete | TIME is the active default. Weather and agenda code exist, but both still need real-world validation before normal-user enablement. |
 | Settings and startup | Mostly complete for alpha | Settings pages and startup modes exist. Clean-account startup and first-launch migration still need manual verification. |
-| Packaging | Test-build complete | `build-exe.bat` produces `release\GluSpot-6.404\GluSpot.exe`; signing, installer/update behavior, and distribution hardening are pending. |
+| Packaging | Verified internal 6.405 onedir build | `build-exe.bat` produced `release\GluSpot-6.405\GluSpot.exe`; frozen dependency/device/capture acceptance and packaged helper/icon/source integrity passed. Signing, installer/update behavior, and distribution hardening remain blockers. |
 | Release operations | Incomplete | Steamworks, SteamPipe, crash/support diagnostics, copyright/data audit, and multi-machine QA remain blockers. |
 
 Overall project completeness: about 75% for an internal alpha/testable Windows desktop app, about 45% for a public paid Windows release, and about 30% for a Steam-ready release pipeline.
@@ -208,7 +213,7 @@ Overall project completeness: about 75% for an internal alpha/testable Windows d
 Current assessment:
 
 - Stability: strong automated behavior coverage, but not enough manual desktop coverage for a public paid release.
-- Completeness: suitable for internal alpha or controlled 6.404 test builds; not Steam-ready yet.
+- Completeness: suitable for internal alpha or controlled 6.405 test builds; not Steam-ready yet.
 - Performance: the music surface has a repeatable synthetic Qt raster benchmark, but real-desktop FPS, cold-start time, memory/CPU use, and long-running behavior still need measured reports.
 
 Steam release requirements still pending:
@@ -223,6 +228,7 @@ Steam release requirements still pending:
 
 ## Current Branch Fixes
 
+- October 2 audio chooser / 6.405: the output, translation, β, and window/island controls use the user's circular reference and supplied SVG icons with bounded Qt caches. The chooser uses a cached frosted music backdrop, compact device rows, confirmed inline volume, and a temporary **＋** manual-IP dialog. The prior advanced section, permanent IP field, manual lyric-delay slider, and automation switch are removed. Sender-buffer compensation remains automatic for every cast, including migrated manual settings. Windows volume changes are read back; authenticated HomePod volume is published only from receiver evidence, and command failure leaves healthy casting/mute ownership intact. UI screenshots are native Qt fixtures; HomePod volume and new multi-song alignment still require hardware QA. Final verification passed 2760 Python tests, six native suites, and the frozen package acceptance check; details and limits are recorded below.
 - October 2 / 6.404 verification: 2720 Python tests passed in 78.577 seconds; five native suites, Python compilation and whitespace checks passed. The 6.404 onedir package passed its explicit acceptance check; native helper, provenance, LGPL source and replaceable discovery files were verified. Native Qt fixtures retain intermediate scrolling poses and accessible compact-menu controls. This version still needs a new multi-song HomePod listening check for actual lyric/audio alignment; the October 1 90-second hardware confirmation belongs to 6.403.
 - October 2 lyric clocks / 6.404: source observations remain separate from delivery projection and display-only HomePod compensation. Repeated bad positions with fresh event stamps cannot confirm a seek; pause transitions, source changes and same-song timing enrichment cannot reuse old jump evidence. Real GSMTC updates every 5–10 seconds establish their own cadence before UIA row fallback. The island and large music surfaces share the source-clock rules while existing row springs preserve the viewport through correction and real Seek. Single-HomePod casting publishes a clean-interval sender buffer estimate every 500 ms; optional **自动补偿** adjusts the lyric delay gradually without reconnecting per song. Disabling it retains manual 0–5 second adjustment, including existing saved calibration. The estimate uses protocol buffer plus input queue and does not claim receiver playhead or acoustic measurement. Dynamic-background work remains in its separate branch. Verification evidence and hardware limits are in [audio routing](docs/audio-routing.md).
 
@@ -362,11 +368,15 @@ Steam release requirements still pending:
 - `assets/logos/`: TIME reminder SVG assets.
 - `assets/music_controls/`: playback control SVG assets.
 - `GluSpot.spec`: PyInstaller `onedir` test-build definition.
-- `build-exe.bat`: repeatable Windows test-build command for version 6.403.
+- `build-exe.bat`: repeatable Windows test-build command for version 6.405.
 - `packaging/windows/version_info.txt`: Windows executable version metadata.
 - `tests/`: behavior tests.
 
 ## Verification
+
+The October 2 audio chooser / 6.405 passed all 2760 discovered Python tests in 70.106 s with verbose fault-handling logs, Python compilation, and tracked/new-file whitespace checks. The first full run exposed the prior transparent-translation test's requirement for a near-white enabled face; the circular face was brightened to retain that requirement, then the complete suite passed. Final native review also found a volume-write timeout clearing a prior confirmed level. The repair retains that level, and the cryptographic timeout/late-CSeq regressions passed with all six native CTest suites during `build-exe.bat` (78 sender-policy checks). Native Qt fixtures cover local, AirPods Pro, HomePod mini, light contrast, and scrolling at 640 × 360. In six small fixture scenes, eight forced material captures per scene measured median costs of 5.0–6.2 ms (maximum 7.2 ms); this is a crop/blur timing sample, not desktop FPS. At runtime capture is cached, runs outside paint, and refreshes no more than once per second; paints run no discovery, device commands, or blur work.
+
+The final unsigned 6.405 onedir package's `--audio-package-check` exited 0, read real endpoint volume scalars, discovered HomePod mini, and probed 250 ms of local capture without changing default/mute/volume, saving audio, accessing user settings, or starting a receiver session. The helper SHA-256 is `727333d6f6cf0b2f3d66d764bbde9b13bc5627137c8595d9a5131eab58672d0a`, identical in source build and package. Packaged provenance, the LGPL source archive, replaceable discovery modules, all five supplied SVGs and Qt SVG runtime files passed integrity checks. Evidence is in ignored `logs/audio-output-6.405-final-full-tests.log`, `logs/build-6.405.log`, `logs/audio-package-6.405-check.json`, `logs/audio-package-6.405-artifact-proof.json`, and `logs/audio-output-6.405-qa/`. The independent worktree remains on `codex/audio-homepod-level1-2`; no dynamic-background changes were merged. Process audit is 100/100 after the documented corrections and verification. HomePod volume write/external adjustment and new multi-song audible lyric alignment remain explicit hardware QA gates; fixture screenshots and the earlier 6.403 listening pass do not establish them.
 
 The October 1 audio follow-up / 6.403 passed all 2669 discovered tests in 67.935 s with fault handling and verbose logging, compilation and diff/new-file whitespace checks. An additional real-child hard-kill ownership case then passed with all 17 subprocess tests (2.678 s); no runtime code changed after the full pass. Four native suites and eight actual-helper lifecycle checks passed; the 65-second cryptographic receiver regression fails under the old missing event keys and passes after repair. A real 90.06-second M6-to-HomePod mini cast had three encrypted event acknowledgements, 44 successful feedback replies, no capture drops and no disconnect; the user confirmed only HomePod was audible and delay acceptable. M6's original mute and unchanged volume were checked after the local probe, and mute restored after the cast. Native Qt montages verify menu integration over album/dark backgrounds plus light/white contrast fixtures, compact casting and expanded keyboard/scroll access. Recovery tests cover failed retry, prepared-session ownership, hard termination, pipe errors, final diagnostics without UI polling and user mute preservation. The frozen 6.403 acceptance check passed dependency imports, M6 capture and HomePod discovery; its helper hash, provenance, LGPL source archive and replaceable discovery modules were verified against the build inputs. The verified 1.5-second RTP setting remains unchanged; other drivers, multi-hour sessions, sleep/reconnect and measured acoustic latency remain pending. The final helper's external-unmute check is 250 ms, compared with two seconds during the hardware pass.
 

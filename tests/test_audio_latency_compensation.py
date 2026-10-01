@@ -40,20 +40,21 @@ class ContinuousLatencyTests(unittest.TestCase):
             self.controller._step()
             self.assertEqual(self.controller.snapshot().cast_latency_seconds, previous)
 
-    def test_manual_delay_survives_telemetry_and_can_resume_automation(self):
-        self.controller.set_latency(2.3)
-        self.clock += 0.15
-        self.controller._step()
-        self.assertFalse(self.controller.snapshot().cast_latency_auto)
-        self.assertEqual(self.controller.snapshot().cast_latency_seconds, 2.3)
-        self.clock += 5
-        self.controller._step()
-        self.assertEqual(self.controller.snapshot().cast_latency_seconds, 2.3)
-        self.controller.set_auto_latency(True)
+    def test_legacy_manual_delay_cannot_disable_continuous_automatic_compensation(self):
+        self.assertFalse(self.controller.set_latency(2.3))
+        self.assertFalse(self.controller.set_auto_latency(False))
         self.clock += 0.15
         self.controller._step()
         self.assertTrue(self.controller.snapshot().cast_latency_auto)
-        self.assertGreater(self.controller.snapshot().cast_latency_seconds, 2.28)
+        self.assertAlmostEqual(self.controller.snapshot().cast_latency_seconds, 1.512)
+        self.clock += 5
+        self.controller._step()
+        self.assertAlmostEqual(self.controller.snapshot().cast_latency_seconds, 1.53)
+        self.assertTrue(self.controller.set_auto_latency(True))
+        self.clock += 0.15
+        self.controller._step()
+        self.assertTrue(self.controller.snapshot().cast_latency_auto)
+        self.assertAlmostEqual(self.controller.snapshot().cast_latency_seconds, 1.53)
 
     def test_stop_clears_estimate_and_new_cast_uses_its_own_session(self):
         self.clock += 0.5
@@ -64,16 +65,16 @@ class ContinuousLatencyTests(unittest.TestCase):
         self.assertEqual(snapshot.cast_latency_seconds, 0)
         self.assertIsNone(snapshot.cast_latency_estimate_seconds)
 
-    def test_rapid_toggle_and_repeated_slider_values_keep_final_request(self):
-        self.controller.set_auto_latency(True)
-        self.controller.set_auto_latency(False)
-        self.controller.set_auto_latency(True)
+    def test_legacy_toggle_and_slider_values_never_queue_manual_compensation(self):
+        self.assertTrue(self.controller.set_auto_latency(True))
+        self.assertFalse(self.controller.set_auto_latency(False))
+        self.assertTrue(self.controller.set_auto_latency(True))
         self.controller._step()
         self.assertTrue(self.controller.snapshot().cast_latency_auto)
         for seconds in (1.75, 2.0, 1.75):
-            self.controller.set_latency(seconds)
+            self.assertFalse(self.controller.set_latency(seconds))
         self.controller._step()
-        self.assertEqual(self.controller.snapshot().cast_latency_seconds, 1.75)
+        self.assertEqual(self.controller.snapshot().cast_latency_seconds, 1.5)
 
 
 if __name__ == "__main__":

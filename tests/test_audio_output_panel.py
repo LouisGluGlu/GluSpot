@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -18,8 +18,8 @@ from local.music_surface_window import MusicSurfaceWindow
 class _RouteProvider:
     def __init__(self):
         self.devices = (
-            AudioRouteDevice("local", "本地扬声器", kind="speaker", is_default=True),
-            AudioRouteDevice("bluetooth", "蓝牙耳机", kind="headphones", is_bluetooth=True),
+            AudioRouteDevice("local", "本地扬声器", kind="speaker", is_default=True, volume=.36),
+            AudioRouteDevice("bluetooth", "蓝牙耳机", kind="airpods-pro", is_bluetooth=True, volume=.62),
             AudioRouteDevice("homepod", "客厅 HomePod", kind="homepod", transport="airplay"),
         )
         self.snapshot = AudioRouteSnapshot(self.devices, active_id="local")
@@ -43,13 +43,8 @@ class _RouteProvider:
         self.calls.append(("add", host))
         return self.accept
 
-    def set_audio_output_latency(self, seconds):
-        self.calls.append(("latency", seconds))
-        self.snapshot = replace(self.snapshot, cast_latency_seconds=seconds, cast_latency_auto=False)
-
-    def set_audio_output_auto_latency(self, enabled):
-        self.calls.append(("auto_latency", enabled))
-        self.snapshot = replace(self.snapshot, cast_latency_auto=enabled)
+    def set_audio_output_volume(self, device_id, volume):
+        self.calls.append(("volume", device_id, volume))
         return self.accept
 
 
@@ -82,7 +77,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["bluetooth"].subtitle, "蓝牙音频")
         self.assertFalse(self.panel.stop_button.isEnabled())
         self.assertFalse(self.panel.stop_button.isVisible())
-        self.assertFalse(self.panel.advanced_widget.isVisible())
+        self.assertFalse(hasattr(self.panel, "advanced_widget"))
         self.assertLess(self.panel.height(), 310)
         self.assertGreaterEqual(self.panel.x(), 12)
         self.assertLessEqual(self.panel.x() + self.panel.width(), self.owner.width() - 12)
@@ -140,33 +135,34 @@ class AudioOutputPanelTests(unittest.TestCase):
 
     def test_manual_device_add_and_stop_use_provider_boundary(self):
         self._open()
-        self.panel.advanced_button.click()
-        self.panel.host_input.setText(" 192.168.1.25 ")
-        self.panel.add_button.click()
+        with patch("local.audio_output_panel.QInputDialog.getText", return_value=(" 192.168.1.25 ", True)):
+            self.panel.add_button.click()
         self.assertIn(("add", "192.168.1.25"), self.provider.calls)
-        self.assertEqual(self.panel.host_input.text(), "")
-        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="streaming")
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting")
         self.panel.sync_snapshot()
         self.panel.stop_button.click()
         self.assertIn(("stop",), self.provider.calls)
         self.assertEqual(self.panel._rows["homepod"].state, "active")
 
-    def test_cast_delay_control_reads_snapshot_and_changes_only_provider_setting(self):
-        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", cast_latency_seconds=1.5,
-                                         cast_latency_auto=False)
+    def test_cancelled_manual_dialog_does_not_enqueue(self):
         self._open()
-        self.assertFalse(self.panel.latency_widget.isVisible())
-        self.panel.advanced_button.click()
-        self.assertTrue(self.panel.latency_widget.isVisible())
-        self.assertEqual(self.panel.latency_slider.value(), 150)
-        self.assertEqual(self.panel.latency_label.text(), "歌词延后 1.50 秒")
-        self.assertFalse(any(call[0] == "latency" for call in self.provider.calls))
-        self.panel.latency_slider.setValue(235)
-        self.assertIn(("latency", 2.35), self.provider.calls)
-        self.assertEqual(self.panel.latency_label.text(), "歌词延后 2.35 秒")
+        before = tuple(self.provider.calls)
+        with patch("local.audio_output_panel.QInputDialog.getText", return_value=("192.168.1.25", False)):
+            self.panel.add_button.click()
+        self.assertEqual(tuple(self.provider.calls), before)
+
+    def test_no_options_or_manual_delay_controls_and_auto_badge_on_active_receiver_only(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting", cast_latency_seconds=1.52)
+        self._open()
+        for removed in ("advanced_button", "advanced_widget", "latency_slider", "auto_latency_button"):
+            self.assertFalse(hasattr(self.panel, removed))
+        self.assertEqual(self.panel._rows["homepod"].delay_text, "+1.52s")
+        self.assertEqual(self.panel._rows["local"].delay_text, "")
+        self.assertIn("自动歌词补偿", self.panel._rows["homepod"].accessibleDescription())
         self.provider.snapshot = replace(self.provider.snapshot, active_id="local")
         self.panel.sync_snapshot()
-        self.assertFalse(self.panel.latency_widget.isVisible())
+        self.assertEqual(self.panel._rows["homepod"].delay_text, "")
+        self.assertFalse(any(c[0] in {"latency", "auto_latency"} for c in self.provider.calls))
 
     def test_small_surface_keeps_devices_and_footer_accessible_in_one_scroll_area(self):
         self.owner.resize(640, 360)
@@ -174,49 +170,162 @@ class AudioOutputPanelTests(unittest.TestCase):
         self._open()
         self.app.processEvents()
         self.assertGreater(self.panel.scroll.viewport().height(), 150)
-        self.assertFalse(self.panel.host_input.isVisible())
-        self.panel.advanced_button.click()
-        self.app.processEvents()
-        scroll = self.panel.scroll.verticalScrollBar()
-        self.assertGreater(scroll.maximum(), 0)
-        scroll.setValue(scroll.maximum())
-        bottom = self.panel.host_input.mapTo(self.panel.scroll.viewport(), self.panel.host_input.rect().bottomLeft())
+        bar = self.panel.scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        bottom = self.panel.stop_button.mapTo(self.panel.scroll.viewport(), self.panel.stop_button.rect().bottomLeft())
         self.assertLessEqual(bottom.y(), self.panel.scroll.viewport().height())
         self.assertGreaterEqual(bottom.y(), 0)
-        self.assertTrue(self.panel.host_input.isVisible())
+        self.assertLessEqual(self.panel.y() + self.panel.height(), self.owner.height() - 12)
 
-    def test_more_options_is_keyboard_operable_and_preserves_route_and_motion_state(self):
-        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", cast_latency_seconds=1.5)
+    def test_keyboard_volume_and_row_selection_are_separate_and_tab_order_is_logical(self):
+        self._open()
+        row = self.panel._rows["local"]
+        self.assertEqual(row.nextInFocusChain(), row.volume_slider)
+        QTest.keyClick(row.volume_slider, Qt.Key.Key_Right)
+        self.assertIn(("volume", "local", .38), self.provider.calls)
+        self.assertFalse(any(c[0] == "select" for c in self.provider.calls))
+        QTest.keyClick(row, Qt.Key.Key_Space)
+        self.assertIn(("select", "local"), self.provider.calls)
+
+    def test_volume_pointer_scrub_only_queues_volume_and_poll_does_not_reset_drag(self):
+        self._open()
+        self.app.processEvents()
+        row = self.panel._rows["bluetooth"]
+        slider = row.volume_slider
+        point = QPoint(round(slider.width() * .8), slider.height() // 2)
+        QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=point)
+        requested = slider.value()
+        self.assertGreater(requested, 75)
+        self.panel.sync_snapshot()
+        self.assertEqual(slider.value(), requested)
+        QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=point)
+        self.assertFalse(slider.isSliderDown())
+        self.assertFalse(any(c[0] == "select" for c in self.provider.calls))
+        self.assertTrue(any(c[0] == "volume" and c[1] == "bluetooth" for c in self.provider.calls))
+
+    def test_volume_request_awaits_readback_then_external_updates_follow(self):
+        self._open()
+        row = self.panel._rows["local"]
+        row.volume_slider.setValue(71)
+        self.panel.sync_snapshot()
+        self.assertEqual(row.volume_slider.value(), 71)
+        self.assertEqual(row.device.volume, .36)
+        devices = tuple(replace(d, volume=.71) if d.id == "local" else d for d in self.provider.snapshot.devices)
+        self.provider.snapshot = replace(self.provider.snapshot, devices=devices)
+        self.panel.sync_snapshot()
+        self.assertIsNone(row._requested_volume)
+        self.provider.snapshot = replace(self.provider.snapshot, devices=tuple(replace(d, volume=.28) if d.id == "local" else d for d in devices))
+        self.panel.sync_snapshot()
+        self.assertEqual(row.volume_slider.value(), 28)
+
+    def test_unconfirmed_volume_times_out_to_actual_readback_without_new_action(self):
+        self._open()
+        row = self.panel._rows["local"]
+        with patch("local.audio_output_panel.time.monotonic", return_value=100):
+            row.volume_slider.setValue(71)
+        before = tuple(self.provider.calls)
+        with patch("local.audio_output_panel.time.monotonic", return_value=103):
+            self.panel.sync_snapshot()
+        self.assertEqual(row.volume_slider.value(), 36)
+        self.assertEqual(tuple(self.provider.calls), before)
+
+    def test_failed_volume_reverts_and_preserves_cast_and_original_device_state(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting", devices=tuple(replace(d, volume=.4) if d.id == "homepod" else d for d in self.provider.devices))
+        self._open()
+        self.provider.accept = False
+        row = self.panel._rows["homepod"]
+        row.volume_slider.setValue(77)
+        self.assertEqual(row.volume_slider.value(), 40)
+        self.assertEqual(row.state, "active")
+        self.assertEqual(self.panel.status_label.text(), "暂时无法调整此设备音量。")
+        self.assertFalse(any(c[0] in {"stop", "select"} for c in self.provider.calls))
+
+    def test_unknown_volume_never_exposes_editable_or_fabricated_slider(self):
+        self._open()
+        slider = self.panel._rows["homepod"].volume_slider
+        self.assertTrue(slider.isHidden())
+        self.assertFalse(slider.isEnabled())
+        self.assertFalse(any(c[0] == "volume" for c in self.provider.calls))
+
+    def test_current_homepod_volume_remains_usable_when_mdns_temporarily_disappears(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting", devices=(replace(self.provider.devices[2], volume=.4, available=False),))
         self._open()
         row = self.panel._rows["homepod"]
-        row.elapsed, row.progress = 0.25, 0.4
-        before = tuple(self.provider.calls)
-        QTest.keyClick(self.panel.advanced_button, Qt.Key.Key_Space)
-        self.assertTrue(self.panel.advanced_widget.isVisible())
-        self.assertTrue(self.panel.latency_widget.isVisible())
-        self.assertEqual(self.panel.advanced_button.nextInFocusChain(), self.panel.auto_latency_button)
-        self.assertEqual(self.panel.auto_latency_button.nextInFocusChain(), self.panel.latency_slider)
-        self.assertEqual(self.panel.latency_slider.nextInFocusChain(), self.panel.host_input)
-        self.assertEqual((row.elapsed, row.progress), (0.25, 0.4))
-        self.assertEqual(tuple(self.provider.calls), before)
-        QTest.keyClick(self.panel.advanced_button, Qt.Key.Key_Space)
-        self.assertFalse(self.panel.advanced_widget.isVisible())
-        self.assertTrue(self.panel.stop_button.isVisible())
+        self.assertTrue(row.volume_slider.isEnabled())
+        row.volume_slider.setValue(45)
+        self.assertIn(("volume", "homepod", .45), self.provider.calls)
 
-    def test_automatic_compensation_shows_estimate_and_manual_toggle_stays_on_session(self):
-        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
-                                         cast_latency_seconds=1.52, cast_latency_estimate_seconds=1.525)
+    def test_muted_source_slider_reports_muting_and_never_queues_route_actions(self):
+        self.provider.snapshot = replace(self.provider.snapshot, devices=(replace(self.provider.devices[0], volume_muted=True),))
         self._open()
-        self.panel.advanced_button.click()
-        self.assertTrue(self.panel.auto_latency_button.isChecked())
-        self.assertFalse(self.panel.latency_slider.isEnabled())
-        self.assertEqual(self.panel.latency_estimate_label.text(), "投放缓冲估计 1.52 秒")
-        self.assertFalse(any(call[0] in {"auto_latency", "latency"} for call in self.provider.calls))
-        self.panel.auto_latency_button.click()
-        self.assertIn(("auto_latency", False), self.provider.calls)
-        self.assertTrue(self.panel.latency_slider.isEnabled())
-        self.assertEqual(self.provider.snapshot.active_id, "homepod")
-        self.assertFalse(any(call[0] in {"select", "stop"} for call in self.provider.calls))
+        slider = self.panel._rows["local"].volume_slider
+        self.assertIn("已静音", slider.accessibleName())
+        slider.setValue(43)
+        self.assertIn(("volume", "local", .43), self.provider.calls)
+        self.assertFalse(any(c[0] in {"stop", "select"} for c in self.provider.calls))
+
+    def test_volume_wheel_is_ignored(self):
+        self._open()
+        slider = self.panel._rows["local"].volume_slider
+        event = SimpleNamespace(ignore=lambda: None)
+        before = tuple(self.provider.calls)
+        slider.wheelEvent(event)
+        self.assertEqual(tuple(self.provider.calls), before)
+
+    def test_small_list_opens_with_current_receiver_visible(self):
+        self.owner.resize(640, 360)
+        extra = tuple(AudioRouteDevice(f"device-{i}", f"设备 {i}") for i in range(5))
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod",
+                                         devices=extra + self.provider.devices)
+        self._open()
+        self.app.processEvents()
+        row = self.panel._rows["homepod"]
+        top = row.mapTo(self.panel.scroll.viewport(), row.rect().topLeft())
+        bottom = row.mapTo(self.panel.scroll.viewport(), row.rect().bottomLeft())
+        self.assertGreaterEqual(top.y(), 0)
+        self.assertLessEqual(bottom.y(), self.panel.scroll.viewport().height())
+
+    def test_material_capture_excludes_children_and_is_rate_limited(self):
+        self._open()
+        self.panel._appearance_elapsed = 1
+        before = tuple(self.provider.calls)
+        with patch.object(self.owner, "render", wraps=self.owner.render) as render:
+            with patch("local.audio_output_panel.time.monotonic", return_value=500):
+                self.panel._capture_material(force=True)
+                self.panel._capture_material()
+            self.assertEqual(render.call_count, 1)
+            self.assertEqual(render.call_args.args[-1], QWidget.RenderFlag.DrawWindowBackground)
+        self.assertFalse(self.panel._material.isNull())
+        self.assertLessEqual(self.panel._material.width(), self.panel.width() // 2 + 1)
+        self.assertEqual(tuple(self.provider.calls), before)
+
+    def test_material_samples_the_popup_location_and_blurs_page_content(self):
+        class Page(QWidget):
+            def paintEvent(page, event):
+                with QPainter(page) as painter:
+                    painter.fillRect(page.rect(), QColor(0, 0, 255))
+                    painter.fillRect(0, 0, 300, page.height(), QColor(255, 0, 0))
+        page = Page()
+        page.resize(600, 400)
+        page.show()
+        panel = AudioOutputPanel(self.provider, page)
+        try:
+            panel.open_at(QPoint(580, 50))
+            panel._animation_timer.stop()
+            panel._poll_timer.stop()
+            material = panel._material
+            left = material.pixelColor(8, material.height() // 2)
+            right = material.pixelColor(material.width() - 8, material.height() // 2)
+            self.assertGreater(left.red(), left.blue() + 10)
+            self.assertGreater(right.blue(), right.red() + 10)
+            # The underlying hard edge is softened before being veiled.
+            edge = round((300 - panel.x()) / 2)
+            near = material.pixelColor(edge, material.height() // 2)
+            self.assertGreater(near.blue(), left.blue())
+            self.assertGreater(near.red(), right.red())
+        finally:
+            panel.dismiss()
+            page.close()
 
     def test_cached_music_backdrop_drives_panel_tone_and_readable_neutral_ink(self):
         self._open()
@@ -230,7 +339,7 @@ class AudioOutputPanelTests(unittest.TestCase):
                 self.assertEqual(self.panel._accent, self.panel._ink)
                 self.assertEqual(self.panel._rows["local"].ink, self.panel._ink)
                 self.assertEqual(self.panel._rows["local"].label_font.families(), self.panel._label_font.families())
-        self.assertEqual(self.panel._background, QColor(255, 255, 255))
+        self.assertGreater(self.panel._background.red(), 240)
 
     def test_many_devices_scroll_without_exposing_advanced_fields_or_losing_active_row(self):
         self.owner.resize(640, 360)
@@ -239,7 +348,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self._open()
         self.app.processEvents()
         self.assertGreater(self.panel.scroll.verticalScrollBar().maximum(), 0)
-        self.assertFalse(self.panel.advanced_widget.isVisible())
+        self.assertFalse(hasattr(self.panel, "advanced_widget"))
         self.assertEqual(self.panel._rows["local"].state, "active")
         self.assertLessEqual(self.panel.y() + self.panel.height(), self.owner.height() - 12)
 
@@ -249,7 +358,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         before = (self.panel._appearance_elapsed, self.panel._rows["local"].elapsed, tuple(self.provider.calls))
         frame = QImage(self.panel.size(), QImage.Format.Format_ARGB32_Premultiplied)
         frame.fill(Qt.GlobalColor.transparent)
-        self.panel.render(frame)
+        with patch.object(self.panel, "_capture_material", side_effect=AssertionError("paint capture")):
+            self.panel.render(frame)
         self.assertEqual(before, (self.panel._appearance_elapsed, self.panel._rows["local"].elapsed, tuple(self.provider.calls)))
         self.assertFalse(frame.isNull())
 

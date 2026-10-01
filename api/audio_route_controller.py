@@ -28,8 +28,10 @@ class AudioRouteController:
         self._backend = backend
         self._discovery = discovery or AirPlayDiscovery()
         self._sender = sender or AirPlayProcess(source_id=source_id)
-        self._latency = self._normalize_latency(latency_seconds)
-        self._auto_latency = bool(auto_latency_enabled)
+        # Constructor options remain migration aliases. Compensation is now
+        # always automatic and starts from the existing protocol buffer.
+        self._latency = 1.5
+        self._auto_latency = True
         self._latency_updated_at = None
         self._lock = threading.Lock()
         self._snapshot = AudioRouteSnapshot(status_message="正在读取音频设备",
@@ -44,6 +46,7 @@ class AudioRouteController:
         self._cast_id = ""
         self._cast_source_id = ""
         self._cast_source_original_mute = None
+        self._receiver_volume_status_signature = None
         self._generation = 0
         self._worker_started_at = time.monotonic()
         self._endpoint_error = False
@@ -84,8 +87,9 @@ class AudioRouteController:
         with self._lock:
             if operation in {"select", "stop"}:
                 self._commands = deque((c for c in self._commands if c[0] not in {"select", "stop"}), maxlen=16)
-            elif operation in {"latency", "auto_latency"}:
-                self._commands = deque((c for c in self._commands if c[0] != operation), maxlen=16)
+            elif operation == "volume":
+                self._commands = deque((c for c in self._commands
+                                        if c[0] != "volume" or c[1][0] != value[0]), maxlen=16)
             elif any(c[0] == operation and c[1] == value for c in self._commands):
                 return True
             self._commands.append((operation, value))
@@ -104,10 +108,34 @@ class AudioRouteController:
         return self._enqueue("stop")
 
     def set_latency(self, value):
-        return self._enqueue("latency", self._normalize_latency(value))
+        """Deprecated manual delay control; automatic compensation owns it."""
+        return False
 
     def set_auto_latency(self, enabled):
-        return self._enqueue("auto_latency", bool(enabled))
+        return enabled is True and not self._closed.is_set()
+
+    @staticmethod
+    def _volume_scalar(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        try:
+            value = float(value)
+        except OverflowError:
+            return None
+        return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
+
+    def set_volume(self, device_id, volume):
+        value = self._volume_scalar(volume)
+        current = self.snapshot()
+        device = next((d for d in current.devices if d.id == device_id), None)
+        if value is None or device is None or device.volume is None:
+            return False
+        if device.transport == "airplay":
+            if device_id != self._cast_id or current.state not in {"waiting_audio", "casting"}:
+                return False
+        elif device.transport != "windows" or not device.available:
+            return False
+        return self._enqueue("volume", (device_id, value, self._generation))
 
     def add_homepod(self, address, port=7000):
         try:
@@ -122,7 +150,9 @@ class AudioRouteController:
     def _refresh_devices(self):
         try:
             raw = self._backend.list_outputs()
-            local = tuple(AudioRouteDevice(d.id, d.name, d.kind, "windows", d.is_bluetooth, d.is_default)
+            local = tuple(AudioRouteDevice(d.id, d.name, d.kind, "windows", d.is_bluetooth, d.is_default,
+                                           volume=self._volume_scalar(getattr(d, "volume", None)),
+                                           volume_muted=bool(getattr(d, "volume_muted", False)))
                           for d in raw)
         except Exception as exc:
             self._endpoint_error = True
@@ -163,18 +193,78 @@ class AudioRouteController:
         for identity, device in self._manual_devices.items():
             if not any(d.host == device.host for d in remote.values()):
                 remote[identity] = device
-        devices = self._local_devices + tuple(sorted(remote.values(), key=lambda d: (d.name.casefold(), d.id)))
         current = self.snapshot()
         # A receiver can disappear temporarily from mDNS while its session lives.
-        if self._cast_id and self._cast_id not in {d.id for d in devices}:
+        if self._cast_id and self._cast_id not in remote:
             active = next((d for d in current.devices if d.id == self._cast_id), None)
             if active is not None:
-                devices += (replace(active, available=False),)
+                remote[active.id] = replace(active, available=False)
+        confirmed = None
+        if self._cast_id and current.state in {"waiting_audio", "casting"}:
+            read = getattr(self._sender, "receiver_volume_state", None)
+            evidence = read() if callable(read) else {}
+            if (isinstance(evidence, dict) and evidence.get("known") is True
+                    and evidence.get("source") in {"receiver_read", "receiver_info", "receiver_ack"}):
+                confirmed = self._volume_scalar(evidence.get("volume"))
+            if isinstance(evidence, dict):
+                code, operation = evidence.get("last_code"), evidence.get("operation")
+                signature = (self._generation, evidence.get("pending"), code, operation,
+                             evidence.get("known"), confirmed)
+                changed = signature != self._receiver_volume_status_signature
+                self._receiver_volume_status_signature = signature
+            else:
+                changed, code, operation = False, None, None
+            if changed and evidence.get("pending") is False:
+                if isinstance(code, int) and not isinstance(code, bool) and (code >= 400 or code == 0):
+                    if operation == "set":
+                        reason = f"接收端返回 {code}" if code else "音量指令超时"
+                        self._publish(status_message=f"HomePod 音量调整失败：{reason}")
+                    elif operation == "read" and confirmed is None:
+                        self._publish(status_message="暂时无法读取 HomePod 音量")
+                elif code == 200 and operation == "set" and confirmed is not None:
+                    self._publish(status_message="已调整 HomePod 音量")
+        remote = {identity: replace(device,
+                    volume=confirmed if identity == self._cast_id else None,
+                    volume_muted=confirmed == 0.0 if identity == self._cast_id and confirmed is not None else False)
+                  for identity, device in remote.items()}
+        devices = self._local_devices + tuple(sorted(remote.values(), key=lambda d: (d.name.casefold(), d.id)))
         self._publish(devices=devices, discovery_state=self._discovery.state)
+
+    def _set_volume(self, identity, value, generation):
+        """Adjust the named device without routing changes or mute recovery."""
+        current = self.snapshot()
+        device = next((d for d in current.devices if d.id == identity), None)
+        try:
+            if device is None or device.volume is None:
+                raise RuntimeError("设备音量暂时不可用")
+            if device.transport == "windows":
+                if not any(d.id == identity and d.available for d in self._local_devices):
+                    raise RuntimeError("音频设备已断开")
+                self._backend.set_endpoint_volume(identity, value)
+                actual = self._volume_scalar(self._backend.get_endpoint_volume(identity))
+                if actual is None or not math.isclose(actual, value, abs_tol=0.005):
+                    raise RuntimeError("无法确认设备音量")
+                muted = bool(self._backend.get_endpoint_mute(identity))
+                self._local_devices = tuple(replace(d, volume=actual, volume_muted=muted)
+                                            if d.id == identity else d for d in self._local_devices)
+            elif (device.transport == "airplay" and identity == self._cast_id
+                    and generation == self._generation and current.state in {"waiting_audio", "casting"}):
+                if self._sender.set_volume(value) is False:
+                    raise RuntimeError("HomePod 音量指令未被接受")
+                # Sending is not receiver confirmation. A later read/200 ACK
+                # publishes the actual volume through the sender snapshot.
+            else:
+                raise RuntimeError("设备连接已改变，请重试")
+            self._publish(status_message=f"正在调整 {device.name} 音量" if device.transport == "airplay"
+                          else f"已调整 {device.name} 音量")
+        except Exception as exc:
+            # Volume errors leave a healthy cast and its owned mute intact.
+            self._publish(status_message=f"调整音量失败：{str(exc)[:180]}")
 
     def _end_cast(self):
         self._generation += 1
         self._latency_updated_at = None
+        self._receiver_volume_status_signature = None
         source_id, original_mute = self._cast_source_id, self._cast_source_original_mute
         try:
             self._sender.stop()
@@ -303,18 +393,8 @@ class AudioRouteController:
                 self._end_cast()
                 self._publish(state="ready", status_message="HomePod 投放已停止")
                 self._refresh_devices()
-            elif operation == "latency":
-                self._latency = value
-                self._auto_latency = False
-                self._publish(cast_latency_seconds=value if self.snapshot().state == "casting" else 0.0,
-                              cast_latency_auto=False)
-            elif operation == "auto_latency":
-                self._auto_latency = value
-                self._publish(cast_latency_auto=value)
-                if not value and self.snapshot().state == "casting":
-                    # Preserve the currently audible calibration when the
-                    # user turns automation off, then allow slider edits.
-                    self._latency = self.snapshot().cast_latency_seconds
+            elif operation == "volume":
+                self._set_volume(*value)
             elif operation == "manual":
                 host, port = value
                 identity = "airplay:manual:" + host

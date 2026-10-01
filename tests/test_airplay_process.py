@@ -289,6 +289,86 @@ class AirPlayProcessTests(unittest.TestCase):
         self.sender.stop()
         self.assertIsNone(self.sender.latency_estimate())
 
+    def _publish_volume(self, **updates):
+        state = {"volume": 0.3, "known": True, "source": "receiver_read",
+                 "pending": False, "last_code": 200}
+        state.update(updates)
+        self.sender._remember_native_event(self.sender._mute_state,
+            {"event": "receiver_volume", "receiver_volume": state})
+
+    def test_receiver_volume_is_unknown_until_connected_actual_read_and_send_does_not_confirm(self):
+        self.assertIsNone(self.sender.receiver_volume())
+        self.assertFalse(self.sender.set_volume(0.5))
+        self.sender.start(HOME, "endpoint")
+        self._wait_events()
+        self.assertIsNone(self.sender.receiver_volume())
+        self._publish_volume()
+        self.assertAlmostEqual(self.sender.receiver_volume(), 0.3)
+        self.assertTrue(self.sender.set_volume(0.7))
+        self.assertAlmostEqual(self.sender.receiver_volume(), 0.3)
+        self._publish_volume(volume=0.7, source="receiver_ack", pending=False)
+        self.assertAlmostEqual(self.sender.receiver_volume(), 0.7)
+        view = self.sender.receiver_volume_state()
+        view["volume"] = 1
+        self.assertAlmostEqual(self.sender.receiver_volume(), 0.7)
+        self.sender._remember_native_event(self.sender._mute_state, {"event": "error", "message": "lost"})
+        self.assertFalse(self.sender.set_volume(0.8))
+        self.assertIsNone(self.sender.receiver_volume())
+
+    def test_receiver_volume_rejects_malformed_state_and_slider_commands(self):
+        self.sender.start(HOME, "endpoint")
+        self._wait_events()
+        for value in (-0.01, 1.01, True, "0.5", None, float("nan"), float("inf"), 10 ** 400):
+            with self.subTest(value=value):
+                self.assertFalse(self.sender.set_volume(value))
+                self._publish_volume(volume=value)
+                self.assertIsNone(self.sender.receiver_volume())
+        self._publish_volume(known=False, volume=0.5)
+        self.assertIsNone(self.sender.receiver_volume())
+        self._publish_volume(source="sent", volume=0.5)
+        self.assertIsNone(self.sender.receiver_volume())
+        self._publish_volume(volume=0, source="receiver_ack")
+        self.assertEqual(self.sender.receiver_volume(), 0)
+        self._publish_volume(known=False, volume=None, source="unknown", last_code=501)
+        self.assertEqual(self.sender.receiver_volume_state()["last_code"], 501)
+        self.assertIsNone(self.sender.receiver_volume())
+
+    def test_receiver_volume_resets_on_stop_and_fences_previous_helper_events(self):
+        self.sender.start(HOME, "endpoint")
+        self._wait_events()
+        self._publish_volume(volume=0.9)
+        old_state = self.sender._mute_state
+        self.sender.stop()
+        self.assertIsNone(self.sender.receiver_volume())
+        self.assertFalse(self.sender.set_volume(1))
+        self.sender.start(HOME, "another")
+        self._wait_events()
+        self.sender._remember_native_event(old_state,
+            {"event": "receiver_volume", "receiver_volume": {"volume": 0.9, "known": True, "source": "receiver_ack"}})
+        self.assertIsNone(self.sender.receiver_volume())
+        self.sender._remember_native_event(self.sender._mute_state,
+            {"event": "stats", "receiver_volume": {"volume": 0.2, "known": True,
+             "source": "receiver_info", "pending": False, "last_code": 0}})
+        self.assertAlmostEqual(self.sender.receiver_volume(), 0.2)
+
+    def test_real_child_receives_normalized_json_and_publishes_receiver_ack(self):
+        self.script.write_text(
+            "import sys,json\n"
+            "print(json.dumps({'event':'waiting_audio'}),flush=True)\n"
+            "for line in sys.stdin:\n"
+            " if line.strip()=='stop': break\n"
+            " command=json.loads(line)\n"
+            " if command['command']=='set_volume':\n"
+            "  print(json.dumps({'event':'receiver_volume','receiver_volume':{'volume':command['volume'],'known':True,'source':'receiver_ack','pending':False,'last_code':200}}),flush=True)\n",
+            encoding="utf-8")
+        self.sender.start(HOME, "endpoint")
+        self._wait_events()
+        self.assertTrue(self.sender.set_volume(0.65))
+        event = self._wait_events()[-1]
+        self.assertEqual(event["event"], "receiver_volume")
+        self.assertEqual(event["receiver_volume"]["volume"], 0.65)
+        self.assertEqual(self.sender.receiver_volume_state()["source"], "receiver_ack")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -362,6 +364,7 @@ void RaopSender::stopTimers_() {
 }
 
 void RaopSender::tick() {
+    checkVolumeTimeout_();
     const Clock::time_point now = now_();
     auto due = [&](Timer_& t) {
         if (!t.active || t.due > now) return false;
@@ -431,6 +434,7 @@ void RaopSender::onFeedbackTimer_() {
         req += "Client-Instance: " + dacpId_ + "\r\n";
         req += "Content-Length: 0\r\n\r\n";
         pendingMethods_.push_back("FEEDBACK");
+        pendingCseqs_.push_back(cseq_ - 1);
         pendingIsHttp_.push_back(false);   // ignored by handleResponse_
         writeRtsp_(req);
         ++diagnostics_.feedbackSent;
@@ -469,6 +473,7 @@ void RaopSender::start(const std::string& host, uint16_t port, const std::string
     eventEncBuf_.clear();
     eventPlainBuf_.clear();
     pendingMethods_.clear();
+    pendingCseqs_.clear();
     rtspSession_.clear();
     serverPort_ = controlPort_ = timingPort_ = 0;
     framesSent_ = 0;
@@ -478,6 +483,9 @@ void RaopSender::start(const std::string& host, uint16_t port, const std::string
     inReadFrames_ = 0;
     backlogSeq_.assign(kBacklogSize, -1);
     pendingVolumeDb_ = kNoVolume;   // never carry volume between devices
+    volumeWriteQueued_ = false;
+    volumeRequestCseq_ = -1;
+    volumeWireDb_ = kNoVolume;
 
     // v0.66.x Phase 2/3, reset auth/AP2 state for the new session.
     ap2_.reset();
@@ -650,6 +658,7 @@ RaopDiagnostics RaopSender::diagnostics() const {
 }
 
 void RaopSender::setVolume(double pct) {
+    if (!std::isfinite(pct)) return;
     pct = std::clamp(pct, 0.0, 100.0);
     // pyatv pct_to_dbfs: 0 % is the AirPlay mute sentinel -144, the
     // rest maps linearly onto the -30..0 dBFS attenuation range. Written
@@ -659,13 +668,81 @@ void RaopSender::setVolume(double pct) {
     // 100 % and the wire text becomes "-0.000000".
     const double dbfs = (pct < 0.01) ? -144.0 : ((pct * 3.0 - 300.0) / 10.0);
     pendingVolumeDb_ = dbfs;
+    volumeWriteQueued_ = true;
     if (state_ == State::Streaming) {
-        const std::string body = "volume: " + fixed6(dbfs);
-        Extra vh;
-        if (!rtspSession_.empty())
-            vh.push_back({"Session", rtspSession_});
-        sendRequest_("SET_PARAMETER", rtspUri_(), "text/parameters", body, vh);
+        sendVolumeRequest_();
     }
+}
+
+void RaopSender::sendVolumeRequest_() {
+    if (state_ != State::Streaming || volumeRequestCseq_ >= 0 || !volumeWriteQueued_) return;
+    const auto wireText = fixed6(pendingVolumeDb_);
+    // The acknowledged value is the six-decimal dB level actually on the wire.
+    std::from_chars(wireText.data(), wireText.data() + wireText.size(), volumeWireDb_);
+    volumeWriteQueued_ = false;
+    Extra vh;
+    if (!rtspSession_.empty()) vh.push_back({"Session", rtspSession_});
+    volumeRequestCseq_ = cseq_;
+    volumeDeadline_ = now_() + std::chrono::seconds(3);
+    diagnostics_.receiverVolumePending = true;
+    diagnostics_.receiverVolumeOperation = "set";
+    ++diagnostics_.receiverVolumeRevision;
+    sendRequest_("SET_PARAMETER", rtspUri_(), "text/parameters",
+                 "volume: " + wireText, vh);
+    pendingMethods_.back() = "VOLUME_SET";
+}
+
+bool RaopSender::requestReceiverVolume() {
+    if (state_ != State::Streaming || volumeRequestCseq_ >= 0 || volumeWriteQueued_) return false;
+    Extra vh;
+    if (!rtspSession_.empty()) vh.push_back({"Session", rtspSession_});
+    volumeRequestCseq_ = cseq_;
+    volumeDeadline_ = now_() + std::chrono::seconds(3);
+    diagnostics_.receiverVolumePending = true;
+    diagnostics_.receiverVolumeOperation = "read";
+    ++diagnostics_.receiverVolumeRevision;
+    sendRequest_("GET_PARAMETER", rtspUri_(), "text/parameters", "volume\r\n", vh);
+    pendingMethods_.back() = "VOLUME_GET";
+    return true;
+}
+
+void RaopSender::clearReceiverVolume_() {
+    diagnostics_.receiverVolumeKnown = false;
+    diagnostics_.receiverVolumeSource = "unknown";
+    ++diagnostics_.receiverVolumeRevision;
+}
+
+void RaopSender::updateReceiverVolume_(double db, const std::string& source) {
+    // Existing pyatv-compatible mapping: -144 is muted; -30..0 dB is 0..100%.
+    if (!std::isfinite(db) || (db != -144.0 && (db < -30.0 || db > 0.0))) {
+        clearReceiverVolume_();
+        return;
+    }
+    diagnostics_.receiverVolumePct = db == -144.0 ? 0.0 : (db + 30.0) / 0.3;
+    diagnostics_.receiverVolumeKnown = true;
+    diagnostics_.receiverVolumeSource = source;
+    ++diagnostics_.receiverVolumeRevision;
+}
+
+void RaopSender::checkVolumeTimeout_() {
+    if (state_ != State::Streaming || volumeRequestCseq_ < 0 || now_() < volumeDeadline_) return;
+    const auto seq = std::find(pendingCseqs_.begin(), pendingCseqs_.end(), volumeRequestCseq_);
+    if (seq != pendingCseqs_.end()) {
+        const auto index = seq - pendingCseqs_.begin();
+        pendingMethods_.erase(pendingMethods_.begin() + index);
+        pendingIsHttp_.erase(pendingIsHttp_.begin() + index);
+        pendingCseqs_.erase(seq);
+    }
+    volumeRequestCseq_ = -1;
+    diagnostics_.receiverVolumePending = false;
+    diagnostics_.lastVolumeCode = 0;  // No response, not a fabricated HTTP status.
+    // An unacknowledged write must not replace (or erase) the last confirmed
+    // level. Retaining it also leaves explicit retry available to the UI.
+    if (diagnostics_.receiverVolumeOperation == "set")
+        ++diagnostics_.receiverVolumeRevision;
+    else
+        clearReceiverVolume_();
+    sendVolumeRequest_();  // At most the latest explicit write survives a timeout.
 }
 
 void RaopSender::submitPin(const std::string& code) {
@@ -771,6 +848,7 @@ void RaopSender::sendRequest_(const std::string& method, const std::string& uri,
     req += "\r\n";
     req += body;
     pendingMethods_.push_back(method);
+    pendingCseqs_.push_back(cseq_ - 1);
     pendingIsHttp_.push_back(false);       // RTSP reply
     // Remember the last handshake request so a 401 can re-issue it with auth.
     pendingDigestMethod_ = method;
@@ -850,7 +928,7 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
         const size_t headEnd = eventPlainBuf_.find("\r\n\r\n");
         if (headEnd == std::string::npos) break;
         int contentLen = 0;
-        std::string cseq;
+        std::string cseq, contentType;
         for (const std::string& line : splitOn(eventPlainBuf_.substr(0, headEnd), '\n')) {
             const std::string t = trimAscii(line);
             const size_t colon = t.find(':');
@@ -859,9 +937,30 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
             const std::string v = trimAscii(t.substr(colon + 1));
             if (k == "content-length") contentLen = toInt(v);
             else if (k == "cseq")      cseq = v;
+            else if (k == "content-type") contentType = lowerAscii(v);
         }
         const size_t total = headEnd + 4 + size_t(contentLen > 0 ? contentLen : 0);
         if (eventPlainBuf_.size() < total) break;   // body still arriving
+        // The authenticated receiver may publish its current level in a real
+        // updateInfo event. Keep the existing minimal acknowledgement intact.
+        if (contentLen > 0 && contentLen <= 65536 &&
+            contentType == "application/x-apple-binary-plist" &&
+            eventPlainBuf_.starts_with("POST /command ")) {
+            const auto event = airplay::bplist::decode(toBytes(eventPlainBuf_.substr(headEnd + 4, size_t(contentLen))));
+            if (event) {
+                const auto* type = event->find("type");
+                const auto* value = event->find("value");
+                const auto* volume = value ? value->find("initialVolume") : nullptr;
+                if (type && type->asStr() == "updateInfo" && volume) {
+                    if (volume->type == airplay::bplist::Value::Type::Real)
+                        updateReceiverVolume_(volume->r, "receiver_info");
+                    else if (volume->type == airplay::bplist::Value::Type::Int)
+                        updateReceiverVolume_(double(volume->i), "receiver_info");
+                    if (volumeRequestCseq_ < 0 && diagnostics_.receiverVolumeKnown)
+                        diagnostics_.receiverVolumeOperation = "info";
+                }
+            }
+        }
         eventPlainBuf_.erase(0, total);
         ++diagnostics_.eventRequests;
         // Encrypted 200 OK, owntone's respond() sends a BARE 200 (just Server),
@@ -967,23 +1066,72 @@ void RaopSender::onRtspReadyRead_(std::span<const uint8_t> bytes) {
             warn_("Cast: RAOP unexpected response (code {})", code);
             continue;
         }
-        const std::string method = pendingMethods_.front();
-        pendingMethods_.pop_front();
-        bool replyIsHttp = false;
-        if (!pendingIsHttp_.empty()) { replyIsHttp = pendingIsHttp_.front(); pendingIsHttp_.pop_front(); }
+        bool seqOk = false;
+        const int seq = toInt(headerValue(headers, "cseq"), seqOk);
+        size_t index = 0;
+        if (seqOk) {
+            const auto match = std::find(pendingCseqs_.begin(), pendingCseqs_.end(), seq);
+            if (match == pendingCseqs_.end()) {
+                warn_("Cast: ignoring unmatched RTSP response CSeq {}", seq);
+                continue;
+            }
+            index = size_t(match - pendingCseqs_.begin());
+        } else if (pendingMethods_.front() == "VOLUME_SET" || pendingMethods_.front() == "VOLUME_GET") {
+            // A bare 200 cannot confirm a receiver volume command.
+            continue;
+        }
+        const std::string method = pendingMethods_[index];
+        const bool replyIsHttp = pendingIsHttp_[index];
+        pendingMethods_.erase(pendingMethods_.begin() + index);
+        pendingIsHttp_.erase(pendingIsHttp_.begin() + index);
+        pendingCseqs_.erase(pendingCseqs_.begin() + index);
 
         // v0.66.x Phase 2/3, route HTTP-mode replies (pairing / AP2
         // plists) to the pairing dispatcher; everything else is RTSP.
         if (replyIsHttp) {
             onPairingResponse_(code, headers, body);
         } else {
-            handleResponse_(method, code, headers);
+            handleResponse_(method, code, headers, body);
         }
         if (state_ == State::Idle) return;   // fail_ during dispatch
     }
 }
 
-void RaopSender::handleResponse_(const std::string& method, int code, const Headers& headers) {
+void RaopSender::handleResponse_(const std::string& method, int code, const Headers& headers,
+                                 const std::string& body) {
+    if (method == "VOLUME_SET" || method == "VOLUME_GET") {
+        volumeRequestCseq_ = -1;
+        diagnostics_.receiverVolumePending = false;
+        diagnostics_.lastVolumeCode = code;
+        ++diagnostics_.receiverVolumeRevision;
+        if (method == "VOLUME_SET") {
+            if (code == 200) updateReceiverVolume_(volumeWireDb_, "receiver_ack");
+            // A rejection retains the last actual read/ack, never the requested value.
+        } else {
+            bool found = false;
+            if (code == 200 && body.size() <= 1024) {
+                for (const auto& raw : splitOn(body, '\n')) {
+                    const auto line = trimAscii(raw);
+                    const auto colon = line.find(':');
+                    if (colon == std::string::npos || lowerAscii(trimAscii(line.substr(0, colon))) != "volume") continue;
+                    const auto text = trimAscii(line.substr(colon + 1));
+                    double db = 0;
+                    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), db);
+                    if (parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size()) {
+                        updateReceiverVolume_(db, "receiver_read");
+                        found = true;
+                    }
+                    break;
+                }
+            }
+            // A receiver may provide actual levels through /info or updateInfo
+            // but reject GET_PARAMETER. Keep that genuine evidence; malformed
+            // successful reads and absent evidence still stay explicitly unknown.
+            if (!found && (code == 200 || !diagnostics_.receiverVolumeKnown)) clearReceiverVolume_();
+        }
+        sendVolumeRequest_();
+        return;
+    }
     // Streaming-time auxiliaries first, failures are non-fatal there.
     if (method == "SET_PARAMETER") {
         if (code != 200)
@@ -1185,11 +1333,8 @@ void RaopSender::startStreaming_() {
     if (airplay2_ && !preserveReceiverVolume_ && pendingVolumeDb_ <= kNoVolume + 1.0)
         pendingVolumeDb_ = 0.0;
     if (pendingVolumeDb_ > kNoVolume + 1.0) {
-        const std::string body = "volume: " + fixed6(pendingVolumeDb_);
-        Extra vh;
-        if (!rtspSession_.empty())
-            vh.push_back({"Session", rtspSession_});
-        sendRequest_("SET_PARAMETER", rtspUri_(), "text/parameters", body, vh);
+        volumeWriteQueued_ = true;
+        sendVolumeRequest_();
     }
     arm_(pacer_);   // audio RTP loop starts LAST (after RECORD/FLUSH/volume)
     if (airplay2_) {
@@ -1242,6 +1387,7 @@ void RaopSender::httpPost_(const std::string& uri, const std::string& contentTyp
     req += "\r\n";
     req += body;
     pendingMethods_.push_back("POST");
+    pendingCseqs_.push_back(cseq_ - 1);
     pendingIsHttp_.push_back(true);
     writeRtsp_(req);
     if (!waitingForPin_) arm_(timeout_);
@@ -1435,6 +1581,17 @@ void RaopSender::onPairingResponse_(int code, const Headers& headers, const std:
         // GET /info acknowledged (device-capability plist; we don't need its
         // contents for realtime audio), proceed to the session SETUP.
         info_("Cast: AirPlay 2 GET /info ok, starting SETUP");
+        if (body.size() <= 65536) {
+            const auto info = airplay::bplist::decode(toBytes(body));
+            if (info) {
+                const auto* volume = info->find("initialVolume");
+                if (volume && volume->type == airplay::bplist::Value::Type::Real)
+                    updateReceiverVolume_(volume->r, "receiver_info");
+                else if (volume && volume->type == airplay::bplist::Value::Type::Int)
+                    updateReceiverVolume_(double(volume->i), "receiver_info");
+                if (diagnostics_.receiverVolumeKnown) diagnostics_.receiverVolumeOperation = "info";
+            }
+        }
         sendAp2SetupSession_();
         break;
     case PairStage::Ap2Session: handleAp2SetupSession_(body); break;
@@ -1811,6 +1968,7 @@ void RaopSender::sendAp2Rtsp_(const std::string& method, const std::string& uri,
     req += "\r\n";
     req += body;
     pendingMethods_.push_back(method);
+    pendingCseqs_.push_back(cseq_ - 1);
     pendingIsHttp_.push_back(true);   // reply has a plist body -> pairing dispatcher
     writeRtsp_(req);
     arm_(timeout_);

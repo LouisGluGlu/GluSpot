@@ -41,14 +41,31 @@ implement HomePod multiroom groups or synchronized Bluetooth/AirPlay fanout.
   capturing a different output. Retrying is explicit in the chooser.
 - **停止投放** and application exit stop/reap the owned helper. No auto-cast
   occurs at startup. Only the UI initiates audio capture/casting.
-- During a cast, **歌词延后** adjusts the displayed lyric clock by 0–5 seconds
-  (initial value 1.5 seconds), without rewriting the player's position or
-  applying the cast delay to lyric Seek commands. This is an adjustable buffer
-  estimate, not an acoustic latency measurement.
-- The compact menu uses the music page's cached background and font, neutral
-  device rows and existing control treatment. **更多选项** folds manual IP,
-  lyric delay and the explanatory hint. At 640 × 360 the main casting controls
-  remain visible; expanded options scroll, with keyboard access retained.
+- During a cast, display compensation is fully automatic, starting from the
+  existing 1.5-second protocol buffer and following valid sender-buffer evidence
+  with a bounded slew. Previous manual-delay/automation settings are ignored;
+  the old compatibility setters cannot disable automation or save a new delay.
+  Compensation never rewrites player position or lyric Seek targets and is not
+  measured acoustic latency. No per-song reconnection or microphone is used.
+- The chooser removes **更多选项**, the delay slider and automation switch.
+  Manual IPv4 discovery remains behind a small **＋** dialog. Four circular
+  controls match the user's reference; the linked-ring SVG replaces the former
+  output symbol. Supplied SVGs distinguish explicit HomePod, HomePod mini,
+  AirPods Pro and speaker kinds; an unknown receiver is not called a HomePod.
+- Each connected/controllable device exposes a slim volume slider in its row.
+  Windows uses CoreAudio master scalar, set and readback; it does not unmute a
+  suppressed cast source. Only the current authenticated receiver's actual
+  `/info`/`updateInfo`, volume read or matching command acknowledgement supplies
+  HomePod volume. Unknown is unavailable, with no fabricated default. Dragging
+  never selects a route. Commands coalesce to the latest value per device,
+  old-session commands are fenced, and failures retain the cast and local mute.
+- Selected rows use a pale capsule with dark text, and an active AirPlay row
+  shows its automatic compensation beside the volume bar. The popup blurs a
+  half-size crop of the current music page with album tint and a neutral veil;
+  capture omits child widgets to prevent recursive panel images. Material is
+  cached, built outside paint, and refreshed at most once per second while
+  visible. Hidden panels stop their timers. A long list scrolls at 640 × 360
+  and opens with the active/pending device visible; keyboard navigation remains.
 
 ## Architecture and references
 
@@ -88,7 +105,7 @@ The explicit package acceptance command runs before normal GUI/single-instance
 startup and writes only the requested JSON report:
 
 ```powershell
-.\release\GluSpot-6.404\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
+.\release\GluSpot-6.405\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
 ```
 
 It imports packaged dependencies, checks application module availability,
@@ -164,7 +181,7 @@ the same LAN. PIN/password receivers are outside this transient-authentication
 path. CI tests and a `streaming` event alone are not audible-playback evidence.
 
 
-## 6.404 follow-up: lyric discontinuities and compensation
+## 6.404 follow-up: lyric discontinuities and compensation (historical behavior)
 
 The source position, original observation time/value and display offset are
 separate. Projection preserves both observation fields. A new event stamp with
@@ -213,3 +230,22 @@ The helper SHA-256 is
 Detailed local evidence is in ignored `logs/lyric-delay-6.404-final-full-tests.log`,
 `logs/build-6.404.log`, `logs/audio-package-6.404-check.json` and
 `logs/audio-package-6.404-artifact-proof.json`.
+
+## 6.405 follow-up: automatic compensation, frosted chooser and actual volume
+
+The current behavior above supersedes 6.404's manual slider and automation
+migration rules. Source-clock continuity and the validated fixed RTP buffer
+remain in place. The UI never treats a queued receiver command as confirmation;
+a short pending slider pose yields to actual readback on confirmation or timeout.
+HomePod reads are bounded, run every five seconds, and preserve actual receiver
+information when a read is unsupported. Matching CSeq 200 confirms writes;
+rejections and timeouts retain the prior volume. The fake receiver's old CSeq
+counter was corrected to echo requests, so delayed replies cannot acknowledge a
+newer transaction. See native README and vendored provenance for exact contracts.
+
+New volume read/write handling has not yet been exercised on physical HomePod
+hardware. The earlier 90-second 6.403 listening pass does not validate this new
+control path or new multi-song lyric alignment. The supplied dual-HomePod fourth
+level reference is a future UI direction, not implemented multiroom/fanout.
+Native Qt screenshots use explicit fixture devices/volumes. Final 6.405
+verification and package evidence are recorded in the canonical README.

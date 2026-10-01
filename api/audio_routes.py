@@ -20,6 +20,10 @@ class AudioRouteDevice:
     host: str = ""
     port: int = 7000
     device_id: str = ""
+    # Actual endpoint scalar or confirmed current receiver volume. None means
+    # this device has no usable volume evidence/control in the current session.
+    volume: float | None = None
+    volume_muted: bool = False
 
 
 @dataclass(frozen=True)

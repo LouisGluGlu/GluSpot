@@ -73,7 +73,8 @@ from local.music_surface_palette import (
     background_role_color,
     future_lyric_color as select_future_lyric_color,
 )
-from local.audio_output_panel import AudioOutputPanel, paint_audio_output_icon
+from local.audio_output_panel import AudioOutputPanel
+from local.audio_output_icons import paint_audio_output_icon
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -7243,7 +7244,7 @@ class MusicSurfaceWindow(QWidget):
 
     def _window_control_base_rect(self, rect: QRectF) -> QRectF:
         scale = self._surface_scale(rect)
-        width, height, top = 68.0 * scale, 34.0 * scale, 18.0 * scale
+        width, height, top = 44.0 * scale, 44.0 * scale, 18.0 * scale
         return QRectF(rect.right() - 22.0 * scale - width, top, width, height)
 
     @staticmethod
@@ -7470,6 +7471,35 @@ class MusicSurfaceWindow(QWidget):
         if self._hovered_window_button not in self._button_rects:
             self._hovered_window_button = ""
 
+    def _translation_symbol_path(self, rect: QRectF) -> QPainterPath:
+        """The compact 文/A symbol also supplies the active face's cutout."""
+        scale = rect.width() / 24.0
+        path = QPainterPath()
+        path.addText(QPointF(0.0, 17.0 * scale),
+                     self._surface_font(19.0 * scale, QFont.Weight.Bold), "文")
+        path.addText(QPointF(16.0 * scale, 26.0 * scale),
+                     self._surface_font(13.0 * scale, QFont.Weight.Bold), "A")
+        return path.translated(rect.center() - path.boundingRect().center())
+
+    @staticmethod
+    def _paint_window_mode_icon(painter: QPainter, rect: QRectF, fullscreen: bool, color: QColor):
+        """Show the existing destination: a music window, or the island."""
+        painter.save()
+        painter.translate(rect.topLeft())
+        painter.scale(rect.width() / 24.0, rect.height() / 24.0)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(color, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                            Qt.PenJoinStyle.RoundJoin))
+        if fullscreen:
+            painter.drawRoundedRect(QRectF(5.5, 3.5, 16.5, 13.5), 2.0, 2.0)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(QRectF(1.0, 13.0, 15.5, 6.5), 3.25, 3.25)
+        else:
+            painter.setPen(QPen(color, 2.8))
+            painter.drawRoundedRect(QRectF(2.0, 8.0, 20.0, 9.0), 4.5, 4.5)
+        painter.restore()
+
     def _paint_window_controls(self, painter: QPainter, rect: QRectF, *, paint_ink: bool = True):
         self._sync_window_control_rects(rect)
         if not paint_ink:
@@ -7490,6 +7520,7 @@ class MusicSurfaceWindow(QWidget):
         audio_button = self._audio_output_button_rect(button, scale)
         audio_hovered = self._hovered_window_button == "audio_output"
         audio_pressed = self._pressed_window_button == "audio_output"
+        audio_active = self._audio_output_panel is not None and self._audio_output_panel.isVisible()
         if audio_available:
             bounds = bounds.united(audio_button)
         translated = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
@@ -7501,55 +7532,67 @@ class MusicSurfaceWindow(QWidget):
 
         def draw(layer: QPainter, *, hovered_state: bool = hovered, pressed_state: bool = pressed):
             layer.save()
-            layer.setFont(self._surface_font(13.0 * scale, QFont.Weight.Medium))
+            def face(target: QRectF, is_hovered: bool = False, is_pressed: bool = False,
+                     active: bool = False):
+                border = QColor(168, 170, 172, 245) if active else QColor(75, 76, 77, 240)
+                fill = QColor(248, 249, 250, 245) if active else QColor(
+                    47 if is_pressed else (67 if is_hovered else 55),
+                    48 if is_pressed else (68 if is_hovered else 56),
+                    49 if is_pressed else (69 if is_hovered else 57), 236)
+                layer.setPen(QPen(border, max(1.0, 1.4 * scale)))
+                layer.setBrush(fill)
+                layer.drawEllipse(target)
+
+            def icon_rect(target: QRectF, fraction: float = 0.55):
+                side = target.width() * fraction
+                return QRectF(target.center().x() - side / 2.0,
+                              target.center().y() - side / 2.0, side, side)
+
+            ink = QColor(255, 255, 255, 242)
             if audio_available:
-                layer.setPen(QPen(QColor(255, 255, 255, 82 if audio_hovered else 48), max(1.0, scale)))
-                layer.setBrush(QColor(7, 9, 13, 116 if audio_pressed else (92 if audio_hovered else 72)))
-                layer.drawRoundedRect(audio_button, audio_button.height() / 2.0, audio_button.height() / 2.0)
-                paint_audio_output_icon(layer, QRectF(audio_button.left() + 9.0 * scale, audio_button.top() + 8.0 * scale, 18.0 * scale, 18.0 * scale), "output", QColor(255, 255, 255, 228 if audio_hovered else 205))
-                layer.setPen(QColor(255, 255, 255, 228 if audio_hovered else 205))
-                layer.drawText(audio_button.adjusted(27.0 * scale, 0.0, -4.0 * scale, 0.0), Qt.AlignmentFlag.AlignCenter, "输出")
+                face(audio_button, audio_hovered, audio_pressed, audio_active)
+                paint_audio_output_icon(layer, icon_rect(audio_button), "output",
+                                        QColor(80, 151, 220) if audio_active else ink)
+            translation_symbol = self._translation_symbol_path(icon_rect(translation, 0.58))
             if translated:
-                # One vector path with a text-shaped hole keeps the letters
-                # genuinely transparent over the live album background.
+                # The vector symbol is removed from the face, so its ink is
+                # the live album background through a genuine transparent hole.
                 path = QPainterPath()
                 path.setFillRule(Qt.FillRule.OddEvenFill)
-                path.addRoundedRect(translation, translation.height() / 2.0, translation.height() / 2.0)
-                metrics = QFontMetricsF(layer.font())
-                x = translation.center().x() - metrics.horizontalAdvance("翻译") / 2.0
-                y = translation.center().y() + (metrics.ascent() - metrics.descent()) / 2.0
-                path.addText(QPointF(x, y), layer.font(), "翻译")
-                # Qt addText switches the path back to WindingFill.
+                path.addEllipse(translation)
+                path.addPath(translation_symbol)
                 path.setFillRule(Qt.FillRule.OddEvenFill)
                 layer.setPen(Qt.PenStyle.NoPen)
-                layer.setBrush(QColor(255, 255, 255, 210 if translation_pressed else (230 if translation_hovered else 218)))
+                layer.setBrush(QColor(248, 249, 250, 245))
                 layer.drawPath(path)
+                layer.setPen(QPen(QColor(168, 170, 172, 245), max(1.0, 1.4 * scale)))
+                layer.setBrush(Qt.BrushStyle.NoBrush)
+                layer.drawEllipse(translation)
             else:
-                layer.setPen(QPen(QColor(255, 255, 255, 82 if translation_hovered else 48), max(1.0, scale)))
-                layer.setBrush(QColor(7, 9, 13, 116 if translation_pressed else (92 if translation_hovered else 72)))
-                layer.drawRoundedRect(translation, translation.height() / 2.0, translation.height() / 2.0)
-                layer.setPen(QColor(255, 255, 255, 228 if translation_hovered else 205))
-                layer.drawText(translation, Qt.AlignmentFlag.AlignCenter, "翻译")
+                face(translation, translation_hovered, translation_pressed)
+                layer.setPen(Qt.PenStyle.NoPen)
+                layer.setBrush(ink)
+                layer.drawPath(translation_symbol)
             if show_obo:
-                layer.setPen(QPen(QColor(255, 255, 255, 82 if obo_active else 40), max(1.0, scale)))
-                layer.setBrush(QColor(7, 9, 13, 160 if obo_active else 96))
-                layer.drawRoundedRect(obo, obo.height() / 2.0, obo.height() / 2.0)
-                layer.setFont(self._surface_font(14.0 * scale, QFont.Weight.Bold))
+                beta = QPainterPath()
+                beta.addText(QPointF(), self._surface_font(28.0 * scale, QFont.Weight.Bold), "β")
+                beta = beta.translated(obo.center() - beta.boundingRect().center())
                 if obo_active:
                     gold = QLinearGradient(obo.topLeft(), obo.bottomRight())
-                    gold.setColorAt(0.0, QColor(255, 247, 176))
-                    gold.setColorAt(0.48, QColor(241, 207, 76))
-                    gold.setColorAt(1.0, QColor(191, 137, 19))
-                    layer.setPen(QPen(gold, 1.0))
+                    gold.setColorAt(0.0, QColor(255, 239, 42))
+                    gold.setColorAt(0.48, QColor(244, 211, 18))
+                    gold.setColorAt(1.0, QColor(190, 135, 10))
+                    layer.setPen(QPen(gold, max(1.0, 1.5 * scale)))
+                    layer.setBrush(QColor(0, 0, 0, 110))
+                    layer.drawEllipse(obo)
+                    layer.setBrush(gold)
                 else:
-                    layer.setPen(QColor(235, 237, 240, 202))
-                layer.drawText(obo, Qt.AlignmentFlag.AlignCenter, "OBO")
-            layer.setPen(QPen(QColor(255, 255, 255, 82 if hovered_state else 48), max(1.0, scale)))
-            layer.setBrush(QColor(7, 9, 13, 116 if pressed_state else (92 if hovered_state else 72)))
-            layer.drawRoundedRect(button, button.height() / 2.0, button.height() / 2.0)
-            layer.setPen(QColor(255, 255, 255, 228 if hovered_state else 205))
-            layer.setFont(self._surface_font(13.0 * scale, QFont.Weight.Medium))
-            layer.drawText(button, Qt.AlignmentFlag.AlignCenter, "退出" if key == "return" else "窗口")
+                    face(obo)
+                    layer.setBrush(ink)
+                layer.setPen(Qt.PenStyle.NoPen)
+                layer.drawPath(beta)
+            face(button, hovered_state, pressed_state)
+            self._paint_window_mode_icon(layer, icon_rect(button, 0.60), self._fullscreen, ink)
             layer.restore()
 
         def draw_default(layer: QPainter):
@@ -7558,9 +7601,9 @@ class MusicSurfaceWindow(QWidget):
         self._paint_control_layer(
             painter, bounds, reveal, self._window_control_shift(button, reveal),
             ("window", key, round(scale, 3), show_obo, obo_active, translated,
-             translation_hovered, translation_pressed, hovered, pressed, audio_available, audio_hovered, audio_pressed), draw,
+             translation_hovered, translation_pressed, hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active), draw,
             prewarm_default=(("window", key, round(scale, 3), show_obo, obo_active, translated,
-                              translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed), draw_default),
+                               translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed, audio_active), draw_default),
         )
 
     @staticmethod

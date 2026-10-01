@@ -4930,19 +4930,19 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             )
             self.assertGreater(ink, 60)
 
-    def test_top_right_control_is_one_restrained_mutually_exclusive_pill(self):
+    def test_top_right_mode_control_is_one_circle_with_existing_exclusive_action(self):
         self.window.resize(1190, 666)
         self.window._fullscreen = False
         self.window._sync_window_control_rects()
         self.assertEqual(set(self.window._button_rects), {"return", "translation"})
         windowed_rect = self.window._button_rects["return"]
-        self.assertEqual((windowed_rect.width(), windowed_rect.height()), (68.0, 34.0))
+        self.assertEqual((windowed_rect.width(), windowed_rect.height()), (44.0, 44.0))
 
         self.window.resize(595, 333)
         self.window._sync_window_control_rects()
         half_rect = self.window._button_rects["return"]
-        self.assertAlmostEqual(half_rect.width(), 34.0)
-        self.assertAlmostEqual(half_rect.height(), 17.0)
+        self.assertAlmostEqual(half_rect.width(), 22.0)
+        self.assertAlmostEqual(half_rect.height(), 22.0)
 
         self.window._fullscreen = True
         self.window._sync_window_control_rects()

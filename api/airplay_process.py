@@ -34,12 +34,15 @@ class AirPlayProcess:
         self._reader = None
         self._stderr_reader = None
         self._diagnostic_lock = threading.Lock()
+        self._command_lock = threading.Lock()
         self._stderr_tail = deque(maxlen=24)
         self._last_stats = {}
         self._last_stats_at = 0.0
         self._last_terminal = {}
         self._stopped_at = 0.0
         self._mute_state = {}
+        self._receiver_volume = {}
+        self._receiver_connected = False
         self._exclusive_output = exclusive_output
         self.needs_local_output_restore = False
         self._started_at = 0.0
@@ -59,6 +62,8 @@ class AirPlayProcess:
             self._last_terminal = {}
             tail = self._stderr_tail = deque(maxlen=24)
             mute_state = self._mute_state = {}
+            self._receiver_volume = {}
+            self._receiver_connected = False
         if not self.executable.is_file():
             raise RuntimeError("HomePod 投放组件未安装，请更新完整的 GluSpot 安装包")
         args = [str(self.executable), "--host", device.host, "--port", str(device.port),
@@ -92,6 +97,14 @@ class AirPlayProcess:
                 state.update(event)
             if state is not self._mute_state:
                 return
+            if event.get("event") in {"waiting_audio", "streaming"}:
+                self._receiver_connected = True
+            elif event.get("event") in {"error", "stopped"}:
+                self._receiver_connected = False
+            if event.get("event") in {"stats", "receiver_volume"}:
+                volume_state = event.get("receiver_volume")
+                if isinstance(volume_state, dict):
+                    self._receiver_volume = dict(volume_state)
             if event.get("event") == "stats":
                 self._last_stats = dict(event)
                 self._last_stats_at = time.monotonic()
@@ -121,7 +134,64 @@ class AirPlayProcess:
                 "stats": dict(self._last_stats), "terminal": dict(self._last_terminal),
                 "transport_messages": tuple(self._stderr_tail),
                 "local_output": dict(self._mute_state),
+                "receiver_volume": dict(self._receiver_volume),
             }
+
+    def receiver_volume_state(self):
+        """Current receiver read/ack, never a guessed or merely requested level."""
+        with self._diagnostic_lock:
+            state = self._receiver_volume
+            volume = state.get("volume")
+            connected = self._process is not None and self._receiver_connected and not self._last_terminal
+            known = (connected and state.get("known") is True and
+                     state.get("source") in {"receiver_read", "receiver_info", "receiver_ack"} and
+                     isinstance(volume, (int, float)) and not isinstance(volume, bool))
+            if known:
+                try:
+                    volume = float(volume)
+                    known = math.isfinite(volume) and 0 <= volume <= 1
+                except OverflowError:
+                    known = False
+            code = state.get("last_code", 0)
+            return {"volume": volume if known else None, "known": bool(known),
+                    "source": state.get("source") if known else "unknown",
+                    "operation": state.get("operation", "unknown") if state.get("operation") in
+                                 {"read", "set", "info"} else "unknown",
+                    "pending": bool(connected and state.get("pending") is True),
+                    "last_code": code if isinstance(code, int) and not isinstance(code, bool) else 0}
+
+    def receiver_volume(self):
+        return self.receiver_volume_state()["volume"]
+
+    def set_volume(self, volume: float) -> bool:
+        """Queue an explicit normalized receiver level; True is not receiver ack.
+
+        The audio controller calls this on its worker. Native code coalesces
+        slider commands and publishes a confirmed level only after RTSP 200.
+        This never changes the fixed loopback source's Windows mute/volume.
+        """
+        if isinstance(volume, bool) or not isinstance(volume, (int, float)):
+            return False
+        try:
+            volume = float(volume)
+        except OverflowError:
+            return False
+        if not math.isfinite(volume) or not 0 <= volume <= 1:
+            return False
+        with self._command_lock:
+            with self._diagnostic_lock:
+                process = self._process
+                if process is None or not self._receiver_connected or self._last_terminal:
+                    return False
+            try:
+                if process.poll() is not None:
+                    return False
+                process.stdin.write(json.dumps({"command": "set_volume", "volume": volume},
+                                                allow_nan=False, separators=(",", ":")) + "\n")
+                process.stdin.flush()
+                return True
+            except (OSError, ValueError):
+                return False
 
     def latency_estimate(self):
         """Fresh sender buffer estimate in seconds, or None; never acoustic latency.
@@ -166,7 +236,7 @@ class AirPlayProcess:
                     continue
                 try:
                     event = json.loads(line)
-                    if not isinstance(event, dict) or event.get("event") not in {"connecting", "waiting_audio", "streaming", "error", "stopped", "stats", "mute_state"}:
+                    if not isinstance(event, dict) or event.get("event") not in {"connecting", "waiting_audio", "streaming", "error", "stopped", "stats", "mute_state", "receiver_volume"}:
                         continue
                     if on_event is not None:
                         on_event(event)
@@ -214,7 +284,8 @@ class AirPlayProcess:
         return tuple(results)
 
     def stop(self):
-        process, self._process = self._process, None
+        with self._command_lock:
+            process, self._process = self._process, None
         try:
             if process is not None:
                 self._stopped_at = time.monotonic()

@@ -12,7 +12,7 @@ from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.windows_audio_devices import AudioOutputDevice
 
 
-HOME = AudioRouteDevice("airplay:AABBCCDDEEFF", "书房 HomePod", "homepod", "airplay",
+HOME = AudioRouteDevice("airplay:AABBCCDDEEFF", "书房 HomePod", "homepod-mini", "airplay",
                        host="192.0.2.10", port=7000, device_id="AABBCCDDEEFF")
 OTHER_HOME = replace(HOME, id="airplay:112233445566", name="客厅 HomePod", host="192.0.2.11")
 
@@ -26,11 +26,15 @@ class _Backend:
         self.closed = False
         self.mutes = {"speakers": False, "headphones": False}
         self.mute_calls = []
+        self.volumes = {"speakers": 0.6, "headphones": 0.25}
+        self.volume_calls = []
+        self.volume_error = ""
 
     def list_outputs(self):
         if self.error:
             raise OSError(self.error)
-        return self.outputs
+        return tuple(replace(d, volume=self.volumes.get(d.id), volume_muted=self.mutes.get(d.id, False))
+                     for d in self.outputs)
 
     def set_default(self, identity):
         self.selected.append(identity)
@@ -45,6 +49,15 @@ class _Backend:
     def set_endpoint_mute(self, identity, muted):
         self.mute_calls.append((identity, muted))
         self.mutes[identity] = muted
+
+    def get_endpoint_volume(self, identity):
+        return self.volumes[identity]
+
+    def set_endpoint_volume(self, identity, volume):
+        if self.volume_error:
+            raise OSError(self.volume_error)
+        self.volume_calls.append((identity, volume))
+        self.volumes[identity] = volume
 
 
 class _Discovery:
@@ -75,6 +88,9 @@ class _Sender:
         self.start_error = ""
         self.stop_error = ""
         self.needs_local_output_restore = False
+        self.volume_state = {"volume": None, "known": False, "source": "unknown", "pending": False, "last_code": 0}
+        self.volume_calls = []
+        self.volume_accept = True
 
     def start(self, device, source):
         if self.start_error:
@@ -82,17 +98,27 @@ class _Sender:
         self.starts.append((device.id, source))
         self.events = []
         self.running = True
+        self.volume_state = {"volume": None, "known": False, "source": "unknown", "pending": False, "last_code": 0}
 
     def stop(self):
         self.stops += 1
         self.running = False
         self.events = []
+        self.volume_state = {"volume": None, "known": False, "source": "unknown", "pending": False, "last_code": 0}
         if self.stop_error:
             raise OSError(self.stop_error)
 
     def poll_events(self):
         events, self.events = tuple(self.events), []
         return events
+
+    def receiver_volume_state(self):
+        return dict(self.volume_state)
+
+    def set_volume(self, value):
+        self.volume_calls.append(value)
+        self.volume_state["pending"] = True
+        return self.volume_accept
 
 
 class AudioRouteControllerTests(unittest.TestCase):
@@ -203,14 +229,15 @@ class AudioRouteControllerTests(unittest.TestCase):
         self.assertEqual(snapshot.cast_source_id, "speakers")
         self.assertEqual(self.backend.selected, [])
 
-    def test_streaming_event_confirms_target_and_applies_calibrated_delay(self):
-        self.controller.set_latency(2.25)
+    def test_streaming_event_confirms_target_and_starts_automatic_protocol_delay(self):
+        self.assertFalse(self.controller.set_latency(2.25))
         self.controller._step()
         snapshot = self._cast()
         self.assertEqual(snapshot.active_id, HOME.id)
         self.assertEqual(snapshot.state, "casting")
         self.assertEqual(snapshot.pending_id, "")
-        self.assertEqual(snapshot.cast_latency_seconds, 2.25)
+        self.assertEqual(snapshot.cast_latency_seconds, 1.5)
+        self.assertTrue(snapshot.cast_latency_auto)
 
     def test_handshake_waiting_for_pcm_keeps_pending_target_without_lyric_delay(self):
         self.controller.select(HOME.id)
@@ -371,16 +398,167 @@ class AudioRouteControllerTests(unittest.TestCase):
             with self.subTest(host=host, port=port):
                 self.assertFalse(self.controller.add_homepod(host, port))
 
-    def test_latency_handles_nonfinite_values_and_updates_live_cast_only(self):
-        for value, expected in ((float("nan"), 1.5), (float("inf"), 1.5), (None, 1.5), (-1, 0), (99, 5)):
-            self.controller.set_latency(value)
+    def test_legacy_manual_latency_cannot_change_automatic_compensation(self):
+        for value in (float("nan"), float("inf"), None, -1, 99, 1.75):
+            self.assertFalse(self.controller.set_latency(value))
             self.controller._step()
-            self.assertEqual(self.controller._latency, expected)
+            self.assertEqual(self.controller._latency, 1.5)
             self.assertEqual(self.controller.snapshot().cast_latency_seconds, 0.0)
         self._cast()
-        self.controller.set_latency(1.75)
+        self.assertFalse(self.controller.set_auto_latency(False))
         self.controller._step()
-        self.assertEqual(self.controller.snapshot().cast_latency_seconds, 1.75)
+        self.assertEqual(self.controller.snapshot().cast_latency_seconds, 1.5)
+        self.assertTrue(self.controller.snapshot().cast_latency_auto)
+
+    def test_legacy_constructor_options_do_not_restore_manual_runtime_mode(self):
+        controller = AudioRouteController(_Backend(), _Discovery(), _Sender(),
+                                         start_worker=False, latency_seconds=3.2, auto_latency_enabled=False)
+        self.addCleanup(controller.close)
+        controller._refresh_devices()
+        controller.select(HOME.id)
+        controller._step()
+        controller._sender.events = [{"event": "streaming"}]
+        controller._step()
+        self.assertTrue(controller.snapshot().cast_latency_auto)
+        self.assertEqual(controller.snapshot().cast_latency_seconds, 1.5)
+
+    def test_local_volume_is_actual_named_device_scalar_and_never_changes_selection(self):
+        self.assertEqual([d.volume for d in self.controller.snapshot().devices[:2]], [0.6, 0.25])
+        self.assertTrue(self.controller.set_volume("headphones", 0.75))
+        self.assertEqual(self.backend.volume_calls, [])
+        self.controller._step()
+        changed = next(d for d in self.controller.snapshot().devices if d.id == "headphones")
+        self.assertEqual(changed.volume, 0.75)
+        self.assertEqual(self.backend.volume_calls, [("headphones", 0.75)])
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.controller.snapshot().active_id, "speakers")
+        self.backend.volumes["headphones"] = 0.42
+        self.controller._refresh_devices()
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == "headphones"), 0.42)
+
+    def test_volume_during_cast_preserves_local_mute_and_sender_session(self):
+        self._cast()
+        self.backend.mutes["speakers"] = True
+        self.controller._refresh_devices()
+        starts, stops = tuple(self.sender.starts), self.sender.stops
+        self.assertTrue(self.controller.set_volume("speakers", 0.35))
+        self.controller._step()
+        snapshot = self.controller.snapshot()
+        self.assertTrue(self.backend.mutes["speakers"])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(tuple(self.sender.starts), starts)
+        self.assertEqual(self.sender.stops, stops)
+        self.assertEqual(snapshot.state, "casting")
+        local = next(d for d in snapshot.devices if d.id == "speakers")
+        self.assertEqual((local.volume, local.volume_muted), (0.35, True))
+
+    def test_unknown_remote_volume_is_not_invented_and_send_requires_connection(self):
+        self.assertIsNone(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id))
+        self.assertFalse(self.controller.set_volume(HOME.id, 0.5))
+        self._cast()
+        self.assertFalse(self.controller.set_volume(HOME.id, 0.5))
+        self.sender.volume_state.update(volume=0.38, known=True, source="receiver_read")
+        self.controller._step()
+        home = next(d for d in self.controller.snapshot().devices if d.id == HOME.id)
+        self.assertAlmostEqual(home.volume, 0.38)
+        self.assertFalse(home.volume_muted)
+        self.assertTrue(self.controller.set_volume(HOME.id, 0.75))
+        self.controller._step()
+        self.assertEqual(self.sender.volume_calls, [0.75])
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id), 0.38)
+        self.sender.volume_state.update(volume=0.75, pending=False, source="receiver_ack")
+        self.controller._step()
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id), 0.75)
+        self.assertFalse(self.controller.set_volume(OTHER_HOME.id, 0.6))
+        self.controller.stop_cast()
+        self.controller._step()
+        self.assertIsNone(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id))
+
+    def test_remote_zero_is_receiver_mute_only_and_invalid_evidence_is_unknown(self):
+        self._cast()
+        self.backend.mutes["speakers"] = True
+        self.sender.volume_state.update(volume=0.4, known=True, source="receiver_read")
+        self.controller._step()
+        self.assertTrue(self.controller.set_volume(HOME.id, 0.0))
+        self.controller._step()
+        self.sender.volume_state.update(volume=0.0, source="receiver_ack")
+        self.controller._step()
+        home = next(d for d in self.controller.snapshot().devices if d.id == HOME.id)
+        self.assertEqual((home.volume, home.volume_muted), (0.0, True))
+        self.assertTrue(self.backend.mutes["speakers"])
+        self.assertEqual(self.backend.mute_calls, [])
+        for evidence in ({"volume": 0.5, "known": False, "source": "receiver_read"},
+                         {"volume": 0.5, "known": True, "source": "sent"},
+                         {"volume": float("nan"), "known": True, "source": "receiver_read"}):
+            self.sender.volume_state = evidence
+            self.controller._step()
+            self.assertIsNone(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id))
+
+    def test_receiver_info_is_real_initial_volume_and_async_failure_does_not_stop_cast(self):
+        self._cast()
+        self.sender.volume_state.update(volume=0.38, known=True, source="receiver_info", operation="info")
+        self.controller._step()
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id), 0.38)
+        self.assertTrue(self.controller.set_volume(HOME.id, 0.7))
+        self.controller._step()
+        stops = self.sender.stops
+        for code in (500, 0):
+            self.sender.volume_state.update(pending=False, last_code=code, operation="set")
+            self.controller._step()
+            self.assertIn("音量调整失败", self.controller.snapshot().status_message)
+            self.assertEqual(self.controller.snapshot().state, "casting")
+            self.assertEqual(self.sender.stops, stops)
+            self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id), 0.38)
+        # An old failure snapshot must not overwrite the next request's status
+        # while native code is still receiving it; only new evidence reports.
+        self.assertTrue(self.controller.set_volume(HOME.id, 0.6))
+        self.controller._step()
+        self.assertIn("正在调整", self.controller.snapshot().status_message)
+        self.sender.volume_state.update(volume=0.6, source="receiver_ack", pending=False, last_code=200)
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().status_message, "已调整 HomePod 音量")
+        self.sender.volume_state.update(known=False, volume=None, source="unknown", last_code=501, operation="read")
+        self.controller._step()
+        self.assertIn("无法读取", self.controller.snapshot().status_message)
+        self.assertEqual(self.controller.snapshot().state, "casting")
+        self.assertEqual(self.sender.stops, stops)
+        self.assertIsNone(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id))
+
+    def test_rapid_volume_requests_coalesce_per_device_and_errors_do_not_stop_cast(self):
+        self._cast()
+        for value in (0.2, 0.5, 0.2):
+            self.assertTrue(self.controller.set_volume("headphones", value))
+        self.assertTrue(self.controller.set_volume("speakers", 0.8))
+        self.controller._step()
+        self.assertEqual(self.backend.volume_calls, [("headphones", 0.2), ("speakers", 0.8)])
+        self.backend.volume_error = "volume access denied"
+        stops = self.sender.stops
+        self.assertTrue(self.controller.set_volume("headphones", 0.9))
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "casting")
+        self.assertIn("volume access denied", self.controller.snapshot().status_message)
+        self.assertEqual(self.sender.stops, stops)
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_invalid_volume_stale_session_and_disconnection_do_not_mutate_outputs(self):
+        for value in (None, True, "0.4", -0.1, 1.1, float("nan"), 10 ** 400):
+            self.assertFalse(self.controller.set_volume("speakers", value))
+        self.assertFalse(self.controller.set_volume("unknown", 0.5))
+        self.controller.set_volume("headphones", 0.5)
+        self.backend.outputs = (self.backend.outputs[0],)
+        self.controller._refresh_devices()
+        self.controller._step()
+        self.assertEqual(self.backend.volume_calls, [])
+        self._cast()
+        self.sender.volume_state.update(volume=0.4, known=True, source="receiver_read")
+        self.controller._step()
+        self.controller.select(OTHER_HOME.id)
+        self.assertTrue(self.controller.set_volume(HOME.id, 0.8))
+        self.controller._step()
+        self.assertEqual(self.sender.volume_calls, [])
+        self.assertEqual(self.backend.volume_calls, [])
 
     def test_close_is_idempotent_and_public_operations_are_rejected(self):
         self._cast()
@@ -392,6 +570,7 @@ class AudioRouteControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.refresh())
         self.assertFalse(self.controller.select(HOME.id))
         self.assertFalse(self.controller.stop_cast())
+        self.assertFalse(self.controller.set_volume("speakers", 0.5))
 
     def test_endpoint_enumeration_error_during_cast_stops_sender(self):
         self._cast()
@@ -464,6 +643,14 @@ class AirPlayDiscoveryTests(unittest.TestCase):
     def test_receiver_parses_homepod_unicode_identity_and_selects_ipv4(self):
         device = receiver_from_service(self._info(SERVICE_TYPES[0]), SERVICE_TYPES[0])
         self.assertEqual(device, HOME)
+
+    def test_device_kind_requires_explicit_model_and_discovery_never_invents_volume(self):
+        for model, expected in (("AudioAccessory5,1", "homepod-mini"), ("AudioAccessory1,1", "homepod"),
+                                ("HomePod", "homepod"), ("", "airplay"), ("Speaker", "airplay")):
+            info = self._info(SERVICE_TYPES[0], label="HomePod mini", properties={b"model": model.encode()})
+            device = receiver_from_service(info, SERVICE_TYPES[0])
+            self.assertEqual(device.kind, expected)
+            self.assertIsNone(device.volume)
 
     def test_raop_mac_prefix_and_airplay_deviceid_merge_once_prefer_airplay_control_port(self):
         discovery = AirPlayDiscovery()

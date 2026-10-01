@@ -25,6 +25,9 @@ class _Adapter:
         self.mutes = {"local": False, "bt": True, "usb": False}
         self.mute_calls = []
         self.confirm_mute = True
+        self.volumes = {"local": 0.6, "bt": 0.25, "usb": 1.0}
+        self.volume_calls = []
+        self.confirm_volume = True
 
     def snapshot(self):
         return self.endpoints, dict(self.defaults)
@@ -43,6 +46,16 @@ class _Adapter:
         self.mute_calls.append((device_id, muted))
         if self.confirm_mute:
             self.mutes[device_id] = muted
+
+    def get_endpoint_volume(self, device_id):
+        if device_id not in self.volumes:
+            raise OSError("missing render endpoint")
+        return self.volumes[device_id]
+
+    def set_endpoint_volume(self, device_id, volume):
+        self.volume_calls.append((device_id, volume))
+        if self.confirm_volume:
+            self.volumes[device_id] = volume
 
 
 class WindowsAudioDevicesTests(unittest.TestCase):
@@ -85,7 +98,7 @@ class WindowsAudioDevicesTests(unittest.TestCase):
     def test_invalid_and_duplicate_endpoint_ids_do_not_create_duplicate_controls(self):
         endpoint = self.adapter.endpoints[0]
         self.adapter.endpoints = (endpoint, endpoint, _Endpoint("", "not a render ID"))
-        self.assertEqual(self.backend.list_outputs(), (AudioOutputDevice("local", "Speakers", "speaker", False, True),))
+        self.assertEqual(self.backend.list_outputs(), (AudioOutputDevice("local", "Speakers", "speaker", False, True, 0.6),))
 
     def test_switch_uses_id_and_leaves_communications_default_alone(self):
         self.backend.set_default("bt")
@@ -195,8 +208,100 @@ class WindowsAudioDevicesTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "requires Windows"):
                     operation("local")
 
+    def test_volume_snapshot_reads_actual_scalar_and_external_changes_without_mutations(self):
+        first = self.backend.list_outputs()
+        self.assertEqual([(d.volume, d.volume_muted) for d in first], [(0.6, False), (0.25, True), (1.0, False)])
+        self.adapter.volumes["bt"] = 0.85
+        self.adapter.mutes["bt"] = False
+        second = self.backend.list_outputs()
+        self.assertEqual((second[1].volume, second[1].volume_muted), (0.85, False))
+        self.assertEqual(self.adapter.volume_calls, [])
+        self.assertEqual(self.adapter.mute_calls, [])
+        self.assertEqual(self.adapter.calls, [])
+
+    def test_endpoint_without_volume_support_remains_listed_with_unknown_value(self):
+        self.adapter.volumes.pop("bt")
+        devices = self.backend.list_outputs()
+        self.assertEqual([d.id for d in devices], ["local", "bt", "usb"])
+        self.assertIsNone(devices[1].volume)
+        self.assertEqual(devices[0].volume, 0.6)
+        self.assertEqual(devices[2].volume, 1.0)
+
+    def test_volume_changes_only_named_endpoint_and_preserves_cast_source_mute(self):
+        self.adapter.mutes["local"] = True
+        self.assertAlmostEqual(self.backend.set_endpoint_volume("local", 0.3), 0.3)
+        self.assertAlmostEqual(self.backend.get_endpoint_volume("local"), 0.3)
+        self.assertEqual(self.adapter.volume_calls, [("local", 0.3)])
+        self.assertEqual(self.adapter.volumes["bt"], 0.25)
+        self.assertTrue(self.adapter.mutes["local"])
+        self.assertEqual(self.adapter.mute_calls, [])
+        self.assertEqual(self.adapter.calls, [])
+        self.backend.set_endpoint_volume("local", 0.3)
+        self.assertEqual(self.adapter.volume_calls, [("local", 0.3)])
+
+    def test_volume_input_failure_and_unconfirmed_readback_never_claim_success(self):
+        for value in (None, True, "0.4", -0.1, 1.1, float("nan"), float("inf"), 10 ** 400):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.backend.set_endpoint_volume("local", value)
+        self.assertEqual(self.adapter.volume_calls, [])
+        with self.assertRaisesRegex(OSError, "missing"):
+            self.backend.set_endpoint_volume("gone", 0.4)
+        self.adapter.confirm_volume = False
+        with self.assertRaisesRegex(RuntimeError, "did not confirm"):
+            self.backend.set_endpoint_volume("local", 0.4)
+        self.assertEqual(self.backend.get_endpoint_volume("local"), 0.6)
+        self.assertEqual(self.adapter.mute_calls, [])
+
+    def test_endpoint_volume_rejects_invalid_identity_closed_backend_and_other_platform(self):
+        for identity in (None, "", "local\0other"):
+            for operation in (self.backend.get_endpoint_volume, lambda value: self.backend.set_endpoint_volume(value, 0.4)):
+                with self.subTest(identity=identity), self.assertRaises(ValueError):
+                    operation(identity)
+        self.backend.close()
+        for operation in (self.backend.get_endpoint_volume, lambda value: self.backend.set_endpoint_volume(value, 0.4)):
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                operation("local")
+        backend = WindowsAudioDevices()
+        with patch("api.windows_audio_devices.sys.platform", "linux"):
+            for operation in (backend.get_endpoint_volume, lambda value: backend.set_endpoint_volume(value, 0.4)):
+                with self.assertRaisesRegex(RuntimeError, "requires Windows"):
+                    operation("local")
+
+    def test_airpods_pro_glyph_uses_explicit_model_without_guessing_bluetooth_transport(self):
+        self.adapter.endpoints = (
+            _Endpoint("pro", "Headphones (AirPods Pro)", 3, False),
+            _Endpoint("brand", "AirPods", 3, True),
+            _Endpoint("speaker", "AirPods Pro speaker", 1, False),
+        )
+        devices = self.backend.list_outputs()
+        self.assertEqual([d.kind for d in devices], ["airpods-pro", "headphones", "speaker"])
+        self.assertFalse(devices[0].is_bluetooth)
+
 
 class NativeEndpointAbiTests(unittest.TestCase):
+    def test_endpoint_scalar_uses_sdk_float_and_never_setmute_or_default_output(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        adapter._ole32 = object()
+        scope = unittest.mock.MagicMock()
+        scope.__enter__.return_value = scope
+        calls = []
+        def call(pointer, index, argtypes, *args):
+            self.assertEqual(pointer, "endpoint-volume")
+            calls.append((index, argtypes, args))
+            if index == 9:
+                args[0]._obj.value = 0.3
+            return 0
+        with patch("api.windows_audio_devices._ComScope", return_value=scope), \
+             patch.object(adapter, "_endpoint_volume", return_value="endpoint-volume") as activate, \
+             patch("api.windows_audio_devices._call", side_effect=call):
+            self.assertAlmostEqual(adapter.get_endpoint_volume("render-id"), 0.3)
+            adapter.set_endpoint_volume("render-id", 0.7)
+        self.assertEqual([entry[0] for entry in calls], [9, 7])
+        self.assertEqual(calls[0][1], (ctypes.POINTER(ctypes.c_float),))
+        self.assertEqual(calls[1][1], (ctypes.c_float, ctypes.c_void_p))
+        self.assertEqual(calls[1][2], (0.7, None))
+        self.assertEqual([entry.args[1] for entry in activate.call_args_list], ["render-id", "render-id"])
+
     def test_endpoint_mute_uses_sdk_bool_and_only_getmute_setmute_vtable_entries(self):
         adapter = object.__new__(_WindowsCoreAudioAdapter)
         adapter._ole32 = object()
