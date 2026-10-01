@@ -234,6 +234,61 @@ class AirPlayProcessTests(unittest.TestCase):
         values = list(events.queue)
         self.assertEqual(values[-1]["event"], "error")
 
+    def _publish_timing(self, **updates):
+        timing = {"method": "protocol_plus_input_queue", "valid": True,
+                  "estimated_delay_ms": 1520.0, "protocol_buffer_ms": 1500.0,
+                  "input_queue_ms": 20.0}
+        timing.update(updates)
+        self.sender._remember_native_event(self.sender._mute_state,
+            {"event": "stats", "timing": timing,
+             "protocol": {"receiver_latency_reported": True, "receiver_latency_frames": 88200}})
+
+    def test_fresh_sender_estimate_excludes_receiver_and_returns_an_isolated_snapshot(self):
+        self.sender.start(HOME, "endpoint")
+        self._publish_timing()
+        estimate = self.sender.latency_estimate()
+        self.assertAlmostEqual(estimate["seconds"], 1.52)
+        self.assertEqual(estimate["source"], "protocol_plus_input_queue")
+        self.assertAlmostEqual(estimate["protocol_buffer_seconds"], 1.5)
+        self.assertAlmostEqual(estimate["input_queue_seconds"], 0.02)
+        estimate["seconds"] = 9
+        self.assertAlmostEqual(self.sender.latency_estimate()["seconds"], 1.52)
+        with patch("api.airplay_process.time.monotonic", return_value=self.sender._last_stats_at + 2.01):
+            self.assertIsNone(self.sender.latency_estimate())
+
+    def test_invalid_and_malformed_estimates_never_adjust_lyrics(self):
+        self.sender.start(HOME, "endpoint")
+        for updates in ({"valid": False}, {"valid": 1}, {"method": "measured_acoustic"},
+                        {"estimated_delay_ms": -1}, {"estimated_delay_ms": True},
+                        {"estimated_delay_ms": float("nan")}, {"input_queue_ms": float("inf")},
+                        {"estimated_delay_ms": "1520"}, {"estimated_delay_ms": 3000},
+                        {"input_queue_ms": None}, {"estimated_delay_ms": 10 ** 400}):
+            with self.subTest(updates=updates):
+                self._publish_timing(**updates)
+                self.assertIsNone(self.sender.latency_estimate())
+        self._publish_timing()
+        self.assertIsNotNone(self.sender.latency_estimate())
+        # Old helpers provide useful diagnostics without claiming a delay.
+        self.sender._remember_native_event(self.sender._mute_state, {"event": "stats"})
+        self.assertIsNone(self.sender.latency_estimate())
+
+    def test_stop_failure_and_restart_invalidate_timing_and_fence_old_reader(self):
+        self.sender.start(HOME, "endpoint")
+        self._publish_timing()
+        old_state = self.sender._mute_state
+        old_event = dict(self.sender._last_stats)
+        self.sender._remember_native_event(old_state, {"event": "error", "message": "lost"})
+        self.assertIsNone(self.sender.latency_estimate())
+        self.sender.stop()
+        self.assertIsNone(self.sender.latency_estimate())
+        self.sender.start(HOME, "another")
+        self.sender._remember_native_event(old_state, old_event)
+        self.assertIsNone(self.sender.latency_estimate())
+        self._publish_timing(estimated_delay_ms=1510.0, input_queue_ms=10.0)
+        self.assertAlmostEqual(self.sender.latency_estimate()["seconds"], 1.51)
+        self.sender.stop()
+        self.assertIsNone(self.sender.latency_estimate())
+
 
 if __name__ == "__main__":
     unittest.main()

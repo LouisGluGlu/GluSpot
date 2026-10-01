@@ -21,7 +21,7 @@ class AudioRouteController:
     POLL_SECONDS = 2.0
 
     def __init__(self, backend=None, discovery=None, sender=None, *, latency_seconds=1.5,
-                 start_worker=True, source_id=""):
+                 start_worker=True, source_id="", auto_latency_enabled=True):
         if backend is None:
             from api.windows_audio_devices import WindowsAudioDevices
             backend = WindowsAudioDevices()
@@ -29,8 +29,11 @@ class AudioRouteController:
         self._discovery = discovery or AirPlayDiscovery()
         self._sender = sender or AirPlayProcess(source_id=source_id)
         self._latency = self._normalize_latency(latency_seconds)
+        self._auto_latency = bool(auto_latency_enabled)
+        self._latency_updated_at = None
         self._lock = threading.Lock()
-        self._snapshot = AudioRouteSnapshot(status_message="正在读取音频设备")
+        self._snapshot = AudioRouteSnapshot(status_message="正在读取音频设备",
+                                            cast_latency_auto=self._auto_latency)
         self._commands = deque(maxlen=16)
         self._wake = threading.Event()
         self._closed = threading.Event()
@@ -81,6 +84,8 @@ class AudioRouteController:
         with self._lock:
             if operation in {"select", "stop"}:
                 self._commands = deque((c for c in self._commands if c[0] not in {"select", "stop"}), maxlen=16)
+            elif operation in {"latency", "auto_latency"}:
+                self._commands = deque((c for c in self._commands if c[0] != operation), maxlen=16)
             elif any(c[0] == operation and c[1] == value for c in self._commands):
                 return True
             self._commands.append((operation, value))
@@ -100,6 +105,9 @@ class AudioRouteController:
 
     def set_latency(self, value):
         return self._enqueue("latency", self._normalize_latency(value))
+
+    def set_auto_latency(self, enabled):
+        return self._enqueue("auto_latency", bool(enabled))
 
     def add_homepod(self, address, port=7000):
         try:
@@ -166,6 +174,7 @@ class AudioRouteController:
 
     def _end_cast(self):
         self._generation += 1
+        self._latency_updated_at = None
         source_id, original_mute = self._cast_source_id, self._cast_source_original_mute
         try:
             self._sender.stop()
@@ -173,7 +182,8 @@ class AudioRouteController:
             self._cast_id = self._cast_source_id = ""
             self._cast_source_original_mute = None
             default_id = next((d.id for d in self._local_devices if d.is_default), "")
-            self._publish(active_id=default_id, pending_id="", cast_source_id="", cast_latency_seconds=0.0)
+            self._publish(active_id=default_id, pending_id="", cast_source_id="", cast_latency_seconds=0.0,
+                          cast_latency_estimate_seconds=None)
             evidence = self.diagnostics().get("local_output", {})
             if evidence.get("endpoint_id") == source_id and isinstance(evidence.get("original_muted"), bool):
                 original_mute = evidence["original_muted"]
@@ -231,6 +241,7 @@ class AudioRouteController:
                 name = device.name if device is not None else "HomePod"
                 self._publish(active_id=self._cast_id, pending_id="", state="casting",
                               cast_latency_seconds=self._latency, status_message=f"正在投放到 {name}")
+                self._latency_updated_at = time.monotonic()
                 self._announce(name, "HomePod 投放已连接")
             elif event.get("event") in {"error", "stopped"}:
                 message = str(event.get("message") or "HomePod 投放已中断")[:240]
@@ -238,6 +249,41 @@ class AudioRouteController:
                 self._refresh_devices()
                 self._publish(state="error", status_message=message, pending_id="")
                 break
+
+    def _update_latency(self):
+        """Track sender scheduling evidence without reconnecting or seeking.
+
+        This estimate excludes receiver acoustics. A bounded slew keeps both
+        row selection and the reading front continuous between 500 ms samples.
+        Missing/stale evidence holds the last compensation instead of toggling
+        back to a default each time capture is temporarily silent.
+        """
+        current = self.snapshot()
+        if current.state != "casting" or not self._cast_id:
+            return
+        now = time.monotonic()
+        elapsed = max(0.0, min(1.0, now - self._latency_updated_at)) if self._latency_updated_at is not None else 0.0
+        self._latency_updated_at = now
+        read = getattr(self._sender, "latency_estimate", None)
+        estimate = read() if callable(read) else None
+        if estimate is None:
+            if current.cast_latency_estimate_seconds is not None:
+                self._publish(cast_latency_estimate_seconds=None)
+            return
+        try:
+            target = float(estimate["seconds"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            self._publish(cast_latency_estimate_seconds=None)
+            return
+        if not math.isfinite(target) or not 0.0 <= target <= 5.0:
+            self._publish(cast_latency_estimate_seconds=None)
+            return
+        changes = {"cast_latency_estimate_seconds": target}
+        if self._auto_latency:
+            difference = target - current.cast_latency_seconds
+            step = max(-0.08 * elapsed, min(0.08 * elapsed, difference))
+            changes["cast_latency_seconds"] = current.cast_latency_seconds + step
+        self._publish(**changes)
 
     def _step(self):
         if self._closed.is_set():
@@ -259,7 +305,16 @@ class AudioRouteController:
                 self._refresh_devices()
             elif operation == "latency":
                 self._latency = value
-                self._publish(cast_latency_seconds=value if self.snapshot().state == "casting" else 0.0)
+                self._auto_latency = False
+                self._publish(cast_latency_seconds=value if self.snapshot().state == "casting" else 0.0,
+                              cast_latency_auto=False)
+            elif operation == "auto_latency":
+                self._auto_latency = value
+                self._publish(cast_latency_auto=value)
+                if not value and self.snapshot().state == "casting":
+                    # Preserve the currently audible calibration when the
+                    # user turns automation off, then allow slider edits.
+                    self._latency = self.snapshot().cast_latency_seconds
             elif operation == "manual":
                 host, port = value
                 identity = "airplay:manual:" + host
@@ -270,6 +325,7 @@ class AudioRouteController:
                 # Manual targets describe an address, never a successful connection.
                 self._merge_devices()
         self._poll_sender()
+        self._update_latency()
         self._merge_devices()
 
     def _run(self):

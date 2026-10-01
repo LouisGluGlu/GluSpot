@@ -1,6 +1,7 @@
 // GluSpot: Windows endpoint loopback capture -> one authenticated AirPlay 2 sender.
 #include "pcm_convert.h"
 #include "endpoint_mute_guard.h"
+#include "timing_estimate.h"
 #include "raop_loop.h"
 #include "raop_sender.h"
 #include "ring_buffer.h"
@@ -59,8 +60,11 @@ void muteStatus(const std::string& phase, const std::string& endpoint, bool orig
 }
 
 void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64_t dropped,
-                    uint64_t discontinuities) {
+                    uint64_t discontinuities, gluspot::BufferTimingTracker& timing, bool streaming) {
     const auto d = sender.diagnostics();
+    const auto estimate = timing.sample({captured, d.audioFramesSent, d.silenceFrames,
+        dropped, discontinuities, d.queuedInputFrames, d.inputSampleRate,
+        d.protocolLatencyFrames, streaming});
     std::cout << "{\"event\":\"stats\",\"captured_frames\":" << captured
               << ",\"dropped_samples\":" << dropped << ",\"discontinuities\":" << discontinuities
               << ",\"protocol\":{\"feedback_sent\":" << d.feedbackSent
@@ -76,7 +80,12 @@ void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64
               << ",\"protocol_latency_frames\":" << d.protocolLatencyFrames
               << ",\"receiver_latency_frames\":" << d.receiverLatencyFrames
               << ",\"receiver_latency_reported\":" << (d.receiverLatencyReported ? "true" : "false")
-              << ",\"last_error\":" << jsonString(d.lastError) << "}}\n" << std::flush;
+              << ",\"last_error\":" << jsonString(d.lastError)
+              << "},\"timing\":{\"method\":\"protocol_plus_input_queue\""
+              << ",\"estimated_delay_ms\":" << estimate.delayMs()
+              << ",\"protocol_buffer_ms\":" << estimate.protocolBufferMs
+              << ",\"input_queue_ms\":" << estimate.inputQueueMs
+              << ",\"valid\":" << (estimate.valid ? "true" : "false") << "}}\n" << std::flush;
 }
 
 std::wstring wide(const std::string& text) {
@@ -348,7 +357,8 @@ int wmain(int argc, wchar_t** argv) {
         status("connecting");
         sender.start(host, port, name);
         const auto connectDeadline = std::chrono::steady_clock::now() + 20s;
-        auto statsDeadline = std::chrono::steady_clock::now() + 5s;
+        auto statsDeadline = std::chrono::steady_clock::now() + 500ms;
+        gluspot::BufferTimingTracker timing;
         auto muteDeadline = std::chrono::steady_clock::now() + 250ms;
         std::string pending;
         while (!failed && !interrupted && !stopFromStdin(pending)) {
@@ -371,12 +381,14 @@ int wmain(int argc, wchar_t** argv) {
                 reportedStreaming = true; status("streaming");
             }
             if (authenticated && std::chrono::steady_clock::now() >= statsDeadline) {
-                transportStats(sender, capture.frames.load(), capture.droppedSamples.load(), capture.discontinuities.load());
-                statsDeadline = std::chrono::steady_clock::now() + 5s;
+                transportStats(sender, capture.frames.load(), capture.droppedSamples.load(),
+                               capture.discontinuities.load(), timing, true);
+                statsDeadline = std::chrono::steady_clock::now() + 500ms;
             }
         }
         // One final bounded snapshot preserves the close/failure evidence.
-        transportStats(sender, capture.frames.load(), capture.droppedSamples.load(), capture.discontinuities.load());
+        transportStats(sender, capture.frames.load(), capture.droppedSamples.load(),
+                       capture.discontinuities.load(), timing, false);
         sender.stop();
         if (muteGuard) {
             try {

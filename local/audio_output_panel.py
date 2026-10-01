@@ -228,6 +228,14 @@ class AudioOutputPanel(QWidget):
         delay_layout.setSpacing(5)
         self.latency_label = QLabel("歌词延后 1.50 秒")
         delay_layout.addWidget(self.latency_label)
+        self.auto_latency_button = QPushButton("自动补偿")
+        self.auto_latency_button.setCheckable(True)
+        self.auto_latency_button.setFixedHeight(28)
+        self.auto_latency_button.setToolTip("持续估计投放缓冲，不打断歌曲；实际出声仍可手动校准。")
+        self.auto_latency_button.toggled.connect(self._auto_latency_changed)
+        delay_layout.addWidget(self.auto_latency_button)
+        self.latency_estimate_label = QLabel()
+        delay_layout.addWidget(self.latency_estimate_label)
         self.latency_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.latency_slider.setRange(0, 500)
         self.latency_slider.setSingleStep(5)
@@ -324,6 +332,7 @@ class AudioOutputPanel(QWidget):
         """)
         self.hint_label.setStyleSheet(f"color: {muted};")
         self.latency_label.setStyleSheet(f"color: {muted};")
+        self.latency_estimate_label.setStyleSheet(f"color: {muted};")
         for row in self._rows.values():
             self._style_row(row)
 
@@ -355,7 +364,7 @@ class AudioOutputPanel(QWidget):
 
     def _sync_tab_order(self):
         controls = [self.refresh_button, self.close_button, *self._rows.values(),
-                    self.stop_button, self.advanced_button, self.latency_slider,
+                    self.stop_button, self.advanced_button, self.auto_latency_button, self.latency_slider,
                     self.host_input, self.add_button]
         for previous, current in zip(controls, controls[1:]):
             QWidget.setTabOrder(previous, current)
@@ -448,6 +457,15 @@ class AudioOutputPanel(QWidget):
             self.status_label.show()
             self._fit_to_content()
 
+    def _auto_latency_changed(self, enabled: bool):
+        self._action_error = ""
+        try:
+            if self.provider.set_audio_output_auto_latency(enabled) is False:
+                self._action_error = "暂时无法调整自动补偿。"
+        except Exception:
+            self._action_error = "暂时无法调整自动补偿。"
+        self.sync_snapshot()
+
     def sync_snapshot(self):
         """Read only the provider's published state; never discover in this UI."""
         self._sync_surface_style()
@@ -496,6 +514,14 @@ class AudioOutputPanel(QWidget):
         casting = any(d is not None and d.transport == "airplay" for d in (active, pending))
         self.stop_button.setVisible(casting)
         self.latency_widget.setVisible(casting)
+        self.auto_latency_button.blockSignals(True)
+        self.auto_latency_button.setChecked(snapshot.cast_latency_auto)
+        self.auto_latency_button.blockSignals(False)
+        self.latency_slider.setEnabled(not snapshot.cast_latency_auto)
+        estimate = snapshot.cast_latency_estimate_seconds
+        self.latency_estimate_label.setText(
+            f"投放缓冲估计 {estimate:.2f} 秒" if estimate is not None else "等待投放缓冲数据"
+        )
         if not self.latency_slider.isSliderDown():
             self.latency_slider.blockSignals(True)
             self.latency_slider.setValue(round(max(0.0, min(5.0, snapshot.cast_latency_seconds)) * 100))

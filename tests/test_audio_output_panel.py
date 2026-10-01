@@ -45,7 +45,12 @@ class _RouteProvider:
 
     def set_audio_output_latency(self, seconds):
         self.calls.append(("latency", seconds))
-        self.snapshot = replace(self.snapshot, cast_latency_seconds=seconds)
+        self.snapshot = replace(self.snapshot, cast_latency_seconds=seconds, cast_latency_auto=False)
+
+    def set_audio_output_auto_latency(self, enabled):
+        self.calls.append(("auto_latency", enabled))
+        self.snapshot = replace(self.snapshot, cast_latency_auto=enabled)
+        return self.accept
 
 
 class AudioOutputPanelTests(unittest.TestCase):
@@ -147,7 +152,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["homepod"].state, "active")
 
     def test_cast_delay_control_reads_snapshot_and_changes_only_provider_setting(self):
-        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", cast_latency_seconds=1.5)
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", cast_latency_seconds=1.5,
+                                         cast_latency_auto=False)
         self._open()
         self.assertFalse(self.panel.latency_widget.isVisible())
         self.panel.advanced_button.click()
@@ -188,13 +194,29 @@ class AudioOutputPanelTests(unittest.TestCase):
         QTest.keyClick(self.panel.advanced_button, Qt.Key.Key_Space)
         self.assertTrue(self.panel.advanced_widget.isVisible())
         self.assertTrue(self.panel.latency_widget.isVisible())
-        self.assertEqual(self.panel.advanced_button.nextInFocusChain(), self.panel.latency_slider)
+        self.assertEqual(self.panel.advanced_button.nextInFocusChain(), self.panel.auto_latency_button)
+        self.assertEqual(self.panel.auto_latency_button.nextInFocusChain(), self.panel.latency_slider)
         self.assertEqual(self.panel.latency_slider.nextInFocusChain(), self.panel.host_input)
         self.assertEqual((row.elapsed, row.progress), (0.25, 0.4))
         self.assertEqual(tuple(self.provider.calls), before)
         QTest.keyClick(self.panel.advanced_button, Qt.Key.Key_Space)
         self.assertFalse(self.panel.advanced_widget.isVisible())
         self.assertTrue(self.panel.stop_button.isVisible())
+
+    def test_automatic_compensation_shows_estimate_and_manual_toggle_stays_on_session(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
+                                         cast_latency_seconds=1.52, cast_latency_estimate_seconds=1.525)
+        self._open()
+        self.panel.advanced_button.click()
+        self.assertTrue(self.panel.auto_latency_button.isChecked())
+        self.assertFalse(self.panel.latency_slider.isEnabled())
+        self.assertEqual(self.panel.latency_estimate_label.text(), "投放缓冲估计 1.52 秒")
+        self.assertFalse(any(call[0] in {"auto_latency", "latency"} for call in self.provider.calls))
+        self.panel.auto_latency_button.click()
+        self.assertIn(("auto_latency", False), self.provider.calls)
+        self.assertTrue(self.panel.latency_slider.isEnabled())
+        self.assertEqual(self.provider.snapshot.active_id, "homepod")
+        self.assertFalse(any(call[0] in {"select", "stop"} for call in self.provider.calls))
 
     def test_cached_music_backdrop_drives_panel_tone_and_readable_neutral_ink(self):
         self._open()

@@ -85,6 +85,10 @@ class TrackData:
     # Projection and visual polls keep this unchanged so a cached read or
     # already-handled Seek is not mistaken for new clock evidence.
     position_sampled_at: float = 0.0
+    # Original source position paired with position_sampled_at, before delivery
+    # or cached-frame projection. None means this source has no observation.
+    # A verified local Seek retains its initial target, not projected playback.
+    position_observed_seconds: float | None = None
 
 
 @dataclass(frozen=True)

@@ -76,7 +76,7 @@ Events:
 - `connecting`: capture format validated, networking begins.
 - `waiting_audio`: authenticated session started; waiting for source packets.
 - `streaming`: at least one real captured packet entered the sender ring.
-- `stats`: captured_frames, dropped_samples and discontinuities every 5 seconds.
+- `stats`: captured_frames, dropped_samples and discontinuities every 500 ms.
   A bounded `protocol` object also reports feedback sent/replied/rejected,
   event requests/acknowledgements/decrypt failures, event socket/key state,
   audio/silence frames, queued input frames and the last transport error.
@@ -84,7 +84,25 @@ Events:
   fixed 66150-frame RTP timeline offset (1.5 s at 44.1 kHz);
   `receiver_latency_frames` is only the receiver's reported RECORD value when
   present, not a measurement of audible end-to-end delay. These fields do not
-  adjust lyric timing or reduce the receiver's buffer.
+  reduce the receiver's buffer.
+  A `timing` object contains `method: protocol_plus_input_queue`,
+  `estimated_delay_ms`, `protocol_buffer_ms`, `input_queue_ms` and `valid`.
+  The estimate is `protocol_latency_frames / 44100` plus
+  `queued_input_frames / input_sample_rate`, including the resampler staging
+  queue. It is sender scheduling time, not acoustic calibration or a measured
+  receiver playhead. Network RTT and the optional receiver RECORD latency are
+  not added: they are different quantities and may overlap this schedule.
+  `valid` requires a complete interval with increasing capture/audio counters
+  and no new padded silence, dropped capture samples or discontinuities. A
+  stopped session, startup sample or non-flowing interval is invalid; the next
+  clean flowing interval can recover. The Python owner's `latency_estimate()`
+  returns an isolated dict with `seconds`, `source`, `sample_age_seconds`,
+  `protocol_buffer_seconds` and `input_queue_seconds`, or `None` for invalid,
+  stale (over 2 seconds), stopped, failed or previous-session samples.
+  The lyric controller may use this estimate without reconnecting on track
+  changes; player/driver timing, actual HomePod output delay and acoustic delay
+  remain outside this estimate. Captured SILENT packets still count as flow,
+  so `valid` does not assert that a listener can hear audio.
 - `error`: message describing initialization, capture, pairing or network failure.
 - `stopped`: the sender has requested TEARDOWN and closed its sockets.
 - `mute_state`: in exclusive-output mode, `prepared` reports the original

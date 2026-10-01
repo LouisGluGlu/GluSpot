@@ -344,8 +344,11 @@ class MusicSurfaceWindow(QWidget):
         self._timeline_signature_source = None
         self._owner_seek_marker = None
         self._lyric_source_was_playing: bool | None = None
+        self._lyric_source_app: str | None = None
         self._owner_lyric_marker = None
         self._pending_backward_seek: tuple[float, float] | None = None
+        self._pending_backward_seek_app: str | None = None
+        self._seek_request_source_app: str | None = None
         self._pending_lyric_offset_reanchor = False
         self._lyric_hit_rects: dict[int, QRectF] = {}
         self._hovered_lyric_index: int | None = None
@@ -2777,12 +2780,10 @@ class MusicSurfaceWindow(QWidget):
             media_position = float(self.owner._estimated_media_position(now))
         except (AttributeError, TypeError, ValueError):
             media_position = float(getattr(self.owner, "media_position_seconds", 0.0) or 0.0)
-        position = media_position
         offset = getattr(self.owner, "_effective_lyric_offset_seconds", None)
         lyric_offset = 0.0
         if callable(offset):
             lyric_offset = float(offset())
-            position += lyric_offset
         track_key = self._visual_track_identity()
         timeline_source = tuple(timed)
         if timeline_source != self._timeline_signature_source:
@@ -2843,19 +2844,42 @@ class MusicSurfaceWindow(QWidget):
         # while already paused can bypass confirmation; row labels cannot.
         # One interpolated provider sample painted 80 times is still one sample.
         source = str(getattr(self.owner, "media_position_source", "") or "")
+        source_app = str(getattr(self.owner, "media_source_app", "") or "")
+        if source_app != self._lyric_source_app:
+            # Identical track IDs can survive an app handoff. Clock evidence
+            # and accepted seek targets belong to that app, while the same
+            # sentence keeps its physical viewport pose.
+            self._owner_seek_marker = None
+            self._lyric_source_was_playing = None
+            self._pending_backward_seek = None
+            self._pending_backward_seek_app = None
+        self._lyric_source_app = source_app
+        if hasattr(self.owner, "media_position_observed_seconds"):
+            # An explicit None is an unknown observation, not permission to
+            # confirm a spike using the provider's already-projected clock.
+            # A non-finite confirmation marker never replaces source time.
+            # Owners predating this contract retain their raw fallback.
+            observed_position = self.owner.media_position_observed_seconds
+        else:
+            observed_position = getattr(self.owner, "media_raw_position_seconds",
+                                        getattr(self.owner, "media_position_seconds", media_position))
+        observed_position = float("nan") if observed_position is None else float(observed_position)
         original_sample_at = float(getattr(self.owner, "media_position_sampled_at", 0.0) or 0.0)
         sample_id = (
             original_sample_at if original_sample_at > 0.0 else float(getattr(self.owner, "media_position_sync_at", now) or 0.0),
             0.0 if original_sample_at > 0.0 else float(getattr(self.owner, "media_raw_position_seconds", getattr(self.owner, "media_position_seconds", media_position)) or 0.0),
             source,
+            source_app,
         )
         playing = bool(getattr(self.owner, "media_is_playing", False))
         paused_source_seek = (
             not playing and self._lyric_source_was_playing is False
             and source in {"windows-media", "interactive"}
+            and math.isfinite(observed_position)
             and original_sample_at > 0.0
             and self._owner_seek_marker is not None
             and self._owner_seek_marker[2] == source
+            and self._owner_seek_marker[3] == source_app
             and sample_id != self._owner_seek_marker
         )
         # A paused player may publish only one event after its slider moves.
@@ -2869,11 +2893,8 @@ class MusicSurfaceWindow(QWidget):
                 or (original_sample_at > 0.0 and sample_id != self._owner_seek_marker)
             )
         )
-        if self._pending_lyric_offset_reanchor:
-            # A user-visible offset change is a timeline edit, not a player
-            # Seek. Bypass the seek-spike guard once without touching audio.
-            explicit_seek = True
-            self._pending_lyric_offset_reanchor = False
+        presentation_reanchor = self._pending_lyric_offset_reanchor
+        self._pending_lyric_offset_reanchor = False
         self._owner_seek_marker = sample_id
         self._lyric_source_was_playing = playing
         if explicit_seek:
@@ -2886,7 +2907,7 @@ class MusicSurfaceWindow(QWidget):
         self._owner_lyric_marker = owner_lyric_marker
         if self._pending_backward_seek is not None:
             target_seconds, expires_at = self._pending_backward_seek
-            if now > expires_at:
+            if now > expires_at or self._pending_backward_seek_app not in {None, source_app}:
                 self._pending_backward_seek = None
             elif abs(media_position - target_seconds) <= 0.85:
                 explicit_seek = True
@@ -2902,20 +2923,27 @@ class MusicSurfaceWindow(QWidget):
                 anchor_index = active_index_for_position(owner_timed, anchor, lead_seconds=0.0)
                 if anchor_index + 1 < len(owner_timed):
                     next_start = float(owner_timed[anchor_index + 1][0])
-                    position_ceiling = max(0.0, max(anchor, next_start - 0.08) + lyric_offset)
+                    position_ceiling = max(0.0, max(anchor, next_start - 0.08))
         previous_active = self._lyric_motion.active_index
-        if explicit_seek:
+        presentation_changed = presentation_reanchor or not math.isclose(
+            lyric_offset, self._lyric_motion.presentation_offset, abs_tol=1e-7,
+        )
+        if explicit_seek or presentation_changed:
             self._obo_advanced_focus_index = None
             self._obo_advanced_focus_pose = None
             self._obo_advanced_handoff_last_at = None
         frame = self._lyric_motion.frame(
-            timed, max(0.0, position), now, track_key,
+            timed, max(0.0, media_position), now, track_key,
             fallback_index=int(getattr(self.owner, "lyric_index", 0) or 0),
             duration=float(getattr(self.owner, "media_duration_seconds", 0.0) or 0.0),
             sample_id=sample_id,
             playing=playing,
             explicit_seek=explicit_seek,
             position_ceiling=position_ceiling,
+            presentation_offset=lyric_offset,
+            presentation_reanchor=presentation_reanchor,
+            sample_position=observed_position,
+            source_generation=(source_app, source),
         )
         if abs(frame.active_index - previous_active) > 1:
             self._clear_lyric_browse()
@@ -7989,6 +8017,7 @@ class MusicSurfaceWindow(QWidget):
             self.update()
             return
         self._seek_pending = True
+        self._seek_request_source_app = str(getattr(self.owner, "media_source_app", "") or "")
 
         def request():
             try:
@@ -8011,10 +8040,13 @@ class MusicSurfaceWindow(QWidget):
     @Slot(bool, float, str)
     def _on_seek_finished(self, succeeded: bool, seconds: float, track_key: str):
         self._seek_pending = False
+        request_app = self._seek_request_source_app
+        self._seek_request_source_app = None
         # Seek completion is asynchronous and must not change normal Windows
         # stacking. Any temporary player reveal restores the prior foreground
         # window inside the provider before this callback is delivered.
-        if track_key != self._browse_track_key:
+        source_app = str(getattr(self.owner, "media_source_app", "") or "")
+        if track_key != self._browse_track_key or request_app not in {None, source_app}:
             return
         # A failed player seek must not leave the viewport permanently frozen
         # at its manual browse anchor. Resume from the actual media clock; only
@@ -8026,6 +8058,7 @@ class MusicSurfaceWindow(QWidget):
             # Keep following the real clock, but remember the target long
             # enough for an asynchronous player readback to arrive.
             self._pending_backward_seek = (float(seconds), time.monotonic() + 5.0)
+            self._pending_backward_seek_app = source_app
             self.owner.last_media_refresh_at = 0.0
         self.update()
 

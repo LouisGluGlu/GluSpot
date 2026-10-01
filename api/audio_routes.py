@@ -36,3 +36,5 @@ class AudioRouteSnapshot:
     event_serial: int = 0
     event_name: str = ""
     event_message: str = ""
+    cast_latency_auto: bool = True
+    cast_latency_estimate_seconds: float | None = None

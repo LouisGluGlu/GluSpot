@@ -7,12 +7,12 @@ This README is the canonical product, implementation, release-readiness, and pen
 ## Current Status
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.403`.
+- Current test-build version: `6.404`.
 - Development state: internal alpha / test build, not ready for paid Steam release.
 - Runnable app: `local/main.py`, or `launch.bat`.
 - Main UI surface: the V2 island only.
 - Test baseline command: `python -m unittest discover tests -v`.
-- Release blocker level: the 6.403 Windows test package can be built, but signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
+- Release blocker level: the 6.404 Windows test package can be built, but signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
 
 ## Run
 
@@ -22,7 +22,7 @@ If dependencies are missing, run `setup-env.bat` once, then launch again. Runtim
 
 ## Windows Test Build
 
-GluSpot 6.403 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
+GluSpot 6.404 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
 
 Build from the project root:
 
@@ -33,14 +33,14 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.403\GluSpot.exe
+release\GluSpot-6.404\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It is not an installer, does not include Steamworks ownership validation, and should not be treated as a public release artifact.
 
-`GluSpot-6.403` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
+`GluSpot-6.404` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
 
-Known 6.403 test-build caveats:
+Known 6.404 test-build caveats:
 
 - PyInstaller reports optional missing modules from Unix-only Python paths, NumPy/Pillow optional helpers, and setuptools internals; these are expected in a Windows GUI package unless a runtime feature proves otherwise.
 - PyInstaller also reports missing `UIAutomationClient_VC140_X64.dll` / `UIAutomationClient_VC140_X86.dll` from the `uiautomation` dependency. The build still completes, but WeChat/QQ/DingTalk detail-detection paths should be checked on a real desktop.
@@ -58,7 +58,7 @@ Known 6.403 test-build caveats:
 ## Naming And Assets
 
 - `GluSpot` is the product name, app name, startup task/app ID, runtime lock namespace, and settings namespace.
-- The current app version is `6.403`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
+- The current app version is `6.404`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
 - `assets/brand/` stores the generated GluSpot PNG and ICO brand assets.
 - User-selected global icons are copied into the GluSpot settings data directory under `icons/` and saved as PNG plus ICO.
 - `assets/logos/` stores TIME reminder SVG assets. The old root-level `logos/` folder has been removed.
@@ -189,7 +189,7 @@ The Apache-2.0 sender is pinned with provenance and notices; restricted AirSonic
 
 ## Completeness Assessment
 
-Version 6.403 is suitable for a controlled desktop test pass, not for public release.
+Version 6.404 is suitable for a controlled desktop test pass, not for public release.
 
 | Area | Assessment | Notes |
 | --- | --- | --- |
@@ -198,7 +198,7 @@ Version 6.403 is suitable for a controlled desktop test pass, not for public rel
 | Media and lyric integration | Partially complete | Generic Windows media is the baseline. NetEase, BetterNCM, QQ, Qishui, and Kugou paths are optional profile attachments that still need real-app QA. |
 | Plugins and notifications | Partially complete | TIME is the active default. Weather and agenda code exist, but both still need real-world validation before normal-user enablement. |
 | Settings and startup | Mostly complete for alpha | Settings pages and startup modes exist. Clean-account startup and first-launch migration still need manual verification. |
-| Packaging | Test-build complete | `build-exe.bat` produces `release\GluSpot-6.403\GluSpot.exe`; signing, installer/update behavior, and distribution hardening are pending. |
+| Packaging | Test-build complete | `build-exe.bat` produces `release\GluSpot-6.404\GluSpot.exe`; signing, installer/update behavior, and distribution hardening are pending. |
 | Release operations | Incomplete | Steamworks, SteamPipe, crash/support diagnostics, copyright/data audit, and multi-machine QA remain blockers. |
 
 Overall project completeness: about 75% for an internal alpha/testable Windows desktop app, about 45% for a public paid Windows release, and about 30% for a Steam-ready release pipeline.
@@ -208,7 +208,7 @@ Overall project completeness: about 75% for an internal alpha/testable Windows d
 Current assessment:
 
 - Stability: strong automated behavior coverage, but not enough manual desktop coverage for a public paid release.
-- Completeness: suitable for internal alpha or controlled 6.403 test builds; not Steam-ready yet.
+- Completeness: suitable for internal alpha or controlled 6.404 test builds; not Steam-ready yet.
 - Performance: the music surface has a repeatable synthetic Qt raster benchmark, but real-desktop FPS, cold-start time, memory/CPU use, and long-running behavior still need measured reports.
 
 Steam release requirements still pending:
@@ -222,6 +222,9 @@ Steam release requirements still pending:
 - Add crash reporting or at least structured runtime diagnostics suitable for support.
 
 ## Current Branch Fixes
+
+- October 2 / 6.404 verification: 2720 Python tests passed in 78.577 seconds; five native suites, Python compilation and whitespace checks passed. The 6.404 onedir package passed its explicit acceptance check; native helper, provenance, LGPL source and replaceable discovery files were verified. Native Qt fixtures retain intermediate scrolling poses and accessible compact-menu controls. This version still needs a new multi-song HomePod listening check for actual lyric/audio alignment; the October 1 90-second hardware confirmation belongs to 6.403.
+- October 2 lyric clocks / 6.404: source observations remain separate from delivery projection and display-only HomePod compensation. Repeated bad positions with fresh event stamps cannot confirm a seek; pause transitions, source changes and same-song timing enrichment cannot reuse old jump evidence. Real GSMTC updates every 5–10 seconds establish their own cadence before UIA row fallback. The island and large music surfaces share the source-clock rules while existing row springs preserve the viewport through correction and real Seek. Single-HomePod casting publishes a clean-interval sender buffer estimate every 500 ms; optional **自动补偿** adjusts the lyric delay gradually without reconnecting per song. Disabling it retains manual 0–5 second adjustment, including existing saved calibration. The estimate uses protocol buffer plus input queue and does not claim receiver playhead or acoustic measurement. Dynamic-background work remains in its separate branch. Verification evidence and hardware limits are in [audio routing](docs/audio-routing.md).
 
 - October 1 audio follow-up / 6.403: transient AirPlay event keys and encrypted acknowledgements now keep HomePod sessions alive past the reproduced 30-second watchdog. HomePod selection suppresses the current local endpoint after authentication and restores its original mute on stop/error/exit, with owned-state fallback after abnormal helper termination. The M6 → HomePod mini chain passed 90.06 seconds and the user confirmed only HomePod sound with acceptable delay. The compact music-page chooser inherits background/font, with manual IP and lyric delay in **更多选项**. Bounded transport diagnostics and recovery regressions retain final evidence without blocking paints. No new latency mode or dynamic-background changes are included.
 - October 1 audio outputs: the existing V2 music surface and provider expose active Windows speakers/Bluetooth outputs, passive arrival notices, confirmed default-device selection, and explicit single-HomePod casting. Discovery merges AirPlay/RAOP advertisements; the native helper captures a fixed WASAPI output with bounded PCM and preserves the receiver volume. Device/source failures and shutdown stop the owned process, clear stale casting state and require an explicit retry. The notification and music surface query application screens to avoid a PySide6 transient-widget ownership bug, with the surface retaining monitor selection. The audio work continues in `codex/audio-homepod-level1-2`, separate from the dynamic-background worktree.

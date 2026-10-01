@@ -154,6 +154,38 @@ class MusicAnimationEngineIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(final_position, final_target, delta=0.10)
         self.assertAlmostEqual(final_velocity, 0.0, delta=0.10)
 
+    def test_output_latency_reversal_keeps_row_pose_and_timer_drives_intermediate_scroll(self):
+        offset = [0.0]
+        self.owner._effective_lyric_offset_seconds = lambda: offset[0]
+        self.owner.media_position_seconds = 8.2
+        self.owner.media_raw_position_seconds = 8.2
+        self.owner.media_position_source = "windows-media"
+        self._render(100.0)
+        initial = self._pose(2)
+        offset[0] = -1.5
+        self._render(100.0)
+        cast_pose = self._pose(2)
+        self.assertEqual(self.window._lyric_motion.active_index, 1)
+        self.assertAlmostEqual(cast_pose[0], initial[0], delta=0.001)
+        self.assertAlmostEqual(cast_pose[1], initial[1], delta=0.001)
+        self.assertGreater(abs(cast_pose[0] - cast_pose[2]), 30.0)
+        positions = []
+        for step in range(1, 17):
+            now = 100.0 + step / 120.0
+            self.owner.media_position_seconds = 8.2 + step / 120.0
+            self._tick(now)
+            positions.append(self._pose(2)[0])
+        self.assertGreater(len({round(value, 4) for value in positions}), 10)
+        moving = self._pose(2)
+        offset[0] = 0.0
+        self._render(100.0 + 16 / 120.0)
+        stopped = self._pose(2)
+        self.assertEqual(self.window._lyric_motion.active_index, 2)
+        self.assertAlmostEqual(stopped[0], moving[0], delta=0.001)
+        self.assertAlmostEqual(stopped[1], moving[1], delta=0.001)
+        self.assertAlmostEqual(self.window._lyric_motion.last_source_position, 8.2 + 16 / 120.0)
+        self.assertIsNone(self.window._lyric_motion.pending_clock_position)
+
 
 class WaveIslandAnimationEngineTests(unittest.TestCase):
     @classmethod
