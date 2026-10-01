@@ -5661,6 +5661,7 @@ class MusicSurfaceWindow(QWidget):
         self._paint_background(
             painter, rect, primary, secondary, time.monotonic(),
             ambient_colors=palette.ambient_colors,
+            ambient_weights=palette.ambient_weights,
             advance_frame=paint_region is None or QRegion(self.rect()).subtracted(paint_region).isEmpty(),
         )
         # Transport light is a native-resolution foreground layer of the
@@ -7129,7 +7130,8 @@ class MusicSurfaceWindow(QWidget):
 
     def _paint_background(
         self, painter: QPainter, rect: QRectF, primary: QColor, secondary: QColor,
-        now: float, *, ambient_colors: tuple[QColor, ...] = (), advance_frame: bool = True,
+        now: float, *, ambient_colors: tuple[QColor, ...] = (),
+        ambient_weights: tuple[float, ...] = (), advance_frame: bool = True,
     ):
         # The album-flow renderer owns the small blurred raster and smooth
         # palette retargeting. Lyric-only paints reuse this complete image,
@@ -7139,7 +7141,7 @@ class MusicSurfaceWindow(QWidget):
         intensity_value = getattr(self.owner, "music_flow_intensity", 0.74)
         intensity = max(0.0, min(1.0, float(0.74 if intensity_value is None else intensity_value)))
         identity = self._track_visual[0] if self._track_visual else None
-        key = (width, height, tuple(color.rgba() for color in colors), intensity, identity)
+        key = (width, height, tuple(color.rgba() for color in colors), ambient_weights, intensity, identity)
         # Advancing during a lyric-only dirty paint would leave a newer
         # background patch surrounded by old pixels. Hold the displayed
         # frame and its contrast samples until a whole-surface paint.
@@ -7149,7 +7151,7 @@ class MusicSurfaceWindow(QWidget):
             or now - self._background_cache_at >= self.AMBIENT_FRAME_SECONDS
         )):
             self._background_cache = self._album_flow_background.render(
-                QSize(width, height), colors, now, intensity,
+                QSize(width, height), colors, now, intensity, weights=ambient_weights,
             )
             self._background_cache_key = key
             self._background_cache_at = now

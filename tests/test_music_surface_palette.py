@@ -41,9 +41,138 @@ def _ink_contrast(ink: QColor, backdrop: QColor) -> float:
 
 
 class MusicSurfacePaletteTests(unittest.TestCase):
+    def test_ambient_core_keeps_real_strong_pigment_separate_from_same_hue_shadows(self):
+        shadow, core, pale = QColor(7, 22, 38), QColor(20, 130, 240), QColor(180, 207, 235)
+        palette = artwork_surface_palette(
+            _artwork(((70, shadow), (95, core), (100, pale))), QColor("black"), QColor("black"),
+        )
+        self.assertEqual(palette.ambient_colors[0], shadow)
+        self.assertIn(core, palette.ambient_colors)
+        self.assertGreater(core.hsvSaturation(), 225)
+
+    def test_one_percent_ambient_magenta_survives_brightness_and_chroma_fragmentation(self):
+        image = QImage(72, 72, QImage.Format.Format_RGB32)
+        image.fill(QColor(220, 184, 139))
+        # Each tone alone occupies less than the family support threshold.
+        # Together they are a real one-percent colored detail, not pixel noise.
+        pigments = tuple(QColor.fromHsv(hue, chroma, value) for hue, chroma, value in (
+            (322, 220, 230), (338, 235, 230), (325, 205, 160),
+            (341, 230, 160), (329, 135, 205), (336, 145, 180),
+        ))
+        for index in range(54):
+            image.setPixelColor(index % 9, 10 + index // 9, pigments[index // 9])
+        palette = artwork_surface_palette(image, QColor("black"), QColor("black"))
+        self.assertGreater(palette.ambient_colors[0].red(), palette.ambient_colors[0].blue())
+        accents = [color for color in palette.ambient_colors if 310 <= color.hsvHue() <= 350]
+        self.assertTrue(accents)
+        self.assertTrue(any(color.hsvSaturation() >= 200 and color.value() >= 210 for color in accents))
+
+    def test_ambient_one_pixel_neon_noise_is_rejected_on_black_art(self):
+        image = QImage(72, 72, QImage.Format.Format_RGB32)
+        image.fill(QColor(0, 0, 0))
+        image.setPixelColor(14, 25, QColor("magenta"))
+        palette = artwork_surface_palette(image, QColor("blue"), QColor("cyan"))
+        self.assertEqual(palette.ambient_colors, (QColor("black"),))
+
+    def test_scattered_one_percent_neon_noise_does_not_become_an_ambient_pigment(self):
+        image = QImage(72, 72, QImage.Format.Format_RGB32)
+        image.fill(QColor(0, 0, 0))
+        for index in range(54):
+            image.setPixelColor(4 + (index % 9) * 8, 4 + (index // 9) * 11, QColor("magenta"))
+        palette = artwork_surface_palette(image, QColor("blue"), QColor("cyan"))
+        self.assertEqual(palette.ambient_colors, (QColor("black"),))
+
+    def test_uniform_colored_art_supplies_its_only_source_tone(self):
+        source = QColor(15, 174, 210)
+        palette = artwork_surface_palette(
+            _artwork(((100, source),)), QColor("blue"), QColor("red"),
+        )
+        self.assertEqual(palette.ambient_colors, (source,))
+        self.assertEqual(palette.ambient_weights, (1.0,))
+
+    def test_sparse_ambient_accent_keeps_its_actual_source_coverage(self):
+        image = QImage(72, 72, QImage.Format.Format_RGB32)
+        image.fill(QColor(0, 0, 0))
+        accent = QColor(230, 35, 145)
+        for y in range(12, 18):
+            for x in range(20, 29):
+                image.setPixelColor(x, y, accent)
+        palette = artwork_surface_palette(image, QColor("blue"), QColor("cyan"))
+        self.assertEqual(palette.ambient_colors, (QColor("black"), accent))
+        self.assertEqual(len(palette.ambient_colors), len(palette.ambient_weights))
+        self.assertGreater(palette.ambient_weights[0], 0.50)
+        self.assertGreater(palette.ambient_weights[1], 0.0)
+        self.assertLess(palette.ambient_weights[1], 0.04)
+        self.assertAlmostEqual(palette.ambient_weights[1], 54 / (72 * 72))
+
+    def test_ambient_family_and_variant_weights_report_original_coverage(self):
+        shadow, core = QColor(7, 22, 38), QColor(20, 130, 240)
+        palette = artwork_surface_palette(
+            _artwork(((75, shadow), (100, core))), QColor("black"), QColor("black"),
+        )
+        self.assertEqual(palette.ambient_colors, (shadow, core))
+        # Both tones belong to the dominant blue family; its base has all
+        # family support while the vivid variation owns its actual quarter.
+        self.assertAlmostEqual(palette.ambient_weights[0], 1.0)
+        self.assertAlmostEqual(palette.ambient_weights[1], 0.25)
+        self.assertGreater(sum(palette.ambient_weights), 1.0)
+
+    def test_ambient_weights_are_bounded_and_match_selected_color_order(self):
+        fixtures = (
+            _artwork(((50, QColor(8, 8, 8)), (100, QColor(235, 235, 235)))),
+            _artwork(tuple((index * 10, QColor.fromHsv(hue, 220, 190))
+                           for index, hue in enumerate(range(0, 360, 36), start=1))),
+            _artwork(((60, QColor(220, 184, 139)), (85, QColor(25, 115, 200)),
+                      (100, QColor(230, 35, 145)))),
+        )
+        for image in fixtures:
+            palette = artwork_surface_palette(image, QColor("black"), QColor("black"))
+            self.assertEqual(len(palette.ambient_colors), len(palette.ambient_weights))
+            self.assertTrue(all(0.0 < weight <= 1.0 for weight in palette.ambient_weights))
+            self.assertGreaterEqual(palette.ambient_weights[0], max(palette.ambient_weights))
+
+    def test_ambient_tonal_variants_cannot_overflow_six_supported_families(self):
+        bands = tuple(
+            (index * 10, QColor.fromHsv(hue, chroma, value))
+            for index, (hue, chroma, value) in enumerate((
+                (0, 180, 210), (60, 190, 210), (120, 195, 210),
+                (180, 195, 210), (240, 190, 210), (300, 180, 210),
+                (0, 230, 110), (60, 230, 110), (120, 230, 110), (180, 230, 110),
+            ), start=1)
+        )
+        palette = artwork_surface_palette(_artwork(bands), QColor("black"), QColor("black"))
+        self.assertEqual(len(palette.ambient_colors), 6)
+
+    def test_required_light_blue_ink_is_brighter_than_bright_gray_envelope(self):
+        backdrop = QColor(145, 145, 145)
+        ink = future_lyric_color(
+            QColor("#1023ff"), backdrop, use_light=True,
+            primary=QColor("#c8aa46"), require_light=True,
+        )
+        composite = QColor(*(
+            round(front * ink.alphaF() + back * (1.0 - ink.alphaF()))
+            for front, back in zip(ink.getRgb()[:3], backdrop.getRgb()[:3])
+        ))
+        self.assertGreater(relative_luminance(composite), relative_luminance(backdrop))
+        self.assertGreaterEqual(_ink_contrast(ink, backdrop), 2.30)
+        self.assertLessEqual(_hue_distance(ink, QColor("#1023ff")), 2)
+        # The same fixed light ink must also remain visible on the dark field.
+        self.assertGreaterEqual(_ink_contrast(ink, QColor(20, 20, 20)), 2.30)
+
+    def test_required_light_ink_stays_valid_for_an_impossible_white_envelope(self):
+        ink = future_lyric_color(
+            QColor("blue"), QColor("white"), use_light=True, require_light=True,
+        )
+        self.assertTrue(ink.isValid())
+
     def test_three_role_construction_keeps_optional_ambient_palette_empty(self):
         palette = MusicSurfacePalette(QColor("red"), QColor("green"), QColor("blue"))
         self.assertEqual(palette.ambient_colors, ())
+        self.assertEqual(palette.ambient_weights, ())
+        with_colors = MusicSurfacePalette(
+            QColor("red"), QColor("green"), QColor("blue"), (QColor("red"),),
+        )
+        self.assertEqual(with_colors.ambient_weights, ())
 
     def test_ambient_palette_keeps_six_supported_cover_pigments(self):
         pigments = tuple(QColor.fromHsv(hue, 210, 204) for hue in range(0, 360, 60))
@@ -158,8 +287,10 @@ class MusicSurfacePaletteTests(unittest.TestCase):
             with self.subTest(missing=image.isNull()):
                 palette = artwork_surface_palette(image, primary, secondary)
                 self.assertEqual(palette.ambient_colors, (primary, secondary))
+                self.assertEqual(palette.ambient_weights, (0.5, 0.5))
         identical = artwork_surface_palette(QImage(), primary, primary)
         self.assertEqual(identical.ambient_colors, (primary,))
+        self.assertEqual(identical.ambient_weights, (1.0,))
 
     def test_bulk_rgba_samples_match_qt_pixel_color_across_source_formats(self):
         colors = (

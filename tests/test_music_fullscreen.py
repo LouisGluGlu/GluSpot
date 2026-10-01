@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import threading
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -4040,6 +4041,37 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.assertEqual(lights.call_count, 5)
             self.assertEqual(self.window._background_cache.size(), QSize(256, 144))
 
+    def test_album_coverage_reaches_renderer_and_invalidates_a_fast_frame(self):
+        art = QImage(100, 100, QImage.Format.Format_RGB32)
+        art.fill(QColor(12, 15, 20))
+        with QPainter(art) as painter:
+            painter.fillRect(0, 60, 100, 40, QColor(210, 42, 51))
+        self.owner.album_art = art
+        self.owner.media_track_id = "coverage-handoff"
+        self.window.resize(960, 540)
+        palette = self.window._art_palette()
+        self.assertEqual(len(palette.ambient_colors), len(palette.ambient_weights))
+        self.assertGreater(len(palette.ambient_weights), 1)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        with patch.object(
+            self.window._album_flow_background, "render", wraps=self.window._album_flow_background.render,
+        ) as renderer:
+            with patch("local.music_surface_window.time.monotonic", return_value=20.0):
+                self.window.render(output)
+            self.assertEqual(renderer.call_args.kwargs["weights"], palette.ambient_weights)
+            previous_key = self.window._background_cache_key
+            changed = replace(palette, ambient_weights=tuple(reversed(palette.ambient_weights)))
+            self.assertNotEqual(changed.ambient_weights, palette.ambient_weights)
+            # A coverage-only change is visible even before the 30 Hz frame
+            # interval expires; colors and geometry are otherwise unchanged.
+            with patch.object(self.window, "_art_palette", return_value=changed), patch(
+                "local.music_surface_window.time.monotonic", return_value=20.001,
+            ):
+                self.window.render(output)
+            self.assertEqual(renderer.call_count, 2)
+            self.assertEqual(renderer.call_args.kwargs["weights"], changed.ambient_weights)
+            self.assertNotEqual(self.window._background_cache_key, previous_key)
+
     def test_music_surface_uses_heavy_wrapped_lyrics_and_grouped_controls(self):
         self.owner.track_title = "Attention"
         self.owner.artist = "Charlie Puth"
@@ -4135,11 +4167,21 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         # rather than occupying fixed 70/15/15 percent strips.
         samples = [background.pixelColor(round(background.width() * x), round(background.height() * y))
                    for x in (0.16, 0.32, 0.50, 0.68, 0.84) for y in (0.2, 0.5, 0.8)]
-        self.assertGreater(len({color.rgba() for color in samples}), 8)
+        vertical_range = max(abs(samples[column * 3].getRgb()[channel]
+                                 - samples[column * 3 + 2].getRgb()[channel])
+                             for column in range(5) for channel in range(3))
+        horizontal_range = max(abs(samples[row].getRgb()[channel]
+                                   - samples[12 + row].getRgb()[channel])
+                               for row in range(3) for channel in range(3))
+        self.assertGreater(vertical_range, 8)
+        self.assertGreater(horizontal_range, 8)
         self.assertTrue(any(color.red() > color.blue() + 15 for color in samples))
         unread = self.window._future_lyric_color(QRectF(520, 100, 350, 240))
-        self.assertGreater(unread.red(), unread.blue() + 55)
-        self.assertLess(unread.value(), 235)
+        # Brighter moving fields need a paler gold than the old dark field,
+        # while retaining the album hue and separation from white read ink.
+        self.assertAlmostEqual(unread.hsvHue(), ambient_color(palette.characteristic).hsvHue(), delta=2)
+        self.assertGreater(unread.red(), unread.blue() + 30)
+        self.assertLess(unread.blue(), 225)
         for backdrop in self.window._background_sample_colors(QRectF(520, 100, 350, 240)):
             self.assertGreaterEqual(
                 self.window._contrast_ratio(self.window._composited_color(unread, backdrop), backdrop),
@@ -4205,6 +4247,100 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                     self.assertGreaterEqual(self.window._contrast_ratio(
                         self.window._composited_color(fixed_ink, backdrop), backdrop,
                     ), 2.0)
+
+    def test_bright_moving_fields_preserve_read_metadata_and_fixed_unread_contrast(self):
+        art = QImage(120, 120, QImage.Format.Format_RGB32)
+        colors = (QColor("#ffff00"), QColor("#00ffff"), QColor("#ffffff"),
+                  QColor("#181818"), QColor("#ee1530"), QColor("#153aff"))
+        with QPainter(art) as painter:
+            for index, color in enumerate(colors):
+                painter.fillRect(index * 20, 0, 20, 120, color)
+        self.owner.album_art = art
+        self.owner.media_track_id = "bright-six-pigments"
+        self.owner.track_title = "Bright album"
+        self.owner.artist = "Visible artist"
+        self.owner.timed_lyrics = [(0.0, "Already read words"), (4.0, "Waiting words")]
+        self.owner.media_position_seconds = 1.0
+        self.owner._estimated_media_position = lambda _now: self.owner.media_position_seconds
+        self.window.resize(960, 540)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        metadata_inks = {}
+        original_metadata = self.window._paint_scrolling_metadata
+
+        def record_metadata(painter, *args, **kwargs):
+            metadata_inks[kwargs["field"]] = QColor(painter.pen().color())
+            return original_metadata(painter, *args, **kwargs)
+
+        with patch.object(self.window, "_paint_scrolling_metadata", side_effect=record_metadata), patch(
+            "local.music_surface_window.time.monotonic", return_value=0.0,
+        ):
+            self.window.render(output)
+        self.assertEqual(set(metadata_inks), {"title", "artist"})
+        palette = self.window._art_palette()
+        region = QRectF(520, 100, 350, 240)
+        unread = self.window._future_lyric_color(region)
+        inks = (("read", QColor(255, 255, 255), 3.0),
+                ("title", metadata_inks["title"], 3.0),
+                ("artist", metadata_inks["artist"], 1.90),
+                ("center_artist", QColor(255, 255, 255, 155), 2.0),
+                ("unread", unread, 2.0))
+        for frame in range(601):
+            self.window._background_cache = self.window._album_flow_background.render(
+                self.window.size(), palette.ambient_colors, frame / 30.0,
+                weights=palette.ambient_weights,
+            )
+            if frame % 30 != 0:
+                continue
+            self.assertEqual(self.window._future_lyric_color(region), unread)
+            background = self.window._background_cache
+            # Check across the full field, not just the lyric column's median:
+            # these pigments can cross both metadata and lyrics later.
+            backdrops = {background.pixelColor(x, y).rgba()
+                         for y in range(0, background.height(), 8)
+                         for x in range(0, background.width(), 8)}
+            for name, ink, minimum in inks:
+                worst = min(self.window._contrast_ratio(
+                    self.window._composited_color(ink, QColor.fromRgba(rgba)), QColor.fromRgba(rgba),
+                ) for rgba in backdrops)
+                self.assertGreaterEqual(worst, minimum, (frame, name, worst))
+
+    def test_light_gray_and_dark_album_transitions_keep_unread_above_the_entire_field(self):
+        self.window.resize(960, 540)
+        region = QRectF(520, 100, 350, 240)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        for album_index, colors in enumerate((
+            (QColor("#101010"), QColor("#162fff")),
+            (QColor("#f4d8a5"), QColor("#00ee66")),
+            (QColor("#ffffff"), QColor("#999999"), QColor("#101010")),
+        )):
+            art = QImage(120, 120, QImage.Format.Format_RGB32)
+            with QPainter(art) as painter:
+                for index, color in enumerate(colors):
+                    painter.fillRect(index * 120 // len(colors), 0, 120 // len(colors), 120, color)
+            self.owner.album_art = art
+            self.owner.media_track_id = f"light-dark-transition-{album_index}"
+            palette = self.window._art_palette()
+            for frame in range(61):
+                now = album_index * 2.0 + frame / 30.0
+                with QPainter(output) as painter:
+                    self.window._paint_background(
+                        painter, QRectF(self.window.rect()), palette.primary, palette.secondary, now,
+                        ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights,
+                    )
+                if frame % 10 != 0:
+                    continue
+                unread = self.window._future_lyric_color(region)
+                envelope = self.window._album_flow_background.contrast_backdrop(self.window._background_cache)
+                self.assertIsNotNone(envelope)
+                self.assertGreater(self.window._relative_luminance(unread),
+                                   self.window._relative_luminance(envelope))
+                for backdrop in self.window._background_sample_colors(QRectF(self.window.rect())):
+                    self.assertGreaterEqual(self.window._contrast_ratio(
+                        self.window._composited_color(unread, backdrop), backdrop,
+                    ), 2.0)
+                    self.assertGreaterEqual(self.window._contrast_ratio(
+                        QColor(255, 255, 255), backdrop,
+                    ), 3.0)
 
     def test_monochrome_album_unread_tone_is_distinct_from_white(self):
         self.window.resize(320, 180)
