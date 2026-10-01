@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from local.audio_output_panel import paint_audio_output_icon
@@ -30,7 +30,10 @@ class AudioDeviceNotice(QWidget):
         self._timer.timeout.connect(self._advance)
 
     def present(self, name: str, message: str, kind: str = "device", screen=None):
-        screen = screen or self.screen()
+        # QWidget.screen() reparents the shared QScreen Python wrapper to this
+        # transient widget in PySide6 6.11. Query the application so disposing
+        # the notice cannot invalidate other users of the same screen wrapper.
+        screen = screen or QGuiApplication.primaryScreen()
         if screen is None:
             return
         available = screen.availableGeometry()

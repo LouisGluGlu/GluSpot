@@ -75,16 +75,44 @@ locates `_internal/native/GluSpotAirPlay.exe`. `GLUSPOT_AIRPLAY_ENGINE` is an
 explicit development override. The source/helper identity is installation
 specific and saved under the GluSpot settings namespace.
 
+The explicit package acceptance command runs before normal GUI/single-instance
+startup and writes only the requested JSON report:
+
+```powershell
+.\release\GluSpot-6.402\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
+```
+
+It imports packaged dependencies, checks application module availability,
+enumerates render endpoints, browses mDNS for two seconds and probes the native
+helper's local capture for 250 ms. It does not access user settings, change the
+default output, save audio or start a receiver session. Application modules are
+checked with `find_spec`, separately from actual dependency imports. It does
+not create a QApplication or validate window-platform startup; full desktop QA
+remains separate. Exit codes are 0 (passed), 1 (failed checks in the report) and
+2 (arguments or report-writing failure).
+
 Automated coverage includes endpoint rollback/readback, lifecycle races,
 source loss, mDNS merge/malformed ads, bounded subprocess events and teardown,
 UI state/animation, and output-delay Seek separation. Native suites verify HAP
 authentication, encrypted ALAC against a simulated receiver, local sockets and
-PCM conversion. A real Windows loopback probe and real HomePod mini mDNS
-discovery have passed. These do not establish audible HomePod playback.
+PCM conversion and receiver-volume preservation. Four native test suites and
+seven actual-helper lifecycle checks passed. On October 1, 2026, the real
+controller discovered HomePod mini “起居室” (AudioAccessory5,1), authenticated,
+cast the computer's current sound for 5.03 seconds, then stopped and closed.
+The user confirmed: “听到了，声音正常”. This validates audible single-receiver
+playback on that LAN, not measured latency or sustained compatibility.
 
-Hardware release gates remain: actual HomePod mini authentication and audible
-playback, Windows firewall/inbound UDP behavior, Bluetooth switching with
-actual players, sustained playback and stop/exit recovery. HomePod access
-settings must allow the PC on the same LAN. PIN/password receivers are outside
-this transient-authentication path. Do not represent CI tests or a `streaming`
-event as a measured acoustic or long-running playback result.
+Screen-lifetime regressions reproduce invalidation of PySide6's shared QScreen
+wrapper with QWidget.screen() on a transient window. The notice and music
+surface now query the application's screen without that transient ownership;
+the music surface resolves its current monitor before the primary fallback.
+The final complete Python suite passed 2648 tests in 96.093 seconds. Both
+screen-lifetime regressions fail under their respective old QWidget queries.
+Python compilation, tracked/new-file whitespace checks and native Qt panel
+inspection passed, including scrolling controls at the 640 × 360 minimum.
+
+Hardware release gates remain: Bluetooth switching with actual players,
+sustained playback, sleep/reconnect, other firmware/access settings and networks,
+and acoustic latency measurement. HomePod access settings must allow the PC on
+the same LAN. PIN/password receivers are outside this transient-authentication
+path. CI tests and a `streaming` event alone are not audible-playback evidence.

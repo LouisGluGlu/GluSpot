@@ -273,6 +273,7 @@ class WindowsMediaProvider:
         self.message_detector = WindowsMessageDetector(settings_getter)
         self._audio_route_controller = None
         self._audio_route_init_lock = threading.Lock()
+        self._audio_route_closed = False
         self._start_loop()
 
     def start_audio_outputs(self):
@@ -284,6 +285,8 @@ class WindowsMediaProvider:
             lock = self._audio_route_init_lock = threading.Lock()
         with lock:
             if getattr(self, "_audio_route_controller", None) is None:
+                if getattr(self, "_audio_route_closed", False):
+                    raise RuntimeError("Audio output service is closed")
                 from api.audio_route_controller import AudioRouteController
                 source_id = str(self.settings_getter("v2_airplay_sender_id", ""))
                 if not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", source_id):
@@ -321,9 +324,14 @@ class WindowsMediaProvider:
         return controller.set_latency(value)
 
     def close_audio_outputs(self):
-        controller = getattr(self, "_audio_route_controller", None)
-        if controller is not None:
-            controller.close()
+        lock = getattr(self, "_audio_route_init_lock", None)
+        if lock is None:
+            lock = self._audio_route_init_lock = threading.Lock()
+        with lock:
+            self._audio_route_closed = True
+            controller = getattr(self, "_audio_route_controller", None)
+            if controller is not None:
+                controller.close()
 
     def get_visual_data(self) -> IslandVisualData:
         now = time.monotonic()
@@ -986,14 +994,15 @@ class WindowsMediaProvider:
 
     def diagnostics(self) -> dict[str, object]:
         track = self._last_data.track if self._last_data is not None else None
+        audio_route = self.get_audio_route_snapshot()
         return {
             "audio_route": {
-                "state": self.get_audio_route_snapshot().state,
-                "active_id": self.get_audio_route_snapshot().active_id,
-                "pending_id": self.get_audio_route_snapshot().pending_id,
-                "cast_source_id": self.get_audio_route_snapshot().cast_source_id,
-                "device_count": len(self.get_audio_route_snapshot().devices),
-                "status": self.get_audio_route_snapshot().status_message,
+                "state": audio_route.state,
+                "active_id": audio_route.active_id,
+                "pending_id": audio_route.pending_id,
+                "cast_source_id": audio_route.cast_source_id,
+                "device_count": len(audio_route.devices),
+                "status": audio_route.status_message,
             },
             "provider_status": self._provider_status,
             "winsdk_loaded": MediaManager is not None,

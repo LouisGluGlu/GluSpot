@@ -4,9 +4,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QCoreApplication, QEvent, QPointF, QRect, QRectF, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QWidget
+from shiboken6 import isValid
 
 from local.music_surface_window import MusicSurfaceWindow
 
@@ -65,6 +66,31 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
         frame.fill(QColor(0, 0, 0))
         self.window.render(frame)
         return frame
+
+    def test_disposing_surface_preserves_shared_application_screen_wrapper(self):
+        shared = QGuiApplication.primaryScreen()
+        surface = MusicSurfaceWindow(self.owner)
+        surface.setGeometry(shared.availableGeometry())
+        try:
+            self.assertIs(surface.screen(), shared)
+        finally:
+            surface.shutdown()
+            surface.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertTrue(isValid(shared))
+        self.assertIs(QGuiApplication.primaryScreen(), shared)
+
+    def test_screen_query_uses_surface_location_and_primary_fallback(self):
+        other_screen, primary = object(), object()
+        center = self.window.frameGeometry().center()
+        with patch.object(QGuiApplication, "screenAt", return_value=other_screen) as screen_at, \
+                patch.object(QGuiApplication, "primaryScreen", return_value=primary) as primary_screen:
+            self.assertIs(self.window.screen(), other_screen)
+            screen_at.assert_called_once_with(center)
+            primary_screen.assert_not_called()
+        with patch.object(QGuiApplication, "screenAt", return_value=None), \
+                patch.object(QGuiApplication, "primaryScreen", return_value=primary):
+            self.assertIs(self.window.screen(), primary)
 
     def test_animation_frames_only_scale_snapshot_then_layout_once_at_target(self):
         snapshot = self._snapshot()

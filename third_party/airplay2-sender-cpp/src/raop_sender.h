@@ -126,6 +126,11 @@ public:
     // does not check out. Default false = log and continue (SECURITY.md).
     void setStrictReceiverAuth(bool strict) { strictAuth_ = strict; }
 
+    // GluSpot local addition: suppress the default AP2 0 dB volume request.
+    // The receiver keeps its existing volume unless setVolume() is explicit.
+    // Default false retains the upstream sender's behavior.
+    void setPreserveReceiverVolume(bool preserve) { preserveReceiverVolume_ = preserve; }
+
     // Connect + handshake + stream. One session at a time. `host` is what
     // the host's RaopIo can connect to (a dotted-quad from mDNS, or a name).
     void start(const std::string& host, uint16_t port, const std::string& name);
@@ -138,8 +143,8 @@ public:
     bool waitingForPin() const { return waitingForPin_; }
 
     // Receiver volume, 0..100 % -> AirPlay dBFS (-30..0; 0 % = -144 mute,
-    // the pyatv pct_to_dbfs mapping). Not sent automatically at start so
-    // the receiver keeps its own current volume.
+    // the pyatv pct_to_dbfs mapping). AP2 sends 0 dB automatically at launch
+    // unless setPreserveReceiverVolume(true) was selected before start().
     void setVolume(double pct);
 
     // Now-playing metadata pushed to the receiver via DMAP-tagged
@@ -293,6 +298,7 @@ private:
     std::function<Clock::time_point()> clock_;
     RaopIdentity identity_;
     bool         strictAuth_ = false;
+    bool         preserveReceiverVolume_ = false;  // GluSpot opt-in, see above
 
     // -- RTSP session -------------------------------------------------
     bool        rtspConnected_ = false;  // the control socket is up

@@ -115,7 +115,7 @@ class AudioRouteController:
             self._endpoint_error = True
             if self._cast_id:
                 self._end_cast()
-            self._publish(state="error", status_message=f"读取音频设备失败：{str(exc)[:180]}")
+            self._publish(active_id="", state="error", status_message=f"读取音频设备失败：{str(exc)[:180]}")
             return False
         if self._closed.is_set():
             return False
@@ -165,7 +165,8 @@ class AudioRouteController:
             self._sender.stop()
         finally:
             self._cast_id = self._cast_source_id = ""
-            self._publish(pending_id="", cast_source_id="", cast_latency_seconds=0.0)
+            default_id = next((d.id for d in self._local_devices if d.is_default), "")
+            self._publish(active_id=default_id, pending_id="", cast_source_id="", cast_latency_seconds=0.0)
 
     def _select(self, identity):
         if self._closed.is_set() or not self._refresh_devices() or self._closed.is_set():

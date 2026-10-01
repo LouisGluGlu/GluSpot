@@ -11,6 +11,8 @@ proof checking is strict; a proof mismatch fails the session. PIN/password
 devices are not configured by this helper. The upstream sender has an
 approximately 1.5-second receiver buffer; this helper does not attempt to
 change lyric timing, mute local playback, or offer synchronized multiroom.
+Connection preserves the receiver's existing volume. The helper never sends
+the upstream's automatic 0 dB volume request; a muted HomePod stays muted.
 
 ## Build
 
@@ -29,8 +31,10 @@ Mbed TLS build dependency. Output is `build/native-airplay/GluSpotAirPlay.exe`
 and redistribution notices under `build/native-airplay/licenses/`.
 
 The script runs the upstream cryptographic/protocol fake receiver tests, the
-real local socket host tests, and GluSpot PCM conversion tests. None contacts a
-physical HomePod. A physical HomePod pass is still required.
+real local socket host tests, and GluSpot PCM conversion and volume-policy
+tests. None contacts a physical HomePod. Separately, on October 1, 2026, the
+GluSpot controller and this helper cast to HomePod mini “起居室” for 5.03 seconds
+and stopped cleanly; the user confirmed normal audible computer sound.
 
 Run the actual helper's offline lifecycle pass with an active render endpoint:
 
@@ -82,6 +86,6 @@ speaker channels, keeps centre audio in a surround downmix, and drops bounded
 packets if a network consumer stalls. A silent source may not generate loopback
 packets; authenticated `waiting_audio` is distinct from flowing audio. There is
 no claim that endpoint master-volume mute preserves captured audio on all
-drivers, so this build does not mute the source. Real HomePod firmware,
-network/firewall behavior, sustained playback, sleep/reconnect and audible
-latency need hardware verification before a release.
+drivers, so this build does not mute the source. Other HomePod firmware/access
+settings and networks, sustained playback, sleep/reconnect and audible latency
+still need hardware verification before a release.

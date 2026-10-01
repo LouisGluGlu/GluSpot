@@ -168,7 +168,7 @@ private:
             while (WaitForSingleObject(stopEvent_, 5) == WAIT_TIMEOUT) {
                 UINT32 packet = 0;
                 check(capture->GetNextPacketSize(&packet), "WASAPI next packet");
-                while (packet) {
+                while (packet && WaitForSingleObject(stopEvent_, 0) == WAIT_TIMEOUT) {
                     BYTE* data = nullptr;
                     UINT32 count = 0;
                     DWORD flags = 0;
@@ -289,6 +289,7 @@ int wmain(int argc, wchar_t** argv) {
         fxchain::RaopSender sender(loop, std::move(events),
             [](fxchain::RaopLogLevel, const std::string& line) { std::cerr << line << '\n'; });
         sender.setStrictReceiverAuth(true);
+        sender.setPreserveReceiverVolume(true);
         sender.attachRing(&capture.ring());
         sender.setInputFormat(capture.format().rate);
         sender.setIdentity({"GluSpot", sourceId, "iPhone14,3"});
@@ -300,6 +301,7 @@ int wmain(int argc, wchar_t** argv) {
         std::string pending;
         while (!failed && !interrupted && !stopFromStdin(pending)) {
             loop.pump(sender, 20ms);
+            if (failed) break;
             const auto error = capture.error();
             if (!error.empty()) { status("error", error); failed = true; break; }
             if (!authenticated && std::chrono::steady_clock::now() >= connectDeadline) {
