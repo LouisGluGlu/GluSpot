@@ -14,6 +14,15 @@ if not exist "%PYEXE%" (
     exit /b 1
 )
 
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%packaging\windows\build-airplay.ps1"
+if errorlevel 1 (
+    echo GluSpot AirPlay helper build failed. Install CMake and a Windows C++20 toolchain; see native\airplay_sender\README.md.
+    exit /b 1
+)
+
+"%PYEXE%" -X utf8 "%ROOT%packaging\windows\prepare-audio-licenses.py"
+if errorlevel 1 exit /b 1
+
 "%PYEXE%" -X utf8 -m PyInstaller --noconfirm --clean --workpath "%ROOT%build\pyinstaller" --distpath "%ROOT%release" "%ROOT%GluSpot.spec"
 if errorlevel 1 (
     echo GluSpot 6.402 build failed.

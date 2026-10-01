@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, QSize, QStringListModel, Qt, QTimer, QUrl, QVariantAnimation
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPointF, QRectF, QRunnable, QSize, QStringListModel, Qt, QThreadPool, QTimer, QUrl, QVariantAnimation, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
@@ -43,11 +43,18 @@ from local.mac_style import (
     mac_traffic_lights,
 )
 from local.no_wheel_widgets import NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
+from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
 from local.settings_store import (
     DEFAULT_MUSIC_AMBIENCE_VALUES,
     DEFAULT_MUSIC_APP_PROFILES,
     DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
+    MUSIC_READING_GRADIENT_DEFAULT_STEPS,
+    MUSIC_READING_LIFT_DEFAULT_LEVEL,
+    MUSIC_READING_STRATEGY_DEFAULT,
     MYDOCKFINDER_LISTEN_PROCESS_CHOICES,
+    normalize_music_reading_gradient_steps,
+    normalize_music_reading_lift_level,
+    normalize_music_reading_strategy,
     normalize_mydockfinder_listener_process_names,
 )
 from local.startup import StartupManager, build_startup_command, normalize_startup_mode
@@ -59,6 +66,25 @@ from local.ui_theme import (
     style_combo_popup,
 )
 from local.diagnostics_presentation import DIAGNOSTIC_FIELD_ROWS, format_settings_diagnostics
+
+
+class _MusicCacheClearSignals(QObject):
+    finished = Signal(str, object)
+
+
+class _MusicCacheClearJob(QRunnable):
+    def __init__(self, clear_cache, kind: str):
+        super().__init__()
+        self.clear_cache = clear_cache
+        self.kind = kind
+        self.signals = _MusicCacheClearSignals()
+
+    def run(self):
+        try:
+            result = self.clear_cache(self.kind)
+        except Exception as exc:
+            result = {"deleted_files": 0, "deleted_bytes": 0, "errors": [str(exc)]}
+        self.signals.finished.emit(self.kind, result)
 
 
 class ColorButton(QPushButton):
@@ -144,7 +170,7 @@ class MusicAmbiencePreview(QWidget):
         "expanded_duotone_balance": 58,
         "diffraction_frequency": 0.46,
     }
-    VALID_STYLES = {"sea_level", "duotone_full", "bilateral_diffraction", "yaoguang", "solid_album", "pure_black", "pure_white"}
+    VALID_STYLES = set(DEFAULT_MUSIC_AMBIENCE_VALUES)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -606,8 +632,6 @@ class SettingsWindow(QDialog):
     MUSIC_AMBIENCE_STYLES = (
         ("海平面", "sea_level"),
         ("整岛双色", "duotone_full"),
-        ("双侧衍射", "bilateral_diffraction"),
-        ("瑶光", "yaoguang"),
         ("纯色背景", "solid_album"),
         ("黑色", "pure_black"),
         ("白色", "pure_white"),
@@ -616,16 +640,8 @@ class SettingsWindow(QDialog):
         ("常规", "standard"),
         ("双板", "dual_panel"),
     )
-    YAOGUANG_COLOR_SOURCES = (
-        ("自选色", "custom"),
-        ("专辑色提取", "album"),
-    )
-    YAOGUANG_HEIGHT_MODES = (
-        ("常规", "regular"),
-        ("宽松", "spacious"),
-    )
-    COLOR_FILL_BLOCKED_BACKGROUND_STYLES = {"sea_level", "duotone_full", "yaoguang", "solid_album"}
-    COLOR_FILL_BLOCKED_REASON = "海平面、整岛双色、瑶光与纯色背景下不可用"
+    COLOR_FILL_BLOCKED_BACKGROUND_STYLES = {"sea_level", "duotone_full", "solid_album"}
+    COLOR_FILL_BLOCKED_REASON = "海平面、整岛双色与纯色背景下不可用"
     EMBER_COLOR_FILL_BACKGROUND_STYLES = {"pure_black", "pure_white"}
     EMBER_COLOR_FILL_BLOCKED_REASON = "彩色背景下不可用"
     EMBER_COLOR_BACK_GRAY_BACKGROUND_STYLES = {"sea_level", "duotone_full", "solid_album"}
@@ -637,6 +653,7 @@ class SettingsWindow(QDialog):
     SETTINGS_SIDEBAR_ICON_FILES = {
         "基础设置": {"dark": "基础设置（白）.svg", "light": "基础设置 (黑).svg"},
         "媒体控制": {"dark": "媒体控制（白）.svg", "light": "媒体控制（黑）.svg"},
+        "全屏歌词": {"dark": "全屏歌词（白）.svg", "light": "全屏歌词（黑）.svg"},
         "插件设置": {"dark": "插件设置（白）.svg", "light": "插件设置（黑）.svg"},
         "通知设置": {"dark": "通知设置（白）.svg", "light": "通知设置（黑）.svg"},
         "关于我": {"dark": "关于我（白）.svg", "light": "关于我（黑）.svg"},
@@ -710,11 +727,6 @@ class SettingsWindow(QDialog):
         ("无", "none"),
         ("Windows 启动项", "registry"),
         ("计划任务（推荐）", "task"),
-    )
-
-    LYRIC_ELASTIC_MODES = (
-        ("双侧悦动", "both"),
-        ("左侧轻推", "left"),
     )
 
     LYRIC_FLOW_STYLES = (
@@ -798,6 +810,7 @@ class SettingsWindow(QDialog):
         self._barrage_page_index = 3
         self._diagnostics_page_index = 4
         self._diagnostic_labels: dict[str, QLabel] = {}
+        self._music_cache_clear_job = None
         self._detail_panels: list[tuple[QPushButton, QFrame]] = []
         self._applying_theme = False
         self._window_drag_global = None
@@ -1006,6 +1019,7 @@ class SettingsWindow(QDialog):
         pages = (
             ("基础设置", self._basic_settings_page()),
             ("媒体控制", self._media_page()),
+            ("全屏歌词", self._music_surface_lyrics_page()),
             ("插件设置", self._plugins_page()),
             ("通知设置", self._notification_page()),
             ("关于我", self._about_page()),
@@ -2136,7 +2150,7 @@ class SettingsWindow(QDialog):
             "歌词动画帧率",
             30,
             fps_cap,
-            self._fps_setting_value(getattr(self.island_widget, "lyric_animation_fps", self._setting_value("v2_lyric_animation_fps", 60))),
+            self._fps_setting_value(getattr(self.island_widget, "lyric_animation_fps", self._setting_value("v2_lyric_animation_fps", 120))),
             self._set_lyric_animation_fps,
             " FPS",
         )
@@ -2388,44 +2402,11 @@ class SettingsWindow(QDialog):
         self.music_flow_slider = self._slider_row(music_ambience_layout, "流光浮动强度", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
         self.compact_duotone_balance = self._slider_row(music_ambience_layout, "收缩双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50)))), self._set_compact_duotone_balance, "%")
         self.expanded_duotone_balance = self._slider_row(music_ambience_layout, "展开双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "expanded_duotone_balance", 50)))), self._set_expanded_duotone_balance, "%")
-        self.diffraction_frequency_slider = self._slider_row(music_ambience_layout, "衍射频率", 0, 100, max(0, min(100, int(getattr(self.island_widget, "diffraction_frequency", self._setting_value("v2_diffraction_frequency", 0.30)) * 100))), self._set_diffraction_frequency, "%")
         self.solid_album_background_fallback = ColorButton(
             str(getattr(self.island_widget, "solid_album_background_fallback", self._setting_value("v2_solid_album_background_fallback", "#16BCFF"))),
             self._set_solid_album_background_fallback,
         )
         self._row(music_ambience_layout, "纯色默认色", self.solid_album_background_fallback)
-        self.yaoguang_color_source = self._combo(
-            list(self.YAOGUANG_COLOR_SOURCES),
-            str(getattr(self.island_widget, "yaoguang_color_source", self._setting_value("v2_yaoguang_color_source", "custom")) or "custom"),
-            self._set_yaoguang_color_source,
-        )
-        self._row(music_ambience_layout, "瑶光配色", self.yaoguang_color_source)
-        self.yaoguang_outer_color = ColorButton(
-            str(getattr(self.island_widget, "yaoguang_outer_color", self._setting_value("v2_yaoguang_outer_color", "#6C35F2"))),
-            self._set_yaoguang_outer_color,
-        )
-        self._row(music_ambience_layout, "瑶光外圈色", self.yaoguang_outer_color)
-        self.yaoguang_album_inverse_checkbox = self._check(
-            "专辑反相色",
-            bool(getattr(self.island_widget, "yaoguang_album_inverse_enabled", self._setting_value("v2_yaoguang_album_inverse_enabled", False))),
-            self._set_yaoguang_album_inverse_enabled,
-        )
-        music_ambience_layout.addWidget(self.yaoguang_album_inverse_checkbox)
-        self.yaoguang_blur_strength = self._slider_row(
-            music_ambience_layout,
-            "瑶光模糊强度",
-            0,
-            200,
-            max(0, min(200, int(getattr(self.island_widget, "yaoguang_blur_strength", self._setting_value("v2_yaoguang_blur_strength", 58))))),
-            self._set_yaoguang_blur_strength,
-            "%",
-        )
-        self.yaoguang_height_mode = self._combo(
-            list(self.YAOGUANG_HEIGHT_MODES),
-            str(getattr(self.island_widget, "yaoguang_height_mode", self._setting_value("v2_yaoguang_height_mode", "regular")) or "regular"),
-            self._set_yaoguang_height_mode,
-        )
-        self._row(music_ambience_layout, "瑶光高度", self.yaoguang_height_mode)
         self._update_music_ambience_controls()
 
         lyric_title = QLabel("歌词显示")
@@ -2436,7 +2417,6 @@ class SettingsWindow(QDialog):
         self.no_lyrics_input.setPlaceholderText("暂无歌词")
         self.no_lyrics_input.textChanged.connect(self._set_no_lyrics_text)
         self._row(c, "无歌词时显示", self.no_lyrics_input)
-
         self.lyric_flow_style = self._combo(
             list(self.LYRIC_FLOW_STYLES),
             str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream"))),
@@ -2586,7 +2566,10 @@ class SettingsWindow(QDialog):
             " ms",
         )
 
-        self._wave_stream_controls, wave_layout, self._wave_stream_detail_toggle = self._detail_panel(c, "波光逐流")
+        self._wave_stream_controls = QWidget(self)
+        wave_layout = QVBoxLayout(self._wave_stream_controls)
+        wave_layout.setContentsMargins(0, 0, 0, 0)
+        c.addWidget(self._wave_stream_controls)
         self.wave_font_weight = self._combo(
             [("Bold", "bold"), ("Heavy", "heavy")],
             str(getattr(self.island_widget, "wave_font_weight", self._setting_value("v2_wave_font_weight", "bold"))),
@@ -2594,22 +2577,15 @@ class SettingsWindow(QDialog):
         )
         self._row(wave_layout, "字体粗细", self.wave_font_weight)
         self.lyric_font_size = self._slider_row(wave_layout, "波光字号", 14, 24, max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18)))), self._set_lyric_font_size, " px")
-        self.lyric_elastic_strength = self._slider_row(wave_layout, "悦动强度", 0, 160, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100)))), self._set_lyric_elastic_strength, "%")
-        self.lyric_word_spacing = self._slider_row(wave_layout, "字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100)))), self._set_lyric_word_spacing, "%")
-        self.wave_word_fill_checkbox = self._check(
-            "歌词读字",
-            bool(getattr(self.island_widget, "wave_word_fill_enabled", self._setting_value("v2_wave_word_fill_enabled", False))),
-            self._set_wave_word_fill_enabled,
+        self.music_surface_preload_count = self._slider_row(
+            c,
+            "音乐页预载歌曲",
+            1,
+            6,
+            max(1, min(6, int(self._setting_value("v2_music_surface_preload_count", 6)))),
+            self._set_music_surface_preload_count,
+            " 首",
         )
-        self.wave_word_fill_indicator = self._status_indicator(True, "可用")
-        self._indicator_row(wave_layout, "歌词读字", self.wave_word_fill_indicator, self.wave_word_fill_checkbox)
-        self.wave_color_fill_checkbox = self._check(
-            "",
-            bool(getattr(self.island_widget, "wave_color_fill_enabled", self._setting_value("v2_wave_color_fill_enabled", False))),
-            self._set_wave_color_fill_enabled,
-        )
-        self.wave_color_fill_indicator = self._status_indicator(True, "可用")
-        self._indicator_row(wave_layout, "歌词炫彩", self.wave_color_fill_indicator, self.wave_color_fill_checkbox)
         self.dual_line_lyrics_checkbox = self._check(
             "",
             bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)),
@@ -2626,8 +2602,6 @@ class SettingsWindow(QDialog):
         self.dual_line_font_size = self._slider_row(wave_layout, "双语字号", 8, 20, max(8, min(20, int(getattr(self.island_widget, "dual_line_font_size", self._setting_value("v2_dual_line_font_size", 12))))), self._set_dual_line_font_size, " px")
         self.dual_line_secondary_weight = self._slider_row(wave_layout, "次行字重", 40, 100, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72)))), self._set_dual_line_secondary_weight, "%")
         self.dual_line_secondary_spacing = self._slider_row(wave_layout, "次行字词间距", 60, 150, max(60, min(150, int(getattr(self.island_widget, "dual_line_secondary_spacing", 100)))), self._set_dual_line_secondary_spacing, "%")
-        self.lyric_elastic_mode = self._combo(list(self.LYRIC_ELASTIC_MODES), str(getattr(self.island_widget, "lyric_elastic_mode", "both")), self._set_lyric_elastic_mode)
-        self._row(wave_layout, "悦动方式", self.lyric_elastic_mode)
         self.wave_compact_cover_checkbox = self._check(
             "收缩态显示专辑封面",
             bool(getattr(self.island_widget, "compact_lyric_show_cover", self._setting_value("v2_compact_lyric_show_cover", True))),
@@ -2725,6 +2699,115 @@ class SettingsWindow(QDialog):
         layout.addStretch(1)
         return page
 
+    @staticmethod
+    def _reading_gradient_label(value: int) -> str:
+        if int(value) <= 0:
+            return "无渐变"
+        return f"拉丁 {value / 10:.1f} 字 / 中文 {value / 15:.1f} 字"
+
+    def _music_surface_lyrics_page(self) -> QWidget:
+        page = self._page("全屏歌词")
+        layout: QVBoxLayout = page._content_layout
+        card = self._card(layout)
+        c = card.layout()
+
+        hint = QLabel("读字方案同步全屏、窗口和灵动岛；金标读字在全屏与窗口右上角显示 OBO，有独立字词时间时亮起金字，否则为暗底白字。低感知方案隐藏 OBO。其余参数调整全屏与窗口音乐页。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(self._hint_style(2, 8))
+        c.addWidget(hint)
+
+        self.music_surface_reading_strategy = self._combo(
+            [("金标读字", "gold"), ("低感知方案", "low_perception")],
+            normalize_music_reading_strategy(getattr(
+                self.island_widget,
+                "music_surface_reading_strategy",
+                self._setting_value("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT),
+            )),
+            self._set_music_surface_reading_strategy,
+        )
+        self._row(c, "歌词读字方案", self.music_surface_reading_strategy)
+        strategy_hint = QLabel(
+            "金标读字：真实逐字优先，只有行时间时按行内均分读字。"
+            "低感知方案：全曲有真实逐字时间时全曲读字，缺少逐字时间的句子按行估算；全曲没有真实逐字时间则整行切换。"
+            "金标读字的 OBO 亮起表示这首歌至少一行有独立字词时间；暗底白字表示当前只有行计时或合成时间。"
+        )
+        strategy_hint.setWordWrap(True)
+        strategy_hint.setStyleSheet(self._hint_style(2, 8))
+        c.addWidget(strategy_hint)
+
+        self.music_surface_reading_lift_level = self._combo(
+            [("0（不抬升）", 0), ("原高度的 1/4", 1), ("原高度的 1/2", 2), ("原高度", 4)],
+            normalize_music_reading_lift_level(getattr(
+                self.island_widget,
+                "music_surface_reading_lift_level",
+                self._setting_value("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL),
+            )),
+            self._set_music_surface_reading_lift_level,
+        )
+        self._row(c, "读字抬升高度", self.music_surface_reading_lift_level)
+        self.music_surface_reading_gradient_steps = self._slider_row(
+            c, "读字渐变范围", 0, 30,
+            normalize_music_reading_gradient_steps(getattr(
+                self.island_widget,
+                "music_surface_reading_gradient_steps",
+                self._setting_value("v2_music_surface_reading_gradient_steps", MUSIC_READING_GRADIENT_DEFAULT_STEPS),
+            )),
+            self._set_music_surface_reading_gradient_steps,
+        )
+        self.music_surface_reading_gradient_steps._value_formatter = self._reading_gradient_label
+        self._update_slider_value_label(
+            self.music_surface_reading_gradient_steps,
+            self.music_surface_reading_gradient_steps.value(),
+        )
+        gradient_hint = QLabel("最左侧为清晰分界；最右侧最多跨 3 个拉丁字符或 2 个中文字，混合歌词按文字宽度过渡。")
+        gradient_hint.setWordWrap(True)
+        gradient_hint.setStyleSheet(self._hint_style(2, 8))
+        c.addWidget(gradient_hint)
+
+        self.music_sparse_highlight_seconds_per_unit = self._slider_row(
+            c, "高光触发阈值（每字词）", 8, 20,
+            int(round(10 * normalize_sparse_seconds_per_unit(getattr(
+                self.island_widget,
+                "music_sparse_highlight_seconds_per_unit",
+                self._setting_value("v2_music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT),
+            )))),
+            self._set_music_sparse_highlight_seconds_per_unit,
+        )
+        self.music_sparse_highlight_seconds_per_unit._value_formatter = lambda value: f"{value / 10:.1f} 秒"
+        self._update_slider_value_label(
+            self.music_sparse_highlight_seconds_per_unit,
+            self.music_sparse_highlight_seconds_per_unit.value(),
+        )
+        self.music_intro_cleanup_checkbox = self._check(
+            "片头制作信息改为 · · · 倒计时",
+            bool(getattr(self.island_widget, "music_intro_cleanup_enabled", self._setting_value("v2_music_intro_cleanup_enabled", True))),
+            self._set_music_intro_cleanup_enabled,
+        )
+        c.addWidget(self.music_intro_cleanup_checkbox)
+        self.music_surface_translation_checkbox = self._check(
+            "显示翻译 / 粤语音译（含内嵌内容；与音乐岛同步）",
+            bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)),
+            self._set_dual_line_lyrics,
+        )
+        c.addWidget(self.music_surface_translation_checkbox)
+        secondary_card = self._card(layout).layout()
+        cantonese_title = QLabel("粤语次行内容")
+        self._register_section_label(cantonese_title, 12, 8)
+        secondary_card.addWidget(cantonese_title)
+        self.cantonese_secondary_priority = self._combo(
+            [("音译优先（粤拼）", "phonetic_first"), ("翻译优先", "translation_first")],
+            str(self._setting_value("v2_cantonese_secondary_priority", "phonetic_first")),
+            self._set_cantonese_secondary_priority,
+        )
+        self._row(secondary_card, "粤语显示顺序", self.cantonese_secondary_priority)
+        cantonese_hint = QLabel("优先显示选定内容，缺少时显示另一项。识别粤语标注、已有粤拼或典型粤语用字后，优先使用歌词源音译，缺少音译时在后台生成粤拼。")
+        cantonese_hint.setWordWrap(True)
+        cantonese_hint.setStyleSheet(self._hint_style(2, 8))
+        secondary_card.addWidget(cantonese_hint)
+        c.addStretch(1)
+        layout.addStretch(1)
+        return page
+
     def _appearance_page(self) -> QWidget:
         page = self._page("外观")
         layout: QVBoxLayout = page._content_layout
@@ -2794,44 +2877,11 @@ class SettingsWindow(QDialog):
         self.music_flow_slider = self._slider_row(music_ambience_layout, "流光浮动强度", 0, 100, max(0, min(100, int(getattr(self.island_widget, "music_flow_intensity", 0.74) * 100))), self._set_music_flow_intensity, "%")
         self.compact_duotone_balance = self._slider_row(music_ambience_layout, "收缩双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "compact_duotone_balance", 50)))), self._set_compact_duotone_balance, "%")
         self.expanded_duotone_balance = self._slider_row(music_ambience_layout, "展开双色占比", 0, 100, max(0, min(100, int(getattr(self.island_widget, "expanded_duotone_balance", 50)))), self._set_expanded_duotone_balance, "%")
-        self.diffraction_frequency_slider = self._slider_row(music_ambience_layout, "衍射频率", 0, 100, max(0, min(100, int(getattr(self.island_widget, "diffraction_frequency", self._setting_value("v2_diffraction_frequency", 0.30)) * 100))), self._set_diffraction_frequency, "%")
         self.solid_album_background_fallback = ColorButton(
             str(getattr(self.island_widget, "solid_album_background_fallback", self._setting_value("v2_solid_album_background_fallback", "#16BCFF"))),
             self._set_solid_album_background_fallback,
         )
         self._row(music_ambience_layout, "纯色默认色", self.solid_album_background_fallback)
-        self.yaoguang_color_source = self._combo(
-            list(self.YAOGUANG_COLOR_SOURCES),
-            str(getattr(self.island_widget, "yaoguang_color_source", self._setting_value("v2_yaoguang_color_source", "custom")) or "custom"),
-            self._set_yaoguang_color_source,
-        )
-        self._row(music_ambience_layout, "瑶光配色", self.yaoguang_color_source)
-        self.yaoguang_outer_color = ColorButton(
-            str(getattr(self.island_widget, "yaoguang_outer_color", self._setting_value("v2_yaoguang_outer_color", "#6C35F2"))),
-            self._set_yaoguang_outer_color,
-        )
-        self._row(music_ambience_layout, "瑶光外圈色", self.yaoguang_outer_color)
-        self.yaoguang_album_inverse_checkbox = self._check(
-            "专辑反相色",
-            bool(getattr(self.island_widget, "yaoguang_album_inverse_enabled", self._setting_value("v2_yaoguang_album_inverse_enabled", False))),
-            self._set_yaoguang_album_inverse_enabled,
-        )
-        music_ambience_layout.addWidget(self.yaoguang_album_inverse_checkbox)
-        self.yaoguang_blur_strength = self._slider_row(
-            music_ambience_layout,
-            "瑶光模糊强度",
-            0,
-            200,
-            max(0, min(200, int(getattr(self.island_widget, "yaoguang_blur_strength", self._setting_value("v2_yaoguang_blur_strength", 58))))),
-            self._set_yaoguang_blur_strength,
-            "%",
-        )
-        self.yaoguang_height_mode = self._combo(
-            list(self.YAOGUANG_HEIGHT_MODES),
-            str(getattr(self.island_widget, "yaoguang_height_mode", self._setting_value("v2_yaoguang_height_mode", "regular")) or "regular"),
-            self._set_yaoguang_height_mode,
-        )
-        self._row(music_ambience_layout, "瑶光高度", self.yaoguang_height_mode)
         self.animation_speed = self._combo(list(self.ANIMATION_SPEEDS), float(getattr(self.island_widget, "animation_speed", 1.0)), self._set_animation_speed)
         self._row(c, "动画倍速", self.animation_speed)
 
@@ -3107,6 +3157,25 @@ class SettingsWindow(QDialog):
         open_location.clicked.connect(self._open_app_location)
         self._row(l, "浏览", open_location)
 
+        cache_card = self._card(layout)
+        cache_layout = cache_card.layout()
+        cache_layout.addWidget(self._section_label("缓存管理", top=0))
+        self.clear_artwork_cache_button = QPushButton("清理封面并重试")
+        self.clear_artwork_cache_button.clicked.connect(lambda: self._clear_music_cache("artwork"))
+        self._row(cache_layout, "专辑封面缓存", self.clear_artwork_cache_button)
+        self.clear_lyrics_cache_button = QPushButton("清理在线歌词")
+        self.clear_lyrics_cache_button.clicked.connect(lambda: self._clear_music_cache("lyrics"))
+        self._row(cache_layout, "在线歌词缓存", self.clear_lyrics_cache_button)
+        cache_hint = QLabel("保留手动歌词、设置和歌词偏移；清理后重新获取当前歌曲。")
+        cache_hint.setObjectName("Muted")
+        cache_hint.setWordWrap(True)
+        cache_layout.addWidget(cache_hint)
+        self.music_cache_status = QLabel("")
+        self.music_cache_status.setObjectName("Muted")
+        self.music_cache_status.setWordWrap(True)
+        self.music_cache_status.setTextFormat(Qt.TextFormat.PlainText)
+        cache_layout.addWidget(self.music_cache_status)
+
         diagnostic_card = self._card(layout)
         d = diagnostic_card.layout()
         self._diagnostic_labels = {}
@@ -3129,6 +3198,49 @@ class SettingsWindow(QDialog):
         self._refresh_diagnostics()
         layout.addStretch(1)
         return page
+
+    def _clear_music_cache(self, kind: str):
+        if self._music_cache_clear_job is not None:
+            return
+        provider = getattr(self.island_widget, "data_provider", None)
+        clear_cache = getattr(provider, "clear_music_cache", None)
+        if not callable(clear_cache):
+            self.music_cache_status.setText("当前媒体来源不支持缓存清理。")
+            return
+        self.clear_artwork_cache_button.setEnabled(False)
+        self.clear_lyrics_cache_button.setEnabled(False)
+        self.music_cache_status.setText("正在清理封面缓存…" if kind == "artwork" else "正在清理在线歌词缓存…")
+        job = _MusicCacheClearJob(clear_cache, kind)
+        # This receiver outlives settings. Closing this dialog while disk
+        # cleanup runs must not leave the music view's old decoded cache alive.
+        notify = getattr(self.island_widget, "on_music_cache_cleared", None)
+        if callable(notify):
+            job.signals.finished.connect(notify, Qt.ConnectionType.QueuedConnection)
+        job.signals.finished.connect(self._music_cache_cleared, Qt.ConnectionType.QueuedConnection)
+        self._music_cache_clear_job = job
+        QThreadPool.globalInstance().start(job)
+
+    @Slot(str, object)
+    def _music_cache_cleared(self, kind: str, result):
+        self._music_cache_clear_job = None
+        self.clear_artwork_cache_button.setEnabled(True)
+        self.clear_lyrics_cache_button.setEnabled(True)
+        report = result if isinstance(result, dict) else {"errors": ["清理未返回结果"]}
+        errors = report.get("errors", [])
+        if report.get("refresh_requested"):
+            notify = getattr(self.island_widget, "on_music_cache_cleared", None)
+            if not callable(notify):
+                self.island_widget.last_media_refresh_at = -999.0
+                self.island_widget.update()
+        removed = int(report.get("deleted_files", 0))
+        size_mb = max(0, int(report.get("deleted_bytes", 0))) / (1024 * 1024)
+        noun = "封面" if kind == "artwork" else "在线歌词"
+        status = f"已清理{noun}缓存：{removed} 个文件，{size_mb:.1f} MB。"
+        if report.get("refresh_requested"):
+            status += "正在重新获取当前歌曲。"
+        if errors:
+            status += "部分缓存未能清理：" + "；".join(str(error) for error in errors[:3])
+        self.music_cache_status.setText(status)
 
     def _barrage_position_max(self) -> int:
         try:
@@ -3294,7 +3406,7 @@ class SettingsWindow(QDialog):
             (self.fps_slider, self._fps_setting_value(getattr(self.island_widget, "animation_fps", 60))),
             (
                 self.lyric_fps_slider,
-                self._fps_setting_value(getattr(self.island_widget, "lyric_animation_fps", self._setting_value("v2_lyric_animation_fps", 60))),
+                self._fps_setting_value(getattr(self.island_widget, "lyric_animation_fps", self._setting_value("v2_lyric_animation_fps", 120))),
             ),
             (
                 self.plugin_fullscreen_alert_x_offset,
@@ -3320,8 +3432,6 @@ class SettingsWindow(QDialog):
             (self.album_island_expanded_cover_size, max(36, min(96, int(getattr(self.island_widget, "album_island_expanded_cover_size", self._setting_value("v2_album_island_expanded_cover_size", 72)))))),
             (self.album_island_spacing, max(48, min(170, int(getattr(self.island_widget, "album_island_spacing", self._setting_value("v2_album_island_spacing", 112)))))),
             (self.album_island_perspective_amount, max(0, min(200, int(getattr(self.island_widget, "album_island_perspective_amount", self._setting_value("v2_album_island_perspective_amount", 100)))))),
-            (self.lyric_elastic_strength, max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100))))),
-            (self.lyric_word_spacing, max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100))))),
             (self.dual_line_font_size, max(8, min(20, int(getattr(self.island_widget, "dual_line_font_size", self._setting_value("v2_dual_line_font_size", 12)))))),
             (self.dual_line_secondary_weight, max(40, min(100, int(getattr(self.island_widget, "dual_line_secondary_weight", 72))))),
             (self.dual_line_secondary_spacing, max(60, min(150, int(getattr(self.island_widget, "dual_line_secondary_spacing", 100))))),
@@ -3424,12 +3534,6 @@ class SettingsWindow(QDialog):
         self.gelv_word_fill_checkbox.blockSignals(True)
         self.gelv_word_fill_checkbox.setChecked(bool(getattr(self.island_widget, "gelv_word_fill_enabled", self._setting_value("v2_gelv_word_fill_enabled", False))))
         self.gelv_word_fill_checkbox.blockSignals(False)
-        self.wave_word_fill_checkbox.blockSignals(True)
-        self.wave_word_fill_checkbox.setChecked(bool(getattr(self.island_widget, "wave_word_fill_enabled", self._setting_value("v2_wave_word_fill_enabled", False))))
-        self.wave_word_fill_checkbox.blockSignals(False)
-        self.wave_color_fill_checkbox.blockSignals(True)
-        self.wave_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "wave_color_fill_enabled", self._setting_value("v2_wave_color_fill_enabled", False))))
-        self.wave_color_fill_checkbox.blockSignals(False)
         self.ember_word_fill_checkbox.blockSignals(True)
         self.ember_word_fill_checkbox.setChecked(bool(getattr(self.island_widget, "ember_word_fill_enabled", self._setting_value("v2_ember_word_fill_enabled", True))))
         self.ember_word_fill_checkbox.blockSignals(False)
@@ -3460,31 +3564,11 @@ class SettingsWindow(QDialog):
             self.solid_album_background_fallback.set_color(
                 str(getattr(self.island_widget, "solid_album_background_fallback", self._setting_value("v2_solid_album_background_fallback", "#16BCFF")))
             )
-        if hasattr(self, "yaoguang_color_source"):
-            self._set_combo_data(
-                self.yaoguang_color_source,
-                str(getattr(self.island_widget, "yaoguang_color_source", self._setting_value("v2_yaoguang_color_source", "custom")) or "custom"),
-            )
-        if hasattr(self, "yaoguang_outer_color"):
-            self.yaoguang_outer_color.set_color(
-                str(getattr(self.island_widget, "yaoguang_outer_color", self._setting_value("v2_yaoguang_outer_color", "#6C35F2")))
-            )
-        if hasattr(self, "yaoguang_album_inverse_checkbox"):
-            self.yaoguang_album_inverse_checkbox.blockSignals(True)
-            self.yaoguang_album_inverse_checkbox.setChecked(bool(getattr(self.island_widget, "yaoguang_album_inverse_enabled", self._setting_value("v2_yaoguang_album_inverse_enabled", False))))
-            self.yaoguang_album_inverse_checkbox.blockSignals(False)
-        if hasattr(self, "yaoguang_blur_strength"):
-            self.yaoguang_blur_strength.blockSignals(True)
-            self.yaoguang_blur_strength.setValue(max(0, min(200, int(getattr(self.island_widget, "yaoguang_blur_strength", self._setting_value("v2_yaoguang_blur_strength", 58))))))
-            self.yaoguang_blur_strength.blockSignals(False)
-        if hasattr(self, "yaoguang_height_mode"):
-            self._set_combo_data(
-                self.yaoguang_height_mode,
-                str(getattr(self.island_widget, "yaoguang_height_mode", self._setting_value("v2_yaoguang_height_mode", "regular")) or "regular"),
-            )
         self._set_combo_data(self.no_lyrics_display_mode, str(getattr(self.island_widget, "no_lyrics_display_mode", self._setting_value("v2_no_lyrics_display_mode", "text"))))
         if hasattr(self, "dual_line_secondary_source"):
             self._set_combo_data(self.dual_line_secondary_source, str(self._setting_value("v2_dual_line_secondary_source", "translation") or "translation"))
+        if hasattr(self, "cantonese_secondary_priority"):
+            self._set_combo_data(self.cantonese_secondary_priority, str(self._setting_value("v2_cantonese_secondary_priority", "phonetic_first")))
         if hasattr(self, "lyric_chinese_conversion"):
             self._set_combo_data(self.lyric_chinese_conversion, str(self._setting_value("v2_lyric_chinese_conversion", "off") or "off"))
         self._set_combo_data(self.album_island_cover_count, int(getattr(self.island_widget, "album_island_cover_count", self._setting_value("v2_album_island_cover_count", 5))))
@@ -3505,7 +3589,6 @@ class SettingsWindow(QDialog):
             self.album_island_perspective_amount.blockSignals(True)
             self.album_island_perspective_amount.setValue(max(0, min(200, int(getattr(self.island_widget, "album_island_perspective_amount", self._setting_value("v2_album_island_perspective_amount", 100))))))
             self.album_island_perspective_amount.blockSignals(False)
-        self._set_combo_data(self.lyric_elastic_mode, str(getattr(self.island_widget, "lyric_elastic_mode", "both")))
         self._set_combo_data(self.plugin_timezone, str(self._setting_value("v2_plugin_timezone", "local") or "local"))
         self.plugin_timezone_text.blockSignals(True)
         self.plugin_timezone_text.setText(str(self._setting_value("v2_plugin_timezone", "local") or "local"))
@@ -3540,6 +3623,46 @@ class SettingsWindow(QDialog):
         self.lyric_font_size.blockSignals(True)
         self.lyric_font_size.setValue(max(14, min(24, int(getattr(self.island_widget, "lyric_font_size", 18)))))
         self.lyric_font_size.blockSignals(False)
+        if hasattr(self, "music_surface_reading_lift_level"):
+            self._set_combo_data(
+                self.music_surface_reading_lift_level,
+                normalize_music_reading_lift_level(getattr(
+                    self.island_widget,
+                    "music_surface_reading_lift_level",
+                    self._setting_value("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL),
+                )),
+            )
+        if hasattr(self, "music_surface_reading_strategy"):
+            self._set_combo_data(
+                self.music_surface_reading_strategy,
+                normalize_music_reading_strategy(getattr(
+                    self.island_widget,
+                    "music_surface_reading_strategy",
+                    self._setting_value("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT),
+                )),
+            )
+        if hasattr(self, "music_surface_reading_gradient_steps"):
+            slider = self.music_surface_reading_gradient_steps
+            slider.blockSignals(True)
+            slider.setValue(normalize_music_reading_gradient_steps(getattr(
+                self.island_widget,
+                "music_surface_reading_gradient_steps",
+                self._setting_value("v2_music_surface_reading_gradient_steps", MUSIC_READING_GRADIENT_DEFAULT_STEPS),
+            )))
+            slider.blockSignals(False)
+            self._update_slider_value_label(slider, slider.value())
+        if hasattr(self, "music_sparse_highlight_seconds_per_unit"):
+            slider = self.music_sparse_highlight_seconds_per_unit
+            slider.blockSignals(True)
+            slider.setValue(int(round(10 * normalize_sparse_seconds_per_unit(
+                getattr(
+                    self.island_widget,
+                    "music_sparse_highlight_seconds_per_unit",
+                    self._setting_value("v2_music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT),
+                )
+            ))))
+            slider.blockSignals(False)
+            self._update_slider_value_label(slider, slider.value())
         if hasattr(self, "wave_font_weight"):
             self._set_combo_data(
                 self.wave_font_weight,
@@ -3589,20 +3712,6 @@ class SettingsWindow(QDialog):
             self.gelv_word_spacing.blockSignals(True)
             self.gelv_word_spacing.setValue(max(100, min(420, int(getattr(self.island_widget, "gelv_word_spacing", self._setting_value("v2_gelv_word_spacing", 320))))))
             self.gelv_word_spacing.blockSignals(False)
-        self.lyric_elastic_strength.blockSignals(True)
-        self.lyric_elastic_strength.setValue(max(0, min(160, int(getattr(self.island_widget, "lyric_elastic_strength", 100)))))
-        self.lyric_elastic_strength.blockSignals(False)
-        self.lyric_word_spacing.blockSignals(True)
-        self.lyric_word_spacing.setValue(max(60, min(150, int(getattr(self.island_widget, "lyric_word_spacing", 100)))))
-        self.lyric_word_spacing.blockSignals(False)
-        if hasattr(self, "wave_color_fill_checkbox"):
-            if hasattr(self, "wave_word_fill_checkbox"):
-                self.wave_word_fill_checkbox.blockSignals(True)
-                self.wave_word_fill_checkbox.setChecked(bool(getattr(self.island_widget, "wave_word_fill_enabled", self._setting_value("v2_wave_word_fill_enabled", False))))
-                self.wave_word_fill_checkbox.blockSignals(False)
-            self.wave_color_fill_checkbox.blockSignals(True)
-            self.wave_color_fill_checkbox.setChecked(bool(getattr(self.island_widget, "wave_color_fill_enabled", self._setting_value("v2_wave_color_fill_enabled", False))))
-            self.wave_color_fill_checkbox.blockSignals(False)
         if hasattr(self, "ember_word_fill_checkbox"):
             self.ember_word_fill_checkbox.blockSignals(True)
             self.ember_word_fill_checkbox.setChecked(bool(getattr(self.island_widget, "ember_word_fill_enabled", self._setting_value("v2_ember_word_fill_enabled", True))))
@@ -3635,31 +3744,15 @@ class SettingsWindow(QDialog):
             self.solid_album_background_fallback.set_color(
                 str(getattr(self.island_widget, "solid_album_background_fallback", self._setting_value("v2_solid_album_background_fallback", "#16BCFF")))
             )
-        if hasattr(self, "yaoguang_color_source"):
-            self._set_combo_data(
-                self.yaoguang_color_source,
-                str(getattr(self.island_widget, "yaoguang_color_source", self._setting_value("v2_yaoguang_color_source", "custom")) or "custom"),
-            )
-        if hasattr(self, "yaoguang_outer_color"):
-            self.yaoguang_outer_color.set_color(
-                str(getattr(self.island_widget, "yaoguang_outer_color", self._setting_value("v2_yaoguang_outer_color", "#6C35F2")))
-            )
-        if hasattr(self, "yaoguang_album_inverse_checkbox"):
-            self.yaoguang_album_inverse_checkbox.blockSignals(True)
-            self.yaoguang_album_inverse_checkbox.setChecked(bool(getattr(self.island_widget, "yaoguang_album_inverse_enabled", self._setting_value("v2_yaoguang_album_inverse_enabled", False))))
-            self.yaoguang_album_inverse_checkbox.blockSignals(False)
-        if hasattr(self, "yaoguang_blur_strength"):
-            self.yaoguang_blur_strength.blockSignals(True)
-            self.yaoguang_blur_strength.setValue(max(0, min(200, int(getattr(self.island_widget, "yaoguang_blur_strength", self._setting_value("v2_yaoguang_blur_strength", 58))))))
-            self.yaoguang_blur_strength.blockSignals(False)
-        if hasattr(self, "yaoguang_height_mode"):
-            self._set_combo_data(
-                self.yaoguang_height_mode,
-                str(getattr(self.island_widget, "yaoguang_height_mode", self._setting_value("v2_yaoguang_height_mode", "regular")) or "regular"),
-            )
         self.dual_line_lyrics_checkbox.blockSignals(True)
         self.dual_line_lyrics_checkbox.setChecked(bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)))
         self.dual_line_lyrics_checkbox.blockSignals(False)
+        self.music_surface_translation_checkbox.blockSignals(True)
+        self.music_surface_translation_checkbox.setChecked(bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)))
+        self.music_surface_translation_checkbox.blockSignals(False)
+        self.music_intro_cleanup_checkbox.blockSignals(True)
+        self.music_intro_cleanup_checkbox.setChecked(bool(getattr(self.island_widget, "music_intro_cleanup_enabled", self._setting_value("v2_music_intro_cleanup_enabled", True))))
+        self.music_intro_cleanup_checkbox.blockSignals(False)
         if hasattr(self, "gelv_dual_line_checkbox"):
             self.gelv_dual_line_checkbox.blockSignals(True)
             self.gelv_dual_line_checkbox.setChecked(bool(getattr(self.island_widget, "enable_dual_line_lyrics", False)))
@@ -3828,25 +3921,6 @@ class SettingsWindow(QDialog):
                 ember_color_fill_available,
                 "可用" if ember_color_fill_available else ember_color_fill_reason,
             )
-        wave_word_fill_available = self._wave_word_fill_available_for_settings()
-        wave_word_fill_reason = "" if wave_word_fill_available else "当前文字流样式下不可用"
-        if hasattr(self, "wave_word_fill_checkbox"):
-            self._set_switch_enabled(self.wave_word_fill_checkbox, wave_word_fill_available, wave_word_fill_reason)
-        if hasattr(self, "wave_word_fill_indicator"):
-            self._set_status_indicator(
-                self.wave_word_fill_indicator,
-                wave_word_fill_available,
-                "可用" if wave_word_fill_available else wave_word_fill_reason,
-            )
-        wave_color_fill_available = self._wave_color_fill_available_for_settings()
-        if hasattr(self, "wave_color_fill_checkbox"):
-            self._set_switch_enabled(self.wave_color_fill_checkbox, wave, color_fill_reason)
-        if hasattr(self, "wave_color_fill_indicator"):
-            self._set_status_indicator(
-                self.wave_color_fill_indicator,
-                wave_color_fill_available,
-                "可用" if wave_color_fill_available else color_fill_reason,
-            )
         if hasattr(self, "wave_compact_cover_checkbox"):
             self._set_switch_enabled(self.wave_compact_cover_checkbox, wave, "")
         if hasattr(self, "wave_font_weight"):
@@ -3902,22 +3976,7 @@ class SettingsWindow(QDialog):
         style = self._current_music_ambience_style()
         if style not in self.COLOR_FILL_BLOCKED_BACKGROUND_STYLES:
             return True
-        return self._yaoguang_colorful_unlocked_for_settings()
-
-    def _yaoguang_colorful_unlocked_for_settings(self) -> bool:
-        if self._current_music_ambience_style() != "yaoguang":
-            return False
-        source_widget = getattr(self, "yaoguang_color_source", None)
-        if source_widget is not None and hasattr(source_widget, "currentData"):
-            source = str(source_widget.currentData() or "custom")
-        else:
-            source = str(getattr(self.island_widget, "yaoguang_color_source", self._setting_value("v2_yaoguang_color_source", "custom")) or "custom")
-        inverse_widget = getattr(self, "yaoguang_album_inverse_checkbox", None)
-        if inverse_widget is not None and hasattr(inverse_widget, "isChecked"):
-            inverse_enabled = bool(inverse_widget.isChecked())
-        else:
-            inverse_enabled = bool(getattr(self.island_widget, "yaoguang_album_inverse_enabled", self._setting_value("v2_yaoguang_album_inverse_enabled", False)))
-        return source.strip().lower() in {"album", "album_color", "cover", "cover_color"} and inverse_enabled
+        return False
 
     def _ember_color_fill_background_available_for_settings(self) -> bool:
         return self._current_music_ambience_style() in self.EMBER_COLOR_FILL_BACKGROUND_STYLES
@@ -3942,14 +4001,6 @@ class SettingsWindow(QDialog):
             return False
         return self._color_fill_background_available_for_settings()
 
-    def _wave_color_fill_available_for_settings(self) -> bool:
-        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")) or "wave_stream")
-        return style == "wave_stream" and self._color_fill_background_available_for_settings()
-
-    def _wave_word_fill_available_for_settings(self) -> bool:
-        style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")) or "wave_stream")
-        return style == "wave_stream"
-
     def _ember_color_fill_available_for_settings(self) -> bool:
         style = str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")) or "wave_stream")
         if style != "ember_fade":
@@ -3969,7 +4020,6 @@ class SettingsWindow(QDialog):
                         "music_flow_intensity": style_values.get("music_flow_intensity", values[style]["music_flow_intensity"]),
                         "compact_duotone_balance": style_values.get("compact_duotone_balance", values[style]["compact_duotone_balance"]),
                         "expanded_duotone_balance": style_values.get("expanded_duotone_balance", values[style]["expanded_duotone_balance"]),
-                        "diffraction_frequency": style_values.get("diffraction_frequency", values[style]["diffraction_frequency"]),
                     }
                 )
         return values
@@ -3984,11 +4034,10 @@ class SettingsWindow(QDialog):
             "music_flow_intensity": max(0.0, min(1.0, int(self.music_flow_slider.value()) / 100.0)),
             "compact_duotone_balance": max(0, min(100, int(self.compact_duotone_balance.value()))),
             "expanded_duotone_balance": max(0, min(100, int(self.expanded_duotone_balance.value()))),
-            "diffraction_frequency": max(0.0, min(1.0, int(self.diffraction_frequency_slider.value()) / 100.0)),
         }
 
     def _save_music_ambience_values_for_style(self, style: str | None = None):
-        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance", "diffraction_frequency_slider")):
+        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance")):
             return
         style = style or self._current_music_ambience_style()
         if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
@@ -4005,7 +4054,6 @@ class SettingsWindow(QDialog):
         self._save("v2_music_flow_intensity", float(values["music_flow_intensity"]))
         self._save("v2_compact_duotone_balance", int(values["compact_duotone_balance"]))
         self._save("v2_expanded_duotone_balance", int(values["expanded_duotone_balance"]))
-        self._save("v2_diffraction_frequency", float(values["diffraction_frequency"]))
 
     def _apply_music_ambience_values_for_style(self, style: str):
         values = self._music_ambience_values().get(style, DEFAULT_MUSIC_AMBIENCE_VALUES["sea_level"])
@@ -4013,7 +4061,6 @@ class SettingsWindow(QDialog):
         flow = max(0.0, min(1.0, float(values.get("music_flow_intensity", 0.74))))
         compact = max(0, min(100, int(values.get("compact_duotone_balance", 50))))
         expanded = max(0, min(100, int(values.get("expanded_duotone_balance", 50))))
-        diffraction_frequency = max(0.0, min(1.0, float(values.get("diffraction_frequency", 0.30))))
         self.island_widget.ambient_intensity = ambient
         if hasattr(self.island_widget, "set_music_flow_intensity"):
             self.island_widget.set_music_flow_intensity(flow, notify=False)
@@ -4024,23 +4071,17 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.compact_duotone_balance = compact
             self.island_widget.expanded_duotone_balance = expanded
-        if hasattr(self.island_widget, "set_diffraction_frequency"):
-            self.island_widget.set_diffraction_frequency(diffraction_frequency, notify=False)
-        else:
-            self.island_widget.diffraction_frequency = diffraction_frequency
         if hasattr(self, "wave_slider"):
             self._set_slider_value(self.wave_slider, int(round(ambient * 100)))
             self._set_slider_value(self.music_flow_slider, int(round(flow * 100)))
             self._set_slider_value(self.compact_duotone_balance, compact)
             self._set_slider_value(self.expanded_duotone_balance, expanded)
-            self._set_slider_value(self.diffraction_frequency_slider, int(round(diffraction_frequency * 100)))
         self._save_legacy_music_ambience_values(
             {
                 "ambient_intensity": ambient,
                 "music_flow_intensity": flow,
                 "compact_duotone_balance": compact,
                 "expanded_duotone_balance": expanded,
-                "diffraction_frequency": diffraction_frequency,
             }
         )
         if hasattr(self.island_widget, "update"):
@@ -4051,8 +4092,9 @@ class SettingsWindow(QDialog):
             return
         allowed = self._music_background_options_allowed()
         current_style = self._current_music_ambience_style()
-        if current_style not in allowed:
-            current_style = "pure_black"
+        raw_style = str(getattr(self.island_widget, "music_ambience_style", current_style) or "sea_level")
+        if raw_style not in allowed:
+            current_style = "sea_level"
             if hasattr(self.island_widget, "set_music_ambience_style"):
                 self.island_widget.set_music_ambience_style(current_style, notify=False)
             else:
@@ -4081,50 +4123,21 @@ class SettingsWindow(QDialog):
             title_label.setText(title)
 
     def _update_music_ambience_control_visibility(self, style: str):
-        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance", "diffraction_frequency_slider")):
+        if not all(hasattr(self, name) for name in ("wave_slider", "music_flow_slider", "compact_duotone_balance", "expanded_duotone_balance")):
             return
         style = str(style or "sea_level")
         if hasattr(self, "_music_ambience_controls"):
             self._music_ambience_controls.setVisible(style not in {"pure_black", "pure_white"})
-        self._set_slider_row_visible(self.wave_slider, style in {"sea_level", "duotone_full", "bilateral_diffraction"}, "衍射强度" if style == "bilateral_diffraction" else "饱和光强度")
+        self._set_slider_row_visible(self.wave_slider, style in {"sea_level", "duotone_full"}, "饱和光强度")
         self._set_slider_row_visible(self.music_flow_slider, style == "sea_level", "流光浮动强度")
         self._set_slider_row_visible(self.compact_duotone_balance, style == "duotone_full", "双色占比")
         self._set_slider_row_visible(self.expanded_duotone_balance, False)
-        self._set_slider_row_visible(self.diffraction_frequency_slider, style == "bilateral_diffraction", "衍射频率")
         fallback_button = getattr(self, "solid_album_background_fallback", None)
         if fallback_button is not None:
             row = fallback_button.parentWidget()
             if row is not None:
                 row.setVisible(style == "solid_album")
             fallback_button.setEnabled(style == "solid_album")
-        yaoguang_source = getattr(self, "yaoguang_color_source", None)
-        yaoguang_source_value = "custom"
-        if yaoguang_source is not None:
-            row = yaoguang_source.parentWidget()
-            if row is not None:
-                row.setVisible(style == "yaoguang")
-            yaoguang_source.setEnabled(style == "yaoguang")
-            yaoguang_source_value = str(yaoguang_source.currentData() or "custom")
-        yaoguang_button = getattr(self, "yaoguang_outer_color", None)
-        if yaoguang_button is not None:
-            row = yaoguang_button.parentWidget()
-            if row is not None:
-                row.setVisible(style == "yaoguang")
-            yaoguang_button.setEnabled(style == "yaoguang" and yaoguang_source_value != "album")
-        yaoguang_inverse = getattr(self, "yaoguang_album_inverse_checkbox", None)
-        if yaoguang_inverse is not None:
-            yaoguang_inverse.setVisible(style == "yaoguang")
-            yaoguang_inverse.setEnabled(style == "yaoguang" and yaoguang_source_value == "album")
-        yaoguang_blur = getattr(self, "yaoguang_blur_strength", None)
-        if yaoguang_blur is not None:
-            self._set_slider_row_visible(yaoguang_blur, style == "yaoguang", "瑶光模糊强度")
-            yaoguang_blur.setEnabled(style == "yaoguang")
-        yaoguang_height = getattr(self, "yaoguang_height_mode", None)
-        if yaoguang_height is not None:
-            row = yaoguang_height.parentWidget()
-            if row is not None:
-                row.setVisible(style == "yaoguang")
-            yaoguang_height.setEnabled(style == "yaoguang")
 
     def _music_background_options_allowed(self) -> set[str]:
         return set(DEFAULT_MUSIC_AMBIENCE_VALUES)
@@ -4156,10 +4169,6 @@ class SettingsWindow(QDialog):
                 values,
                 album_color=album_color,
                 secondary_color=secondary_color,
-                yaoguang_outer_color=str(getattr(self.island_widget, "yaoguang_outer_color", self._setting_value("v2_yaoguang_outer_color", "#6C35F2"))),
-                yaoguang_blur_strength=int(getattr(self.island_widget, "yaoguang_blur_strength", self._setting_value("v2_yaoguang_blur_strength", 58))),
-                yaoguang_color_source=str(getattr(self.island_widget, "yaoguang_color_source", self._setting_value("v2_yaoguang_color_source", "custom")) or "custom"),
-                yaoguang_album_inverse_enabled=bool(getattr(self.island_widget, "yaoguang_album_inverse_enabled", self._setting_value("v2_yaoguang_album_inverse_enabled", False))),
                 playing=bool(getattr(self.island_widget, "media_is_playing", True)),
             )
 
@@ -4940,29 +4949,6 @@ class SettingsWindow(QDialog):
         self._save("v2_wave_font_weight", weight)
         self._touch()
 
-    def _set_wave_word_fill_enabled(self, enabled: bool):
-        enabled = bool(enabled)
-        if enabled and not self._wave_word_fill_available_for_settings():
-            enabled = False
-        self._set_island_bool_setting("wave_word_fill_enabled", enabled)
-        self._set_switch_checked(getattr(self, "wave_word_fill_checkbox", None), enabled)
-        self._save("v2_wave_word_fill_enabled", enabled)
-        self._update_lyric_flow_controls()
-        self._touch()
-
-    def _set_wave_color_fill_enabled(self, enabled: bool):
-        enabled = bool(enabled)
-        self._set_island_bool_setting("wave_color_fill_enabled", enabled)
-        self._set_switch_checked(getattr(self, "wave_color_fill_checkbox", None), enabled)
-        self._save("v2_wave_color_fill_enabled", enabled)
-        if hasattr(self, "music_ambience_style"):
-            actual_style = self._current_music_ambience_style()
-            self._save("v2_music_ambience_style", actual_style)
-            self._apply_music_ambience_values_for_style(actual_style)
-            self._update_music_ambience_controls()
-        self._update_lyric_flow_controls()
-        self._touch()
-
     def _set_ember_word_fill_enabled(self, enabled: bool):
         enabled = bool(enabled)
         self._set_island_bool_setting("ember_word_fill_enabled", enabled)
@@ -5211,98 +5197,13 @@ class SettingsWindow(QDialog):
         self._update_previews()
         self._touch()
 
-    def _set_yaoguang_outer_color(self):
-        color = self.yaoguang_outer_color.color()
-        if hasattr(self.island_widget, "set_yaoguang_outer_color"):
-            self.island_widget.set_yaoguang_outer_color(color, notify=False)
-            color = str(getattr(self.island_widget, "yaoguang_outer_color", color))
-        else:
-            qcolor = QColor(str(color or "#6C35F2"))
-            if not qcolor.isValid():
-                qcolor = QColor("#6C35F2")
-            color = qcolor.name().upper()
-            self.island_widget.yaoguang_outer_color = color
-            self.island_widget.update()
-        self.yaoguang_outer_color.set_color(color)
-        self._save("v2_yaoguang_outer_color", color)
-        self._update_previews()
-        self._touch()
-
-    def _set_yaoguang_color_source(self, _index: int = -1):
-        source = "custom"
-        if hasattr(self, "yaoguang_color_source"):
-            source = str(self.yaoguang_color_source.currentData() or "custom")
-        source = "album" if source == "album" else "custom"
-        if hasattr(self.island_widget, "set_yaoguang_color_source"):
-            self.island_widget.set_yaoguang_color_source(source, notify=False)
-            source = str(getattr(self.island_widget, "yaoguang_color_source", source) or source)
-        else:
-            self.island_widget.yaoguang_color_source = source
-            if source != "album":
-                self.island_widget.yaoguang_album_inverse_enabled = False
-            self.island_widget.update()
-        source = "album" if source == "album" else "custom"
-        self._save("v2_yaoguang_color_source", source)
-        if source != "album":
-            self._set_yaoguang_album_inverse_enabled(False)
-        self._update_music_ambience_controls()
-        self._update_previews()
-        self._touch()
-
-    def _set_yaoguang_album_inverse_enabled(self, enabled: bool):
-        source = str(getattr(self.island_widget, "yaoguang_color_source", self._setting_value("v2_yaoguang_color_source", "custom")) or "custom")
-        enabled = bool(enabled) and source == "album"
-        if hasattr(self.island_widget, "set_yaoguang_album_inverse_enabled"):
-            self.island_widget.set_yaoguang_album_inverse_enabled(enabled, notify=False)
-            enabled = bool(getattr(self.island_widget, "yaoguang_album_inverse_enabled", enabled))
-        else:
-            self.island_widget.yaoguang_album_inverse_enabled = enabled
-            self.island_widget.update()
-        if hasattr(self, "yaoguang_album_inverse_checkbox") and self.yaoguang_album_inverse_checkbox.isChecked() != enabled:
-            self.yaoguang_album_inverse_checkbox.blockSignals(True)
-            self.yaoguang_album_inverse_checkbox.setChecked(enabled)
-            self.yaoguang_album_inverse_checkbox.blockSignals(False)
-        self._save("v2_yaoguang_album_inverse_enabled", enabled)
-        self._update_music_ambience_controls()
-        self._update_previews()
-        self._touch()
-
-    def _set_yaoguang_blur_strength(self, value: int):
-        value = max(0, min(200, int(value)))
-        if hasattr(self.island_widget, "set_yaoguang_blur_strength"):
-            self.island_widget.set_yaoguang_blur_strength(value, notify=False)
-            value = int(getattr(self.island_widget, "yaoguang_blur_strength", value))
-        else:
-            self.island_widget.yaoguang_blur_strength = value
-            self.island_widget.update()
-        if hasattr(self, "yaoguang_blur_strength") and self.yaoguang_blur_strength.value() != value:
-            self._set_slider_value(self.yaoguang_blur_strength, value)
-        self._save("v2_yaoguang_blur_strength", value)
-        self._update_previews()
-        self._touch()
-
-    def _set_yaoguang_height_mode(self, _index: int = -1):
-        mode = "regular"
-        if hasattr(self, "yaoguang_height_mode"):
-            mode = str(self.yaoguang_height_mode.currentData() or "regular")
-        mode = "spacious" if mode == "spacious" else "regular"
-        if hasattr(self.island_widget, "set_yaoguang_height_mode"):
-            self.island_widget.set_yaoguang_height_mode(mode, notify=False)
-            mode = str(getattr(self.island_widget, "yaoguang_height_mode", mode) or mode)
-        else:
-            self.island_widget.yaoguang_height_mode = mode
-            self.island_widget.update()
-        mode = "spacious" if mode == "spacious" else "regular"
-        if hasattr(self, "yaoguang_height_mode"):
-            self._set_combo_data(self.yaoguang_height_mode, mode)
-        self._save("v2_yaoguang_height_mode", mode)
-        self._update_previews()
-        self._touch()
-
     def _set_no_lyrics_display_mode(self, _index: int = -1):
         mode = str(self.no_lyrics_display_mode.currentData() or "text")
-        if hasattr(self.island_widget, "set_no_lyrics_display_mode"):
-            self.island_widget.set_no_lyrics_display_mode(mode, notify=False)
+        if mode not in {"text", "album_island"}:
+            mode = "text"
+        setter = getattr(self.island_widget, "set_no_lyrics_display_mode", None)
+        if callable(setter):
+            setter(mode, notify=False)
         else:
             self.island_widget.no_lyrics_display_mode = mode
             self.island_widget.update()
@@ -5651,17 +5552,6 @@ class SettingsWindow(QDialog):
         self._update_previews()
         self._touch()
 
-    def _set_diffraction_frequency(self, value: int):
-        amount = max(0.0, min(1.0, value / 100.0))
-        if hasattr(self.island_widget, "set_diffraction_frequency"):
-            self.island_widget.set_diffraction_frequency(amount, notify=False)
-        else:
-            self.island_widget.diffraction_frequency = amount
-            self.island_widget.update()
-        self._save("v2_diffraction_frequency", amount)
-        self._save_music_ambience_values_for_style()
-        self._update_previews()
-
     def _set_compact_duotone_balance(self, value: int):
         value = max(0, min(100, int(value)))
         expanded_value = value if self._current_music_ambience_style() == "duotone_full" else None
@@ -5746,6 +5636,9 @@ class SettingsWindow(QDialog):
     def _set_music_app_profile_lyric_offset(self, service: str, value: int):
         seconds = max(-12.0, min(12.0, float(value) / 1000.0))
         self._save_music_app_profile_value(service, "lyric_offset_seconds", seconds)
+        apply_active = getattr(self.island_widget, "set_active_music_app_lyric_offset", None)
+        if callable(apply_active):
+            apply_active(service, seconds)
 
     def _set_music_app_profile_betterncm_enabled(self, enabled: bool):
         self._save_music_app_profile_value("netease", "betterncm_enabled", bool(enabled))
@@ -5875,32 +5768,53 @@ class SettingsWindow(QDialog):
             self.island_widget.update()
         self._save("v2_lyric_font_size", size)
 
-    def _set_lyric_elastic_strength(self, value: int):
-        strength = max(0, min(160, int(value)))
-        if hasattr(self.island_widget, "set_lyric_elastic_strength"):
-            self.island_widget.set_lyric_elastic_strength(strength, notify=False)
+    def _set_music_surface_reading_strategy(self, _index: int = -1):
+        strategy = normalize_music_reading_strategy(self.music_surface_reading_strategy.currentData())
+        setter = getattr(self.island_widget, "set_music_surface_reading_strategy", None)
+        if callable(setter):
+            setter(strategy, notify=False)
         else:
-            self.island_widget.lyric_elastic_strength = strength
-            self.island_widget.update()
-        self._save("v2_lyric_elastic_strength", strength)
+            self.island_widget.music_surface_reading_strategy = strategy
+            surface = getattr(self.island_widget, "music_fullscreen_overlay", None)
+            if surface is not None:
+                surface.update()
+        self._save("v2_music_surface_reading_strategy", strategy)
 
-    def _set_lyric_word_spacing(self, value: int):
-        spacing = max(60, min(150, int(value)))
-        if hasattr(self.island_widget, "set_lyric_word_spacing"):
-            self.island_widget.set_lyric_word_spacing(spacing, notify=False)
+    def _set_music_surface_reading_lift_level(self, _index: int = -1):
+        level = normalize_music_reading_lift_level(self.music_surface_reading_lift_level.currentData())
+        setter = getattr(self.island_widget, "set_music_surface_reading_lift_level", None)
+        if callable(setter):
+            setter(level, notify=False)
         else:
-            self.island_widget.lyric_word_spacing = spacing
-            self.island_widget.update()
-        self._save("v2_lyric_word_spacing", spacing)
+            self.island_widget.music_surface_reading_lift_level = level
+            surface = getattr(self.island_widget, "music_fullscreen_overlay", None)
+            if surface is not None:
+                surface.update()
+        self._save("v2_music_surface_reading_lift_level", level)
 
-    def _set_lyric_elastic_mode(self, _index: int = -1):
-        mode = self.lyric_elastic_mode.currentData() or "both"
-        if hasattr(self.island_widget, "set_lyric_elastic_mode"):
-            self.island_widget.set_lyric_elastic_mode(mode, notify=False)
+    def _set_music_surface_reading_gradient_steps(self, value: int):
+        steps = normalize_music_reading_gradient_steps(value)
+        setter = getattr(self.island_widget, "set_music_surface_reading_gradient_steps", None)
+        if callable(setter):
+            setter(steps, notify=False)
         else:
-            self.island_widget.lyric_elastic_mode = mode
+            self.island_widget.music_surface_reading_gradient_steps = steps
+            surface = getattr(self.island_widget, "music_fullscreen_overlay", None)
+            if surface is not None:
+                surface.update()
+        self._save("v2_music_surface_reading_gradient_steps", steps)
+
+    def _set_music_sparse_highlight_seconds_per_unit(self, value: int):
+        seconds = normalize_sparse_seconds_per_unit(value / 10)
+        if hasattr(self.island_widget, "set_music_sparse_highlight_seconds_per_unit"):
+            self.island_widget.set_music_sparse_highlight_seconds_per_unit(seconds, notify=False)
+        else:
+            self.island_widget.music_sparse_highlight_seconds_per_unit = seconds
             self.island_widget.update()
-        self._save("v2_lyric_elastic_mode", mode)
+        self._save("v2_music_sparse_highlight_seconds_per_unit", seconds)
+
+    def _set_music_surface_preload_count(self, value: int):
+        self._save("v2_music_surface_preload_count", max(1, min(6, int(value))))
 
     def _set_dual_line_lyrics(self, enabled: bool):
         enabled = bool(enabled)
@@ -5909,7 +5823,11 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.enable_dual_line_lyrics = enabled
             self.island_widget.update()
-        for checkbox in (getattr(self, "dual_line_lyrics_checkbox", None), getattr(self, "gelv_dual_line_checkbox", None)):
+        for checkbox in (
+            getattr(self, "dual_line_lyrics_checkbox", None),
+            getattr(self, "gelv_dual_line_checkbox", None),
+            getattr(self, "music_surface_translation_checkbox", None),
+        ):
             if checkbox is None:
                 continue
             checkbox.blockSignals(True)
@@ -5918,6 +5836,17 @@ class SettingsWindow(QDialog):
         self._save("v2_enable_dual_line_lyrics", enabled)
         self._update_lyric_flow_controls()
         self._request_lyric_display_progress_follow()
+        self._touch()
+
+    def _set_music_intro_cleanup_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        setter = getattr(self.island_widget, "set_music_intro_cleanup_enabled", None)
+        if callable(setter):
+            setter(enabled, notify=False)
+        else:
+            self.island_widget.music_intro_cleanup_enabled = enabled
+            self.island_widget.update()
+        self._save("v2_music_intro_cleanup_enabled", enabled)
         self._touch()
 
     def _request_lyric_display_progress_follow(self):
@@ -5938,6 +5867,15 @@ class SettingsWindow(QDialog):
         if mode not in {"translation", "transliteration"}:
             mode = "translation"
         self._save("v2_dual_line_secondary_source", mode)
+        self._request_lyric_display_progress_follow()
+        self._touch()
+
+    def _set_cantonese_secondary_priority(self, _index: int = -1):
+        combo = getattr(self, "cantonese_secondary_priority", None)
+        value = str(combo.currentData() if combo is not None else "phonetic_first")
+        if value not in {"phonetic_first", "translation_first"}:
+            value = "phonetic_first"
+        self._save("v2_cantonese_secondary_priority", value)
         self._request_lyric_display_progress_follow()
         self._touch()
 

@@ -111,7 +111,7 @@ def app_dark_mode(settings_getter: Callable[[str, object], object] | None = None
         return False
 
 
-LIGHT_MUSIC_AMBIENCE_STYLES = {"pure_white", "yaoguang"}
+LIGHT_MUSIC_AMBIENCE_STYLES = {"pure_white"}
 
 
 @dataclass(frozen=True)

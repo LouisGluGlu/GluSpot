@@ -2,16 +2,54 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import shutil
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from local.branding import APP_NAME, app_data_dir, legacy_app_data_dirs, settings_file_for
+from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
 
 
 APP_DATA_DIR = app_data_dir()
 SETTINGS_FILE = settings_file_for()
+
+
+MUSIC_READING_GRADIENT_DEFAULT_STEPS = 30
+MUSIC_READING_LIFT_DEFAULT_LEVEL = 2
+MUSIC_READING_LIFT_LEVELS = (0, 1, 2, 4)
+MUSIC_READING_STRATEGY_DEFAULT = "gold"
+
+
+def normalize_music_reading_strategy(value) -> str:
+    """Keep the current interpolated reading unless low-perception is selected."""
+    return value if isinstance(value, str) and value in {"gold", "low_perception"} else MUSIC_READING_STRATEGY_DEFAULT
+
+
+def normalize_music_reading_lift_level(value) -> int:
+    """Quarter units of the original reading lift height."""
+    try:
+        if isinstance(value, bool):
+            return MUSIC_READING_LIFT_DEFAULT_LEVEL
+        number = float(value)
+        if not math.isfinite(number) or not number.is_integer():
+            return MUSIC_READING_LIFT_DEFAULT_LEVEL
+        level = int(number)
+    except (TypeError, ValueError, OverflowError):
+        return MUSIC_READING_LIFT_DEFAULT_LEVEL
+    return level if level in MUSIC_READING_LIFT_LEVELS else MUSIC_READING_LIFT_DEFAULT_LEVEL
+
+
+def normalize_music_reading_gradient_steps(value) -> int:
+    """Tenths of a visual character, from a hard edge to the widest feather."""
+    try:
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("non-finite gradient width")
+        return max(0, min(30, int(round(number))))
+    except (TypeError, ValueError, OverflowError):
+        return MUSIC_READING_GRADIENT_DEFAULT_STEPS
 
 DEFAULT_MUSIC_AMBIENCE_VALUES = {
     "sea_level": {
@@ -19,49 +57,30 @@ DEFAULT_MUSIC_AMBIENCE_VALUES = {
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
-        "diffraction_frequency": 0.30,
     },
     "duotone_full": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
-        "diffraction_frequency": 0.30,
     },
     "pure_black": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
-        "diffraction_frequency": 0.30,
-    },
-    "bilateral_diffraction": {
-        "ambient_intensity": 0.0,
-        "music_flow_intensity": 0.74,
-        "compact_duotone_balance": 50,
-        "expanded_duotone_balance": 50,
-        "diffraction_frequency": 0.30,
-    },
-    "yaoguang": {
-        "ambient_intensity": 0.0,
-        "music_flow_intensity": 0.74,
-        "compact_duotone_balance": 50,
-        "expanded_duotone_balance": 50,
-        "diffraction_frequency": 0.30,
     },
     "solid_album": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
-        "diffraction_frequency": 0.30,
     },
     "pure_white": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
-        "diffraction_frequency": 0.30,
     },
 }
 
@@ -151,13 +170,7 @@ DEFAULT_SETTINGS = {
     "v2_music_reactive_background_intensity": 55,
     "v2_compact_duotone_balance": 50,
     "v2_expanded_duotone_balance": 50,
-    "v2_diffraction_frequency": 0.30,
     "v2_solid_album_background_fallback": "#16BCFF",
-    "v2_yaoguang_outer_color": "#6C35F2",
-    "v2_yaoguang_blur_strength": 58,
-    "v2_yaoguang_color_source": "custom",
-    "v2_yaoguang_album_inverse_enabled": False,
-    "v2_yaoguang_height_mode": "regular",
     "v2_music_ambience_values": copy.deepcopy(DEFAULT_MUSIC_AMBIENCE_VALUES),
     "v2_enable_player_progress_plugin": False,
     "v2_player_progress_auto_detect": False,
@@ -174,8 +187,6 @@ DEFAULT_SETTINGS = {
     "v2_gelv_color_fill_enabled": False,
     "v2_gelv_word_fill_enabled": False,
     "v2_wave_font_weight": "bold",
-    "v2_wave_word_fill_enabled": False,
-    "v2_wave_color_fill_enabled": False,
     "v2_ember_font_weight": "normal",
     "v2_ember_font_size": 18,
     "v2_ember_line_mode": "split",
@@ -210,7 +221,7 @@ DEFAULT_SETTINGS = {
     "v2_imported_settings_fonts": [],
     "v2_high_quality_font_rendering": False,
     "v2_animation_fps": 60,
-    "v2_lyric_animation_fps": 60,
+    "v2_lyric_animation_fps": 120,
     "v2_animation_speed": 1.0,
     "v2_empty_island_display_mode": "visible_bar",
     "v2_no_music_island_priority": "plugin",
@@ -235,14 +246,18 @@ DEFAULT_SETTINGS = {
     "v2_expand_direction": "auto",
     "v2_lyric_offset_seconds": 0.0,
     "v2_lyric_font_size": 18,
-    "v2_lyric_elastic_strength": 100,
-    "v2_lyric_elastic_mode": "both",
-    "v2_lyric_word_spacing": 100,
+    "v2_music_surface_reading_lift_level": MUSIC_READING_LIFT_DEFAULT_LEVEL,
+    "v2_music_surface_reading_gradient_steps": MUSIC_READING_GRADIENT_DEFAULT_STEPS,
+    "v2_music_surface_reading_strategy": MUSIC_READING_STRATEGY_DEFAULT,
+    "v2_music_sparse_highlight_seconds_per_unit": SPARSE_MIN_SECONDS_PER_UNIT,
+    "v2_music_surface_preload_count": 6,
+    "v2_music_intro_cleanup_enabled": True,
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_font_size": 12,
     "v2_dual_line_secondary_weight": 72,
     "v2_dual_line_secondary_spacing": 100,
     "v2_dual_line_secondary_source": "translation",
+    "v2_cantonese_secondary_priority": "phonetic_first",
     "v2_lyric_chinese_conversion": "off",
     "v2_compact_lyric_show_cover": True,
     "v2_no_lyrics_text": "暂无歌词",
@@ -267,6 +282,23 @@ DEFAULT_SETTINGS = {
     "v2_enable_qq_detail_notification": False,
     "v2_enable_dingtalk_notification": False,
     "v2_enable_dingtalk_detail_notification": False,
+}
+
+
+_REMOVED_MUSIC_AMBIENCE_STYLES = {"yaoguang", "bilateral_diffraction"}
+_REMOVED_VISUAL_SETTING_KEYS = {
+    "v2_diffraction_frequency",
+    "v2_yaoguang_outer_color",
+    "v2_yaoguang_blur_strength",
+    "v2_yaoguang_color_source",
+    "v2_yaoguang_album_inverse_enabled",
+    "v2_yaoguang_height_mode",
+    "v2_wave_word_fill_enabled",
+    "v2_wave_color_fill_enabled",
+    "v2_lyric_elastic_strength",
+    "v2_lyric_elastic_mode",
+    "v2_lyric_word_spacing",
+    "v2_fullscreen_reading_effect",
 }
 
 
@@ -306,10 +338,37 @@ class SettingsManager(QObject):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._settings.update(data)
-            if "v2_wave_word_fill_enabled" not in data and "v2_wave_color_fill_enabled" in data:
-                self._settings["v2_wave_word_fill_enabled"] = bool(data.get("v2_wave_color_fill_enabled", False))
-                self._settings["v2_wave_color_fill_enabled"] = False
+            if not isinstance(data, dict):
+                return
+            migrated = any(key in data for key in _REMOVED_VISUAL_SETTING_KEYS)
+            self._settings.update({key: value for key, value in data.items() if key not in _REMOVED_VISUAL_SETTING_KEYS})
+            for key in ("v2_music_ambience_style", "v2_music_background_follow_previous_style"):
+                if str(self._settings.get(key, "") or "").strip().lower() in _REMOVED_MUSIC_AMBIENCE_STYLES:
+                    self._settings[key] = "sea_level"
+                    migrated = True
+            ambience_values = self._settings.get("v2_music_ambience_values")
+            if isinstance(ambience_values, dict):
+                self._settings["v2_music_ambience_values"] = {
+                    style: values for style, values in ambience_values.items() if style in DEFAULT_MUSIC_AMBIENCE_VALUES
+                }
+                migrated = migrated or ambience_values != self._settings["v2_music_ambience_values"]
+            self._settings["v2_music_sparse_highlight_seconds_per_unit"] = normalize_sparse_seconds_per_unit(
+                self._settings.get("v2_music_sparse_highlight_seconds_per_unit")
+            )
+            raw_lift_level = self._settings.get("v2_music_surface_reading_lift_level")
+            lift_level = normalize_music_reading_lift_level(raw_lift_level)
+            self._settings["v2_music_surface_reading_lift_level"] = lift_level
+            migrated = migrated or raw_lift_level != lift_level
+            raw_gradient_steps = self._settings.get("v2_music_surface_reading_gradient_steps")
+            gradient_steps = normalize_music_reading_gradient_steps(raw_gradient_steps)
+            self._settings["v2_music_surface_reading_gradient_steps"] = gradient_steps
+            migrated = migrated or raw_gradient_steps != gradient_steps
+            raw_reading_strategy = self._settings.get("v2_music_surface_reading_strategy")
+            reading_strategy = normalize_music_reading_strategy(raw_reading_strategy)
+            self._settings["v2_music_surface_reading_strategy"] = reading_strategy
+            migrated = migrated or raw_reading_strategy != reading_strategy
+            if migrated:
+                self.save()
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -338,6 +397,21 @@ class SettingsManager(QObject):
         return self._settings.get(key, default)
 
     def set(self, key: str, value):
+        if key in _REMOVED_VISUAL_SETTING_KEYS:
+            return
+        if key in {"v2_music_ambience_style", "v2_music_background_follow_previous_style"}:
+            if str(value or "").strip().lower() in _REMOVED_MUSIC_AMBIENCE_STYLES:
+                value = "sea_level"
+        if key == "v2_music_ambience_values" and isinstance(value, dict):
+            value = {style: values for style, values in value.items() if style in DEFAULT_MUSIC_AMBIENCE_VALUES}
+        if key == "v2_music_sparse_highlight_seconds_per_unit":
+            value = normalize_sparse_seconds_per_unit(value)
+        if key == "v2_music_surface_reading_lift_level":
+            value = normalize_music_reading_lift_level(value)
+        if key == "v2_music_surface_reading_gradient_steps":
+            value = normalize_music_reading_gradient_steps(value)
+        if key == "v2_music_surface_reading_strategy":
+            value = normalize_music_reading_strategy(value)
         if self._settings.get(key) == value:
             return
         self._settings[key] = value

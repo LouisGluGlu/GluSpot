@@ -18,9 +18,12 @@ from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 from api.providers import WindowsMediaProvider
 from local.branding import APP_NAME, local_app_data_dir, resolve_icon_paths
 from local.island_stack_visual import IslandStackVisual
+from local.audio_device_notice import AudioDeviceNotice
 from local.settings_store import (
     DEFAULT_MUSIC_AMBIENCE_VALUES,
     DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
+    MUSIC_READING_LIFT_DEFAULT_LEVEL,
+    MUSIC_READING_STRATEGY_DEFAULT,
     MYDOCKFINDER_LISTEN_PROCESS_CHOICES,
     SettingsManager,
     normalize_mydockfinder_listener_process_names,
@@ -277,12 +280,22 @@ class LocalIslandApp:
         set_theme_settings_getter(self.settings.get)
         IslandStackVisual.load_embedded_lyric_fonts()
         self.data_provider = WindowsMediaProvider(settings_getter=self.settings.get)
+        self.data_provider.settings_setter = self.settings.set
+        self.app.aboutToQuit.connect(self.data_provider.close_audio_outputs)
+        self.data_provider.start_audio_outputs()
         app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)))
         self.app.setFont(QFont(app_font_family, 9))
         self.window = IslandStackVisual(data_provider=self.data_provider)
         self.window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         self.window.settings_getter = self.settings.get
         self.window.settings_setter = self.settings.set
+        self.audio_device_notice = AudioDeviceNotice()
+        self._audio_device_event_serial = 0
+        self.audio_device_notice_timer = QTimer(self.app)
+        self.audio_device_notice_timer.setInterval(350)
+        self.audio_device_notice_timer.timeout.connect(self._poll_audio_device_notice)
+        self.audio_device_notice_timer.start()
+        self.app.aboutToQuit.connect(self.audio_device_notice.close)
         self._apply_startup_setting()
         self._apply_saved_settings()
         self.settings_window = SettingsWindow(self.window, self.settings)
@@ -292,6 +305,15 @@ class LocalIslandApp:
         self._setup_mydockfinder_listener()
         self.tray = None
         self._setup_tray()
+
+    def _poll_audio_device_notice(self):
+        route = self.data_provider.get_audio_route_snapshot()
+        if route.event_serial <= self._audio_device_event_serial:
+            return
+        self._audio_device_event_serial = route.event_serial
+        device = next((d for d in route.devices if d.name == route.event_name), None)
+        self.audio_device_notice.present(route.event_name, route.event_message,
+                                        device.kind if device else "device", self.window.screen())
 
     def _music_ambience_values_for_style(self, style: str) -> dict[str, float | int]:
         if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
@@ -308,7 +330,6 @@ class LocalIslandApp:
             "music_flow_intensity": raw_values.get("music_flow_intensity", self.settings.get("v2_music_flow_intensity", defaults["music_flow_intensity"])),
             "compact_duotone_balance": raw_values.get("compact_duotone_balance", self.settings.get("v2_compact_duotone_balance", defaults["compact_duotone_balance"])),
             "expanded_duotone_balance": raw_values.get("expanded_duotone_balance", self.settings.get("v2_expanded_duotone_balance", defaults["expanded_duotone_balance"])),
-            "diffraction_frequency": raw_values.get("diffraction_frequency", self.settings.get("v2_diffraction_frequency", defaults["diffraction_frequency"])),
         }
 
     def _location_mode_setting(self) -> str:
@@ -405,6 +426,8 @@ class LocalIslandApp:
         )
         self.window.time_alarm_side_display = str(self.settings.get("v2_time_alarm_side_display", "note") or "note")
         ambience_style = str(self.settings.get("v2_music_ambience_style", "sea_level") or "sea_level")
+        if ambience_style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
+            ambience_style = "sea_level"
         ambience_values = self._music_ambience_values_for_style(ambience_style)
         self.window.ambient_intensity = max(0.0, min(1.0, float(ambience_values["ambient_intensity"])))
         self.window.set_music_reactive_background_enabled(
@@ -422,41 +445,15 @@ class LocalIslandApp:
             expanded=int(ambience_values["expanded_duotone_balance"]),
             notify=False,
         )
-        self.window.set_diffraction_frequency(float(ambience_values["diffraction_frequency"]), notify=False)
         if hasattr(self.window, "set_solid_album_background_fallback"):
             self.window.set_solid_album_background_fallback(
                 str(self.settings.get("v2_solid_album_background_fallback", "#16BCFF") or "#16BCFF"),
                 notify=False,
             )
-        if hasattr(self.window, "set_yaoguang_outer_color"):
-            self.window.set_yaoguang_outer_color(
-                str(self.settings.get("v2_yaoguang_outer_color", "#6C35F2") or "#6C35F2"),
-                notify=False,
-            )
-        if hasattr(self.window, "set_yaoguang_blur_strength"):
-            self.window.set_yaoguang_blur_strength(
-                int(self.settings.get("v2_yaoguang_blur_strength", 58)),
-                notify=False,
-            )
-        if hasattr(self.window, "set_yaoguang_color_source"):
-            self.window.set_yaoguang_color_source(
-                str(self.settings.get("v2_yaoguang_color_source", "custom") or "custom"),
-                notify=False,
-            )
-        if hasattr(self.window, "set_yaoguang_album_inverse_enabled"):
-            self.window.set_yaoguang_album_inverse_enabled(
-                bool(self.settings.get("v2_yaoguang_album_inverse_enabled", False)),
-                notify=False,
-            )
-        if hasattr(self.window, "set_yaoguang_height_mode"):
-            self.window.set_yaoguang_height_mode(
-                str(self.settings.get("v2_yaoguang_height_mode", "regular") or "regular"),
-                notify=False,
-            )
         self.window.set_ui_font(str(self.settings.get("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)), notify=False)
         self.window.set_high_quality_font_rendering(bool(self.settings.get("v2_high_quality_font_rendering", False)), notify=False)
         self.window.set_animation_fps(int(self.settings.get("v2_animation_fps", 60)), notify=False)
-        self.window.set_lyric_animation_fps(int(self.settings.get("v2_lyric_animation_fps", 60)), notify=False)
+        self.window.set_lyric_animation_fps(int(self.settings.get("v2_lyric_animation_fps", 120)), notify=False)
         self.window.set_animation_speed(float(self.settings.get("v2_animation_speed", 1.0)), notify=False)
         self.window.set_empty_island_display_mode(str(self.settings.get("v2_empty_island_display_mode", "visible_bar")), notify=False)
         if hasattr(self.window, "set_no_music_island_priority"):
@@ -488,17 +485,25 @@ class LocalIslandApp:
         self.window.set_expand_direction(str(self.settings.get("v2_expand_direction", "auto")), notify=False)
         self.window.set_lyric_offset_seconds(float(self.settings.get("v2_lyric_offset_seconds", 0.0)), notify=False)
         self.window.set_lyric_font_size(int(self.settings.get("v2_lyric_font_size", 18)), notify=False)
-        self.window.set_lyric_elastic_strength(int(self.settings.get("v2_lyric_elastic_strength", 100)), notify=False)
-        self.window.set_lyric_elastic_mode(str(self.settings.get("v2_lyric_elastic_mode", "both")), notify=False)
-        self.window.set_lyric_word_spacing(int(self.settings.get("v2_lyric_word_spacing", 100)), notify=False)
+        self.window.set_music_surface_reading_lift_level(
+            self.settings.get("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL), notify=False
+        )
+        self.window.set_music_surface_reading_gradient_steps(
+            self.settings.get("v2_music_surface_reading_gradient_steps", 30), notify=False
+        )
+        self.window.set_music_surface_reading_strategy(
+            self.settings.get("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT), notify=False
+        )
+        self.window.set_music_sparse_highlight_seconds_per_unit(
+            self.settings.get("v2_music_sparse_highlight_seconds_per_unit", 1.5), notify=False
+        )
+        self.window.set_music_intro_cleanup_enabled(bool(self.settings.get("v2_music_intro_cleanup_enabled", True)), notify=False)
         self.window.set_enable_dual_line_lyrics(bool(self.settings.get("v2_enable_dual_line_lyrics", False)), notify=False)
         self.window.set_dual_line_font_size(int(self.settings.get("v2_dual_line_font_size", 12)), notify=False)
         self.window.set_dual_line_secondary_weight(int(self.settings.get("v2_dual_line_secondary_weight", 72)), notify=False)
         self.window.set_dual_line_secondary_spacing(int(self.settings.get("v2_dual_line_secondary_spacing", 100)), notify=False)
         self.window.set_compact_lyric_show_cover(bool(self.settings.get("v2_compact_lyric_show_cover", True)), notify=False)
         self.window.set_wave_font_weight(str(self.settings.get("v2_wave_font_weight", "bold")), notify=False)
-        self.window.set_wave_word_fill_enabled(bool(self.settings.get("v2_wave_word_fill_enabled", False)), notify=False)
-        self.window.set_wave_color_fill_enabled(bool(self.settings.get("v2_wave_color_fill_enabled", False)), notify=False)
         self.window.set_lyric_flow_style(str(self.settings.get("v2_lyric_flow_style", "wave_stream")), notify=False)
         self.window.set_gelv_font_family(IslandStackVisual.GELV_FONT_FAMILY, notify=False)
         self.window.set_gelv_primary_font_size(int(self.settings.get("v2_gelv_primary_font_size", 22)), notify=False)
@@ -641,6 +646,11 @@ class LocalIslandApp:
         self.settings_window.activateWindow()
 
     def toggle_window(self):
+        focus_music_surface = getattr(self.window, "_focus_active_music_surface", None)
+        if callable(focus_music_surface) and focus_music_surface():
+            return
+        if bool(getattr(self.window, "_music_surface_active", False)):
+            return
         if self.window.isVisible():
             self.window.hide()
         else:
