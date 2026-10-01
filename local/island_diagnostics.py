@@ -41,7 +41,7 @@ class VisualRuntimeDiagnostics:
     reactive_background_enabled: bool = False
     reactive_background_intensity: int = 55
     animation_fps: int = 60
-    lyric_animation_fps: int = 60
+    lyric_animation_fps: int = 120
     animation_speed: float = 1.0
     compact_duotone_balance: int = 50
     expanded_duotone_balance: int = 50

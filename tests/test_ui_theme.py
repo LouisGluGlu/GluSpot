@@ -62,13 +62,13 @@ class UiThemeTests(unittest.TestCase):
             "sea_level",
         )
 
-    def test_music_background_follow_theme_treats_white_and_yaoguang_as_light(self):
+    def test_music_background_follow_theme_treats_only_white_as_light(self):
         self.assertEqual(ui_theme.music_ambience_theme_category("pure_white"), "light")
-        self.assertEqual(ui_theme.music_ambience_theme_category("yaoguang"), "light")
+        self.assertNotIn("yaoguang", ui_theme.LIGHT_MUSIC_AMBIENCE_STYLES)
         self.assertEqual(ui_theme.music_ambience_theme_category("sea_level"), "dark")
         self.assertEqual(ui_theme.music_ambience_style_for_theme(False, "sea_level", follow_enabled=True), "pure_white")
-        self.assertEqual(ui_theme.music_ambience_style_for_theme(False, "yaoguang", follow_enabled=True), "yaoguang")
-        self.assertEqual(ui_theme.music_ambience_style_for_theme(True, "yaoguang", follow_enabled=True), "pure_black")
+        self.assertEqual(ui_theme.music_ambience_style_for_theme(False, "pure_white", follow_enabled=True), "pure_white")
+        self.assertEqual(ui_theme.music_ambience_style_for_theme(True, "pure_white", follow_enabled=True), "pure_black")
         self.assertEqual(ui_theme.music_ambience_style_for_theme(True, "pure_black", follow_enabled=False), "pure_black")
 
     def test_music_background_light_sync_plan_saves_dark_style_before_light_switch(self):

@@ -22,9 +22,21 @@ class AudioFrame:
 
 
 @dataclass(frozen=True)
+class TimedLyricUnit:
+    start_seconds: float
+    # None means the source did not provide an end timestamp. Callers may
+    # estimate display progress, but must not treat that estimate as evidence
+    # of a sustained syllable for highlight selection.
+    end_seconds: float | None
+    text: str
+
+
+@dataclass(frozen=True)
 class TimedLyricLine:
     time_seconds: float
     text: str
+    units: tuple[TimedLyricUnit, ...] = ()
+    timing_kind: str = "line"
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,19 @@ class TrackData:
     position_interactive: bool = False
     album_queue: tuple[AlbumQueueEntry, ...] = ()
     lyric_offset_seconds: float = 0.0
+    # Provider-selected adapter owning the per-player lyric offset. The UI
+    # uses this identity only to apply a slider change to the current song.
+    lyric_offset_adapter: str = "system"
+    # The media provider is the authority for whether artwork came from an
+    # original-art source or the Windows media session's thumbnail.
+    album_art_source: str = ""
+    # Track-bound acquisition state. A failed attempt retains the preview;
+    # only a decoded original replacing that preview ends the visual wait.
+    album_art_lookup_state: str = ""
+    # Original player progress observation or verified local Seek event time.
+    # Projection and visual polls keep this unchanged so a cached read or
+    # already-handled Seek is not mistaken for new clock evidence.
+    position_sampled_at: float = 0.0
 
 
 @dataclass(frozen=True)

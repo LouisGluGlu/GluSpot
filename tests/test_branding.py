@@ -134,6 +134,26 @@ class BrandingTests(unittest.TestCase):
         self.assertIn(("app_id", "GluSpot"), calls)
         self.assertIn(("console", "GluSpot"), calls)
 
+    def test_windows_package_registers_qt_and_shiboken_dll_directories(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = (root / "GluSpot.spec").read_text(encoding="utf-8")
+        hook = root / "packaging" / "windows" / "runtime_qt_dlls.py"
+
+        self.assertIn('runtime_qt_dlls.py', spec)
+        self.assertTrue(hook.exists())
+        source = hook.read_text(encoding="utf-8")
+        self.assertIn('os.add_dll_directory', source)
+        self.assertIn('pyside_dir / "Qt6Core.dll"', source)
+        self.assertIn('shiboken_dir / "shiboken6.abi3.dll"', source)
+
+    def test_windows_package_excludes_incompatible_host_icu(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = (root / "GluSpot.spec").read_text(encoding="utf-8")
+
+        self.assertIn("a.binaries = [", spec)
+        self.assertIn('"icuuc.dll", "icudt78.dll"', spec)
+        self.assertIn("Path(entry[0]).name.lower()", spec)
+
 
 if __name__ == "__main__":
     unittest.main()

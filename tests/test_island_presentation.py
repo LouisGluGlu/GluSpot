@@ -1296,6 +1296,18 @@ class IslandPresentationTests(unittest.TestCase):
             )
         )
 
+    def test_message_refresh_cannot_hide_a_distinct_media_generation(self):
+        self.assertTrue(
+            media_visual_track_changed(
+                initial=False,
+                incoming_track_id="same-title-new-version",
+                previous_track_id="same-title-old-version",
+                same_visible_track=True,
+                message_refresh=True,
+                same_media_generation=False,
+            )
+        )
+
     def test_folded_message_limit_allows_more_when_messages_own_the_island(self):
         self.assertEqual(
             folded_message_limit(
