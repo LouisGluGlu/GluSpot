@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtGui import QColor, QImage
 
 from local.music_surface_palette import (
+    MusicSurfacePalette,
     artwork_surface_palette,
     background_role_color,
     future_lyric_color,
@@ -40,6 +41,126 @@ def _ink_contrast(ink: QColor, backdrop: QColor) -> float:
 
 
 class MusicSurfacePaletteTests(unittest.TestCase):
+    def test_three_role_construction_keeps_optional_ambient_palette_empty(self):
+        palette = MusicSurfacePalette(QColor("red"), QColor("green"), QColor("blue"))
+        self.assertEqual(palette.ambient_colors, ())
+
+    def test_ambient_palette_keeps_six_supported_cover_pigments(self):
+        pigments = tuple(QColor.fromHsv(hue, 210, 204) for hue in range(0, 360, 60))
+        image = _artwork(tuple(zip((30, 54, 74, 87, 95, 100), pigments)))
+        palette = artwork_surface_palette(image, QColor("black"), QColor("black"))
+
+        self.assertEqual(
+            tuple(color.getRgb() for color in palette.ambient_colors),
+            tuple(color.getRgb() for color in pigments),
+        )
+        for index, first in enumerate(palette.ambient_colors):
+            for second in palette.ambient_colors[index + 1:]:
+                self.assertGreaterEqual(_hue_distance(first, second), 42)
+
+    def test_ambient_palette_is_bounded_and_does_not_repeat_nearby_hues(self):
+        image = _artwork(tuple(
+            (index * 10, QColor.fromHsv(hue, 220, 190))
+            for index, hue in enumerate(range(0, 360, 36), start=1)
+        ))
+        first = artwork_surface_palette(image, QColor("black"), QColor("black"))
+        second = artwork_surface_palette(image.copy(), QColor("black"), QColor("black"))
+
+        self.assertGreaterEqual(len(first.ambient_colors), 3)
+        self.assertLessEqual(len(first.ambient_colors), 6)
+        self.assertEqual(first.ambient_colors, second.ambient_colors)
+        for index, color in enumerate(first.ambient_colors):
+            for other in first.ambient_colors[index + 1:]:
+                self.assertGreaterEqual(_hue_distance(color, other), 42)
+
+    def test_ambient_palette_caps_mixed_chromatic_and_neutral_bands_at_six(self):
+        colors = tuple(QColor.fromHsv(hue, 210, 204) for hue in range(0, 360, 60)) + (
+            QColor(10, 10, 10), QColor(125, 125, 125), QColor(240, 240, 240),
+        )
+        palette = artwork_surface_palette(
+            _artwork(tuple(zip((20, 35, 50, 60, 70, 80, 90, 95, 100), colors))),
+            QColor("black"), QColor("black"),
+        )
+        self.assertEqual(len(palette.ambient_colors), 6)
+
+    def test_equal_area_ambient_order_is_independent_of_band_position(self):
+        colors = (QColor(195, 30, 40), QColor(30, 195, 40), QColor(30, 40, 195))
+        palettes = []
+        for order in (colors, tuple(reversed(colors))):
+            image = QImage(72, 72, QImage.Format.Format_RGB32)
+            for index, color in enumerate(order):
+                for y in range(index * 24, (index + 1) * 24):
+                    for x in range(72):
+                        image.setPixelColor(x, y, color)
+            palettes.append(artwork_surface_palette(image, QColor("black"), QColor("black")))
+        self.assertEqual(palettes[0].ambient_colors, palettes[1].ambient_colors)
+
+    def test_ambient_palette_retains_three_source_gray_bands_without_chroma(self):
+        shades = (QColor(15, 15, 15), QColor(112, 112, 112), QColor(238, 238, 238))
+        palette = artwork_surface_palette(
+            _artwork(tuple(zip((34, 67, 100), shades))),
+            QColor(22, 188, 255), QColor(18, 60, 126),
+        )
+
+        self.assertEqual(set(color.value() for color in palette.ambient_colors), {15, 112, 238})
+        for color in palette.ambient_colors:
+            self.assertEqual(color.red(), color.green())
+            self.assertEqual(color.green(), color.blue())
+        # Source shades are retained independently of the established dark
+        # lyric/background roles, which continue to stay within their bounds.
+        self.assertLessEqual(palette.primary.value(), 90)
+
+    def test_ambient_palette_discards_unsupported_and_transparent_pigments(self):
+        source = QColor(162, 32, 45)
+        image = QImage(72, 72, QImage.Format.Format_RGBA8888)
+        image.fill(source)
+        for y in range(36):
+            for x in range(72):
+                image.setPixelColor(x, y, QColor(10, 220, 230, 12))
+        for y in range(3):
+            for x in range(3):
+                image.setPixelColor(x, y, QColor(180, 30, 200))
+        palette = artwork_surface_palette(image, QColor("blue"), QColor("cyan"))
+
+        self.assertEqual(palette.ambient_colors, (source,))
+
+    def test_ambient_palette_retains_supported_small_accent(self):
+        source, accent = QColor(95, 78, 139), QColor(235, 28, 55)
+        image = _artwork(((98, source), (100, accent)))
+        palette = artwork_surface_palette(image, QColor("black"), QColor("black"))
+
+        self.assertEqual(palette.ambient_colors, (source, accent))
+
+    def test_isolated_opaque_pixel_cannot_supply_the_ambient_palette(self):
+        image = QImage(72, 72, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(0, 0, 0, 0))
+        image.setPixelColor(3, 3, QColor("magenta"))
+        primary, secondary = QColor(35, 70, 60), QColor(15, 30, 25)
+        palette = artwork_surface_palette(image, primary, secondary)
+        self.assertEqual(palette.ambient_colors, (primary, secondary))
+
+    def test_ambient_dark_pigment_keeps_dominant_red_without_blue_shadow(self):
+        image = _artwork((
+            (47, QColor(42, 7, 15)), (85, QColor(8, 5, 5)),
+            (95, QColor(81, 13, 24)), (100, QColor(13, 25, 65)),
+        ))
+        palette = artwork_surface_palette(image, QColor("blue"), QColor("cyan"))
+
+        chromatic = tuple(color for color in palette.ambient_colors if color.hsvHue() >= 0)
+        self.assertEqual(len(chromatic), 1)
+        self.assertGreater(chromatic[0].red(), chromatic[0].blue() * 2)
+
+    def test_missing_and_fully_transparent_ambient_palette_use_only_supplied_fallbacks(self):
+        primary, secondary = QColor(120, 20, 40), QColor(50, 20, 20)
+        transparent = QImage(72, 72, QImage.Format.Format_RGBA8888)
+        transparent.fill(QColor(5, 230, 180, 0))
+        for image in (QImage(), transparent):
+            with self.subTest(missing=image.isNull()):
+                palette = artwork_surface_palette(image, primary, secondary)
+                self.assertEqual(palette.ambient_colors, (primary, secondary))
+        identical = artwork_surface_palette(QImage(), primary, primary)
+        self.assertEqual(identical.ambient_colors, (primary,))
+
     def test_bulk_rgba_samples_match_qt_pixel_color_across_source_formats(self):
         colors = (
             QColor(42, 7, 15, 255), QColor(9, 18, 67, 128),

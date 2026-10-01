@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -2898,6 +2899,44 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             island.music_fullscreen_overlay = None
             island.close()
 
+    def test_shutdown_releases_internal_callbacks_and_ignores_late_completion(self):
+        self.window.shutdown()
+        self.assertFalse(self.window._timer.isActive())
+        self.window._seek_pending = True
+        with patch.object(self.window, "update") as update:
+            self.window._timer.timeout.emit()
+            self.window._mode_animation.finished.emit()
+            self.window.seekFinished.emit(True, 12.0, self.window._browse_track_key)
+            update.assert_not_called()
+        self.assertTrue(self.window._seek_pending)
+        # Owner exit and an explicit shutdown can both reach this window.
+        self.window.shutdown()
+
+    def test_completion_queued_before_shutdown_cannot_update_closed_surface(self):
+        self.window._browse_track_key = "queued-before-close"
+        self.window._seek_pending = True
+        worker = threading.Thread(target=lambda: self.window.seekFinished.emit(
+            False, 12.0, "queued-before-close",
+        ))
+        worker.start()
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.window.shutdown()
+        with patch.object(self.window, "update") as update:
+            self.app.processEvents()
+            update.assert_not_called()
+        self.assertTrue(self.window._seek_pending)
+
+    def test_explicit_show_after_shutdown_reattaches_surface_callbacks(self):
+        self.window.shutdown()
+        self.window.show_from_island(fullscreen=False)
+        self.app.processEvents()
+        self.assertFalse(self.window._closing_for_shutdown)
+        self.assertTrue(self.window._timer.isActive())
+        self.window._seek_pending = True
+        self.window.seekFinished.emit(False, 0.0, "different-track")
+        self.assertFalse(self.window._seek_pending)
+
     def test_animation_clock_runs_only_while_surface_is_visible(self):
         self.window.show_from_island(fullscreen=False)
         self.app.processEvents()
@@ -2917,7 +2956,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._recent_paint_costs.extend([2.0] * 20)
         with (
             patch.object(self.window, "screen", return_value=SimpleNamespace(refreshRate=lambda: 240.0)),
-            patch("local.music_surface_window.time.monotonic", return_value=100.05),
+            patch("local.music_surface_window.time.monotonic", return_value=100.016),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -2945,7 +2984,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._recent_paint_costs.extend([2.0] * 20)
         with (
             patch.object(self.window, "screen", return_value=SimpleNamespace(refreshRate=lambda: 144.0)),
-            patch("local.music_surface_window.time.monotonic", return_value=100.05),
+            patch("local.music_surface_window.time.monotonic", return_value=100.016),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -2963,7 +3002,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._lyric_spring_active = False
         self.window._last_full_animation_update_at = 100.0
         with (
-            patch("local.music_surface_window.time.monotonic", return_value=100.05),
+            patch("local.music_surface_window.time.monotonic", return_value=100.016),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -2983,7 +3022,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._lyric_spring_active = False
         self.window._last_full_animation_update_at = 100.0
         with (
-            patch("local.music_surface_window.time.monotonic", return_value=100.05),
+            patch("local.music_surface_window.time.monotonic", return_value=100.016),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -3027,7 +3066,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._lyric_spring_active = False
         self.window._last_full_animation_update_at = 100.0
         with (
-            patch("local.music_surface_window.time.monotonic", return_value=100.05),
+            patch("local.music_surface_window.time.monotonic", return_value=100.016),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -3035,7 +3074,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
         self.window._lyric_spring_active = True
         with (
-            patch("local.music_surface_window.time.monotonic", return_value=100.06),
+            patch("local.music_surface_window.time.monotonic", return_value=100.020),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -3044,7 +3083,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._lyric_spring_active = False
         self.window._active_glow_stage = "fade"
         with (
-            patch("local.music_surface_window.time.monotonic", return_value=100.07),
+            patch("local.music_surface_window.time.monotonic", return_value=100.024),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -3069,7 +3108,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.owner.media_position_seconds = 1.1
         second = QImage(self.window.size(), QImage.Format.Format_RGB32)
         second.fill(Qt.GlobalColor.black)
-        with patch("local.music_surface_window.time.monotonic", return_value=20.10):
+        with patch("local.music_surface_window.time.monotonic", return_value=20.016):
             self.window.render(second)
         dirty = first_rect.united(self.window._active_lyric_animation_rect)
         left, top, right, bottom = self.window.width(), self.window.height(), -1, -1
@@ -3338,22 +3377,22 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertFalse(self.window._isolated_glyph_builds)
         self.assertTrue(self.window._isolated_glyph_cache)
 
-    def test_ambient_refresh_reuses_stationary_album_background(self):
+    def test_album_flow_reuses_small_frame_between_ambient_updates(self):
         self.window.resize(960, 540)
         frame = QImage(self.window.size(), QImage.Format.Format_RGB32)
         rect = QRectF(self.window.rect())
         primary, secondary = QColor(180, 70, 55), QColor(32, 40, 50)
         with QPainter(frame) as painter:
             self.window._paint_background(painter, rect, primary, secondary, 1.0)
-        base_key = self.window._background_base_cache.cacheKey()
         moving_key = self.window._background_cache.cacheKey()
         with QPainter(frame) as painter:
-            self.window._paint_background(painter, rect, primary, secondary, 1.3)
-        self.assertEqual(self.window._background_base_cache.cacheKey(), base_key)
-        self.assertNotEqual(self.window._background_cache.cacheKey(), moving_key)
+            self.window._paint_background(painter, rect, primary, secondary, 1.016)
+        self.assertEqual(self.window._background_cache.cacheKey(), moving_key)
         with QPainter(frame) as painter:
-            self.window._paint_background(painter, rect, QColor(40, 100, 160), secondary, 1.6)
-        self.assertNotEqual(self.window._background_base_cache.cacheKey(), base_key)
+            self.window._paint_background(painter, rect, primary, secondary, 1.3)
+        self.assertNotEqual(self.window._background_cache.cacheKey(), moving_key)
+        self.assertLessEqual(self.window._background_cache.width(), 256)
+        self.assertEqual(self.window._background_cache.size(), QSize(256, 144))
 
     def test_wrapped_cjk_scatter_uses_the_same_per_glyph_layers(self):
         self.owner.timed_lyrics = [(0.0, "别走别走"), (12.0, "下一句")]
@@ -3910,7 +3949,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.owner._estimated_media_position = lambda _now: self.owner.media_position_seconds
         self.window.resize(960, 540)
         output = QImage(self.window.size(), QImage.Format.Format_RGB32)
-        with patch.object(self.window, "_paint_ambient_lights", wraps=self.window._paint_ambient_lights) as lights:
+        with patch.object(self.window._album_flow_background, "render", wraps=self.window._album_flow_background.render) as lights:
             with patch("local.music_surface_window.time.monotonic", return_value=20.0):
                 self.window.render(output)
             first_frame = output.bits().tobytes()
@@ -3924,6 +3963,56 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 self.window.render(output)
             self.assertEqual(lights.call_count, 2)
 
+    def test_lyric_dirty_paint_holds_complete_background_and_contrast_samples(self):
+        self.owner.album_art = QImage(100, 100, QImage.Format.Format_RGB32)
+        self.owner.album_art.fill(QColor(160, 20, 30))
+        self.window.resize(960, 540)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        with patch("local.music_surface_window.time.monotonic", return_value=20.0):
+            self.window.render(output)
+        background_key = self.window._background_cache.cacheKey()
+        sample_region = QRectF(520, 100, 350, 240)
+        samples = self.window._background_sample_colors(sample_region)
+        # A new cover and elapsed background interval must still wait for a
+        # complete surface redraw, avoiding seams around lyric dirty regions.
+        self.owner.album_art.fill(QColor(30, 40, 160))
+        with patch("local.music_surface_window.time.monotonic", return_value=20.1):
+            self.window.render(output, QPoint(), QRegion(520, 100, 350, 240))
+        self.assertEqual(self.window._background_cache.cacheKey(), background_key)
+        self.assertEqual(self.window._background_sample_colors(sample_region), samples)
+        with patch("local.music_surface_window.time.monotonic", return_value=20.11):
+            self.window.render(output)
+        self.assertNotEqual(self.window._background_cache.cacheKey(), background_key)
+
+    def test_art_upgrade_and_rapid_track_change_retarget_displayed_background(self):
+        self.owner.media_track_id = "song-a"
+        self.owner.album_art_source = "thumbnail"
+        self.owner.album_art = QImage(80, 80, QImage.Format.Format_RGB32)
+        self.owner.album_art.fill(QColor(190, 30, 50))
+        self.window.resize(960, 540)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        with patch("local.music_surface_window.time.monotonic", return_value=20.0):
+            self.window.render(output)
+        displayed = QImage(self.window._background_cache)
+        self.owner.album_art_source = "original"
+        self.owner.album_art = QImage(1200, 1200, QImage.Format.Format_RGB32)
+        self.owner.album_art.fill(QColor(30, 80, 190))
+        with patch("local.music_surface_window.time.monotonic", return_value=20.0):
+            self.window.render(output)
+        self.assertEqual(self.window._background_cache, displayed)
+        # A newer song supersedes that unfinished original-art transition.
+        self.owner.media_track_id = "song-b"
+        self.owner.album_art.fill(QColor(160, 145, 30))
+        with patch("local.music_surface_window.time.monotonic", return_value=20.0):
+            self.window.render(output)
+        self.assertEqual(self.window._background_cache, displayed)
+        for frame in range(1, 61):
+            with patch("local.music_surface_window.time.monotonic", return_value=20.0 + frame / 30.0):
+                self.window.render(output)
+        settled = self.window._background_cache.pixelColor(128, 72)
+        self.assertGreater(settled.red(), settled.blue() + 30)
+        self.assertGreater(settled.green(), settled.blue() + 25)
+
     def test_ambient_background_invalidates_on_track_colors_intensity_and_size(self):
         self.owner.media_track_id = "song-a"
         self.owner.album_color = QColor(160, 20, 30)
@@ -3935,13 +4024,11 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             with patch("local.music_surface_window.time.monotonic", return_value=now):
                 self.window.render(output)
 
-        with patch.object(self.window, "_paint_ambient_lights", wraps=self.window._paint_ambient_lights) as lights:
+        with patch.object(self.window._album_flow_background, "render", wraps=self.window._album_flow_background.render) as lights:
             render_at(20.0)
             self.owner.media_track_id = "song-b"
             render_at(20.01)
             self.assertEqual(lights.call_count, 2)
-            # With no distinct accent, a secondary-only change intentionally
-            # leaves the single-primary fallback background unchanged.
             self.owner.album_color = QColor(100, 40, 120)
             render_at(20.03)
             self.assertEqual(lights.call_count, 3)
@@ -3951,7 +4038,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.window.resize(3840, 2160)
             render_at(20.05)
             self.assertEqual(lights.call_count, 5)
-            self.assertEqual(self.window._background_cache.size(), QSize(960, 540))
+            self.assertEqual(self.window._background_cache.size(), QSize(256, 144))
 
     def test_music_surface_uses_heavy_wrapped_lyrics_and_grouped_controls(self):
         self.owner.track_title = "Attention"
@@ -4023,7 +4110,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 composite = self.window._composited_color(future, background)
                 self.assertGreaterEqual(self.window._contrast_ratio(composite, background), 2.0)
 
-    def test_multicolor_art_uses_primary_center_secondary_sides_and_gold_unread_ink(self):
+    def test_multicolor_art_flows_across_surface_and_retains_gold_unread_ink(self):
         art = QImage(100, 100, QImage.Format.Format_RGB32)
         art.fill(QColor(8, 9, 12))
         with QPainter(art) as painter:
@@ -4036,23 +4123,20 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         palette = self.window._art_palette()
         self.assertGreater(palette.secondary.red(), palette.secondary.blue() + 60)
         self.assertGreater(palette.characteristic.red(), palette.characteristic.blue() + 80)
-
+        self.assertGreaterEqual(len(palette.ambient_colors), 2)
         frame = QImage(self.window.size(), QImage.Format.Format_RGB32)
         with QPainter(frame) as painter:
             self.window._paint_background(
                 painter, QRectF(self.window.rect()), palette.primary, palette.secondary, 1.0,
+                ambient_colors=palette.ambient_colors,
             )
-        base = self.window._background_base_cache
-        center = base.pixelColor(base.width() // 2, base.height() // 2)
-        edge = base.pixelColor(0, base.height() // 2)
-        self.assertLess(abs(center.red() - center.blue()), 8)
-        self.assertGreater(edge.red(), edge.blue() + 25)
-        self.assertGreater(edge.red(), center.red() + 12)
-        # Exactly the central 70% holds the dominant role; each side owns
-        # the remaining 15% blend, independent of the drifting ambience.
-        for fraction in (0.16, 0.32, 0.50, 0.68, 0.84):
-            self.assertEqual(base.pixelColor(round(base.width() * fraction), base.height() // 2), center)
-
+        background = self.window._background_cache
+        # Organic color masses vary vertically as well as horizontally,
+        # rather than occupying fixed 70/15/15 percent strips.
+        samples = [background.pixelColor(round(background.width() * x), round(background.height() * y))
+                   for x in (0.16, 0.32, 0.50, 0.68, 0.84) for y in (0.2, 0.5, 0.8)]
+        self.assertGreater(len({color.rgba() for color in samples}), 8)
+        self.assertTrue(any(color.red() > color.blue() + 15 for color in samples))
         unread = self.window._future_lyric_color(QRectF(520, 100, 350, 240))
         self.assertGreater(unread.red(), unread.blue() + 55)
         self.assertLess(unread.value(), 235)
@@ -4061,6 +4145,66 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 self.window._contrast_ratio(self.window._composited_color(unread, backdrop), backdrop),
                 2.0,
             )
+
+    def test_returning_album_ink_accounts_for_inherited_bright_palette(self):
+        blue = QImage(100, 100, QImage.Format.Format_RGB32)
+        blue.fill(QColor("#1023ff"))
+        yellow = QImage(100, 100, QImage.Format.Format_RGB32)
+        yellow.fill(QColor("#ffff10"))
+        self.window.resize(960, 540)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        region = QRectF(520, 100, 350, 240)
+        def render_at(now):
+            with patch("local.music_surface_window.time.monotonic", return_value=now):
+                self.window.render(output)
+        self.owner.album_art = blue
+        self.owner.media_track_id = "cached-blue"
+        render_at(0.0)
+        initial_ink = self.window._future_lyric_color(region)
+        self.owner.album_art = yellow
+        self.owner.media_track_id = "yellow-bridge"
+        for frame in range(1, 61):
+            render_at(frame / 30.0)
+        # Reuse A's exact QImage/cache identity while B's brighter field is
+        # still displayed. The old A tint must not bypass its new envelope.
+        self.owner.album_art = blue
+        self.owner.media_track_id = "cached-blue"
+        render_at(2.0)
+        returned_ink = self.window._future_lyric_color(region)
+        self.assertNotEqual(initial_ink, returned_ink)
+        self.assertEqual(initial_ink.hsvHue(), returned_ink.hsvHue())
+        for backdrop in self.window._background_sample_colors(region):
+            self.assertGreaterEqual(self.window._contrast_ratio(
+                self.window._composited_color(returned_ink, backdrop), backdrop,
+            ), 2.0)
+
+    def test_unread_ink_keeps_contrast_as_bright_album_masses_move(self):
+        art = QImage(120, 120, QImage.Format.Format_RGB32)
+        colors = (QColor("#a2df38"), QColor("#c72d61"), QColor("#255ac0"))
+        with QPainter(art) as painter:
+            for index, color in enumerate(colors):
+                painter.fillRect(index * 40, 0, 40, 120, color)
+        self.owner.album_art = art
+        self.owner.media_track_id = "moving-contrast"
+        self.window.resize(960, 540)
+        palette = self.window._art_palette()
+        region = QRectF(520, 100, 350, 240)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        with QPainter(output) as painter:
+            self.window._paint_background(painter, QRectF(self.window.rect()),
+                                          palette.primary, palette.secondary, 0.0,
+                                          ambient_colors=palette.ambient_colors)
+        fixed_ink = self.window._future_lyric_color(region)
+        for frame in range(1, 601):
+            self.window._background_cache = self.window._album_flow_background.render(
+                self.window.size(), palette.ambient_colors, frame / 30.0,
+            )
+            if frame % 30 == 0:
+                self.assertEqual(self.window._future_lyric_color(region), fixed_ink)
+                for backdrop in self.window._background_sample_colors(region):
+                    self.assertGreaterEqual(self.window._contrast_ratio(
+                        self.window._composited_color(fixed_ink, backdrop), backdrop,
+                    ), 2.0)
 
     def test_monochrome_album_unread_tone_is_distinct_from_white(self):
         self.window.resize(320, 180)
@@ -5316,8 +5460,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(warmed_controls, {"window", "transport"})
 
         # The hide begins with non-hovered controls, regardless of where the
-        # resting cursor was. No Pillow GaussianBlur may run in these paints.
-        with patch("local.music_surface_window.ImageFilter.GaussianBlur", side_effect=AssertionError("paint-time blur")):
+        # resting cursor was. Control blur stays prewarmed while the
+        # independently moving background can still refresh its soft raster.
+        with patch.object(self.window, "_build_control_blur", side_effect=AssertionError("paint-time control blur")):
             for instant in (105.05, 105.17, 105.29, 105.41):
                 with patch("local.music_surface_window.time.monotonic", return_value=instant):
                     self.window.render(output)

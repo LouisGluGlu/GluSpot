@@ -20,6 +20,7 @@ class MusicSurfacePalette:
     primary: QColor
     secondary: QColor
     characteristic: QColor
+    ambient_colors: tuple[QColor, ...] = ()
 
     @property
     def uses_primary_fallback(self) -> bool:
@@ -75,13 +76,17 @@ def future_lyric_color(
     *,
     use_light: bool,
     primary: QColor | None = None,
+    require_light: bool = False,
 ) -> QColor:
     """Darken the real accent, or lighten the primary when no accent exists.
 
     Readability can require a brighter accent than the initial darkened
     color. Its hue is preserved, and a saturated accent is never replaced
-    with a generic blue or a nearly-white neutral.
+    with a generic blue or a nearly-white neutral. A moving dark ambience
+    can require light ink across its complete brightness envelope; in that
+    case chroma may soften while the characteristic hue stays unchanged.
     """
+    use_light = True if require_light else use_light
     fallback = primary is not None and _same_color_family(primary, characteristic)
     album = ambient_color(QColor(primary if fallback else characteristic))
     hue, saturation, value, _alpha = album.getHsv()
@@ -102,7 +107,7 @@ def future_lyric_color(
             starting_light = max(172, min(226, round(value * 0.80 + 40)))
         else:
             starting_chroma = min(235, max(110, saturation))
-            minimum_chroma = 110
+            minimum_chroma = 42 if require_light else 110
             starting_light = max(112, min(202, round(value * 0.74)))
         starting_dark = max(90, min(170, round(value * 0.66)))
         chromas = list(range(starting_chroma, minimum_chroma - 1, -10))
@@ -123,7 +128,8 @@ def future_lyric_color(
         ]
     tinted = None
     best_ratio = -1.0
-    for candidate in preferred + alternate:
+    candidates = preferred if require_light else preferred + alternate
+    for candidate in candidates:
         ratio = _contrast_ratio(_composited_color(candidate, backdrop), backdrop)
         if ratio > best_ratio:
             tinted, best_ratio = candidate, ratio
@@ -215,6 +221,56 @@ def _merge_hue_groups(
     return sorted(merged, key=lambda pair: pair[1]["count"], reverse=True)
 
 
+def _ambient_pigments(
+    ranked: list[tuple[tuple[str, int], dict[str, float]]],
+    opaque_count: float,
+) -> tuple[QColor, ...]:
+    """Keep source pigments for moving ambience independently of lyric roles.
+
+    The role palette intentionally compresses black/white artwork to dark
+    gray. Ambience retains the source's shadow/mid/light gray bands so they
+    can move separately. Chromatic families use the same grouped sample and
+    must have real area support; dim colored shadows are accepted only when
+    they are the dominant pigment, matching the primary-role exception.
+    """
+    selected: list[QColor] = []
+    support = max(3.0, opaque_count * 0.006)
+    dominant_key = ranked[0][0]
+    # Stable keys resolve equal-area bands without making their scan location
+    # part of the animation palette order. Existing role ranking is untouched.
+    ordered = sorted(ranked, key=lambda pair: (-pair[1]["count"], pair[0]))
+    for key, group in ordered:
+        if group["count"] < support:
+            continue
+        count = group["count"]
+        color = QColor(*(
+            round(group[channel] / count) for channel in ("red", "green", "blue")
+        ))
+        if key[0] != "hue":
+            level = round(sum(color.getRgb()[:3]) / 3)
+            color = QColor(level, level, level)
+            if any(_is_neutral(existing) and abs(existing.value() - level) < 16 for existing in selected):
+                continue
+        else:
+            if _is_neutral(color) or group["value"] / count < 0.10:
+                continue
+            if key != dominant_key and not _is_visible_accent(color):
+                continue
+            if any(_same_color_family(existing, color) for existing in selected):
+                continue
+        selected.append(color)
+        if len(selected) == 6:
+            break
+    return tuple(selected)
+
+
+def _fallback_ambient(primary: QColor, secondary: QColor) -> tuple[QColor, ...]:
+    """Use only the supplied fallback pigments when artwork has no samples."""
+    if primary == secondary:
+        return (QColor(primary),)
+    return (QColor(primary), QColor(secondary))
+
+
 def artwork_surface_palette(
     image: QImage,
     primary_fallback: QColor,
@@ -230,7 +286,10 @@ def artwork_surface_palette(
     primary_fallback = QColor(primary_fallback)
     secondary_fallback = QColor(secondary_fallback)
     if image.isNull():
-        return MusicSurfacePalette(primary_fallback, secondary_fallback, primary_fallback)
+        return MusicSurfacePalette(
+            primary_fallback, secondary_fallback, primary_fallback,
+            _fallback_ambient(primary_fallback, secondary_fallback),
+        )
 
     sample = image.scaled(
         72, 72,
@@ -281,8 +340,14 @@ def artwork_surface_palette(
             group["value"] += value * alpha
 
     if not opaque_count:
-        return MusicSurfacePalette(primary_fallback, secondary_fallback, primary_fallback)
+        return MusicSurfacePalette(
+            primary_fallback, secondary_fallback, primary_fallback,
+            _fallback_ambient(primary_fallback, secondary_fallback),
+        )
     ranked = _merge_hue_groups(sorted(groups.items(), key=lambda pair: pair[1]["count"], reverse=True))
+    ambient_colors = _ambient_pigments(ranked, opaque_count)
+    if not ambient_colors and opaque_count < 3.0:
+        ambient_colors = _fallback_ambient(primary_fallback, secondary_fallback)
     chromatic = [
         (key, group) for key, group in ranked
         if key[0] == "hue" and group["count"] / opaque_count >= 0.006
@@ -294,6 +359,7 @@ def artwork_surface_palette(
         primary = QColor(level, level, level)
         return MusicSurfacePalette(
             primary, primary.darker(135), QColor(primary),
+            ambient_colors or (QColor(primary),),
         )
 
     dominant_key, dominant_group = ranked[0]
@@ -357,4 +423,6 @@ def artwork_surface_palette(
                 characteristic = _representative(substantial)
     else:
         characteristic = QColor(primary)
-    return MusicSurfacePalette(primary, secondary, characteristic)
+    return MusicSurfacePalette(
+        primary, secondary, characteristic, ambient_colors or (QColor(primary),),
+    )
