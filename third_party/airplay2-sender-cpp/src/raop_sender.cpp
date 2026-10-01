@@ -1139,7 +1139,9 @@ void RaopSender::startStreaming_() {
     // told otherwise, which reads as "connected but silent". If the user never
     // set a cast volume, push 0 dB (no attenuation; the TV/AVR's own volume
     // still governs the actual loudness) so audio is audible by default.
-    if (airplay2_ && pendingVolumeDb_ <= kNoVolume + 1.0)
+    // GluSpot local addition: keep the HomePod's current volume when the host
+    // opts in. Explicit setVolume() requests still take the normal path below.
+    if (airplay2_ && !preserveReceiverVolume_ && pendingVolumeDb_ <= kNoVolume + 1.0)
         pendingVolumeDb_ = 0.0;
     if (pendingVolumeDb_ > kNoVolume + 1.0) {
         const std::string body = "volume: " + fixed6(pendingVolumeDb_);

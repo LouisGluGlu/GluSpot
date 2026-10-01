@@ -11,7 +11,7 @@ import unicodedata
 from PIL import Image, ImageFilter
 
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QTextBoundaryFinder, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QRegion, QTextCharFormat, QTextLayout, QTextOption
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QRegion, QTextCharFormat, QTextLayout, QTextOption
 from PySide6.QtWidgets import QWidget
 
 from api.lyric_timeline import active_index_for_position
@@ -408,6 +408,13 @@ class MusicSurfaceWindow(QWidget):
     @property
     def presentation_mode(self) -> str:
         return "fullscreen" if self._fullscreen else "windowed"
+
+    def screen(self):
+        # QWidget.screen() parents the shared QScreen Python wrapper to this
+        # transient surface in PySide6 6.11. Application queries preserve its
+        # lifetime when the surface is destroyed and retain monitor selection.
+        return (QGuiApplication.screenAt(self.frameGeometry().center())
+                or QGuiApplication.primaryScreen())
 
     def _available_geometry(self) -> QRect:
         screen = self.screen()

@@ -296,6 +296,17 @@ class AudioRouteControllerTests(unittest.TestCase):
         self.assertEqual(snapshot.cast_latency_seconds, 0.0)
         self.assertEqual(snapshot.active_id, "headphones")
 
+    def test_sender_stop_error_cannot_leave_remote_marked_as_active(self):
+        self._cast()
+        self.sender.stop_error = "stop pipe closed"
+        with self.assertRaises(OSError):
+            self.controller._end_cast()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot.active_id, "speakers")
+        self.assertEqual(snapshot.pending_id, "")
+        self.assertEqual(snapshot.cast_source_id, "")
+        self.assertEqual(snapshot.cast_latency_seconds, 0.0)
+
     def test_mdns_disappearance_preserves_live_cast_but_marks_receiver_unavailable(self):
         self._cast()
         self.discovery.receivers = ()
@@ -346,11 +357,20 @@ class AudioRouteControllerTests(unittest.TestCase):
     def test_endpoint_enumeration_error_during_cast_stops_sender(self):
         self._cast()
         self.backend.error = "audio service unavailable"
-        self.controller._refresh_devices()
+        self.assertFalse(self.controller._refresh_devices())
         snapshot = self.controller.snapshot()
         self.assertFalse(self.sender.running)
+        self.assertEqual(snapshot.active_id, "")
+        self.assertEqual(snapshot.pending_id, "")
+        self.assertEqual(snapshot.cast_source_id, "")
         self.assertEqual(snapshot.cast_latency_seconds, 0.0)
         self.assertEqual(snapshot.state, "error")
+        self.assertIn(self.backend.error, snapshot.status_message)
+        self.backend.error = ""
+        self.assertTrue(self.controller._refresh_devices())
+        self.assertEqual(self.controller.snapshot().active_id, "speakers")
+        self.assertEqual(self.controller.snapshot().state, "ready")
+        self.assertEqual(len(self.sender.starts), 1)
 
     def test_enumeration_recovery_does_not_leave_stale_error_forever(self):
         self.backend.error = "audio service unavailable"

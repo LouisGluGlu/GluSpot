@@ -2,8 +2,10 @@ import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 
-from PySide6.QtGui import QImage, QColor
+from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtGui import QGuiApplication, QImage, QColor
 from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 from api.audio_routes import AudioRouteSnapshot
 from local.audio_device_notice import AudioDeviceNotice
@@ -12,11 +14,22 @@ from local.island_stack_visual import IslandStackVisual
 
 class AudioDeviceNoticeTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):
+    def _qt_application(cls):
         cls.app = QApplication.instance() or QApplication([])
+        return cls.app
+
+    def _dispose_notice(self, notice):
+        # close() only hides a QWidget; dispose the native window while this
+        # fixture still owns it rather than during a later cyclic GC pass.
+        notice._timer.stop()
+        notice.close()
+        notice.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_notice_retargets_and_expires_without_paint_advancing_time(self):
+        self._qt_application()
         notice = AudioDeviceNotice()
+        self.addCleanup(self._dispose_notice, notice)
         notice.present("蓝牙耳机", "蓝牙设备已接入", "headphones")
         notice._timer.stop()
         before = notice._elapsed
@@ -31,6 +44,17 @@ class AudioDeviceNoticeTests(unittest.TestCase):
         notice.present("HomePod", "投放已连接", "homepod")
         self.assertEqual(notice._elapsed, 0)
         notice.close()
+
+    def test_disposing_notice_preserves_the_shared_application_screen_wrapper(self):
+        self._qt_application()
+        screen = QGuiApplication.primaryScreen()
+        notice = AudioDeviceNotice()
+        try:
+            notice.present("HomePod", "投放已连接", "homepod")
+        finally:
+            self._dispose_notice(notice)
+        self.assertTrue(isValid(screen))
+        self.assertIs(QGuiApplication.primaryScreen(), screen)
 
     def test_output_delay_changes_reading_but_not_seek_offsets_or_player_clock(self):
         snapshot = AudioRouteSnapshot(state="casting", cast_latency_seconds=1.5)

@@ -64,7 +64,12 @@ def main() -> None:
             connection, _ = server.accept()
             with connection:
                 connection.settimeout(5)
-                pairing_request = connection.recv(8192)
+                pairing_request = bytearray()
+                while b"\r\n\r\n" not in pairing_request:
+                    chunk = connection.recv(8192)
+                    assert chunk, "native sender closed before its pairing request"
+                    pairing_request.extend(chunk)
+                    assert len(pairing_request) < 65536, "oversized pairing request"
                 assert b"/pair-setup" in pairing_request
                 if mode == "stop":
                     process.stdin.write("stop\n")
