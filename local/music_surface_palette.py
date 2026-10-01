@@ -21,6 +21,9 @@ class MusicSurfacePalette:
     secondary: QColor
     characteristic: QColor
     ambient_colors: tuple[QColor, ...] = ()
+    # Original opacity-weighted coverage in ambient_colors order. A family
+    # and its tonal variant overlap, so these fractions need not sum to one.
+    ambient_weights: tuple[float, ...] = ()
 
     @property
     def uses_primary_fallback(self) -> bool:
@@ -103,11 +106,11 @@ def future_lyric_color(
             # forcing a heavily saturated accent here made it disappear into
             # its own background instead.
             starting_chroma = max(48, min(150, round(saturation * 0.63)))
-            minimum_chroma = 42
+            minimum_chroma = 12 if require_light else 42
             starting_light = max(172, min(226, round(value * 0.80 + 40)))
         else:
             starting_chroma = min(235, max(110, saturation))
-            minimum_chroma = 42 if require_light else 110
+            minimum_chroma = 12 if require_light else 110
             starting_light = max(112, min(202, round(value * 0.74)))
         starting_dark = max(90, min(170, round(value * 0.66)))
         chromas = list(range(starting_chroma, minimum_chroma - 1, -10))
@@ -129,13 +132,25 @@ def future_lyric_color(
     tinted = None
     best_ratio = -1.0
     candidates = preferred if require_light else preferred + alternate
+    backdrop_luminance = relative_luminance(backdrop) if require_light else 0.0
     for candidate in candidates:
-        ratio = _contrast_ratio(_composited_color(candidate, backdrop), backdrop)
+        composite = _composited_color(candidate, backdrop)
+        if require_light and relative_luminance(composite) <= backdrop_luminance:
+            # A saturated blue can have high HSV value while remaining
+            # darker than a bright gray field. Absolute contrast alone would
+            # then choose dark ink that disappears when the field drifts away.
+            continue
+        ratio = _contrast_ratio(composite, backdrop)
         if ratio > best_ratio:
             tinted, best_ratio = candidate, ratio
         if ratio >= 2.30:
             tinted = candidate
             break
+    if tinted is None:
+        # An impossible envelope (for example white on white) should still
+        # return a valid, brightest available tint. Supported moving-field
+        # envelopes are brightness-capped by the renderer before selection.
+        tinted = max(preferred, key=lambda candidate: relative_luminance(_composited_color(candidate, backdrop)))
     return QColor(tinted)
 
 
@@ -222,53 +237,135 @@ def _merge_hue_groups(
 
 
 def _ambient_pigments(
-    ranked: list[tuple[tuple[str, int], dict[str, float]]],
+    groups: dict[tuple[str, int, int, int], dict[str, float]],
     opaque_count: float,
-) -> tuple[QColor, ...]:
-    """Keep source pigments for moving ambience independently of lyric roles.
+) -> tuple[tuple[QColor, ...], tuple[float, ...]]:
+    """Keep occupied source tones and supported colorful details separately.
 
-    The role palette intentionally compresses black/white artwork to dark
-    gray. Ambience retains the source's shadow/mid/light gray bands so they
-    can move separately. Chromatic families use the same grouped sample and
-    must have real area support; dim colored shadows are accepted only when
-    they are the dominant pigment, matching the primary-role exception.
+    Area belongs to the whole hue family, so dividing a real one-percent
+    detail into several brightness/chroma bins does not make it disappear.
+    Its representative comes from one supported bin, never the RGB average
+    of its bright pigment and dark/pale shades. Neutral shadow/mid/light
+    bands stay neutral and the most occupied family supplies the first tone.
     """
-    selected: list[QColor] = []
-    support = max(3.0, opaque_count * 0.006)
-    dominant_key = ranked[0][0]
-    # Stable keys resolve equal-area bands without making their scan location
-    # part of the animation palette order. Existing role ranking is untouched.
-    ordered = sorted(ranked, key=lambda pair: (-pair[1]["count"], pair[0]))
-    for key, group in ordered:
-        if group["count"] < support:
-            continue
+    def color_of(group: dict[str, float]) -> QColor:
         count = group["count"]
-        color = QColor(*(
-            round(group[channel] / count) for channel in ("red", "green", "blue")
-        ))
-        if key[0] != "hue":
-            level = round(sum(color.getRgb()[:3]) / 3)
-            color = QColor(level, level, level)
-            if any(_is_neutral(existing) and abs(existing.value() - level) < 16 for existing in selected):
-                continue
+        return QColor(*(round(group[channel] / count) for channel in ("red", "green", "blue")))
+
+    def vividness(pair) -> float:
+        color = color_of(pair[1])
+        return color.hsvSaturationF() * math.sqrt(color.valueF())
+
+    # A family retains its constituent brightness/chroma bins. The leading
+    # source hue anchors merging; scan location cannot change equal-area ties.
+    families: list[list[tuple[tuple[str, int, int, int], dict[str, float]]]] = []
+    for key, group in sorted(groups.items(), key=lambda pair: (-pair[1]["count"], pair[0])):
+        destination = next((family for family in families if (
+            key[0] == "neutral" and family[0][0] == key
+        ) or (
+            key[0] == "hue" and family[0][0][0] == "hue"
+            and _hue_distance(key[1] * 15, family[0][0][1] * 15) <= 30
+        )), None)
+        if destination is None:
+            families.append([(key, group)])
         else:
-            if _is_neutral(color) or group["value"] / count < 0.10:
+            destination.append((key, group))
+
+    # Adjacent hue bins for the same saturation/brightness band are one tone.
+    # This preserves source pigment strength without averaging in its shadows.
+    def tones_of(family):
+        tones: dict[tuple[int, int], dict[str, float]] = {}
+        for key, group in family:
+            tone = tones.setdefault(key[2:], {field: 0.0 for field in group})
+            for field in tone:
+                tone[field] += group[field]
+        return sorted(tones.items(), key=lambda pair: (-pair[1]["count"], pair[0]))
+
+    ranked = sorted(families, key=lambda family: (-sum(group["count"] for _key, group in family), family[0][0]))
+    support = max(3.0, opaque_count * 0.006)
+    choices: list[tuple[float, QColor, list[tuple[tuple[int, int], dict[str, float]]]]] = []
+    for family_index, family in enumerate(ranked):
+        area = sum(group["count"] for _key, group in family)
+        coherent = sum(group["coherent"] for _key, group in family)
+        if area < support or coherent < max(2.0, support * 0.25):
+            continue
+        tones = tones_of(family)
+        candidates = [pair for pair in tones if pair[1]["count"] >= max(3.0, area * 0.05)]
+        if not candidates:
+            continue
+        neutral = family[0][0][0] == "neutral"
+        if neutral:
+            color = color_of(tones[0][1])
+            level = round(sum(color.getRgb()[:3]) / 3.0)
+            color = QColor(level, level, level)
+        else:
+            visible = [pair for pair in candidates if _is_visible_accent(color_of(pair[1]))]
+            if family_index == 0:
+                # The actual dominant dark pigment must remain dark. The
+                # renderer can retain that shade as its cover-derived base.
+                color = color_of(tones[0][1])
+            elif visible:
+                # Occupied tone first; a supported vivid core can become a
+                # separate variation without turning a cream/cloud mass into
+                # its tiny brown ladder or a pale portrait into a skin accent.
+                color = color_of(max(visible, key=lambda pair: pair[1]["count"])[1])
+            else:
                 continue
-            if key != dominant_key and not _is_visible_accent(color):
+            if _is_neutral(color):
                 continue
-            if any(_same_color_family(existing, color) for existing in selected):
-                continue
-        selected.append(color)
-        if len(selected) == 6:
-            break
-    return tuple(selected)
+        choices.append((area, color, candidates if not neutral else []))
+
+    if not choices:
+        return (), ()
+    # Neighboring families may still represent the same hue near bin edges.
+    # Retain the larger one, but preserve genuinely different neutral shades.
+    distinct = []
+    for choice in choices:
+        color = choice[1]
+        if any((
+            _is_neutral(color) and _is_neutral(existing[1]) and abs(color.value() - existing[1].value()) < 16
+        ) or (
+            not _is_neutral(color) and not _is_neutral(existing[1]) and _same_color_family(color, existing[1])
+        ) for existing in distinct):
+            continue
+        distinct.append(choice)
+    selected_choices = distinct[:6]
+    if len(distinct) > 6:
+        # A supported sparse vivid family should survive a cover with many
+        # neutral/skin/shadow bands. It never displaces the occupied first tone.
+        accent = max(distinct[1:], key=lambda choice: (
+            choice[1].hsvSaturationF() * math.sqrt(choice[1].valueF()), choice[0],
+        ))
+        if accent not in selected_choices:
+            selected_choices[-1] = accent
+            selected_choices.sort(key=lambda choice: -choice[0])
+    selected = [QColor(choice[1]) for choice in selected_choices]
+    weights = [choice[0] / opaque_count for choice in selected_choices]
+    if len(selected) == 6:
+        return tuple(selected), tuple(weights)
+    # When fewer families exist, retain genuinely supported tonal variants
+    # of them. Uniform art yields no additional tones and no invented hues.
+    variations = sorted((
+        pair for _area, _color, tones in selected_choices for pair in tones
+    ), key=lambda pair: (-vividness(pair), -pair[1]["count"], pair[0]))
+    for _key, group in variations:
+        color = color_of(group)
+        if not _is_visible_accent(color):
+            continue
+        if all(max(abs(first - second) for first, second in zip(color.getRgb()[:3], existing.getRgb()[:3])) >= 42
+               for existing in selected):
+            selected.append(color)
+            weights.append(group["count"] / opaque_count)
+            if len(selected) == 6:
+                break
+    return tuple(selected), tuple(weights)
 
 
-def _fallback_ambient(primary: QColor, secondary: QColor) -> tuple[QColor, ...]:
+def _fallback_ambient(primary: QColor, secondary: QColor) -> tuple[tuple[QColor, ...], tuple[float, ...]]:
     """Use only the supplied fallback pigments when artwork has no samples."""
     if primary == secondary:
-        return (QColor(primary),)
-    return (QColor(primary), QColor(secondary))
+        return (QColor(primary),), (1.0,)
+    return (QColor(primary), QColor(secondary)), (0.5, 0.5)
 
 
 def artwork_surface_palette(
@@ -286,9 +383,10 @@ def artwork_surface_palette(
     primary_fallback = QColor(primary_fallback)
     secondary_fallback = QColor(secondary_fallback)
     if image.isNull():
+        colors, weights = _fallback_ambient(primary_fallback, secondary_fallback)
         return MusicSurfacePalette(
             primary_fallback, secondary_fallback, primary_fallback,
-            _fallback_ambient(primary_fallback, secondary_fallback),
+            colors, weights,
         )
 
     sample = image.scaled(
@@ -299,6 +397,8 @@ def artwork_surface_palette(
     pixels = sample.constBits()
     row_bytes = sample.bytesPerLine()
     groups: dict[tuple[str, int], dict[str, float]] = {}
+    ambient_groups: dict[tuple[str, int, int, int], dict[str, float]] = {}
+    ambient_keys: list[tuple[str, int, int, int] | None] = [None] * (sample.width() * sample.height())
     opaque_count = 0.0
     brightness_sum = 0.0
     for y in range(sample.height()):
@@ -338,16 +438,47 @@ def artwork_surface_palette(
             group["blue"] += color.blue() * alpha
             group["saturation"] += saturation * alpha
             group["value"] += value * alpha
+            if _is_neutral(color):
+                ambient_key = ("neutral", 0, 0, 0 if value < 0.18 else (2 if value > 0.82 else 1))
+            else:
+                ambient_key = (
+                    "hue", int(((hue * 360.0) + 7.5) // 15.0) % 24,
+                    min(2, int(saturation * 3)), min(3, int(value * 4)),
+                )
+            ambient_group = ambient_groups.setdefault(ambient_key, {
+                "count": 0.0, "red": 0.0, "green": 0.0, "blue": 0.0,
+                "coherent": 0.0,
+            })
+            index = y * sample.width() + x
+            neighbors = (
+                ambient_keys[index - 1] if x else None,
+                ambient_keys[index - sample.width()] if y else None,
+            )
+            # Disconnected single-pixel chromatic noise must not gain support
+            # merely by sharing a hue. Neighbor evidence is collected during
+            # this same sample scan, including across tonal-bin boundaries.
+            if any(neighbor is not None and (
+                neighbor == ambient_key if ambient_key[0] == "neutral" else (
+                    neighbor[0] == "hue" and _hue_distance(neighbor[1] * 15, ambient_key[1] * 15) <= 30
+                )
+            ) for neighbor in neighbors):
+                ambient_group["coherent"] += alpha
+            ambient_keys[index] = ambient_key
+            ambient_group["count"] += alpha
+            ambient_group["red"] += color.red() * alpha
+            ambient_group["green"] += color.green() * alpha
+            ambient_group["blue"] += color.blue() * alpha
 
     if not opaque_count:
+        colors, weights = _fallback_ambient(primary_fallback, secondary_fallback)
         return MusicSurfacePalette(
             primary_fallback, secondary_fallback, primary_fallback,
-            _fallback_ambient(primary_fallback, secondary_fallback),
+            colors, weights,
         )
     ranked = _merge_hue_groups(sorted(groups.items(), key=lambda pair: pair[1]["count"], reverse=True))
-    ambient_colors = _ambient_pigments(ranked, opaque_count)
+    ambient_colors, ambient_weights = _ambient_pigments(ambient_groups, opaque_count)
     if not ambient_colors and opaque_count < 3.0:
-        ambient_colors = _fallback_ambient(primary_fallback, secondary_fallback)
+        ambient_colors, ambient_weights = _fallback_ambient(primary_fallback, secondary_fallback)
     chromatic = [
         (key, group) for key, group in ranked
         if key[0] == "hue" and group["count"] / opaque_count >= 0.006
@@ -360,6 +491,7 @@ def artwork_surface_palette(
         return MusicSurfacePalette(
             primary, primary.darker(135), QColor(primary),
             ambient_colors or (QColor(primary),),
+            ambient_weights or (1.0,),
         )
 
     dominant_key, dominant_group = ranked[0]
@@ -425,4 +557,5 @@ def artwork_surface_palette(
         characteristic = QColor(primary)
     return MusicSurfacePalette(
         primary, secondary, characteristic, ambient_colors or (QColor(primary),),
+        ambient_weights or (1.0,),
     )
