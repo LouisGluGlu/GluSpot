@@ -60,6 +60,7 @@ class MusicAnnotationFocusTests(unittest.TestCase):
     def _render(self, position, now, *, image=None, region=None):
         self.owner.media_position_seconds = position
         self.owner.media_position_sampled_at = now
+        self.owner.media_position_observed_seconds = position
         image = image if image is not None else self._image()
         captured = {}
         original = self.window._paint_wrapped_lifted_lyric
@@ -111,9 +112,12 @@ class MusicAnnotationFocusTests(unittest.TestCase):
                         self.assertGreater(opacity, 0.0)
                     self.assertAlmostEqual(waiting["echo"][1], waiting["回声"][1])
 
-                    self._render(2.99, 102.0)
-                    self._render(3.0, 102.1)
-                    _, reading = self._render(3.04, 102.2)
+                    # Keep the source clock advancing with wall time: this
+                    # tests annotation ownership across a natural row change,
+                    # rather than an unconfirmed player-clock discontinuity.
+                    self._render(2.99, 102.79)
+                    self._render(3.0, 102.80)
+                    _, reading = self._render(3.04, 102.84)
                     self.assertEqual(self.window._lyric_motion.active_index, 1)
                     self.assertEqual(self.window._parenthetical_visible_since[1], entered_at)
                     self.assertEqual(set(reading), {"echo", "回声"})

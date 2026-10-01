@@ -88,7 +88,7 @@ The explicit package acceptance command runs before normal GUI/single-instance
 startup and writes only the requested JSON report:
 
 ```powershell
-.\release\GluSpot-6.403\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
+.\release\GluSpot-6.404\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
 ```
 
 It imports packaged dependencies, checks application module availability,
@@ -162,3 +162,54 @@ sustained playback, sleep/reconnect, other firmware/access settings and networks
 and acoustic latency measurement. HomePod access settings must allow the PC on
 the same LAN. PIN/password receivers are outside this transient-authentication
 path. CI tests and a `streaming` event alone are not audible-playback evidence.
+
+
+## 6.404 follow-up: lyric discontinuities and compensation
+
+The source position, original observation time/value and display offset are
+separate. Projection preserves both observation fields. A new event stamp with
+the same wrong position cannot confirm a playing seek; neither background-work
+latency nor repaint cadence creates independent evidence. Pause transitions and
+app/adapter changes discard incompatible candidates. A verified local Seek or a
+fresh event from an already-paused source retains its immediate source reanchor,
+while the lyric viewport keeps scrolling from its physical pose. Same-song row
+or timing enrichment remaps that pose without confirming a pending source jump.
+GSMTC natural progress can establish a 5/10-second observation cadence; frozen
+positions, marker-only updates and real discontinuities do not extend authority.
+
+During a connected cast, **自动补偿** uses a sender buffer estimate. Every 500 ms
+the helper separately converts its fixed RTP protocol buffer at 44.1 kHz and
+input queue at the captured sample rate. One clean flowing interval is required;
+startup, underrun, capture drop/discontinuity, stale data, stop/error or a previous
+session cannot publish valid timing. The controller slews compensation by at most
+80 ms per second. Missing evidence holds the current delay. Turning automation
+off freezes it for manual adjustment; existing nondefault manual settings stay
+manual on migration. Rapid slider/toggle requests keep the latest value.
+
+This estimates sender buffering, not measured end-to-end sound. It excludes
+network RTT and receiver-reported latency, which cannot safely be added to the
+RTP timeline. No microphone is opened and no per-song reconnection is performed.
+HomePod feedback in this path supplies no verified rendered playback timestamp.
+Exact physical calibration needs a separate reliable timing measurement; the
+manual slider remains available for a persistent audible offset.
+
+The October 1 M6/HomePod 90-second confirmation remains evidence for 6.403.
+The 6.404 clock and compensation changes require a new multi-song audible
+check; automated fixtures do not establish actual HomePod/lyric alignment.
+
+The final 6.404 Python suite passed 2720 tests in 78.577 seconds. Five native
+CTest suites passed during `build-exe.bat`, and the frozen package acceptance
+check exited 0. Helper hash, packaged provenance, LGPL source integrity and
+replaceable discovery files match the source build. Native Qt fixtures show
+intermediate scrolling poses through cast-delay changes, frozen bad positions,
+pause and a real paused Seek; the compact menu remains scrollable at 640 × 360.
+Python compilation and tracked/new-file whitespace checks passed. The first
+full run rejected an annotation fixture whose supplied progress advanced faster
+than its simulated clock; its timestamps were corrected, preserving all visual
+assertions and the runtime guard, before the final complete run.
+
+The helper SHA-256 is
+`8ece8ecc8ab7db216ec79fdef9e272e7374c8954309c83e00c6b7cd2eb38ea50`.
+Detailed local evidence is in ignored `logs/lyric-delay-6.404-final-full-tests.log`,
+`logs/build-6.404.log`, `logs/audio-package-6.404-check.json` and
+`logs/audio-package-6.404-artifact-proof.json`.

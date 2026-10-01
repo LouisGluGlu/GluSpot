@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
 from api.audio_route_controller import AudioRouteController
@@ -47,6 +47,10 @@ class _Controller:
         self.calls.append(("set_latency", value))
         return not self.closed
 
+    def set_auto_latency(self, enabled):
+        self.calls.append(("set_auto_latency", enabled))
+        return not self.closed
+
     def close(self):
         self.closed = True
 
@@ -80,7 +84,8 @@ class AudioRouteProviderTests(unittest.TestCase):
             controller = provider.start_audio_outputs()
             again = provider.start_audio_outputs()
         self.assertIs(controller, again)
-        self.assertEqual(controller.options, {"source_id": "02:11:22:33:44:55", "latency_seconds": 1.5})
+        self.assertEqual(controller.options, {"source_id": "02:11:22:33:44:55", "latency_seconds": 1.5,
+                                               "auto_latency_enabled": True})
         self.assertEqual(saved, {"v2_airplay_sender_id": "02:11:22:33:44:55"})
         random.assert_called_once_with(5)
         factory.assert_called_once()
@@ -95,6 +100,7 @@ class AudioRouteProviderTests(unittest.TestCase):
         random.assert_not_called()
         self.assertEqual(controller.options["source_id"], "02:aa:BB:01:02:03")
         self.assertEqual(controller.options["latency_seconds"], 2.3)
+        self.assertFalse(controller.options["auto_latency_enabled"])
         self.assertEqual(saved["v2_airplay_sender_id"], "02:aa:BB:01:02:03")
 
     def test_invalid_settings_identity_is_replaced_before_helper_can_use_it(self):
@@ -157,7 +163,25 @@ class AudioRouteProviderTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertTrue(provider.set_audio_output_latency(raw))
                 self.assertEqual(saved["v2_homepod_lyric_delay_seconds"], expected)
+                self.assertFalse(saved["v2_homepod_auto_lyric_delay"])
                 self.assertEqual(controller.calls[-1], ("set_latency", expected))
+
+    def test_auto_latency_preference_is_saved_and_reused(self):
+        provider, saved = self._provider({"v2_homepod_lyric_delay_seconds": 2.3})
+        with patch("api.audio_route_controller.AudioRouteController", side_effect=_Controller):
+            controller = provider.start_audio_outputs()
+        self.assertFalse(controller.options["auto_latency_enabled"])
+        self.assertTrue(provider.set_audio_output_auto_latency(True))
+        self.assertTrue(saved["v2_homepod_auto_lyric_delay"])
+        self.assertEqual(controller.calls[-1], ("set_auto_latency", True))
+
+    def test_disabling_automation_saves_current_compensation_for_next_launch(self):
+        provider, saved = self._provider()
+        controller = provider._audio_route_controller = _Controller()
+        controller.result = replace(controller.result, state="casting", cast_latency_seconds=1.525)
+        self.assertTrue(provider.set_audio_output_auto_latency(False))
+        self.assertFalse(saved["v2_homepod_auto_lyric_delay"])
+        self.assertEqual(saved["v2_homepod_lyric_delay_seconds"], 1.525)
 
     def test_shutdown_without_start_and_repeated_shutdown_do_not_create_controller(self):
         provider, _saved = self._provider()

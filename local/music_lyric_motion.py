@@ -811,6 +811,9 @@ class MusicLyricMotion:
         self.velocity = 0.0
         self.last_at: float | None = None
         self.last_position: float | None = None
+        self.last_source_position: float | None = None
+        self.source_generation: object | None = None
+        self.presentation_offset = 0.0
         self.pending_forward_index: int | None = None
         self.pending_forward_at: float | None = None
         self.pending_backward_index: int | None = None
@@ -818,12 +821,16 @@ class MusicLyricMotion:
         self.pending_clock_position: float | None = None
         self.pending_clock_sample: object | None = None
         self.pending_clock_at: float | None = None
+        self.pending_clock_sample_position: float | None = None
+        self.pending_clock_playing: bool | None = None
         self._clock = MotionSimulationClock()
 
     def _clear_pending_clock(self):
         self.pending_clock_position = None
         self.pending_clock_sample = None
         self.pending_clock_at = None
+        self.pending_clock_sample_position = None
+        self.pending_clock_playing = None
 
     def _stable_position(
         self,
@@ -834,8 +841,9 @@ class MusicLyricMotion:
         playing: bool,
         explicit_seek: bool,
         independent_sample: bool,
+        sample_position: float | None,
     ) -> tuple[float, bool]:
-        previous = self.last_position
+        previous = self.last_source_position
         last_at = self.last_at
         if previous is None or last_at is None or explicit_seek:
             self._clear_pending_clock()
@@ -857,6 +865,11 @@ class MusicLyricMotion:
         candidate_matches = (
             self.pending_clock_position is not None
             and self.pending_clock_at is not None
+            and self.pending_clock_playing == playing
+            and (
+                sample_position is None or self.pending_clock_sample_position is None
+                or math.isfinite(sample_position) == math.isfinite(self.pending_clock_sample_position)
+            )
             and deviation * (self.pending_clock_position - expected) > 0.0
             and abs(position - self.pending_clock_position - (now - self.pending_clock_at if playing else 0.0))
                 <= max(0.80, (now - self.pending_clock_at) * 0.50)
@@ -869,12 +882,37 @@ class MusicLyricMotion:
             sample_id != self.pending_clock_sample
             and now - self.pending_clock_at >= confirm_seconds
         ):
-            self._clear_pending_clock()
-            return position, True
+            elapsed_sample = now - self.pending_clock_at
+            raw_advance = (
+                sample_position - self.pending_clock_sample_position
+                if sample_position is not None and self.pending_clock_sample_position is not None
+                else None
+            )
+            known_observation = (
+                sample_position is None or math.isfinite(sample_position)
+            ) and (
+                self.pending_clock_sample_position is None
+                or math.isfinite(self.pending_clock_sample_position)
+            )
+            advancing_observation = known_observation and (
+                raw_advance is None or not playing or (
+                    raw_advance >= max(0.005, elapsed_sample * 0.25)
+                    and abs(raw_advance - elapsed_sample) <= max(0.80, elapsed_sample * 0.50)
+                )
+            )
+            # A fresh event stamp with the same frozen/wrong Position is not
+            # corroboration of a playing seek. Interpolated frames can keep
+            # advancing while this original source observation stands still.
+            # Already-paused/native seeks are explicitly accepted by the view.
+            if advancing_observation:
+                self._clear_pending_clock()
+                return position, True
         if not candidate_matches:
             self.pending_clock_position = position
             self.pending_clock_sample = sample_id
             self.pending_clock_at = now
+            self.pending_clock_sample_position = sample_position
+            self.pending_clock_playing = playing
         return expected, False
 
     def _clear_pending_forward(self):
@@ -975,12 +1013,39 @@ class MusicLyricMotion:
         playing: bool = True,
         explicit_seek: bool = False,
         position_ceiling: float | None = None,
+        presentation_offset: float = 0.0,
+        presentation_reanchor: bool = False,
+        sample_position: float | None = None,
+        source_generation: object | None = None,
     ) -> MusicLyricFrame:
+        """Validate the player clock before applying a display-only offset.
+
+        ``last_source_position`` owns source spike confirmation. ``last_position``
+        remains the reading time consumed by word highlights and viewport layout.
+        Changing output latency retargets that presentation without confirming or
+        clearing a suspected source jump, and never resets the spring's pose.
+        ``sample_position`` is the original, unprojected source observation;
+        a non-finite value means observation unknown and cannot confirm jumps.
+        Callers omitting it retain the legacy interpolated-clock contract.
+        ``source_generation`` isolates evidence from different apps/adapters
+        without resetting the current viewport position or velocity.
+        """
         now = float(now)
         position = max(0.0, float(position))
+        presentation_offset = float(presentation_offset)
+        if not math.isfinite(presentation_offset):
+            presentation_offset = 0.0
+        presentation_changed = presentation_reanchor or not math.isclose(
+            presentation_offset, self.presentation_offset, abs_tol=1e-7,
+        )
         explicit_seek = explicit_seek or allow_backward or authoritative_index is not None
         resetting = track_key != self.track_key or self.last_at is None or now < self.last_at
         clock_reanchored = explicit_seek
+        if source_generation != self.source_generation:
+            self._clear_pending_clock()
+            self._clear_pending_forward()
+            self._clear_pending_backward()
+        self.source_generation = source_generation
         if resetting:
             self._clear_pending_clock()
         else:
@@ -988,12 +1053,15 @@ class MusicLyricMotion:
                 position, now, now if sample_id is None else sample_id,
                 playing=playing, explicit_seek=explicit_seek,
                 independent_sample=sample_id is not None,
+                sample_position=None if sample_position is None else float(sample_position),
             )
         # A coarse lyric-row observation can only locate the playhead within
         # that row. Smoothing may extrapolate beyond its bounded input at low
         # paint rates, so apply the observation's limit after stabilization.
         if position_ceiling is not None:
             position = min(position, max(0.0, float(position_ceiling)))
+        self.last_source_position = float(position)
+        position = max(0.0, position + presentation_offset)
         raw_index = (active_index_for_position(timed_lyrics, position, lead_seconds=0.0)
                      if timed_lyrics else max(0, fallback_index))
         if timed_lyrics and not resetting:
@@ -1002,8 +1070,8 @@ class MusicLyricMotion:
                 raw_index,
                 float(position),
                 float(now),
-                allow_backward=allow_backward or clock_reanchored,
-                allow_jump=explicit_seek or clock_reanchored,
+                allow_backward=allow_backward or clock_reanchored or presentation_changed,
+                allow_jump=explicit_seek or clock_reanchored or presentation_changed,
                 authoritative_index=authoritative_index,
             )
         else:
@@ -1011,7 +1079,7 @@ class MusicLyricMotion:
             self._clear_pending_forward()
             self._clear_pending_backward()
         if (
-            timed_lyrics and not resetting and not explicit_seek
+            timed_lyrics and not resetting and not explicit_seek and not presentation_changed
             and index == self.active_index and self.last_position is not None
             and position < self.last_position
             and self.last_position - position < self.BACKWARD_SEEK_JUMP_SECONDS
@@ -1045,6 +1113,7 @@ class MusicLyricMotion:
 
         self.active_index = index
         self.last_position = float(position)
+        self.presentation_offset = presentation_offset
 
         progress = 0.0
         if timed_lyrics:

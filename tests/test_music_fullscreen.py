@@ -1248,10 +1248,13 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window.on_lyric_offset_changed()
         with patch.object(self.window._lyric_motion, "frame", wraps=self.window._lyric_motion.frame) as motion:
             frame = self.window._lyric_frame(timed, 10.02)
-            self.assertTrue(motion.call_args.kwargs["explicit_seek"])
+            self.assertFalse(motion.call_args.kwargs["explicit_seek"])
+            self.assertTrue(motion.call_args.kwargs["presentation_reanchor"])
+            self.assertEqual(motion.call_args.kwargs["presentation_offset"], 5.0)
             self.assertEqual(frame.active_index, 1)
             self.window._lyric_frame(timed, 10.04)
             self.assertFalse(motion.call_args.kwargs["explicit_seek"])
+            self.assertFalse(motion.call_args.kwargs["presentation_reanchor"])
         self.assertEqual(self.owner.seek_calls, [])
 
     def test_real_unit_front_reuses_stable_playhead_after_a_stale_clock_spike(self):

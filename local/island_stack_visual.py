@@ -79,7 +79,7 @@ from local.audio_reactive_engine import (
     live_audio_availability_request_plan,
 )
 from local.album_art_pipeline import album_art_bytes_signature, album_art_update_plan
-from local.music_lyric_motion import LogicalLineSpringChain
+from local.music_lyric_motion import LogicalLineSpringChain, MusicLyricMotion
 from local.music_lyric_reading import (
     LyricReadingRenderer,
     apply_cjk_letter_spacing,
@@ -1650,6 +1650,7 @@ class IslandStackVisual(QWidget):
         self.media_source_app = track.source_app
         self.media_position_source = position_plan.position_source
         self.media_position_sampled_at = float(getattr(track, "position_sampled_at", 0.0) or 0.0)
+        self.media_position_observed_seconds = getattr(track, "position_observed_seconds", None)
         self.media_position_plan_reason = position_plan.reason
         self.media_position_confidence = position_plan.position_confidence
         self.media_position_interactive = position_plan.position_interactive
@@ -2027,13 +2028,83 @@ class IslandStackVisual(QWidget):
                     output_delay = max(0.0, min(5.0, float(route.cast_latency_seconds)))
         return max(-24.0, min(24.0, global_offset + app_offset - output_delay))
 
+    def _stable_lyric_source_position(self, now: float) -> float:
+        """Validate source observations before adding display-only latency.
+
+        All island word effects consume this clock. Source seeking and player
+        progress continue to use _estimated_media_position without output delay.
+        """
+        position = self._estimated_media_position(now)
+        sync_at = getattr(self, "media_position_sync_at", None)
+        if sync_at is None:
+            return position
+        source = str(getattr(self, "media_position_source", "") or "")
+        observed_at = float(getattr(self, "media_position_sampled_at", 0.0) or 0.0)
+        legacy_raw = float(getattr(self, "media_raw_position_seconds", getattr(self, "media_position_seconds", position)) or 0.0)
+        raw = legacy_raw
+        if hasattr(self, "media_position_observed_seconds"):
+            observed_position = self.media_position_observed_seconds
+            # No original evidence must not become an advancing observation
+            # through delivery projection. NaN is only a confirmation marker;
+            # the source position passed to the clock remains unchanged.
+            raw = float(observed_position) if observed_position is not None else float("nan")
+        app = str(getattr(self, "media_source_app", "") or "")
+        sample = (observed_at if observed_at > 0.0 else sync_at,
+                  0.0 if observed_at > 0.0 else legacy_raw, source, app)
+        prior = getattr(self, "_island_lyric_source_sample", None)
+        playing = bool(getattr(self, "media_is_playing", False))
+        explicit_seek = (
+            source == "local-seek" and (prior is None or prior[2] != source or sample != prior)
+        ) or (
+            not playing and getattr(self, "_island_lyric_source_playing", None) is False
+            and source in {"windows-media", "interactive"}
+            and observed_at > 0.0 and prior is not None
+            and math.isfinite(raw)
+            and prior[2:] == sample[2:] and sample != prior
+        )
+        self._island_lyric_source_sample = sample
+        self._island_lyric_source_playing = playing
+        clock = getattr(self, "_island_lyric_source_clock", None)
+        if clock is None:
+            clock = self._island_lyric_source_clock = MusicLyricMotion()
+        ceiling = None
+        timed = getattr(self, "timed_lyrics", ()) or ()
+        if source.endswith("-uia-lyrics") and timed:
+            anchor = float(getattr(self, "media_position_seconds", position) or 0.0)
+            index = active_index_for_position(timed, anchor, lead_seconds=0.0)
+            if index + 1 < len(timed):
+                ceiling = max(anchor, float(timed[index + 1][0]) - 0.08)
+        clock.frame([], position, now, str(getattr(self, "media_track_id", "") or ""),
+                    sample_id=sample, sample_position=raw, playing=playing,
+                    explicit_seek=explicit_seek, position_ceiling=ceiling,
+                    source_generation=(app, source))
+        return float(clock.last_source_position)
+
+    def _prepare_island_lyric_offset(self, now: float, offset: float) -> bool:
+        previous = getattr(self, "_island_last_lyric_offset", offset)
+        self._island_last_lyric_offset = offset
+        changed = not math.isclose(previous, offset, abs_tol=1e-7)
+        if changed:
+            # Compensation is presentation state, not a player seek. Drop
+            # cached ink only when it would otherwise prevent re-calibration.
+            self.lyric_last_phase_index = self.ember_last_phase_index = -1
+            self.lyric_last_phase_progress = self.ember_last_phase_progress = 0.0
+            self.lyric_last_phase_at = self.ember_last_phase_at = now
+            self.lyric_last_phase_timing_kind = ""
+        return changed
+
     def _looks_like_seek_to_start(self, raw_position: float, previous_position: float, previous_raw_position: float | None) -> bool:
         return media_position_looks_like_seek_to_start(raw_position, previous_position, previous_raw_position)
 
     def _sync_timed_lyrics(self, now: float, allow_backward: bool = False) -> bool:
         if not self.timed_lyrics:
             return False
-        position = max(0.0, self._estimated_media_position(now) + self._effective_lyric_offset_seconds())
+        offset = self._effective_lyric_offset_seconds()
+        previous_offset = getattr(self, "_island_last_sync_offset", offset)
+        self._island_last_sync_offset = offset
+        offset_changed = not math.isclose(previous_offset, offset, abs_tol=1e-7)
+        self._prepare_island_lyric_offset(now, offset)
+        position = max(0.0, self._stable_lyric_source_position(now) + offset)
         previous_index = int(getattr(self, "lyric_index", 0))
         # The normal island uses a 120 ms visual lead. A coarse UIA lyric-row
         # anchor is already bounded to that observed row, so adding the lead
@@ -2043,7 +2114,9 @@ class IslandStackVisual(QWidget):
         index = active_index_near_position(
             self.timed_lyrics, position, previous_index, lead_seconds=lead,
         )
-        if index < previous_index and bool(getattr(self, "media_is_playing", False)) and not allow_backward:
+        if (index < previous_index and bool(getattr(self, "media_is_playing", False))
+                and not allow_backward and not offset_changed
+                and getattr(self, "_island_lyric_source_clock", None) is None):
             current_start = float(self.timed_lyrics[min(previous_index, len(self.timed_lyrics) - 1)][0])
             last_position = float(getattr(self, "lyric_last_sync_position", 0.0))
             small_backstep = position >= max(0.0, current_start - 1.05) or 0.0 < last_position - position < 2.4
@@ -7251,7 +7324,17 @@ class IslandStackVisual(QWidget):
                 media_is_playing=bool(getattr(self, "media_is_playing", False)),
                 transition_kind=getattr(self, "lyric_transition_kind", ""),
             )
-            return diagnostics.as_dict()
+            result = diagnostics.as_dict()
+            clock = getattr(self, "_island_lyric_source_clock", None)
+            pending_at = getattr(clock, "pending_clock_at", None)
+            result["source_clock"] = {
+                "observed_seconds": getattr(self, "media_position_observed_seconds", None),
+                "observed_at": getattr(self, "media_position_sampled_at", 0.0),
+                "validated_seconds": getattr(clock, "last_source_position", None),
+                "pending_seconds": getattr(clock, "pending_clock_position", None),
+                "pending_age_seconds": max(0.0, now - pending_at) if pending_at is not None else None,
+            }
+            return result
         except Exception as exc:
             return {
                 "estimated_position_seconds": estimated_position,
@@ -10056,7 +10139,7 @@ class IslandStackVisual(QWidget):
         timed = getattr(self, "timed_lyrics", []) or []
         index = int(getattr(self, "lyric_index", 0))
         if timed and 0 <= index < len(timed):
-            position = max(0.0, self._estimated_media_position(now) + self._effective_lyric_offset_seconds())
+            position = max(0.0, self._stable_lyric_source_position(now) + self._effective_lyric_offset_seconds())
             start = float(timed[index][0])
             if index + 1 < len(timed):
                 end = float(timed[index + 1][0])
@@ -10071,7 +10154,8 @@ class IslandStackVisual(QWidget):
         extra_offset = max(0.0, min(4.0, float(getattr(self, "ember_lyric_offset_seconds", 0.0) or 0.0)))
         if abs(extra_offset) <= 0.0001:
             return self._lyric_phase(now)
-        estimated_position = self._estimated_media_position(now)
+        estimated_position = self._stable_lyric_source_position(now)
+        self._prepare_island_lyric_offset(now, self._effective_lyric_offset_seconds())
         paint_state = build_lyric_paint_state(
             timed_lyrics=getattr(self, "timed_lyrics", ()) or (),
             lyric_index=getattr(self, "lyric_index", 0),
@@ -14931,8 +15015,9 @@ class IslandStackVisual(QWidget):
         return not self._island_song_has_genuine_unit_timing()
 
     def _lyric_phase(self, now: float) -> dict[str, float]:
-        estimated_position = self._estimated_media_position(now)
+        estimated_position = self._stable_lyric_source_position(now)
         lyric_offset = self._effective_lyric_offset_seconds()
+        self._prepare_island_lyric_offset(now, lyric_offset)
         paint_state = build_lyric_paint_state(
             timed_lyrics=getattr(self, "timed_lyrics", ()) or (),
             lyric_index=getattr(self, "lyric_index", 0),

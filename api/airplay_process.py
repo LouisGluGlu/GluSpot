@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections import deque
 from pathlib import Path
@@ -23,6 +24,7 @@ def engine_path() -> Path:
 
 class AirPlayProcess:
     CONNECT_TIMEOUT = 25.0
+    TIMING_MAX_AGE = 2.0
 
     def __init__(self, executable=None, popen=None, *, source_id="", exclusive_output=True):
         self.executable = Path(executable) if executable is not None else engine_path()
@@ -34,6 +36,7 @@ class AirPlayProcess:
         self._diagnostic_lock = threading.Lock()
         self._stderr_tail = deque(maxlen=24)
         self._last_stats = {}
+        self._last_stats_at = 0.0
         self._last_terminal = {}
         self._stopped_at = 0.0
         self._mute_state = {}
@@ -52,6 +55,7 @@ class AirPlayProcess:
         self._started_at = self._stopped_at = 0.0
         with self._diagnostic_lock:
             self._last_stats = {}
+            self._last_stats_at = 0.0
             self._last_terminal = {}
             tail = self._stderr_tail = deque(maxlen=24)
             mute_state = self._mute_state = {}
@@ -90,6 +94,7 @@ class AirPlayProcess:
                 return
             if event.get("event") == "stats":
                 self._last_stats = dict(event)
+                self._last_stats_at = time.monotonic()
             elif event.get("event") == "error" or (
                     event.get("event") == "stopped" and self._last_terminal.get("event") != "error"):
                 self._last_terminal = dict(event)
@@ -117,6 +122,38 @@ class AirPlayProcess:
                 "transport_messages": tuple(self._stderr_tail),
                 "local_output": dict(self._mute_state),
             }
+
+    def latency_estimate(self):
+        """Fresh sender buffer estimate in seconds, or None; never acoustic latency.
+
+        The fixed RTP buffer and the input queue have different sample rates.
+        Native stats convert each separately and omit receiver/network latency.
+        Reading this single retained snapshot does not touch the helper pipes.
+        """
+        with self._diagnostic_lock:
+            age = time.monotonic() - self._last_stats_at
+            timing = self._last_stats.get("timing")
+            if (self._process is None or not self._last_stats_at or self._last_terminal or
+                    self._stopped_at or age < 0 or age > self.TIMING_MAX_AGE or
+                    not isinstance(timing, dict) or timing.get("valid") is not True or
+                    timing.get("method") != "protocol_plus_input_queue"):
+                return None
+            values = tuple(timing.get(key) for key in (
+                "estimated_delay_ms", "protocol_buffer_ms", "input_queue_ms"))
+            if any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   for value in values):
+                return None
+            try:
+                delay, protocol, queued = (float(value) for value in values)
+            except OverflowError:
+                return None
+            if any(not math.isfinite(value) or value < 0 for value in (delay, protocol, queued)):
+                return None
+            if not math.isclose(delay, protocol + queued, abs_tol=0.1):
+                return None
+            return {"seconds": delay / 1000.0, "source": timing["method"],
+                    "sample_age_seconds": age, "protocol_buffer_seconds": protocol / 1000.0,
+                    "input_queue_seconds": queued / 1000.0}
 
     @staticmethod
     def _read_events(process, events, on_event=None):

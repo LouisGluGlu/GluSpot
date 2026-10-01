@@ -253,6 +253,7 @@ class WindowsMediaProvider:
         self._lyrics_found_progress_retry_not_before = 0.0
         self._lyrics_found_progress_retry_until = 0.0
         self._last_raw_timeline_track_id = ""
+        self._last_raw_timeline_source_app = ""
         self._last_raw_timeline_position: float | None = None
         self._last_raw_timeline_at = 0.0
         self._raw_timeline_observation_signature: tuple[object, ...] | None = None
@@ -295,7 +296,9 @@ class WindowsMediaProvider:
                     if callable(setter):
                         setter("v2_airplay_sender_id", source_id)
                 self._audio_route_controller = AudioRouteController(
-                    latency_seconds=self.settings_getter("v2_homepod_lyric_delay_seconds", 1.5), source_id=source_id)
+                    latency_seconds=self.settings_getter("v2_homepod_lyric_delay_seconds", 1.5), source_id=source_id,
+                    auto_latency_enabled=self.settings_getter("v2_homepod_auto_lyric_delay",
+                        self.settings_getter("v2_homepod_lyric_delay_seconds", 1.5) == 1.5))
         return self._audio_route_controller
 
     def get_audio_route_snapshot(self) -> AudioRouteSnapshot:
@@ -321,7 +324,19 @@ class WindowsMediaProvider:
         setter = getattr(self, "settings_setter", None)
         if callable(setter):
             setter("v2_homepod_lyric_delay_seconds", value)
+            setter("v2_homepod_auto_lyric_delay", False)
         return controller.set_latency(value)
+
+    def set_audio_output_auto_latency(self, enabled: bool) -> bool:
+        controller = self.start_audio_outputs()
+        enabled = bool(enabled)
+        setter = getattr(self, "settings_setter", None)
+        if callable(setter):
+            setter("v2_homepod_auto_lyric_delay", enabled)
+            current = controller.snapshot()
+            if not enabled and current.state == "casting":
+                setter("v2_homepod_lyric_delay_seconds", current.cast_latency_seconds)
+        return controller.set_auto_latency(enabled)
 
     def close_audio_outputs(self):
         lock = getattr(self, "_audio_route_init_lock", None)
@@ -591,16 +606,18 @@ class WindowsMediaProvider:
 
     def _raw_timeline_observation_at(
         self, track_key: str, timeline: object, is_playing: bool, sampled_at: float,
+        *, source_app: str = "",
     ) -> float:
         """Keep repeated reads of one Windows timeline as one observation.
 
         GSMTC may return the same position and LastUpdatedTime through many
         polls. Retrieval time is not evidence of a second seek. The first
         monotonic observation stays the projection origin; a changed position,
-        source update, track or play state creates a fresh observation.
+        source update, track or play state creates a fresh observation. Source
+        application identity stays separate from a shared song/cache identity.
         """
         signature = (
-            str(track_key), getattr(timeline, "last_updated_time", None),
+            str(track_key), str(source_app), getattr(timeline, "last_updated_time", None),
             self._timespan_seconds(getattr(timeline, "position", None)),
             self._timespan_seconds(getattr(timeline, "start_time", None)),
             self._timespan_seconds(getattr(timeline, "end_time", None)),
@@ -791,6 +808,7 @@ class WindowsMediaProvider:
             # Keep the verified Seek event's identity through cached projections.
             # Repainting or polling the same Seek is not a second user action.
             position_sampled_at=float(self._local_seek_at),
+            position_observed_seconds=float(self._local_seek_position_seconds),
             position_confidence=max(float(track.position_confidence), 0.68),
             position_interactive=True,
         )
@@ -1950,6 +1968,7 @@ class WindowsMediaProvider:
                 position_seconds=position,
                 position_source="local-seek",
                 position_sampled_at=float(self._local_seek_at),
+                position_observed_seconds=position,
                 position_confidence=max(float(track.position_confidence), 0.58),
             )
             self._last_data = replace(self._last_data, track=updated_track)
@@ -2335,9 +2354,11 @@ class WindowsMediaProvider:
         position_confidence = 1.0 if position_seconds > 0.0 else (0.26 if duration_seconds > 0.0 else 0.18)
         raw_timeline_position = position_seconds
         previous_raw_timeline_position: float | None = None
-        if self._last_raw_timeline_track_id == track_key:
+        if (self._last_raw_timeline_track_id == track_key
+                and getattr(self, "_last_raw_timeline_source_app", raw_source_app) == raw_source_app):
             previous_raw_timeline_position = self._last_raw_timeline_position
         self._last_raw_timeline_track_id = track_key
+        self._last_raw_timeline_source_app = raw_source_app
         self._last_raw_timeline_position = raw_timeline_position
         self._last_raw_timeline_at = read_at
         if player_position_reader is not None and duration_seconds <= 0.0:
@@ -2417,16 +2438,24 @@ class WindowsMediaProvider:
         # music surface must not mistake a reprojected GSMTC value for a new
         # independent player sample when confirming a surprising clock jump.
         raw_observed_at = (
-            self._raw_timeline_observation_at(track_key, timeline, self._is_playing(playback), timeline_sampled_at)
+            self._raw_timeline_observation_at(
+                track_key, timeline, self._is_playing(playback), timeline_sampled_at,
+                source_app=raw_source_app,
+            )
             if session_metadata_matches else 0.0
         )
         raw_clock_advancing = self._raw_timeline_corroborates_lyric_anchor(
-            track_key, raw_timeline_position, raw_observed_at, time.monotonic(),
+            str((track_key, raw_source_app)), raw_timeline_position, raw_observed_at, time.monotonic(),
             is_playing=self._is_playing(playback), metadata_matches=session_metadata_matches,
         )
         position_sampled_at = float(self._local_seek_at) if position_source == "local-seek" else (
             raw_observed_at if position_source in {"windows-media", "interactive"}
             else timeline_sampled_at if session_metadata_matches else 0.0
+        )
+        position_observed_seconds = (
+            float(self._local_seek_position_seconds) if position_source == "local-seek"
+            else raw_timeline_position if session_metadata_matches and position_source in {"windows-media", "interactive"}
+            else None
         )
         should_read_player_anchor = player_position_reader is not None and bool(timed_lyrics)
         if should_read_player_anchor:
@@ -2494,6 +2523,7 @@ class WindowsMediaProvider:
                         position_seconds = raw_timeline_position
                         position_source = "windows-media"
                         position_sampled_at = raw_observed_at
+                        position_observed_seconds = raw_timeline_position
                     elif use_player_sample and (
                         position_seconds <= 0.0 or (fresh_player_anchor and player_disagrees)
                     ):
@@ -2501,6 +2531,7 @@ class WindowsMediaProvider:
                         position_source = player_sample.source
                         position_confidence = player_sample.confidence
                         position_sampled_at = float(getattr(player_sample, "sampled_at", 0.0) or 0.0)
+                        position_observed_seconds = float(player_sample.position_seconds)
         if not title and not artist:
             self._provider_status = "no_session"
             return None
@@ -2525,6 +2556,7 @@ class WindowsMediaProvider:
             position_source=position_source,
             position_confidence=position_confidence,
             position_sampled_at=position_sampled_at,
+            position_observed_seconds=position_observed_seconds,
             source_app_foreground=source_app_foreground,
             position_interactive=source_app_interactive,
             album_queue=album_queue,
@@ -2932,6 +2964,7 @@ class WindowsMediaProvider:
             duration_seconds=0.0,
             position_source="foreground-title",
             position_sampled_at=0.0,
+            position_observed_seconds=None,
             position_confidence=0.40,
             source_app_foreground=True,
             position_interactive=True,
@@ -2939,6 +2972,7 @@ class WindowsMediaProvider:
         self._last_data = replace(data, track=corrected_track)
         self._last_ready_at = now
         self._last_raw_timeline_track_id = ""
+        self._last_raw_timeline_source_app = ""
         self._last_raw_timeline_position = None
         self._last_raw_timeline_at = 0.0
         self._raw_timeline_observation_signature = None
@@ -3418,21 +3452,31 @@ class WindowsMediaProvider:
             self._raw_lyric_anchor_clock = {
                 "track_key": str(track_key), "position": float(raw_position),
                 "advanced_at": float(observed_at), "natural_advances": 0,
+                "interval_seconds": 0.0,
             }
             return False
         advance = float(raw_position) - float(previous["position"])
         if abs(advance) > 0.02:
             interval = float(observed_at) - float(previous["advanced_at"])
             natural = (
-                0.0 < interval <= 3.0 and advance > 0.05
-                and abs(advance - interval) <= max(0.40, interval * 0.35)
+                interval > 0.0 and advance > 0.05
+                and abs(advance - interval) <= max(0.40, min(1.10, interval * 0.35))
             )
             previous["natural_advances"] = int(previous["natural_advances"]) + 1 if natural else 0
+            previous["interval_seconds"] = interval if natural else 0.0
             previous["position"] = float(raw_position)
             previous["advanced_at"] = float(observed_at)
         # Repeated reads (even with a fresh LastUpdatedTime) do not renew
         # advanced_at. A frozen Windows clock can still use the UIA fallback.
-        return int(previous["natural_advances"]) >= 2 and 0.0 <= now - float(previous["advanced_at"]) <= 2.5
+        # Some players publish real GSMTC progress every five or ten seconds.
+        # Trust a cadence established by actual position advances through its
+        # next expected event plus the existing fresh UIA sample allowance;
+        # a fixed 2.5-second expiry would hand the intervening frames back to a
+        # selected/scrolled lyric row on every cycle. Long gaps do not grant
+        # larger position-error tolerance or turn a marker-only poll into time.
+        freshness = max(2.5, float(previous.get("interval_seconds", 0.0)) + 0.75)
+        return (int(previous["natural_advances"]) >= 2
+                and 0.0 <= now - float(previous["advanced_at"]) <= freshness)
 
     def _should_use_player_sample(self, source_prefix: str, sample_source: str, sample_age: float, is_playing: bool) -> bool:
         source_prefix = str(source_prefix or "").strip().casefold()
