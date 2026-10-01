@@ -409,6 +409,12 @@ void RaopSender::onPinTimeout_() {
 void RaopSender::onFeedbackTimer_() {
     if (state_ != State::Streaming) return;
     if (airplay2_) {
+        // GluSpot: only one unanswered feedback request may occupy the FIFO.
+        // An unresponsive peer must not build an unbounded pending-method queue.
+        if (std::find(pendingMethods_.begin(), pendingMethods_.end(), "FEEDBACK") != pendingMethods_.end()) {
+            ++diagnostics_.feedbackSkipped;
+            return;
+        }
         // #90/#109, AP2 keep-alive: a post-RECORD Apple TV closes the
         // session after ~30 s without a VALID feedback request. The control
         // channel is RTSP, not HTTP, owntone/pyatv send `POST /feedback
@@ -427,6 +433,7 @@ void RaopSender::onFeedbackTimer_() {
         pendingMethods_.push_back("FEEDBACK");
         pendingIsHttp_.push_back(false);   // ignored by handleResponse_
         writeRtsp_(req);
+        ++diagnostics_.feedbackSent;
     } else {
         sendRequest_("POST", "/feedback", {}, {});
     }
@@ -436,6 +443,7 @@ void RaopSender::onFeedbackTimer_() {
 
 void RaopSender::start(const std::string& host, uint16_t port, const std::string& name) {
     stop();
+    diagnostics_ = {};
     host_ = host;
     name_ = name;
     hostIp_.clear();
@@ -540,9 +548,11 @@ void RaopSender::releaseSockets_() {
     }
     localControlPort_ = localTimingPort_ = 0;
     io_.tcpClose(RaopTcp::Event, false);   // #90, AP2 event channel
+    diagnostics_.eventConnected = false;
 }
 
 void RaopSender::fail_(const std::string& why) {
+    diagnostics_.lastError = why.substr(0, 512);
     warn_("Cast: RAOP error, {}", why);
     const bool wasStarting = state_ != State::Streaming;
     state_ = State::Idle;
@@ -558,6 +568,7 @@ void RaopSender::fail_(const std::string& why) {
 
 void RaopSender::onTcpConnected(RaopTcp ch, const RaopEndpoint& local, const RaopEndpoint& peer) {
     if (ch == RaopTcp::Event) {
+        diagnostics_.eventConnected = state_ != State::Idle;
         if (state_ != State::Idle)
             info_("Cast: AirPlay 2 event channel open ({}:{})", peer.ip, peer.port);
         return;
@@ -578,6 +589,8 @@ void RaopSender::onTcpConnectFailed(RaopTcp ch, const std::string& reason) {
         // (a receiver that drops the event channel usually tears down).
         if (state_ == State::Streaming || state_ == State::Handshake)
             warn_("Cast: AirPlay 2 event channel error: {}", reason);
+        diagnostics_.eventConnected = false;
+        diagnostics_.lastError = ("Event connection failed: " + reason).substr(0, 512);
         return;
     }
     if (state_ != State::Idle)
@@ -591,6 +604,9 @@ void RaopSender::onTcpData(RaopTcp ch, std::span<const uint8_t> bytes) {
 
 void RaopSender::onTcpClosed(RaopTcp ch, const std::string& reason) {
     if (ch == RaopTcp::Event) {
+        diagnostics_.eventConnected = false;
+        if (state_ != State::Idle)
+            diagnostics_.lastError = ("Event channel closed: " + reason).substr(0, 512);
         if (state_ == State::Streaming || state_ == State::Handshake)
             warn_("Cast: AirPlay 2 event channel closed{}",
                   reason.empty() ? std::string() : ", " + reason);
@@ -598,6 +614,7 @@ void RaopSender::onTcpClosed(RaopTcp ch, const std::string& reason) {
     }
     rtspConnected_ = false;
     if (state_ == State::Idle) return;   // our own stop(), quiet
+    diagnostics_.lastError = reason.empty() ? "Control connection closed by receiver" : reason.substr(0, 512);
     if (!reason.empty()) { fail_(reason); return; }   // socket error, not a FIN
     const bool wasStarting = state_ != State::Streaming;
     state_ = State::Idle;
@@ -621,6 +638,16 @@ void RaopSender::onUdpDatagram(RaopUdp s, std::span<const uint8_t> bytes, const 
 }
 
 // -- host application calls ------------------------------------------
+
+RaopDiagnostics RaopSender::diagnostics() const {
+    RaopDiagnostics result = diagnostics_;
+    result.eventKeyed = ap2_ && ap2_->eventIn.size() == 32 && ap2_->eventOut.size() == 32;
+    result.audioFramesSent = framesSent_;
+    result.queuedInputFrames = (ring_ ? ring_->availableRead() / kChannels : 0) + inBuf_.size() / kChannels;
+    result.inputSampleRate = inputRate_;
+    result.protocolLatencyFrames = latency_;
+    return result;
+}
 
 void RaopSender::setVolume(double pct) {
     pct = std::clamp(pct, 0.0, 100.0);
@@ -810,6 +837,7 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
         const Bytes aad(lp, lp + 2);
         auto dec = airplay::chacha20Poly1305Decrypt(ap2_->eventIn, nonce8, ctTag, aad);
         if (!dec) {
+            ++diagnostics_.eventDecryptFailures;
             warn_("Cast: AirPlay 2 event-channel decrypt failed, dropping");
             eventEncBuf_.clear();
             return;
@@ -835,6 +863,7 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
         const size_t total = headEnd + 4 + size_t(contentLen > 0 ? contentLen : 0);
         if (eventPlainBuf_.size() < total) break;   // body still arriving
         eventPlainBuf_.erase(0, total);
+        ++diagnostics_.eventRequests;
         // Encrypted 200 OK, owntone's respond() sends a BARE 200 (just Server),
         // no Content-Length/Audio-Latency (those can corrupt the receiver's
         // realtime timeline). Echo CSeq when the request carried one.
@@ -858,6 +887,7 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
         out.append(reinterpret_cast<const char*>(rlp), 2);
         out.append(reinterpret_cast<const char*>(rct.data()), rct.size());
         io_.tcpSend(RaopTcp::Event, spanOf(out));
+        ++diagnostics_.eventAcks;
     }
 }
 
@@ -969,7 +999,18 @@ void RaopSender::handleResponse_(const std::string& method, int code, const Head
         }
         return;
     }
-    if (method == "FEEDBACK") return;   // AP2 keep-alive, reply ignored
+    if (method == "FEEDBACK") {
+        ++diagnostics_.feedbackReplies;
+        diagnostics_.lastFeedbackCode = code;
+        if (code < 200 || code >= 300) {
+            ++diagnostics_.feedbackRejected;
+            diagnostics_.lastError = "Feedback rejected (" + std::to_string(code) + ")";
+            // One warning per session; repeated codes stay visible in counters.
+            if (diagnostics_.feedbackRejected == 1)
+                warn_("Cast: AirPlay 2 feedback rejected ({})", code);
+        }
+        return;
+    }
     if (method == "TEARDOWN") return;
 
     // v0.66.x, RTSP digest auth for pw=true receivers (RFC 2617 MD5).
@@ -1268,7 +1309,6 @@ void RaopSender::beginAuthChain_() {
 }
 
 void RaopSender::onPairingResponse_(int code, const Headers& headers, const std::string& body) {
-    (void)headers;
     if (state_ == State::Idle) return;
 
     // Once we're streaming the handshake is done; a late/duplicate
@@ -1293,6 +1333,12 @@ void RaopSender::onPairingResponse_(int code, const Headers& headers, const std:
     // anyway so the stream is at least established. Handled before the generic
     // non-2xx abort below so a RECORD 500 doesn't kill the session.
     if (pairStage_ == PairStage::Ap2Record) {
+        bool latencyOk = false;
+        const int receiverLatency = toInt(headerValue(headers, "audio-latency"), latencyOk);
+        if (latencyOk && receiverLatency >= 0) {
+            diagnostics_.receiverLatencyReported = true;
+            diagnostics_.receiverLatencyFrames = uint32_t(receiverLatency);
+        }
         info_("Cast: AirPlay 2 RECORD reply ({}){}, proceeding to stream SETUP",
               code, (code >= 200 && code < 300) ? " OK" : " (not accepted)");
         sendAp2SetupStream_();
@@ -1550,6 +1596,12 @@ void RaopSender::handlePairSetupM4_(const std::string& body) {
         ap2_->controlIn  = hkdfSha512("Control-Salt",
                                       "Control-Read-Encryption-Key",
                                       ap2_->sharedSecret, 32);
+        // GluSpot: transient pairing also has an encrypted event channel. Use
+        // FULL 64-byte SRP K for HKDF (only raw audio truncates K to 32 bytes).
+        // Reverse event connection: incoming Events-Write, outgoing Events-Read.
+        // pyatv HapTransient.encryption_keys + AP2Session._setup_event_channel.
+        ap2_->eventIn = hkdfSha512("Events-Salt", "Events-Write-Encryption-Key", ap2_->sharedSecret, 32);
+        ap2_->eventOut = hkdfSha512("Events-Salt", "Events-Read-Encryption-Key", ap2_->sharedSecret, 32);
         pairStage_ = PairStage::Done;
         afterAuthOk_();
         return;
@@ -1981,7 +2033,7 @@ std::string RaopSender::encodeAlacFrame_(const int16_t* frames, int nFrames) {
 
 void RaopSender::sendAudioPacket_() {
     int16_t frames[kFramesPerPacket * kChannels];
-    fillFrames_(frames, kFramesPerPacket);
+    diagnostics_.silenceFrames += kFramesPerPacket - fillFrames_(frames, kFramesPerPacket);
 
     // 12-byte RTP header (big-endian, shared by AP1 + AP2).
     std::string header;

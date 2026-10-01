@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
@@ -75,6 +76,9 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["local"].subtitle, "当前输出")
         self.assertEqual(self.panel._rows["bluetooth"].subtitle, "蓝牙音频")
         self.assertFalse(self.panel.stop_button.isEnabled())
+        self.assertFalse(self.panel.stop_button.isVisible())
+        self.assertFalse(self.panel.advanced_widget.isVisible())
+        self.assertLess(self.panel.height(), 310)
         self.assertGreaterEqual(self.panel.x(), 12)
         self.assertLessEqual(self.panel.x() + self.panel.width(), self.owner.width() - 12)
 
@@ -101,6 +105,15 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["local"].state, "active")
         self.assertEqual(self.panel._rows["homepod"].state, "available")
 
+    def test_snapshot_failure_reveals_message_when_default_status_was_hidden(self):
+        self._open()
+        self.assertFalse(self.panel.status_label.isVisible())
+        with patch.object(self.provider, "get_audio_route_snapshot", side_effect=OSError("gone")):
+            self.panel.sync_snapshot()
+        self.assertTrue(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_label.text(), "音频设备暂时不可用。")
+        self.assertFalse(self.panel.stop_button.isEnabled())
+
     def test_new_snapshot_preserves_surviving_row_motion_and_removes_departed_device(self):
         self._open()
         original = self.panel._rows["local"]
@@ -122,6 +135,7 @@ class AudioOutputPanelTests(unittest.TestCase):
 
     def test_manual_device_add_and_stop_use_provider_boundary(self):
         self._open()
+        self.panel.advanced_button.click()
         self.panel.host_input.setText(" 192.168.1.25 ")
         self.panel.add_button.click()
         self.assertIn(("add", "192.168.1.25"), self.provider.calls)
@@ -135,6 +149,8 @@ class AudioOutputPanelTests(unittest.TestCase):
     def test_cast_delay_control_reads_snapshot_and_changes_only_provider_setting(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", cast_latency_seconds=1.5)
         self._open()
+        self.assertFalse(self.panel.latency_widget.isVisible())
+        self.panel.advanced_button.click()
         self.assertTrue(self.panel.latency_widget.isVisible())
         self.assertEqual(self.panel.latency_slider.value(), 150)
         self.assertEqual(self.panel.latency_label.text(), "歌词延后 1.50 秒")
@@ -152,11 +168,58 @@ class AudioOutputPanelTests(unittest.TestCase):
         self._open()
         self.app.processEvents()
         self.assertGreater(self.panel.scroll.viewport().height(), 150)
+        self.assertFalse(self.panel.host_input.isVisible())
+        self.panel.advanced_button.click()
+        self.app.processEvents()
         scroll = self.panel.scroll.verticalScrollBar()
         self.assertGreater(scroll.maximum(), 0)
         scroll.setValue(scroll.maximum())
         bottom = self.panel.host_input.mapTo(self.panel.scroll.viewport(), self.panel.host_input.rect().bottomLeft())
         self.assertLessEqual(bottom.y(), self.panel.scroll.viewport().height())
+        self.assertGreaterEqual(bottom.y(), 0)
+        self.assertTrue(self.panel.host_input.isVisible())
+
+    def test_more_options_is_keyboard_operable_and_preserves_route_and_motion_state(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", cast_latency_seconds=1.5)
+        self._open()
+        row = self.panel._rows["homepod"]
+        row.elapsed, row.progress = 0.25, 0.4
+        before = tuple(self.provider.calls)
+        QTest.keyClick(self.panel.advanced_button, Qt.Key.Key_Space)
+        self.assertTrue(self.panel.advanced_widget.isVisible())
+        self.assertTrue(self.panel.latency_widget.isVisible())
+        self.assertEqual(self.panel.advanced_button.nextInFocusChain(), self.panel.latency_slider)
+        self.assertEqual(self.panel.latency_slider.nextInFocusChain(), self.panel.host_input)
+        self.assertEqual((row.elapsed, row.progress), (0.25, 0.4))
+        self.assertEqual(tuple(self.provider.calls), before)
+        QTest.keyClick(self.panel.advanced_button, Qt.Key.Key_Space)
+        self.assertFalse(self.panel.advanced_widget.isVisible())
+        self.assertTrue(self.panel.stop_button.isVisible())
+
+    def test_cached_music_backdrop_drives_panel_tone_and_readable_neutral_ink(self):
+        self._open()
+        for backdrop in (QColor(64, 35, 28), QColor(20, 20, 22), QColor(232, 228, 219), QColor(255, 255, 255)):
+            with self.subTest(backdrop=backdrop.name()):
+                self.owner._background_sample_colors = lambda _rect: (backdrop,)
+                self.owner._surface_font = lambda size, weight: self.panel._label_font
+                self.panel.sync_snapshot()
+                self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(self.panel._ink, self.panel._background), 4.5)
+                self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(self.panel._muted, self.panel._background), 4.5)
+                self.assertEqual(self.panel._accent, self.panel._ink)
+                self.assertEqual(self.panel._rows["local"].ink, self.panel._ink)
+                self.assertEqual(self.panel._rows["local"].label_font.families(), self.panel._label_font.families())
+        self.assertEqual(self.panel._background, QColor(255, 255, 255))
+
+    def test_many_devices_scroll_without_exposing_advanced_fields_or_losing_active_row(self):
+        self.owner.resize(640, 360)
+        extra = tuple(AudioRouteDevice(f"device-{index}", f"音频设备 {index}") for index in range(10))
+        self.provider.snapshot = replace(self.provider.snapshot, devices=self.provider.devices + extra)
+        self._open()
+        self.app.processEvents()
+        self.assertGreater(self.panel.scroll.verticalScrollBar().maximum(), 0)
+        self.assertFalse(self.panel.advanced_widget.isVisible())
+        self.assertEqual(self.panel._rows["local"].state, "active")
+        self.assertLessEqual(self.panel.y() + self.panel.height(), self.owner.height() - 12)
 
     def test_paint_does_not_advance_motion_or_run_provider_actions(self):
         self._open()

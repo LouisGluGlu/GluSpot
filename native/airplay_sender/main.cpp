@@ -1,5 +1,6 @@
 // GluSpot: Windows endpoint loopback capture -> one authenticated AirPlay 2 sender.
 #include "pcm_convert.h"
+#include "endpoint_mute_guard.h"
 #include "raop_loop.h"
 #include "raop_sender.h"
 #include "ring_buffer.h"
@@ -48,6 +49,34 @@ std::string jsonString(const std::string& s) {
 void status(const std::string& event, const std::string& message = "") {
     std::cout << "{\"event\":" << jsonString(event)
               << ",\"message\":" << jsonString(message) << "}\n" << std::flush;
+}
+
+void muteStatus(const std::string& phase, const std::string& endpoint, bool original, bool applied) {
+    std::cout << "{\"event\":\"mute_state\",\"phase\":" << jsonString(phase)
+              << ",\"endpoint_id\":" << jsonString(endpoint)
+              << ",\"original_muted\":" << (original ? "true" : "false")
+              << ",\"applied\":" << (applied ? "true" : "false") << "}\n" << std::flush;
+}
+
+void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64_t dropped,
+                    uint64_t discontinuities) {
+    const auto d = sender.diagnostics();
+    std::cout << "{\"event\":\"stats\",\"captured_frames\":" << captured
+              << ",\"dropped_samples\":" << dropped << ",\"discontinuities\":" << discontinuities
+              << ",\"protocol\":{\"feedback_sent\":" << d.feedbackSent
+              << ",\"feedback_replies\":" << d.feedbackReplies << ",\"feedback_rejected\":" << d.feedbackRejected
+              << ",\"feedback_skipped\":" << d.feedbackSkipped << ",\"last_feedback_code\":" << d.lastFeedbackCode
+              << ",\"event_requests\":" << d.eventRequests << ",\"event_acks\":" << d.eventAcks
+              << ",\"event_decrypt_failures\":" << d.eventDecryptFailures
+              << ",\"event_connected\":" << (d.eventConnected ? "true" : "false")
+              << ",\"event_keyed\":" << (d.eventKeyed ? "true" : "false")
+              << ",\"audio_frames_sent\":" << d.audioFramesSent << ",\"silence_frames\":" << d.silenceFrames
+              << ",\"queued_input_frames\":" << d.queuedInputFrames
+              << ",\"input_sample_rate\":" << d.inputSampleRate
+              << ",\"protocol_latency_frames\":" << d.protocolLatencyFrames
+              << ",\"receiver_latency_frames\":" << d.receiverLatencyFrames
+              << ",\"receiver_latency_reported\":" << (d.receiverLatencyReported ? "true" : "false")
+              << ",\"last_error\":" << jsonString(d.lastError) << "}}\n" << std::flush;
 }
 
 std::wstring wide(const std::string& text) {
@@ -230,11 +259,12 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleCtrlHandler(consoleHandler, TRUE);
     std::string host, endpoint, deviceId, name = "HomePod", sourceId = "02:47:4C:55:53:50";
     uint16_t port = 7000;
-    bool probe = false;
+    bool probe = false, exclusiveOutput = false;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string arg = utf8(argv[i]);
             if (arg == "--probe-capture") { probe = true; continue; }
+            if (arg == "--exclusive-output") { exclusiveOutput = true; continue; }
             if (i + 1 >= argc) throw std::runtime_error("Missing option value");
             const std::string value = utf8(argv[++i]);
             if (arg == "--host") host = value;
@@ -253,9 +283,18 @@ int wmain(int argc, wchar_t** argv) {
         if (!probe && (endpoint.empty() || std::sscanf(host.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &extra) != 4 ||
                        a > 255 || b > 255 || c > 255 || d > 255))
             throw std::runtime_error("Casting requires --host IPv4 and --endpoint render ID");
+        if (probe && exclusiveOutput)
+            throw std::runtime_error("Capture probe does not support --exclusive-output");
     } catch (const std::exception& ex) { status("error", ex.what()); return 2; }
 
     try {
+        // Constructing the guard reads state only. Muting begins after the
+        // receiver authenticates; the parent gets the original state first.
+        std::unique_ptr<gluspot::EndpointMuteGuard> muteGuard;
+        if (exclusiveOutput) {
+            muteGuard = std::make_unique<gluspot::EndpointMuteGuard>(wide(endpoint));
+            muteStatus("prepared", endpoint, muteGuard->originalMuted(), false);
+        }
         Capture capture(endpoint);
         if (!capture.waitReady()) {
             const auto why = capture.error();
@@ -276,7 +315,19 @@ int wmain(int argc, wchar_t** argv) {
         fxchain::RaopEvents events;
         events.launched = [&](bool ok, const std::string& error) {
             if (!ok) { status("error", error); failed = true; }
-            else { authenticated = true; capture.start(); status("waiting_audio", "AirPlay connected; waiting for source audio"); }
+            else {
+                try {
+                    capture.start();
+                    if (muteGuard) {
+                        muteGuard->mute();
+                        muteStatus("muted", endpoint, muteGuard->originalMuted(), true);
+                    }
+                    authenticated = true;
+                    status("waiting_audio", "AirPlay connected; waiting for source audio");
+                } catch (const std::exception& ex) {
+                    status("error", ex.what()); failed = true;
+                }
+            }
         };
         events.closed = [&] {
             if (!failed) status("error", "Receiver ended the AirPlay session");
@@ -298,6 +349,7 @@ int wmain(int argc, wchar_t** argv) {
         sender.start(host, port, name);
         const auto connectDeadline = std::chrono::steady_clock::now() + 20s;
         auto statsDeadline = std::chrono::steady_clock::now() + 5s;
+        auto muteDeadline = std::chrono::steady_clock::now() + 250ms;
         std::string pending;
         while (!failed && !interrupted && !stopFromStdin(pending)) {
             loop.pump(sender, 20ms);
@@ -308,17 +360,32 @@ int wmain(int argc, wchar_t** argv) {
                 status("error", "AirPlay connection timed out; check receiver access and inbound UDP firewall rules");
                 failed = true; break;
             }
+            if (authenticated && muteGuard && std::chrono::steady_clock::now() >= muteDeadline) {
+                if (!muteGuard->isStillMuted()) {
+                    status("error", "Local output was unmuted externally; HomePod casting stopped");
+                    failed = true; break;
+                }
+                muteDeadline = std::chrono::steady_clock::now() + 250ms;
+            }
             if (authenticated && capture.frames.load() && !reportedStreaming) {
                 reportedStreaming = true; status("streaming");
             }
             if (authenticated && std::chrono::steady_clock::now() >= statsDeadline) {
-                std::cout << "{\"event\":\"stats\",\"captured_frames\":" << capture.frames.load()
-                          << ",\"dropped_samples\":" << capture.droppedSamples.load()
-                          << ",\"discontinuities\":" << capture.discontinuities.load() << "}\n" << std::flush;
+                transportStats(sender, capture.frames.load(), capture.droppedSamples.load(), capture.discontinuities.load());
                 statsDeadline = std::chrono::steady_clock::now() + 5s;
             }
         }
+        // One final bounded snapshot preserves the close/failure evidence.
+        transportStats(sender, capture.frames.load(), capture.droppedSamples.load(), capture.discontinuities.load());
         sender.stop();
+        if (muteGuard) {
+            try {
+                muteGuard->restore();
+                muteStatus("restored", endpoint, muteGuard->originalMuted(), false);
+            } catch (const std::exception& ex) {
+                status("error", ex.what()); failed = true;
+            }
+        }
         status("stopped");
         return failed ? 1 : 0;
     } catch (const std::exception& ex) { status("error", ex.what()); return 1; }

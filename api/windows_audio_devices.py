@@ -9,6 +9,7 @@ ABI sources consulted:
 https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/mmdeviceapi.idl
 https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/functiondiscoverykeys_devpkey.h
 https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/cfgmgr32.h
+https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/endpointvolume.idl
 https://github.com/frgnca/AudioDeviceCmdlets/blob/master/SOURCE/IPolicyConfig.cs
 
 PolicyConfig is an undocumented Windows interface, verified against the above
@@ -108,6 +109,40 @@ class WindowsAudioDevices:
         with self._lock:
             self._closed = True
 
+    def get_endpoint_mute(self, device_id: str) -> bool:
+        """Read one explicit render endpoint; does not select an output."""
+        self._validate_endpoint_id(device_id)
+        with self._lock:
+            adapter = self._backend()
+            if adapter is None:
+                raise RuntimeError("Audio endpoint mute requires Windows")
+            return bool(adapter.get_endpoint_mute(device_id))
+
+    def set_endpoint_mute(self, device_id: str, muted: bool) -> None:
+        """Set/confirm mute only; master/channel volumes remain unchanged.
+
+        This is an explicit routing/recovery primitive, not an automatic mute
+        policy. In particular, it makes no claim that every driver preserves
+        loopback PCM while muted.
+        """
+        self._validate_endpoint_id(device_id)
+        if not isinstance(muted, bool):
+            raise ValueError("Audio endpoint mute must be a bool")
+        with self._lock:
+            adapter = self._backend()
+            if adapter is None:
+                raise RuntimeError("Audio endpoint mute requires Windows")
+            if bool(adapter.get_endpoint_mute(device_id)) == muted:
+                return
+            adapter.set_endpoint_mute(device_id, muted)
+            if bool(adapter.get_endpoint_mute(device_id)) != muted:
+                raise RuntimeError("Windows did not confirm the selected endpoint mute")
+
+    @staticmethod
+    def _validate_endpoint_id(device_id):
+        if not isinstance(device_id, str) or not device_id or "\0" in device_id:
+            raise ValueError("A valid output endpoint ID is required")
+
 
 _DWORD = ctypes.c_uint32
 _HRESULT = ctypes.c_int32
@@ -154,6 +189,7 @@ _MM_ENUMERATOR = "bcde0395-e52f-467c-8e3d-c4579291692e"
 _IID_ENUMERATOR = "a95664d2-9614-4f35-a746-de8db63617e6"
 _POLICY_CONFIG = "870af99c-171d-4f9e-af0d-e63df40c2bc9"
 _IID_POLICY_CONFIG = "f8679f50-850a-41cf-9c72-430f290290c8"
+_IID_ENDPOINT_VOLUME = "5cdf2c82-841e-4546-9722-0cf74078229a"
 
 
 def _check(hr, operation):
@@ -233,6 +269,45 @@ class _WindowsCoreAudioAdapter:
             return ctypes.wstring_at(text)
         finally:
             self._ole32.CoTaskMemFree(text)
+
+    def _endpoint_volume(self, scope, device_id):
+        """Activate SDK IAudioEndpointVolume for an explicit render ID."""
+        enumerator = scope.create(_MM_ENUMERATOR, _IID_ENUMERATOR)
+        device = ctypes.c_void_p()
+        _check(_call(enumerator, 5, (ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p)),
+                     device_id, ctypes.byref(device)), "IMMDeviceEnumerator.GetDevice")
+        scope.own(device)
+        # IAudioEndpointVolume also exists on capture devices. Do not mute one.
+        direction = ctypes.c_void_p()
+        _check(_call(device, 0, (ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)),
+                     ctypes.byref(_GUID.from_string("1be09788-6894-4089-8586-9a2a6c265ac5")),
+                     ctypes.byref(direction)), "IMMDevice.QueryInterface(IMMEndpoint)")
+        scope.own(direction)
+        flow = ctypes.c_int()
+        _check(_call(direction, 3, (ctypes.POINTER(ctypes.c_int),), ctypes.byref(flow)),
+               "IMMEndpoint.GetDataFlow")
+        if flow.value != 0:  # eRender
+            raise ValueError("Audio endpoint mute requires a render endpoint")
+        volume = ctypes.c_void_p()
+        _check(_call(device, 3, (ctypes.POINTER(_GUID), _DWORD, ctypes.c_void_p,
+                               ctypes.POINTER(ctypes.c_void_p)),
+                     ctypes.byref(_GUID.from_string(_IID_ENDPOINT_VOLUME)), 23, None,
+                     ctypes.byref(volume)), "IMMDevice.Activate(IAudioEndpointVolume)")
+        return scope.own(volume)
+
+    def get_endpoint_mute(self, device_id):
+        with _ComScope(self._ole32) as scope:
+            volume = self._endpoint_volume(scope, device_id)
+            value = ctypes.c_int32()  # Windows BOOL is 32-bit, including x64.
+            _check(_call(volume, 15, (ctypes.POINTER(ctypes.c_int32),), ctypes.byref(value)),
+                   "IAudioEndpointVolume.GetMute")
+            return bool(value.value)
+
+    def set_endpoint_mute(self, device_id, muted):
+        with _ComScope(self._ole32) as scope:
+            volume = self._endpoint_volume(scope, device_id)
+            _check(_call(volume, 14, (ctypes.c_int32, ctypes.c_void_p), int(muted), None),
+                   "IAudioEndpointVolume.SetMute")
 
     def _property(self, store, key):
         value = _PROPVARIANT()
