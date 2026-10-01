@@ -8,11 +8,15 @@ Protected audio that Windows excludes from loopback is not bypassed.
 
 Only a single HomePod with HAP transient pairing is supported. Receiver SRP
 proof checking is strict; a proof mismatch fails the session. PIN/password
-devices are not configured by this helper. The upstream sender has an
-approximately 1.5-second receiver buffer; this helper does not attempt to
-change lyric timing, mute local playback, or offer synchronized multiroom.
+devices are not configured by this helper. The sender uses a fixed 66150-frame
+RTP timeline offset (1.5 seconds at 44.1 kHz); this is a sender setting, not a
+measured receiver minimum or audible end-to-end delay. The helper does not
+change lyric timing or offer synchronized multiroom.
 Connection preserves the receiver's existing volume. The helper never sends
 the upstream's automatic 0 dB volume request; a muted HomePod stays muted.
+Transient pairing derives both control and event keys from full SRP K; the
+reverse event channel decrypts receiver requests and answers an encrypted,
+minimal 200 OK. Sending feedback alone does not satisfy the event watchdog.
 
 ## Build
 
@@ -35,6 +39,14 @@ real local socket host tests, and GluSpot PCM conversion and volume-policy
 tests. None contacts a physical HomePod. Separately, on October 1, 2026, the
 GluSpot controller and this helper cast to HomePod mini “起居室” for 5.03 seconds
 and stopped cleanly; the user confirmed normal audible computer sound.
+After fixing transient event acknowledgement and integrating exclusive output,
+the controller/helper sustained a 90.06-second HomePod mini session on the M6
+source endpoint: local mute remained active, 3 event requests were acknowledged
+without decrypt errors, and 44 feedback requests received replies. Stopping
+restored the original unmuted state. The user confirmed that only the HomePod
+played and the delay was acceptable. The final helper also polls external
+unmute at 250 ms; that timing refinement was checked offline, while the 90-second
+pass used the same capture/mute/transport path with a 2-second poll.
 
 Run the actual helper's offline lifecycle pass with an active render endpoint:
 
@@ -51,6 +63,7 @@ partial-handshake stop, stdin EOF, connection timeout and real WASAPI capture.
 GluSpotAirPlay.exe --host 192.168.1.25 --port 7000 --endpoint {Windows render ID}
                   --device-id {mDNS receiver ID} --name LivingRoom
                   --source-id {persistent MAC-like GluSpot installation ID}
+                  [--exclusive-output]
 ```
 
 The host must be a numeric IPv4 address. The source endpoint must be explicit
@@ -64,8 +77,21 @@ Events:
 - `waiting_audio`: authenticated session started; waiting for source packets.
 - `streaming`: at least one real captured packet entered the sender ring.
 - `stats`: captured_frames, dropped_samples and discontinuities every 5 seconds.
+  A bounded `protocol` object also reports feedback sent/replied/rejected,
+  event requests/acknowledgements/decrypt failures, event socket/key state,
+  audio/silence frames, queued input frames and the last transport error.
+  A final stats event precedes stop. `protocol_latency_frames` is the sender's
+  fixed 66150-frame RTP timeline offset (1.5 s at 44.1 kHz);
+  `receiver_latency_frames` is only the receiver's reported RECORD value when
+  present, not a measurement of audible end-to-end delay. These fields do not
+  adjust lyric timing or reduce the receiver's buffer.
 - `error`: message describing initialization, capture, pairing or network failure.
 - `stopped`: the sender has requested TEARDOWN and closed its sockets.
+- `mute_state`: in exclusive-output mode, `prepared` reports the original
+  explicit endpoint mute before networking; `muted` follows authentication;
+  `restored` follows checked restoration. Each carries `endpoint_id`,
+  `original_muted` and `applied`. The parent must retain this state and restore
+  through the endpoint backend after a failed or forced helper termination.
 
 Exit codes: 0 clean stop, 1 runtime failure, 2 invalid arguments. Connection is
 bounded to 20 seconds. The network poll maximum is 20 ms, capture stop wait is
@@ -75,6 +101,17 @@ still enforce its own process timeout and terminate a stuck helper on shutdown.
 `--probe-capture [--endpoint ID]` initializes loopback capture for 250 ms and
 reports its format/counters without contacting or sending to any network device.
 It generates no test audio and saves no captured content.
+It rejects `--exclusive-output`; a diagnostic capture probe never mutes.
+
+`--exclusive-output` opts into local endpoint mute while casting. Its guard
+reads the original state without changing it, then mutes only after the receiver
+authenticates. The original mute state is restored on stop, error, stdin EOF
+and normal unwinding; the guard never changes master/channel volume or the
+default output. External unmute ends the cast instead of repeatedly overriding
+the user's hardware controls. The Python owner provides recovery if the helper
+is killed before its guard can run. Endpoint-mute loopback behavior depends on
+the audio driver: the current M6 endpoint was verified to retain loopback PCM
+while muted, but that result is not a claim for every Windows endpoint.
 
 Windows firewall must permit inbound UDP for the helper; the receiver initiates
 timing/retransmission packets. The helper does not change firewall rules.
@@ -86,6 +123,7 @@ speaker channels, keeps centre audio in a surround downmix, and drops bounded
 packets if a network consumer stalls. A silent source may not generate loopback
 packets; authenticated `waiting_audio` is distinct from flowing audio. There is
 no claim that endpoint master-volume mute preserves captured audio on all
-drivers, so this build does not mute the source. Other HomePod firmware/access
+drivers. A driver that suppresses loopback after mute needs a different capture
+path; raising receiver volume does not solve it. Other HomePod firmware/access
 settings and networks, sustained playback, sleep/reconnect and audible latency
 still need hardware verification before a release.

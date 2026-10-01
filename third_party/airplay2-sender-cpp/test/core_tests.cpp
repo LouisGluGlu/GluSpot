@@ -1005,10 +1005,11 @@ void testAp2Transient() {
     pcm = r.rx.decodeAudio(dgs[0].data);
     CHECK(pcm && *pcm == rampExpect(704, int16_t(704 * 37)), "second packet continues the ring");
 
-    // the event channel exists but transient pairing has no event keys: pushes are drained, not answered
+    // GluSpot: transient pairing is keyed too; unauthenticated garbage must
+    // still be dropped without synthesizing an acknowledgement.
     r.sender->onTcpConnected(RaopTcp::Event, {r.localIp, 50001}, {r.peerIp, 7001});
     r.sender->onTcpData(RaopTcp::Event, spanOf(std::string_view("\x05\x00garbage-frame-bytes-here")));
-    CHECK(r.io.takeTcp(RaopTcp::Event).empty() && r.sender->active(), "unkeyed event channel: drained quietly");
+    CHECK(r.io.takeTcp(RaopTcp::Event).empty() && r.sender->active(), "invalid event ciphertext is dropped without a reply");
 
     // AP2 feedback every 2 s, as an RTSP/1.0 POST with the identity headers
     r.advance(1900);

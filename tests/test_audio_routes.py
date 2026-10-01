@@ -24,6 +24,8 @@ class _Backend:
         self.selected = []
         self.error = ""
         self.closed = False
+        self.mutes = {"speakers": False, "headphones": False}
+        self.mute_calls = []
 
     def list_outputs(self):
         if self.error:
@@ -36,6 +38,13 @@ class _Backend:
 
     def close(self):
         self.closed = True
+
+    def get_endpoint_mute(self, identity):
+        return self.mutes[identity]
+
+    def set_endpoint_mute(self, identity, muted):
+        self.mute_calls.append((identity, muted))
+        self.mutes[identity] = muted
 
 
 class _Discovery:
@@ -65,6 +74,7 @@ class _Sender:
         self.running = False
         self.start_error = ""
         self.stop_error = ""
+        self.needs_local_output_restore = False
 
     def start(self, device, source):
         if self.start_error:
@@ -306,6 +316,35 @@ class AudioRouteControllerTests(unittest.TestCase):
         self.assertEqual(snapshot.pending_id, "")
         self.assertEqual(snapshot.cast_source_id, "")
         self.assertEqual(snapshot.cast_latency_seconds, 0.0)
+
+    def test_hard_killed_sender_restores_only_its_original_local_endpoint(self):
+        self._cast()
+        self.backend.mutes["speakers"] = True
+        self.sender.needs_local_output_restore = True
+        self.backend.set_default("headphones")
+        self.controller.stop_cast()
+        self.controller._step()
+        self.assertEqual(self.backend.mute_calls, [("speakers", False)])
+        self.assertEqual(self.controller.snapshot().active_id, "headphones")
+
+    def test_fallback_preserves_original_mute_and_user_explicit_unmute(self):
+        for originally_muted in (False, True):
+            with self.subTest(originally_muted=originally_muted):
+                self.backend.mutes["speakers"] = originally_muted
+                self._cast()
+                self.sender.needs_local_output_restore = True
+                self.backend.mutes["speakers"] = originally_muted
+                self.controller.stop_cast()
+                self.controller._step()
+                self.assertEqual(self.backend.mute_calls, [])
+
+    def test_exit_after_hard_kill_restores_local_sound_before_backend_close(self):
+        self._cast()
+        self.backend.mutes["speakers"] = True
+        self.sender.needs_local_output_restore = True
+        self.controller.close()
+        self.assertEqual(self.backend.mute_calls, [("speakers", False)])
+        self.assertTrue(self.backend.closed)
 
     def test_mdns_disappearance_preserves_live_cast_but_marks_receiver_unavailable(self):
         self._cast()

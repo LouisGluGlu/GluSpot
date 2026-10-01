@@ -62,6 +62,21 @@ template <typename T> class RingBuffer;
 // cipher state). Forward-declared here.
 struct RaopAp2State;
 
+// GluSpot local addition: bounded counters, read on the sender-driving thread.
+// These describe transport/buffer state, not measured acoustic latency.
+struct RaopDiagnostics {
+    uint64_t feedbackSent = 0, feedbackReplies = 0, feedbackRejected = 0, feedbackSkipped = 0;
+    int lastFeedbackCode = 0;
+    uint64_t eventRequests = 0, eventAcks = 0, eventDecryptFailures = 0;
+    bool eventConnected = false, eventKeyed = false;
+    uint64_t audioFramesSent = 0, silenceFrames = 0;
+    size_t queuedInputFrames = 0;
+    uint32_t inputSampleRate = 0;
+    uint32_t protocolLatencyFrames = 0, receiverLatencyFrames = 0;
+    bool receiverLatencyReported = false;
+    std::string lastError;
+};
+
 // What the sender tells the host application. Every callback fires from
 // inside a sender call (onTcpData / tick / stop ...), i.e. on the thread that
 // drives the sender; none may destroy the sender, calling stop() is fine.
@@ -136,6 +151,7 @@ public:
     void start(const std::string& host, uint16_t port, const std::string& name);
     void stop();   // TEARDOWN + close
     bool active() const { return state_ != State::Idle; }
+    RaopDiagnostics diagnostics() const;  // GluSpot read-only session snapshot
 
     // v0.66.x Phase 2, supply the on-screen PIN the user typed (drives the
     // legacy/HAP PIN pairing). Only meaningful while waitingForPin() is true.
@@ -299,6 +315,7 @@ private:
     RaopIdentity identity_;
     bool         strictAuth_ = false;
     bool         preserveReceiverVolume_ = false;  // GluSpot opt-in, see above
+    RaopDiagnostics diagnostics_;  // reset on start, retained after stop for final stats
 
     // -- RTSP session -------------------------------------------------
     bool        rtspConnected_ = false;  // the control socket is up

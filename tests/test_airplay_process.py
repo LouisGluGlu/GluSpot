@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections import deque
 from pathlib import Path
 import queue
 import subprocess
@@ -9,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from api.airplay_process import AirPlayProcess
 from api.audio_routes import AudioRouteDevice
@@ -57,6 +58,40 @@ class AirPlayProcessTests(unittest.TestCase):
         self.sender.stop()
         self.assertEqual(process.poll(), 0)
         self.assertIsNone(self.sender._reader)
+        self.assertIsNone(self.sender._stderr_reader)
+
+    def test_transport_evidence_is_bounded_and_retained_after_child_exit(self):
+        self.script.write_text(
+            "import sys,json\n"
+            "for i in range(70): print('transport '+str(i),file=sys.stderr,flush=True)\n"
+            "print(json.dumps({'event':'stats','event_replies':3}),flush=True)\n"
+            "print(json.dumps({'event':'error','message':'event channel closed'}),flush=True)\n",
+            encoding="utf-8")
+        self.sender.start(HOME, "endpoint")
+        events = []
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            events.extend(self.sender.poll_events())
+            if any(event["event"] == "error" for event in events):
+                break
+            time.sleep(0.01)
+        self.sender.stop()
+        evidence = self.sender.diagnostics()
+        self.assertEqual(evidence["stats"]["event_replies"], 3)
+        self.assertEqual(evidence["terminal"]["message"], "event channel closed")
+        self.assertEqual(len(evidence["transport_messages"]), 24)
+        self.assertEqual(evidence["transport_messages"][-1], "transport 69")
+        self.assertGreater(evidence["session_seconds"], 0)
+
+    def test_stderr_flood_drops_oversize_lines_and_old_session_cannot_replace_new_tail(self):
+        from types import SimpleNamespace
+        old_tail = deque(maxlen=24)
+        self.sender._stderr_tail.append("current session")
+        lines = ["x" * 9000 + "\n"] + ["entry " + str(i) + "\n" for i in range(100)]
+        self.sender._read_stderr(SimpleNamespace(stderr=io.StringIO("".join(lines))), old_tail)
+        self.assertEqual(len(old_tail), 24)
+        self.assertEqual(old_tail[-1], "entry 99")
+        self.assertEqual(self.sender.diagnostics()["transport_messages"], ("current session",))
 
     def test_unicode_and_untrusted_names_are_passed_as_arguments(self):
         self.sender.start(HOME, 'endpoint $() " \n')
@@ -92,6 +127,93 @@ class AirPlayProcessTests(unittest.TestCase):
         sender = AirPlayProcess(Path(self.temp.name) / "absent.exe")
         with self.assertRaisesRegex(RuntimeError, "投放组件未安装"):
             sender.start(HOME, "endpoint")
+
+    def test_failed_restart_does_not_reuse_previous_session_mute_ownership(self):
+        self.sender.needs_local_output_restore = True
+        self.sender._mute_state = {"endpoint_id": "endpoint", "original_muted": False, "phase": "muted"}
+        self.sender._last_stats = {"event": "stats", "event_acks": 3}
+        self.sender._popen = lambda *_a, **_kw: (_ for _ in ()).throw(OSError("CreateProcess failed"))
+        with self.assertRaisesRegex(OSError, "CreateProcess failed"):
+            self.sender.start(HOME, "endpoint")
+        self.assertFalse(self.sender.needs_local_output_restore)
+        self.assertEqual(self.sender.diagnostics()["local_output"], {})
+        self.assertEqual(self.sender.diagnostics()["stats"], {})
+
+    def test_mute_restore_evidence_is_recorded_even_without_ui_polling(self):
+        self.script.write_text(
+            "import sys,json\n"
+            "for phase in ('prepared','muted','restored'):\n"
+            " print(json.dumps({'event':'mute_state','phase':phase,'endpoint_id':'endpoint','original_muted':False}),flush=True)\n",
+            encoding="utf-8")
+        self.sender.start(HOME, "endpoint")
+        self.sender._process.wait(timeout=3)
+        self.sender.stop()
+        self.assertEqual(self.sender.diagnostics()["local_output"]["phase"], "restored")
+        self.assertFalse(self.sender.needs_local_output_restore)
+
+    def test_stop_retains_final_stats_and_error_without_polling_the_final_queue(self):
+        self.script.write_text(
+            "import sys,json\n"
+            "for line in sys.stdin:\n"
+            " if line.strip()=='stop': break\n"
+            "for event in ({'event':'stats','final_frames':999},{'event':'error','message':'transport lost'},{'event':'stopped'}):\n"
+            " print(json.dumps(event),flush=True)\n",
+            encoding="utf-8")
+        self.sender.start(HOME, "endpoint")
+        self.sender.stop()
+        self.assertEqual(self.sender.diagnostics()["stats"]["final_frames"], 999)
+        self.assertEqual(self.sender.diagnostics()["terminal"]["message"], "transport lost")
+
+    def test_failed_pipe_cleanup_still_closes_other_pipes_and_requests_mute_recovery(self):
+        process = Mock(returncode=1)
+        process.poll.return_value = 1
+        process.stdout.close.side_effect = OSError("stdout cleanup failed")
+        self.sender._process = process
+        reader, stderr_reader = Mock(), Mock()
+        self.sender._reader, self.sender._stderr_reader = reader, stderr_reader
+        self.sender._mute_state = {"phase": "muted", "original_muted": False, "applied": True}
+        self.sender.stop()
+        process.stdin.close.assert_called_once()
+        process.stderr.close.assert_called_once()
+        reader.join.assert_called_once()
+        stderr_reader.join.assert_called_once()
+        self.assertTrue(self.sender.needs_local_output_restore)
+
+    def test_failed_kill_wait_keeps_cleanup_and_mute_recovery_enabled(self):
+        process = Mock(returncode=None)
+        process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired("sender", 1)
+        self.sender._process = process
+        self.sender._mute_state = {"phase": "muted", "original_muted": False, "applied": True}
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.sender.stop()
+        process.kill.assert_called_once()
+        process.stderr.close.assert_called_once()
+        self.assertTrue(self.sender.needs_local_output_restore)
+
+    def test_prepared_session_has_no_authority_to_restore_a_users_later_mute(self):
+        process = Mock(returncode=1)
+        process.poll.return_value = 1
+        self.sender._process = process
+        self.sender._mute_state = {"phase": "prepared", "original_muted": False, "applied": False}
+        self.sender.stop()
+        self.assertFalse(self.sender.needs_local_output_restore)
+
+    def test_real_child_hard_exit_retains_confirmed_mute_ownership_for_parent_recovery(self):
+        self.script.write_text(
+            "import sys,json,time\n"
+            "print(json.dumps({'event':'mute_state','phase':'muted','endpoint_id':'endpoint','original_muted':False,'applied':True}),flush=True)\n"
+            "time.sleep(60)\n", encoding="utf-8")
+        self.sender.start(HOME, "endpoint")
+        self.assertEqual(self._wait_events()[0]["event"], "mute_state")
+        process = self.sender._process
+        process.kill()
+        process.wait(timeout=3)
+        self.sender.stop()
+        self.assertTrue(self.sender.needs_local_output_restore)
+        self.assertEqual(self.sender.diagnostics()["local_output"]["endpoint_id"], "endpoint")
+        self.assertIsNone(self.sender._reader)
+        self.assertIsNone(self.sender._stderr_reader)
 
     def test_malformed_unknown_oversize_lines_do_not_enter_event_queue(self):
         lines = ["oops\n", "[]\n", '{"event":"unexpected"}\n', "x" * 9000 + "\n",

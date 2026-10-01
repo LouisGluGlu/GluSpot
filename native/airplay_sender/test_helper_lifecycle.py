@@ -41,6 +41,8 @@ def main() -> None:
         return process
 
     collect(launch([executable, "--host", "invalid", "--endpoint", endpoint]), "invalid host", 2)
+    collect(launch([executable, "--probe-capture", "--exclusive-output", "--endpoint", endpoint]),
+            "capture probe rejects mute option", 2)
     collect(launch([executable, "--probe-capture", "--endpoint", "missing-endpoint"]), "missing endpoint", 1)
 
     # Close a bound port, then assert the actual native host reports refusal.
@@ -60,7 +62,7 @@ def main() -> None:
             server.bind(("127.0.0.1", 0))
             server.listen()
             server.settimeout(5)
-            process = launch(base + ["--port", str(server.getsockname()[1])])
+            process = launch(base + ["--port", str(server.getsockname()[1]), "--exclusive-output"])
             connection, _ = server.accept()
             with connection:
                 connection.settimeout(5)
@@ -84,6 +86,9 @@ def main() -> None:
                 events = collect(process, f"handshake {mode}", 1 if mode == "timeout" else 0)
                 assert events[-1]["event"] == "stopped", events
                 assert (any(item["event"] == "error" for item in events)) == (mode == "timeout")
+                mute_events = [item for item in events if item["event"] == "mute_state"]
+                assert [item["phase"] for item in mute_events] == ["prepared", "restored"]
+                assert not any(item["applied"] for item in mute_events), "partial handshake must never mute"
 
     capture = launch([executable, "--probe-capture", "--endpoint", endpoint])
     output, error = capture.communicate(timeout=5)

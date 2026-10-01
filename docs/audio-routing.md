@@ -25,10 +25,15 @@ implement HomePod multiroom groups or synchronized Bluetooth/AirPlay fanout.
   Windows output's shared system mix and sends AirPlay 2 realtime audio. This
   includes notifications and other apps using that output. No microphone is
   opened, and protected content excluded by Windows is not bypassed.
-- The local output can remain audible: this version neither installs a virtual
-  audio driver nor promises that muting a physical endpoint preserves loopback
-  capture on every driver. This is an audio cast, not an exclusive replacement
-  Windows endpoint.
+- After HomePod authenticates, the native helper mutes the selected local render
+  endpoint. Stop, errors and stdin EOF restore its original mute; volume and
+  default-output identity are unchanged. The parent retains per-session mute
+  ownership for recovery after abnormal helper termination. A prepared session
+  has no right to undo a user's mute, and a failed retry cannot inherit old
+  ownership. External unmute ends the cast, with a 250 ms polling interval.
+  This is a cast with local suppression, not a virtual Windows output device.
+  Driver behavior matters: M6 was verified to retain real PCM while muted;
+  drivers that suppress loopback on mute require a different capture path.
 - Connection, authenticated waiting for source audio, flowing audio, failure and
   stop are separate states. Rapid choices serialize; switching to a local device
   stops the old cast first. A source disconnect or external default-output
@@ -40,6 +45,10 @@ implement HomePod multiroom groups or synchronized Bluetooth/AirPlay fanout.
   (initial value 1.5 seconds), without rewriting the player's position or
   applying the cast delay to lyric Seek commands. This is an adjustable buffer
   estimate, not an acoustic latency measurement.
+- The compact menu uses the music page's cached background and font, neutral
+  device rows and existing control treatment. **更多选项** folds manual IP,
+  lyric delay and the explanatory hint. At 640 × 360 the main casting controls
+  remain visible; expanded options scroll, with keyboard access retained.
 
 ## Architecture and references
 
@@ -79,7 +88,7 @@ The explicit package acceptance command runs before normal GUI/single-instance
 startup and writes only the requested JSON report:
 
 ```powershell
-.\release\GluSpot-6.402\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
+.\release\GluSpot-6.403\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
 ```
 
 It imports packaged dependencies, checks application module availability,
@@ -110,6 +119,43 @@ The final complete Python suite passed 2648 tests in 96.093 seconds. Both
 screen-lifetime regressions fail under their respective old QWidget queries.
 Python compilation, tracked/new-file whitespace checks and native Qt panel
 inspection passed, including scrolling controls at the 640 × 360 minimum.
+
+## 6.403 follow-up: duplicate playback and 30-second disconnect
+
+The 30-second failure was reproduced by a simulated receiver watchdog.
+Transient SRP authentication derived control keys but omitted the reversed
+event-channel keys, so encrypted HomePod events were discarded. The repair
+derives them from the full 64-byte SRP key, using the same HKDF labels/direction
+as the existing PIN path and pyatv. The regression fails at 30 seconds under
+the old implementation and passes 65 simulated seconds with 13 event replies,
+32 feedback replies and continued audio. Feedback method tracking is bounded
+when a receiver stops answering.
+
+On October 1, 2026, the real controller used Bluetooth speaker M6 as its fixed
+capture source and cast to HomePod mini “起居室” for 90.06 seconds. All three
+real encrypted event requests were acknowledged, all 44 feedbacks returned
+200, there were no decrypt errors or dropped capture samples, and input
+queue samples remained roughly 14–24 ms rather than accumulating. M6 was
+muted throughout and restored to its original unmuted state on stop. The user
+confirmed: “只有 HomePod，延迟可接受”. No microphone or acoustic latency
+measurement was used. The earlier short local probe also confirmed nonzero
+PCM while M6's mute readback was true, with volume unchanged.
+
+The 1.5-second RTP timeline setting and adjustable lyric delay are retained.
+They are separate from captured-input queue depth and a receiver-reported
+latency, and are not a universal acoustic delay measurement. The follow-up
+does not add an unverified lower-buffer mode. The final helper differs from
+the physical-test helper only in checking external unmute every 250 ms rather
+than two seconds; the final binary passed the native/offline lifecycle checks.
+
+Subprocess diagnostics retain bounded per-session transport messages, final
+stats/error, event replies and mute ownership. Fake-child regressions cover
+failed retry, timeout/kill, pipe cleanup failures, no-UI-poll teardown and
+preserving a user's mute during a session that only reached preparation.
+Recovery requires recorded ownership: forcibly killing in the tiny interval
+between SetMute and its ownership event, killing parent and helper together,
+or unplugging the source can leave Windows mute needing manual restoration.
+This is not an unconditional crash-recovery guarantee.
 
 Hardware release gates remain: Bluetooth switching with actual players,
 sustained playback, sleep/reconnect, other firmware/access settings and networks,

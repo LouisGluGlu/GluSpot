@@ -40,6 +40,7 @@ class AudioRouteController:
         self._baseline = False
         self._cast_id = ""
         self._cast_source_id = ""
+        self._cast_source_original_mute = None
         self._generation = 0
         self._worker_started_at = time.monotonic()
         self._endpoint_error = False
@@ -58,6 +59,10 @@ class AudioRouteController:
     def snapshot(self):
         with self._lock:
             return self._snapshot
+
+    def diagnostics(self):
+        read = getattr(self._sender, "diagnostics", None)
+        return read() if callable(read) else {}
 
     def _publish(self, **changes):
         with self._lock:
@@ -161,12 +166,23 @@ class AudioRouteController:
 
     def _end_cast(self):
         self._generation += 1
+        source_id, original_mute = self._cast_source_id, self._cast_source_original_mute
         try:
             self._sender.stop()
         finally:
             self._cast_id = self._cast_source_id = ""
+            self._cast_source_original_mute = None
             default_id = next((d.id for d in self._local_devices if d.is_default), "")
             self._publish(active_id=default_id, pending_id="", cast_source_id="", cast_latency_seconds=0.0)
+            evidence = self.diagnostics().get("local_output", {})
+            if evidence.get("endpoint_id") == source_id and isinstance(evidence.get("original_muted"), bool):
+                original_mute = evidence["original_muted"]
+            if (source_id and original_mute is False and
+                    getattr(self._sender, "needs_local_output_restore", False)):
+                # Preserve a user's explicit unmute. Never touch volume or the
+                # new default output; only restore the endpoint this cast owned.
+                if self._backend.get_endpoint_mute(source_id):
+                    self._backend.set_endpoint_mute(source_id, original_mute)
 
     def _select(self, identity):
         if self._closed.is_set() or not self._refresh_devices() or self._closed.is_set():
@@ -194,6 +210,8 @@ class AudioRouteController:
                     raise RuntimeError("没有可用的电脑音频输出，无法获取播放器声音")
                 if self._closed.is_set():
                     return
+                self._cast_source_original_mute = self._backend.get_endpoint_mute(source.id)
+                self._cast_source_id = source.id
                 self._sender.start(device, source.id)
                 self._cast_id, self._cast_source_id = device.id, source.id
                 self._publish(cast_source_id=source.id)
@@ -271,7 +289,7 @@ class AudioRouteController:
             self._dispose()
 
     def _dispose(self):
-        for cleanup in (self._sender.stop, self._discovery.close, self._backend.close):
+        for cleanup in (self._end_cast, self._discovery.close, self._backend.close):
             try:
                 cleanup()
             except Exception:

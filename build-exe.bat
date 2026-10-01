@@ -25,11 +25,11 @@ if errorlevel 1 exit /b 1
 
 "%PYEXE%" -X utf8 -m PyInstaller --noconfirm --clean --workpath "%ROOT%build\pyinstaller" --distpath "%ROOT%release" "%ROOT%GluSpot.spec"
 if errorlevel 1 (
-    echo GluSpot 6.402 build failed.
+    echo GluSpot 6.403 build failed.
     pause
     exit /b 1
 )
 
-echo GluSpot 6.402 build is ready:
-echo "%ROOT%release\GluSpot-6.402\GluSpot.exe"
+echo GluSpot 6.403 build is ready:
+echo "%ROOT%release\GluSpot-6.403\GluSpot.exe"
 pause

@@ -1003,6 +1003,8 @@ class WindowsMediaProvider:
                 "cast_source_id": audio_route.cast_source_id,
                 "device_count": len(audio_route.devices),
                 "status": audio_route.status_message,
+                "sender": (self._audio_route_controller.diagnostics()
+                           if getattr(self, "_audio_route_controller", None) is not None else {}),
             },
             "provider_status": self._provider_status,
             "winsdk_loaded": MediaManager is not None,

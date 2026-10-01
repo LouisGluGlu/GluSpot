@@ -5,7 +5,7 @@ from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 
 ROOT = Path(SPECPATH)
-APP_VERSION = "6.402"
+APP_VERSION = "6.403"
 AIRPLAY_EXE = ROOT / "build" / "native-airplay" / "GluSpotAirPlay.exe"
 AIRPLAY_LICENSES = AIRPLAY_EXE.parent / "licenses"
 DISCOVERY_LICENSES = ROOT / "build" / "audio-licenses"
