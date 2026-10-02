@@ -21,24 +21,40 @@ implement HomePod multiroom groups or synchronized Bluetooth/AirPlay fanout.
   `_raop._tcp`. Both advertisements merge into one receiver. Manual HomePod IPv4
   entry is available if discovery is blocked; adding an IP does not claim that
   the device connected.
-- Selecting one HomePod starts a native helper that captures the current
-  Windows output's shared system mix and sends AirPlay 2 realtime audio. This
-  includes notifications and other apps using that output. No microphone is
-  opened, and protected content excluded by Windows is not bypassed.
+- Selecting one HomePod starts a native helper that sends AirPlay 2 realtime
+  audio. The current single-receiver mode captures all computer application
+  playback, including notifications and applications pinned to other outputs.
+  Exclusive casting prefers Windows process loopback excluding the helper's
+  own process tree, using dynamic activation on Windows build 20348 or later.
+  Actual API activation/initialization decides availability; when unavailable,
+  capture falls back to the selected output's shared system mix. No microphone
+  is opened, and protected content excluded by Windows is not bypassed.
+  Music-app-only capture is reserved for the later synchronized
+  multi-HomePod/Bluetooth stage; that stage is not implemented here.
 - After HomePod authenticates, the native helper mutes the selected local render
-  endpoint. Stop, errors and stdin EOF restore its original mute; volume and
-  default-output identity are unchanged. The parent retains per-session mute
+  endpoint before capture starts. Stop, errors and stdin EOF restore its original
+  mute; volume and default-output identity are unchanged. The parent retains per-session mute
   ownership for recovery after abnormal helper termination. A prepared session
   has no right to undo a user's mute, and a failed retry cannot inherit old
   ownership. External unmute ends the cast, with a 250 ms polling interval.
   This is a cast with local suppression, not a virtual Windows output device.
-  Driver behavior matters: M6 was verified to retain real PCM while muted;
-  drivers that suppress loopback on mute require a different capture path.
+  Apps pinned to another output can still sound there: only the selected
+  endpoint is suppressed, and other outputs are not synchronized. Driver
+  behavior matters for fallback: M6 retained real PCM while muted, whereas the
+  user's Realtek endpoint returned zero PCM. The new process-loopback probe
+  obtained nonzero PCM while the Realtek endpoint stayed muted.
 - Connection, authenticated waiting for source audio, flowing audio, failure and
   stop are separate states. Rapid choices serialize; switching to a local device
   stops the old cast first. A source disconnect or external default-output
   change stops casting with an actionable message rather than silently
   capturing a different output. Retrying is explicit in the chooser.
+- Flowing-audio readiness requires recent accepted nonzero capture samples and
+  nonzero final PCM handed to the UDP transport. Counts, last-signal age and peak are reported
+  in bounded `capture_signal` diagnostics without retaining PCM content. Fresh,
+  current-session evidence of three seconds with no source signal shows
+  “已连接 HomePod，暂未检测到电脑声音”; resumed signal clears that message without
+  reconnecting, seeking or changing volume. Stale events cannot renew status.
+  These checks establish source/transport signal, not audible receiver output.
 - **停止投放** and application exit stop/reap the owned helper. No auto-cast
   occurs at startup. Only the UI initiates audio capture/casting.
 - During a cast, display compensation is fully automatic, starting from the
@@ -78,7 +94,7 @@ native sender, independent of the lyric/animation clock.
 | Component | Source / reason |
 | --- | --- |
 | Windows endpoint backend | Windows Core Audio enumeration/property APIs; default selection uses PolicyConfig, also demonstrated by MIT [AudioDeviceCmdlets](https://github.com/frgnca/AudioDeviceCmdlets). GluSpot uses its own ctypes wrapper and transactional confirmation. |
-| Windows PCM acquisition | Shared-mode WASAPI fixed-render-endpoint loopback; GluSpot native capture/format conversion. |
+| Windows PCM acquisition | GluSpot native process-loopback activation, with fixed-render-endpoint WASAPI fallback and format conversion. API/ABI checked against Microsoft's [application loopback sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/); no sample implementation is incorporated. |
 | Single receiver transport | Apache-2.0 [airplay2-sender-cpp](https://github.com/akustikrausch/airplay2-sender-cpp), pinned to `fc913509039412790aa2427558d35178aa7842ea`; provenance and original hashes are in `third_party/airplay2-sender-cpp/`. |
 | AirPlay discovery | Unmodified `python-zeroconf` 0.151.5, LGPL-2.1-or-later; the Windows onedir package keeps it replaceable and includes its exact source distribution and notices. |
 | Protocol/synchronization references | MIT [pyatv](https://github.com/postlund/pyatv) and [OwnTone's libairptp](https://github.com/owntone/owntone-server/tree/master/src/libairptp). No PTP/group coordinator is included in this level 2 path. |
@@ -105,7 +121,7 @@ The explicit package acceptance command runs before normal GUI/single-instance
 startup and writes only the requested JSON report:
 
 ```powershell
-.\release\GluSpot-6.405\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
+.\release\GluSpot-6.406\GluSpot.exe --audio-package-check C:\Temp\audio-check.json
 ```
 
 It imports packaged dependencies, checks application module availability,
@@ -249,3 +265,43 @@ control path or new multi-song lyric alignment. The supplied dual-HomePod fourth
 level reference is a future UI direction, not implemented multiroom/fanout.
 Native Qt screenshots use explicit fixture devices/volumes. Final 6.405
 verification and package evidence are recorded in the canonical README.
+
+## 6.406 follow-up: Realtek silent capture under local mute
+
+The user's newly connected HomePod session was silent. The exported diagnostic
+was obtained after restart and contained no failing-session transport evidence;
+it could not establish where sound was lost. A short live probe then reproduced
+the driver's behavior: Realtek endpoint loopback contained real PCM before mute
+and all-zero PCM while muted. The earlier M6 pass did not cover this endpoint.
+The new process-loopback probe obtained 13743 nonzero samples and a 0.688171 peak
+while the same Realtek endpoint was confirmed muted. The probe restored the
+original unmuted state and left the observed 0.56 volume scalar unchanged. It
+saved no audio, opened no microphone and contacted no receiver. This proves
+capture under mute on this setup, not audible HomePod playback.
+
+The user authorized all computer application playback for the current
+single-receiver stage, including applications routed to another endpoint.
+Native activation uses the checked Windows interface dynamically, retaining
+callback state across cancellation or late completion and bounding its wait.
+The fixed selected endpoint still governs local mute ownership, disconnect and
+default-output guards. Process capture is preferred for exclusive casting;
+endpoint fallback remains available where activation is unsupported. The
+diagnostic `--probe-capture --process-loopback` requires the new mode so a
+successful probe cannot silently describe fallback capture.
+
+Streaming readiness now requires capture signal no older than one second plus
+nonzero final PCM handed to the UDP transport. `protocol.nonzero_samples_sent`
+and the bounded `capture_signal` object expose this evidence. The parent stamps
+each event before queueing using its own monotonic clock; the controller rejects
+stale, out-of-order, malformed or previous-session signal samples. Silence and
+recovery update status without restarting the cast or changing playback.
+The final controller/helper sustained a 90.032-second Realtek-to-HomePod mini
+cast with 45 feedback replies, one encrypted event acknowledgement, no capture
+drops/discontinuities/decrypt failures, and local mute active throughout.
+Stop restored mute and the unchanged 0.56 output scalar; receiver volume was
+not changed by the test. The user confirmed normal sound with only HomePod
+audible. All 2774 Python tests, seven native suites, thirteen helper lifecycle
+cases, and frozen 6.406 package checks passed. The bundled process-loopback
+probe returned nonzero PCM and packaged helper/source/icon integrity matched.
+The canonical README records evidence and limits. Other Windows versions,
+drivers, unsupported-API fallback and long sessions still need compatibility QA.

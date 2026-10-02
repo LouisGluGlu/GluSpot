@@ -50,6 +50,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace fxchain {
 
@@ -2192,6 +2193,10 @@ std::string RaopSender::encodeAlacFrame_(const int16_t* frames, int nFrames) {
 void RaopSender::sendAudioPacket_() {
     int16_t frames[kFramesPerPacket * kChannels];
     diagnostics_.silenceFrames += kFramesPerPacket - fillFrames_(frames, kFramesPerPacket);
+    // Count the final resampled/padded PCM, not accepted input or packets. A
+    // dry ring, genuinely silent source, or quantized-away impulse is zero.
+    const auto nonzero = uint64_t(std::count_if(frames, frames + kFramesPerPacket * kChannels,
+        [](int16_t sample) { return sample != 0; }));
 
     // 12-byte RTP header (big-endian, shared by AP1 + AP2).
     std::string header;
@@ -2225,6 +2230,8 @@ void RaopSender::sendAudioPacket_() {
     std::string pkt = header;
     pkt += wirePayload;
     io_.udpSend(RaopUdp::Audio, RaopEndpoint{hostIp_, serverPort_}, spanOf(pkt));
+    diagnostics_.nonzeroSamplesSent += std::min(nonzero,
+        std::numeric_limits<uint64_t>::max() - diagnostics_.nonzeroSamplesSent);
 
     // Retransmit backlog (the receiver asks by seq via type 0x55).
     const int slot = seq_ & (kBacklogSize - 1);

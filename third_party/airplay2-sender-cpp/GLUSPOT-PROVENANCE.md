@@ -91,6 +91,19 @@ existing deterministic malformed-hostname change. The original imported hash
 manifest remains untouched. The sender's preserved-volume default, pairing
 crypto, audio payload and fixed 66150-frame timeline remain unchanged.
 
+Local modification (2026-10-02): `src/raop_sender.h/.cpp` add the cumulative
+`nonzeroSamplesSent` diagnostic. It counts nonzero samples in the final PCM
+after resampling and silence padding, then accumulates after the audio datagram
+is handed to `RaopIo::udpSend`. The counter saturates at `uint64_t` maximum and
+resets through the existing session diagnostics reset. It stores no PCM and
+does not change encoding, encryption, volume or packet timing. Empty-ring
+padding and actual zero-valued input never prove a sound-bearing send; input
+whose tiny impulse quantizes to zero during resampling also remains zero.
+GluSpot's cryptographic AP2 receiver tests independently decrypt the emitted
+audio and compare its actual nonzero sample count with this diagnostic,
+including silence and session restart. This proves transport handoff, not
+network delivery or receiver audibility.
+
 The Apache-2.0 license and NOTICE apply to the upstream sender core. The
 transport includes MIT-licensed pyatv attribution, preserved in
 `licenses/THIRD-PARTY-NOTICES.txt`. The vendored ed25519 primitive retains its

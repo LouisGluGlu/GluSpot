@@ -238,6 +238,9 @@ class AirPlayProcess:
                     event = json.loads(line)
                     if not isinstance(event, dict) or event.get("event") not in {"connecting", "waiting_audio", "streaming", "error", "stopped", "stats", "mute_state", "receiver_volume"}:
                         continue
+                    # Receiver-supplied JSON cannot assert when Python received
+                    # it. Stamp here so queued signal evidence can expire.
+                    event["_received_at"] = time.monotonic()
                     if on_event is not None:
                         on_event(event)
                     if events.full():

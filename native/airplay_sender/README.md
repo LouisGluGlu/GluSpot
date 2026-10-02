@@ -1,10 +1,18 @@
 # GluSpot AirPlay helper
 
-The helper captures one fixed Windows render endpoint through shared-mode
-WASAPI loopback and sends stereo PCM through the vendored AirPlay 2 sender.
-Capture stays on that endpoint when Windows' default device changes. This
-captures the endpoint's system mix, not only the active GSMTC music app.
-Protected audio that Windows excludes from loopback is not bypassed.
+The helper sends stereo PCM through the vendored AirPlay 2 sender. Exclusive
+casting prefers Windows process loopback excluding the helper's own process
+tree, capturing all computer application playback across output endpoints.
+This is the authorized scope for the current single-HomePod stage; music-app-only
+capture belongs to the future synchronized multi-HomePod/Bluetooth stage.
+Process loopback requires Windows build 20348 or later; the helper dynamically
+loads `ActivateAudioInterfaceAsync` and checks actual activation/initialization.
+If unavailable, it falls back to shared-mode WASAPI loopback on the selected
+render endpoint. Ordinary nonexclusive capture uses that endpoint directly.
+The selected endpoint remains fixed for validation, mute ownership and source
+guards even in process mode; an external default-output change ends the cast.
+No microphone or virtual driver is used. Protected audio that Windows excludes
+from loopback is not bypassed.
 
 Only a single HomePod with HAP transient pairing is supported. Receiver SRP
 proof checking is strict; a proof mismatch fails the session. PIN/password
@@ -35,9 +43,9 @@ Mbed TLS build dependency. Output is `build/native-airplay/GluSpotAirPlay.exe`
 and redistribution notices under `build/native-airplay/licenses/`.
 
 The script runs the upstream cryptographic/protocol fake receiver tests, the
-real local socket host tests, and GluSpot PCM conversion and volume-policy
-tests. None contacts a physical HomePod. Separately, on October 1, 2026, the
-GluSpot controller and this helper cast to HomePod mini “起居室” for 5.03 seconds
+real local socket host tests, and GluSpot PCM conversion, capture-signal and
+volume-policy tests. None contacts a physical HomePod. Separately, on October 1,
+2026, the GluSpot controller and this helper cast to HomePod mini “起居室” for 5.03 seconds
 and stopped cleanly; the user confirmed normal audible computer sound.
 After fixing transient event acknowledgement and integrating exclusive output,
 the controller/helper sustained a 90.06-second HomePod mini session on the M6
@@ -47,6 +55,17 @@ restored the original unmuted state. The user confirmed that only the HomePod
 played and the delay was acceptable. The final helper also polls external
 unmute at 250 ms; that timing refinement was checked offline, while the 90-second
 pass used the same capture/mute/transport path with a 2-second poll.
+
+On October 2, 2026, the repaired process-loopback path sustained a separate
+90.032-second Realtek-to-HomePod mini cast on Windows build 26200. Local mute
+stayed active, 45 feedback replies and one encrypted event acknowledgement
+were received, with no capture drops, discontinuities or decrypt failures.
+Stop restored the original unmuted state and unchanged 0.56 output scalar;
+the test did not change receiver volume. The user confirmed normal sound with
+only HomePod audible. Seven native suites and thirteen actual-helper lifecycle
+cases passed, and the 6.406 package's bundled process-capture probe returned
+nonzero PCM. This does not certify other Windows builds/drivers or multi-hour
+sessions; see the canonical project README for final package evidence.
 
 Run the actual helper's offline lifecycle pass with an active render endpoint:
 
@@ -93,11 +112,17 @@ Events:
 
 - `connecting`: capture format validated, networking begins.
 - `waiting_audio`: authenticated session started; waiting for source packets.
-- `streaming`: at least one real captured packet entered the sender ring.
+- `streaming`: accepted capture contains nonzero PCM no older than one second,
+  and the sender has handed nonzero final PCM to its UDP transport. Capture starts after
+  owned local mute is applied in exclusive mode; pre-mute packets cannot alone
+  satisfy readiness. This is signal/transport evidence, not receiver audibility.
 - `stats`: captured_frames, dropped_samples and discontinuities every 500 ms.
   A bounded `protocol` object also reports feedback sent/replied/rejected,
   event requests/acknowledgements/decrypt failures, event socket/key state,
-  audio/silence frames, queued input frames and the last transport error.
+  audio/silence frames, `nonzero_samples_sent`, queued input frames and the last
+  transport error. `nonzero_samples_sent` counts nonzero final PCM only after
+  the UDP transport call; queueing a packet alone does not increase it. This
+  does not confirm network delivery or decoding by the receiver.
   A final stats event precedes stop. `protocol_latency_frames` is the sender's
   fixed 66150-frame RTP timeline offset (1.5 s at 44.1 kHz);
   `receiver_latency_frames` is only the receiver's reported RECORD value when
@@ -121,6 +146,19 @@ Events:
   changes; player/driver timing, actual HomePod output delay and acoustic delay
   remain outside this estimate. Captured SILENT packets still count as flow,
   so `valid` does not assert that a listener can hear audio.
+  A `capture_signal` object reports `mode`/`scope` as
+  `process_loopback`/`all_other_processes` or
+  `endpoint_loopback`/`selected_endpoint`, cumulative `nonzero_samples` accepted
+  into the bounded ring, `last_nonzero_age_ms` (null before any signal), and a
+  normalized interval `peak`. A dropped packet does not count as accepted
+  signal. No PCM content is retained. The process owner stamps receipt using
+  its monotonic clock, overriding any helper-supplied `_received_at`. The route
+  controller accepts valid current-session evidence with advancing receipt
+  times at most two seconds old. Fresh evidence of three seconds without source
+  signal shows
+  “已连接 HomePod，暂未检测到电脑声音”; signal recovery clears that status without
+  reconnecting, seeking or changing volume. Silence can mean a paused player or
+  quiet passage, so the status does not diagnose a driver or receiver failure.
 - `error`: message describing initialization, capture, pairing or network failure.
 - `stopped`: the sender has requested TEARDOWN and closed its sockets.
 - `mute_state`: in exclusive-output mode, `prepared` reports the original
@@ -150,24 +188,34 @@ events remain unknown. State is fenced per process/session, and normal errors,
 stop or forced termination cannot make an old receiver control a new session.
 
 Exit codes: 0 clean stop, 1 runtime failure, 2 invalid arguments. Connection is
-bounded to 20 seconds. The network poll maximum is 20 ms, capture stop wait is
+bounded to 20 seconds. Process activation waits at most four seconds, supports
+stop cancellation and retains callback state safely if completion arrives late.
+Pending stop/stdin EOF is checked before receiver networking begins. The network
+poll maximum is 20 ms, capture stop wait is
 5 ms, and upstream TEARDOWN flush is bounded to 800 ms. The Python owner should
 still enforce its own process timeout and terminate a stuck helper on shutdown.
 
 `--probe-capture [--endpoint ID]` initializes loopback capture for 250 ms and
 reports its format/counters without contacting or sending to any network device.
-It generates no test audio and saves no captured content.
+It generates no test audio and saves no captured content. Adding
+`--process-loopback` requires process capture and reports its `capture_signal`;
+an unavailable API fails that diagnostic rather than silently testing endpoint
+fallback. `--process-loopback` is rejected outside a capture probe.
 It rejects `--exclusive-output`; a diagnostic capture probe never mutes.
 
 `--exclusive-output` opts into local endpoint mute while casting. Its guard
 reads the original state without changing it, then mutes only after the receiver
-authenticates. The original mute state is restored on stop, error, stdin EOF
-and normal unwinding; the guard never changes master/channel volume or the
+authenticates and before capture starts. The original mute state is restored on
+stop, error, stdin EOF and normal unwinding; the guard never changes master/channel volume or the
 default output. External unmute ends the cast instead of repeatedly overriding
 the user's hardware controls. The Python owner provides recovery if the helper
-is killed before its guard can run. Endpoint-mute loopback behavior depends on
-the audio driver: the current M6 endpoint was verified to retain loopback PCM
-while muted, but that result is not a claim for every Windows endpoint.
+is killed before its guard can run. Only the selected endpoint is muted:
+applications pinned to another output can still be audible on that output even
+though process capture forwards their playback. Endpoint-mute loopback behavior
+depends on the driver. M6 retained PCM while muted; the user's Realtek endpoint
+returned all-zero PCM. A process-loopback probe on that Realtek setup retained
+nonzero PCM while mute was confirmed and restored the prior mute without changing
+volume. This capture result does not itself establish HomePod playback.
 
 Windows firewall must permit inbound UDP for the helper; the receiver initiates
 timing/retransmission packets. The helper does not change firewall rules.
@@ -179,8 +227,10 @@ speaker channels, keeps centre audio in a surround downmix, and drops bounded
 packets if a network consumer stalls. A silent source may not generate loopback
 packets; authenticated `waiting_audio` is distinct from flowing audio. There is
 no claim that endpoint master-volume mute preserves captured audio on all
-drivers. A driver that suppresses loopback after mute needs a different capture
-path; raising receiver volume does not solve it. Other HomePod firmware/access
+drivers. Process capture avoids the reproduced Realtek mute suppression; the
+fallback endpoint path can still be affected on systems where process activation
+is unavailable. Raising receiver volume does not solve missing source PCM.
+Other HomePod firmware/access
 settings and networks, sustained playback, sleep/reconnect and audible latency
 still need hardware verification before a release.
 Receiver volume read, write and external-change handling were verified with

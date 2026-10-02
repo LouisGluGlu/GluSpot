@@ -19,6 +19,9 @@ from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 
 class AudioRouteController:
     POLL_SECONDS = 2.0
+    CAPTURE_SIGNAL_MAX_AGE = 2.0
+    CAPTURE_SILENCE_SECONDS = 3.0
+    CAPTURE_SILENCE_MESSAGE = "已连接 HomePod，暂未检测到电脑声音"
 
     def __init__(self, backend=None, discovery=None, sender=None, *, latency_seconds=1.5,
                  start_worker=True, source_id="", auto_latency_enabled=True):
@@ -47,6 +50,12 @@ class AudioRouteController:
         self._cast_source_id = ""
         self._cast_source_original_mute = None
         self._receiver_volume_status_signature = None
+        self._capture_authenticated_at = None
+        self._capture_session_started_at = None
+        self._capture_signal_received_at = None
+        self._capture_signal_first_received_at = None
+        self._capture_signal_nonzero = None
+        self._capture_signal_age_ms = None
         self._generation = 0
         self._worker_started_at = time.monotonic()
         self._endpoint_error = False
@@ -265,6 +274,12 @@ class AudioRouteController:
         self._generation += 1
         self._latency_updated_at = None
         self._receiver_volume_status_signature = None
+        self._capture_authenticated_at = None
+        self._capture_session_started_at = None
+        self._capture_signal_received_at = None
+        self._capture_signal_first_received_at = None
+        self._capture_signal_nonzero = None
+        self._capture_signal_age_ms = None
         source_id, original_mute = self._cast_source_id, self._cast_source_original_mute
         try:
             self._sender.stop()
@@ -312,6 +327,7 @@ class AudioRouteController:
                     return
                 self._cast_source_original_mute = self._backend.get_endpoint_mute(source.id)
                 self._cast_source_id = source.id
+                self._capture_session_started_at = time.monotonic()
                 self._sender.start(device, source.id)
                 self._cast_id, self._cast_source_id = device.id, source.id
                 self._publish(cast_source_id=source.id)
@@ -320,25 +336,106 @@ class AudioRouteController:
             default_id = next((d.id for d in self._local_devices if d.is_default), "")
             self._publish(active_id=default_id, pending_id="", state="error", status_message=str(exc)[:240])
 
+    def _observe_capture_signal(self, event):
+        """Report fresh capture evidence without changing routing or playback.
+
+        A zero buffer can be a paused player or a song's quiet passage. This is
+        a status message, never proof of a driver fault or receiver audibility.
+        Older helpers have no signal evidence and retain their existing status.
+        """
+        current = self.snapshot()
+        if current.state not in {"waiting_audio", "casting"} or self._capture_authenticated_at is None:
+            return
+        signal = event.get("capture_signal")
+        if not isinstance(signal, dict):
+            return
+        count, age, peak = (signal.get(key) for key in ("nonzero_samples", "last_nonzero_age_ms", "peak"))
+        if (isinstance(count, bool) or not isinstance(count, int) or not 0 <= count < 2**64
+                or (signal.get("mode"), signal.get("scope")) not in {
+                    ("process_loopback", "all_other_processes"),
+                    ("endpoint_loopback", "selected_endpoint"),
+                } or isinstance(peak, bool) or not isinstance(peak, (int, float))):
+            return
+        try:
+            if not math.isfinite(peak) or not 0 <= peak <= 1:
+                return
+            if age is not None and (isinstance(age, bool) or not isinstance(age, (int, float))
+                                    or not math.isfinite(age) or age < 0):
+                return
+        except OverflowError:
+            return
+        if (count == 0 and (age is not None or peak != 0)) or (count > 0 and age is None):
+            return
+        now = time.monotonic()
+        received = event.get("_received_at")
+        # The process reader timestamps every event before queueing.
+        # Reject backlog and repeated/out-of-order events instead of making an
+        # old sample fresh merely because the routing worker was polled again.
+        if isinstance(received, bool) or not isinstance(received, (int, float)):
+            return
+        try:
+            if (not math.isfinite(received) or not 0 <= now - received <= self.CAPTURE_SIGNAL_MAX_AGE
+                    or self._capture_session_started_at is not None and received < self._capture_session_started_at
+                    or self._capture_signal_received_at is not None and received <= self._capture_signal_received_at):
+                return
+        except OverflowError:
+            return
+        if self._capture_signal_nonzero is not None:
+            if count < self._capture_signal_nonzero:
+                return
+            if (count == self._capture_signal_nonzero and age is not None
+                    and self._capture_signal_age_ms is not None and age + 1 < self._capture_signal_age_ms):
+                return
+        self._capture_signal_received_at = received
+        if self._capture_signal_first_received_at is None:
+            self._capture_signal_first_received_at = received
+        self._capture_signal_nonzero, self._capture_signal_age_ms = count, age
+        silent = (age >= self.CAPTURE_SILENCE_SECONDS * 1000 if age is not None
+                  else now - self._capture_signal_first_received_at >= self.CAPTURE_SILENCE_SECONDS)
+        if silent:
+            self._publish(status_message=self.CAPTURE_SILENCE_MESSAGE)
+        elif current.status_message == self.CAPTURE_SILENCE_MESSAGE:
+            device = next((d for d in current.devices if d.id == self._cast_id), None)
+            name = device.name if device is not None else "HomePod"
+            self._publish(status_message=f"正在投放到 {name}" if current.state == "casting"
+                          else "已连接 HomePod，等待电脑播放声音")
+
     def _poll_sender(self):
         if not self._cast_id:
             return
-        for event in self._sender.poll_events():
+        session = (self._generation, self._cast_id)
+        events = self._sender.poll_events()
+        if self._closed.is_set() or session != (self._generation, self._cast_id):
+            return
+        # A terminal event in this batch wins over earlier stats/streaming.
+        # Do not announce a healthy stream immediately before reporting loss.
+        terminal = next((e for e in events if e.get("event") == "error"), None)
+        if terminal is None:
+            terminal = next((e for e in events if e.get("event") == "stopped"), None)
+        if terminal is not None:
+            message = str(terminal.get("message") or "HomePod 投放已中断")[:240]
+            self._end_cast()
+            self._refresh_devices()
+            self._publish(state="error", status_message=message, pending_id="")
+            return
+        for event in events:
+            if self._closed.is_set() or session != (self._generation, self._cast_id):
+                break
             if event.get("event") == "waiting_audio":
+                if self._capture_authenticated_at is None:
+                    self._capture_authenticated_at = time.monotonic()
                 self._publish(state="waiting_audio", status_message="已连接 HomePod，等待电脑播放声音")
             elif event.get("event") == "streaming":
+                if self._capture_authenticated_at is None:
+                    self._capture_authenticated_at = time.monotonic()
                 device = next((d for d in self.snapshot().devices if d.id == self._cast_id), None)
                 name = device.name if device is not None else "HomePod"
                 self._publish(active_id=self._cast_id, pending_id="", state="casting",
                               cast_latency_seconds=self._latency, status_message=f"正在投放到 {name}")
                 self._latency_updated_at = time.monotonic()
                 self._announce(name, "HomePod 投放已连接")
-            elif event.get("event") in {"error", "stopped"}:
-                message = str(event.get("message") or "HomePod 投放已中断")[:240]
-                self._end_cast()
-                self._refresh_devices()
-                self._publish(state="error", status_message=message, pending_id="")
-                break
+            elif event.get("event") == "stats":
+                self._observe_capture_signal(event)
 
     def _update_latency(self):
         """Track sender scheduling evidence without reconnecting or seeking.

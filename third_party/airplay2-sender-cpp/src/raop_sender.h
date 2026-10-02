@@ -70,6 +70,7 @@ struct RaopDiagnostics {
     uint64_t eventRequests = 0, eventAcks = 0, eventDecryptFailures = 0;
     bool eventConnected = false, eventKeyed = false;
     uint64_t audioFramesSent = 0, silenceFrames = 0;
+    uint64_t nonzeroSamplesSent = 0; // Final PCM handed to the transport; not receiver audibility.
     size_t queuedInputFrames = 0;
     uint32_t inputSampleRate = 0;
     uint32_t protocolLatencyFrames = 0, receiverLatencyFrames = 0;
