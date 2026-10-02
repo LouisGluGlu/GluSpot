@@ -42,6 +42,9 @@ class MusicAnnotationDirtyRegionTests(unittest.TestCase):
 
     def setUp(self):
         self.owner = _AnnotationOwner()
+        # These comparisons isolate annotation ink; live backdrop motion
+        # has its own frame/dirty-region regression coverage.
+        self.owner.music_flow_intensity = 0.0
         self.window = MusicSurfaceWindow(self.owner)
         self.window.resize(1920, 1080)
         self.window._fullscreen = True

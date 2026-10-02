@@ -51,7 +51,6 @@ from local.music_lyric_motion import (
     LogicalLineSpringChain,
     MotionSimulationClock,
     MusicLyricMotion,
-    ambient_light_positions,
     continuous_read_lift,
     lyric_emphasis_plan,
     lyric_glow_phase,
@@ -75,6 +74,7 @@ from local.music_surface_palette import (
 )
 from local.audio_output_panel import AudioOutputPanel
 from local.audio_output_icons import paint_audio_output_icon
+from local.music_surface_background import AlbumFlowBackgroundRenderer
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -106,8 +106,7 @@ class MusicSurfaceWindow(QWidget):
     RESIZE_MARGIN = 9
     TITLE_BAR_HEIGHT = 58
     MODE_TRANSITION_MS = 340
-    AMBIENT_FRAME_SECONDS = 0.12
-    AMBIENT_CACHE_MAX_WIDTH = 960
+    AMBIENT_FRAME_SECONDS = AlbumFlowBackgroundRenderer.FRAME_SECONDS
     LYRIC_RASTER_CACHE_MAX_BYTES = 48 * 1024 * 1024
     LYRIC_RASTER_CACHE_MAX_ENTRIES = 128
     LYRIC_BLUR_CACHE_MAX_BYTES = 32 * 1024 * 1024
@@ -228,6 +227,7 @@ class MusicSurfaceWindow(QWidget):
         self._future_tone_cache: dict[tuple, QColor] = {}
         self._future_tone_track_key = None
         self._future_tone_use_light = False
+        self._future_tone_require_light = False
         self._future_tone_backdrop = QColor(12, 15, 22)
         self._art_palette_cache_key = None
         self._art_palette_cache: MusicSurfacePalette | None = None
@@ -332,10 +332,7 @@ class MusicSurfaceWindow(QWidget):
         self._background_cache_key = None
         self._background_cache_at = -1.0
         self._background_cache = QImage()
-        self._ambient_role_mask_cache_key = None
-        self._ambient_role_masks: tuple[QImage, QImage] | None = None
-        self._background_base_cache_key = None
-        self._background_base_cache = QImage()
+        self._album_flow_background = AlbumFlowBackgroundRenderer()
         self._browse_index: float | None = None
         self._browse_until = 0.0
         self._browse_return_from: float | None = None
@@ -457,6 +454,10 @@ class MusicSurfaceWindow(QWidget):
     ):
         self._cancel_mode_transition()
         self._reset_control_idle()
+        if self._closing_for_shutdown:
+            self._timer.timeout.connect(self._on_animation_tick)
+            self._mode_animation.finished.connect(self._finish_mode_transition)
+            self.seekFinished.connect(self._on_seek_finished)
         self._closing_for_shutdown = False
         self._timer.start()
         if fullscreen is None:
@@ -1333,6 +1334,8 @@ class MusicSurfaceWindow(QWidget):
         shown a safe frame budget; 60 Hz and expensive frames remain at the
         existing 8 ms request cadence.
         """
+        if self._closing_for_shutdown:
+            return
         if self._mode_animation.state() == QAbstractAnimation.State.Paused:
             if self._timer.interval() != self._transition_frame_interval():
                 self._timer.setInterval(self._transition_frame_interval())
@@ -1577,12 +1580,20 @@ class MusicSurfaceWindow(QWidget):
                 self.update(self._lyric_animation_rect)
 
     def shutdown(self):
+        if self._closing_for_shutdown:
+            return
         self._dismiss_audio_output_panel()
         self._restore_idle_cursor()
         self._closing_for_shutdown = True
         self._timer.stop()
         self._cancel_mode_transition()
+        # Release bound receiver connections when this surface is closed,
+        # before Qt/Python reclaim it and its child animation objects. An
+        # explicit later show reattaches them through the existing entrypoint.
         self.close()
+        self._timer.timeout.disconnect(self._on_animation_tick)
+        self._mode_animation.finished.disconnect(self._finish_mode_transition)
+        self.seekFinished.disconnect(self._on_seek_finished)
 
     def closeEvent(self, event):
         self._restore_idle_cursor()
@@ -2135,23 +2146,32 @@ class MusicSurfaceWindow(QWidget):
         """Choose one album-hued unread tone for the whole song."""
         palette = self._art_palette()
         album_source = QColor(palette.characteristic)
+        flow_backdrop = self._album_flow_background.contrast_backdrop(self._background_cache)
         track_key = (
             self._visual_track_identity(), self._art_palette_cache_key,
             palette.characteristic.rgba(),
+            None if flow_backdrop is None else flow_backdrop.rgba(),
         )
         cached = self._future_tone_cache.get(track_key)
         if cached is not None:
             return QColor(cached)
         if track_key != self._future_tone_track_key:
-            overview = self._background_sample_colors(QRectF(self.rect()))
-            backdrop = sorted(overview, key=self._relative_luminance)[len(overview) // 2]
-            backdrop_luminance = self._relative_luminance(backdrop)
-            self._future_tone_use_light = backdrop_luminance < 0.11
+            backdrop = flow_backdrop
+            if backdrop is not None:
+                # The darkest moment's spatial median cannot protect fixed
+                # lyric ink when a brighter album mass later drifts beneath it.
+                self._future_tone_use_light = True
+                self._future_tone_require_light = True
+            else:
+                overview = self._background_sample_colors(QRectF(self.rect()))
+                backdrop = sorted(overview, key=self._relative_luminance)[len(overview) // 2]
+                self._future_tone_use_light = self._relative_luminance(backdrop) < 0.11
+                self._future_tone_require_light = False
             self._future_tone_backdrop = QColor(backdrop)
             self._future_tone_track_key = track_key
         tinted = select_future_lyric_color(
             album_source, self._future_tone_backdrop, use_light=self._future_tone_use_light,
-            primary=palette.primary,
+            primary=palette.primary, require_light=self._future_tone_require_light,
         )
         self._future_tone_cache[track_key] = QColor(tinted)
         while len(self._future_tone_cache) > 256:
@@ -5674,7 +5694,12 @@ class MusicSurfaceWindow(QWidget):
             secondary = self._mix_color(previous[5], secondary, transition)
         else:
             self._previous_track_visual = None
-        self._paint_background(painter, rect, primary, secondary, time.monotonic())
+        self._paint_background(
+            painter, rect, primary, secondary, time.monotonic(),
+            ambient_colors=palette.ambient_colors,
+            ambient_weights=palette.ambient_weights,
+            advance_frame=paint_region is None or QRegion(self.rect()).subtracted(paint_region).isEmpty(),
+        )
         # Transport light is a native-resolution foreground layer of the
         # background. Its cached low-resolution composite was too faint after
         # upscale on bright artwork, while the cover/text below still need to
@@ -7139,107 +7164,36 @@ class MusicSurfaceWindow(QWidget):
     def _background_role_color(source: QColor) -> QColor:
         return background_role_color(source)
 
-    def _paint_background(self, painter: QPainter, rect: QRectF, primary: QColor, secondary: QColor, now: float):
-        # The three large, soft glows move only a few pixels per tenth of a
-        # second. Keep their composite at a bounded resolution while lyrics,
-        # controls and cover continue painting at the display's full rate.
-        # Preserve the extracted album hue boldly; only a near-white sample is
-        # normalized to gray so the surface does not become a blank white page.
-        primary = self._background_role_color(primary)
-        secondary = self._background_role_color(secondary)
+    def _paint_background(
+        self, painter: QPainter, rect: QRectF, primary: QColor, secondary: QColor,
+        now: float, *, ambient_colors: tuple[QColor, ...] = (),
+        ambient_weights: tuple[float, ...] = (), advance_frame: bool = True,
+    ):
+        # The album-flow renderer owns the small blurred raster and smooth
+        # palette retargeting. Lyric-only paints reuse this complete image,
+        # including its contrast samples, until the next ambient frame.
+        colors = ambient_colors or (primary, secondary)
         width, height = max(1, int(rect.width())), max(1, int(rect.height()))
-        intensity = max(0.0, min(1.0, float(getattr(self.owner, "music_flow_intensity", 0.74) or 0.74)))
+        intensity_value = getattr(self.owner, "music_flow_intensity", 0.74)
+        intensity = max(0.0, min(1.0, float(0.74 if intensity_value is None else intensity_value)))
         identity = self._track_visual[0] if self._track_visual else None
-        key = (width, height, primary.rgba(), secondary.rgba(), intensity, identity)
-        if (
+        key = (width, height, tuple(color.rgba() for color in colors), ambient_weights, intensity, identity)
+        # Advancing during a lyric-only dirty paint would leave a newer
+        # background patch surrounded by old pixels. Hold the displayed
+        # frame and its contrast samples until a whole-surface paint.
+        if self._background_cache.isNull() or (advance_frame and (
             key != self._background_cache_key
-            or self._background_cache.isNull()
             or now < self._background_cache_at
             or now - self._background_cache_at >= self.AMBIENT_FRAME_SECONDS
-        ):
-            scale = min(1.0, self.AMBIENT_CACHE_MAX_WIDTH / width)
-            image_width = max(1, round(width * scale))
-            image_height = max(1, round(height * scale))
-            base_key = (image_width, image_height, primary.rgba(), secondary.rgba())
-            if base_key != self._background_base_cache_key or self._background_base_cache.isNull():
-                base = QImage(image_width, image_height, QImage.Format.Format_RGB32)
-                with QPainter(base) as layer:
-                    layer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                    image_rect = QRectF(base.rect())
-                    gradient = QLinearGradient(
-                        QPointF(image_rect.left(), image_rect.center().y()),
-                        QPointF(image_rect.right(), image_rect.center().y()),
-                    )
-                    # The dominant artwork color fills the central 70%; the
-                    # distinct runner-up blends through the outer 15% on
-                    # each side. No synthesized hue is mixed into the cover.
-                    gradient.setColorAt(0.0, secondary)
-                    gradient.setColorAt(0.15, primary)
-                    gradient.setColorAt(0.85, primary)
-                    gradient.setColorAt(1.0, secondary)
-                    layer.fillRect(image_rect, gradient)
-                self._background_base_cache = base
-                self._background_base_cache_key = base_key
-            image = QImage(self._background_base_cache)
-            with QPainter(image) as layer:
-                layer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                image_rect = QRectF(image.rect())
-                self._paint_ambient_lights(layer, image_rect, primary, secondary, now)
-            self._background_cache = image
+        )):
+            self._background_cache = self._album_flow_background.render(
+                QSize(width, height), colors, now, intensity, weights=ambient_weights,
+            )
             self._background_cache_key = key
             self._background_cache_at = now
-        image = self._background_cache
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.drawImage(rect, image)
-        painter.restore()
-
-    def _paint_ambient_lights(self, painter: QPainter, rect: QRectF, primary: QColor, secondary: QColor, now: float):
-        if primary == secondary:
-            return
-        intensity = max(0.0, min(1.0, float(getattr(self.owner, "music_flow_intensity", 0.74) or 0.74)))
-        colors = (QColor(secondary), QColor(secondary), QColor(primary))
-        radii = (0.48, 0.42, 0.37)
-        size = QSize(max(1, math.ceil(rect.width())), max(1, math.ceil(rect.height())))
-        mask_key = (size.width(), size.height())
-        if mask_key != self._ambient_role_mask_cache_key or self._ambient_role_masks is None:
-            masks = []
-            for central in (False, True):
-                mask = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
-                gradient = QLinearGradient(0.0, 0.0, size.width(), 0.0)
-                for stop, alpha in ((0.0, 0), (0.15, 255), (0.85, 255), (1.0, 0)):
-                    gradient.setColorAt(stop, QColor(255, 255, 255, alpha if central else 255 - alpha))
-                with QPainter(mask) as layer:
-                    layer.fillRect(mask.rect(), gradient)
-                masks.append(mask)
-            self._ambient_role_masks = tuple(masks)
-            self._ambient_role_mask_cache_key = mask_key
-        painter.save()
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
-        # Soft masks keep the side hue within its 15% regions without a hard
-        # clip seam while the center's own hue can continue to breathe.
-        positions = ambient_light_positions(now)
-        for central, indexes in ((False, (0, 1)), (True, (2,))):
-            field = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
-            field.fill(Qt.GlobalColor.transparent)
-            with QPainter(field) as light:
-                light.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                light.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
-                for index in indexes:
-                    x_ratio, y_ratio = positions[index]
-                    color, radius_ratio = colors[index], radii[index]
-                    center = QPointF(size.width() * x_ratio, size.height() * y_ratio)
-                    radius = max(size.width(), size.height()) * radius_ratio
-                    glow = QRadialGradient(center, radius)
-                    glow.setColorAt(0.0, QColor(color.red(), color.green(), color.blue(), round(47 * intensity)))
-                    glow.setColorAt(0.52, QColor(color.red(), color.green(), color.blue(), round(16 * intensity)))
-                    glow.setColorAt(1.0, QColor(color.red(), color.green(), color.blue(), 0))
-                    light.setPen(Qt.PenStyle.NoPen)
-                    light.setBrush(glow)
-                    light.drawEllipse(center, radius, radius)
-                light.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-                light.drawImage(QPointF(), self._ambient_role_masks[int(central)])
-            painter.drawImage(rect.topLeft(), field)
+        painter.drawImage(rect, self._background_cache)
         painter.restore()
 
     def _window_control_base_rect(self, rect: QRectF) -> QRectF:
@@ -8082,6 +8036,8 @@ class MusicSurfaceWindow(QWidget):
 
     @Slot(bool, float, str)
     def _on_seek_finished(self, succeeded: bool, seconds: float, track_key: str):
+        if self._closing_for_shutdown:
+            return
         self._seek_pending = False
         request_app = self._seek_request_source_app
         self._seek_request_source_app = None
