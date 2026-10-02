@@ -224,6 +224,31 @@ class AirPlayProcessTests(unittest.TestCase):
         self.assertEqual(events.qsize(), 1)
         self.assertEqual(events.get()["message"], "真正失败")
 
+    def test_reader_owns_receipt_timestamp_and_queue_and_diagnostics_share_the_actual_receipt(self):
+        from types import SimpleNamespace
+        for index, forged in enumerate((10**12, -1, True, None, "future", {"time": 99}, float("nan"))):
+            with self.subTest(forged=forged):
+                event = {"event": "stats", "_received_at": forged, "capture_signal": {
+                    "nonzero_samples": 20, "last_nonzero_age_ms": 0,
+                    "peak": .1, "mode": "endpoint_loopback", "scope": "selected_endpoint",
+                }}
+                process = SimpleNamespace(stdout=io.StringIO(json.dumps(event) + "\n"))
+                received = 123.5 + index
+                # Diagnostic retention happens after parsing; it must preserve
+                # the reader's receipt, rather than restamping the queued event.
+                with patch("api.airplay_process.time.monotonic", side_effect=(received, received + .25)):
+                    self.sender._read_events(process, self.sender._events,
+                        lambda value: self.sender._remember_native_event(self.sender._mute_state, value))
+                queued, = self.sender.poll_events()
+                evidence = self.sender.diagnostics()["stats"]
+                self.assertEqual(queued["_received_at"], received)
+                self.assertEqual(evidence["_received_at"], received)
+                self.assertEqual(evidence["capture_signal"], event["capture_signal"])
+                self.assertEqual(self.sender._last_stats_at, received + .25)
+                # UI queue consumers cannot rewrite the retained receipt.
+                queued["_received_at"] = -100
+                self.assertEqual(self.sender.diagnostics()["stats"]["_received_at"], received)
+
     def test_flood_is_bounded_and_preserves_latest_terminal_event(self):
         lines = [json.dumps({"event": "stats", "frames": i}) + "\n" for i in range(300)]
         lines.append(json.dumps({"event": "error", "message": "last"}) + "\n")

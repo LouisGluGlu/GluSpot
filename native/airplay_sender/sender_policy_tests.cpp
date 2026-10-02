@@ -7,6 +7,96 @@
 
 namespace {
 size_t volumeRequests(const FakeReceiver& receiver);
+
+void testActualNonzeroAudioSendEvidence() {
+    g_test = "GluSpot final nonzero PCM transport evidence";
+    Rig rig;
+    rig.sender->setPreserveReceiverVolume(true);
+    runAp2Handshake(rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    REQUIRE(rig.launchedOk && *rig.launchedOk, "nonzero evidence test launches AP2");
+    rig.io.takeUdp();
+    CHECK(rig.sender->diagnostics().nonzeroSamplesSent == 0,
+          "authenticated handshake alone does not prove sound-bearing audio");
+    uint64_t decodedNonzero = 0;
+    auto checkPacket = [&] {
+        const auto datagrams = rig.io.takeUdp();
+        size_t audioPackets = 0;
+        for (const auto& packet : datagrams) {
+            if (packet.s != RaopUdp::Audio) continue;
+            ++audioPackets;
+            const auto pcm = rig.rx.decodeAudio(packet.data);
+            REQUIRE(pcm.has_value(), "receiver independently decrypts ALAC audio");
+            decodedNonzero += uint64_t(std::count_if(pcm->begin(), pcm->end(),
+                [](int16_t sample) { return sample != 0; }));
+        }
+        CHECK(audioPackets == 1, "one pacer step hands one encrypted audio datagram to transport");
+        CHECK(rig.sender->diagnostics().nonzeroSamplesSent == decodedNonzero,
+              "sender evidence equals the independently decoded wire PCM");
+    };
+    rig.advance(8);
+    checkPacket();
+    CHECK(rig.sender->diagnostics().audioFramesSent == 352 && decodedNonzero == 0,
+          "empty-ring padding advances timeline but cannot prove nonzero audio");
+
+    const std::vector<int16_t> zeros(352 * 2, 0);
+    REQUIRE(rig.ring.tryPush(zeros), "zero-valued source packet enters ring");
+    rig.advance(8);
+    checkPacket();
+    CHECK(decodedNonzero == 0, "actual zero-valued source PCM does not count as sound");
+
+    auto mixed = zeros;
+    mixed[0] = -32768; mixed[1] = 32767; mixed[17] = 1; mixed[31] = -1;
+    REQUIRE(rig.ring.tryPush(mixed), "nonzero source packet enters ring");
+    CHECK(rig.sender->diagnostics().nonzeroSamplesSent == 0,
+          "queued input does not prove it has been sent");
+    rig.advance(8);
+    checkPacket();
+    CHECK(decodedNonzero == 4, "both full-scale and tiny final samples count without counting zeros");
+    rig.advance(8);
+    checkPacket();
+    CHECK(decodedNonzero == 4, "later padding retains historical count without fabricating fresh sound");
+    rig.sender->stop();
+    rig.exchange();
+    CHECK(rig.sender->diagnostics().nonzeroSamplesSent == 4,
+          "stopping retains final bounded evidence for diagnostics");
+
+    rig.rx = FakeReceiver{};
+    runAp2Handshake(rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    REQUIRE(rig.launchedOk && *rig.launchedOk, "a new AP2 session launches");
+    CHECK(rig.sender->diagnostics().nonzeroSamplesSent == 0,
+          "new session cannot inherit another receiver's nonzero evidence");
+    rig.io.takeUdp();
+    decodedNonzero = 0;
+    rig.advance(8);
+    checkPacket();
+    CHECK(decodedNonzero == 0, "restarted empty session remains explicitly silent");
+
+    // 48 kHz input frame 1 has a one-LSB impulse. The 44.1 kHz lerp samples
+    // frame 0 at phase 0 and frame 1 at ~1.088, truncating the latter to zero.
+    // Input evidence is nonzero; the actual emitted packet must stay zero.
+    Rig resampled;
+    resampled.sender->setPreserveReceiverVolume(true);
+    resampled.sender->setInputFormat(48000);
+    runAp2Handshake(resampled, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    REQUIRE(resampled.launchedOk && *resampled.launchedOk, "resampling evidence test launches");
+    resampled.io.takeUdp();
+    std::vector<int16_t> impulse(960 * 2, 0);
+    impulse[2] = 1;
+    REQUIRE(resampled.ring.tryPush(impulse), "tiny nonzero impulse enters the input ring");
+    resampled.advance(8);
+    const auto resampledPackets = resampled.io.takeUdp();
+    size_t audioPackets = 0;
+    for (const auto& packet : resampledPackets) {
+        if (packet.s != RaopUdp::Audio) continue;
+        ++audioPackets;
+        const auto pcm = resampled.rx.decodeAudio(packet.data);
+        REQUIRE(pcm.has_value(), "resampled wire packet independently decrypts");
+        CHECK(std::all_of(pcm->begin(), pcm->end(), [](int16_t sample) { return sample == 0; }),
+              "sub-LSB resampled impulse emits an entirely zero-valued packet");
+    }
+    CHECK(audioPackets == 1 && resampled.sender->diagnostics().nonzeroSamplesSent == 0,
+          "nonzero sending evidence is measured after resampling, not from input count");
+}
 // The original fake receiver intentionally does not implement GET_PARAMETER.
 // Replace only that reply using its independently derived encrypted channel.
 void replyVolume(Rig& rig, int code, const std::string& body = {}, int overrideSeq = -1) {
@@ -362,6 +452,7 @@ void testUnansweredFeedbackIsBoundedAndRecoverable() {
 }  // namespace
 
 int main() {
+    testActualNonzeroAudioSendEvidence();
     testReceiverVolumeReadAckAndCoalescing();
     testReceiverVolumeUnknownTimeoutAndLateResponses();
     testReceiverInitialVolumeInfo();

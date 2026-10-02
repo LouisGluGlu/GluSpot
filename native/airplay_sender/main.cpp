@@ -3,6 +3,8 @@
 #include "endpoint_mute_guard.h"
 #include "timing_estimate.h"
 #include "helper_commands.h"
+#include "process_loopback.h"
+#include "capture_signal.h"
 #include "raop_loop.h"
 #include "raop_sender.h"
 #include "ring_buffer.h"
@@ -73,8 +75,21 @@ std::string receiverVolumeJson(const fxchain::RaopDiagnostics& d) {
     return out.str();
 }
 
+uint64_t monotonicMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+void signalJson(const gluspot::CaptureSignalSnapshot& signal, bool processLoopback) {
+    std::cout << "{\"mode\":\"" << (processLoopback ? "process_loopback" : "endpoint_loopback")
+              << "\",\"scope\":\"" << (processLoopback ? "all_other_processes" : "selected_endpoint")
+              << "\",\"nonzero_samples\":" << signal.nonzeroSamples << ",\"last_nonzero_age_ms\":";
+    if (signal.lastNonzeroAgeMs) std::cout << *signal.lastNonzeroAgeMs;
+    else std::cout << "null";
+    std::cout << ",\"peak\":" << signal.peak << '}';
+}
 void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64_t dropped,
-                    uint64_t discontinuities, gluspot::BufferTimingTracker& timing, bool streaming) {
+                    uint64_t discontinuities, gluspot::BufferTimingTracker& timing, bool streaming,
+                    const gluspot::CaptureSignalSnapshot& signal, bool processLoopback) {
     const auto d = sender.diagnostics();
     const auto estimate = timing.sample({captured, d.audioFramesSent, d.silenceFrames,
         dropped, discontinuities, d.queuedInputFrames, d.inputSampleRate,
@@ -89,6 +104,7 @@ void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64
               << ",\"event_connected\":" << (d.eventConnected ? "true" : "false")
               << ",\"event_keyed\":" << (d.eventKeyed ? "true" : "false")
               << ",\"audio_frames_sent\":" << d.audioFramesSent << ",\"silence_frames\":" << d.silenceFrames
+              << ",\"nonzero_samples_sent\":" << d.nonzeroSamplesSent
               << ",\"queued_input_frames\":" << d.queuedInputFrames
               << ",\"input_sample_rate\":" << d.inputSampleRate
               << ",\"protocol_latency_frames\":" << d.protocolLatencyFrames
@@ -100,7 +116,9 @@ void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64
               << ",\"protocol_buffer_ms\":" << estimate.protocolBufferMs
               << ",\"input_queue_ms\":" << estimate.inputQueueMs
               << ",\"valid\":" << (estimate.valid ? "true" : "false")
-              << "},\"receiver_volume\":" << receiverVolumeJson(d) << "}\n" << std::flush;
+              << "},\"receiver_volume\":" << receiverVolumeJson(d) << ",\"capture_signal\":";
+    signalJson(signal, processLoopback);
+    std::cout << "}\n" << std::flush;
 }
 
 std::wstring wide(const std::string& text) {
@@ -128,7 +146,8 @@ void check(HRESULT hr, const char* action) {
 
 class Capture {
 public:
-    explicit Capture(std::string endpoint) : endpoint_(std::move(endpoint)) {
+    explicit Capture(std::string endpoint, bool preferProcess = false, bool requireProcess = false)
+        : endpoint_(std::move(endpoint)), preferProcess_(preferProcess), requireProcess_(requireProcess) {
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!stopEvent_) throw std::runtime_error("Cannot create capture stop event");
         worker_ = std::thread([this] { run(); });
@@ -146,10 +165,16 @@ public:
     const gluspot::PcmFormat& format() const { return format_; }
     fxchain::RingBuffer<int16_t>& ring() { return *ring_; }
     void start() { begin_ = true; }
+    bool processLoopback() const { return processLoopback_; }
+    gluspot::CaptureSignalSnapshot signal(bool resetPeak = false) {
+        return signal_.snapshot(monotonicMs(), resetPeak);
+    }
     std::atomic<uint64_t> frames{0}, droppedSamples{0}, discontinuities{0};
 
 private:
     std::string endpoint_;
+    bool preferProcess_ = false, requireProcess_ = false, processLoopback_ = false;
+    gluspot::CaptureSignalCounter signal_;
     HANDLE stopEvent_ = nullptr;
     std::thread worker_;
     std::atomic<bool> begin_{false};
@@ -182,11 +207,48 @@ private:
             DWORD state;
             check(device->GetState(&state), "Endpoint state");
             if (state != DEVICE_STATE_ACTIVE) throw std::runtime_error("Selected source endpoint is not active");
+            struct EventOwner { HANDLE handle = nullptr; ~EventOwner() { if (handle) CloseHandle(handle); } } sampleOwner;
+            // Release the client before closing its notification event, even
+            // when initialization/capture exits through an exception.
             ComPtr<IAudioClient> client;
-            check(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                   reinterpret_cast<void**>(client.GetAddressOf())), "WASAPI activation");
             WAVEFORMATEX* mix = nullptr;
-            check(client->GetMixFormat(&mix), "WASAPI mix format");
+            HANDLE sampleEvent = nullptr;
+            if (preferProcess_) {
+                const auto activation = gluspot::activateProcessLoopback(stopEvent_, client);
+                if (WaitForSingleObject(stopEvent_, 0) == WAIT_OBJECT_0) throw StopRequested{};
+                if (SUCCEEDED(activation)) {
+                    // The virtual mixer need not implement GetMixFormat. The
+                    // Microsoft sample uses explicit 44.1 kHz stereo PCM16.
+                    WAVEFORMATEX requested{};
+                    requested.wFormatTag = WAVE_FORMAT_PCM;
+                    requested.nChannels = 2;
+                    requested.nSamplesPerSec = 44100;
+                    requested.wBitsPerSample = 16;
+                    requested.nBlockAlign = 4;
+                    requested.nAvgBytesPerSec = 176400;
+                    const auto initialized = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
+                        AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, 0, 0, &requested, nullptr);
+                    if (SUCCEEDED(initialized)) {
+                        sampleEvent = sampleOwner.handle = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                        if (!sampleEvent) throw std::runtime_error("Cannot create process capture event");
+                        check(client->SetEventHandle(sampleEvent), "Process loopback event");
+                        mix = static_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(requested)));
+                        if (!mix) throw std::bad_alloc();
+                        *mix = requested;
+                        processLoopback_ = true;
+                    } else if (requireProcess_) check(initialized, "Process loopback initialization");
+                } else if (requireProcess_) check(activation, "Process loopback activation");
+                if (!processLoopback_) {
+                    std::cerr << "Process loopback unavailable; using selected endpoint loopback\n";
+                    client.Reset();
+                }
+            }
+            if (!processLoopback_) {
+                check(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                       reinterpret_cast<void**>(client.GetAddressOf())), "WASAPI activation");
+                check(client->GetMixFormat(&mix), "WASAPI mix format");
+            }
             std::unique_ptr<WAVEFORMATEX, decltype(&CoTaskMemFree)> mixOwner(mix, CoTaskMemFree);
             bool floating = mix->wFormatTag == WAVE_FORMAT_IEEE_FLOAT;
             uint32_t mask = 0;
@@ -201,8 +263,9 @@ private:
             format_ = {mix->nSamplesPerSec, mix->nChannels, mix->wBitsPerSample,
                        mix->nBlockAlign, floating, mask};
             gluspot::validateFormat(format_);
-            check(client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                     1000000, 0, mix, nullptr), "WASAPI loopback initialization");
+            if (!processLoopback_)
+                check(client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                         1000000, 0, mix, nullptr), "WASAPI loopback initialization");
             ComPtr<IAudioCaptureClient> capture;
             check(client->GetService(IID_PPV_ARGS(&capture)), "WASAPI capture service");
             // About 170 ms at 48 kHz; bounded so a stalled sender never builds
@@ -234,7 +297,10 @@ private:
                                                flags & AUDCLNT_BUFFERFLAGS_SILENT, converted);
                         if (!ring_->tryPush(std::span<const int16_t>(converted)))
                             droppedSamples += converted.size();
-                        else frames += count;
+                        else {
+                            frames += count;
+                            signal_.recordAccepted(std::span<const int16_t>(converted), monotonicMs());
+                        }
                         if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) ++discontinuities;
                     } catch (...) { capture->ReleaseBuffer(count); throw; }
                     check(capture->ReleaseBuffer(count), "WASAPI capture release");
@@ -288,11 +354,12 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleCtrlHandler(consoleHandler, TRUE);
     std::string host, endpoint, deviceId, name = "HomePod", sourceId = "02:47:4C:55:53:50";
     uint16_t port = 7000;
-    bool probe = false, exclusiveOutput = false;
+    bool probe = false, exclusiveOutput = false, processProbe = false;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string arg = utf8(argv[i]);
             if (arg == "--probe-capture") { probe = true; continue; }
+            if (arg == "--process-loopback") { processProbe = true; continue; }
             if (arg == "--exclusive-output") { exclusiveOutput = true; continue; }
             if (i + 1 >= argc) throw std::runtime_error("Missing option value");
             const std::string value = utf8(argv[++i]);
@@ -314,6 +381,8 @@ int wmain(int argc, wchar_t** argv) {
             throw std::runtime_error("Casting requires --host IPv4 and --endpoint render ID");
         if (probe && exclusiveOutput)
             throw std::runtime_error("Capture probe does not support --exclusive-output");
+        if (processProbe && !probe)
+            throw std::runtime_error("--process-loopback is only supported with --probe-capture");
     } catch (const std::exception& ex) { status("error", ex.what()); return 2; }
 
     try {
@@ -324,7 +393,7 @@ int wmain(int argc, wchar_t** argv) {
             muteGuard = std::make_unique<gluspot::EndpointMuteGuard>(wide(endpoint));
             muteStatus("prepared", endpoint, muteGuard->originalMuted(), false);
         }
-        Capture capture(endpoint);
+        Capture capture(endpoint, exclusiveOutput || processProbe, processProbe);
         if (!capture.waitReady()) {
             const auto why = capture.error();
             status("error", why.empty() ? "Capture initialization timed out" : why); return 1;
@@ -335,7 +404,9 @@ int wmain(int argc, wchar_t** argv) {
                       << "}\n" << std::flush;
             capture.start();
             std::this_thread::sleep_for(250ms);
-            std::cout << "{\"event\":\"stats\",\"captured_frames\":" << capture.frames.load() << "}\n" << std::flush;
+            std::cout << "{\"event\":\"stats\",\"captured_frames\":" << capture.frames.load() << ",\"capture_signal\":";
+            signalJson(capture.signal(), capture.processLoopback());
+            std::cout << "}\n" << std::flush;
             if (!capture.error().empty()) { status("error", capture.error()); return 1; }
             status("stopped"); return 0;
         }
@@ -346,11 +417,13 @@ int wmain(int argc, wchar_t** argv) {
             if (!ok) { status("error", error); failed = true; }
             else {
                 try {
-                    capture.start();
                     if (muteGuard) {
                         muteGuard->mute();
                         muteStatus("muted", endpoint, muteGuard->originalMuted(), true);
                     }
+                    // Begin sampling only after mute succeeds: a driver's
+                    // final pre-mute buffer must not certify exclusive output.
+                    capture.start();
                     authenticated = true;
                     status("waiting_audio", "AirPlay connected; waiting for source audio");
                 } catch (const std::exception& ex) {
@@ -374,6 +447,12 @@ int wmain(int argc, wchar_t** argv) {
         sender.setInputFormat(capture.format().rate);
         sender.setIdentity({"GluSpot", sourceId, "iPhone14,3"});
         sender.setAuth(fxchain::RaopDeviceInfo::Auth::HapTransient, true, deviceId, "", "");
+        std::string pending;
+        // Initialization is bounded but can outlast parent cancellation. Do
+        // not start a receiver session after an already closed/stopped pipe.
+        if (interrupted || commandsFromStdin(pending, sender, false)) {
+            status("stopped"); return 0;
+        }
         status("connecting");
         sender.start(host, port, name);
         const auto connectDeadline = std::chrono::steady_clock::now() + 20s;
@@ -382,7 +461,6 @@ int wmain(int argc, wchar_t** argv) {
         auto muteDeadline = std::chrono::steady_clock::now() + 250ms;
         auto volumeDeadline = std::chrono::steady_clock::now();
         uint64_t volumeRevision = ~uint64_t(0);
-        std::string pending;
         while (!failed && !interrupted && !commandsFromStdin(pending, sender, authenticated)) {
             loop.pump(sender, 20ms);
             if (failed) break;
@@ -399,7 +477,9 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 muteDeadline = std::chrono::steady_clock::now() + 250ms;
             }
-            if (authenticated && capture.frames.load() && !reportedStreaming) {
+            const auto signal = capture.signal();
+            if (authenticated && gluspot::hasStreamingSignal(signal, sender.diagnostics().nonzeroSamplesSent)
+                && !reportedStreaming) {
                 reportedStreaming = true; status("streaming");
             }
             if (authenticated && std::chrono::steady_clock::now() >= volumeDeadline) {
@@ -414,13 +494,15 @@ int wmain(int argc, wchar_t** argv) {
             }
             if (authenticated && std::chrono::steady_clock::now() >= statsDeadline) {
                 transportStats(sender, capture.frames.load(), capture.droppedSamples.load(),
-                               capture.discontinuities.load(), timing, true);
+                               capture.discontinuities.load(), timing, true,
+                               capture.signal(true), capture.processLoopback());
                 statsDeadline = std::chrono::steady_clock::now() + 500ms;
             }
         }
         // One final bounded snapshot preserves the close/failure evidence.
         transportStats(sender, capture.frames.load(), capture.droppedSamples.load(),
-                       capture.discontinuities.load(), timing, false);
+                       capture.discontinuities.load(), timing, false,
+                       capture.signal(), capture.processLoopback());
         sender.stop();
         if (muteGuard) {
             try {

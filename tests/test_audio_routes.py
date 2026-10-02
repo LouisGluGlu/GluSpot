@@ -256,6 +256,201 @@ class AudioRouteControllerTests(unittest.TestCase):
         self.controller._step()
         self.assertEqual(self.controller.snapshot().state, "casting")
 
+    @staticmethod
+    def _capture_stats(nonzero=0, age=None, *, peak=0.0, received=100.0,
+                       mode="endpoint_loopback", scope="selected_endpoint"):
+        return {"event": "stats", "_received_at": received, "capture_signal": {
+            "nonzero_samples": nonzero, "last_nonzero_age_ms": age,
+            "peak": peak, "mode": mode, "scope": scope,
+        }}
+
+    def _poll_at(self, now, *events):
+        self.sender.events = list(events)
+        with patch("api.audio_route_controller.time.monotonic", return_value=now):
+            self.controller._step()
+        return self.controller.snapshot()
+
+    def _waiting_at(self, now=100.0, device=HOME):
+        with patch("api.audio_route_controller.time.monotonic", return_value=now):
+            self.controller.select(device.id)
+            self.controller._step()
+        return self._poll_at(now, {"event": "waiting_audio"})
+
+    def test_authenticated_zero_capture_warns_after_three_seconds_without_routing_or_streaming(self):
+        self._waiting_at()
+        self._poll_at(100.0, self._capture_stats(received=100.0))
+        starts, stops = tuple(self.sender.starts), self.sender.stops
+        before = self._poll_at(102.999, self._capture_stats(received=102.999))
+        self.assertEqual(before.status_message, "已连接 HomePod，等待电脑播放声音")
+        silent = self._poll_at(103.0, self._capture_stats(received=103.0))
+        self.assertEqual(silent.status_message, self.controller.CAPTURE_SILENCE_MESSAGE)
+        self.assertEqual(silent.state, "waiting_audio")
+        self.assertEqual(silent.active_id, "speakers")
+        self.assertEqual(silent.pending_id, HOME.id)
+        self.assertEqual(silent.cast_latency_seconds, 0.0)
+        self.assertEqual(silent.event_serial, 0)
+        self.assertEqual(tuple(self.sender.starts), starts)
+        self.assertEqual(self.sender.stops, stops)
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_capture_resuming_only_clears_warning_and_native_streaming_still_owns_connection(self):
+        self._waiting_at()
+        self._poll_at(100.0, self._capture_stats(received=100.0))
+        self._poll_at(103.0, self._capture_stats(received=103.0))
+        resumed = self._poll_at(103.5, self._capture_stats(20, 10, peak=.2, received=103.5))
+        self.assertEqual(resumed.state, "waiting_audio")
+        self.assertEqual(resumed.status_message, "已连接 HomePod，等待电脑播放声音")
+        self.assertEqual(resumed.pending_id, HOME.id)
+        self.assertEqual(resumed.event_serial, 0)
+        confirmed = self._poll_at(103.6, {"event": "streaming"})
+        self.assertEqual(confirmed.state, "casting")
+        self.assertEqual(confirmed.status_message, f"正在投放到 {HOME.name}")
+        self.assertEqual(confirmed.event_serial, 1)
+
+    def test_casting_silent_passage_reports_evidence_and_recovers_without_restart_or_seek(self):
+        with patch("api.audio_route_controller.time.monotonic", return_value=100.0):
+            self._cast()
+        starts, stops = tuple(self.sender.starts), self.sender.stops
+        before = self._poll_at(103.0, self._capture_stats(20, 2999, received=103.0))
+        self.assertEqual(before.status_message, f"正在投放到 {HOME.name}")
+        silent = self._poll_at(103.1, self._capture_stats(20, 3000, received=103.1))
+        self.assertEqual(silent.status_message, self.controller.CAPTURE_SILENCE_MESSAGE)
+        self.assertEqual(silent.state, "casting")
+        self.assertEqual(silent.active_id, HOME.id)
+        self.assertEqual(silent.cast_latency_seconds, 1.5)
+        resumed = self._poll_at(103.5, self._capture_stats(40, 5, peak=.1, received=103.5))
+        self.assertEqual(resumed.status_message, f"正在投放到 {HOME.name}")
+        self.assertEqual(resumed.event_serial, before.event_serial)
+        self.assertEqual(tuple(self.sender.starts), starts)
+        self.assertEqual(self.sender.stops, stops)
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_capture_stats_never_authenticate_a_connecting_receiver(self):
+        with patch("api.audio_route_controller.time.monotonic", return_value=100.0):
+            self.controller.select(HOME.id)
+            self.controller._step()
+        current = self.controller.snapshot()
+        observed = self._poll_at(104.0, self._capture_stats(20, 0, peak=.2, received=104.0))
+        self.assertEqual(observed, current)
+        self.assertIsNone(self.controller._capture_signal_nonzero)
+
+    def test_old_helper_without_capture_signal_keeps_its_existing_status(self):
+        self._waiting_at()
+        current = self.controller.snapshot()
+        self.assertEqual(self._poll_at(110.0, {"event": "stats", "captured_frames": 48000}), current)
+        self._poll_at(110.1, self._capture_stats(received=110.1))
+        self.assertEqual(self.controller.snapshot(), current)
+        self._poll_at(113.1, self._capture_stats(received=113.1))
+        silent = self.controller.snapshot()
+        self.assertEqual(self._poll_at(113.2, {"event": "stats", "captured_frames": 96000}), silent)
+
+    def test_invalid_capture_signal_cannot_claim_silence_or_sound(self):
+        self._waiting_at()
+        current = self.controller.snapshot()
+        invalid = (
+            {"nonzero_samples": True}, {"nonzero_samples": -1}, {"nonzero_samples": "0"},
+            {"nonzero_samples": 2**64}, {"nonzero_samples": 1},
+            {"last_nonzero_age_ms": 0}, {"last_nonzero_age_ms": -1},
+            {"last_nonzero_age_ms": True}, {"last_nonzero_age_ms": float("nan")},
+            {"last_nonzero_age_ms": float("inf")}, {"last_nonzero_age_ms": 10**1000},
+            {"peak": True}, {"peak": -.1}, {"peak": 1.1}, {"peak": "0"},
+            {"peak": float("nan")}, {"peak": float("inf")}, {"peak": 10**1000},
+            {"peak": .1}, {"mode": "microphone"}, {"scope": "one_player"},
+            {"mode": "process_loopback"},
+        )
+        for override in invalid:
+            with self.subTest(override=override):
+                event = self._capture_stats(received=104.0)
+                event["capture_signal"].update(override)
+                self.assertEqual(self._poll_at(104.0, event), current)
+                self.assertIsNone(self.controller._capture_signal_nonzero)
+        for signal in (None, [], "silent", {}):
+            with self.subTest(signal=signal):
+                self.assertEqual(self._poll_at(104.0, {"event": "stats", "capture_signal": signal}), current)
+
+    def test_process_capture_evidence_has_same_status_contract_as_endpoint_capture(self):
+        self._waiting_at()
+        self._poll_at(100.0, self._capture_stats(received=100.0,
+                      mode="process_loopback", scope="all_other_processes"))
+        silent = self._poll_at(103.0, self._capture_stats(received=103.0,
+                               mode="process_loopback", scope="all_other_processes"))
+        self.assertEqual(silent.status_message, self.controller.CAPTURE_SILENCE_MESSAGE)
+        self.assertEqual(silent.state, "waiting_audio")
+
+    def test_stale_future_repeated_and_out_of_order_capture_stats_do_not_clear_warning(self):
+        self._waiting_at()
+        silent = self._poll_at(104.0, self._capture_stats(20, 4000, received=104.0))
+        for received in (None, False, "104", float("nan"), float("inf"), 10**1000,
+                         101.0, 104.0, 103.9, 104.6):
+            with self.subTest(received=received):
+                # None represents a missing timestamp on new signal evidence.
+                event = self._capture_stats(30, 0, peak=.1, received=received)
+                if received is None:
+                    event.pop("_received_at")
+                self.assertEqual(self._poll_at(104.5, event), silent)
+
+    def test_same_session_counter_or_last_audio_age_regression_is_not_fresh_sound(self):
+        self._waiting_at()
+        silent = self._poll_at(104.0, self._capture_stats(20, 4000, received=104.0))
+        for count in (0, 19, 20):
+            with self.subTest(count=count):
+                age = None if count == 0 else 0
+                event = self._capture_stats(count, age, received=104.5)
+                self.assertEqual(self._poll_at(104.5, event), silent)
+
+    def test_new_receiver_fences_previous_signal_and_resets_counter_and_silence_grace(self):
+        self._waiting_at()
+        self._poll_at(104.0, self._capture_stats(20, 4000, received=104.0))
+        self._waiting_at(105.0, OTHER_HOME)
+        current = self.controller.snapshot()
+        old = self._capture_stats(30, 0, peak=.1, received=104.5)
+        self.assertEqual(self._poll_at(105.1, old), current)
+        self.assertIsNone(self.controller._capture_signal_nonzero)
+        self._poll_at(105.2, self._capture_stats(received=105.2))
+        self.assertEqual(self._poll_at(107.9, self._capture_stats(received=107.9)), current)
+        silent = self._poll_at(108.2, self._capture_stats(received=108.2))
+        self.assertEqual(silent.status_message, self.controller.CAPTURE_SILENCE_MESSAGE)
+        self.assertEqual(silent.pending_id, OTHER_HOME.id)
+
+    def test_terminal_events_win_over_entire_capture_batch_without_false_connection_notice(self):
+        for terminal in ("error", "stopped"):
+            with self.subTest(terminal=terminal):
+                with patch("api.audio_route_controller.time.monotonic", return_value=100.0):
+                    self.controller.select(HOME.id)
+                    self.controller._step()
+                previous = self.controller.snapshot().event_serial
+                result = self._poll_at(104.0, {"event": "streaming"},
+                          self._capture_stats(received=104.0),
+                          {"event": terminal, "message": "receiver disconnected"},
+                          self._capture_stats(20, 0, peak=.1, received=104.0))
+                self.assertEqual(result.state, "error")
+                self.assertEqual(result.status_message, "receiver disconnected")
+                self.assertEqual(result.event_serial, previous)
+                self.assertEqual(result.active_id, "speakers")
+                self.assertIsNone(self.controller._capture_authenticated_at)
+
+    def test_poll_result_cannot_publish_capture_for_a_session_that_ended_during_poll(self):
+        self._waiting_at()
+        def end_during_poll():
+            self.controller._end_cast()
+            self.controller._publish(state="ready", status_message="HomePod 投放已停止")
+            return (self._capture_stats(received=104.0), {"event": "streaming"})
+        self.sender.poll_events = end_during_poll
+        result = self._poll_at(104.0)
+        self.assertEqual(result.state, "ready")
+        self.assertEqual(result.status_message, "HomePod 投放已停止")
+        self.assertEqual(result.active_id, "speakers")
+        self.assertEqual(result.event_serial, 0)
+
+    def test_capture_recovery_does_not_erase_an_unrelated_receiver_volume_error(self):
+        self._waiting_at()
+        self._poll_at(104.0, self._capture_stats(20, 4000, received=104.0))
+        self.controller._publish(status_message="HomePod 音量调整失败：接收端返回 500")
+        result = self._poll_at(104.5, self._capture_stats(40, 0, peak=.1, received=104.5))
+        self.assertEqual(result.status_message, "HomePod 音量调整失败：接收端返回 500")
+
     def test_close_arriving_during_selection_refresh_prevents_sender_start(self):
         self.controller.select(HOME.id)
         original = self.backend.list_outputs
