@@ -1,5 +1,51 @@
 # Album flow and HomePod source integration
 
+## Current follow-up: synchronized outputs / 6.408
+
+The original combined commit `f3058d3` was merged with isolated synchronized
+audio commit `247036d39489146b02c5a35c7fa15e4fbc5548f5` at the user's request.
+Only README required a manual conflict resolution; both histories and their
+verification provenance remain visible. The music surface, album-flow renderer
+and palette files retain their exact combined-background contents. The added
+group path preserves the provider boundary and existing material/controls.
+
+This combined source passed 2998 discovered Python tests in 92.462 seconds.
+Three additional real-Qt background/group-menu tests then passed in focused
+validation: pending/confirmed membership, named independent volume and
+scroll-accessible stop with authoritative snapshots and complete-frame capture.
+The six-module focused run passed 373 tests in 25.404 seconds, followed by
+40 panel/integration tests after fixture refinement. All nine native suites
+passed in 17.23 seconds, thirteen actual group-helper lifecycle cases passed,
+and compilation, dependency consistency and whitespace checks passed.
+
+The combined `release/GluSpot-6.408/GluSpot.exe` passed its frozen acceptance
+before UI/settings startup. Its included sender, five supplied device SVGs,
+license source archive, provenance, imported group modules and Windows
+6.408.0.0 resources match the build inputs. Native Qt windowed/compact/light/
+dark integration images were inspected. A normal frozen launch stayed alive
+and responsive with an actual `GluSpot` window handle; the computer-use helper
+does not expose the transparent floating island as a targetable window, so
+this launch is not claimed as complete native-desktop visual acceptance.
+
+The prior physical sender replay logged 15.032 seconds of continuous music
+to HomePod mini + M6; the user confirmed “两边都出声，基本同步”. It is listening
+evidence for that speaker pair, not a new listening test of the combined GUI.
+The user has one HomePod mini, so physical multi-HomePod and stereo-pair/leader
+topology acceptance remain pending. See [group evidence](audio-group-sync.md).
+
+Source synchronization to `E:/gpt-island` uses only the merged Git source-file
+manifest. The existing primary checkout was backed up first and independently
+compared with the common baseline and both inputs. No unique primary source
+code was missing from the merge; its prior 265 lyric deletions remain deleted.
+Runtime folders, settings, `.git`, environment and old build artifacts are
+retained. The recoverable pre-sync archive lives beside this repository in
+`../pre-sync-backup-6.408/` and is not included in the runnable distribution.
+
+Evidence stays ignored under `.runtime/merge-6.408-*`,
+`logs/merge-6.408-*` and `logs/combined-output-*.png`.
+
+## Original 6.406 merge history
+
 This combined source was created on October 2, 2026 at the user's request.
 The original `gpt-island_background` and `gpt-island_Homepod_step1&2` directories
 remain unchanged beside the independent `gpt-island_merged` repository.

@@ -97,7 +97,13 @@ class _OutputRow(QAbstractButton):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCheckable(True)
         self.set_device(device)
+
+    def nextCheckState(self):
+        # Selection belongs to confirmed provider snapshots, including for
+        # keyboard and accessibility activation of this checkable button.
+        pass
 
     def _volume_changed(self, value):
         self._requested_volume = value / 100.0
@@ -135,6 +141,8 @@ class _OutputRow(QAbstractButton):
         if self.state == "pending":
             return "正在连接…"
         if self.state == "active":
+            if self.device.route_state in {"active", "casting"}:
+                return "同步播放"
             return "正在投放" if self.device.transport == "airplay" else "当前输出"
         if not self.device.available:
             return "设备不可用"
@@ -206,6 +214,19 @@ class _OutputRow(QAbstractButton):
             if self.state == "pending":
                 painter.setPen(QPen(ink, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 painter.drawArc(QRectF(self.width() - 25, 15, 12, 12), int(-self.elapsed * 280 * 16), 250 * 16)
+            elif self.state == "active":
+                # Retain a visible membership mark on pale backdrops, where
+                # the selected capsule alone offers little contrast.
+                center = QPointF(self.width() - 19, 21)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(ink)
+                painter.drawEllipse(center, 7, 7)
+                painter.setPen(QPen(self.selected_fill, 1.5, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                check = QPainterPath(center + QPointF(-3, 0))
+                check.lineTo(center + QPointF(-.7, 2.3))
+                check.lineTo(center + QPointF(3.3, -2.2))
+                painter.drawPath(check)
 
 
 class AudioOutputPanel(QWidget):
@@ -466,7 +487,10 @@ class AudioOutputPanel(QWidget):
     def _select(self, device_id: str):
         self._action_error = ""
         try:
-            if not self.provider.select_audio_output(device_id):
+            select = getattr(self.provider, "toggle_audio_output", None)
+            if not callable(select):
+                select = self.provider.select_audio_output
+            if not select(device_id):
                 self._action_error = "无法切换到此设备，请刷新后重试。"
         except Exception:
             self._action_error = "无法切换到此设备，请刷新后重试。"
@@ -538,7 +562,10 @@ class AudioOutputPanel(QWidget):
             self._device_order = order
         for device in snapshot.devices:
             row = self._rows[device.id]
-            row.state = "pending" if device.id == snapshot.pending_id else "active" if device.id == snapshot.active_id else "available"
+            pending = device.id in snapshot.pending_ids or device.id == snapshot.pending_id
+            selected = device.id in snapshot.member_ids or device.id == snapshot.active_id
+            row.state = "pending" if pending else "active" if selected else "available"
+            row.setChecked(row.state == "active")
             row.delay_text = f"+{snapshot.cast_latency_seconds:.2f}s" if row.state == "active" and device.transport == "airplay" else ""
             row.set_device(device)
             self._style_row(row)
@@ -556,14 +583,17 @@ class AudioOutputPanel(QWidget):
         error = bool(self._action_error or snapshot.state in {"error", "failed"})
         error_color = "#a22d2d" if relative_luminance(self._background) > .45 else "#ffb9b3"
         self.status_label.setStyleSheet(f"color: {error_color if error else self._muted.name()};")
-        casting = any(d.transport == "airplay" and d.id in {snapshot.active_id, snapshot.pending_id} for d in snapshot.devices)
+        group_devices = set(snapshot.member_ids) | set(snapshot.pending_ids) | {snapshot.active_id, snapshot.pending_id}
+        casting = any(d.transport == "airplay" and d.id in group_devices for d in snapshot.devices)
+        grouped = len(set(snapshot.member_ids) | set(snapshot.pending_ids)) > 1
+        self.stop_button.setText("停止同步播放" if grouped else "停止 HomePod 投放")
         self.stop_button.setEnabled(casting)
         self.stop_button.setVisible(casting)
         self._fit_to_content()
         self._sync_tab_order()
         if self.isVisible() and self._appearance_elapsed >= self.APPEAR_SECONDS:
             self._capture_material()
-        if self.isVisible() and (snapshot.pending_id or any(abs(row.progress - (1 if row.state == "active" else 0)) > .01 or row.elapsed < .5 for row in self._rows.values())):
+        if self.isVisible() and (snapshot.pending_id or snapshot.pending_ids or any(abs(row.progress - (1 if row.state == "active" else 0)) > .01 or row.elapsed < .5 for row in self._rows.values())):
             if not self._animation_timer.isActive():
                 self._clock.reset(time.monotonic())
                 self._animation_timer.start()
@@ -577,7 +607,7 @@ class AudioOutputPanel(QWidget):
         self.move(self._anchor + QPoint(0, round(-10 * (1 - settle))))
         for row in self._rows.values():
             row.advance(elapsed)
-        pending = bool(self._snapshot and self._snapshot.pending_id)
+        pending = bool(self._snapshot and (self._snapshot.pending_id or self._snapshot.pending_ids))
         rows_animating = any(row.elapsed < .5 or abs(row.progress - (1 if row.state == "active" else 0)) > .01 for row in self._rows.values())
         if phase >= 1 and not pending and not rows_animating:
             self._animation_timer.stop()

@@ -25,6 +25,7 @@ def engine_path() -> Path:
 class AirPlayProcess:
     CONNECT_TIMEOUT = 25.0
     TIMING_MAX_AGE = 2.0
+    STOP_TIMEOUT = 1.5
 
     def __init__(self, executable=None, popen=None, *, source_id="", exclusive_output=True):
         self.executable = Path(executable) if executable is not None else engine_path()
@@ -296,7 +297,7 @@ class AirPlayProcess:
                     if process.poll() is None:
                         process.stdin.write("stop\n")
                         process.stdin.flush()
-                    process.wait(timeout=1.5)
+                    process.wait(timeout=self._stop_timeout())
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     if process.poll() is None:
                         process.kill()
@@ -325,3 +326,6 @@ class AirPlayProcess:
                         restored = self._mute_state.get("phase") == "restored"
                         owned = self._mute_state.get("applied") is True
                         self.needs_local_output_restore = owned and not restored and process.returncode != 0
+
+    def _stop_timeout(self):
+        return self.STOP_TIMEOUT

@@ -137,6 +137,16 @@ uint64_t ts2ntp(uint64_t ts, uint32_t rate) {
     return ((ts << 16) / rate) << 16;
 }
 
+// Exact 32.32 increments without shifting a large frame count or multiplying
+// a long-running nanosecond count. Wrapping the NTP seconds word is normal.
+uint64_t framesToNtp(uint64_t frames, uint32_t rate) {
+    return ((frames / rate) << 32) + ((frames % rate) << 32) / rate;
+}
+uint64_t nsToNtp(uint64_t ns) {
+    return ((ns / 1000000000ULL) << 32)
+        + (ns % 1000000000ULL) * 0x100000000ULL / 1000000000ULL;
+}
+
 // std::string (the wire layer) <-> airplay::Bytes (the crypto layer).
 Bytes toBytes(const std::string& s) {
     return Bytes(reinterpret_cast<const uint8_t*>(s.data()),
@@ -316,6 +326,43 @@ void RaopSender::setInputFormat(uint32_t sampleRate) {
     inputRate_ = sampleRate > 0 ? sampleRate : 48000;
 }
 
+void RaopSender::setCoordinatedPlayback(bool coordinated) {
+    if (state_ != State::Idle) return;
+    coordinatedPlayback_ = coordinated;
+}
+
+bool RaopSender::armCoordinatedTimeline(Clock::time_point start, uint64_t ntpAnchor,
+                                       uint32_t latencyFrames) {
+    if (!coordinatedPlayback_ || !airplay2_ || state_ != State::Streaming
+        || coordinatedTimelineArmed_ || latencyFrames < 11025 || latencyFrames > 88200)
+        return false;
+    clockStart_ = start;
+    coordinatedNtpAnchor_ = ntpAnchor;
+    latency_ = latencyFrames;
+    coordinatedTimelineArmed_ = true;
+    sendSyncPacket_(true);
+    arm_(syncTimer_);
+    return true;
+}
+
+bool RaopSender::sendCoordinatedAudio(uint64_t frameIndex, std::span<const int16_t> pcm) {
+    if (!coordinatedPlayback_ || !coordinatedTimelineArmed_ || state_ != State::Streaming
+        || pcm.size() != size_t(kFramesPerPacket * kChannels) || frameIndex != framesSent_
+        || frameIndex > std::numeric_limits<uint64_t>::max() - kFramesPerPacket
+        || frameIndex > std::numeric_limits<uint64_t>::max() - latency_)
+        return false;
+    const auto elapsed = now_() - clockStart_;
+    if (elapsed < Clock::duration::zero()) return false;
+    const uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    const uint64_t elapsedFrames = (ns / 1000000000ULL) * kRaopRate
+        + (ns % 1000000000ULL) * kRaopRate / 1000000000ULL;
+    // Allow the host's bounded catch-up bursts after scheduler jitter, while
+    // refusing PCM whose first frame's actual presentation time has passed.
+    if (elapsedFrames > frameIndex + latency_) return false;
+    sendPcmPacket_(pcm);
+    return true;
+}
+
 void RaopSender::setAuth(RaopDeviceInfo::Auth auth, bool airplay2,
                          const std::string& deviceId, const std::string& credsJson,
                          const std::string& password) {
@@ -345,6 +392,15 @@ uint64_t RaopSender::ntpNow_() {
     const uint64_t sec  = us / 1000000ULL;
     const uint64_t frac = us % 1000000ULL;
     return ((sec + 0x83AA7E80ULL) << 32) | ((frac << 32) / 1000000ULL);
+}
+
+uint64_t RaopSender::timingNtpNow_() const {
+    if (!coordinatedPlayback_ || !coordinatedTimelineArmed_) return ntpNow_();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(now_() - clockStart_).count();
+    if (elapsed >= 0) return coordinatedNtpAnchor_ + nsToNtp(uint64_t(elapsed));
+    // Avoid negating INT64_MIN if a deliberately extreme test clock is used.
+    const auto magnitude = uint64_t(-(elapsed + 1)) + 1;
+    return coordinatedNtpAnchor_ - nsToNtp(magnitude);
 }
 
 uint32_t RaopSender::rtptime32_() const {
@@ -478,6 +534,9 @@ void RaopSender::start(const std::string& host, uint16_t port, const std::string
     rtspSession_.clear();
     serverPort_ = controlPort_ = timingPort_ = 0;
     framesSent_ = 0;
+    coordinatedTimelineArmed_ = false;
+    coordinatedNtpAnchor_ = 0;
+    latency_ = 22050 + 44100;
     firstAudio_ = true;
     srcPhase_ = 0.0;
     inBuf_.clear();
@@ -539,6 +598,7 @@ void RaopSender::stop() {
         // minutes: tcpClose(flush=true) drains it before the FIN.
     }
     state_ = State::Idle;   // BEFORE disconnect -> a close notification stays quiet
+    coordinatedTimelineArmed_ = false;
     io_.tcpClose(RaopTcp::Control, true);
     rtspConnected_ = false;
     releaseSockets_();
@@ -652,9 +712,12 @@ RaopDiagnostics RaopSender::diagnostics() const {
     RaopDiagnostics result = diagnostics_;
     result.eventKeyed = ap2_ && ap2_->eventIn.size() == 32 && ap2_->eventOut.size() == 32;
     result.audioFramesSent = framesSent_;
-    result.queuedInputFrames = (ring_ ? ring_->availableRead() / kChannels : 0) + inBuf_.size() / kChannels;
-    result.inputSampleRate = inputRate_;
+    result.queuedInputFrames = coordinatedPlayback_ ? 0
+        : (ring_ ? ring_->availableRead() / kChannels : 0) + inBuf_.size() / kChannels;
+    result.inputSampleRate = coordinatedPlayback_ ? kRaopRate : inputRate_;
     result.protocolLatencyFrames = latency_;
+    result.coordinatedPlayback = coordinatedPlayback_;
+    result.coordinatedTimelineArmed = coordinatedTimelineArmed_;
     return result;
 }
 
@@ -1313,12 +1376,14 @@ void RaopSender::startStreaming_() {
     // pyatv StreamContext.reset(): anchor the timeline on wall-clock
     // NTP so sync-packet NTP values and our timing-server replies share
     // one epoch (the receiver correlates the two for clock recovery).
-    startTs_ = ntp2ts(ntpNow_(), kRaopRate);
     framesSent_ = 0;
     firstAudio_ = true;
-    clockStart_ = now_();
-    sendSyncPacket_(true);   // first sync carries the marker bit
-    arm_(syncTimer_);
+    if (!coordinatedPlayback_) {
+        startTs_ = ntp2ts(ntpNow_(), kRaopRate);
+        clockStart_ = now_();
+        sendSyncPacket_(true);   // first sync carries the marker bit
+        arm_(syncTimer_);
+    }
     // #90, RECORD already ran between session + stream SETUP (owntone order),
     // so streaming just needs sync + volume + the RTP loop here.
     // Volume requested before the session was up? Apply it now. pyatv
@@ -1337,7 +1402,8 @@ void RaopSender::startStreaming_() {
         volumeWriteQueued_ = true;
         sendVolumeRequest_();
     }
-    arm_(pacer_);   // audio RTP loop starts LAST (after RECORD/FLUSH/volume)
+    if (!coordinatedPlayback_)
+        arm_(pacer_);   // group host owns packet pacing; no per-receiver ring/timeline
     if (airplay2_) {
         // AP2: feedback is an HTTP POST /feedback every 2 s (pyatv
         // FEEDBACK_INTERVAL).
@@ -1353,9 +1419,12 @@ void RaopSender::startStreaming_() {
     // the stream is live (track changes during playback re-push via
     // setNowPlaying -> sendMetadata_).
     sendMetadata_();
-    info_("Cast: RAOP streaming to '{}', RTP {} frames/packet @ {} Hz{}",
-          name_, kFramesPerPacket, kRaopRate,
-          (ap2_ && ap2_->encryptAudio) ? " (encrypted)" : "");
+    if (coordinatedPlayback_)
+        info_("Cast: coordinated receiver '{}' ready, awaiting shared PCM timeline @ {} Hz", name_, kRaopRate);
+    else
+        info_("Cast: RAOP streaming to '{}', RTP {} frames/packet @ {} Hz{}",
+              name_, kFramesPerPacket, kRaopRate,
+              (ap2_ && ap2_->encryptAudio) ? " (encrypted)" : "");
     if (events_.launched) events_.launched(true, std::string());
 }
 
@@ -2193,10 +2262,16 @@ std::string RaopSender::encodeAlacFrame_(const int16_t* frames, int nFrames) {
 void RaopSender::sendAudioPacket_() {
     int16_t frames[kFramesPerPacket * kChannels];
     diagnostics_.silenceFrames += kFramesPerPacket - fillFrames_(frames, kFramesPerPacket);
+    sendPcmPacket_(frames);
+}
+
+void RaopSender::sendPcmPacket_(std::span<const int16_t> frames) {
     // Count the final resampled/padded PCM, not accepted input or packets. A
     // dry ring, genuinely silent source, or quantized-away impulse is zero.
-    const auto nonzero = uint64_t(std::count_if(frames, frames + kFramesPerPacket * kChannels,
+    const auto nonzero = uint64_t(std::count_if(frames.begin(), frames.end(),
         [](int16_t sample) { return sample != 0; }));
+    const auto meaningful = uint64_t(std::count_if(frames.begin(), frames.end(),
+        [](int16_t sample) { return sample < -1 || sample > 1; }));
 
     // 12-byte RTP header (big-endian, shared by AP1 + AP2).
     std::string header;
@@ -2213,7 +2288,7 @@ void RaopSender::sendAudioPacket_() {
     //  * AP1 RAOP announces L16 (RFC 3551) -> BIG-endian s16 raw PCM.
     std::string payload;
     if (ap2_ && ap2_->encryptAudio) {
-        payload = encodeAlacFrame_(frames, kFramesPerPacket);
+        payload = encodeAlacFrame_(frames.data(), kFramesPerPacket);
     } else {
         payload.reserve(kPayloadBytes);
         for (int i = 0; i < kFramesPerPacket * kChannels; ++i) {
@@ -2232,6 +2307,8 @@ void RaopSender::sendAudioPacket_() {
     io_.udpSend(RaopUdp::Audio, RaopEndpoint{hostIp_, serverPort_}, spanOf(pkt));
     diagnostics_.nonzeroSamplesSent += std::min(nonzero,
         std::numeric_limits<uint64_t>::max() - diagnostics_.nonzeroSamplesSent);
+    diagnostics_.meaningfulSamplesSent += std::min(meaningful,
+        std::numeric_limits<uint64_t>::max() - diagnostics_.meaningfulSamplesSent);
 
     // Retransmit backlog (the receiver asks by seq via type 0x55).
     const int slot = seq_ & (kBacklogSize - 1);
@@ -2312,11 +2389,14 @@ size_t RaopSender::fillFrames_(int16_t* dst, size_t want) {
 
 void RaopSender::sendSyncPacket_(bool first) {
     if (serverPort_ == 0 || controlPort_ == 0) return;
+    if (coordinatedPlayback_ && !coordinatedTimelineArmed_) return;
     // pyatv ControlClient._sync_task: maps "the frame we just wrote"
     // (head_ts == startTs_+framesSent_) onto NTP wall time; `now` is the
     // latency-shifted RTP time the audio headers carry, and
     // `now_without_latency` is where the receiver should be PLAYING.
-    const uint64_t curNtp = ts2ntp(startTs_ + framesSent_, kRaopRate);
+    const uint64_t curNtp = coordinatedPlayback_
+        ? coordinatedNtpAnchor_ + framesToNtp(framesSent_, kRaopRate)
+        : ts2ntp(startTs_ + framesSent_, kRaopRate);
     const uint32_t now = rtptime32_();
     std::string pkt;
     pkt.reserve(20);
@@ -2357,7 +2437,7 @@ void RaopSender::onTimingDatagram_(std::span<const uint8_t> dg, const RaopEndpoi
     // pyatv TimingServer.datagram_received: echo the request's
     // sendtime as our reftime; receive + send time = NTP "now"
     // (one wall-clock read is plenty at this precision).
-    const uint64_t now = ntpNow_();
+    const uint64_t now = timingNtpNow_();
     std::string resp;
     resp.reserve(32);
     resp += char(dg[0]);                 // proto byte echoed
