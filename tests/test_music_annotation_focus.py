@@ -45,6 +45,9 @@ class MusicAnnotationFocusTests(unittest.TestCase):
 
     def setUp(self):
         self.owner = _Owner()
+        # These comparisons isolate annotation ink; live backdrop motion
+        # has its own frame/dirty-region regression coverage.
+        self.owner.music_flow_intensity = 0.0
         self.window = MusicSurfaceWindow(self.owner)
         self.window.resize(960, 540)
 
