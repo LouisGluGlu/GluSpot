@@ -97,6 +97,41 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.panel.sync_snapshot()
         self.assertEqual(self.panel._rows["homepod"].subtitle, "正在投放")
 
+    def test_group_member_selection_and_volume_remain_separate(self):
+        second = AudioRouteDevice("homepod-2", "书房 HomePod mini", "homepod-mini", "airplay", volume=.48)
+        devices = tuple(replace(d, volume=.41, route_state="active") if d.id in {"homepod", "bluetooth"} else d
+                        for d in self.provider.devices) + (replace(second, route_state="active"),)
+        self.provider.snapshot = AudioRouteSnapshot(devices, active_id="homepod", state="casting",
+            member_ids=("homepod", "homepod-2", "bluetooth"), group_id="session-1", capture_scope="music_process_tree")
+        self.provider.toggle_audio_output = lambda device_id: self.provider.calls.append(("toggle", device_id)) or True
+        self._open()
+        for identity in ("homepod", "homepod-2", "bluetooth"):
+            self.assertEqual(self.panel._rows[identity].state, "active")
+            self.assertTrue(self.panel._rows[identity].isChecked())
+        self.assertEqual(self.panel._rows["bluetooth"].subtitle, "同步播放")
+        self.assertEqual(self.panel._rows["local"].state, "available")
+        self.assertFalse(self.panel._rows["local"].isChecked())
+        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.panel._rows["homepod-2"].volume_slider.setValue(53)
+        self.assertIn(("volume", "homepod-2", .53), self.provider.calls)
+        self.assertFalse(any(call[0] in {"toggle", "select"} for call in self.provider.calls))
+        self.panel._rows["homepod-2"].click()
+        self.assertIn(("toggle", "homepod-2"), self.provider.calls)
+        self.assertEqual(self.panel._rows["homepod-2"].state, "active")
+        self.assertTrue(self.panel._rows["homepod-2"].isChecked())
+
+    def test_all_pending_group_members_remain_pending_until_native_confirmation(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="local", state="connecting",
+            pending_ids=("homepod", "bluetooth"), status_message="正在连接同步输出")
+        self._open()
+        self.assertEqual(self.panel._rows["homepod"].state, "pending")
+        self.assertEqual(self.panel._rows["bluetooth"].state, "pending")
+        self.assertFalse(self.panel._rows["homepod"].isChecked())
+        self.assertFalse(self.panel._rows["bluetooth"].isChecked())
+        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.assertTrue(self.panel.stop_button.isVisible())
+
     def test_failure_retains_authoritative_active_output_and_exact_reason(self):
         self._open()
         self.provider.snapshot = replace(self.provider.snapshot, pending_id="", state="error", status_message="HomePod 配对失败，请检查设备访问设置")

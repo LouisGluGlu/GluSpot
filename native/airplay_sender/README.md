@@ -150,7 +150,13 @@ Events:
   `process_loopback`/`all_other_processes` or
   `endpoint_loopback`/`selected_endpoint`, cumulative `nonzero_samples` accepted
   into the bounded ring, `last_nonzero_age_ms` (null before any signal), and a
-  normalized interval `peak`. A dropped packet does not count as accepted
+  normalized interval `peak`. `meaningful_samples` and
+  `last_meaningful_age_ms` separately count samples above one PCM16 LSB;
+  `protocol.meaningful_samples_sent` counts these samples after transport
+  handoff. A real session-mute probe left +/-1 LSB dither with music suppressed,
+  so startup requires fresh meaningful capture and transport evidence. The
+  diagnostic nonzero counter alone cannot acknowledge playback.
+  A dropped packet does not count as accepted
   signal. No PCM content is retained. The process owner stamps receipt using
   its monotonic clock, overriding any helper-supplied `_received_at`. The route
   controller accepts valid current-session evidence with advancing receipt
@@ -219,6 +225,43 @@ volume. This capture result does not itself establish HomePod playback.
 
 Windows firewall must permit inbound UDP for the helper; the receiver initiates
 timing/retransmission packets. The helper does not change firewall rules.
+
+## Synchronized group mode (development)
+
+`--group` dispatches the same executable to the shared music-output host.
+It requires `--music-pid`, `--music-created-at` (Windows process creation time)
+and `--source-endpoint`. Each receiver is explicit and starts with
+`--receiver-id`, followed by `--host`, `--port`, `--device-id`, and `--name`.
+An optional `--local-endpoint` enables one Windows/Bluetooth member, distinct
+from the suppressed source. At least one HomePod and at most eight total
+outputs are allowed. Invalid arguments are rejected before Windows state or
+receiver networking is touched.
+
+The host uses one verified INCLUDE process-tree capture, an all-SETUP barrier,
+one future steady/NTP/RTP origin and one final 352-frame stereo packet for all
+receivers. A shared bounded rate correction keeps capture-clock drift from
+exhausting the 150 ms queue; every receiver and the local history sees that
+same conditioned PCM. Local WASAPI rendering reads the history by frame index
+and uses its endpoint clock for continuous bounded drift correction. It does
+not consume the capture ring or invent a Bluetooth acoustic delay.
+
+Group stats append named `members`, `group`, and optional `local_render`
+objects. Receiver volume commands use
+`{"command":"set_volume","receiver":0,"volume":0.35}`, where the integer
+index belongs to this helper's fixed receiver order. A group is declared
+streaming only after meaningful music reaches every network member and the
+selected local renderer. Any member failure, source identity loss, capture
+overrun or missed presentation deadline stops the whole group and restores
+owned source mute. Source suppression and application routing limitations,
+physical verification gates and protocol references are recorded in
+[`docs/audio-group-sync.md`](../../docs/audio-group-sync.md).
+
+`test_group_helper_lifecycle.py --idle-test-process` exercises the actual
+helper with a verified silent process and local fake pairing sockets. It
+does not authenticate a receiver, mute an endpoint, save PCM or contact a
+physical receiver. The native group suite independently decrypts two fake
+receivers to verify identical final PCM and presentation mappings; it also
+checks history bounds and continuous correction under simulated clock drift.
 
 ## Verification limits
 
