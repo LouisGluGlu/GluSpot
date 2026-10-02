@@ -24,6 +24,8 @@ class AudioRouteDevice:
     # this device has no usable volume evidence/control in the current session.
     volume: float | None = None
     volume_muted: bool = False
+    route_state: str = "available"
+    route_message: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,3 +44,8 @@ class AudioRouteSnapshot:
     event_message: str = ""
     cast_latency_auto: bool = True
     cast_latency_estimate_seconds: float | None = None
+    member_ids: tuple[str, ...] = ()
+    pending_ids: tuple[str, ...] = ()
+    group_id: str = ""
+    capture_scope: str = ""
+    music_source_app_id: str = ""

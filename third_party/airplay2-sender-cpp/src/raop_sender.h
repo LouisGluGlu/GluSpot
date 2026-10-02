@@ -71,10 +71,12 @@ struct RaopDiagnostics {
     bool eventConnected = false, eventKeyed = false;
     uint64_t audioFramesSent = 0, silenceFrames = 0;
     uint64_t nonzeroSamplesSent = 0; // Final PCM handed to the transport; not receiver audibility.
+    uint64_t meaningfulSamplesSent = 0; // Excludes +/-1 LSB mixer dither; not receiver audibility.
     size_t queuedInputFrames = 0;
     uint32_t inputSampleRate = 0;
     uint32_t protocolLatencyFrames = 0, receiverLatencyFrames = 0;
     bool receiverLatencyReported = false;
+    bool coordinatedPlayback = false, coordinatedTimelineArmed = false;
     double receiverVolumePct = 0;
     bool receiverVolumeKnown = false, receiverVolumePending = false;
     std::string receiverVolumeSource = "unknown";
@@ -88,7 +90,7 @@ struct RaopDiagnostics {
 // inside a sender call (onTcpData / tick / stop ...), i.e. on the thread that
 // drives the sender; none may destroy the sender, calling stop() is fine.
 struct RaopEvents {
-    std::function<void(bool ok, const std::string& error)> launched;   // RECORD accepted / failed
+    std::function<void(bool ok, const std::string& error)> launched;   // ready / failed; group mode awaits host timeline
     std::function<void()>                                  closed;     // session ended
     // The receiver shows a PIN; collect 4 digits and call submitPin().
     std::function<void(const std::string& deviceName)>     pinRequired;
@@ -152,6 +154,25 @@ public:
     // The receiver keeps its existing volume unless setVolume() is explicit.
     // Default false retains the upstream sender's behavior.
     void setPreserveReceiverVolume(bool preserve) { preserveReceiverVolume_ = preserve; }
+
+    // GluSpot group mode. Select before start() while inactive. Setup still
+    // emits launched(true), meaning authenticated/ready; audio and sync wait
+    // for the host's group barrier. The host resamples/cuts each PCM packet
+    // once and supplies that identical packet to every ready receiver.
+    void setCoordinatedPlayback(bool coordinated);
+    // One shared frame-zero monotonic/NTP anchor for every group member.
+    // The anchor may be in the future. NTP timing replies then advance from
+    // this monotonic mapping, independent of subsequent system-clock changes.
+    // Only AP2 ready sessions can arm, once; latency must fit the advertised
+    // 11025..88200 frame range. No ring is consumed in coordinated mode.
+    bool armCoordinatedTimeline(Clock::time_point start, uint64_t ntpAnchor,
+                                uint32_t latencyFrames = 66150);
+    // Exactly 352 interleaved stereo frames at 44100 Hz. frameIndex must be
+    // contiguous (0,352,...). The host owns packet pacing; sending before
+    // frame zero or after this packet's presentation deadline is rejected
+    // without advancing sequence/nonce/diagnostics. false requires the host
+    // to wait or remove/fail the member, never silently skip its source PCM.
+    bool sendCoordinatedAudio(uint64_t frameIndex, std::span<const int16_t> pcm);
 
     // Connect + handshake + stream. One session at a time. `host` is what
     // the host's RaopIo can connect to (a dotted-quad from mDNS, or a name).
@@ -304,6 +325,7 @@ private:
     // Streaming
     void onPacerTick_();
     void sendAudioPacket_();
+    void sendPcmPacket_(std::span<const int16_t> frames);
     std::string encodeAlacFrame_(const int16_t* frames, int nFrames);   // #90 ALAC, one 352-frame packet
     size_t fillFrames_(int16_t* dst, size_t want); // ring -> 44.1 kHz frames
     void sendSyncPacket_(bool first);
@@ -314,6 +336,7 @@ private:
     void sendMetadata_();
 
     static uint64_t ntpNow_();                     // 64-bit NTP wall time
+    uint64_t timingNtpNow_() const;                // shared steady mapping when coordinated/armed
 
     template <class... A> void info_(std::string_view fmt, const A&... a) const {
         if (log_) log_(RaopLogLevel::Info, raopFormat(fmt, a...));
@@ -330,6 +353,9 @@ private:
     RaopIdentity identity_;
     bool         strictAuth_ = false;
     bool         preserveReceiverVolume_ = false;  // GluSpot opt-in, see above
+    bool         coordinatedPlayback_ = false;
+    bool         coordinatedTimelineArmed_ = false;
+    uint64_t     coordinatedNtpAnchor_ = 0;
     RaopDiagnostics diagnostics_;  // reset on start, retained after stop for final stats
 
     // -- RTSP session -------------------------------------------------

@@ -5,6 +5,7 @@
 #include "helper_commands.h"
 #include "process_loopback.h"
 #include "capture_signal.h"
+#include "group_main.h"
 #include "raop_loop.h"
 #include "raop_sender.h"
 #include "ring_buffer.h"
@@ -85,7 +86,11 @@ void signalJson(const gluspot::CaptureSignalSnapshot& signal, bool processLoopba
               << "\",\"nonzero_samples\":" << signal.nonzeroSamples << ",\"last_nonzero_age_ms\":";
     if (signal.lastNonzeroAgeMs) std::cout << *signal.lastNonzeroAgeMs;
     else std::cout << "null";
-    std::cout << ",\"peak\":" << signal.peak << '}';
+    std::cout << ",\"peak\":" << signal.peak << ",\"meaningful_samples\":" << signal.meaningfulSamples
+              << ",\"last_meaningful_age_ms\":";
+    if (signal.lastMeaningfulAgeMs) std::cout << *signal.lastMeaningfulAgeMs;
+    else std::cout << "null";
+    std::cout << '}';
 }
 void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64_t dropped,
                     uint64_t discontinuities, gluspot::BufferTimingTracker& timing, bool streaming,
@@ -105,6 +110,7 @@ void transportStats(const fxchain::RaopSender& sender, uint64_t captured, uint64
               << ",\"event_keyed\":" << (d.eventKeyed ? "true" : "false")
               << ",\"audio_frames_sent\":" << d.audioFramesSent << ",\"silence_frames\":" << d.silenceFrames
               << ",\"nonzero_samples_sent\":" << d.nonzeroSamplesSent
+              << ",\"meaningful_samples_sent\":" << d.meaningfulSamplesSent
               << ",\"queued_input_frames\":" << d.queuedInputFrames
               << ",\"input_sample_rate\":" << d.inputSampleRate
               << ",\"protocol_latency_frames\":" << d.protocolLatencyFrames
@@ -351,6 +357,8 @@ bool commandsFromStdin(std::string& pending, fxchain::RaopSender& sender, bool a
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc > 1 && std::wstring(argv[1]) == L"--group")
+        return gluspot::runGroupHelper(argc, argv);
     SetConsoleCtrlHandler(consoleHandler, TRUE);
     std::string host, endpoint, deviceId, name = "HomePod", sourceId = "02:47:4C:55:53:50";
     uint16_t port = 7000;
@@ -478,7 +486,7 @@ int wmain(int argc, wchar_t** argv) {
                 muteDeadline = std::chrono::steady_clock::now() + 250ms;
             }
             const auto signal = capture.signal();
-            if (authenticated && gluspot::hasStreamingSignal(signal, sender.diagnostics().nonzeroSamplesSent)
+            if (authenticated && gluspot::hasStreamingSignal(signal, sender.diagnostics().meaningfulSamplesSent)
                 && !reportedStreaming) {
                 reportedStreaming = true; status("streaming");
             }

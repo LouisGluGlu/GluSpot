@@ -28,12 +28,15 @@ CAPTURE_TIMEOUT_SECONDS = 10.0
 _MODULES = (
     "api.providers", "api.audio_route_controller", "api.audio_routes",
     "api.windows_audio_devices", "api.airplay_discovery", "api.airplay_process",
+    "api.windows_audio_sessions", "api.windows_app_audio_routes", "api.airplay_group_process",
     "local.audio_output_panel", "local.audio_device_notice",
 )
 _DEPENDENCIES = (
     "PySide6", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
     "shiboken6", "zeroconf", "ifaddr",
 )
+_GROUP_MODULES = frozenset({"api.windows_audio_sessions", "api.windows_app_audio_routes",
+                            "api.airplay_group_process"})
 
 
 def _error(exc: Exception) -> str:
@@ -59,6 +62,9 @@ def _module_info(name: str) -> dict:
         spec = importlib.util.find_spec(name)
         if spec is None:
             return {"name": name, "ok": False, "error": "Module spec missing"}
+        if name in _GROUP_MODULES:
+            module = importlib.import_module(name)
+            return {"name": name, "ok": True, "execution_checked": True, **_location(module.__spec__)}
         return {"name": name, "ok": True, "execution_checked": False, **_location(spec)}
     except Exception as exc:
         return {"name": name, "ok": False, "error": _error(exc)}
@@ -173,6 +179,39 @@ def _check_capture(endpoint_id: str) -> dict:
     return result
 
 
+def _check_group_dispatch() -> dict:
+    """Reject incomplete group arguments before Windows/audio/network work.
+
+    An old single-output executable must not pass package acceptance alongside
+    the new Python group controller. This validates dispatch and packaged helper
+    compatibility, not receiver playback or application routing support.
+    """
+    executable = engine_path()
+    result = {"ok": False, "executable": str(executable), "returncode": None,
+              "receiver_contacted": False, "windows_state_changed": False}
+    if not executable.is_file():
+        result["error"] = "Native group helper missing"
+        return result
+    kwargs = dict(stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                  encoding="utf-8", errors="replace", timeout=CAPTURE_TIMEOUT_SECONDS)
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        completed = subprocess.run([str(executable), "--group"], **kwargs)
+        result["returncode"] = completed.returncode
+        events = [json.loads(line) for line in completed.stdout.splitlines()]
+        result["events"] = events
+        result["ok"] = (completed.returncode == 2 and len(events) == 1
+                        and isinstance(events[0], dict) and events[0].get("event") == "error"
+                        and events[0].get("message") ==
+                        "Group requires a verified music process, source endpoint and HomePod")
+        if not result["ok"]:
+            result["error"] = "Packaged helper does not implement the expected group dispatch"
+    except Exception as exc:
+        result["error"] = _error(exc)
+    return result
+
+
 def build_audio_package_report() -> dict:
     began = time.monotonic()
     frozen = bool(getattr(sys, "frozen", False))
@@ -182,6 +221,13 @@ def build_audio_package_report() -> dict:
     endpoints = _check_endpoints()
     discovery = _check_discovery()
     capture = _check_capture(endpoints["default_endpoint_id"])
+    group = _check_group_dispatch()
+    external_helper = frozen and bool(os.environ.get("GLUSPOT_AIRPLAY_ENGINE", ""))
+    if external_helper:
+        # Runtime overrides remain useful for diagnostics, but an external
+        # binary cannot certify the native helper shipped inside this bundle.
+        capture.update(ok=False, error="Frozen package acceptance requires the bundled helper; clear GLUSPOT_AIRPLAY_ENGINE")
+        group.update(ok=False, error="External helper cannot certify frozen group dispatch")
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -198,9 +244,10 @@ def build_audio_package_report() -> dict:
         "render_endpoints": endpoints,
         "mdns": discovery,
         "native_capture": capture,
+        "native_group_dispatch": group,
         "elapsed_seconds": round(time.monotonic() - began, 3),
         "ok": all(item["ok"] for item in dependencies + modules)
-              and endpoints["ok"] and discovery["ok"] and capture["ok"],
+              and endpoints["ok"] and discovery["ok"] and capture["ok"] and group["ok"],
     }
 
 

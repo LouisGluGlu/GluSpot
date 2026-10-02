@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
@@ -10,6 +11,8 @@ from api.airplay_discovery import AirPlayDiscovery, SERVICE_TYPES, receiver_from
 from api.audio_route_controller import AudioRouteController
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.windows_audio_devices import AudioOutputDevice
+from api.windows_audio_sessions import AudioSessionEvidence, MusicAudioSource
+from api.airplay_group_process import AirPlayGroupProcess
 
 
 HOME = AudioRouteDevice("airplay:AABBCCDDEEFF", "书房 HomePod", "homepod-mini", "airplay",
@@ -119,6 +122,117 @@ class _Sender:
         self.volume_calls.append(value)
         self.volume_state["pending"] = True
         return self.volume_accept
+
+
+class _GroupSender(_Sender):
+    def __init__(self):
+        super().__init__()
+        self.volume_states = {}
+        self.member_states = {}
+        self.estimate = None
+        self.source_evidence = {}
+
+    def start_group(self, devices, source, endpoint):
+        AirPlayGroupProcess._validate_group(devices, source, endpoint)
+        if self.start_error:
+            raise RuntimeError(self.start_error)
+        self.starts.append((tuple(device.id for device in devices), endpoint,
+                            source.process_id, source.process_created_at_100ns))
+        self.running, self.events = True, []
+        self.volume_states = {}
+
+    def receiver_volume_state(self, identity):
+        return dict(self.volume_states.get(identity, {}))
+
+    def receiver_states(self):
+        return dict(self.member_states)
+
+    def set_device_volume(self, identity, volume):
+        self.volume_calls.append((identity, volume))
+        return self.volume_accept
+
+    def latency_estimate(self):
+        return self.estimate
+
+    def diagnostics(self):
+        return {"local_output": dict(self.source_evidence), "schema_version": 1}
+
+    @staticmethod
+    def ready_events():
+        return [{"event": "waiting_audio"}, {"event": "stats", "_received_at": time.monotonic(),
+            "capture_signal": {"mode": "process_loopback", "scope": "music_process_tree", "peak": .3,
+                "nonzero_samples": 100, "last_nonzero_age_ms": 0,
+                "meaningful_samples": 80, "last_meaningful_age_ms": 0}}, {"event": "streaming"}]
+
+    def stop(self):
+        super().stop()
+        self.volume_states = {}
+
+
+class _AppRouter:
+    def __init__(self, read_source, write_source):
+        self.read_source, self.write_source = read_source, write_source
+        self.allow = False
+        self.calls = []
+        self.guards = []
+        self.during_wait = None
+        self.wait_error = ""
+        self.check_error = ""
+        self.restore_error = ""
+        self.occupied = set()
+
+    def recover_pending(self):
+        self.calls.append(("recover",))
+        return False
+
+    def endpoint_is_unoccupied(self, endpoint, source):
+        return endpoint not in self.occupied
+
+    def prepare(self, source, spare, local):
+        self.calls.append(("prepare", spare, local))
+        if not self.allow or spare in self.occupied:
+            raise RuntimeError("spare occupied")
+        guard = _AppGuard(self, source, spare)
+        self.guards.append(guard)
+        return guard
+
+    def close(self, *, timeout=5.0):
+        self.calls.append(("close", timeout))
+
+
+class _AppGuard:
+    def __init__(self, owner, source, spare):
+        self.owner, self.source, self.spare_endpoint = owner, source, spare
+        self.restored = False
+
+    def apply(self):
+        self.owner.calls.append(("apply", self.spare_endpoint))
+
+    def wait_migrated(self, *, timeout=5.0, cancelled=None):
+        self.owner.calls.append(("wait", timeout))
+        if self.owner.during_wait:
+            self.owner.during_wait()
+        if cancelled is not None and cancelled():
+            raise RuntimeError("migration cancelled")
+        if self.owner.wait_error:
+            raise RuntimeError(self.owner.wait_error)
+        fresh = replace(self.source, sessions=tuple(replace(session, endpoint_id=self.spare_endpoint)
+                                                   for session in self.source.sessions))
+        self.owner.write_source(fresh)
+        return fresh
+
+    def check(self):
+        self.owner.calls.append(("check",))
+        if self.owner.check_error:
+            raise RuntimeError(self.owner.check_error)
+
+    def restore(self):
+        self.owner.calls.append(("restore", self.spare_endpoint))
+        if self.owner.restore_error:
+            raise RuntimeError(self.owner.restore_error)
+        if not self.restored:
+            self.owner.write_source(self.source)
+            self.restored = True
 
 
 class AudioRouteControllerTests(unittest.TestCase):
@@ -826,6 +940,568 @@ class AudioRouteControllerTests(unittest.TestCase):
             pass
         self.assertTrue(self.backend.closed)
         self.assertTrue(self.discovery.closed)
+
+
+class AudioRouteGroupControllerTests(unittest.TestCase):
+    def setUp(self):
+        self.backend, self.discovery = _Backend(), _Discovery()
+        self.single, self.group = _Sender(), _GroupSender()
+        session = AudioSessionEvidence("speakers", 310, "session", "instance")
+        self.source = MusicAudioSource("cloudmusic.exe", 300, 1000, r"C:\Music\cloudmusic.exe",
+                                       (310,), ("session",), (session,), 100.0)
+        self.resolve_calls = []
+        self.router = _AppRouter(lambda: self.source, lambda source: setattr(self, "source", source))
+
+        def resolver(app_id):
+            self.resolve_calls.append(app_id)
+            return self.source
+
+        self.controller = AudioRouteController(self.backend, self.discovery, self.single,
+            group_sender=self.group, source_resolver=resolver, app_router=self.router, start_worker=False)
+        self.addCleanup(self.controller.close)
+        self.controller._refresh_devices()
+        self.controller.set_music_source("cloudmusic.exe")
+        self.controller._step()
+
+    def _stream(self, identity=HOME.id):
+        self.assertTrue(self.controller.toggle(identity))
+        self.controller._step()
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        return self.controller.snapshot()
+
+    def _source_check_due(self):
+        self.controller._next_source_resolve_at = 0
+        self.controller._step()
+
+    def test_first_homepod_toggle_captures_only_selected_music_process(self):
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(self.group.starts, [((HOME.id,), "speakers", 300, 1000)])
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(snapshot.state, "connecting")
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(snapshot.pending_ids, (HOME.id,))
+        self.assertEqual(snapshot.capture_scope, "music_process_tree")
+        self.assertEqual(snapshot.music_source_app_id, "cloudmusic.exe")
+        self.assertEqual(self.backend.selected, [])
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().member_ids, (HOME.id,))
+        self.assertEqual(self.controller.snapshot().pending_ids, ())
+
+    def test_second_homepod_toggle_rebuilds_one_shared_helper_with_both_members(self):
+        self._stream()
+        self.controller.toggle(OTHER_HOME.id)
+        self.controller._step()
+        self.assertEqual(self.group.starts[-1][0], (HOME.id, OTHER_HOME.id))
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(self.controller.snapshot().pending_ids, (HOME.id, OTHER_HOME.id))
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().member_ids, (HOME.id, OTHER_HOME.id))
+        selected = [d for d in self.controller.snapshot().devices if d.id in self.controller.snapshot().member_ids]
+        self.assertTrue(all(d.route_state == "active" for d in selected))
+
+    def test_bluetooth_member_addition_uses_fixed_source_without_default_switch(self):
+        self._stream()
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.assertEqual(self.group.starts[-1][0], (HOME.id, "headphones"))
+        self.assertEqual(self.group.starts[-1][1], "speakers")
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
+    def test_same_source_local_render_without_safe_physical_spare_fails_closed(self):
+        self._stream()
+        starts = len(self.group.starts)
+        self.controller.toggle("speakers")
+        self.controller._step()
+        self.assertEqual(len(self.group.starts), starts)
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("空闲电脑音频输出", self.controller.snapshot().status_message)
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+
+    def test_windows_only_toggle_keeps_existing_explicit_default_selection(self):
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.assertEqual(self.backend.selected, ["headphones"])
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.controller.snapshot().active_id, "headphones")
+
+    def test_remove_last_homepod_returns_remaining_bluetooth_to_local_selection(self):
+        self._stream()
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.backend.selected, ["headphones"])
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+        self.assertEqual(self.controller.snapshot().capture_scope, "")
+
+    def test_waiting_music_source_preserves_desired_members_and_limits_retry_frequency(self):
+        self.source = None
+        with patch("api.audio_route_controller.time.monotonic", return_value=100):
+            self.controller.toggle(HOME.id)
+            self.controller._step()
+            self.controller._refresh_devices()
+            self.controller._step()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot.state, "waiting_source")
+        self.assertEqual(snapshot.pending_ids, (HOME.id,))
+        self.assertEqual(len(self.resolve_calls), 1)
+        self.assertEqual(self.group.starts, [])
+        with patch("api.audio_route_controller.time.monotonic", return_value=102):
+            self.controller._step()
+        self.assertEqual(len(self.resolve_calls), 2)
+
+    def test_empty_or_unknown_source_does_not_use_display_name_or_all_sound(self):
+        self.controller.set_music_source("")
+        self.controller._step()
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_source")
+        self.assertEqual(self.resolve_calls, [])
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(self.group.starts, [])
+
+    def test_new_exact_player_identity_rebuilds_group_but_same_player_track_does_not(self):
+        self._stream()
+        original = tuple(self.group.starts)
+        self.controller.set_music_source("cloudmusic.exe")
+        self.controller._step()
+        self.assertEqual(tuple(self.group.starts), original)
+        self.source = replace(self.source, source_app_id="Spotify.exe", process_id=400,
+                              process_created_at_100ns=2000, process_path=r"C:\Spotify\Spotify.exe")
+        self.controller.set_music_source("Spotify.exe")
+        self.controller._step()
+        self.assertEqual(self.group.starts[-1][0], (HOME.id,))
+        self.assertEqual(self.group.starts[-1][2:], (400, 2000))
+        self.assertEqual(self.controller.snapshot().music_source_app_id, "Spotify.exe")
+
+    def test_source_pinned_to_nondefault_endpoint_does_not_immediately_stop_group(self):
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self._stream()
+        self.controller._refresh_devices()
+        self.assertEqual(self.controller.snapshot().state, "casting")
+        self.assertTrue(self.group.running)
+        self.assertEqual(self.controller.snapshot().cast_source_id, "headphones")
+        self.assertEqual(self.backend.selected, [])
+
+    def test_positive_source_endpoint_migration_stops_group_and_does_not_recast(self):
+        self._stream()
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self._source_check_due()
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+        self.assertIn("输出已改变", self.controller.snapshot().status_message)
+        starts = tuple(self.group.starts)
+        self._source_check_due()
+        self.assertEqual(tuple(self.group.starts), starts)
+
+    def test_positive_root_pid_or_creation_change_stops_group(self):
+        for changes in ({"process_id": 301}, {"process_created_at_100ns": 1001}):
+            with self.subTest(changes=changes):
+                self.source = replace(self.source, process_id=300, process_created_at_100ns=1000)
+                self._stream()
+                self.source = replace(self.source, **changes)
+                self._source_check_due()
+                self.assertFalse(self.group.running)
+                self.assertEqual(self.controller.snapshot().state, "error")
+
+    def test_pause_without_active_source_evidence_holds_existing_group(self):
+        self._stream()
+        self.source = None
+        self._source_check_due()
+        self.assertTrue(self.group.running)
+        self.assertEqual(self.controller.snapshot().state, "casting")
+
+    def test_multiple_source_endpoints_are_reported_instead_of_default_guessing(self):
+        self.source = replace(self.source, sessions=self.source.sessions + (
+            replace(self.source.sessions[0], endpoint_id="headphones", session_instance_id="second"),))
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("多个输出", self.controller.snapshot().status_message)
+
+    def test_remote_member_volume_uses_named_group_and_waits_for_real_ack(self):
+        self._stream()
+        self.controller.toggle(OTHER_HOME.id)
+        self.controller._step()
+        self.group.events = self.group.ready_events()
+        self.group.volume_states = {
+            HOME.id: {"volume": .3, "known": True, "source": "receiver_read"},
+            OTHER_HOME.id: {"volume": .7, "known": True, "source": "receiver_info"},
+        }
+        self.controller._step()
+        self.assertTrue(self.controller.set_volume(OTHER_HOME.id, .23))
+        self.controller._step()
+        self.assertEqual(self.group.volume_calls, [(OTHER_HOME.id, .23)])
+        self.assertEqual(self.single.volume_calls, [])
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == OTHER_HOME.id), .7)
+        self.group.volume_states[OTHER_HOME.id].update(volume=.23, source="receiver_ack")
+        self.controller._step()
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == OTHER_HOME.id), .23)
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == HOME.id), .3)
+
+    def test_stale_volume_generation_is_fenced_after_group_rebuild(self):
+        self._stream()
+        self.group.volume_states[HOME.id] = {"volume": .3, "known": True, "source": "receiver_read"}
+        self.controller._step()
+        old_generation = self.controller._generation
+        self.controller.toggle(OTHER_HOME.id)
+        self.controller._step()
+        self.group.events = self.group.ready_events()
+        self.group.volume_states[HOME.id] = {"volume": .3, "known": True, "source": "receiver_read"}
+        self.controller._step()
+        self.controller._set_volume(HOME.id, .9, old_generation)
+        self.assertEqual(self.group.volume_calls, [])
+        self.assertEqual(self.controller.snapshot().state, "casting")
+
+    def test_group_error_wins_over_streaming_and_clears_retry_intent(self):
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.group.events = [{"event": "streaming"}, {"event": "error", "message": "PTP timeline lost"}]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertEqual(self.controller.snapshot().status_message, "PTP timeline lost")
+        self.assertEqual(self.controller.snapshot().event_serial, 0)
+        self.assertEqual(self.controller.snapshot().pending_ids, ())
+        starts = tuple(self.group.starts)
+        self._source_check_due()
+        self.assertEqual(tuple(self.group.starts), starts)
+
+    def test_group_stop_restores_only_owned_source_after_abnormal_helper_exit(self):
+        self._stream()
+        self.backend.mutes["speakers"] = True
+        self.group.needs_local_output_restore = True
+        self.group.source_evidence = {"endpoint_id": "speakers", "original_muted": False, "phase": "muted"}
+        self.controller.stop_cast()
+        self.controller._step()
+        self.assertEqual(self.backend.mute_calls, [("speakers", False)])
+        self.assertEqual(self.backend.volume_calls, [])
+        self.assertEqual(self.controller.diagnostics()["schema_version"], 1)
+
+    def test_selected_local_disappearance_stops_shared_group(self):
+        self._stream()
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        self.backend.outputs = tuple(device for device in self.backend.outputs if device.id != "headphones")
+        self.controller._refresh_devices()
+        self.assertFalse(self.group.running)
+        self.assertIn("蓝牙设备已断开", self.controller.snapshot().status_message)
+
+    def test_temporary_mdns_loss_keeps_live_member_volume_and_group_edit_evidence(self):
+        self._stream()
+        self.discovery.receivers = (OTHER_HOME,)
+        self.group.volume_states[HOME.id] = {"volume": .3, "known": True, "source": "receiver_read"}
+        self.controller._step()
+        home = next(d for d in self.controller.snapshot().devices if d.id == HOME.id)
+        self.assertFalse(home.available)
+        self.assertEqual(home.volume, .3)
+        self.controller.toggle(OTHER_HOME.id)
+        self.controller._step()
+        self.assertEqual(self.group.starts[-1][0], (HOME.id, OTHER_HOME.id))
+
+    def test_stop_supersedes_queued_group_toggle_before_any_cast(self):
+        self.controller.toggle(HOME.id)
+        self.controller.toggle(OTHER_HOME.id)
+        self.controller.stop_cast()
+        self.controller._step()
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.controller.snapshot().state, "ready")
+
+    def test_legacy_select_after_group_replaces_it_with_one_compatible_sender(self):
+        self._stream()
+        self.controller.select(HOME.id)
+        self.controller._step()
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self.assertEqual(self.controller.snapshot().pending_ids, ())
+
+    def test_total_member_limit_preserves_current_group_when_extra_receiver_is_rejected(self):
+        self.discovery.receivers = tuple(replace(HOME, id=f"receiver-{index}", host=f"192.0.2.{index + 1}")
+                                         for index in range(9))
+        self.controller._refresh_devices()
+        for receiver in self.discovery.receivers[:8]:
+            self.controller.toggle(receiver.id)
+            self.controller._step()
+            self.group.events = self.group.ready_events()
+            self.controller._step()
+        starts = tuple(self.group.starts)
+        self.controller.toggle(self.discovery.receivers[8].id)
+        self.controller._step()
+        self.assertEqual(tuple(self.group.starts), starts)
+        self.assertEqual(len(self.controller.snapshot().member_ids), 8)
+        self.assertIn("最多", self.controller.snapshot().status_message)
+
+    def test_two_queued_toggles_cancel_instead_of_coalescing_into_one_selection(self):
+        self.controller.toggle(HOME.id)
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.controller.snapshot().pending_ids, ())
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+
+    def test_transport_streaming_before_positive_stats_waits_then_confirms(self):
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.group.events = [{"event": "streaming"}]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_audio")
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+        self.group.events = [self.group.ready_events()[1]]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "casting")
+        self.assertEqual(self.controller.snapshot().member_ids, (HOME.id,))
+
+    def test_positive_stats_without_transport_streaming_do_not_claim_group_playback(self):
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.group.events = self.group.ready_events()[:2]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_audio")
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+        self.group.events = [{"event": "streaming"}]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "casting")
+
+    def test_dither_only_or_missing_meaningful_evidence_cannot_confirm_group_streaming(self):
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        sample = self.group.ready_events()[1]
+        sample["capture_signal"].update(meaningful_samples=0, last_meaningful_age_ms=None, peak=1 / 32768)
+        self.group.events = [{"event": "waiting_audio"}, sample, {"event": "streaming"}]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_audio")
+        sample = self.group.ready_events()[1]
+        del sample["capture_signal"]["meaningful_samples"]
+        del sample["capture_signal"]["last_meaningful_age_ms"]
+        self.group.events = [sample]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_audio")
+
+    def test_stale_positive_stats_cannot_confirm_group_after_transport_readiness(self):
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        sample = self.group.ready_events()[1]
+        sample["_received_at"] -= 10
+        self.group.events = [{"event": "waiting_audio"}, sample, {"event": "streaming"}]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_audio")
+        self.group.events = [self.group.ready_events()[1]]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "casting")
+
+    def test_unrelated_all_sound_signal_cannot_authorize_music_group(self):
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        sample = self.group.ready_events()[1]
+        sample["capture_signal"]["scope"] = "all_other_processes"
+        self.group.events = [{"event": "waiting_audio"}, sample, {"event": "streaming"}]
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_audio")
+
+    def test_group_silence_uses_meaningful_sample_age_despite_nonzero_dither(self):
+        self._stream()
+        sample = self.group.ready_events()[1]
+        sampled_at = self.controller._capture_signal_received_at + 1
+        sample["_received_at"] = sampled_at
+        sample["capture_signal"].update(nonzero_samples=200, last_nonzero_age_ms=0,
+                                       meaningful_samples=80, last_meaningful_age_ms=3500, peak=1 / 32768)
+        self.group.events = [sample]
+        with patch("api.audio_route_controller.time.monotonic", return_value=sampled_at):
+            self.controller._step()
+        self.assertIn("暂未检测到音乐软件声音", self.controller.snapshot().status_message)
+        starts = tuple(self.group.starts)
+        sample = self.group.ready_events()[1]
+        sample["_received_at"] = sampled_at + 1
+        sample["capture_signal"].update(nonzero_samples=300, meaningful_samples=160)
+        self.group.events = [sample]
+        with patch("api.audio_route_controller.time.monotonic", return_value=sampled_at + 1):
+            self.controller._step()
+        self.assertNotIn("暂未检测到音乐软件声音", self.controller.snapshot().status_message)
+        self.assertEqual(tuple(self.group.starts), starts)
+
+    def _bluetooth_source_group(self):
+        self.router.allow = True
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self._stream()
+        self.controller.toggle("headphones")
+        self.controller._step()
+
+    def test_same_bluetooth_source_moves_only_music_to_verified_spare_before_native_start(self):
+        self._bluetooth_source_group()
+        self.assertEqual(self.group.starts[-1], ((HOME.id, "headphones"), "speakers", 300, 1000))
+        self.assertEqual(self.controller.snapshot().cast_source_id, "speakers")
+        self.assertEqual(self.router.calls[:4], [("recover",), ("prepare", "speakers", "headphones"),
+                                               ("apply", "speakers"), ("wait", 5.0)])
+        self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"speakers"})
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_route_guard_restores_after_helper_stop_and_source_mute_restoration(self):
+        self._bluetooth_source_group()
+        order = []
+        original_stop = self.group.stop
+        original_mute = self.backend.set_endpoint_mute
+        original_restore = self.router.guards[-1].restore
+        self.group.stop = lambda: (order.append("helper_stop"), original_stop())[-1]
+        self.backend.set_endpoint_mute = lambda identity, value: (order.append("mute_restore"), original_mute(identity, value))[-1]
+        self.router.guards[-1].restore = lambda: (order.append("app_restore"), original_restore())[-1]
+        self.backend.mutes["speakers"] = True
+        self.group.needs_local_output_restore = True
+        self.controller.stop_cast()
+        self.controller._step()
+        self.assertEqual(order, ["helper_stop", "mute_restore", "app_restore"])
+        self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"headphones"})
+        self.assertIsNone(self.controller._app_route_guard)
+
+    def test_migration_timeout_restores_guard_and_never_starts_native_for_undelayed_source(self):
+        self.router.allow, self.router.wait_error = True, "music stream did not migrate"
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self._stream()
+        starts = tuple(self.group.starts)
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.assertEqual(tuple(self.group.starts), starts)
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("did not migrate", self.controller.snapshot().status_message)
+        self.assertTrue(self.router.guards[-1].restored)
+        self.assertIsNone(self.controller._app_route_guard)
+
+    def test_queued_stop_cancels_route_wait_then_clears_preserved_intent_without_native_start(self):
+        self.router.allow = True
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self._stream()
+        starts = tuple(self.group.starts)
+        self.router.during_wait = self.controller.stop_cast
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.assertEqual(tuple(self.group.starts), starts)
+        self.assertTrue(self.router.guards[-1].restored)
+        self.assertEqual(self.controller.snapshot().pending_ids, (HOME.id, "headphones"))
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().pending_ids, ())
+        self.assertEqual(self.controller.snapshot().state, "ready")
+
+    def test_cancelled_membership_migration_keeps_desired_group_for_next_edit(self):
+        self.router.allow = True
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self._stream()
+
+        def queue_edit():
+            self.router.during_wait = None
+            self.controller.toggle(OTHER_HOME.id)
+
+        self.router.during_wait = queue_edit
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().pending_ids, (HOME.id, "headphones"))
+        self.controller._step()
+        self.assertEqual(self.group.starts[-1][0], (HOME.id, "headphones", OTHER_HOME.id))
+        self.assertEqual(self.group.starts[-1][1], "speakers")
+
+    def test_external_application_route_change_stops_group_and_restores_owned_guard(self):
+        self._bluetooth_source_group()
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        self.router.check_error = "application chose another endpoint"
+        self._source_check_due()
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertTrue(self.router.guards[-1].restored)
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+
+    def test_guard_restore_failure_retains_recovery_owner_without_claiming_ready(self):
+        self._bluetooth_source_group()
+        self.router.restore_error = "owned application output recovery pending"
+        self.controller.stop_cast()
+        with self.assertRaisesRegex(RuntimeError, "recovery pending"):
+            self.controller._step()
+        self.assertIs(self.controller._app_route_guard, self.router.guards[-1])
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+        self.router.restore_error = ""
+        self.controller._end_cast()
+        self.assertIsNone(self.controller._app_route_guard)
+
+    def test_member_rebuild_restores_old_app_route_before_new_owned_transaction(self):
+        self._bluetooth_source_group()
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        self.controller.toggle(OTHER_HOME.id)
+        self.controller._step()
+        self.assertTrue(self.router.guards[0].restored)
+        self.assertEqual(len(self.router.guards), 2)
+        self.assertFalse(self.router.guards[-1].restored)
+        self.assertEqual(self.group.starts[-1][0], (HOME.id, "headphones", OTHER_HOME.id))
+
+    def test_shutdown_router_close_does_not_repeat_the_full_restoration_wait(self):
+        self._bluetooth_source_group()
+        self.controller.close()
+        self.assertTrue(self.router.guards[-1].restored)
+        self.assertEqual(self.router.calls[-1], ("close", 0.0))
+        self.assertTrue(self.backend.closed)
+
+    def test_group_shutdown_join_budget_covers_all_native_members_and_app_restoration(self):
+        self._stream()
+        thread = SimpleNamespace(join=lambda **kwargs: setattr(self, "joined_timeout", kwargs["timeout"]))
+        self.controller._thread = thread
+        self.controller.close()
+        self.assertEqual(self.joined_timeout, 17.5)
+        self.controller._thread = None
+        self.controller._dispose()
+
+    def test_music_shared_source_without_unused_spare_does_not_mute_other_application(self):
+        self.router.occupied.add("speakers")
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("空闲电脑音频输出", self.controller.snapshot().status_message)
+
+    def test_music_shared_source_uses_unused_spare_without_global_output_switch(self):
+        self.backend.outputs += (AudioOutputDevice("spare", "备用电脑扬声器", "speaker"),)
+        self.backend.mutes["spare"], self.backend.volumes["spare"] = False, .4
+        self.router.occupied.add("speakers")
+        self.router.allow = True
+        self.controller._refresh_devices()
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.assertEqual(self.group.starts, [((HOME.id,), "spare", 300, 1000)])
+        self.assertIn(("prepare", "spare", "speakers"), self.router.calls)
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_another_application_on_existing_capture_output_stops_and_restores_mute(self):
+        self._stream()
+        self.backend.mutes["speakers"] = True
+        self.group.needs_local_output_restore = True
+        self.router.occupied.add("speakers")
+        self._source_check_due()
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.backend.mute_calls, [("speakers", False)])
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("另一应用占用", self.controller.snapshot().status_message)
+
+    def test_unknown_spare_ownership_fails_closed_before_any_native_start(self):
+        with patch.object(self.router, "endpoint_is_unoccupied", side_effect=OSError("ownership unavailable")):
+            self.controller.toggle(HOME.id)
+            self.controller._step()
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.controller.snapshot().state, "error")
 
 
 class AirPlayDiscoveryTests(unittest.TestCase):

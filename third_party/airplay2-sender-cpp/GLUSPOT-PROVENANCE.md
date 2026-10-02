@@ -116,11 +116,90 @@ This pinned crypto dependency should be reviewed before any public release.
 GluSpot's own WASAPI capture, PCM conversion and helper process protocol live
 in `native/airplay_sender/`. No AirFlash GPL code or AirSonic code is included.
 
-This import implements only one AirPlay 2 realtime session with HAP transient
-pairing. It uses the upstream's NTP timing path, not AirPlay 2 synchronized
-multiroom/PTP. Upstream's current README distinguishes its prior Qt build
+The original import implements one AirPlay 2 realtime session with HAP transient
+pairing, using the upstream's NTP timing path. Upstream's current README distinguishes its prior Qt build
 hardware verification from the standalone C++ build. GluSpot performed its own
 90.06-second HomePod mini pass on October 1, 2026, including encrypted event
 acknowledgements and Bluetooth M6 mute/restoration; the user confirmed only
 HomePod was audible and delay was acceptable. This does not establish long
 sessions, other firmware or multiroom compatibility.
+
+Local modification (2026-10-02, group playback work): `src/raop_sender.h/.cpp`
+add an explicit coordinated mode. Authentication and stream SETUP still produce
+the existing `launched` readiness callback, while the sender awaits the host's
+group barrier without emitting its own PCM, padded silence or sync. Feedback,
+encrypted event acknowledgement and explicit receiver-volume requests stay live.
+The host arms each ready receiver with the **same** steady-clock frame-zero time,
+64-bit NTP anchor and negotiated presentation lead, then supplies the same final
+352-frame / 44.1-kHz stereo PCM packet and contiguous source frame index to each
+member. Encoding, per-session encryption/nonces, retransmission and signal
+diagnostics reuse the existing sender implementation. The coordinated core does
+not consume its input ring or independently resample a source.
+
+Audio RTP timestamps and periodic sync retain the shared source-frame-to-NTP
+mapping. Once armed, NTP timing replies derive from that anchor plus steady-clock
+elapsed time, so subsequent Windows wall-clock adjustment cannot move a group's
+timeline. Before arming, timing replies use the existing system NTP clock; the
+host must derive the shared anchor from that same NTP epoch. Sending before frame
+zero, malformed PCM, a duplicate/skipped source index and PCM already past its
+presentation deadline are rejected without advancing sequence, nonce or frame
+counters. A bounded late host tick may still catch up before that deadline.
+Stop/restart clears the arm and source frame index. The ordinary sender's ring,
+resampler, NTP path, pairing and preserved-volume behavior remain unchanged.
+
+Protocol evidence checked against pinned sources, without copying GPL code:
+
+- OwnTone `4fa5dccfb69622f42e77bd05628034a69a567d57`, `src/outputs/airplay.c`:
+  `master_session_make` reuses a master by audio quality/timing mode;
+  `packets_send` distributes the same master RTP source packet to its members;
+  `packets_sync_send` distributes the same source position/time mapping;
+  `payload_make_setup_session_ntp` and `payload_make_setup_session_ptp` demonstrate
+  that realtime type 96 supports both clocks. Buffered type 103 is not required
+  merely to coordinate independent receivers:
+  <https://github.com/owntone/owntone-server/blob/4fa5dccfb69622f42e77bd05628034a69a567d57/src/outputs/airplay.c>.
+- MIT pyatv `b277a4c8222ecdcbaab8a24e3e713ca44765adb4`,
+  `pyatv/protocols/raop/protocols/airplayv2.py` advertises NTP timing, realtime
+  type 96, and the 11025..88200-frame latency range; `stream_client.py`
+  documents the RTP/sync relationship already implemented by the imported sender:
+  <https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/raop/protocols/airplayv2.py>
+  and
+  <https://github.com/postlund/pyatv/blob/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/raop/stream_client.py>.
+
+GluSpot's separate `native/airplay_sender/group_sender_tests.cpp` authenticates
+two cryptographic fake receivers at different times, independently decrypts their
+different-key ALAC streams and compares their identical PCM/RTP/NTP presentation
+mapping. It covers future start barriers, malformed/duplicate/skipped/late packet
+rejection, monotonic timing replies, retransmission, session reset and feedback/
+event maintenance while setup-ready. Packet-arrival coincidence alone is never
+used to assert synchronization. This establishes the coordinated wire contract,
+not acoustic alignment of physical HomePods, Bluetooth transport latency, or
+Apple Home stereo-pair/group-leader support. Those require separate device
+evidence. No PTP service or receiver acoustic feedback is fabricated here.
+
+The additional `meaningfulSamplesSent` counter counts final PCM16 samples whose
+absolute value is greater than one, saturating after the same UDP handoff as
+`nonzeroSamplesSent`. A Windows music-session mute probe suppressed the actual
+music while leaving +/-1 LSB mixer dither, so nonzero samples alone are too weak
+to certify flowing music. The original nonzero counter is retained as separate
+diagnostic evidence. Cryptographic fake receivers independently decode a dither
+packet (nonzero but no meaningful samples), then meaningful positive/negative
+samples, and verify exact cumulative counts and restart isolation. These are
+signal thresholds, not acoustic or receiver playback proof.
+
+GluSpot's own group host and shared source-clock conditioner live outside this
+vendored tree in `native/airplay_sender/group_main.cpp/.h`. The host uses one
+verified music-process capture, one bounded final-PCM history, one shared small
+rate correction for capture-clock drift, and independent encrypted sessions.
+All output members see the same conditioned source-frame indices. No OwnTone,
+libairptp or other GPL source was incorporated by this group implementation.
+
+The group host separately guards receiver liveness from setup readiness onward.
+A receiver must advance its successful authenticated feedback count within ten
+steady-clock seconds. Rejected replies, outgoing packets, skipped feedback and
+encrypted event acknowledgements cannot refresh that deadline. One failed
+member stops the complete group, including while other members are still
+pairing. This does not alter the ordinary sender's feedback policy. The group's
+cryptographic fake tests preserve a healthy 65-second ready barrier, then cover
+both unarmed and armed receivers that keep TCP/event traffic open while feedback
+replies are blackholed, plus repeatedly rejected feedback. These tests validate
+bounded session-loss detection; they do not establish receiver acoustic output.

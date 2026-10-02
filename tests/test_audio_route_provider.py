@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
@@ -33,6 +34,14 @@ class _Controller:
 
     def select(self, identity):
         self.calls.append(("select", identity))
+        return not self.closed
+
+    def toggle(self, identity):
+        self.calls.append(("toggle", identity))
+        return not self.closed
+
+    def set_music_source(self, source_app_id):
+        self.calls.append(("source", source_app_id))
         return not self.closed
 
     def set_volume(self, identity, volume):
@@ -80,6 +89,66 @@ class AudioRouteProviderTests(unittest.TestCase):
             provider.close_audio_outputs()
         factory.assert_not_called()
         self.assertEqual(saved, {})
+
+    def test_group_toggle_forwards_exact_selected_session_identity_and_reuses_controller(self):
+        provider, saved = self._provider({"v2_airplay_sender_id": "02:11:22:33:44:55"})
+        data = EmptyIslandDataProvider().get_visual_data()
+        provider._last_data = replace(data, track=replace(data.track,
+            source_app="网易云音乐", source_app_id="D:\\Apps\\CloudMusic\\cloudmusic.exe"))
+        with patch("api.audio_route_controller.AudioRouteController", side_effect=_Controller) as factory:
+            self.assertTrue(provider.toggle_audio_output("homepod-a"))
+            self.assertTrue(provider.toggle_audio_output("bluetooth-b"))
+        factory.assert_called_once()
+        controller = provider._audio_route_controller
+        self.assertEqual(controller.calls, [("source", "D:\\Apps\\CloudMusic\\cloudmusic.exe"),
+                                            ("toggle", "homepod-a"), ("toggle", "bluetooth-b")])
+        self.assertFalse(any("网易云音乐" in call for call in controller.calls))
+
+    def test_initial_source_forward_cannot_replace_a_newer_concurrent_media_delivery(self):
+        provider, _saved = self._provider({"v2_airplay_sender_id": "02:11:22:33:44:55"})
+        empty = EmptyIslandDataProvider().get_visual_data()
+        first = replace(empty, track=replace(empty.track, source_app_id="first.exe"))
+        newer = replace(empty, track=replace(empty.track, source_app_id="second.exe"))
+        provider._last_data = first
+        provider._advance_delayed_media_sample = lambda data, _now: data
+        provider._stabilize_incoming_position = lambda data, _now: data
+        provider._apply_recent_local_seek_to_visual_data = lambda data, _now: data
+        provider._refresh_future = Future()
+        provider._refresh_future.set_result(newer)
+        entered, release, newer_published = threading.Event(), threading.Event(), threading.Event()
+        controller = _Controller()
+
+        def forward(identity):
+            if identity == "first.exe":
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise RuntimeError("initial source forwarding timed out")
+            controller.calls.append(("source", identity))
+
+        controller.set_music_source = forward
+        stable = provider._stabilize_incoming_position
+
+        def publish_newer(data, now):
+            newer_published.set()
+            return stable(data, now)
+
+        provider._stabilize_incoming_position = publish_newer
+        with patch("api.audio_route_controller.AudioRouteController", return_value=controller):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                started = executor.submit(provider.start_audio_outputs)
+                self.assertTrue(entered.wait(timeout=1))
+                consumed = executor.submit(provider._consume_current_refresh_future, 100)
+                self.assertTrue(newer_published.wait(timeout=1))
+                deadline = time.monotonic() + 1
+                while provider._last_data is not newer and time.monotonic() < deadline:
+                    time.sleep(.001)
+                self.assertIs(provider._last_data, newer)
+                self.assertFalse(consumed.done())  # It waits behind initial forwarding.
+                release.set()
+                self.assertIs(started.result(timeout=2), controller)
+                consumed.result(timeout=2)
+        self.assertEqual(controller.calls, [("source", "first.exe"), ("source", "second.exe")])
+        self.assertIs(provider._last_data, newer)
 
     def test_first_start_generates_one_persistent_local_sender_id(self):
         provider, saved = self._provider()

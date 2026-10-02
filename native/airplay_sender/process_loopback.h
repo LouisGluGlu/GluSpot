@@ -7,6 +7,7 @@
 #include <audioclient.h>
 #include <wrl/client.h>
 #include <atomic>
+#include <cstdint>
 
 namespace gluspot {
 
@@ -21,9 +22,10 @@ static_assert(sizeof(ProcessActivationParams) == 12);
 
 class ProcessActivation final : public IActivateAudioInterfaceCompletionHandler, public IAgileObject {
 public:
-    ProcessActivation() {
+    ProcessActivation(DWORD targetProcessId = 0, bool includeProcessTree = false) {
         event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        params_.targetProcessId = GetCurrentProcessId();
+        params_.targetProcessId = targetProcessId ? targetProcessId : GetCurrentProcessId();
+        params_.processLoopbackMode = includeProcessTree ? 0 : 1;
         property_.vt = VT_BLOB;
         property_.blob.cbSize = sizeof(params_);
         property_.blob.pBlobData = reinterpret_cast<BYTE*>(&params_);
@@ -75,7 +77,9 @@ private:
     Microsoft::WRL::ComPtr<IAudioClient> client_;
 };
 
-inline HRESULT activateProcessLoopback(HANDLE stopEvent, Microsoft::WRL::ComPtr<IAudioClient>& client) {
+inline HRESULT activateProcessLoopback(HANDLE stopEvent, Microsoft::WRL::ComPtr<IAudioClient>& client,
+                                      DWORD targetProcessId = 0, bool includeProcessTree = false) {
+    if (includeProcessTree && !targetProcessId) return E_INVALIDARG;
     // Load only the OS library. Dynamic lookup keeps the ordinary endpoint path
     // usable on systems without process-loopback support.
     static HMODULE audioLibrary = LoadLibraryExW(L"mmdevapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -85,7 +89,7 @@ inline HRESULT activateProcessLoopback(HANDLE stopEvent, Microsoft::WRL::ComPtr<
     const auto activate = reinterpret_cast<Activate>(GetProcAddress(audioLibrary, "ActivateAudioInterfaceAsync"));
     if (!activate) return E_NOTIMPL;
     Microsoft::WRL::ComPtr<ProcessActivation> handler;
-    handler.Attach(new ProcessActivation());
+    handler.Attach(new ProcessActivation(targetProcessId, includeProcessTree));
     if (!handler->valid()) return HRESULT_FROM_WIN32(GetLastError());
     Microsoft::WRL::ComPtr<IActivateAudioInterfaceAsyncOperation> operation;
     handler->AddRef(); // Owned until callback or synchronous activation failure.
