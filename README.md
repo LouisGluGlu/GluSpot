@@ -7,13 +7,13 @@ This README is the canonical product, implementation, release-readiness, and pen
 ## Current Status
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.407`.
-- The group-output development package passed frozen acceptance; audible alignment and physical multi-HomePod checks remain pending.
+- Current test-build version: `6.408`.
+- The preceding 6.407 group-output package passed frozen acceptance; the user confirmed basic HomePod mini + M6 audible alignment. The 6.408 follow-up package is being verified; physical multi-HomePod checks remain pending.
 - Development state: internal alpha / test build, not ready for paid Steam release.
 - Runnable app: `local/main.py`, or `launch.bat`.
 - Main UI surface: the V2 island only.
 - Test baseline command: `python -m unittest discover tests -v`.
-- Release blocker level: the 6.407 development package passed frozen acceptance, and a 90.078-second music-only HomePod mini + M6 transport/render/restoration check passed. Multi-HomePod hardware, acoustic alignment and app-restart recovery remain unverified. Signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
+- Release blocker level: the preceding 6.407 development package passed frozen acceptance, and a 90.078-second music-only HomePod mini + M6 transport/render/restoration check passed. A separate 15.032-second replay received the user's confirmation that both speakers sounded basically synchronized. Multi-HomePod hardware, precise acoustic offset, long-session hardware drift and app-restart recovery remain unverified. Signing, installer/update flow, Steamworks integration, real-desktop QA, performance profiling, and copyright-safe lyrics/data policy are still required before public paid release.
 
 ## Run
 
@@ -23,7 +23,7 @@ If dependencies are missing, run `setup-env.bat` once, then launch again. Runtim
 
 ## Windows Test Build
 
-GluSpot 6.407 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
+GluSpot 6.408 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
 
 Build from the project root:
 
@@ -34,12 +34,12 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.407\GluSpot.exe
+release\GluSpot-6.408\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It is not an installer, does not include Steamworks ownership validation, and should not be treated as a public release artifact.
 
-`GluSpot-6.407` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
+`GluSpot-6.408` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
 
 Known Windows test-build caveats:
 
@@ -59,7 +59,7 @@ Known Windows test-build caveats:
 ## Naming And Assets
 
 - `GluSpot` is the product name, app name, startup task/app ID, runtime lock namespace, and settings namespace.
-- The current app version is `6.407`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
+- The current app version is `6.408`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
 - `assets/brand/` stores the generated GluSpot PNG and ICO brand assets.
 - User-selected global icons are copied into the GluSpot settings data directory under `icons/` and saved as PNG plus ICO.
 - `assets/logos/` stores TIME reminder SVG assets. The old root-level `logos/` folder has been removed.
@@ -197,7 +197,7 @@ The Apache-2.0 sender is pinned with provenance and notices; restricted AirSonic
 
 ## Completeness Assessment
 
-Version 6.407 passed development package checks and a controlled HomePod mini + M6 transport/render/restoration check. Full multi-device acceptance and public release readiness remain pending.
+The preceding 6.407 package passed development checks and controlled HomePod mini + M6 transport/render/restoration checks, with the user confirming basic audible alignment. The 6.408 follow-up verification is in progress. Full multi-device acceptance and public release readiness remain pending.
 
 | Area | Assessment | Notes |
 | --- | --- | --- |
@@ -206,7 +206,7 @@ Version 6.407 passed development package checks and a controlled HomePod mini + 
 | Media and lyric integration | Partially complete | Generic Windows media is the baseline. NetEase, BetterNCM, QQ, Qishui, and Kugou paths are optional profile attachments that still need real-app QA. |
 | Plugins and notifications | Partially complete | TIME is the active default. Weather and agenda code exist, but both still need real-world validation before normal-user enablement. |
 | Settings and startup | Mostly complete for alpha | Settings pages and startup modes exist. Clean-account startup and first-launch migration still need manual verification. |
-| Packaging | 6.407 development onedir verified | The package passed frozen dependency/device/capture/group-dispatch acceptance, including execution of new group modules. Packaged helper, output icons, provenance and version resources were verified. Output is `release\GluSpot-6.407\GluSpot.exe`. Signing, installer/update behavior, distribution hardening and actual group UI/playback acceptance remain blockers. |
+| Packaging | 6.408 follow-up verification in progress | The preceding 6.407 package passed frozen dependency/device/capture/group-dispatch acceptance, including execution of new group modules. The 6.408 output is `release\GluSpot-6.408\GluSpot.exe`. Signing, installer/update behavior, distribution hardening and wider group UI/playback acceptance remain blockers. |
 | Release operations | Incomplete | Steamworks, SteamPipe, crash/support diagnostics, copyright/data audit, and multi-machine QA remain blockers. |
 
 Overall project completeness: about 75% for an internal alpha/testable Windows desktop app, about 45% for a public paid Windows release, and about 30% for a Steam-ready release pipeline.
@@ -216,7 +216,7 @@ Overall project completeness: about 75% for an internal alpha/testable Windows d
 Current assessment:
 
 - Stability: strong automated behavior coverage, but not enough manual desktop coverage for a public paid release.
-- Completeness: internal alpha; 6.407 development package validation and controlled mixed-output transport/restoration passed. Acoustic and multi-HomePod acceptance remains pending. Not Steam-ready yet.
+- Completeness: internal alpha; preceding development package validation and controlled mixed-output transport/restoration passed, with basic audible alignment confirmed by the user. The 6.408 follow-up verification and wider multi-HomePod acceptance remain pending. Not Steam-ready yet.
 - Performance: the music surface has a repeatable synthetic Qt raster benchmark, but real-desktop FPS, cold-start time, memory/CPU use, and long-running behavior still need measured reports.
 
 Steam release requirements still pending:
@@ -231,7 +231,7 @@ Steam release requirements still pending:
 
 ## Current Branch Fixes
 
-- Levels 3–4 development is active on isolated branch `codex/audio-homepod-level3-4`: synchronized multiple HomePods and delayed Windows/Bluetooth music playback, restricted to the selected music process tree. Shared RTP/NTP/PCM sending, menu multi-selection, independent volume, guarded spare-output app routing and continuous clock correction are implemented. A 90.078-second HomePod mini + M6 check completed with no capture drops or local underruns, then restored the music app's actual M6 stream and original output policies. The 6.407 internal package passed frozen acceptance and 2910 Python tests; audible alignment still needs the user's listening assessment, and actual multi-HomePod listening needs another HomePod. See [group synchronization evidence and remaining gates](docs/audio-group-sync.md). These stages are not yet fully verified.
+- Levels 3–4 development is active on isolated branch `codex/audio-homepod-level3-4`: synchronized multiple HomePods and delayed Windows/Bluetooth music playback, restricted to the selected music process tree. Shared RTP/NTP/PCM sending, menu multi-selection, independent volume, guarded spare-output app routing and continuous clock correction are implemented. A 90.078-second HomePod mini + M6 check completed with no capture drops or local underruns, then restored the music app's actual M6 stream and original output policies. In a separate 15.032-second replay, the user confirmed “两边都出声，基本同步”. The 6.408 follow-up adds confirmed membership checkmarks, a group stop label and paused-route recovery handling. A three-hour PCM clock-drift model and encrypted dual-receiver pause/resume tests passed; actual multi-HomePod listening needs another HomePod. See [group synchronization evidence and remaining gates](docs/audio-group-sync.md). These stages are not yet fully verified across hardware and topology configurations.
 - October 2 HomePod silent-start repair / 6.406: muted Realtek endpoint loopback produced zero PCM despite active computer playback. Exclusive casting now prefers native Windows process loopback, covering all computer application playback as authorized for the current single-receiver stage, with endpoint fallback when the API is unavailable. Local mute ownership, receiver volume and default-device guards remain in place. Streaming requires fresh nonzero capture and nonzero sent PCM; bounded signal diagnostics report a silent source and recovery without restarting the cast. The 90.032-second Realtek-to-HomePod mini cast passed, the user confirmed normal sound with only HomePod audible, and the full suites and frozen package checks passed; details and compatibility limits are recorded below.
 - October 2 audio chooser / 6.405: the output, translation, β, and window/island controls use the user's circular reference and supplied SVG icons with bounded Qt caches. The chooser uses a cached frosted music backdrop, compact device rows, confirmed inline volume, and a temporary **＋** manual-IP dialog. The prior advanced section, permanent IP field, manual lyric-delay slider, and automation switch are removed. Sender-buffer compensation remains automatic for every cast, including migrated manual settings. Windows volume changes are read back; authenticated HomePod volume is published only from receiver evidence, and command failure leaves healthy casting/mute ownership intact. UI screenshots are native Qt fixtures; HomePod volume and new multi-song alignment still require hardware QA. Final verification passed 2760 Python tests, six native suites, and the frozen package acceptance check; details and limits are recorded below.
 - October 2 / 6.404 verification: 2720 Python tests passed in 78.577 seconds; five native suites, Python compilation and whitespace checks passed. The 6.404 onedir package passed its explicit acceptance check; native helper, provenance, LGPL source and replaceable discovery files were verified. Native Qt fixtures retain intermediate scrolling poses and accessible compact-menu controls. This version still needs a new multi-song HomePod listening check for actual lyric/audio alignment; the October 1 90-second hardware confirmation belongs to 6.403.
@@ -374,7 +374,7 @@ Steam release requirements still pending:
 - `assets/logos/`: TIME reminder SVG assets.
 - `assets/music_controls/`: playback control SVG assets.
 - `GluSpot.spec`: PyInstaller `onedir` test-build definition.
-- `build-exe.bat`: repeatable Windows test-build command for version 6.407.
+- `build-exe.bat`: repeatable Windows test-build command for version 6.408.
 - `packaging/windows/version_info.txt`: Windows executable version metadata.
 - `tests/`: behavior tests.
 

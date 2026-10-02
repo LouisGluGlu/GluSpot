@@ -439,7 +439,7 @@ void testSharedCaptureClockConditionerContinuityAndDrift() {
     const std::vector<int16_t> seed(gluspot::GroupPcmConditioner::targetQueueFrames * 2, 1200);
     REQUIRE(drifting.feed(seed), "drift model primes the common target queue");
     uint64_t extraFrames = 0;
-    // Model a source 0.17% faster than the group clock. One shared correction
+    // Model a source about 0.057% faster than the group clock. One shared correction
     // must consume that rate without growing an unbounded FIFO or losing data.
     for (size_t packet = 0; packet < 14000; ++packet) {
         const auto extra = packet % 5 == 0 ? 1u : 0u;
@@ -461,6 +461,201 @@ void testSharedCaptureClockConditionerContinuityAndDrift() {
     empty.packet(output);
     CHECK(std::all_of(output.begin(), output.end(), [](int16_t value) { return value == -2000; }),
           "resume reads new source PCM continuously without old audio or synthetic timeline seek");
+}
+
+void testThreeHourSharedCaptureClockDrift() {
+    g_test = "GluSpot three simulated hours of shared capture-clock drift";
+    gluspot::GroupPcmConditioner conditioner;
+    const std::vector<int16_t> lead(gluspot::GroupPcmConditioner::targetQueueFrames * 2, 1800);
+    REQUIRE(conditioner.feed(lead), "long-running actual conditioner starts with one bounded capture lead");
+    std::array<int16_t, 706> input;
+    input.fill(1800);
+    std::array<int16_t, 704> output{};
+    constexpr uint64_t hourFrames = 44100ULL * 3600;
+    constexpr uint64_t totalFrames = hourFrames * 3;
+    int64_t captureFraction = 0;
+    uint64_t frameIndex = 0, acceptedFrames = lead.size() / 2;
+    size_t minimumQueue = lead.size() / 2, maximumQueue = minimumQueue;
+    bool fed = true, slewBounded = true, rateBounded = true, audioPreserved = true;
+    double previousRatio = conditioner.ratio();
+    const auto began = Clock::now();
+    for (; frameIndex + 352 <= totalFrames; frameIndex += 352) {
+        // Exact integer-clock simulation, rather than rounding each packet's
+        // ppm error away: one hour +1700 ppm, one -1700, then one +1000.
+        const auto hour = frameIndex / hourFrames;
+        const int ppm = hour == 0 ? 1700 : hour == 1 ? -1700 : 1000;
+        captureFraction += int64_t(352) * ppm;
+        const int64_t extra = captureFraction / 1000000;
+        captureFraction -= extra * 1000000;
+        const size_t sourceFrames = size_t(352 + extra);
+        if (!conditioner.feed(std::span<const int16_t>(input.data(), sourceFrames * 2))) { fed = false; break; }
+        acceptedFrames += sourceFrames;
+        conditioner.packet(output);
+        const auto ratio = conditioner.ratio();
+        const auto queued = conditioner.queuedFrames();
+        minimumQueue = std::min(minimumQueue, queued); maximumQueue = std::max(maximumQueue, queued);
+        slewBounded = slewBounded && std::abs(ratio - previousRatio) <= .00001000001;
+        rateBounded = rateBounded && ratio >= .998 && ratio <= 1.002;
+        audioPreserved = audioPreserved && output.front() == 1800 && output.back() == 1800;
+        previousRatio = ratio;
+        if (frameIndex % (352 * 7517ULL) == 0 && frameIndex % hourFrames > 44100ULL * 300) {
+            CHECK(std::abs(ratio - (1.0 + double(ppm) / 1000000)) < .000005,
+                  "one shared conditioner converges to the actual capture clock in either drift direction");
+        }
+    }
+    CHECK(fed && frameIndex >= totalFrames - 352 && acceptedFrames > frameIndex,
+          "three hours consume actual PCM packets with exact positive/negative source-clock error");
+    CHECK(minimumQueue > 4000 && maximumQueue < 9000 && conditioner.paddedFrames() == 0,
+          "multi-hour rate reversals retain bounded real source lead without starvation or whole-frame skips");
+    CHECK(slewBounded && rateBounded && audioPreserved,
+          "clock correction stays continuous and within 2000 ppm while preserving the actual constant source");
+    std::printf("Three-hour shared conditioner: queue %zu..%zu frames; wall %.3f s\n", minimumQueue, maximumQueue,
+        std::chrono::duration<double>(Clock::now() - began).count());
+}
+
+void testTwoReceiversPauseSilenceResumeOnOneTimeline() {
+    for (const bool captureStarves : {false, true}) {
+        g_test = captureStarves ? "GluSpot capture starvation resumes on the same two-receiver timeline"
+                               : "GluSpot captured pause silence resumes on the same two-receiver timeline";
+        Clock::time_point now{std::chrono::seconds(2000)};
+        Rig a, b;
+        for (auto* rig : {&a, &b}) {
+            rig->sender->setClock([&now] { return now; });
+            rig->sender->setCoordinatedPlayback(true); rig->sender->setPreserveReceiverVolume(true);
+            runAp2Handshake(*rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+            REQUIRE(rig->launchedOk && *rig->launchedOk, "pause/resume receivers each authenticate once");
+            rig->fillRingRamp(2500, rig == &a ? 27 : 991);
+        }
+        const auto ringA = a.ring.availableRead(), ringB = b.ring.availableRead();
+        const auto start = now;
+        const uint64_t anchor = 0xE033221144556677ULL;
+        for (auto* rig : {&a, &b}) {
+            REQUIRE(rig->sender->armCoordinatedTimeline(start, anchor), "one shared timeline is armed once before music");
+            rig->io.takeUdp();
+        }
+        gluspot::GroupPcmConditioner conditioner;
+        const std::vector<int16_t> lead(gluspot::GroupPcmConditioner::targetQueueFrames * 2, 1200);
+        REQUIRE(conditioner.feed(lead), "the shared music source has its initial capture lead");
+        auto history = std::make_unique<gluspot::GroupPcmHistory>();
+        std::array<int16_t, 704> input{}, finalPcm{}, localPcm{};
+        uint16_t firstA = 0, firstB = 0;
+        size_t silentPackets = 0, resumedPackets = 0;
+        constexpr size_t musicPackets = 125, pausePackets = 250, totalPackets = 500;
+        for (size_t packet = 0; packet < totalPackets; ++packet) {
+            const uint64_t frameIndex = packet * 352;
+            now = start + std::chrono::nanoseconds(frameIndex * 1000000000ULL / 44100);
+            for (auto* rig : {&a, &b}) { rig->sender->tick(); rig->exchange(); }
+            auto clockPacketsA = a.io.takeUdp(), clockPacketsB = b.io.takeUdp();
+            CHECK(std::none_of(clockPacketsA.begin(), clockPacketsA.end(), [](const auto& datagram) { return datagram.s == RaopUdp::Audio; }) &&
+                  std::none_of(clockPacketsB.begin(), clockPacketsB.end(), [](const auto& datagram) { return datagram.s == RaopUdp::Audio; }),
+                  "independent receiver ticks cannot invent PCM during music, pause or resume");
+            clockPacketsA.erase(std::remove_if(clockPacketsA.begin(), clockPacketsA.end(),
+                [](const auto& datagram) { return datagram.s != RaopUdp::Control; }), clockPacketsA.end());
+            clockPacketsB.erase(std::remove_if(clockPacketsB.begin(), clockPacketsB.end(),
+                [](const auto& datagram) { return datagram.s != RaopUdp::Control; }), clockPacketsB.end());
+            CHECK(clockPacketsA.size() == clockPacketsB.size(), "both paused/resumed receivers retain the same sync cadence");
+            if (!clockPacketsA.empty()) {
+                REQUIRE(clockPacketsA.size() == 1, "one periodic shared sync is emitted at a due host tick");
+                CHECK(clockPacketsA.front().data == clockPacketsB.front().data &&
+                      wire64(clockPacketsA.front().data, 8) == anchor + sampleNtp(frameIndex) &&
+                      be32(clockPacketsA.front().data, 4) == frameIndex,
+                      "periodic sync maps the same continuous music/silence/resume source index to the original NTP origin");
+            }
+            const bool paused = packet >= musicPackets && packet < musicPackets + pausePackets;
+            input.fill(paused ? 0 : packet < musicPackets ? 1200 : 3200);
+            if (!paused || !captureStarves)
+                REQUIRE(conditioner.feed(input), "bounded shared capture accepts the actual source packet or captured silence");
+            conditioner.packet(finalPcm);
+            REQUIRE(history->append(frameIndex, finalPcm) && history->pull(frameIndex, localPcm),
+                    "local render history receives the same single conditioned PCM packet");
+            REQUIRE(a.sender->sendCoordinatedAudio(frameIndex, finalPcm) && b.sender->sendCoordinatedAudio(frameIndex, finalPcm),
+                    "each output receives a contiguous source index including pause silence");
+            const auto pa = packetsOf(a, RaopUdp::Audio), pb = packetsOf(b, RaopUdp::Audio);
+            REQUIRE(pa.size() == 1 && pb.size() == 1, "pause/resume fan-out emits exactly one packet per receiver");
+            const auto decodedA = a.rx.decodeAudio(pa.front().data), decodedB = b.rx.decodeAudio(pb.front().data);
+            REQUIRE(decodedA && decodedB, "both differently keyed receivers independently decode emitted PCM");
+            CHECK(*decodedA == *decodedB && std::equal(decodedA->begin(), decodedA->end(), localPcm.begin()),
+                  "both network sessions and local history contain the identical final PCM on pause/resume");
+            if (!packet) { firstA = be16(pa.front().data, 2); firstB = be16(pb.front().data, 2); }
+            CHECK(be16(pa.front().data, 2) == uint16_t(firstA + packet) && be16(pb.front().data, 2) == uint16_t(firstB + packet) &&
+                  be32(pa.front().data, 4) == 66150 + frameIndex && be32(pb.front().data, 4) == 66150 + frameIndex,
+                  "pause/resume preserves continuous sequence and the original shared presentation mapping");
+            CHECK(uint8_t(pa.front().data[1]) == (packet ? 0x60 : 0xE0) && uint8_t(pb.front().data[1]) == (packet ? 0x60 : 0xE0),
+                  "resume does not re-mark a session or invent a new RTP origin");
+            if (packet >= musicPackets + 30 && packet < musicPackets + pausePackets) {
+                CHECK(std::all_of(decodedA->begin(), decodedA->end(), [](int16_t value) { return value == 0; }),
+                      "after draining the bounded music lead both physical packet payloads are actual silence");
+                ++silentPackets;
+            }
+            if (packet >= musicPackets + pausePackets + 30) {
+                CHECK(std::all_of(decodedA->begin(), decodedA->end(), [](int16_t value) { return value == 3200; }),
+                      "resumed music reaches every output without reconnecting or replaying pre-pause music");
+                ++resumedPackets;
+            }
+        }
+        CHECK(silentPackets == 220 && resumedPackets == 95 && a.launchedCount == 1 && b.launchedCount == 1 &&
+              a.sender->active() && b.sender->active() && a.ring.availableRead() == ringA && b.ring.availableRead() == ringB,
+              "one original session survives music/silence/resume without per-receiver ring consumption");
+        CHECK(captureStarves ? conditioner.paddedFrames() > 0 : conditioner.paddedFrames() == 0,
+              "explicit shared padding is distinguishable from genuinely captured pause silence");
+        a.sender->stop(); b.sender->stop();
+    }
+}
+
+void testTwoReceiverBoundedHostCatchupPreservesSourcePackets() {
+    g_test = "GluSpot bounded host catch-up preserves both receiver PCM timelines";
+    Clock::time_point now{std::chrono::seconds(3000)};
+    Rig a, b;
+    for (auto* rig : {&a, &b}) {
+        rig->sender->setClock([&now] { return now; });
+        rig->sender->setCoordinatedPlayback(true); rig->sender->setPreserveReceiverVolume(true);
+        runAp2Handshake(*rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+        REQUIRE(rig->launchedOk && *rig->launchedOk && rig->sender->armCoordinatedTimeline(now, 0xE044556677889900ULL),
+                "catch-up receivers start on one authenticated timeline");
+        rig->io.takeUdp();
+    }
+    const auto start = now;
+    gluspot::GroupPcmConditioner conditioner;
+    const auto lead = rampExpect(gluspot::GroupPcmConditioner::targetQueueFrames * 2, 24);
+    REQUIRE(conditioner.feed(lead), "actual bounded shared PCM queue is primed before the host stall");
+    uint64_t nextFrame = 0;
+    size_t packets = 0;
+    uint16_t firstA = 0, firstB = 0;
+    auto sendNext = [&] {
+        std::array<int16_t, 704> pcm{};
+        conditioner.packet(pcm);
+        REQUIRE(a.sender->sendCoordinatedAudio(nextFrame, pcm) && b.sender->sendCoordinatedAudio(nextFrame, pcm),
+                "late but not expired source packet reaches every member contiguously");
+        const auto pa = packetsOf(a, RaopUdp::Audio), pb = packetsOf(b, RaopUdp::Audio);
+        REQUIRE(pa.size() == 1 && pb.size() == 1, "catch-up still emits exactly one packet per source index per member");
+        const auto decodedA = a.rx.decodeAudio(pa.front().data), decodedB = b.rx.decodeAudio(pb.front().data);
+        CHECK(decodedA && decodedB && *decodedA == *decodedB && std::equal(decodedA->begin(), decodedA->end(), pcm.begin()),
+              "catch-up shares the actual conditioned source packet, without independent per-member resampling");
+        if (!packets) { firstA = be16(pa.front().data, 2); firstB = be16(pb.front().data, 2); }
+        CHECK(be16(pa.front().data, 2) == uint16_t(firstA + packets) && be16(pb.front().data, 2) == uint16_t(firstB + packets) &&
+              be32(pa.front().data, 4) == 66150 + nextFrame && be32(pb.front().data, 4) == 66150 + nextFrame,
+              "same-time catch-up burst preserves original sequential packet and presentation indices");
+        ++packets; nextFrame += 352;
+    };
+    sendNext();
+    now += std::chrono::milliseconds(35);
+    for (auto* rig : {&a, &b}) { rig->sender->tick(); rig->exchange(); }
+    CHECK(a.io.takeUdp().empty() && b.io.takeUdp().empty(), "a 35 ms host stall cannot trigger any independent sender pacer");
+    const uint64_t dueFrame = 35ULL * 44100 / 1000;
+    REQUIRE(conditioner.feed(std::vector<int16_t>(size_t(dueFrame) * 2, 3300)),
+            "capture accumulated during the stall stays within the shared queue bound");
+    int burst = 0;
+    while (nextFrame <= dueFrame && burst++ < 8) sendNext();
+    CHECK(packets == 5 && burst == 4 && nextFrame > dueFrame && conditioner.paddedFrames() == 0,
+          "four retained source packets catch up within the host's eight-packet budget without skips or padding");
+    const auto beforeA = a.sender->diagnostics().audioFramesSent, beforeB = b.sender->diagnostics().audioFramesSent;
+    now = start + std::chrono::seconds(2);
+    const auto pcm = rampExpect(704, 311);
+    CHECK(!a.sender->sendCoordinatedAudio(nextFrame, pcm) && !b.sender->sendCoordinatedAudio(nextFrame, pcm) &&
+          a.sender->diagnostics().audioFramesSent == beforeA && b.sender->diagnostics().audioFramesSent == beforeB &&
+          a.io.takeUdp().empty() && b.io.takeUdp().empty(),
+          "a source packet already past presentation is rejected for the entire group without rewriting the timeline");
+    a.sender->stop(); b.sender->stop();
 }
 
 void testDitherTransportNeverCertifiesMusic() {
@@ -504,6 +699,9 @@ int main() {
     testGroupArgumentIdentityAndCommandIsolation();
     testSharedHistoryArbitraryRenderRangesAndRetention();
     testSharedCaptureClockConditionerContinuityAndDrift();
+    testThreeHourSharedCaptureClockDrift();
+    testTwoReceiversPauseSilenceResumeOnOneTimeline();
+    testTwoReceiverBoundedHostCatchupPreservesSourcePackets();
     testDitherTransportNeverCertifiesMusic();
     std::printf("GluSpot group sender: %d/%d checks passed\n", g_checks - g_failures, g_checks);
     return g_failures ? 1 : 0;

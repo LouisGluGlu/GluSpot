@@ -24,6 +24,7 @@ class Adapter:
         self.routes = {(30, 0): "", (30, 1): "old-role-one"}
         self.writes, self.closed = [], []
         self.owners = (("bt", 30, True, False),)
+        self.states = None
         self.fail_role = None
         self.confirm = True
         self.journal = None
@@ -58,6 +59,9 @@ class Adapter:
     def active_owners(self):
         return self.owners
 
+    def session_owners(self):
+        return self.states if self.states is not None else tuple((*owner, 1) for owner in self.owners)
+
 
 class AppRouteTests(unittest.TestCase):
     def setUp(self):
@@ -71,7 +75,9 @@ class AppRouteTests(unittest.TestCase):
             if value == _PREFIX + "bt" + _RENDER_SUFFIX and self.current is not None and self.current.process_id == 30:
                 self.current = source("bt")
         self.adapter.on_set = restore_effective
-        self.devices = SimpleNamespace(list_outputs=lambda: (SimpleNamespace(id="bt"), SimpleNamespace(id="spare")))
+        self.default_endpoint = "bt"
+        self.devices = SimpleNamespace(list_outputs=lambda: (SimpleNamespace(id="bt", is_default=self.default_endpoint == "bt"),
+                                                             SimpleNamespace(id="spare", is_default=self.default_endpoint == "spare")))
         self.backend = WindowsAppAudioRoutes(devices=self.devices, adapter=self.adapter,
                                             resolver=lambda app: self.current, journal_path=self.journal)
         self.addCleanup(self.close_backend, self.backend)
@@ -361,6 +367,257 @@ class AppRouteTests(unittest.TestCase):
         guard.restore(timeout=0)
         self.assertFalse(self.journal.exists())
 
+    def pause_source(self, *, single=False):
+        self.current = None
+        self.adapter.owners = ()
+        self.adapter.states = (("spare", 30, single, False, 0),)
+        self.adapter.on_set = None
+
+    def paused_restore(self):
+        guard = self.prepare()
+        guard.apply()
+        self.pause_source()
+        guard.restore(timeout=0)
+        return guard
+
+    def test_pause_stop_restores_original_policies_and_releases_ownership(self):
+        guard = self.paused_restore()
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): "old-role-one"})
+        self.assertEqual(guard.restoration_state, "policy_restored_no_active_stream")
+        self.assertTrue(guard._closed)
+        self.assertEqual(self.adapter.closed, [(30, 100)])
+        self.assertIsNone(self.backend._active)
+        self.assertIsNone(self.backend._lease)
+        saved = self.backend.pending_recovery()
+        self.assertEqual(saved["stage"], "resume_verification_pending")
+        self.assertTrue(all(role["restored"] for role in saved["roles"]))
+
+    def test_paused_deferred_recovery_is_read_only_releases_lease_and_does_not_block(self):
+        self.paused_restore()
+        before = list(self.adapter.writes)
+        self.assertFalse(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertIsNone(self.backend._active)
+        self.assertIsNone(self.backend._lease)
+        self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+
+    def test_paused_close_leaves_only_observation_not_owned_route_changes(self):
+        guard = self.prepare()
+        guard.apply()
+        self.pause_source()
+        self.backend.close(timeout=0)
+        self.assertTrue(guard._closed)
+        self.assertIsNone(self.backend._lease)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): "old-role-one"})
+        self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+
+    def test_resume_at_original_endpoint_clears_observation_without_writes(self):
+        self.paused_restore()
+        self.current = source("bt")
+        self.adapter.states = (("bt", 30, True, False, 1),)
+        before = list(self.adapter.writes)
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertFalse(self.journal.exists())
+        self.assertIsNone(self.backend._lease)
+
+    def test_resume_still_on_spare_repairs_actual_stream_with_original_policy_preserved(self):
+        self.paused_restore()
+        self.current = source("spare")
+        self.adapter.states = (("spare", 30, True, False, 1),)
+        self.adapter.on_set = lambda pid, role, value: setattr(self, "current", source("bt")) if value == _PREFIX + "bt" + _RENDER_SUFFIX else None
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.current.sessions[0].endpoint_id, "bt")
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): "old-role-one"})
+        self.assertFalse(self.journal.exists())
+
+    def test_resume_external_new_policy_is_preserved_even_when_same_as_former_spare(self):
+        self.paused_restore()
+        owned = _PREFIX + "spare" + _RENDER_SUFFIX
+        self.adapter.routes[(30, 1)] = owned
+        self.current = source("spare")
+        before = list(self.adapter.writes)
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertEqual(self.adapter.routes[(30, 1)], owned)
+        self.assertFalse(self.journal.exists())
+
+    def test_none_source_requires_real_idle_session_not_absence_or_active_ambiguity(self):
+        for states in ((), (("spare", 30, True, False, 1),),
+                       (("spare", 30, False, False, 0), ("bt", 99, False, False, 1))):
+            with self.subTest(states=states):
+                guard = self.prepare()
+                guard.apply()
+                self.pause_source()
+                self.adapter.states = states
+                with self.assertRaisesRegex(RuntimeError, "has not been restored"):
+                    guard.restore(timeout=0)
+                self.assertFalse(guard._closed)
+                self.assertNotEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+                self.adapter.states = (("spare", 30, False, False, 0),)
+                guard.restore(timeout=0)
+                self.current = source("bt")
+                self.backend.recover_pending()
+
+    def test_unknown_deferred_state_cannot_write_or_clear_observation(self):
+        self.paused_restore()
+        self.adapter.states = ()
+        before = list(self.adapter.writes)
+        with self.assertRaisesRegex(RuntimeError, "no verified inactive or active stream"):
+            self.backend.recover_pending()
+        self.assertEqual(self.adapter.writes, before)
+        self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+        self.assertIsNone(self.backend._lease)
+
+    def test_deferred_new_audio_child_or_mixed_outputs_cannot_authorize_repair_writes(self):
+        self.paused_restore()
+        for fresh in (
+                replace(source("spare"), session_process_ids=(31,), sessions=(AudioSessionEvidence("spare", 31, "s31", "i31"),)),
+                replace(source("spare"), sessions=(*source("spare").sessions, AudioSessionEvidence("bt", 30, "s30-other", "i30-other")))):
+            with self.subTest(source=fresh):
+                self.current = fresh
+                self.adapter.identities[31] = ProcessIdentity(31, 101, r"C:\Music\renderer.exe")
+                before = list(self.adapter.writes)
+                with self.assertRaisesRegex(RuntimeError, "changed audio owners or ambiguous"):
+                    self.backend.recover_pending()
+                self.assertEqual(self.adapter.writes, before)
+                self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+                self.assertIsNone(self.backend._lease)
+
+    def test_deferred_paused_pid_reuse_cannot_be_treated_as_idle_original_source(self):
+        self.paused_restore()
+        self.adapter.identities[30] = ProcessIdentity(30, 200, r"C:\Music\cloudmusic.exe")
+        before = list(self.adapter.writes)
+        with self.assertRaisesRegex(RuntimeError, "identity changed"):
+            self.backend.recover_pending()
+        self.assertEqual(self.adapter.writes, before)
+        self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+        self.assertIsNone(self.backend._lease)
+
+    def test_active_restarted_process_does_not_inherit_old_observation_write_authority(self):
+        self.adapter.routes[(30, 1)] = ""
+        # The old initialized stream was off the global default before casting.
+        # On restart a fresh stream normally follows the unchanged default.
+        self.default_endpoint = "spare"
+        self.paused_restore()
+        self.current = source("spare", pid=40, created=200)
+        self.adapter.identities[40] = ProcessIdentity(40, 200, r"C:\Music\cloudmusic.exe")
+        self.adapter.routes.update({(40, 0): "", (40, 1): ""})
+        before = list(self.adapter.writes)
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertEqual(self.current.sessions[0].endpoint_id, "spare")
+        self.assertEqual(self.adapter.routes[(40, 0)], "")
+        self.assertEqual(self.adapter.routes[(40, 1)], "")
+        self.assertFalse(self.journal.exists())
+        self.assertIsNone(self.backend._lease)
+
+    def test_source_exit_during_pause_keeps_pending_owned_changes(self):
+        guard = self.prepare()
+        guard.apply()
+        self.pause_source()
+        self.adapter.identities.pop(30)
+        with self.assertRaisesRegex(RuntimeError, "recovery remains pending"):
+            guard.restore(timeout=0)
+        self.assertFalse(guard._closed)
+        self.assertNotEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+
+    def test_paused_new_group_can_supersede_observation_for_a_different_verified_source(self):
+        self.paused_restore()
+        new_source = replace(source("bt", pid=40, created=200), source_app_id="player.exe", process_path=r"C:\Music\player.exe")
+        self.adapter.identities[40] = ProcessIdentity(40, 200, r"C:\Music\player.exe")
+        self.adapter.routes.update({(40, 0): "", (40, 1): ""})
+        self.backend._resolver = lambda app: new_source if app == "player.exe" else None
+        new_guard = self.backend.prepare(new_source, "spare", "bt")
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(new_guard.source, new_source)
+        self.assertFalse(new_guard._closed)
+        new_guard.restore(timeout=0)
+
+    def test_prepare_refreshes_effective_source_after_consuming_resume_observation(self):
+        self.paused_restore()
+        self.current = source("spare")
+        prior_source = self.current
+        self.adapter.on_set = lambda pid, role, value: setattr(self, "current", source("bt")) if value == _PREFIX + "bt" + _RENDER_SUFFIX else None
+        guard = self.backend.prepare(prior_source, "spare", "bt")
+        self.assertTrue(all(role.original_effective_endpoint == "bt" for role in guard._roles))
+        guard.restore()
+
+    def test_forged_deferred_stage_cannot_hide_unrestored_owned_policy(self):
+        guard = self.prepare()
+        guard.apply()
+        original = json.loads(self.journal.read_text(encoding="utf-8"))
+        edited = dict(original, stage="resume_verification_pending")
+        self.journal.write_text(json.dumps(edited), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "still contains owned route writes"):
+            self.backend.pending_recovery()
+        self.journal.write_text(json.dumps(original), encoding="utf-8")
+        guard.restore()
+
+    def test_external_global_default_change_retires_default_following_observation_without_writes(self):
+        self.adapter.routes[(30, 1)] = ""
+        self.paused_restore()
+        self.default_endpoint = "spare"
+        self.current = source("spare")
+        before = list(self.adapter.writes)
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        self.assertFalse(self.journal.exists())
+        self.assertIsNone(self.backend._lease)
+
+    def test_global_default_change_does_not_erase_explicit_per_app_policy_restoration(self):
+        self.paused_restore()
+        self.default_endpoint = "spare"
+        before = list(self.adapter.writes)
+        self.assertFalse(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+
+    def test_old_default_following_observation_without_baseline_cannot_guess_repair(self):
+        self.adapter.routes[(30, 1)] = ""
+        self.paused_restore()
+        saved = json.loads(self.journal.read_text(encoding="utf-8"))
+        saved.pop("original_default_endpoint")
+        self.journal.write_text(json.dumps(saved), encoding="utf-8")
+        self.current = source("spare")
+        before = list(self.adapter.writes)
+        with self.assertRaisesRegex(RuntimeError, "no original Windows default"):
+            self.backend.recover_pending()
+        self.assertEqual(self.adapter.writes, before)
+        self.assertTrue(self.journal.exists())
+        self.assertIsNone(self.backend._lease)
+
+    def test_explicit_new_output_retires_only_returned_policy_observation(self):
+        self.paused_restore()
+        self.adapter.routes[(30, 1)] = "user-output"
+        before = list(self.adapter.writes)
+        self.assertTrue(self.backend.retire_resume_observation())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertEqual(self.adapter.routes[(30, 1)], "user-output")
+        self.assertFalse(self.journal.exists())
+        self.assertIsNone(self.backend._lease)
+        self.assertFalse(self.backend.retire_resume_observation())
+
+    def test_explicit_output_cannot_retire_live_guard_or_unreturned_write_journal(self):
+        guard = self.prepare()
+        guard.apply()
+        with self.assertRaisesRegex(RuntimeError, "still requires restoration"):
+            self.backend.retire_resume_observation()
+        self.backend.close(timeout=0)
+        # Make a standalone nondeferred recovery record without an active guard.
+        self.current = source()
+        guard = self.prepare()
+        guard.apply()
+        self.adapter.identities.pop(30)
+        self.close_backend(self.backend)
+        before = list(self.adapter.writes)
+        with self.assertRaisesRegex(RuntimeError, "still requires restoration"):
+            self.backend.retire_resume_observation()
+        self.assertEqual(self.adapter.writes, before)
+        self.assertTrue(self.journal.exists())
+        self.assertIsNone(self.backend._lease)
+
     def test_failed_live_restore_keeps_explicit_intent_journal_without_claiming_success(self):
         guard = self.prepare()
         guard.apply()
@@ -381,6 +638,16 @@ class AppRouteTests(unittest.TestCase):
         self.backend.restore_source_playback(original, timeout=0)
         self.assertEqual(self.current.sessions[0].endpoint_id, "bt")
         self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        self.assertFalse(self.journal.exists())
+
+    def test_playback_recovery_default_inventory_failure_cannot_acquire_journal_lease(self):
+        original = source("bt")
+        self.current = source("spare")
+        self.default_endpoint = "unknown"
+        with self.assertRaisesRegex(RuntimeError, "default output is not uniquely"):
+            self.backend.restore_source_playback(original, timeout=0)
+        self.assertEqual(self.adapter.writes, [])
+        self.assertIsNone(self.backend._lease)
         self.assertFalse(self.journal.exists())
 
     def test_roles_are_separate_and_communications_never_written(self):

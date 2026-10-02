@@ -215,6 +215,18 @@ class AirPlayGroupProcessTests(unittest.TestCase):
         self.assertEqual(self.sender.diagnostics()["local_output"], {})
         self.assertEqual(self.sender.receiver_volume_state("home")["known"], False)
 
+    def test_missing_helper_for_new_valid_attempt_cannot_inherit_stopped_mute_authority(self):
+        self.sender._mute_state = {"phase": "muted", "endpoint_id": "old-source",
+                                   "original_muted": False, "applied": True}
+        self.sender.needs_local_output_restore = True
+        self.sender.executable = Path(self.temp.name) / "removed-helper.exe"
+        with self.assertRaisesRegex(RuntimeError, "投放组件未安装"):
+            self.sender.start_group((HOME,), SOURCE, "source")
+        self.assertFalse(self.sender.needs_local_output_restore)
+        self.assertEqual(self.sender.diagnostics()["local_output"], {})
+        self.assertIsNone(self.sender._process)
+        self.assertIsNone(self.args)
+
     def test_real_child_stop_reaps_owned_process_and_makes_all_volume_unavailable(self):
         self._connected()
         process = self.sender._process

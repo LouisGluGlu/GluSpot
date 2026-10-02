@@ -24,6 +24,7 @@ class AudioRouteController:
     CAPTURE_SIGNAL_MAX_AGE = 2.0
     CAPTURE_SILENCE_SECONDS = 3.0
     CAPTURE_SILENCE_MESSAGE = "已连接 HomePod，暂未检测到电脑声音"
+    APP_ROUTE_RESUME_MESSAGE = "原输出设置已恢复，等待音乐继续播放"
 
     def __init__(self, backend=None, discovery=None, sender=None, *, latency_seconds=1.5,
                  start_worker=True, source_id="", auto_latency_enabled=True,
@@ -38,6 +39,8 @@ class AudioRouteController:
         self._source_resolver = source_resolver or resolve_music_audio_source
         self._app_router = app_router
         self._app_route_guard = None
+        self._resume_recovery_pending = False
+        self._next_route_recovery_at = 0.0
         self._remaining_commands = ()
         self._last_sender = self._sender
         self._group_mode = False
@@ -420,6 +423,9 @@ class AudioRouteController:
                 if app_guard is not None:
                     try:
                         app_guard.restore()
+                        if getattr(app_guard, "restoration_state", "") == "policy_restored_no_active_stream":
+                            self._resume_recovery_pending = True
+                            self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
                     except Exception:
                         self._app_route_guard = app_guard  # Retain actionable recovery ownership.
                         raise
@@ -439,11 +445,22 @@ class AudioRouteController:
         try:
             if device.transport == "windows":
                 self._backend.set_default(device.id)
-                self._publish(pending_id="", state="ready", status_message=f"已选择 {device.name}")
                 if self._refresh_devices() and any(d.id == identity and d.is_default for d in self._local_devices):
+                    # The user's confirmed new local choice supersedes only
+                    # a pure paused observation. An unreturned route write is
+                    # still recovery ownership and must never be discarded.
+                    if self._pending_app_route_stage():
+                        retire = getattr(self._app_router, "retire_resume_observation", None)
+                        if not callable(retire):
+                            raise RuntimeError("无法确认上次音乐输出恢复记录，请稍后重试")
+                        retire()
+                        if self._pending_app_route_stage():
+                            raise RuntimeError("音乐软件的上次输出恢复仍未完成")
+                        self._resume_recovery_pending = False
+                    self._publish(pending_id="", state="ready", status_message=f"已选择 {device.name}")
                     self._announce(device.name, "已切换音频输出")
                 else:
-                    self._publish(state="error", status_message="无法确认实际音频输出，请刷新后重试")
+                    self._publish(pending_id="", state="error", status_message="无法确认实际音频输出，请刷新后重试")
             else:
                 source = next((d for d in self._local_devices if d.is_default), None)
                 if source is None:
@@ -496,7 +513,7 @@ class AudioRouteController:
             if local:
                 self._select(local)
             else:
-                self._publish(state="ready", status_message="同步播放已停止")
+                self._publish_stopped("同步播放已停止")
                 self._refresh_devices()
             return
         self._begin_group(tuple(selected))
@@ -533,11 +550,35 @@ class AudioRouteController:
             return
         self._next_source_resolve_at = time.monotonic() + self.POLL_SECONDS
         try:
+            # A previous parent/helper failure may have left the player on our
+            # temporary endpoint even when this new group's source and sink
+            # already differ. Restore every durable owned route first, then
+            # resolve again: the pre-recovery session DTO is no longer valid.
+            router = self._get_app_router()
+            router.recover_pending()
+            pending_stage = self._pending_app_route_stage()
+            if pending_stage and pending_stage != "resume_verification_pending":
+                raise RuntimeError("上次音乐输出的恢复仍未完成")
+            self._resume_recovery_pending = pending_stage == "resume_verification_pending"
+            self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
+            if self._route_setup_cancelled():
+                self._cancel_group_setup()
+                return
+        except Exception as exc:
+            if self._route_setup_cancelled():
+                self._cancel_group_setup()
+                return
+            self._end_cast()
+            self._publish(state="error", status_message=f"音乐软件的上次输出尚未恢复：{str(exc)[:160]}")
+            return
+        try:
             source = self._source_resolver(self._music_source_app_id) if self._music_source_app_id else None
         except Exception:
             source = None
         if not isinstance(source, MusicAudioSource) or source.source_app_id != self._music_source_app_id:
-            self._publish(state="waiting_source", status_message="等待音乐软件播放，以确认同步播放来源")
+            message = (self.APP_ROUTE_RESUME_MESSAGE if self._resume_recovery_pending else
+                       "等待音乐软件播放，以确认同步播放来源")
+            self._publish(state="waiting_source", status_message=message)
             return
         endpoints = {session.endpoint_id for session in source.sessions}
         if len(endpoints) != 1:
@@ -556,7 +597,6 @@ class AudioRouteController:
             return
         try:
             local_endpoint = next((device.id for device in selected if device.transport == "windows"), "")
-            router = self._get_app_router()
             if local_endpoint == source_endpoint or not router.endpoint_is_unoccupied(source_endpoint, source):
                 source = self._route_music_to_spare(source, local_endpoint or source_endpoint)
                 source_endpoint = next(iter({session.endpoint_id for session in source.sessions}))
@@ -604,7 +644,6 @@ class AudioRouteController:
 
     def _route_music_to_spare(self, source, local_endpoint):
         router = self._get_app_router()
-        router.recover_pending()
         original_endpoints = {session.endpoint_id for session in source.sessions}
         candidates = sorted((device for device in self._local_devices
                              if device.id != local_endpoint and device.id not in original_endpoints
@@ -636,6 +675,55 @@ class AudioRouteController:
             from api.windows_app_audio_routes import WindowsAppAudioRoutes
             self._app_router = WindowsAppAudioRoutes(devices=self._backend, resolver=self._source_resolver)
         return self._app_router
+
+    def _pending_app_route_stage(self):
+        read = getattr(self._app_router, "pending_recovery", None)
+        record = read() if callable(read) else None
+        if record is None:
+            return ""
+        if not isinstance(record, dict) or not isinstance(record.get("stage"), str):
+            raise RuntimeError("音乐输出恢复记录无法确认")
+        return record["stage"]
+
+    def _publish_stopped(self, message):
+        try:
+            stage = self._pending_app_route_stage()
+        except Exception as exc:
+            self._publish(state="error", status_message=f"{message}；音乐输出恢复记录无法确认：{str(exc)[:120]}")
+            return
+        self._resume_recovery_pending = stage == "resume_verification_pending"
+        self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
+        if stage and not self._resume_recovery_pending:
+            self._publish(state="error", status_message=f"{message}；音乐软件的原输出仍需恢复")
+        else:
+            self._publish(state="ready", status_message=f"{message}；{self.APP_ROUTE_RESUME_MESSAGE}"
+                          if self._resume_recovery_pending else message)
+
+    def _observe_pending_app_recovery(self):
+        # A paused stop can prove policy restoration without proving a live
+        # stream's endpoint. Keep that durable observation through resume;
+        # never recover an active group's intentionally owned route here.
+        if (not self._resume_recovery_pending or self._group_mode or self._cast_id
+                or self._app_route_guard is not None or self._closed.is_set()
+                or time.monotonic() < self._next_route_recovery_at):
+            return
+        self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
+        try:
+            self._app_router.recover_pending()
+            stage = self._pending_app_route_stage()
+            if stage and stage != "resume_verification_pending":
+                raise RuntimeError("音乐软件原输出的恢复仍未完成")
+        except Exception as exc:
+            current = self.snapshot()
+            if current.state == "ready" or current.status_message.startswith("音乐软件原输出恢复待确认："):
+                self._publish(state="error", status_message=f"音乐软件原输出恢复待确认：{str(exc)[:160]}")
+            return
+        self._resume_recovery_pending = bool(stage)
+        current = self.snapshot()
+        if not stage and (current.state == "ready" or current.status_message.startswith("音乐软件原输出恢复待确认：")):
+            # A newer user output policy can legitimately end this observation
+            # too. Clearing its record alone is not proof of the old endpoint.
+            self._publish(state="ready", status_message="音乐软件输出恢复检查已结束")
 
     def _check_group_source(self):
         """A playing app's stream must remain on the explicitly suppressed output.
@@ -873,7 +961,7 @@ class AudioRouteController:
                 self._change_music_source(value)
             elif operation == "stop":
                 self._end_cast()
-                self._publish(state="ready", status_message="HomePod 投放已停止")
+                self._publish_stopped("HomePod 投放已停止")
                 self._refresh_devices()
             elif operation == "volume":
                 self._set_volume(*value)
@@ -887,6 +975,7 @@ class AudioRouteController:
                 # Manual targets describe an address, never a successful connection.
                 self._merge_devices()
         self._remaining_commands = ()
+        self._observe_pending_app_recovery()
         if (self._group_mode and not self._cast_id and self.snapshot().state == "waiting_source"
                 and time.monotonic() >= self._next_source_resolve_at):
             self._try_start_group()

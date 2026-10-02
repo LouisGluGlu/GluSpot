@@ -109,8 +109,6 @@ class AirPlayGroupProcess(AirPlayProcess):
         receivers, local_endpoint = self._validate_group(devices, source, source_endpoint)
         if self._source_id and not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", self._source_id):
             raise ValueError("HomePod 发送端身份无效")
-        if not self.executable.is_file():
-            raise RuntimeError("HomePod 投放组件未安装，请更新完整的 GluSpot 安装包")
         args = [str(self.executable), "--group", "--music-pid", str(source.process_id),
                 "--music-created-at", str(source.process_created_at_100ns),
                 "--source-endpoint", source_endpoint]
@@ -138,6 +136,10 @@ class AirPlayGroupProcess(AirPlayProcess):
             self._group_source = source
             self._group_source_endpoint = source_endpoint
             self._local_endpoint = local_endpoint
+        if not self.executable.is_file():
+            # A valid new attempt cannot inherit a stopped predecessor's mute
+            # authority just because its executable disappeared before spawn.
+            raise RuntimeError("HomePod 投放组件未安装，请更新完整的 GluSpot 安装包")
         kwargs = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                       text=True, encoding="utf-8", errors="replace", bufsize=1)
         if os.name == "nt":
