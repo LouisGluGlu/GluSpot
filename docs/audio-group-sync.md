@@ -2,8 +2,10 @@
 
 This work continues from the verified 6.406 single-HomePod repair on branch
 `codex/audio-homepod-level3-4`, in the existing isolated audio checkout. The
-6.407 development package passed frozen acceptance. Multi-device implementation
-is available for testing; full levels 3–4 acceptance remains in progress.
+6.407 development package passed frozen acceptance, and the user's separate
+HomePod mini + M6 listening replay confirmed basic audible alignment. The
+6.408 follow-up package is being verified. Multi-device implementation is
+available for testing; wider levels 3–4 hardware acceptance remains in progress.
 
 ## Required behavior and verification
 
@@ -111,9 +113,14 @@ back on M6, both app policies again followed Windows defaults, and every
 endpoint's default/mute/volume state matched its initial state. Evidence is in
 ignored `logs/mixed-group-15s-realtek.json`, `logs/mixed-group-90s.json` and
 `logs/music-m6-effective-restore.json`. These checks establish transport, local
-rendering and restoration; the user's simultaneous listening assessment is
-still pending. Endpoint-clock phase is not Bluetooth acoustic-delay proof.
-Multi-hour drift, pause/resume, source replacement, topology changes, device
+rendering and restoration. A separate authorized 15.032-second replay in
+`logs/mixed-group-listening-replay-15s.json` had no drops, discontinuities or
+local underruns, acknowledged eight feedback replies and restored endpoint
+states and effective app routing. The user confirmed “两边都出声，基本同步”;
+`logs/mixed-group-listening-human-confirmation.json` records that listening
+evidence. It establishes basic alignment for this HomePod mini + M6 pair,
+without measuring the acoustic offset. Endpoint-clock phase is not Bluetooth
+acoustic-delay proof. Multi-hour hardware drift, pause/resume, source replacement, topology changes, device
 reconnection and stereo-pair behavior remain to be checked. A new audio child
 process is not silently added to the fixed routing transaction; changed owners
 stop the group and require a new device selection.
@@ -142,3 +149,47 @@ the controller's close wait is bounded to 17.5 seconds for a group.
 Temporary references, generated test data and hardware logs stay in ignored
 `build/` and `logs/`. No microphone capture or recorded PCM is used by the
 diagnostic probes.
+
+## Follow-up lifecycle and menu validation
+
+The 6.408 route guard distinguishes a returned policy from a verified active
+stream. A complete Core Audio inventory must prove retained inactive/expired
+music sessions and no owned or ambiguous active stream before a paused stop
+releases handles and its journal lease. Both original app policies are read
+back; only a `resume_verification_pending` observation remains. Continuing
+music on the original endpoint clears that observation without writes. A
+retained exact process still playing on the old spare can be rebound and
+verified. New app policies, a changed global default for default-following
+roles, explicit confirmed Windows output selection and replacement processes
+supersede the old observation without acquiring new write authority. Unknown
+session state or outstanding owned writes still block new group startup.
+
+Every group start restores any durable pending write transaction before
+resolving a fresh music source. A queued stop during recovery cannot start a
+helper afterward. Idle resume observation never enters a healthy active
+group. The chooser reports restored settings while awaiting live playback
+rather than claiming effective or acoustic recovery during a pause. A missing
+helper on a validated new attempt cannot inherit an earlier helper's mute
+diagnostics. Focused route/controller/wrapper/menu/branding validation passed
+253 tests; the final combined-background suite and package will be recorded
+after integration.
+
+The 6.408 native suite passed all nine CTest suites. Its synchronized sender
+suite passed 25,358 checks. A deterministic three-hour run exercised the
+actual shared PCM conditioner with capture-clock drift of +1,700, -1,700 and
++1,000 ppm for one hour each; the queue remained between 4,764 and 7,762 frames
+without starvation padding. Two independently encrypted receivers decoded the
+same PCM through captured silence, missing capture input and resumed music,
+retaining sequence/RTP continuity and their original NTP mapping without
+reconnecting. A 35 ms host stall caught up its accumulated valid packets within
+the bounded send budget, while expired packets were rejected. These are native
+algorithm and transport checks, not multi-hour physical speaker measurements.
+
+Native Qt fixture rendering checked the existing frosted chooser with three
+selected outputs on album-colored, dark and pale backdrops, pending selection,
+and 640 × 360 viewports. A circular membership checkmark now makes confirmed
+selection legible on pale backgrounds, while independent volume sliders retain
+their device identity. Selection is checkable for accessibility but only
+provider snapshots can change the checked state. Group stop reads “停止同步播放”;
+the compact viewport keeps it reachable in the same scroll area. Evidence
+images remain in ignored `logs/audio-output-group-qa/`.

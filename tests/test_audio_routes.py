@@ -3,6 +3,9 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+import json
+from pathlib import Path
+import tempfile
 from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,7 +14,8 @@ from api.airplay_discovery import AirPlayDiscovery, SERVICE_TYPES, receiver_from
 from api.audio_route_controller import AudioRouteController
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.windows_audio_devices import AudioOutputDevice
-from api.windows_audio_sessions import AudioSessionEvidence, MusicAudioSource
+from api.windows_audio_sessions import AudioSessionEvidence, MusicAudioSource, ProcessIdentity
+from api.windows_app_audio_routes import WindowsAppAudioRoutes, _PREFIX, _RENDER_SUFFIX
 from api.airplay_group_process import AirPlayGroupProcess
 
 
@@ -180,10 +184,21 @@ class _AppRouter:
         self.check_error = ""
         self.restore_error = ""
         self.occupied = set()
+        self.pending = None
 
     def recover_pending(self):
         self.calls.append(("recover",))
         return False
+
+    def pending_recovery(self):
+        return dict(self.pending) if self.pending is not None else None
+
+    def retire_resume_observation(self):
+        self.calls.append(("retire",))
+        if self.pending is not None and self.pending.get("stage") != "resume_verification_pending":
+            raise RuntimeError("original music route writes still require recovery")
+        retired, self.pending = self.pending is not None, None
+        return retired
 
     def endpoint_is_unoccupied(self, endpoint, source):
         return endpoint not in self.occupied
@@ -1342,7 +1357,8 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self._bluetooth_source_group()
         self.assertEqual(self.group.starts[-1], ((HOME.id, "headphones"), "speakers", 300, 1000))
         self.assertEqual(self.controller.snapshot().cast_source_id, "speakers")
-        self.assertEqual(self.router.calls[:4], [("recover",), ("prepare", "speakers", "headphones"),
+        self.assertEqual(self.router.calls[:5], [("recover",), ("recover",),
+                                               ("prepare", "speakers", "headphones"),
                                                ("apply", "speakers"), ("wait", 5.0)])
         self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"speakers"})
         self.assertEqual(self.backend.selected, [])
@@ -1502,6 +1518,354 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.group.starts, [])
         self.assertEqual(self.backend.mute_calls, [])
         self.assertEqual(self.controller.snapshot().state, "error")
+
+    def test_paused_stop_reports_policy_restoration_without_claiming_live_output(self):
+        self._bluetooth_source_group()
+        guard = self.router.guards[-1]
+        original_restore = guard.restore
+
+        def deferred_restore():
+            original_restore()
+            self.source = None
+            guard.restoration_state = "policy_restored_no_active_stream"
+            self.router.pending = {"stage": "resume_verification_pending"}
+
+        guard.restore = deferred_restore
+        self.controller.stop_cast()
+        self.controller._step()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot.state, "ready")
+        self.assertIn("原输出设置已恢复，等待音乐继续播放", snapshot.status_message)
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertIsNone(self.controller._app_route_guard)
+        self.assertTrue(self.controller._resume_recovery_pending)
+        recover_before = self.router.calls.count(("recover",))
+        self.controller._step()
+        self.assertEqual(self.router.calls.count(("recover",)), recover_before)
+
+        def resume_observed():
+            self.router.calls.append(("recover",))
+            self.router.pending = None
+            return True
+
+        self.router.recover_pending = resume_observed
+        self.controller._next_route_recovery_at = 0
+        self.controller._step()
+        self.assertFalse(self.controller._resume_recovery_pending)
+        self.assertEqual(self.controller.snapshot().status_message, "音乐软件输出恢复检查已结束")
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
+    def test_deferred_resume_record_does_not_block_waiting_source_or_run_idle_recovery(self):
+        self.router.pending = {"stage": "resume_verification_pending"}
+        self.source = None
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "waiting_source")
+        self.assertEqual(self.controller.snapshot().pending_ids, (HOME.id,))
+        self.assertEqual(self.controller.snapshot().status_message, self.controller.APP_ROUTE_RESUME_MESSAGE)
+        recover_before = self.router.calls.count(("recover",))
+        self.controller._next_route_recovery_at = 0
+        self.controller._step()
+        self.assertEqual(self.router.calls.count(("recover",)), recover_before)
+
+    def test_idle_resume_observation_never_recovers_an_active_group_owned_route(self):
+        self._stream()
+        self.router.pending = {"stage": "resume_verification_pending"}
+        self.controller._resume_recovery_pending = True
+        self.controller._next_route_recovery_at = 0
+        recover_before = self.router.calls.count(("recover",))
+        self.controller._step()
+        self.assertEqual(self.router.calls.count(("recover",)), recover_before)
+        self.assertTrue(self.group.running)
+        self.assertEqual(self.controller.snapshot().state, "casting")
+
+    def test_queued_stop_after_failed_recovery_does_not_claim_original_policy_restored(self):
+        self.router.pending = {"stage": "effective_recovery_required"}
+
+        def failed_recovery():
+            self.controller.stop_cast()
+            raise RuntimeError("saved output still owned")
+
+        self.router.recover_pending = failed_recovery
+        self.controller.toggle(HOME.id)
+        self.controller._step()
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("原输出仍需恢复", self.controller.snapshot().status_message)
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_resume_observation_does_not_clear_unrelated_receiver_error(self):
+        self.controller._resume_recovery_pending = True
+        self.router.pending = None
+        self.controller._publish(state="error", status_message="HomePod 网络已断开")
+        self.controller._next_route_recovery_at = 0
+        self.controller._step()
+        self.assertFalse(self.controller._resume_recovery_pending)
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertEqual(self.controller.snapshot().status_message, "HomePod 网络已断开")
+
+    def test_confirmed_explicit_local_output_retires_only_pure_paused_observation(self):
+        self.router.pending = {"stage": "resume_verification_pending"}
+        self.controller._resume_recovery_pending = True
+        self.controller.select("headphones")
+        self.controller._step()
+        self.assertEqual(self.backend.selected, ["headphones"])
+        self.assertIn(("retire",), self.router.calls)
+        self.assertIsNone(self.router.pending)
+        self.assertFalse(self.controller._resume_recovery_pending)
+        self.assertEqual(self.controller.snapshot().state, "ready")
+        self.assertEqual(self.controller.snapshot().active_id, "headphones")
+
+    def test_unconfirmed_explicit_local_output_keeps_paused_observation(self):
+        self.router.pending = {"stage": "resume_verification_pending"}
+        self.controller._resume_recovery_pending = True
+        self.backend.set_default = self.backend.selected.append
+        self.controller.select("headphones")
+        self.controller._step()
+        self.assertNotIn(("retire",), self.router.calls)
+        self.assertEqual(self.router.pending["stage"], "resume_verification_pending")
+        self.assertEqual(self.controller.snapshot().state, "error")
+
+    def test_explicit_local_selection_cannot_discard_unreturned_application_route_writes(self):
+        self.router.pending = {"stage": "effective_recovery_required"}
+        self.controller.select("headphones")
+        self.controller._step()
+        self.assertEqual(self.backend.selected, ["headphones"])
+        self.assertIn(("retire",), self.router.calls)
+        self.assertEqual(self.router.pending["stage"], "effective_recovery_required")
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("require recovery", self.controller.snapshot().status_message)
+
+
+class AudioRouteDurableRecoveryTests(unittest.TestCase):
+    """Exercise the real route transaction with a memory-only Windows ABI seam."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.journal = Path(self.directory.name) / "app-route-recovery.json"
+        self.backend, self.discovery = _Backend(), _Discovery()
+        self.backend.outputs += (AudioOutputDevice("spare", "备用扬声器", "speaker"),)
+        self.backend.mutes["spare"], self.backend.volumes["spare"] = False, .4
+        session = AudioSessionEvidence("speakers", 30, "music-session", "music-instance")
+        self.source = MusicAudioSource("cloudmusic.exe", 30, 100, r"C:\Music\cloudmusic.exe",
+                                       (30,), (session.session_identifier,), (session,), 1)
+        self.last_source = self.source
+        self.identity = ProcessIdentity(30, 100, self.source.process_path)
+        self.routes, self.writes, self.closed_handles = {(30, 0): "", (30, 1): ""}, [], []
+        self.timeline = []
+
+        def set_route(pid, role, value):
+            saved = json.loads(self.journal.read_text(encoding="utf-8"))
+            self.assertTrue(any(entry["intent"] and entry["role"] == role for entry in saved["roles"]))
+            self.writes.append((pid, role, value))
+            self.timeline.append(("route", value))
+            self.routes[(pid, role)] = value
+            if value.startswith(_PREFIX) and value.endswith(_RENDER_SUFFIX):
+                endpoint = value[len(_PREFIX):-len(_RENDER_SUFFIX)]
+                current = self.source or self.last_source
+                self.last_source = replace(current, sessions=tuple(
+                    replace(entry, endpoint_id=endpoint) for entry in current.sessions))
+                if self.source is not None:
+                    self.source = self.last_source
+
+        self.adapter = SimpleNamespace(
+            process_identity=lambda pid: self.identity if pid == 30 else None,
+            hold_process=lambda identity: (identity.process_id, identity.process_created_at_100ns),
+            close_handle=self.closed_handles.append,
+            get_route=lambda pid, role: self.routes[(pid, role)], set_route=set_route,
+            active_owners=lambda: tuple((session.endpoint_id, session.process_id, True, False)
+                                       for session in self.source.sessions) if self.source is not None else (),
+            session_owners=lambda: tuple((session.endpoint_id, session.process_id, True, False,
+                                         1 if self.source is not None else 0)
+                                        for session in (self.source or self.last_source).sessions))
+
+    def _router(self):
+        router = WindowsAppAudioRoutes(devices=self.backend, adapter=self.adapter,
+            resolver=lambda _app: self.source, journal_path=self.journal)
+        self.addCleanup(self._close_router, router)
+        return router
+
+    @staticmethod
+    def _close_router(router):
+        try:
+            router.close(timeout=0)
+        except RuntimeError:
+            pass
+
+    def _leave_crashed_parent_journal(self):
+        previous = self._router()
+        guard = previous.prepare(self.source, "spare", "headphones")
+        guard.apply()
+        guard.wait_migrated(timeout=0)
+        self.assertEqual(self.source.sessions[0].endpoint_id, "spare")
+        # Model the OS releasing a dead parent's handles/lease. No graceful
+        # restore/Set runs, so its durable owned policy survives unchanged.
+        guard._close_handles()
+        guard._closed = True
+        previous._active = None
+        previous._release_journal()
+        self.writes.clear()
+        self.timeline.clear()
+
+    def _controller(self, router):
+        self.group = _GroupSender()
+        original_start = self.group.start_group
+
+        def start(devices, source, endpoint):
+            self.timeline.append(("native", endpoint))
+            original_start(devices, source, endpoint)
+
+        self.group.start_group = start
+        controller = AudioRouteController(self.backend, self.discovery, _Sender(),
+            group_sender=self.group, source_resolver=lambda _app: self.source,
+            app_router=router, start_worker=False)
+        self.addCleanup(controller.close)
+        controller._refresh_devices()
+        controller.set_music_source("cloudmusic.exe")
+        controller._step()
+        return controller
+
+    def test_crash_recovery_runs_before_distinct_source_and_local_sink_start(self):
+        self._leave_crashed_parent_journal()
+        controller = self._controller(self._router())
+        controller.toggle(HOME.id)
+        controller.toggle("headphones")
+        controller._step()
+        self.assertEqual(self.group.starts, [((HOME.id, "headphones"), "speakers", 30, 100)])
+        self.assertEqual(self.source.sessions[0].endpoint_id, "speakers")
+        self.assertEqual(self.routes, {(30, 0): "", (30, 1): ""})
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.timeline[-1], ("native", "speakers"))
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        controller.stop_cast()
+        controller._step()
+        self.assertEqual(self.source.sessions[0].endpoint_id, "speakers")
+
+    def test_invalid_durable_recovery_blocks_even_direct_music_capture(self):
+        self._leave_crashed_parent_journal()
+        saved = json.loads(self.journal.read_text(encoding="utf-8"))
+        saved["roles"][0]["owned_route"] = _PREFIX + "unrelated-output" + _RENDER_SUFFIX
+        self.journal.write_text(json.dumps(saved), encoding="utf-8")
+        before = self.journal.read_text(encoding="utf-8")
+        controller = self._controller(self._router())
+        controller.toggle(HOME.id)
+        controller._step()
+        self.assertEqual(controller.snapshot().state, "error")
+        self.assertIn("上次输出尚未恢复", controller.snapshot().status_message)
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.journal.read_text(encoding="utf-8"), before)
+
+    def test_stop_queued_during_recovery_never_starts_helper_after_restore(self):
+        self._leave_crashed_parent_journal()
+        router = self._router()
+        controller = self._controller(router)
+        original_recover = router.recover_pending
+
+        def recover():
+            result = original_recover()
+            controller.stop_cast()
+            return result
+
+        router.recover_pending = recover
+        controller.toggle(HOME.id)
+        controller._step()
+        self.assertEqual(self.group.starts, [])
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.source.sessions[0].endpoint_id, "speakers")
+        controller._step()
+        self.assertEqual(controller.snapshot().state, "ready")
+        self.assertEqual(controller.snapshot().pending_ids, ())
+
+    def _pause_and_stop_real_guard(self):
+        self.source = replace(self.source, sessions=tuple(
+            replace(session, endpoint_id="headphones") for session in self.source.sessions))
+        self.last_source = self.source
+        router = self._router()
+        controller = self._controller(router)
+        controller.toggle(HOME.id)
+        controller.toggle("headphones")
+        controller._step()
+        self.assertEqual(self.group.starts[-1][0], (HOME.id, "headphones"))
+        self.assertNotEqual(self.group.starts[-1][1], "headphones")
+        self.group.events = self.group.ready_events()
+        controller._step()
+        guard = controller._app_route_guard
+        self.assertIsNotNone(guard)
+        self.last_source, self.source = self.source, None
+        controller.stop_cast()
+        controller._step()
+        self.assertEqual(controller.snapshot().state, "ready")
+        self.assertIn(controller.APP_ROUTE_RESUME_MESSAGE, controller.snapshot().status_message)
+        self.assertEqual(guard.restoration_state, "policy_restored_no_active_stream")
+        self.assertIsNone(router._active)
+        self.assertIsNone(router._lease)
+        self.assertEqual(guard._handles, {})
+        self.assertEqual(self.routes, {(30, 0): "", (30, 1): ""})
+        self.assertEqual(router.pending_recovery()["stage"], "resume_verification_pending")
+        return controller, router
+
+    def test_real_paused_guard_stop_preserves_resume_observation_then_verifies_without_new_cast(self):
+        controller, router = self._pause_and_stop_real_guard()
+        starts, writes = tuple(self.group.starts), tuple(self.writes)
+        self.source = self.last_source
+        self.assertEqual(self.source.sessions[0].endpoint_id, "headphones")
+        controller._next_route_recovery_at = 0
+        controller._step()
+        self.assertIsNone(router.pending_recovery())
+        self.assertEqual(tuple(self.writes), writes)
+        self.assertEqual(tuple(self.group.starts), starts)
+        self.assertEqual(controller.snapshot().status_message, "音乐软件输出恢复检查已结束")
+        self.assertFalse(controller._resume_recovery_pending)
+
+    def test_real_resume_on_temporary_endpoint_repairs_owned_music_route_without_reconnecting(self):
+        controller, router = self._pause_and_stop_real_guard()
+        starts = tuple(self.group.starts)
+        self.source = replace(self.last_source, sessions=tuple(
+            replace(session, endpoint_id="spare") for session in self.last_source.sessions))
+        writes_before = len(self.writes)
+        controller._next_route_recovery_at = 0
+        controller._step()
+        self.assertIsNone(router.pending_recovery())
+        self.assertEqual(self.source.sessions[0].endpoint_id, "headphones")
+        self.assertGreater(len(self.writes), writes_before)
+        self.assertEqual(self.routes, {(30, 0): "", (30, 1): ""})
+        self.assertEqual(tuple(self.group.starts), starts)
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
+    def test_new_group_after_paused_stop_waits_then_resolves_fresh_restored_stream(self):
+        controller, router = self._pause_and_stop_real_guard()
+        starts = tuple(self.group.starts)
+        controller.toggle(HOME.id)
+        controller._step()
+        self.assertEqual(controller.snapshot().state, "waiting_source")
+        self.assertEqual(controller.snapshot().pending_ids, (HOME.id,))
+        self.assertEqual(tuple(self.group.starts), starts)
+        self.source = self.last_source
+        controller._next_source_resolve_at = 0
+        controller._step()
+        self.assertEqual(self.group.starts[-1], ((HOME.id,), "headphones", 30, 100))
+        self.assertIsNone(router.pending_recovery())
+        self.assertFalse(controller._resume_recovery_pending)
+
+    def test_real_pure_pause_observation_is_retired_only_after_confirmed_new_local_choice(self):
+        controller, router = self._pause_and_stop_real_guard()
+        writes = tuple(self.writes)
+        controller.select("spare")
+        controller._step()
+        self.assertIsNone(router.pending_recovery())
+        self.assertEqual(tuple(self.writes), writes)
+        self.assertEqual(self.backend.selected, ["spare"])
+        self.assertEqual(controller.snapshot().active_id, "spare")
+        self.assertEqual(controller.snapshot().state, "ready")
+        self.assertFalse(controller._resume_recovery_pending)
+        self.assertIsNone(router._lease)
 
 
 class AirPlayDiscoveryTests(unittest.TestCase):
