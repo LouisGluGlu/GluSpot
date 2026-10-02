@@ -89,6 +89,9 @@ class TrackData:
     # or cached-frame projection. None means this source has no observation.
     # A verified local Seek retains its initial target, not projected playback.
     position_observed_seconds: float | None = None
+    # Exact identity supplied by the selected Windows media session. Audio
+    # routing resolves it against live Core Audio sessions, never display text.
+    source_app_id: str = ""
 
 
 @dataclass(frozen=True)

@@ -300,6 +300,9 @@ class WindowsMediaProvider:
                         setter("v2_airplay_sender_id", source_id)
                 self._audio_route_controller = AudioRouteController(
                     latency_seconds=1.5, source_id=source_id, auto_latency_enabled=True)
+                data = getattr(self, "_last_data", None)
+                if data is not None:
+                    self._audio_route_controller.set_music_source(data.track.source_app_id)
         return self._audio_route_controller
 
     def get_audio_route_snapshot(self) -> AudioRouteSnapshot:
@@ -311,6 +314,10 @@ class WindowsMediaProvider:
 
     def select_audio_output(self, device_id: str) -> bool:
         return self.start_audio_outputs().select(str(device_id))
+
+    def toggle_audio_output(self, device_id: str) -> bool:
+        """Toggle one synchronized music output; the controller owns I/O."""
+        return self.start_audio_outputs().toggle(str(device_id))
 
     def set_audio_output_volume(self, device_id: str, volume: float) -> bool:
         """Queue a real device volume change; published snapshots confirm it."""
@@ -577,6 +584,23 @@ class WindowsMediaProvider:
             self._media_strong_tracking_until = now + TRACK_CHANGE_STRONG_REFRESH_SECONDS
         self._last_data = data
         self._last_ready_at = now
+        controller = getattr(self, "_audio_route_controller", None)
+        update_source = getattr(controller, "set_music_source", None)
+        if callable(update_source):
+            # Lazy construction forwards its initial accepted track while
+            # holding this existing initialization lock. Serialize later
+            # deliveries with that first forward so it cannot replace a newer
+            # selected session after another thread has already published it.
+            # Construction does not acquire the music/cache lock, preserving
+            # the cache reader's existing lock order and bounded source I/O.
+            audio_lock = getattr(self, "_audio_route_init_lock", None)
+            if audio_lock is not None:
+                with audio_lock:
+                    accepted = getattr(self, "_last_data", None)
+                    if accepted is data:
+                        update_source(data.track.source_app_id)
+            else:
+                update_source(data.track.source_app_id)
 
     @staticmethod
     def _advance_delayed_media_sample(data: IslandVisualData, now: float) -> IslandVisualData:
@@ -1012,6 +1036,11 @@ class WindowsMediaProvider:
                 "active_id": audio_route.active_id,
                 "pending_id": audio_route.pending_id,
                 "cast_source_id": audio_route.cast_source_id,
+                "member_ids": audio_route.member_ids,
+                "pending_ids": audio_route.pending_ids,
+                "group_id": audio_route.group_id,
+                "capture_scope": audio_route.capture_scope,
+                "music_source_app_id": audio_route.music_source_app_id,
                 "device_count": len(audio_route.devices),
                 "status": audio_route.status_message,
                 "sender": (self._audio_route_controller.diagnostics()
@@ -2557,6 +2586,7 @@ class WindowsMediaProvider:
             lyric_offset_adapter=player_adapter,
             album_art_source=album_art_source,
             album_art_lookup_state=album_art_lookup_state,
+            source_app_id=raw_source_app,
         )
         with cache_lock:
             if epoch != int(getattr(self, "_music_cache_epoch", 0)):

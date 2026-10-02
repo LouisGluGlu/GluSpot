@@ -140,6 +140,56 @@ class AudioPackageCheckTests(unittest.TestCase):
         self.assertIsNone(result["replacement_path"])
         self.assertEqual(result["storage"], "archive_or_virtual")
 
+    def test_group_dispatch_uses_invalid_args_before_any_device_state_work(self):
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / "GluSpotAirPlay.exe"
+            helper.touch()
+            event = {"event": "error", "message":
+                     "Group requires a verified music process, source endpoint and HomePod"}
+            reply = SimpleNamespace(returncode=2, stdout=json.dumps(event) + "\n", stderr="")
+            with patch.object(check, "engine_path", return_value=helper), \
+                    patch.object(check.subprocess, "run", return_value=reply) as run:
+                result = check._check_group_dispatch()
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["receiver_contacted"])
+            self.assertEqual(run.call_args.args[0], [str(helper), "--group"])
+            self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_legacy_or_broken_group_helper_cannot_pass_new_package_acceptance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / "GluSpotAirPlay.exe"
+            helper.touch()
+            for output, code in ((json.dumps({"event": "error", "message": "Unknown argument --group"}), 1),
+                                 ('[]\n', 2), ('invalid\n', 2),
+                                 (json.dumps({"event": "connecting"}), 0)):
+                with self.subTest(output=output), patch.object(check, "engine_path", return_value=helper), \
+                        patch.object(check.subprocess, "run", return_value=SimpleNamespace(
+                            returncode=code, stdout=output, stderr="")):
+                    self.assertFalse(check._check_group_dispatch()["ok"])
+
+    def test_new_group_modules_are_imported_without_constructing_audio_resources(self):
+        spec = SimpleNamespace(origin="/missing/archive/module.py", loader=object())
+        with patch.object(check.importlib.util, "find_spec", return_value=spec), \
+                patch.object(check.importlib, "import_module", return_value=SimpleNamespace(__spec__=spec)) as imported:
+            result = check._module_info("api.windows_app_audio_routes")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["execution_checked"])
+        imported.assert_called_once_with("api.windows_app_audio_routes")
+
+    def test_external_helper_cannot_certify_a_frozen_bundle(self):
+        with patch.object(check.sys, "frozen", True, create=True), \
+                patch.dict(check.os.environ, {"GLUSPOT_AIRPLAY_ENGINE": "external.exe"}), \
+                patch.object(check, "_dependency_info", return_value={"ok": True}), \
+                patch.object(check, "_module_info", return_value={"ok": True}), \
+                patch.object(check, "_check_endpoints", return_value={"ok": True, "default_endpoint_id": "bt"}), \
+                patch.object(check, "_check_discovery", return_value={"ok": True}), \
+                patch.object(check, "_check_capture", return_value={"ok": True}), \
+                patch.object(check, "_check_group_dispatch", return_value={"ok": True}):
+            report = check.build_audio_package_report()
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["native_capture"]["ok"])
+        self.assertFalse(report["native_group_dispatch"]["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
