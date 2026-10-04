@@ -2021,11 +2021,22 @@ class IslandStackVisual(QWidget):
         app_offset = float(getattr(self, "media_app_lyric_offset_seconds", 0.0) or 0.0)
         output_delay = 0.0
         if include_output_latency:
+            from local.music_output_clock import OutputLatencyClock
+            generation = None
             getter = getattr(getattr(self, "data_provider", None), "get_audio_route_snapshot", None)
             if callable(getter):
                 route = getter()
                 if route.state == "casting":
                     output_delay = max(0.0, min(5.0, float(route.cast_latency_seconds)))
+                    generation = (route.group_id, route.active_id, route.cast_source_id)
+            clock = getattr(self, "_lyric_output_latency_clock", None)
+            if clock is None:
+                clock = self._lyric_output_latency_clock = OutputLatencyClock()
+            output_delay = clock.sample(output_delay, time.monotonic(), generation,
+                                        playing=bool(getattr(self, "media_is_playing", False)))
+            # Manual edits and route transitions re-anchor ink. Ordinary
+            # estimate slewing preserves each view's in-flight focus pose.
+            self._lyric_output_compensation_anchor = (global_offset, app_offset, generation)
         return max(-24.0, min(24.0, global_offset + app_offset - output_delay))
 
     def _stable_lyric_source_position(self, now: float) -> float:
@@ -2084,7 +2095,10 @@ class IslandStackVisual(QWidget):
         previous = getattr(self, "_island_last_lyric_offset", offset)
         self._island_last_lyric_offset = offset
         changed = not math.isclose(previous, offset, abs_tol=1e-7)
-        if changed:
+        anchor = getattr(self, "_lyric_output_compensation_anchor", None)
+        previous_anchor = getattr(self, "_island_lyric_offset_anchor", anchor)
+        self._island_lyric_offset_anchor = anchor
+        if changed and (anchor is None or anchor != previous_anchor):
             # Compensation is presentation state, not a player seek. Drop
             # cached ink only when it would otherwise prevent re-calibration.
             self.lyric_last_phase_index = self.ember_last_phase_index = -1

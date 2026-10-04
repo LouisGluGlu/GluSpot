@@ -17,6 +17,70 @@ from tests.test_music_lyric_visual_layers import _LayerOwner
 
 
 class MusicOutputClockTests(unittest.TestCase):
+    def test_small_source_corrections_keep_every_playing_frame_advancing(self):
+        rows = [(0.0, "one sustained sentence"), (30.0, "next sentence")]
+        for hz in (30, 60, 120):
+            for correction in (-0.035, 0.035):
+                with self.subTest(hz=hz, correction=correction):
+                    motion = MusicLyricMotion()
+                    previous_position = previous_progress = None
+                    for frame_index in range(hz * 5 + 1):
+                        elapsed = frame_index / hz
+                        # The provider delivers a fresh event twice per second
+                        # and projects it between paints. A correction changes
+                        # its anchor, while actual playback remains continuous.
+                        sample_elapsed = (frame_index // (hz // 2)) / 2.0
+                        bias = correction if 1.0 <= sample_elapsed < 2.0 else 0.0
+                        observed = 10.0 + sample_elapsed + bias
+                        projected = observed + elapsed - sample_elapsed
+                        frame = motion.frame(rows, projected, 100.0 + elapsed, "song",
+                                             sample_id=100.0 + sample_elapsed,
+                                             sample_position=observed)
+                        position = motion.last_source_position
+                        if previous_position is not None:
+                            self.assertGreater(position, previous_position)
+                            self.assertGreater(frame.reading_progress, previous_progress)
+                            self.assertLess(abs(position - (10.0 + elapsed)), 0.05)
+                        previous_position, previous_progress = position, frame.reading_progress
+                    # Following the real clock again must repay the correction;
+                    # uninterrupted prediction cannot accumulate a new offset.
+                    self.assertAlmostEqual(motion.last_source_position, 15.0, delta=0.0001)
+                    self.assertIsNone(motion.pending_clock_position)
+
+    def test_alternating_source_noise_does_not_accumulate_clock_drift(self):
+        rows = [(0.0, "one sustained sentence"), (90.0, "next sentence")]
+        for hz in (30, 60, 120):
+            with self.subTest(hz=hz):
+                motion = MusicLyricMotion()
+                previous = None
+                for frame_index in range(hz * 12 + 1):
+                    elapsed = frame_index / hz
+                    sample_number = frame_index // (hz // 2)
+                    sample_elapsed = sample_number / 2.0
+                    bias = (0.035 if sample_number % 2 else -0.035) if 1 <= elapsed < 10 else 0.0
+                    observed = 10.0 + sample_elapsed + bias
+                    position = observed + elapsed - sample_elapsed
+                    motion.frame(rows, position, 100.0 + elapsed, "song",
+                                 sample_id=sample_number, sample_position=observed)
+                    if previous is not None:
+                        self.assertGreater(motion.last_source_position, previous)
+                    self.assertLess(abs(motion.last_source_position - (10.0 + elapsed)), 0.05)
+                    previous = motion.last_source_position
+                self.assertAlmostEqual(motion.last_source_position, 22.0, delta=0.0001)
+
+    def test_small_clock_correction_cannot_advance_a_paused_source(self):
+        motion = MusicLyricMotion()
+        rows = [(0.0, "one sustained sentence"), (30.0, "next sentence")]
+        motion.frame(rows, 10.0, 100.0, "song", playing=False,
+                     sample_id=100.0, sample_position=10.0)
+        for elapsed in (0.1, 0.2, 1.0, 2.0):
+            motion.frame(rows, 9.965, 100.0 + elapsed, "song", playing=False,
+                         sample_id=100.1, sample_position=9.965)
+            self.assertEqual(motion.last_source_position, 10.0)
+        motion.frame(rows, 9.965, 102.1, "song", playing=False, explicit_seek=True,
+                     sample_id=102.1, sample_position=9.965)
+        self.assertEqual(motion.last_source_position, 9.965)
+
     def test_cast_delay_changes_retarget_reading_without_changing_source_clock(self):
         motion = MusicLyricMotion()
         rows = [(index * 0.5, f"Sentence {index}") for index in range(80)]

@@ -2949,7 +2949,14 @@ class MusicSurfaceWindow(QWidget):
         presentation_changed = presentation_reanchor or not math.isclose(
             lyric_offset, self._lyric_motion.presentation_offset, abs_tol=1e-7,
         )
-        if explicit_seek or presentation_changed:
+        compensation_anchor = getattr(self.owner, "_lyric_output_compensation_anchor", None)
+        previous_anchor = getattr(self, "_lyric_compensation_anchor", compensation_anchor)
+        self._lyric_compensation_anchor = compensation_anchor
+        presentation_retarget = presentation_changed and (
+            presentation_reanchor or not playing or compensation_anchor is None
+            or compensation_anchor != previous_anchor
+        )
+        if explicit_seek or presentation_retarget:
             self._obo_advanced_focus_index = None
             self._obo_advanced_focus_pose = None
             self._obo_advanced_handoff_last_at = None
@@ -6118,6 +6125,18 @@ class MusicSurfaceWindow(QWidget):
             and next_start is not None and estimated_end < next_start
             and estimated_end <= current_position < next_start
         )
+        if (
+            self._obo_advanced_focus_index == active + 1
+            and next_start is not None and current_position < next_start
+            and not (real_unit_focus_ready or estimated_focus_ready)
+        ):
+            # A confirmed same-row seek can make the spoken row unfinished
+            # again without changing its active index. Retain early focus only
+            # while its existing unit/row completion evidence still holds.
+            # Beyond next_start, keep the pose through boundary confirmation.
+            self._obo_advanced_focus_index = None
+            self._obo_advanced_focus_pose = None
+            self._obo_advanced_handoff_last_at = None
         if (
             song_has_real_units and (real_unit_focus_ready or estimated_focus_ready)
             and active_pair_first is None

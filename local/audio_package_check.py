@@ -29,14 +29,14 @@ _MODULES = (
     "api.providers", "api.audio_route_controller", "api.audio_routes",
     "api.windows_audio_devices", "api.airplay_discovery", "api.airplay_process",
     "api.windows_audio_sessions", "api.windows_app_audio_routes", "api.airplay_group_process",
-    "local.audio_output_panel", "local.audio_device_notice",
+    "local.audio_output_panel", "local.audio_device_notice", "local.music_output_clock",
 )
 _DEPENDENCIES = (
     "PySide6", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",
     "shiboken6", "zeroconf", "ifaddr",
 )
-_GROUP_MODULES = frozenset({"api.windows_audio_sessions", "api.windows_app_audio_routes",
-                            "api.airplay_group_process"})
+_EXECUTED_MODULES = frozenset({"api.windows_audio_sessions", "api.windows_app_audio_routes",
+                             "api.airplay_group_process", "local.music_output_clock"})
 
 
 def _error(exc: Exception) -> str:
@@ -62,7 +62,7 @@ def _module_info(name: str) -> dict:
         spec = importlib.util.find_spec(name)
         if spec is None:
             return {"name": name, "ok": False, "error": "Module spec missing"}
-        if name in _GROUP_MODULES:
+        if name in _EXECUTED_MODULES:
             module = importlib.import_module(name)
             return {"name": name, "ok": True, "execution_checked": True, **_location(module.__spec__)}
         return {"name": name, "ok": True, "execution_checked": False, **_location(spec)}

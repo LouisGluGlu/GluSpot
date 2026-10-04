@@ -1,8 +1,8 @@
 # Audio outputs and single HomePod casting
 
-The level 1–2 implementation uses the existing V2 music surface and media
-provider boundary. `local/main.py` remains the runnable entry. It does not
-implement HomePod multiroom groups or synchronized Bluetooth/AirPlay fanout.
+Single-receiver casting uses the existing V2 music surface and media provider
+boundary. `local/main.py` remains the runnable entry. Coordinated network and
+Bluetooth outputs are documented in [group synchronization](audio-group-sync.md).
 
 ## Product behavior
 
@@ -29,8 +29,10 @@ implement HomePod multiroom groups or synchronized Bluetooth/AirPlay fanout.
   Actual API activation/initialization decides availability; when unavailable,
   capture falls back to the selected output's shared system mix. No microphone
   is opened, and protected content excluded by Windows is not bypassed.
-  Music-app-only capture is reserved for the later synchronized
-  multi-HomePod/Bluetooth stage; that stage is not implemented here.
+  The checkbox chooser uses this path for one AirPlay receiver and clearly
+  labels “电脑全部声音”. Two or more selected outputs switch to coordinated
+  music-only capture and show “仅当前音乐软件”; removing members back to one
+  restores the owned music route before restarting computer-wide capture.
 - After HomePod authenticates, the native helper mutes the selected local render
   endpoint before capture starts. Stop, errors and stdin EOF restore its original
   mute; volume and default-output identity are unchanged. The parent retains per-session mute
@@ -78,8 +80,9 @@ implement HomePod multiroom groups or synchronized Bluetooth/AirPlay fanout.
 - Selected rows use a pale capsule with dark text, and an active AirPlay row
   shows its automatic compensation beside the volume bar. The popup blurs a
   half-size crop of the current music page with album tint and a neutral veil;
-  capture omits child widgets to prevent recursive panel images. Material is
-  cached, built outside paint, and refreshed at most once per second while
+  displayed background raster is cropped directly, avoiding another full
+  lyric-page paint. Ordinary QWidget parents retain a child-free fallback.
+  Material is cached, built outside paint, and refreshed at most once per second while
   visible. Hidden panels stop their timers. A long list scrolls at 640 × 360
   and opens with the active/pending device visible; keyboard navigation remains.
 

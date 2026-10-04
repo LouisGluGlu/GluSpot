@@ -169,12 +169,13 @@ class AudioPackageCheckTests(unittest.TestCase):
 
     def test_new_group_modules_are_imported_without_constructing_audio_resources(self):
         spec = SimpleNamespace(origin="/missing/archive/module.py", loader=object())
-        with patch.object(check.importlib.util, "find_spec", return_value=spec), \
-                patch.object(check.importlib, "import_module", return_value=SimpleNamespace(__spec__=spec)) as imported:
-            result = check._module_info("api.windows_app_audio_routes")
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["execution_checked"])
-        imported.assert_called_once_with("api.windows_app_audio_routes")
+        for name in ("api.windows_app_audio_routes", "local.music_output_clock"):
+            with self.subTest(name=name), patch.object(check.importlib.util, "find_spec", return_value=spec), \
+                    patch.object(check.importlib, "import_module", return_value=SimpleNamespace(__spec__=spec)) as imported:
+                result = check._module_info(name)
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["execution_checked"])
+            imported.assert_called_once_with(name)
 
     def test_external_helper_cannot_certify_a_frozen_bundle(self):
         with patch.object(check.sys, "frozen", True, create=True), \

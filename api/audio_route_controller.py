@@ -142,7 +142,7 @@ class AudioRouteController:
         return self._enqueue("select", device_id)
 
     def toggle(self, device_id):
-        """Toggle one group member; Windows-only selection retains local behavior."""
+        """One AirPlay output casts computer sound; two or more share music."""
         current = self.snapshot()
         if not any(d.id == device_id and (d.available or device_id in
                    current.member_ids + current.pending_ids) for d in current.devices):
@@ -440,8 +440,10 @@ class AudioRouteController:
         if not self._group_mode and device.id == self._cast_id and self.snapshot().state in {"connecting", "waiting_audio", "casting"}:
             return
         self._end_cast()
-        self._publish(pending_id=device.id, state="switching" if device.transport == "windows" else "connecting",
-                      status_message="正在切换输出" if device.transport == "windows" else "正在连接 HomePod")
+        self._publish(pending_id=device.id, active_id="" if device.transport == "airplay" else self.snapshot().active_id,
+                      capture_scope="all_system" if device.transport == "airplay" else "",
+                      state="switching" if device.transport == "windows" else "connecting",
+                      status_message="正在切换输出" if device.transport == "windows" else "正在连接单设备投放 · 电脑全部声音")
         try:
             if device.transport == "windows":
                 self._backend.set_default(device.id)
@@ -462,6 +464,18 @@ class AudioRouteController:
                 else:
                     self._publish(pending_id="", state="error", status_message="无法确认实际音频输出，请刷新后重试")
             else:
+                # A prior music group may have left durable owned route
+                # writes even after its helper was reaped. Single casting
+                # must return those writes first; pure paused observations
+                # remain live and can be verified while system capture runs.
+                router = self._get_app_router()
+                if self._pending_app_route_stage():
+                    router.recover_pending()
+                pending_stage = self._pending_app_route_stage()
+                if pending_stage and pending_stage != "resume_verification_pending":
+                    raise RuntimeError("音乐软件的上次输出恢复仍未完成")
+                self._resume_recovery_pending = pending_stage == "resume_verification_pending"
+                self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
                 source = next((d for d in self._local_devices if d.is_default), None)
                 if source is None:
                     raise RuntimeError("没有可用的电脑音频输出，无法获取播放器声音")
@@ -515,6 +529,12 @@ class AudioRouteController:
             else:
                 self._publish_stopped("同步播放已停止")
                 self._refresh_devices()
+            return
+        if len(selected) == 1:
+            # Membership count is the public boundary, including when a group
+            # shrinks. Stop/reap and restore the music route before starting
+            # the all-system sender; never leave a hidden one-member group.
+            self._select(selected[0])
             return
         self._begin_group(tuple(selected))
 
@@ -703,7 +723,7 @@ class AudioRouteController:
         # A paused stop can prove policy restoration without proving a live
         # stream's endpoint. Keep that durable observation through resume;
         # never recover an active group's intentionally owned route here.
-        if (not self._resume_recovery_pending or self._group_mode or self._cast_id
+        if (not self._resume_recovery_pending or self._group_mode
                 or self._app_route_guard is not None or self._closed.is_set()
                 or time.monotonic() < self._next_route_recovery_at):
             return
@@ -714,6 +734,10 @@ class AudioRouteController:
             if stage and stage != "resume_verification_pending":
                 raise RuntimeError("音乐软件原输出的恢复仍未完成")
         except Exception as exc:
+            if self._cast_id:
+                self._end_cast()
+                self._publish(state="error", status_message=f"音乐软件原输出恢复待确认：{str(exc)[:160]}")
+                return
             current = self.snapshot()
             if current.state == "ready" or current.status_message.startswith("音乐软件原输出恢复待确认："):
                 self._publish(state="error", status_message=f"音乐软件原输出恢复待确认：{str(exc)[:160]}")
@@ -836,8 +860,13 @@ class AudioRouteController:
         elif current.status_message == silence_message:
             device = next((d for d in current.devices if d.id == self._cast_id), None)
             name = device.name if device is not None else "HomePod"
-            self._publish(status_message=f"正在投放到 {name}" if current.state == "casting"
-                          else "已连接 HomePod，等待电脑播放声音")
+            if self._group_mode:
+                message = (f"正在同步播放到 {len(self._group_member_ids)} 个设备" if current.state == "casting"
+                           else "已连接播放设备，等待音乐软件声音")
+            else:
+                message = (f"正在投放到 {name}" if current.state == "casting"
+                           else "已连接 HomePod，等待电脑播放声音")
+            self._publish(status_message=message)
 
     def _poll_sender(self):
         if not self._cast_id:
