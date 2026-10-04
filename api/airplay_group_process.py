@@ -28,6 +28,16 @@ class AirPlayGroupProcess(AirPlayProcess):
     MAX_EVENT_CHARS = 65536
     _EVENTS = frozenset({"connecting", "waiting_audio", "streaming", "error", "stopped",
                          "stats", "mute_state", "receiver_volume"})
+    _ENDPOINT_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    _LOCAL_BOOL_FIELDS = frozenset({"ready", "armed", "playing", "endpoint_clock_valid",
+                                    "acoustic_delay_known", "clock_qpc_age_known"})
+    _LOCAL_COUNT_FIELDS = frozenset({"written_frames", "nonzero_samples", "meaningful_samples",
+                                     "underrun_frames", "source_frame", "device_clock_frames",
+                                     "presentation_latency_frames", "clock_position", "clock_frequency",
+                                     "clock_qpc_100ns", "padding_frames", "write_estimate_written_frames"})
+    _LOCAL_FLOAT_FIELDS = frozenset({"clock_qpc_age_ms", "write_queue_delay_ms",
+                                     "write_presentation_offset_ms", "write_presentation_epoch_offset_ms",
+                                     "stream_latency_ms", "buffer_duration_ms", "phase_error_ms", "resample_ratio"})
 
     def __init__(self, executable=None, popen=None, *, source_id=""):
         super().__init__(executable, popen, source_id=source_id, exclusive_output=False)
@@ -35,7 +45,14 @@ class AirPlayGroupProcess(AirPlayProcess):
         self._member_evidence = {}
         self._group_source = None
         self._group_source_endpoint = ""
-        self._local_endpoint = ""
+        self._local_endpoints = ()
+        self._local_evidence = {}
+
+    @classmethod
+    def _endpoint_key(cls, endpoint_id):
+        # Match the native group's collision fence without parsing or changing
+        # the opaque IMMDevice::GetId string sent to GetDevice.
+        return endpoint_id.translate(cls._ENDPOINT_CASE_FOLD)
 
     @staticmethod
     def _text(value, maximum):
@@ -64,7 +81,8 @@ class AirPlayGroupProcess(AirPlayProcess):
                 or not source.sessions or any(
                 not isinstance(session, AudioSessionEvidence) or session.active is not True
                 or session.system_sounds is not False or session.single_process is not True
-                or session.endpoint_id != source_endpoint
+                or not isinstance(session.endpoint_id, str)
+                or cls._endpoint_key(session.endpoint_id) != cls._endpoint_key(source_endpoint)
                 or not cls._text(session.session_identifier, 32768)
                 or not cls._text(session.session_instance_id, 32768)
                 or session.process_id not in source.session_process_ids
@@ -72,7 +90,7 @@ class AirPlayGroupProcess(AirPlayProcess):
             raise ValueError("音乐软件的输出已改变，请刷新后重新选择投放设备")
         if not isinstance(devices, (tuple, list)) or not 1 <= len(devices) <= cls.MAX_SINKS:
             raise ValueError("请为同步播放选择 1 至 8 个输出设备")
-        seen, addresses, receivers, locals_ = set(), set(), [], []
+        seen, addresses, endpoints, receivers, locals_ = set(), set(), set(), [], []
         for device in devices:
             if (not isinstance(device, AudioRouteDevice) or not cls._text(device.id, 2048)
                     or device.id in seen or device.available is not True):
@@ -95,18 +113,22 @@ class AirPlayGroupProcess(AirPlayProcess):
                 addresses.add(target)
                 receivers.append(device)
             elif device.transport == "windows":
-                locals_.append(device)
+                endpoint = cls._endpoint_key(device.id)
+                if endpoint in endpoints:
+                    raise ValueError("所选电脑或蓝牙输出重复，请刷新设备列表")
+                if endpoint == cls._endpoint_key(source_endpoint):
+                    raise ValueError("音乐来源与同步输出相同，请先选择另一个电脑输出")
+                endpoints.add(endpoint)
+                locals_.append(device.id)
             else:
                 raise ValueError("所选设备不支持同步播放")
-        if not receivers or len(locals_) > 1:
-            raise ValueError("同步播放需要至少一台 HomePod，且最多一个电脑或蓝牙输出")
-        if locals_ and locals_[0].id == source_endpoint:
-            raise ValueError("音乐来源与同步输出相同，请先选择另一个电脑输出")
-        return tuple(receivers), locals_[0].id if locals_ else ""
+        if not receivers:
+            raise ValueError("同步播放需要至少一台 AirPlay 设备")
+        return tuple(receivers), tuple(locals_)
 
     def start_group(self, devices, source: MusicAudioSource, source_endpoint: str):
         """Start one helper; receiver order also defines command receiver indices."""
-        receivers, local_endpoint = self._validate_group(devices, source, source_endpoint)
+        receivers, local_endpoints = self._validate_group(devices, source, source_endpoint)
         if self._source_id and not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", self._source_id):
             raise ValueError("HomePod 发送端身份无效")
         args = [str(self.executable), "--group", "--music-pid", str(source.process_id),
@@ -114,7 +136,7 @@ class AirPlayGroupProcess(AirPlayProcess):
                 "--source-endpoint", source_endpoint]
         if self._source_id:
             args += ["--source-id", self._source_id]
-        if local_endpoint:
+        for local_endpoint in local_endpoints:
             args += ["--local-endpoint", local_endpoint]
         for receiver in receivers:
             args += ["--receiver-id", receiver.id, "--host", receiver.host,
@@ -135,7 +157,8 @@ class AirPlayGroupProcess(AirPlayProcess):
             self._receiver_ids = tuple(device.id for device in receivers)
             self._group_source = source
             self._group_source_endpoint = source_endpoint
-            self._local_endpoint = local_endpoint
+            self._local_endpoints = local_endpoints
+            self._local_evidence = {}
         if not self.executable.is_file():
             # A valid new attempt cannot inherit a stopped predecessor's mute
             # authority just because its executable disappeared before spawn.
@@ -157,11 +180,79 @@ class AirPlayGroupProcess(AirPlayProcess):
                                               name="GluSpotAirPlayGroupDiagnostics", daemon=True)
         self._stderr_reader.start()
 
+    def _validated_local_renders(self, event):
+        """Validate one complete named renderer sample for this capture session."""
+        renders = event.get("local_renders")
+        if "local_renders" not in event:
+            # Older helpers identify their sole renderer implicitly. An
+            # unnamed object cannot confirm any member of a plural group.
+            legacy = event.get("local_render")
+            if len(self._local_endpoints) == 1 and isinstance(legacy, dict):
+                endpoint = self._local_endpoints[0]
+                if "endpoint_id" not in legacy or legacy["endpoint_id"] == endpoint:
+                    renders = [dict(legacy, endpoint_id=endpoint)]
+            elif not self._local_endpoints and legacy is None:
+                renders = []
+        if (not isinstance(renders, list) or len(renders) != len(self._local_endpoints)
+                or len(renders) > self.MAX_SINKS):
+            return None
+        updates = {}
+        selected = set(self._local_endpoints)
+        fields = self._LOCAL_BOOL_FIELDS | self._LOCAL_COUNT_FIELDS | self._LOCAL_FLOAT_FIELDS
+        for render in renders:
+            if not isinstance(render, dict):
+                return None
+            endpoint = render.get("endpoint_id")
+            if not isinstance(endpoint, str) or endpoint not in selected or endpoint in updates:
+                return None
+            if any(not isinstance(render.get(key), bool) for key in ("ready", "armed", "playing")):
+                return None
+            if "meaningful_samples" not in render:
+                return None
+            for key in fields & render.keys():
+                value = render[key]
+                if key in self._LOCAL_BOOL_FIELDS:
+                    valid = isinstance(value, bool)
+                elif key in self._LOCAL_COUNT_FIELDS:
+                    valid = isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**64
+                else:
+                    valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+                    if valid:
+                        try:
+                            valid = math.isfinite(float(value))
+                        except OverflowError:
+                            valid = False
+                if not valid:
+                    return None
+            updates[endpoint] = {key: render[key] for key in fields & render.keys()}
+            updates[endpoint]["endpoint_id"] = endpoint
+        return updates
+
     def _remember_native_event(self, state, event):
-        super()._remember_native_event(state, event)
+        remembered = event
+        locals_ = None
+        if event.get("event") == "stats":
+            with self._diagnostic_lock:
+                if state is self._mute_state:
+                    locals_ = self._validated_local_renders(event)
+                    remembered = dict(event)
+                    remembered["local_renders"] = list((locals_ or {}).values())
+                    remembered.pop("local_render", None)
+                    if locals_ is not None and len(self._local_endpoints) == 1:
+                        remembered["local_render"] = dict(locals_[self._local_endpoints[0]])
+                    if locals_ is None or any(not all(render[key] is True for key in (
+                            "ready", "armed", "playing")) or render["meaningful_samples"] == 0
+                            for render in locals_.values()):
+                        timing = event.get("timing")
+                        remembered["timing"] = dict(timing, valid=False) if isinstance(timing, dict) else {"valid": False}
+        super()._remember_native_event(state, remembered)
         with self._diagnostic_lock:
             if state is not self._mute_state:
                 return
+            if event.get("event") == "stats":
+                # A missing or malformed member clears the whole local sample,
+                # so one healthy endpoint cannot stand in for another output.
+                self._local_evidence = locals_ or {}
             members = event.get("members")
             if not isinstance(members, list) or len(members) > self.MAX_SINKS:
                 return
@@ -265,7 +356,10 @@ class AirPlayGroupProcess(AirPlayProcess):
         with self._diagnostic_lock:
             source = self._group_source
             result.update({"schema_version": 1, "receiver_ids": self._receiver_ids,
-                           "local_endpoint": self._local_endpoint,
+                           "local_endpoints": self._local_endpoints,
+                           "local_endpoint": self._local_endpoints[0] if len(self._local_endpoints) == 1 else "",
+                           "local_renders": tuple(copy.deepcopy(self._local_evidence[endpoint])
+                               for endpoint in self._local_endpoints if endpoint in self._local_evidence),
                            "music_source": {
                                "source_app_id": source.source_app_id,
                                "process_id": source.process_id,

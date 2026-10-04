@@ -1,6 +1,6 @@
 // GluSpot synchronized group host: one exact music-process capture, one final
 // PCM timeline, independently authenticated AirPlay receivers and optional
-// Windows render output. No receiver owns an independent capture/pacer.
+// Windows render outputs. No receiver owns an independent capture/pacer.
 #include "group_main.h"
 #include "group_capture.h"
 #include "endpoint_mute_guard.h"
@@ -184,12 +184,35 @@ bool stdinCommands(std::string& pending, std::vector<std::unique_ptr<Member>>& m
         if (latest[index] && members[index]->ready) members[index]->sender->setVolume(*latest[index] * 100.0);
     return false;
 }
+#if GLUSPOT_HAS_LOCAL_RENDERER
+void localRenderStats(std::ostream& out, const LocalRenderDiagnostics& d, const std::string* endpoint = nullptr) {
+    out << '{';
+    if (endpoint) out << "\"endpoint_id\":" << quoted(*endpoint) << ',';
+    out << "\"ready\":" << (d.ready ? "true" : "false")
+        << ",\"armed\":" << (d.armed ? "true" : "false") << ",\"playing\":" << (d.playing ? "true" : "false")
+        << ",\"endpoint_clock_valid\":" << (d.endpointClockValid ? "true" : "false")
+        << ",\"acoustic_delay_known\":" << (d.acousticDelayKnown ? "true" : "false")
+        << ",\"written_frames\":" << d.writtenFrames << ",\"nonzero_samples\":" << d.nonzeroSamples
+        << ",\"meaningful_samples\":" << d.meaningfulSamples << ",\"underrun_frames\":" << d.underrunFrames
+        << ",\"source_frame\":" << d.sourceFrame << ",\"device_clock_frames\":" << d.deviceClockFrames
+        << ",\"presentation_latency_frames\":" << d.presentationLatencyFrames
+        << ",\"clock_position\":" << d.clockPosition << ",\"clock_frequency\":" << d.clockFrequency
+        << ",\"clock_qpc_100ns\":" << d.clockQpc100ns << ",\"clock_qpc_age_known\":" << (d.clockQpcAgeKnown ? "true" : "false")
+        << ",\"clock_qpc_age_ms\":" << d.clockQpcAgeMs << ",\"padding_frames\":" << d.paddingFrames
+        << ",\"write_estimate_written_frames\":" << d.writeEstimateWrittenFrames
+        << ",\"write_queue_delay_ms\":" << d.writeQueueDelayMs
+        << ",\"write_presentation_offset_ms\":" << d.writePresentationOffsetMs
+        << ",\"write_presentation_epoch_offset_ms\":" << d.writePresentationEpochOffsetMs
+        << ",\"stream_latency_ms\":" << d.streamLatencyMs << ",\"buffer_duration_ms\":" << d.bufferDurationMs
+        << ",\"phase_error_ms\":" << d.phaseErrorMs << ",\"resample_ratio\":" << d.resampleRatio << '}';
+}
+#endif
 void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>>& members,
                 BufferTimingTracker& timing, bool flowing, uint64_t paddedFrames,
                 const GroupArguments& args, uint64_t timelineFrame, size_t conditionedFrames,
                 double captureRatio
 #if GLUSPOT_HAS_LOCAL_RENDERER
-                , const LocalAudioRenderer* local
+                , const GroupLocalRendererSet<LocalAudioRenderer>& locals
 #endif
                 ) {
     fxchain::RaopDiagnostics aggregate;
@@ -211,6 +234,9 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
         if (!d.lastError.empty()) aggregate.lastError = d.lastError;
     }
     const auto queued = capture.ring().availableRead() / 2 + conditionedFrames;
+#if GLUSPOT_HAS_LOCAL_RENDERER
+    flowing = flowing && locals.hasMeaningfulPcm();
+#endif
     const auto estimate = timing.sample({capture.frames.load(), aggregate.audioFramesSent, paddedFrames,
         capture.droppedSamples.load(), capture.discontinuities.load(), queued, 44100,
         aggregate.protocolLatencyFrames + aggregate.requestedMinLatencyFrames, flowing});
@@ -231,32 +257,33 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
     if (signal.lastMeaningfulAgeMs) std::cout << *signal.lastMeaningfulAgeMs; else std::cout << "null";
     std::cout << ",\"peak\":" << signal.peak << "},\"group\":{\"method\":\"shared_pcm_rtp_ntp\",\"members\":" << members.size()
               << ",\"timeline_frame\":" << timelineFrame << ",\"music_pid\":" << args.musicPid
-              << ",\"music_created_at\":" << args.musicCreatedAt << ",\"local_endpoint\":" << quoted(args.localEndpoint)
-              << ",\"local_renderer\":" << (!args.localEndpoint.empty() ? "true" : "false")
+              << ",\"music_created_at\":" << args.musicCreatedAt << ",\"local_endpoints\":[";
+    for (size_t index = 0; index < args.localEndpoints.size(); ++index) {
+        if (index) std::cout << ',';
+        std::cout << quoted(args.localEndpoints[index]);
+    }
+    std::cout << ']';
+    if (args.localEndpoints.size() == 1) std::cout << ",\"local_endpoint\":" << quoted(args.localEndpoints.front());
+    std::cout << ",\"local_renderer\":" << (!args.localEndpoints.empty() ? "true" : "false")
               << ",\"capture_resample_ratio\":" << captureRatio
               << ",\"acoustic_alignment_verified\":false},\"members\":";
     memberStates(std::cout, members);
 #if GLUSPOT_HAS_LOCAL_RENDERER
-    if (local) {
-        const auto d = local->diagnostics();
-        std::cout << ",\"local_render\":{\"ready\":" << (d.ready ? "true" : "false")
-                  << ",\"armed\":" << (d.armed ? "true" : "false") << ",\"playing\":" << (d.playing ? "true" : "false")
-                  << ",\"endpoint_clock_valid\":" << (d.endpointClockValid ? "true" : "false")
-                  << ",\"acoustic_delay_known\":" << (d.acousticDelayKnown ? "true" : "false")
-                  << ",\"written_frames\":" << d.writtenFrames << ",\"nonzero_samples\":" << d.nonzeroSamples
-                  << ",\"meaningful_samples\":" << d.meaningfulSamples << ",\"underrun_frames\":" << d.underrunFrames
-                  << ",\"source_frame\":" << d.sourceFrame << ",\"device_clock_frames\":" << d.deviceClockFrames
-                  << ",\"presentation_latency_frames\":" << d.presentationLatencyFrames
-                  << ",\"clock_position\":" << d.clockPosition << ",\"clock_frequency\":" << d.clockFrequency
-                  << ",\"clock_qpc_100ns\":" << d.clockQpc100ns << ",\"clock_qpc_age_known\":" << (d.clockQpcAgeKnown ? "true" : "false")
-                  << ",\"clock_qpc_age_ms\":" << d.clockQpcAgeMs << ",\"padding_frames\":" << d.paddingFrames
-                  << ",\"write_estimate_written_frames\":" << d.writeEstimateWrittenFrames
-                  << ",\"write_queue_delay_ms\":" << d.writeQueueDelayMs
-                  << ",\"write_presentation_offset_ms\":" << d.writePresentationOffsetMs
-                  << ",\"write_presentation_epoch_offset_ms\":" << d.writePresentationEpochOffsetMs
-                  << ",\"stream_latency_ms\":" << d.streamLatencyMs << ",\"buffer_duration_ms\":" << d.bufferDurationMs
-                  << ",\"phase_error_ms\":" << d.phaseErrorMs << ",\"resample_ratio\":" << d.resampleRatio << '}';
+    std::cout << ",\"local_renders\":[";
+    std::vector<LocalRenderDiagnostics> observations;
+    observations.reserve(locals.outputs().size());
+    for (const auto& output : locals.outputs()) {
+        if (!observations.empty()) std::cout << ',';
+        observations.push_back(output.renderer->diagnostics());
+        localRenderStats(std::cout, observations.back(), &output.endpoint);
     }
+    std::cout << ']';
+    if (observations.size() == 1) {
+        std::cout << ",\"local_render\":";
+        localRenderStats(std::cout, observations.front());
+    }
+#else
+    std::cout << ",\"local_renders\":[]";
 #endif
     std::cout << "}\n" << std::flush;
 }
@@ -281,19 +308,22 @@ int runGroupHelper(int argc, wchar_t** argv) {
         if (!capture.waitReady()) throw std::runtime_error(capture.error().empty() ? "Music capture initialization timed out" : capture.error());
         auto history = std::make_unique<GroupPcmHistory>();
 #if GLUSPOT_HAS_LOCAL_RENDERER
-        std::unique_ptr<LocalAudioRenderer> local;
-        if (!args.localEndpoint.empty()) {
-            local = std::make_unique<LocalAudioRenderer>(wide(args.localEndpoint),
+        GroupLocalRendererSet<LocalAudioRenderer> locals(args.localEndpoints, [&history](const auto& endpoint) {
+            return std::make_unique<LocalAudioRenderer>(wide(endpoint),
                 [&history](uint64_t frame, std::span<int16_t> output) { return history->pull(frame, output); });
-            if (!local->waitReady()) throw std::runtime_error(local->error().empty() ? "Local group renderer initialization timed out" : local->error());
-        }
+        });
+        if (const auto error = locals.prepare(); !error.empty()) throw std::runtime_error(error);
 #else
-        if (!args.localEndpoint.empty()) throw std::runtime_error("Local synchronized renderer is not included in this build");
+        if (!args.localEndpoints.empty()) throw std::runtime_error("Local synchronized renderer is not included in this build");
 #endif
         bool failed = false, groupArmed = false, streaming = false;
         auto fail = [&](const std::string& message) {
             if (failed) return;
-            failed = true; status("error", message);
+            failed = true;
+#if GLUSPOT_HAS_LOCAL_RENDERER
+            locals.stop();
+#endif
+            status("error", message);
         };
         std::vector<std::unique_ptr<Member>> members;
         for (const auto& receiver : args.receivers) {
@@ -350,7 +380,7 @@ int runGroupHelper(int argc, wchar_t** argv) {
             if (!capture.sourceAlive()) { fail("Music process ended; synchronized group stopped"); break; }
             if (capture.droppedSamples.load()) { fail("Music capture overran; synchronized group stopped before source frames diverged"); break; }
 #if GLUSPOT_HAS_LOCAL_RENDERER
-            if (local && !local->error().empty()) { fail(local->error()); break; }
+            if (const auto error = locals.error(); !error.empty()) { fail(error); break; }
 #endif
             if (now >= guardDeadline) {
                 try { source.check(); }
@@ -385,7 +415,7 @@ int runGroupHelper(int argc, wchar_t** argv) {
                            d.requestedMinLatencyFrames == policy.requestedMinLatencyFrames;
                 })) { fail("Receivers do not share the same presentation latency policy"); break; }
 #if GLUSPOT_HAS_LOCAL_RENDERER
-                if (local && !local->arm(sendStart, presentationFrames)) { fail("Cannot arm local output on shared group timeline"); break; }
+                if (const auto error = locals.arm(sendStart, presentationFrames); !error.empty()) { fail(error); break; }
 #endif
                 capture.start(); groupArmed = true;
                 status("waiting_audio", "Synchronized group connected; waiting for music-process audio");
@@ -430,7 +460,7 @@ int runGroupHelper(int argc, wchar_t** argv) {
             const auto signal = capture.signal();
             bool localSignalReady = true;
 #if GLUSPOT_HAS_LOCAL_RENDERER
-            if (local) localSignalReady = local->diagnostics().meaningfulSamples > 0;
+            localSignalReady = locals.hasMeaningfulPcm();
 #endif
             if (groupArmed && localSignalReady && !streaming && std::all_of(members.begin(), members.end(), [&signal](const auto& member) {
                     return hasStreamingSignal(signal, member->sender->diagnostics().meaningfulSamplesSent);
@@ -443,7 +473,7 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 groupStats(capture, members, timing, groupArmed, conditioner.paddedFrames(), args, nextFrame,
                            conditioner.queuedFrames(), conditioner.ratio()
 #if GLUSPOT_HAS_LOCAL_RENDERER
-                           , local.get()
+                           , locals
 #endif
                            );
                 statsDeadline = now + 500ms;
@@ -453,12 +483,15 @@ int runGroupHelper(int argc, wchar_t** argv) {
         groupStats(capture, members, timing, false, conditioner.paddedFrames(), args, nextFrame,
                    conditioner.queuedFrames(), conditioner.ratio()
 #if GLUSPOT_HAS_LOCAL_RENDERER
-                   , local.get()
+                   , locals
 #endif
                    );
+#if GLUSPOT_HAS_LOCAL_RENDERER
+        locals.stop(); // Fan out before potentially slow receiver teardown.
+#endif
         for (auto& member : members) { member->sender->stop(); member->state = "stopped"; }
 #if GLUSPOT_HAS_LOCAL_RENDERER
-        local.reset(); // No delayed music may continue after source mute is restored.
+        locals.clear(); // Stop every delayed output before source mute is restored.
 #endif
         try { mute.restore(); muteStatus("restored", args, mute, false); }
         catch (const std::exception& error) { fail(error.what()); }

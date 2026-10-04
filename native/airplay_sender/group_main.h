@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <mutex>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <set>
@@ -66,7 +67,8 @@ struct GroupReceiverArgument {
 struct GroupArguments {
     uint32_t musicPid = 0;
     uint64_t musicCreatedAt = 0;
-    std::string sourceEndpoint, localEndpoint;
+    std::string sourceEndpoint;
+    std::vector<std::string> localEndpoints;
     std::string sourceId = "02:47:4C:55:53:50";
     std::vector<GroupReceiverArgument> receivers;
 };
@@ -139,12 +141,16 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
             else if (key == "--port") member.port = uint16_t(groupUnsigned(value, 65535, "receiver port"));
             else if (key == "--device-id") member.deviceId = value;
             else member.name = value;
+        } else if (key == "--local-endpoint") {
+            groupText(value, 2048, "local output endpoint");
+            if (result.localEndpoints.size() == 7)
+                throw std::invalid_argument("At most eight group outputs are supported, including an AirPlay receiver");
+            result.localEndpoints.push_back(value);
         } else {
             if (!global.insert(key).second) throw std::invalid_argument("Duplicate group option");
             if (key == "--music-pid") result.musicPid = uint32_t(groupUnsigned(value, 0xffffffffULL, "music PID"));
             else if (key == "--music-created-at") result.musicCreatedAt = groupUnsigned(value, UINT64_MAX, "music creation token");
             else if (key == "--source-endpoint") result.sourceEndpoint = value;
-            else if (key == "--local-endpoint") result.localEndpoint = value;
             else if (key == "--source-id") result.sourceId = value;
             else throw std::invalid_argument("Unknown group option: " + key);
         }
@@ -153,15 +159,90 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
     if (!global.count("--group") || !result.musicPid || !result.musicCreatedAt || result.receivers.empty())
         throw std::invalid_argument("Group requires a verified music process, source endpoint and HomePod");
     groupText(result.sourceEndpoint, 2048, "source endpoint");
-    if (!result.localEndpoint.empty()) {
-        groupText(result.localEndpoint, 2048, "local output endpoint");
-        if (groupSameEndpoint(result.localEndpoint, result.sourceEndpoint) || result.receivers.size() + 1 > 8)
-            throw std::invalid_argument("Local group output must differ from muted source; at most eight outputs");
-    } else if (global.count("--local-endpoint")) throw std::invalid_argument("Local group output cannot be empty");
+    if (result.receivers.size() + result.localEndpoints.size() > 8)
+        throw std::invalid_argument("At most eight group outputs are supported");
+    for (size_t index = 0; index < result.localEndpoints.size(); ++index) {
+        const auto& endpoint = result.localEndpoints[index];
+        if (groupSameEndpoint(endpoint, result.sourceEndpoint) ||
+            std::any_of(result.localEndpoints.begin(), result.localEndpoints.begin() + index,
+                [&endpoint](const auto& previous) { return groupSameEndpoint(endpoint, previous); }))
+            throw std::invalid_argument("Local group outputs must be unique and differ from muted source");
+    }
     static const std::regex identity("^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$");
     if (!std::regex_match(result.sourceId, identity)) throw std::invalid_argument("Invalid group source identity");
     return result;
 }
+
+// The coordinator owns independent endpoint renderers as one lifecycle. All
+// workers receive the same pull callback and presentation epoch, while their
+// device clocks remain private. Stop signals fan out before any destructor
+// joins: one endpoint must never keep playing during another endpoint's exit.
+// The renderer contract is also exercised with offline fake device clocks.
+template<class Renderer>
+class GroupLocalRendererSet {
+public:
+    struct Output {
+        std::string endpoint;
+        std::unique_ptr<Renderer> renderer;
+    };
+    template<class Factory>
+    GroupLocalRendererSet(const std::vector<std::string>& endpoints, Factory factory) {
+        try {
+            outputs_.reserve(endpoints.size());
+            for (const auto& endpoint : endpoints) {
+                auto renderer = factory(endpoint);
+                if (!renderer) throw std::runtime_error("Local group renderer factory returned no output");
+                outputs_.push_back({endpoint, std::move(renderer)});
+            }
+        } catch (...) { stop(); throw; }
+    }
+    ~GroupLocalRendererSet() { stop(); }
+    GroupLocalRendererSet(const GroupLocalRendererSet&) = delete;
+    GroupLocalRendererSet& operator=(const GroupLocalRendererSet&) = delete;
+
+    std::string prepare() {
+        if (stopped_) return "Local synchronized outputs already stopped";
+        for (const auto& output : outputs_) {
+            if (!output.renderer->waitReady()) {
+                const auto detail = output.renderer->error();
+                stop();
+                return output.endpoint + ": " + (detail.empty() ? "Local group renderer initialization timed out" : detail);
+            }
+        }
+        return {};
+    }
+    std::string arm(typename Renderer::Clock::time_point start, uint32_t presentationFrames) {
+        if (stopped_) return "Local synchronized outputs already stopped";
+        for (const auto& output : outputs_) {
+            if (!output.renderer->arm(start, presentationFrames)) {
+                stop();
+                return output.endpoint + ": Cannot arm local output on shared group timeline";
+            }
+        }
+        return {};
+    }
+    std::string error() const {
+        for (const auto& output : outputs_)
+            if (const auto detail = output.renderer->error(); !detail.empty()) return output.endpoint + ": " + detail;
+        return {};
+    }
+    bool hasMeaningfulPcm() const {
+        if (stopped_) return false;
+        return std::all_of(outputs_.begin(), outputs_.end(), [](const auto& output) {
+            const auto stats = output.renderer->diagnostics();
+            return stats.ready && stats.armed && stats.playing && stats.meaningfulSamples > 0;
+        });
+    }
+    const std::vector<Output>& outputs() const { return outputs_; }
+    void stop() noexcept {
+        stopped_ = true;
+        for (const auto& output : outputs_) output.renderer->requestStop();
+    }
+    void clear() { stop(); outputs_.clear(); }
+private:
+    std::vector<Output> outputs_;
+    bool stopped_ = false;
+};
 
 struct GroupVolumeCommand { size_t receiver = 0; double volume = 0; };
 inline std::optional<GroupVolumeCommand> groupVolumeCommand(const std::string& line, size_t members) {

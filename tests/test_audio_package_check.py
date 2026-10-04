@@ -177,6 +177,44 @@ class AudioPackageCheckTests(unittest.TestCase):
             self.assertTrue(result["execution_checked"])
             imported.assert_called_once_with(name)
 
+    def test_multi_output_parser_check_rejects_source_collision_before_windows_work(self):
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / "helper.exe"
+            helper.touch()
+            event = {"event": "error", "message":
+                     "Local group outputs must be unique and differ from muted source"}
+            reply = SimpleNamespace(returncode=2, stdout=json.dumps(event) + "\n", stderr="")
+            with patch.object(check, "engine_path", return_value=helper), \
+                    patch.object(check.subprocess, "run", return_value=reply) as run:
+                result = check._check_multi_output_dispatch()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["receiver_contacted"])
+        self.assertFalse(result["windows_state_changed"])
+        args = run.call_args.args[0]
+        self.assertEqual(args.count("--local-endpoint"), 2)
+        self.assertEqual(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_old_single_renderer_parser_cannot_certify_multiple_output_bundle(self):
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / "helper.exe"
+            helper.touch()
+            for output, code in ((json.dumps({"event": "error", "message": "Unknown or duplicate group argument"}), 2),
+                                 (json.dumps({"event": "stopped"}), 0), ('[]\n', 2)):
+                with self.subTest(output=output), patch.object(check, "engine_path", return_value=helper), \
+                        patch.object(check.subprocess, "run", return_value=SimpleNamespace(
+                            returncode=code, stdout=output, stderr="")):
+                    self.assertFalse(check._check_multi_output_dispatch()["ok"])
+
+    def test_failed_multiple_output_compatibility_fails_the_complete_report(self):
+        with patch.object(check, "_dependency_info", return_value={"ok": True}), \
+                patch.object(check, "_module_info", return_value={"ok": True}), \
+                patch.object(check, "_check_endpoints", return_value={"ok": True, "default_endpoint_id": "bt"}), \
+                patch.object(check, "_check_discovery", return_value={"ok": True}), \
+                patch.object(check, "_check_capture", return_value={"ok": True}), \
+                patch.object(check, "_check_group_dispatch", return_value={"ok": True}), \
+                patch.object(check, "_check_multi_output_dispatch", return_value={"ok": False}):
+            self.assertFalse(check.build_audio_package_report()["ok"])
+
     def test_external_helper_cannot_certify_a_frozen_bundle(self):
         with patch.object(check.sys, "frozen", True, create=True), \
                 patch.dict(check.os.environ, {"GLUSPOT_AIRPLAY_ENGINE": "external.exe"}), \
@@ -185,11 +223,13 @@ class AudioPackageCheckTests(unittest.TestCase):
                 patch.object(check, "_check_endpoints", return_value={"ok": True, "default_endpoint_id": "bt"}), \
                 patch.object(check, "_check_discovery", return_value={"ok": True}), \
                 patch.object(check, "_check_capture", return_value={"ok": True}), \
-                patch.object(check, "_check_group_dispatch", return_value={"ok": True}):
+                patch.object(check, "_check_group_dispatch", return_value={"ok": True}), \
+                patch.object(check, "_check_multi_output_dispatch", return_value={"ok": True}):
             report = check.build_audio_package_report()
         self.assertFalse(report["ok"])
         self.assertFalse(report["native_capture"]["ok"])
         self.assertFalse(report["native_group_dispatch"]["ok"])
+        self.assertFalse(report["native_multi_output_dispatch"]["ok"])
 
 
 if __name__ == "__main__":

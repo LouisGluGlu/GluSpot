@@ -104,11 +104,13 @@ void testStaggeredReceiversSharePcmAndPresentationClock() {
     uint16_t seqA = 0, seqB = 0;
     uint64_t decodedNonzero = 0;
     uint64_t decodedMeaningful = 0;
+    auto history = std::make_unique<gluspot::GroupPcmHistory>();
     for (uint64_t index : {0ULL, 352ULL, 704ULL, 1056ULL}) {
         if (index) {
             sharedNow += std::chrono::milliseconds(8);
             pcm = rampExpect(704, int16_t(index));
         }
+        REQUIRE(history->append(index, pcm), "the group publishes each final packet exactly once for both Windows outputs");
         REQUIRE(a.sender->sendCoordinatedAudio(index, pcm) && b.sender->sendCoordinatedAudio(index, pcm),
                 "one coordinator packet is accepted by both receiver sessions");
         const auto pa = packetsOf(a, RaopUdp::Audio), pb = packetsOf(b, RaopUdp::Audio);
@@ -116,6 +118,19 @@ void testStaggeredReceiversSharePcmAndPresentationClock() {
         const auto decodedA = a.rx.decodeAudio(pa[0].data), decodedB = b.rx.decodeAudio(pb[0].data);
         CHECK(decodedA && decodedB && *decodedA == pcm && *decodedB == pcm,
               "independent receivers decrypt exactly the same final source PCM");
+        std::array<int16_t, 704> wired{}, bluetooth{};
+        REQUIRE(history->pull(index, wired) && history->pull(index, bluetooth),
+                "two Windows renderers independently read the same published source range");
+        CHECK(std::equal(wired.begin(), wired.end(), pcm.begin()) && wired == bluetooth &&
+              decodedA && std::equal(wired.begin(), wired.end(), decodedA->begin()),
+              "both Windows outputs read exactly the final PCM independently decrypted by both HomePods");
+        if (index) {
+            std::array<int16_t, 64> overlapA{}, overlapB{};
+            REQUIRE(history->pull(index - 13, overlapA) && history->pull(index - 7, overlapB),
+                    "independently scheduled Windows clocks can read overlapping unaligned packet boundaries");
+            CHECK(std::equal(overlapA.begin() + 12, overlapA.end(), overlapB.begin()),
+                  "different render callbacks retain identical shared samples on their common frame range");
+        }
         CHECK(be32(pa[0].data, 4) == 66150 + index && be32(pb[0].data, 4) == 66150 + index,
               "shared source frame has identical presentation RTP in both sessions");
         if (index == 0) { seqA = be16(pa[0].data, 2); seqB = be16(pb[0].data, 2); }
@@ -358,7 +373,7 @@ void testGroupArgumentIdentityAndCommandIsolation() {
         "--device-id", "D002", "--name", "Studio", "--local-endpoint", "{Bluetooth-Output}"};
     const auto parsed = gluspot::parseGroupArguments(valid);
     CHECK(parsed.musicPid == 1234 && parsed.musicCreatedAt == 456789 && parsed.receivers.size() == 2 &&
-          parsed.receivers[1].id == "homepod-two" && parsed.localEndpoint == "{Bluetooth-Output}",
+          parsed.receivers[1].id == "homepod-two" && parsed.localEndpoints == std::vector<std::string>{"{Bluetooth-Output}"},
           "validated CLI preserves ordered receiver identities and exact process creation token");
     auto rejects = [](const std::vector<std::string>& arguments) {
         try { gluspot::parseGroupArguments(arguments); return false; }
@@ -385,6 +400,28 @@ void testGroupArgumentIdentityAndCommandIsolation() {
     CHECK(rejects(duplicateHost), "same physical network endpoint cannot be two group outputs");
     auto absent = valid; absent.erase(absent.begin() + 13, absent.begin() + 15);
     CHECK(rejects(absent), "missing member field is not replaced with guessed sender defaults");
+    auto fourOutputs = valid;
+    fourOutputs.insert(fourOutputs.end(), {"--local-endpoint", "{Wired-Output}"});
+    const auto four = gluspot::parseGroupArguments(fourOutputs);
+    CHECK(four.receivers.size() == 2 && four.localEndpoints ==
+          std::vector<std::string>({"{Bluetooth-Output}", "{Wired-Output}"}),
+          "two HomePods and independent Bluetooth/wired endpoints preserve all four ordered outputs");
+    for (const auto& endpoint : {"{bluetooth-output}", "{Windows-Source}", "{windows-source}", ""}) {
+        auto args = valid; args.insert(args.end(), {"--local-endpoint", endpoint});
+        CHECK(rejects(args), "a repeated or source-equivalent Windows endpoint is never rendered twice or unmuted");
+    }
+    auto eightOutputs = fourOutputs;
+    for (int index = 0; index < 4; ++index)
+        eightOutputs.insert(eightOutputs.end(), {"--local-endpoint", "{Extra-Output-" + std::to_string(index) + '}'});
+    const auto eight = gluspot::parseGroupArguments(eightOutputs);
+    CHECK(eight.receivers.size() + eight.localEndpoints.size() == 8,
+          "the eight-output cap counts both remote and Windows renderers");
+    auto nineOutputs = eightOutputs; nineOutputs.insert(nineOutputs.end(), {"--local-endpoint", "{Ninth-Output}"});
+    CHECK(rejects(nineOutputs), "nine mixed outputs reject before any Windows initialization");
+    auto noReceivers = std::vector<std::string>{"--group", "--music-pid", "1234", "--music-created-at", "456789",
+        "--source-endpoint", "{Windows-Source}", "--local-endpoint", "{Wired-Output}",
+        "--local-endpoint", "{Bluetooth-Output}"};
+    CHECK(rejects(noReceivers), "the AirPlay timeline still requires at least one authenticated receiver");
     CHECK(!gluspot::groupVolumeCommand("{\"command\":\"set_volume\",\"volume\":0.5}", 2),
           "legacy unnamed volume command cannot control an arbitrary group receiver");
     const auto command = gluspot::groupVolumeCommand("{\"command\":\"set_volume\",\"receiver\":1,\"volume\":3.5e-1}", 2);
