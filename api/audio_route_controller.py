@@ -25,6 +25,7 @@ class AudioRouteController:
     CAPTURE_SILENCE_SECONDS = 3.0
     CAPTURE_SILENCE_MESSAGE = "已连接 HomePod，暂未检测到电脑声音"
     APP_ROUTE_RESUME_MESSAGE = "原输出设置已恢复，等待音乐继续播放"
+    _ENDPOINT_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
     def __init__(self, backend=None, discovery=None, sender=None, *, latency_seconds=1.5,
                  start_worker=True, source_id="", auto_latency_enabled=True,
@@ -512,9 +513,6 @@ class AudioRouteController:
         if identity in selected:
             selected.remove(identity)
         else:
-            if device.transport == "windows":
-                selected = [member for member in selected if devices.get(member) is not None
-                            and devices[member].transport != "windows"]
             selected.append(identity)
         if len(selected) > AirPlayGroupProcess.MAX_SINKS:
             self._publish(status_message="同步播放最多支持 8 个输出设备")
@@ -616,9 +614,11 @@ class AudioRouteController:
             self._publish(state="error", status_message="音乐来源或所选设备已断开，请重新选择")
             return
         try:
-            local_endpoint = next((device.id for device in selected if device.transport == "windows"), "")
-            if local_endpoint == source_endpoint or not router.endpoint_is_unoccupied(source_endpoint, source):
-                source = self._route_music_to_spare(source, local_endpoint or source_endpoint)
+            local_endpoints = tuple(device.id for device in selected if device.transport == "windows")
+            local_keys = {endpoint.translate(self._ENDPOINT_ASCII_FOLD) for endpoint in local_endpoints}
+            if (source_endpoint.translate(self._ENDPOINT_ASCII_FOLD) in local_keys
+                    or not router.endpoint_is_unoccupied(source_endpoint, source)):
+                source = self._route_music_to_spare(source, local_endpoints)
                 source_endpoint = next(iter({session.endpoint_id for session in source.sessions}))
             if self._route_setup_cancelled():
                 self._cancel_group_setup()
@@ -662,11 +662,17 @@ class AudioRouteController:
                       group_id=f"group:{self._generation}", capture_scope="music_process_tree",
                       status_message="正在更新同步播放设备")
 
-    def _route_music_to_spare(self, source, local_endpoint):
+    def _route_music_to_spare(self, source, local_endpoints):
         router = self._get_app_router()
         original_endpoints = {session.endpoint_id for session in source.sessions}
+        # Keep the existing journal's one active endpoint witness. Routing and
+        # restoration operate on the music source/spare, never on this witness;
+        # candidate exclusion and the sender both fence every playback sink.
+        route_witness = next(iter(local_endpoints), next(iter(original_endpoints)))
+        excluded_keys = {endpoint.translate(self._ENDPOINT_ASCII_FOLD)
+                         for endpoint in (*local_endpoints, *original_endpoints)}
         candidates = sorted((device for device in self._local_devices
-                             if device.id != local_endpoint and device.id not in original_endpoints
+                             if device.id.translate(self._ENDPOINT_ASCII_FOLD) not in excluded_keys
                              and device.available and not device.is_bluetooth),
                             key=lambda device: (device.is_default, device.kind != "speaker", device.id))
         guard = None
@@ -674,12 +680,12 @@ class AudioRouteController:
             if self._route_setup_cancelled():
                 raise RuntimeError("同步播放设备设置已取消")
             try:
-                guard = router.prepare(source, candidate.id, local_endpoint)
+                guard = router.prepare(source, candidate.id, route_witness)
                 break
             except (ValueError, RuntimeError, OSError):
                 continue
         if guard is None:
-            raise RuntimeError("没有可安全使用的空闲电脑音频输出，暂时无法同步播放此蓝牙设备")
+            raise RuntimeError("同步播放需要一个未参与播放的空闲电脑输出；请保留可用的 HDMI、USB 或其他输出作为音乐来源")
         self._app_route_guard = guard
         self._publish(state="connecting", status_message="正在为音乐软件准备同步播放来源")
         guard.apply()

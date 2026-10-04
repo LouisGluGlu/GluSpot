@@ -1031,6 +1031,200 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.backend.selected, [])
         self.assertEqual(self.backend.volume_calls, [])
 
+    def _add_group_spare(self, identity="spare"):
+        self.backend.outputs += (AudioOutputDevice(identity, "备用电脑输出", "speaker"),)
+        self.backend.mutes[identity], self.backend.volumes[identity] = False, .4
+        self.router.allow = True
+        self.controller._refresh_devices()
+
+    def _stream_four_members(self):
+        self._add_group_spare()
+        self.controller._begin_group((HOME.id, OTHER_HOME.id, "speakers", "headphones"))
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        return self.controller.snapshot()
+
+    def test_windows_checkbox_addition_preserves_existing_windows_and_airplay_members(self):
+        self._add_group_spare()
+        self._stream()
+        for identity in (OTHER_HOME.id, "speakers", "headphones"):
+            self.assertTrue(self.controller.toggle(identity))
+            self.controller._step()
+            expected = (HOME.id, OTHER_HOME.id, "speakers", "headphones")[:
+                (OTHER_HOME.id, "speakers", "headphones").index(identity) + 2]
+            self.assertEqual(self.group.starts[-1][0], expected)
+            self.assertEqual(self.controller.snapshot().pending_ids, expected)
+            self.assertEqual(self.controller.snapshot().member_ids, ())
+            self.group.events = self.group.ready_events()
+            self.controller._step()
+            self.assertEqual(self.controller.snapshot().member_ids, expected)
+        self.assertEqual(self.controller.snapshot().capture_scope, "music_process_tree")
+        self.assertEqual(self.group.starts[-1][1], "spare")
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
+    def test_source_matching_second_windows_member_is_migrated_away_from_all_outputs(self):
+        self._add_group_spare()
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self.controller._begin_group((HOME.id, OTHER_HOME.id, "speakers", "headphones"))
+        self.assertEqual(self.group.starts, [((HOME.id, OTHER_HOME.id, "speakers", "headphones"),
+                                              "spare", 300, 1000)])
+        self.assertEqual([call for call in self.router.calls if call[0] == "prepare"],
+                         [("prepare", "spare", "speakers")])
+        self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"spare"})
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_distinct_music_source_needs_no_route_transaction_for_two_windows_outputs(self):
+        self._add_group_spare()
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="spare"),))
+        self.controller._begin_group((HOME.id, OTHER_HOME.id, "speakers", "headphones"))
+        self.assertEqual(self.group.starts[-1][1], "spare")
+        self.assertEqual(self.router.guards, [])
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_all_selected_windows_outputs_are_excluded_from_capture_spare_candidates(self):
+        self._add_group_spare("monitor")
+        self.controller._begin_group((HOME.id, OTHER_HOME.id, "speakers", "headphones", "monitor"))
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual([call for call in self.router.calls if call[0] == "prepare"], [])
+        self.assertEqual(self.router.guards, [])
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("空闲电脑输出", self.controller.snapshot().status_message)
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
+    def test_four_outputs_without_unused_source_never_start_or_mute_music_session(self):
+        self.router.allow = True
+        self.controller._begin_group((HOME.id, OTHER_HOME.id, "speakers", "headphones"))
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(self.router.guards, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertEqual(self.controller.snapshot().member_ids, ())
+        self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"speakers"})
+
+    def test_occupied_unused_endpoint_cannot_authorize_four_output_group(self):
+        self._add_group_spare()
+        self.router.occupied.add("spare")
+        self.controller._begin_group((HOME.id, OTHER_HOME.id, "speakers", "headphones"))
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.router.guards, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.controller.snapshot().state, "error")
+
+    def test_four_members_have_independent_windows_volume_and_named_airplay_ack(self):
+        self._stream_four_members()
+        self.group.volume_states = {
+            HOME.id: {"volume": .3, "known": True, "source": "receiver_read"},
+            OTHER_HOME.id: {"volume": .7, "known": True, "source": "receiver_info"},
+        }
+        self.controller._step()
+        requested = (("speakers", .22), ("headphones", .41), (HOME.id, .18), (OTHER_HOME.id, .62))
+        for identity, volume in requested:
+            self.assertTrue(self.controller.set_volume(identity, volume))
+        self.controller._step()
+        self.assertEqual(self.backend.volume_calls, [("speakers", .22), ("headphones", .41)])
+        self.assertEqual(self.group.volume_calls, [(HOME.id, .18), (OTHER_HOME.id, .62)])
+        volumes = {device.id: device.volume for device in self.controller.snapshot().devices}
+        self.assertEqual((volumes[HOME.id], volumes[OTHER_HOME.id]), (.3, .7))
+        self.assertEqual((volumes["speakers"], volumes["headphones"], volumes["spare"]), (.22, .41, .4))
+        self.group.volume_states[OTHER_HOME.id].update(volume=.62, source="receiver_ack")
+        self.controller._step()
+        volumes = {device.id: device.volume for device in self.controller.snapshot().devices}
+        self.assertEqual((volumes[HOME.id], volumes[OTHER_HOME.id]), (.3, .62))
+        self.assertEqual(self.controller.snapshot().state, "casting")
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_removing_one_windows_checkbox_preserves_the_other_and_both_airplay_members(self):
+        self._stream_four_members()
+        self.controller.toggle("speakers")
+        self.controller._step()
+        self.assertEqual(self.group.starts[-1][0], (HOME.id, OTHER_HOME.id, "headphones"))
+        self.assertEqual(self.group.starts[-1][1], "speakers")
+        self.assertTrue(self.router.guards[-1].restored)
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        self.assertEqual(self.controller.snapshot().member_ids, (HOME.id, OTHER_HOME.id, "headphones"))
+        self.assertEqual(self.controller.snapshot().capture_scope, "music_process_tree")
+        self.assertEqual(self.backend.selected, [])
+
+    def test_four_member_rebuild_restores_owned_source_and_route_before_restarting(self):
+        self._stream_four_members()
+        order = []
+        guard = self.router.guards[-1]
+        original_stop, original_restore = self.group.stop, guard.restore
+        original_mute, original_start = self.backend.set_endpoint_mute, self.group.start_group
+        self.group.stop = lambda: (order.append("helper_stop"), original_stop())[-1]
+        self.backend.set_endpoint_mute = lambda identity, value: (
+            order.append(("source_restore", identity, value)), original_mute(identity, value))[-1]
+        guard.restore = lambda: (order.append("app_restore"), original_restore())[-1]
+        self.group.start_group = lambda devices, source, endpoint: (
+            order.append(("helper_start", tuple(device.id for device in devices))),
+            original_start(devices, source, endpoint))[-1]
+        self.backend.mutes["spare"] = True
+        self.group.needs_local_output_restore = True
+        self.group.source_evidence = {"endpoint_id": "spare", "original_muted": False, "phase": "muted"}
+        self.controller.toggle("headphones")
+        self.controller._step()
+        self.assertEqual(order, ["helper_stop", ("source_restore", "spare", False), "app_restore",
+                                 ("helper_start", (HOME.id, OTHER_HOME.id, "speakers"))])
+        self.assertEqual(self.group.starts[-1][1], "spare")
+        self.assertEqual(self.backend.volume_calls, [])
+        self.assertEqual(self.backend.selected, [])
+
+    def test_disconnection_of_either_windows_member_stops_and_restores_four_output_group(self):
+        original_outputs = self.backend.outputs
+        for disconnected in ("speakers", "headphones"):
+            with self.subTest(disconnected=disconnected):
+                self.backend.outputs = original_outputs
+                self._stream_four_members()
+                guard = self.router.guards[-1]
+                self.backend.mutes["spare"] = True
+                self.group.needs_local_output_restore = True
+                self.group.source_evidence = {"endpoint_id": "spare", "original_muted": False, "phase": "muted"}
+                self.backend.outputs = tuple(device for device in self.backend.outputs if device.id != disconnected)
+                self.controller._refresh_devices()
+                self.assertFalse(self.group.running)
+                self.assertTrue(guard.restored)
+                self.assertEqual(self.controller.snapshot().member_ids, ())
+                self.assertEqual(self.controller.snapshot().state, "error")
+                self.assertIn("设备已断开", self.controller.snapshot().status_message)
+                self.assertFalse(self.backend.mutes["spare"])
+                self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"speakers"})
+                self.assertEqual(self.backend.volume_calls, [])
+                self.assertEqual(self.backend.selected, [])
+
+    def test_eight_output_limit_counts_each_windows_member_without_replacing_it(self):
+        self._add_group_spare()
+        self.discovery.receivers = tuple(replace(HOME, id=f"receiver-{index}", host=f"192.0.2.{index + 1}")
+                                         for index in range(7))
+        self.controller._refresh_devices()
+        desired = tuple(receiver.id for receiver in self.discovery.receivers[:6]) + ("speakers", "headphones")
+        for identity in desired:
+            self.controller.toggle(identity)
+            self.controller._step()
+            sender = self.single if len(self.controller._group_member_ids) < 2 else self.group
+            sender.events = self.group.ready_events() if sender is self.group else [{"event": "streaming"}]
+            self.controller._step()
+        self.assertEqual(self.controller.snapshot().member_ids, desired)
+        self.assertEqual(self.group.starts[-1][0], desired)
+        starts = tuple(self.group.starts)
+        self.controller.toggle(self.discovery.receivers[6].id)
+        self.controller._step()
+        self.assertEqual(tuple(self.group.starts), starts)
+        self.assertEqual(self.controller.snapshot().member_ids, desired)
+        self.assertTrue(self.group.running)
+        self.assertIn("最多支持 8", self.controller.snapshot().status_message)
+        self.assertEqual(self.backend.selected, [])
+
     def test_same_source_local_render_without_safe_physical_spare_fails_closed(self):
         self._stream()
         starts = len(self.group.starts)
@@ -1038,7 +1232,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.controller._step()
         self.assertEqual(len(self.group.starts), starts)
         self.assertEqual(self.controller.snapshot().state, "error")
-        self.assertIn("空闲电脑音频输出", self.controller.snapshot().status_message)
+        self.assertIn("空闲电脑输出", self.controller.snapshot().status_message)
         self.assertEqual(self.controller.snapshot().member_ids, ())
 
     def test_windows_only_toggle_keeps_existing_explicit_default_selection(self):
@@ -1488,7 +1682,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.group.starts, [])
         self.assertEqual(self.backend.mute_calls, [])
         self.assertEqual(self.controller.snapshot().state, "error")
-        self.assertIn("空闲电脑音频输出", self.controller.snapshot().status_message)
+        self.assertIn("空闲电脑输出", self.controller.snapshot().status_message)
 
     def test_music_shared_source_uses_unused_spare_without_global_output_switch(self):
         self.backend.outputs += (AudioOutputDevice("spare", "备用电脑扬声器", "speaker"),)

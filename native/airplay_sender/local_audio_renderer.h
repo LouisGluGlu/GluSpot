@@ -77,12 +77,14 @@ public:
         catch (...) { CloseHandle(stop_); CloseHandle(begin_); throw; }
     }
     ~LocalAudioRenderer() {
-        SetEvent(stop_);
+        requestStop();
         if (worker_.joinable()) worker_.join();
         CloseHandle(begin_); CloseHandle(stop_);
     }
     LocalAudioRenderer(const LocalAudioRenderer&) = delete;
     LocalAudioRenderer& operator=(const LocalAudioRenderer&) = delete;
+
+    void requestStop() noexcept { SetEvent(stop_); }
 
     bool waitReady() {
         std::unique_lock lock(mutex_);

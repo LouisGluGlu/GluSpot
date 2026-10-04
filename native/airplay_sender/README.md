@@ -3,8 +3,8 @@
 The helper sends stereo PCM through the vendored AirPlay 2 sender. Exclusive
 casting prefers Windows process loopback excluding the helper's own process
 tree, capturing all computer application playback across output endpoints.
-This is the authorized scope for the current single-HomePod stage; music-app-only
-capture belongs to the future synchronized multi-HomePod/Bluetooth stage.
+This is the single-receiver scope. Coordinated groups use verified
+music-process-tree capture, as documented below.
 Process loopback requires Windows build 20348 or later; the helper dynamically
 loads `ActivateAudioInterfaceAsync` and checks actual activation/initialization.
 If unavailable, it falls back to shared-mode WASAPI loopback on the selected
@@ -14,12 +14,13 @@ guards even in process mode; an external default-output change ends the cast.
 No microphone or virtual driver is used. Protected audio that Windows excludes
 from loopback is not bypassed.
 
-Only a single HomePod with HAP transient pairing is supported. Receiver SRP
+The single-receiver path uses HAP transient pairing; coordinated groups use
+the same authentication per receiver. Receiver SRP
 proof checking is strict; a proof mismatch fails the session. PIN/password
 devices are not configured by this helper. The sender uses a fixed 66150-frame
 RTP timeline offset (1.5 seconds at 44.1 kHz); this is a sender setting, not a
-measured receiver minimum or audible end-to-end delay. The helper does not
-change lyric timing or offer synchronized multiroom.
+measured receiver minimum or audible end-to-end delay. The helper does not change lyric timing; group mode adds a shared
+presentation timeline without claiming acoustic latency measurement.
 Connection preserves the receiver's existing volume. The helper never sends
 the upstream's automatic 0 dB volume request; a muted HomePod stays muted.
 Transient pairing derives both control and event keys from full SRP K; the
@@ -232,25 +233,32 @@ timing/retransmission packets. The helper does not change firewall rules.
 It requires `--music-pid`, `--music-created-at` (Windows process creation time)
 and `--source-endpoint`. Each receiver is explicit and starts with
 `--receiver-id`, followed by `--host`, `--port`, `--device-id`, and `--name`.
-An optional `--local-endpoint` enables one Windows/Bluetooth member, distinct
-from the suppressed source. At least one HomePod and at most eight total
-outputs are allowed. Invalid arguments are rejected before Windows state or
+Repeat `--local-endpoint` once for each Windows/Bluetooth member. Every local
+output must be distinct from the suppressed source and from every other local
+output, with the original opaque endpoint ID retained. At least one AirPlay
+receiver and at most eight total outputs are allowed. Invalid arguments are rejected before Windows state or
 receiver networking is touched.
 
 The host uses one verified INCLUDE process-tree capture, an all-SETUP barrier,
 one future steady/NTP/RTP origin and one final 352-frame stereo packet for all
 receivers. A shared bounded rate correction keeps capture-clock drift from
 exhausting the 150 ms queue; every receiver and the local history sees that
-same conditioned PCM. Local WASAPI rendering reads the history by frame index
-and uses its endpoint clock for continuous bounded drift correction. It does
+same conditioned PCM. Each local WASAPI renderer reads the history by frame index
+and uses its own endpoint clock for continuous bounded drift correction. All
+renderers arm against the same presentation epoch; their reads never consume
+the shared history or another renderer’s cursor. It does
 not consume the capture ring or invent a Bluetooth acoustic delay.
 
-Group stats append named `members`, `group`, and optional `local_render`
-objects. Receiver volume commands use
+Group stats append named `members`, `group.local_endpoints`, and a
+`local_renders` array whose entries include `endpoint_id` and per-output clock,
+PCM and underrun evidence. Exactly one local output also retains the legacy
+`group.local_endpoint` and `local_render` aliases; multiple outputs never
+misidentify the first renderer as the whole group. Receiver volume commands use
 `{"command":"set_volume","receiver":0,"volume":0.35}`, where the integer
 index belongs to this helper's fixed receiver order. A group is declared
 streaming only after meaningful music reaches every network member and the
-selected local renderer. Any member failure, source identity loss, capture
+selected local renderers. A failing renderer stops all local workers before
+source suppression is restored. Any member failure, source identity loss, capture
 overrun or missed presentation deadline stops the whole group and restores
 owned source mute. Source suppression and application routing limitations,
 physical verification gates and protocol references are recorded in

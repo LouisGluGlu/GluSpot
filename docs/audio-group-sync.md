@@ -13,7 +13,7 @@ available for testing; wider levels 3–4 hardware acceptance remains in progres
   same target playback time. Independent simultaneous sender processes do not
   satisfy this requirement. Stereo-paired HomePods require a separate leader
   and topology check; two independent room receivers do not prove that case.
-- A selected Windows/Bluetooth output receives those same PCM frames delayed
+- Selected Windows/Bluetooth outputs each receive those same PCM frames delayed
   to the group presentation timeline, with bounded device-clock correction.
   WASAPI timing is endpoint scheduling evidence, not a measurement of wireless
   codec delay or HomePod acoustic output. Listening verification is required.
@@ -67,13 +67,15 @@ dither alone cannot establish that music survived; session mute is therefore
 not used as a transparent interception path.
 
 The implementation retains owned source-endpoint mute and captures the verified
-music process tree before endpoint gain. A delayed local renderer uses a
-different, unmuted endpoint. The controller checks all active source-endpoint
+music process tree before endpoint gain. Each delayed local renderer uses a
+different endpoint from the source; endpoint mute/volume remain user-owned. The controller checks all active source-endpoint
 owners, including system sounds and ambiguous sessions. If music already uses
-the selected Bluetooth output, or another application shares its source output,
+any selected Windows output, or another application shares its source output,
 it temporarily routes only the verified music application to an unoccupied
-spare physical output. With no usable spare, it reports an error and starts no
-sender. Occupancy and owned app policies are checked during playback; a conflict
+spare physical output that is not any selected playback member. With no usable
+spare, it reports an error and starts no sender. Using both available Windows
+outputs for playback therefore needs a third unselected output. A visible HDMI
+or USB endpoint is only a candidate until migration and ownership checks pass. Occupancy and owned app policies are checked during playback; a conflict
 stops the group and restores owned state. There is no virtual driver or
 all-computer fallback. This check cannot make endpoint mute per-application;
 an unrelated app arriving between worker checks may be briefly suppressed

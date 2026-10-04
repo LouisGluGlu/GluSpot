@@ -212,6 +212,43 @@ def _check_group_dispatch() -> dict:
     return result
 
 
+def _check_multi_output_dispatch() -> dict:
+    """Use an intentionally invalid source/sink collision before Windows work.
+
+    The parser must accept repeated local-output arguments, then reject the
+    second one's collision with the muted source. Older one-renderer helpers
+    reject the repeated flag instead and cannot certify this package.
+    """
+    executable = engine_path()
+    result = {"ok": False, "executable": str(executable), "returncode": None,
+              "receiver_contacted": False, "windows_state_changed": False}
+    if not executable.is_file():
+        result["error"] = "Native group helper missing"
+        return result
+    args = [str(executable), "--group", "--music-pid", "1", "--music-created-at", "1",
+            "--source-endpoint", "Source", "--local-endpoint", "First", "--local-endpoint", "sOuRcE",
+            "--receiver-id", "offline", "--host", "127.0.0.1", "--port", "7000",
+            "--device-id", "offline", "--name", "Offline parser check"]
+    kwargs = dict(stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                  encoding="utf-8", errors="replace", timeout=CAPTURE_TIMEOUT_SECONDS)
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        completed = subprocess.run(args, **kwargs)
+        result["returncode"] = completed.returncode
+        events = [json.loads(line) for line in completed.stdout.splitlines()]
+        result["events"] = events
+        result["ok"] = (completed.returncode == 2 and len(events) == 1
+                        and isinstance(events[0], dict) and events[0].get("event") == "error"
+                        and events[0].get("message") ==
+                        "Local group outputs must be unique and differ from muted source")
+        if not result["ok"]:
+            result["error"] = "Packaged helper does not implement the expected multiple-output parser"
+    except Exception as exc:
+        result["error"] = _error(exc)
+    return result
+
+
 def build_audio_package_report() -> dict:
     began = time.monotonic()
     frozen = bool(getattr(sys, "frozen", False))
@@ -222,12 +259,14 @@ def build_audio_package_report() -> dict:
     discovery = _check_discovery()
     capture = _check_capture(endpoints["default_endpoint_id"])
     group = _check_group_dispatch()
+    multiple = _check_multi_output_dispatch()
     external_helper = frozen and bool(os.environ.get("GLUSPOT_AIRPLAY_ENGINE", ""))
     if external_helper:
         # Runtime overrides remain useful for diagnostics, but an external
         # binary cannot certify the native helper shipped inside this bundle.
         capture.update(ok=False, error="Frozen package acceptance requires the bundled helper; clear GLUSPOT_AIRPLAY_ENGINE")
         group.update(ok=False, error="External helper cannot certify frozen group dispatch")
+        multiple.update(ok=False, error="External helper cannot certify frozen multiple-output dispatch")
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -245,9 +284,10 @@ def build_audio_package_report() -> dict:
         "mdns": discovery,
         "native_capture": capture,
         "native_group_dispatch": group,
+        "native_multi_output_dispatch": multiple,
         "elapsed_seconds": round(time.monotonic() - began, 3),
         "ok": all(item["ok"] for item in dependencies + modules)
-              and endpoints["ok"] and discovery["ok"] and capture["ok"] and group["ok"],
+              and endpoints["ok"] and discovery["ok"] and capture["ok"] and group["ok"] and multiple["ok"],
     }
 
 
