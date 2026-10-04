@@ -739,9 +739,12 @@ class AudioRouteController:
             return
         self._next_source_resolve_at = now + self.POLL_SECONDS
         try:
+            read_owned = getattr(self._group_sender, "owned_process_identity", None)
+            owned_process = read_owned() if callable(read_owned) else None
+            ownership = {"owned_process": owned_process} if owned_process is not None else {}
             if self._app_route_guard is not None:
-                self._app_route_guard.check()
-            if not self._get_app_router().endpoint_is_unoccupied(self._cast_source_id, self._group_source):
+                self._app_route_guard.check(**ownership)
+            if not self._get_app_router().endpoint_is_unoccupied(self._cast_source_id, self._group_source, **ownership):
                 raise RuntimeError("同步播放来源输出被另一应用占用")
             source = self._source_resolver(self._music_source_app_id)
         except Exception as exc:

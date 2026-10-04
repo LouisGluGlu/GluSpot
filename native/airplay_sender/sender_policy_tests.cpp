@@ -3,10 +3,120 @@
 #define main upstreamCoreTestMain
 #include "../../third_party/airplay2-sender-cpp/test/core_tests.cpp"
 #undef main
+#include <cmath>
+#include <fstream>
 #include <limits>
+#include <stdexcept>
 
 namespace {
 size_t volumeRequests(const FakeReceiver& receiver);
+
+struct AlacFixture {
+    bool coordinated = false;
+    uint32_t profile = 0;
+    std::vector<int16_t> pcm;
+    std::string payload;
+    size_t datagramBytes = 0;
+};
+
+// Obtain the real production encoder's output through its public sender API.
+// Only authentication/decryption uses the fake peer; an external standard
+// decoder can consume the returned payload without our test decoder.
+std::vector<AlacFixture> actualAlacFixtures() {
+    std::vector<AlacFixture> fixtures;
+    for (const bool coordinated : {false, true}) {
+        Rig rig;
+        rig.sender->setPreserveReceiverVolume(true);
+        rig.sender->setStrictReceiverAuth(true);
+        rig.sender->setCoordinatedPlayback(coordinated);
+        runAp2Handshake(rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+        if (!rig.launchedOk || !*rig.launchedOk)
+            throw std::runtime_error("Synthetic ALAC fixture authentication failed");
+        if (coordinated && !rig.sender->armCoordinatedTimeline(rig.now, 0xEC110234ABCDEF12ULL))
+            throw std::runtime_error("Synthetic ALAC fixture timeline failed");
+        rig.io.takeUdp();
+        for (uint32_t profile = 0; profile < 4; ++profile) {
+            std::vector<int16_t> pcm(704, 0);
+            for (size_t frame = 0; frame < 352; ++frame) {
+                if (profile == 1) {
+                    pcm[frame * 2] = frame % 2 ? 32767 : -32768;
+                    pcm[frame * 2 + 1] = frame % 2 ? -32768 : 32767;
+                } else if (profile == 2) {
+                    pcm[frame * 2] = int16_t(int(frame) * 79 - 14000);
+                    pcm[frame * 2 + 1] = int16_t(13000 - int(frame) * 73);
+                } else if (profile == 3) {
+                    const double phase = double(frame) * 6.2831853071795864769 / 44100.0;
+                    pcm[frame * 2] = int16_t(std::lround(12000.0 * std::sin(phase * 997.0)));
+                    pcm[frame * 2 + 1] = int16_t(std::lround(10000.0 * std::sin(phase * 631.0)));
+                }
+            }
+            if (coordinated) {
+                if (!rig.sender->sendCoordinatedAudio(uint64_t(profile) * 352, pcm))
+                    throw std::runtime_error("Synthetic coordinated PCM was rejected");
+            } else {
+                if (!rig.ring.tryPush(pcm)) throw std::runtime_error("Synthetic PCM ring is full");
+                rig.advance(8);
+            }
+            const auto datagrams = rig.io.takeUdp();
+            const auto packet = std::find_if(datagrams.begin(), datagrams.end(),
+                [](const auto& datagram) { return datagram.s == RaopUdp::Audio; });
+            if (packet == datagrams.end() || std::count_if(datagrams.begin(), datagrams.end(),
+                [](const auto& datagram) { return datagram.s == RaopUdp::Audio; }) != 1 || packet->data.size() < 36)
+                throw std::runtime_error("Synthetic sender must emit exactly one encrypted packet");
+            const auto& wire = packet->data;
+            const Bytes aad(wire.begin() + 4, wire.begin() + 12);
+            const Bytes nonce(wire.end() - 8, wire.end());
+            const Bytes ciphertext(wire.begin() + 12, wire.end() - 8);
+            const auto decrypted = airplay::chacha20Poly1305Decrypt(rig.rx.audioKey, nonce, ciphertext, aad);
+            if (!decrypted) throw std::runtime_error("Synthetic real sender packet did not authenticate");
+            fixtures.push_back({coordinated, profile, std::move(pcm), strOf(*decrypted), wire.size()});
+        }
+        rig.sender->stop();
+        rig.exchange();
+    }
+    return fixtures;
+}
+
+void testExplicitAlacFrameLength() {
+    g_test = "GluSpot ALAC explicit packet length independent of decoder cookie";
+    const auto fixtures = actualAlacFixtures();
+    REQUIRE(fixtures.size() == 8, "standalone and coordinated sender emit four synthetic profiles each");
+    for (const auto& fixture : fixtures) {
+        REQUIRE(fixture.payload.size() == 1416, "uncompressed packet adds exactly one 32-bit frame count");
+        CHECK((uint8_t(fixture.payload[2]) & 0x10u) != 0,
+              "real encoder sets hasSize instead of relying on receiver cookie default");
+        CHECK(fixture.datagramBytes == 12 + 1416 + 16 + 8 && fixture.datagramBytes + 28 <= 1500,
+              "encrypted RTP plus IPv4/UDP headers stays below the ordinary 1500-byte MTU");
+        for (const int cookieFrames : {352, 4096}) {
+            const auto decoded = decodeAlacUncompressed(fixture.payload, cookieFrames);
+            CHECK(decoded && *decoded == fixture.pcm,
+                  "explicit count overrides either 352 or 4096 cookie without changing signed stereo PCM");
+        }
+    }
+}
+
+void exportActualAlacFixtures(const char* path) {
+    const auto fixtures = actualAlacFixtures();
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) throw std::runtime_error("Cannot open the requested synthetic fixture path");
+    file.write("GLUSPOT_ALAC_V1\n", 16);
+    auto number = [&file](uint32_t value) {
+        const char bytes[]{char(value >> 24), char(value >> 16), char(value >> 8), char(value)};
+        file.write(bytes, 4);
+    };
+    number(uint32_t(fixtures.size()));
+    for (const auto& fixture : fixtures) {
+        number(fixture.coordinated ? 1u : 0u); number(fixture.profile);
+        number(uint32_t(fixture.pcm.size())); number(uint32_t(fixture.payload.size()));
+        number(uint32_t(fixture.datagramBytes));
+        for (const auto sample : fixture.pcm) {
+            const char bytes[]{char(uint16_t(sample)), char(uint16_t(sample) >> 8)};
+            file.write(bytes, 2);
+        }
+        file.write(fixture.payload.data(), std::streamsize(fixture.payload.size()));
+    }
+    if (!file) throw std::runtime_error("Cannot write the synthetic ALAC fixture");
+}
 
 void testActualNonzeroAudioSendEvidence() {
     g_test = "GluSpot final nonzero PCM transport evidence";
@@ -451,7 +561,15 @@ void testUnansweredFeedbackIsBoundedAndRecoverable() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Optional offline evidence export. This creates only synthetic samples;
+    // there is no socket, device, microphone, capture or persisted key.
+    if (argc == 3 && std::string_view(argv[1]) == "--export-alac-fixture") {
+        try { exportActualAlacFixtures(argv[2]); return 0; }
+        catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
+    }
+    if (argc != 1) { std::fprintf(stderr, "Usage: gluspot_sender_policy_tests [--export-alac-fixture path]\n"); return 2; }
+    testExplicitAlacFrameLength();
     testActualNonzeroAudioSendEvidence();
     testReceiverVolumeReadAckAndCoalescing();
     testReceiverVolumeUnknownTimeoutAndLateResponses();

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import ntpath
 import os
 from collections import deque
 from pathlib import Path
@@ -11,6 +12,8 @@ import subprocess
 import sys
 import threading
 import time
+
+from api.windows_audio_sessions import _WindowsAudioSessionAdapter, _valid_identity
 
 
 def engine_path() -> Path:
@@ -31,6 +34,9 @@ class AirPlayProcess:
         self.executable = Path(executable) if executable is not None else engine_path()
         self._popen = popen or subprocess.Popen
         self._process = None
+        self._owned_process = None
+        self._owned_process_identity = None
+        self._process_identity_adapter = None
         self._events = queue.Queue(maxsize=32)
         self._reader = None
         self._stderr_reader = None
@@ -79,6 +85,7 @@ class AirPlayProcess:
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         self._process = self._popen(args, **kwargs)
+        self._bind_owned_process_identity()
         self._started_at = time.monotonic()
         self._stopped_at = 0.0
         self._streaming = self._terminal_seen = False
@@ -91,6 +98,53 @@ class AirPlayProcess:
         self._stderr_reader = threading.Thread(target=self._read_stderr, args=(self._process, tail),
                                                name="GluSpotAirPlayDiagnostics", daemon=True)
         self._stderr_reader.start()
+
+    def _bind_owned_process_identity(self):
+        """Bind Windows session authority to the exact child we just spawned.
+
+        Popen retains its native process handle. Polling that handle before and
+        after the PID lookup fences off an exited child and a reused numeric
+        PID; a similarly named executable at another path is never authority.
+        """
+        with self._command_lock:
+            self._owned_process = self._owned_process_identity = None
+            self._process_identity_adapter = None
+            process = self._process
+            if sys.platform != "win32" or process is None:
+                return
+            try:
+                if process.poll() is not None:
+                    return
+                adapter = _WindowsAudioSessionAdapter()
+                identity = adapter.process_identity(process.pid)
+                expected_path = ntpath.normcase(str(self.executable.resolve()))
+                if (not _valid_identity(identity, process.pid)
+                        or ntpath.normcase(ntpath.normpath(identity.process_path)) != expected_path
+                        or process.poll() is not None):
+                    return
+                self._owned_process = process
+                self._owned_process_identity = identity
+                self._process_identity_adapter = adapter
+            except (OSError, RuntimeError, ValueError, AttributeError, TypeError):
+                # Failed identity evidence cannot authorize ignoring a session.
+                return
+
+    def owned_process_identity(self):
+        """Return only the live, reverified child whose capture sessions we own."""
+        with self._command_lock:
+            process, identity = self._owned_process, self._owned_process_identity
+            adapter = self._process_identity_adapter
+            if process is None or process is not self._process or identity is None or adapter is None:
+                return None
+            try:
+                if process.poll() is not None:
+                    return None
+                current = adapter.process_identity(identity.process_id)
+                if current != identity or process.poll() is not None:
+                    return None
+                return identity
+            except (OSError, RuntimeError, ValueError, AttributeError, TypeError):
+                return None
 
     def _remember_native_event(self, state, event):
         with self._diagnostic_lock:
@@ -198,7 +252,8 @@ class AirPlayProcess:
         """Fresh sender buffer estimate in seconds, or None; never acoustic latency.
 
         The fixed RTP buffer and the input queue have different sample rates.
-        Native stats convert each separately and omit receiver/network latency.
+        Native stats convert each separately. Group mode also includes its
+        declared AP2 render lead; this is not measured receiver/network latency.
         Reading this single retained snapshot does not touch the helper pipes.
         """
         with self._diagnostic_lock:
@@ -290,6 +345,8 @@ class AirPlayProcess:
     def stop(self):
         with self._command_lock:
             process, self._process = self._process, None
+            self._owned_process = self._owned_process_identity = None
+            self._process_identity_adapter = None
         try:
             if process is not None:
                 self._stopped_at = time.monotonic()

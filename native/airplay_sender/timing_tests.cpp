@@ -1,4 +1,5 @@
 #include "timing_estimate.h"
+#include "group_main.h"
 #include <cassert>
 #include <cmath>
 
@@ -47,5 +48,21 @@ int main() {
     s.inputSampleRate = 48000; s.protocolLatencyFrames = 0;
     s.capturedFrames += 24000; s.audioFramesSent += 22050;
     assert(!tracker.sample(s).valid);
+
+    // Group display and Windows playback use the same total declared lead.
+    // At a 48kHz capture rate the 250ms AP2 render lead still uses 44.1kHz.
+    tracker = BufferTimingTracker{};
+    s = {24000, 22050, 0, 0, 0, 960, 48000, groupPresentationFrames(66150, 11025), true};
+    assert(!tracker.sample(s).valid);
+    s.capturedFrames += 24000; s.audioFramesSent += 22050;
+    estimate = tracker.sample(s);
+    assert(estimate.valid && estimate.protocolBufferMs == 1750 && estimate.delayMs() == 1770);
+    assert(groupPresentationFrames(88200, 11025) == 99225);
+    for (auto invalid : {0U, 1U, 22050U}) {
+        bool rejected = false;
+        try { (void)groupPresentationFrames(66150, invalid); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        assert(rejected); // Missing/different policies cannot silently arm a member.
+    }
     return 0;
 }

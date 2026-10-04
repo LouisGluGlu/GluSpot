@@ -77,7 +77,7 @@ refuses at SETUP. in order:
 5. **ALAC is mandatory on the realtime stream.** the receiver hardcodes ALAC and
    ignores `ct` / `audioFormat`. send *uncompressed* ALAC frames
    (`audioFormat 0x40000`, `ct 2`, type `0x60`): MSB-first `3b stereo-CPE(=1) ·
-   4b 0 · 12b 0 · 1b hasSize=0 · 2b 0 · 1b isNotCompressed=1 · 352×{L16,R16} ·
+   4b 0 · 12b 0 · 1b hasSize=1 · 2b 0 · 1b isNotCompressed=1 · 32b frame count=352 · 352×{L16,R16} ·
    3b END(=7) · byte-align`.
 
 6. **the keep-alive IS the encrypted event channel.** after RECORD the tv tears

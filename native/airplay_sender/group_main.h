@@ -18,6 +18,16 @@
 namespace gluspot {
 int runGroupHelper(int argc, wchar_t** argv);
 
+// AP2 realtime/NTP keeps the RTP buffer and the requested receiver render
+// lead separate on the wire. Local playback needs both once (OwnTone's
+// network buffer B-250ms vs local B policy). This is protocol evidence,
+// never a receiver-reported acoustic delay. Do not add sync flag 7 again.
+inline uint32_t groupPresentationFrames(uint32_t rtpBuffer, uint32_t requestedMin) {
+    if (rtpBuffer < 11025 || rtpBuffer > 88200 || requestedMin != 11025)
+        throw std::invalid_argument("Unsupported group presentation latency policy");
+    return rtpBuffer + requestedMin;
+}
+
 // A setup-ready receiver must keep acknowledging authenticated /feedback,
 // including while another member is still pairing. Local audio handoff,
 // feedback requests/skips, encrypted events and rejected replies are not proof
@@ -208,8 +218,10 @@ private:
 class GroupPcmConditioner {
 public:
     static constexpr size_t targetQueueFrames = 6615;
+    GroupPcmConditioner() { (void)kernels(); }
     bool feed(std::span<const int16_t> pcm) {
-        if (pcm.size() % 2 || pcm.size() / 2 + queuedFrames() > 44100) return false;
+        const auto frames = pcm.size() / 2;
+        if (pcm.size() % 2 || frames > 44100 || queuedFrames() > 44100 - frames) return false;
         data_.insert(data_.end(), pcm.begin(), pcm.end());
         return true;
     }
@@ -224,24 +236,81 @@ public:
         size_t produced = 0;
         for (; produced < 352; ++produced) {
             const auto left = size_t(phase_);
-            if (left + 1 >= queuedFrames()) break;
+            if (left + radius >= queuedFrames()) break;
             const auto fraction = phase_ - left;
-            for (size_t channel = 0; channel < 2; ++channel) {
-                const auto a = data_[left * 2 + channel], b = data_[(left + 1) * 2 + channel];
-                output[produced * 2 + channel] = int16_t(std::clamp(std::lround(
-                    double(a) + (double(b) - a) * fraction), -32768L, 32767L));
+            // Fractional phase never resets at a packet boundary. A short
+            // symmetric windowed-sinc retains treble without the phase-varying
+            // gain of two-point interpolation; all receivers share this PCM.
+            const double tablePhase = fraction * phaseBins;
+            const auto bin = std::min(size_t(tablePhase), phaseBins - 1);
+            const double blend = tablePhase - bin;
+            const auto& a = kernels()[bin];
+            const auto& b = kernels()[bin + 1];
+            std::array<double, 2> value{};
+            for (size_t tap = 0; tap < taps; ++tap) {
+                const auto offset = int64_t(left) + int64_t(tap) - int64_t(radius - 1);
+                const double weight = a[tap] + (b[tap] - a[tap]) * blend;
+                for (size_t channel = 0; channel < 2; ++channel)
+                    value[channel] += sample(offset, channel) * weight;
             }
+            for (size_t channel = 0; channel < 2; ++channel)
+                output[produced * 2 + channel] = int16_t(std::lround(
+                    std::clamp(value[channel], -32768.0, 32767.0)));
             phase_ += ratio_;
         }
         std::fill(output.begin() + produced * 2, output.end(), int16_t(0));
         paddedFrames_ += 352 - produced;
         const auto consumed = std::min(size_t(phase_), queuedFrames());
-        for (size_t sample = 0; sample < consumed * 2; ++sample) data_.pop_front();
+        for (size_t frame = 0; frame < consumed; ++frame) {
+            for (size_t channel = 0; channel < 2; ++channel) {
+                history_[historyWrite_ * 2 + channel] = data_.front();
+                data_.pop_front();
+            }
+            historyWrite_ = (historyWrite_ + 1) % (radius - 1);
+            historyFrames_ = std::min(historyFrames_ + 1, radius - 1);
+        }
         phase_ -= consumed;
         if (!produced && data_.empty()) phase_ = 0;
     }
 private:
+    static constexpr size_t radius = 16, taps = radius * 2, phaseBins = 1024;
+    using KernelTable = std::array<std::array<double, taps>, phaseBins + 1>;
+    static const KernelTable& kernels() {
+        static const auto table = [] {
+            KernelTable result{};
+            constexpr double pi = 3.1415926535897932384626433832795;
+            for (size_t phase = 0; phase <= phaseBins; ++phase) {
+                const double fraction = double(phase) / phaseBins;
+                double total = 0;
+                for (size_t tap = 0; tap < taps; ++tap) {
+                    const double distance = fraction - (double(tap) - (radius - 1));
+                    const double sinc = distance == 0 ? 1 : std::sin(pi * distance) / (pi * distance);
+                    const double window = std::abs(distance) < radius
+                        ? .42 + .5 * std::cos(pi * distance / radius) + .08 * std::cos(2 * pi * distance / radius) : 0;
+                    total += result[phase][tap] = sinc * window;
+                }
+                for (auto& weight : result[phase]) weight /= total; // Exact DC gain, including near source boundaries.
+            }
+            // Integer phases are the original sample exactly, without trig
+            // roundoff. The end phase is the next sample's matching kernel.
+            result.front().fill(0); result.front()[radius - 1] = 1;
+            result.back().fill(0); result.back()[radius] = 1;
+            return result;
+        }();
+        return table;
+    }
+    double sample(int64_t offset, size_t channel) const {
+        if (offset >= 0) return data_[size_t(offset) * 2 + channel];
+        const auto past = size_t(-offset);
+        if (past <= historyFrames_)
+            return history_[((historyWrite_ + radius - 1 - past) % (radius - 1)) * 2 + channel];
+        // Extend the first real sample only at the beginning of the source.
+        return historyFrames_ ? history_[((historyWrite_ + radius - 1 - historyFrames_) % (radius - 1)) * 2 + channel]
+                              : data_[channel];
+    }
     std::deque<int16_t> data_;
+    std::array<int16_t, (radius - 1) * 2> history_{};
+    size_t historyWrite_ = 0, historyFrames_ = 0;
     double phase_ = 0, ratio_ = 1;
     uint64_t paddedFrames_ = 0;
 };

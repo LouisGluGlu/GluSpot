@@ -67,11 +67,29 @@ void testStaggeredReceiversSharePcmAndPresentationClock() {
         REQUIRE(sync.size() == 1 && sync[0].data.size() == 20, "one 20-byte initial NTP sync");
         CHECK(uint8_t(sync[0].data[0]) == 0x90 && uint8_t(sync[0].data[1]) == 0xD4 &&
               be32(sync[0].data, 4) == 0 && wire64(sync[0].data, 8) == anchor &&
-              be32(sync[0].data, 16) == 66150, "sync maps frame zero to common NTP with common 1.5 second presentation lead");
+              be32(sync[0].data, 16) == 66150, "sync maps frame zero to common NTP with common 1.5 second RTP buffer");
+        // Read the actual encrypted SETUP seen by the independent receiver.
+        // The render lead is declared separately from the wire RTP gap.
+        uint32_t requestedMin = 0;
+        for (const auto& request : rig->rx.requests) {
+            if (request.method != "SETUP") continue;
+            const auto setup = airplay::bplist::decode(bytesOf(request.body));
+            if (!setup) continue;
+            const auto* streams = setup->find("streams");
+            if (!streams || streams->type != airplay::bplist::Value::Type::Arr || streams->arr.empty()) continue;
+            if (const auto* minimum = streams->arr.front().find("latencyMin")) requestedMin = uint32_t(minimum->asInt());
+        }
+        REQUIRE(requestedMin == 11025, "AP2 SETUP declares the receiver render lead independently of the RTP buffer");
+        const auto wireBuffer = be32(sync[0].data, 16) - be32(sync[0].data, 4);
+        const auto localFrames = gluspot::groupPresentationFrames(wireBuffer, requestedMin);
+        CHECK(localFrames == 77175 && sampleNtp(localFrames) == millisecondNtp(1750),
+              "local frame zero includes the declared 250ms render lead exactly once, retaining wire mapping");
         CHECK(!rig->sender->armCoordinatedTimeline(start, anchor), "a live timeline cannot be independently rebased");
         const auto d = rig->sender->diagnostics();
         CHECK(d.coordinatedPlayback && d.coordinatedTimelineArmed && d.queuedInputFrames == 0 &&
-              d.inputSampleRate == 44100, "group diagnostics expose fixed final PCM without per-sink input conditioning");
+              d.inputSampleRate == 44100 && d.requestedMinLatencyFrames == requestedMin &&
+              d.receiverLatencyReported && d.receiverLatencyFrames == 11025,
+              "SETUP declaration and fixture's separate RECORD latency readback both retain their provenance");
     }
     auto pcm = rampExpect(704, -321);
     CHECK(!a.sender->sendCoordinatedAudio(0, pcm) && !b.sender->sendCoordinatedAudio(0, pcm),

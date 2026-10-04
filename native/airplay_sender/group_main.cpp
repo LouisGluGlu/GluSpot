@@ -139,6 +139,7 @@ void protocol(std::ostream& out, const fxchain::RaopDiagnostics& d, uint64_t sil
         << ",\"nonzero_samples_sent\":" << d.nonzeroSamplesSent << ",\"queued_input_frames\":" << queued
         << ",\"meaningful_samples_sent\":" << d.meaningfulSamplesSent
         << ",\"input_sample_rate\":44100,\"protocol_latency_frames\":" << d.protocolLatencyFrames
+        << ",\"requested_min_latency_frames\":" << d.requestedMinLatencyFrames
         << ",\"receiver_latency_frames\":" << d.receiverLatencyFrames
         << ",\"receiver_latency_reported\":" << (d.receiverLatencyReported ? "true" : "false")
         << ",\"coordinated_playback\":" << (d.coordinatedPlayback ? "true" : "false")
@@ -206,17 +207,21 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
         aggregate.nonzeroSamplesSent = std::min(aggregate.nonzeroSamplesSent, d.nonzeroSamplesSent);
         aggregate.meaningfulSamplesSent = std::min(aggregate.meaningfulSamplesSent, d.meaningfulSamplesSent);
         aggregate.protocolLatencyFrames = d.protocolLatencyFrames;
+        aggregate.requestedMinLatencyFrames = d.requestedMinLatencyFrames;
         if (!d.lastError.empty()) aggregate.lastError = d.lastError;
     }
     const auto queued = capture.ring().availableRead() / 2 + conditionedFrames;
     const auto estimate = timing.sample({capture.frames.load(), aggregate.audioFramesSent, paddedFrames,
-        capture.droppedSamples.load(), capture.discontinuities.load(), queued, 44100, aggregate.protocolLatencyFrames, flowing});
+        capture.droppedSamples.load(), capture.discontinuities.load(), queued, 44100,
+        aggregate.protocolLatencyFrames + aggregate.requestedMinLatencyFrames, flowing});
     const auto signal = capture.signal(true);
     std::cout << "{\"event\":\"stats\",\"captured_frames\":" << capture.frames.load()
               << ",\"dropped_samples\":" << capture.droppedSamples.load() << ",\"discontinuities\":" << capture.discontinuities.load()
               << ",\"protocol\":"; protocol(std::cout, aggregate, paddedFrames, queued);
     std::cout << ",\"timing\":{\"method\":\"protocol_plus_input_queue\",\"estimated_delay_ms\":" << estimate.delayMs()
               << ",\"protocol_buffer_ms\":" << estimate.protocolBufferMs << ",\"input_queue_ms\":" << estimate.inputQueueMs
+              << ",\"rtp_buffer_ms\":" << 1000.0 * aggregate.protocolLatencyFrames / 44100
+              << ",\"requested_min_latency_ms\":" << 1000.0 * aggregate.requestedMinLatencyFrames / 44100
               << ",\"valid\":" << (estimate.valid ? "true" : "false") << '}'
               << ",\"capture_signal\":{\"mode\":\"process_loopback\",\"scope\":\"music_process_tree\",\"nonzero_samples\":" << signal.nonzeroSamples
               << ",\"meaningful_samples\":" << signal.meaningfulSamples
@@ -241,6 +246,14 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
                   << ",\"written_frames\":" << d.writtenFrames << ",\"nonzero_samples\":" << d.nonzeroSamples
                   << ",\"meaningful_samples\":" << d.meaningfulSamples << ",\"underrun_frames\":" << d.underrunFrames
                   << ",\"source_frame\":" << d.sourceFrame << ",\"device_clock_frames\":" << d.deviceClockFrames
+                  << ",\"presentation_latency_frames\":" << d.presentationLatencyFrames
+                  << ",\"clock_position\":" << d.clockPosition << ",\"clock_frequency\":" << d.clockFrequency
+                  << ",\"clock_qpc_100ns\":" << d.clockQpc100ns << ",\"clock_qpc_age_known\":" << (d.clockQpcAgeKnown ? "true" : "false")
+                  << ",\"clock_qpc_age_ms\":" << d.clockQpcAgeMs << ",\"padding_frames\":" << d.paddingFrames
+                  << ",\"write_estimate_written_frames\":" << d.writeEstimateWrittenFrames
+                  << ",\"write_queue_delay_ms\":" << d.writeQueueDelayMs
+                  << ",\"write_presentation_offset_ms\":" << d.writePresentationOffsetMs
+                  << ",\"write_presentation_epoch_offset_ms\":" << d.writePresentationEpochOffsetMs
                   << ",\"stream_latency_ms\":" << d.streamLatencyMs << ",\"buffer_duration_ms\":" << d.bufferDurationMs
                   << ",\"phase_error_ms\":" << d.phaseErrorMs << ",\"resample_ratio\":" << d.resampleRatio << '}';
     }
@@ -351,7 +364,9 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 mute.mute(); muteStatus("muted", args, mute, true);
                 // One startup lead: source frame zero enters capture now and
                 // is transmitted 150 ms later, then plays at the protocol's
-                // common presentation time. Queue evidence includes that lead.
+                // common presentation time. The AP2 requested render lead
+                // follows the RTP buffer; local playback must include both.
+                // Queue evidence also includes the capture startup lead.
                 const auto anchorClock = Clock::now();
                 const auto anchorNtp = ntpWallNow();
                 sendStart = anchorClock + 150ms;
@@ -361,8 +376,16 @@ int runGroupHelper(int argc, wchar_t** argv) {
                         fail("Cannot arm every receiver on the shared group timeline"); break;
                     }
                 if (failed) break;
+                const auto policy = members.front()->sender->diagnostics();
+                const auto presentationFrames = groupPresentationFrames(
+                    policy.protocolLatencyFrames, policy.requestedMinLatencyFrames);
+                if (!std::all_of(members.begin(), members.end(), [&policy](const auto& member) {
+                    const auto d = member->sender->diagnostics();
+                    return d.protocolLatencyFrames == policy.protocolLatencyFrames &&
+                           d.requestedMinLatencyFrames == policy.requestedMinLatencyFrames;
+                })) { fail("Receivers do not share the same presentation latency policy"); break; }
 #if GLUSPOT_HAS_LOCAL_RENDERER
-                if (local && !local->arm(sendStart, 66150)) { fail("Cannot arm local output on shared group timeline"); break; }
+                if (local && !local->arm(sendStart, presentationFrames)) { fail("Cannot arm local output on shared group timeline"); break; }
 #endif
                 capture.start(); groupArmed = true;
                 status("waiting_audio", "Synchronized group connected; waiting for music-process audio");

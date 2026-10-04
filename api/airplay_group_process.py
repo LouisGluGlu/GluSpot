@@ -145,6 +145,7 @@ class AirPlayGroupProcess(AirPlayProcess):
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         self._process = self._popen(args, **kwargs)
+        self._bind_owned_process_identity()
         self._started_at = time.monotonic()
         self._streaming = self._terminal_seen = False
         events = self._events = queue.Queue(maxsize=32)

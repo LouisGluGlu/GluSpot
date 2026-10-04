@@ -2142,7 +2142,8 @@ void RaopSender::sendAp2SetupStream_() {
     stream.emplace_back("ct", Value::integer(2));        // ALAC
     stream.emplace_back("isMedia", Value::boolean(true));
     stream.emplace_back("latencyMax", Value::integer(88200));
-    stream.emplace_back("latencyMin", Value::integer(11025));
+    diagnostics_.requestedMinLatencyFrames = 11025;
+    stream.emplace_back("latencyMin", Value::integer(diagnostics_.requestedMinLatencyFrames));
     stream.emplace_back("shk", Value::bytes(ap2_->audioKey));
     stream.emplace_back("spf", Value::integer(352));     // samples per frame
     stream.emplace_back("sr", Value::integer(44100));
@@ -2232,9 +2233,12 @@ void RaopSender::onPacerTick_() {
 // frameLength 352 / 16-bit / 2ch) decodes. The ALAC bitstream is read MSB-first
 // by the receiver (shairport-sync alac.c). Per-frame element layout:
 //   3b channel tag = 1 (stereo CPE) . 4b unused=0 . 12b unknown=0 .
-//   1b hasSize=0 (use cookie's default 352) . 2b wastedBytes=0 .
-//   1b isNotCompressed=1 . then nFrames x {L16,R16} samples MSB-first .
+//   1b hasSize=1 . 2b wastedBytes=0 . 1b isNotCompressed=1 .
+//   32b explicit nFrames . then nFrames x {L16,R16} samples MSB-first .
 //   3b end tag = 7 . zero-pad to a byte boundary.
+// GluSpot: declare each packet's frame length rather than relying on the
+// receiver applying SETUP's spf to its ALAC cookie. This is the standard
+// partial-frame header supported by Apple's ALAC decoder and FFmpeg.
 std::string RaopSender::encodeAlacFrame_(const int16_t* frames, int nFrames) {
     std::string out;
     out.reserve(size_t(nFrames) * kChannels * 2 + 8);
@@ -2249,9 +2253,10 @@ std::string RaopSender::encodeAlacFrame_(const int16_t* frames, int nFrames) {
     put(1, 3);    // stereo channel-pair element
     put(0, 4);    // unused
     put(0, 12);   // unknown
-    put(0, 1);    // hasSize = 0 -> default frame length (352) from the cookie
+    put(1, 1);    // hasSize = 1 -> explicit frame length, independent of cookie default
     put(0, 2);    // wastedBytes = 0
     put(1, 1);    // isNotCompressed = 1 (uncompressed escape)
+    put(uint32_t(nFrames), 32);
     for (int i = 0; i < nFrames * kChannels; ++i)
         put(uint16_t(frames[i]), 16);   // 16-bit sample, MSB-first
     put(7, 3);    // END element tag

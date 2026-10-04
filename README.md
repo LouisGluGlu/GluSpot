@@ -7,7 +7,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 ## Current Status
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.408`.
+- Current test-build version: `6.409`.
+- 6.409 fixes allow the native helper's own verified session, prefer the AirPort's LAN address, explicitly frame 352-sample ALAC and improve shared resampling quality. The user confirmed that HomePod electrical noise was gone and that HomePod mini + AirPort Express synchronized well after a 90.032-second pair check. M6 played early in the preceding three-device check; a declared 250 ms AirPlay 2 render lead has now been added to local presentation and the group lyric estimate, and the corrected three-device test completed 90.110 seconds with state restoration and the user confirming basic synchronization. See [current compatibility and hardware evidence](docs/airport-homepod-compatibility.md).
 - The combined 6.408 background/group-output package passed frozen acceptance and source integration checks; the user confirmed basic HomePod mini + M6 audible alignment in the preceding sender test. Physical multi-HomePod checks remain pending.
 - Source integration: album-color flow plus coordinated HomePod/Windows music outputs, on `codex/merge-background-homepod` in the independent `gpt-island_merged` directory. See [merge provenance and verification](docs/merge-background-homepod.md).
 - Development state: internal alpha / test build, not ready for paid Steam release.
@@ -26,7 +27,7 @@ The combined directory has its own Python environment and native HomePod helper 
 
 ## Windows Test Build
 
-GluSpot 6.408 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
+GluSpot 6.409 uses a PyInstaller `onedir` package for local testing. This gives testers a normal executable while keeping Qt plugins, fonts, icons, data files, and local lyrics easy to inspect.
 
 Build from the project root:
 
@@ -37,12 +38,12 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.408\GluSpot.exe
+release\GluSpot-6.409\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It is not an installer, does not include Steamworks ownership validation, and should not be treated as a public release artifact.
 
-`GluSpot-6.408` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
+`GluSpot-6.409` is a complete `onedir` application. Keep `GluSpot.exe` beside its `_internal` directory; copying the executable alone is unsupported. The Windows package installs an early runtime hook that registers the bundled PySide6 and Shiboken DLL directories before `QtCore` is imported. The build also excludes build-host ICU DLLs: PySide6's Qt6Core needs the unversioned Windows ICU exports, while a versioned Poppler ICU discovered on `PATH` can shadow them and cause a Windows "entry point not found" error.
 
 Known Windows test-build caveats:
 
@@ -62,7 +63,7 @@ Known Windows test-build caveats:
 ## Naming And Assets
 
 - `GluSpot` is the product name, app name, startup task/app ID, runtime lock namespace, and settings namespace.
-- The current app version is `6.408`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
+- The current app version is `6.409`, defined in `local/branding.py`, `GluSpot.spec`, and `packaging/windows/version_info.txt`.
 - `assets/brand/` stores the generated GluSpot PNG and ICO brand assets.
 - User-selected global icons are copied into the GluSpot settings data directory under `icons/` and saved as PNG plus ICO.
 - `assets/logos/` stores TIME reminder SVG assets. The old root-level `logos/` folder has been removed.
@@ -210,7 +211,7 @@ The combined 6.408 source passed 2998 discovered Python tests, then three additi
 | Media and lyric integration | Partially complete | Generic Windows media is the baseline. NetEase, BetterNCM, QQ, Qishui, and Kugou paths are optional profile attachments that still need real-app QA. |
 | Plugins and notifications | Partially complete | TIME is the active default. Weather and agenda code exist, but both still need real-world validation before normal-user enablement. |
 | Settings and startup | Mostly complete for alpha | Settings pages and startup modes exist. Clean-account startup and first-launch migration still need manual verification. |
-| Packaging | Combined 6.408 development onedir verified | The combined package passed frozen dependency/device/capture/group-dispatch acceptance, including execution of new group modules. Packaged helper, icons, provenance and 6.408 Windows resources match the source/build. Output is `release\GluSpot-6.408\GluSpot.exe`; keep `_internal` beside it. Signing, installer/update behavior, distribution hardening and wider hardware acceptance remain blockers. |
+| Packaging | 6.409 development onedir verified | The 6.409 package passed frozen dependency/device/capture/group-dispatch acceptance, including execution of group modules. Packaged helper, icons, provenance and 6.409 Windows resources match the source/build. Output is `release\GluSpot-6.409\GluSpot.exe`; keep `_internal` beside it. Signing, installer/update behavior, distribution hardening and wider hardware acceptance remain blockers. |
 | Release operations | Incomplete | Steamworks, SteamPipe, crash/support diagnostics, copyright/data audit, and multi-machine QA remain blockers. |
 
 Overall project completeness: about 75% for an internal alpha/testable Windows desktop app, about 45% for a public paid Windows release, and about 30% for a Steam-ready release pipeline.
@@ -235,6 +236,7 @@ Steam release requirements still pending:
 
 ## Current Branch Fixes
 
+- October 4 AirPort/HomePod compatibility / 6.409 is isolated on `codex/airport-homepod-sync`, starting from combined commit `1dd9264`. Reviewed source/helper changes are copied to the main and combined checkouts with baseline checks, per-file hashes and complete pre-update backups; dynamic backgrounds remain outside this patch. HomePod mini OS 27.0 and AirPort Express `AirPort10,115` firmware `p20.78100.3` accepted the existing AirPlay 2 transient/NTP path. Discovery prefers the ordinary LAN IPv4; the startup occupancy guard excludes only the current helper's exact live process identity. Explicit 352-frame ALAC passed 16 independent FFmpeg decoder checks, and a continuous 32-tap shared sinc conditioner passed waveform quality tests. The user confirmed that electrical noise disappeared and that the network pair synchronized very well after a 90.032-second check. A 90.047-second HomePod + AirPort + M6 run passed transport/render/restoration, but M6 audibly played early. The latest follow-up adds the declared 11025-frame (250 ms) realtime/NTP render lead once to local presentation and the group lyric estimate while retaining the 66150-frame network RTP gap; this is protocol evidence, not measured acoustic delay, and a corrected 90.110-second three-device check passed transport/restoration with the user confirming basic synchronization. One 34.453-second remote FIN remains unassigned; a separate external-default-output change intentionally stopped another test. The final source passed 3015 Python tests in 89.621 seconds; 258 focused checks and all 10 native suites (46.60 seconds) passed. The rebuilt 6.409 frozen package passed capture/group-dispatch acceptance. See [compatibility, validation and remaining gates](docs/airport-homepod-compatibility.md).
 - October 2 source integration: the first independent merge combined album-flow `c08b5f2` and single-HomePod `2178324` at `f3058d3`. This follow-up integrates the synchronized-output branch through `247036d`, preserving both input histories, background renderer, source observations and provider boundaries. The combined 6.408 passed its own full source, native and frozen-package checks. See [merge provenance](docs/merge-background-homepod.md).
 - Levels 3–4 development is active on isolated branch `codex/audio-homepod-level3-4`: synchronized multiple HomePods and delayed Windows/Bluetooth music playback, restricted to the selected music process tree. Shared RTP/NTP/PCM sending, menu multi-selection, independent volume, guarded spare-output app routing and continuous clock correction are implemented. A 90.078-second HomePod mini + M6 check completed with no capture drops or local underruns, then restored the music app's actual M6 stream and original output policies. In a separate 15.032-second replay, the user confirmed “两边都出声，基本同步”. The 6.408 follow-up adds confirmed membership checkmarks, a group stop label and paused-route recovery handling. A three-hour PCM clock-drift model and encrypted dual-receiver pause/resume tests passed; actual multi-HomePod listening needs another HomePod. See [group synchronization evidence and remaining gates](docs/audio-group-sync.md). These stages are not yet fully verified across hardware and topology configurations.
 - October 2 HomePod silent-start repair / 6.406: muted Realtek endpoint loopback produced zero PCM despite active computer playback. Exclusive casting now prefers native Windows process loopback, covering all computer application playback as authorized for the current single-receiver stage, with endpoint fallback when the API is unavailable. Local mute ownership, receiver volume and default-device guards remain in place. Streaming requires fresh nonzero capture and nonzero sent PCM; bounded signal diagnostics report a silent source and recovery without restarting the cast. The 90.032-second Realtek-to-HomePod mini cast passed, the user confirmed normal sound with only HomePod audible, and the full suites and frozen package checks passed; details and compatibility limits are recorded below.

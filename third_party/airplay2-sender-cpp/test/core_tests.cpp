@@ -307,9 +307,16 @@ std::optional<std::vector<int16_t>> decodeAlacUncompressed(const std::string& fr
     if (get(3) != 1u) return std::nullopt;     // stereo channel-pair element
     if (get(4) != 0u) return std::nullopt;
     if (get(12) != 0u) return std::nullopt;
-    if (get(1) != 0u) return std::nullopt;     // hasSize = 0
+    const auto hasSize = get(1);
+    if (!hasSize) return std::nullopt;
     if (get(2) != 0u) return std::nullopt;     // wastedBytes
     if (get(1) != 1u) return std::nullopt;     // isNotCompressed
+    if (*hasSize) {
+        const auto count = get(32);
+        if (!count || *count == 0 || nFrames <= 0 || *count > uint32_t(nFrames))
+            return std::nullopt;
+        nFrames = int(*count);
+    }
     std::vector<int16_t> pcm;
     pcm.reserve(size_t(nFrames) * 2);
     for (int i = 0; i < nFrames * 2; ++i) {
@@ -994,7 +1001,7 @@ void testAp2Transient() {
     REQUIRE(dgs.size() == 1 && dgs[0].s == RaopUdp::Audio && dgs[0].to.port == 6100, "one audio packet to dataPort");
     const std::string& pkt = dgs[0].data;
     CHECK(uint8_t(pkt[0]) == 0x80 && uint8_t(pkt[1]) == 0xE0 && be32(pkt, 8) == sid, "rtp header: marker on the first packet, SSRC = session id");
-    CHECK(pkt.size() == 12 + 1412 + 16 + 8, "payload = uncompressed ALAC frame (1412 B) + tag + trailing nonce");
+    CHECK(pkt.size() == 12 + 1416 + 16 + 8, "payload = explicit-length uncompressed ALAC frame (1416 B) + tag + trailing nonce");
     auto pcm = r.rx.decodeAudio(pkt);
     CHECK(pcm && *pcm == rampExpect(704), "audio decrypts with the 32-byte key and decodes as uncompressed ALAC");
     CHECK(pkt.substr(pkt.size() - 8) == std::string(8, '\0'), "first nonce is counter 0");
