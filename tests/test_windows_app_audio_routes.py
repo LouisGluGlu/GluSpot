@@ -773,6 +773,47 @@ class AppRouteTests(unittest.TestCase):
         self.adapter.owners = (("spare", 0, False, True),)
         self.assertFalse(self.backend.endpoint_is_unoccupied("spare", self.current))
 
+    def test_exact_owned_capture_session_is_allowed_only_after_reverification(self):
+        helper = ProcessIdentity(50, 200, r"C:\GluSpot\GluSpotAirPlay.exe")
+        self.adapter.identities[50] = helper
+        self.adapter.owners = (("bt", 30, True, False), ("bt", 50, True, False))
+        self.assertFalse(self.backend.endpoint_is_unoccupied("bt", self.current))
+        self.assertTrue(self.backend.endpoint_is_unoccupied("bt", self.current, owned_process=helper))
+        for current in (replace(helper, process_created_at_100ns=201),
+                        replace(helper, process_path=r"C:\Other\GluSpotAirPlay.exe"), None):
+            with self.subTest(current=current):
+                self.adapter.identities[50] = current
+                self.assertFalse(self.backend.endpoint_is_unoccupied("bt", self.current, owned_process=helper))
+
+    def test_owned_capture_identity_never_allows_system_or_ambiguous_owners(self):
+        helper = ProcessIdentity(50, 200, r"C:\GluSpot\GluSpotAirPlay.exe")
+        self.adapter.identities[50] = helper
+        for single, system in ((False, False), (True, True), (False, True)):
+            with self.subTest(single=single, system=system):
+                self.adapter.owners = (("bt", 50, single, system),)
+                self.assertFalse(self.backend.endpoint_is_unoccupied("bt", self.current, owned_process=helper))
+        self.adapter.owners = (("bt", 51, True, False),)
+        self.adapter.identities[51] = replace(helper, process_id=51)
+        self.assertFalse(self.backend.endpoint_is_unoccupied("bt", self.current, owned_process=helper))
+
+    def test_spare_guard_accepts_exact_current_capture_child_but_rejects_stale_authority(self):
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        self.adapter.owners = (("spare", 30, True, False),)
+        guard.wait_migrated(timeout=0)
+        helper = ProcessIdentity(50, 200, r"C:\GluSpot\GluSpotAirPlay.exe")
+        self.adapter.identities[50] = helper
+        self.adapter.owners += (("spare", 50, True, False),)
+        with self.assertRaisesRegex(RuntimeError, "occupied"):
+            guard.check()
+        guard.check(owned_process=helper)
+        self.adapter.identities[50] = replace(helper, process_created_at_100ns=201)
+        with self.assertRaisesRegex(RuntimeError, "occupied"):
+            guard.check(owned_process=helper)
+        self.adapter.owners = (("spare", 30, True, False),)
+        guard.restore()
+
     def test_recovery_rejects_duplicate_roles_bool_role_and_unrelated_restore_route(self):
         guard = self.prepare()
         guard.apply()

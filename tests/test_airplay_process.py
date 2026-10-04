@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 import queue
 import subprocess
@@ -14,6 +15,7 @@ from unittest.mock import Mock, patch
 
 from api.airplay_process import AirPlayProcess
 from api.audio_routes import AudioRouteDevice
+from api.windows_audio_sessions import ProcessIdentity
 
 
 HOME = AudioRouteDevice("home", "起居室", transport="airplay", host="192.0.2.1", device_id="AABB")
@@ -59,6 +61,62 @@ class AirPlayProcessTests(unittest.TestCase):
         self.assertEqual(process.poll(), 0)
         self.assertIsNone(self.sender._reader)
         self.assertIsNone(self.sender._stderr_reader)
+
+    def _owned_child(self, *, identity=None):
+        process = Mock(pid=42, returncode=0)
+        process.poll.return_value = None
+        identity = identity or ProcessIdentity(42, 100, str(self.script.resolve()))
+        adapter = Mock()
+        adapter.process_identity.return_value = identity
+        self.sender._process = process
+        with patch("api.airplay_process.sys.platform", "win32"), patch(
+                "api.airplay_process._WindowsAudioSessionAdapter", return_value=adapter):
+            self.sender._bind_owned_process_identity()
+        return process, identity, adapter
+
+    def test_owned_capture_identity_requires_current_spawn_and_exact_image(self):
+        process, identity, adapter = self._owned_child()
+        self.assertEqual(self.sender.owned_process_identity(), identity)
+        adapter.process_identity.assert_called_with(process.pid)
+        self.sender.stop()
+        self.assertIsNone(self.sender.owned_process_identity())
+        self.assertIsNone(self.sender._owned_process)
+        self.assertIsNone(self.sender._owned_process_identity)
+
+    def test_owned_capture_identity_rejects_pid_reuse_replacement_and_exit(self):
+        process, identity, adapter = self._owned_child()
+        for changed in (replace(identity, process_created_at_100ns=101),
+                        replace(identity, process_path=str(self.script.parent / "other" / self.script.name)), None):
+            with self.subTest(changed=changed):
+                adapter.process_identity.return_value = changed
+                self.assertIsNone(self.sender.owned_process_identity())
+        adapter.process_identity.return_value = identity
+        replacement = Mock(pid=42)
+        replacement.poll.return_value = None
+        self.sender._process = replacement
+        self.assertIsNone(self.sender.owned_process_identity())
+        self.sender._process = process
+        process.poll.return_value = 0
+        self.assertIsNone(self.sender.owned_process_identity())
+
+    def test_same_basename_or_invalid_identity_cannot_bind_capture_authority(self):
+        for identity in (ProcessIdentity(42, 100, str(self.script.parent / "other" / self.script.name)),
+                         ProcessIdentity(42, 0, str(self.script.resolve())),
+                         ProcessIdentity(43, 100, str(self.script.resolve()))):
+            with self.subTest(identity=identity):
+                self._owned_child(identity=identity)
+                self.assertIsNone(self.sender.owned_process_identity())
+                self.sender.stop()
+
+    def test_child_exit_during_identity_lookup_cannot_bind_capture_authority(self):
+        process, _identity, _adapter = self._owned_child()
+        process.poll.side_effect = (None, 0)
+        with patch("api.airplay_process.sys.platform", "win32"), patch(
+                "api.airplay_process._WindowsAudioSessionAdapter", return_value=_adapter):
+            self.sender._bind_owned_process_identity()
+        self.assertIsNone(self.sender.owned_process_identity())
+        process.poll.side_effect = None
+        process.poll.return_value = 0
 
     def test_transport_evidence_is_bounded_and_retained_after_child_exit(self):
         self.script.write_text(

@@ -168,7 +168,7 @@ class WindowsAppAudioRoutes:
             self._active = guard
             return guard
 
-    def endpoint_is_unoccupied(self, endpoint, source):
+    def endpoint_is_unoccupied(self, endpoint, source, *, owned_process=None):
         """Read full active ownership, including system/ambiguous sessions."""
         WindowsAudioDevices._validate_endpoint_id(endpoint)
         if not isinstance(source, MusicAudioSource):
@@ -179,8 +179,28 @@ class WindowsAppAudioRoutes:
                     return False
                 self._adapter = _WindowsAppRouteAdapter()
             selected = {source.process_id, *source.session_process_ids}
-            return all(endpoint_id != endpoint or (pid in selected and single and not system)
-                       for endpoint_id, pid, single, system in self._adapter.active_owners())
+            return self._endpoint_owners_allowed(endpoint, selected, owned_process=owned_process)
+
+    def _endpoint_owners_allowed(self, endpoint, selected, *, owned_process=None):
+        """Accept music owners plus a separately reverified owned capture child.
+
+        Process loopback can register the native helper as an active session on
+        the source render endpoint. It does not make that endpoint shared with
+        another application. Only a caller's exact live child identity grants
+        this exception; ambiguous and system sessions remain unsafe to mute.
+        """
+        for endpoint_id, pid, single, system in self._adapter.active_owners():
+            if endpoint_id != endpoint:
+                continue
+            if single is not True or system is not False:
+                return False
+            if pid in selected:
+                continue
+            if (not _valid_identity(owned_process, pid)
+                    or pid != owned_process.process_id
+                    or self._adapter.process_identity(pid) != owned_process):
+                return False
+        return True
 
     def _default_endpoint(self):
         selected = {output.id for output in self._devices.list_outputs() if getattr(output, "is_default", False)}
@@ -534,11 +554,11 @@ class AppAudioRouteGuard:
         """Separate policy cleanup from effective running-stream verification."""
         return self._restoration_state
 
-    def _verify_spare(self):
+    def _verify_spare(self, *, owned_process=None):
         selected = {entry.identity.process_id for entry in self._roles}
-        for endpoint, pid, single, system in self._owner._adapter.active_owners():
-            if endpoint == self.spare_endpoint and (pid not in selected or not single or system):
-                raise RuntimeError("Spare audio endpoint is occupied by another application")
+        if not self._owner._endpoint_owners_allowed(self.spare_endpoint, selected,
+                                                    owned_process=owned_process):
+            raise RuntimeError("Spare audio endpoint is occupied by another application")
 
     def _fence(self, entry):
         current = self._owner._adapter.process_identity(entry.identity.process_id)
@@ -766,7 +786,7 @@ class AppAudioRouteGuard:
             self._finish_restoration(observation,
                 deferred=observation == "policy_restored_no_active_stream")
 
-    def check(self):
+    def check(self, *, owned_process=None):
         """Validate the active transaction without changing routing or audio."""
         with self._owner._lock:
             if self._closed or not self._applied:
@@ -775,7 +795,7 @@ class AppAudioRouteGuard:
                 self._fence(role)
                 if self._owner._adapter.get_route(role.identity.process_id, role.role) != role.owned_route:
                     raise RuntimeError("Application output changed during migration")
-            self._verify_spare()
+            self._verify_spare(owned_process=owned_process)
 
     def _close_handles(self):
         for handle in self._handles.values():

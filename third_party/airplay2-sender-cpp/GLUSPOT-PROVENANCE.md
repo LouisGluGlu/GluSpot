@@ -203,3 +203,53 @@ cryptographic fake tests preserve a healthy 65-second ready barrier, then cover
 both unarmed and armed receivers that keep TCP/event traffic open while feedback
 replies are blackholed, plus repeatedly rejected feedback. These tests validate
 bounded session-loss detection; they do not establish receiver acoustic output.
+
+Local modification (2026-10-04, explicit ALAC packet length):
+`src/raop_sender.cpp` now sets the standard uncompressed ALAC frame's `hasSize`
+bit and writes its 32-bit, 352-frame count. Previously `hasSize=0` depended on
+the receiver applying stream SETUP's `spf=352` to its decoder cookie. The signed
+stereo samples, 44.1 kHz rate, codec, encryption and RTP/NTP timing are unchanged.
+The payload grows from 1412 to 1416 bytes; encrypted RTP is 1452 bytes, or 1480
+including IPv4/UDP headers, below a 1500-byte MTU. No receiver-specific cookie or
+acoustic result is assumed.
+
+Protocol structure was checked against Apple's Apache-2.0 ALAC decoder,
+`ALACDecoder::Decode`'s partial-frame length override, pinned at
+`c38887c5c5e64a4b31108733bd79ca9b2496d987`:
+<https://github.com/macosforge/alac/blob/c38887c5c5e64a4b31108733bd79ca9b2496d987/codec/ALACDecoder.cpp>.
+Only the standardized header fields are used; no reference implementation is
+copied or bundled. FFmpeg's installed ALAC decoder independently confirmed an
+explicit 352-frame synthetic payload with both 352 and 4096-frame cookies,
+while the implicit-length form failed with a 4096-frame cookie. This establishes
+a format compatibility boundary, not the actual HomePod's decoder cookie.
+
+The shared fake receiver in `test/core_tests.cpp` reads either explicit or
+cookie-default lengths and its payload-size expectation reflects 1416 bytes.
+`native/airplay_sender/sender_policy_tests.cpp` adds signed extremes, silence,
+stereo ramps and independent-frequency synthetic profiles through the actual
+standalone and coordinated sender APIs. Its optional `--export-alac-fixture`
+path exports only synthetic input and the authenticated/decrypted real ALAC
+payload for an external decoder; no live device, captured music or pairing key
+is exported. The ignored `logs/verify_actual_alac_ffmpeg.py` wraps those actual
+payloads in CAF and compares standard-decoder output sample for sample under
+both cookie lengths. This external check is separate from the fake receiver's
+own decoder. Native build and hardware listening must validate the final
+change before claiming the reported HomePod electrical noise is resolved.
+
+Local modification (2026-10-04, AP2 declared render lead): diagnostics expose
+the actual outgoing stream SETUP's `latencyMin=11025` separately as
+`requestedMinLatencyFrames`. It resets with the existing session diagnostics
+and is never labeled receiver-reported latency. The network RTP/NTP gap remains
+66150 frames. GluSpot's group host includes the declaration once in Windows
+presentation and group display timing, for a total fixed lead of 77175 frames.
+The existing WASAPI clock still tracks the Windows output pipeline.
+
+This policy was checked against OwnTone pinned
+`4fa5dccfb69622f42e77bd05628034a69a567d57`: `src/outputs/airplay.c:1207`
+uses total output buffering minus the 250 ms receiver render lead on the
+network, `airplay.c:2629` declares 11025 frames, and `src/outputs/alsa.c:1170`
+uses the full total delay locally. No GPL implementation was copied. Sync
+flag 7 and the AP2 minimum declaration describe the same lead and are not
+added twice. The encrypted fake receiver independently reads the actual
+SETUP and unchanged sync packet to check this distinction. Hardware listening
+is tracked separately from the protocol estimate in the compatibility report.

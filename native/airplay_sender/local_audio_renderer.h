@@ -31,6 +31,12 @@ struct LocalRenderDiagnostics {
     bool endpointClockValid = false, acousticDelayKnown = false;
     uint64_t writtenFrames = 0, nonzeroSamples = 0, meaningfulSamples = 0, underrunFrames = 0;
     uint64_t sourceFrame = 0, deviceClockFrames = 0;
+    uint32_t presentationLatencyFrames = 0;
+    uint64_t clockPosition = 0, clockFrequency = 0, clockQpc100ns = 0;
+    uint64_t paddingFrames = 0, writeEstimateWrittenFrames = 0;
+    bool clockQpcAgeKnown = false;
+    double clockQpcAgeMs = 0, writeQueueDelayMs = 0, writePresentationOffsetMs = 0;
+    double writePresentationEpochOffsetMs = 0;
     double streamLatencyMs = 0, bufferDurationMs = 0;
     double phaseErrorMs = 0, resampleRatio = 1;
 };
@@ -83,12 +89,13 @@ public:
         return condition_.wait_for(lock, std::chrono::seconds(5),
             [this] { return stats_.ready || !error_.empty(); }) && stats_.ready && error_.empty();
     }
-    bool arm(Clock::time_point sendStart, uint32_t latencyFrames = 66150) {
+    bool arm(Clock::time_point sendStart, uint32_t latencyFrames) {
         std::lock_guard lock(mutex_);
-        if (!stats_.ready || stats_.armed || !error_.empty() || !latencyFrames || latencyFrames > 88200) return false;
+        if (!stats_.ready || stats_.armed || !error_.empty() || !latencyFrames || latencyFrames > 99225) return false;
         const auto presentation = sendStart + std::chrono::nanoseconds(uint64_t(latencyFrames) * 1000000000ULL / 44100);
         if (presentation <= Clock::now()) return false;
         presentationEpoch_ = presentation;
+        stats_.presentationLatencyFrames = latencyFrames;
         stats_.armed = true;
         SetEvent(begin_);
         return true;
@@ -115,6 +122,17 @@ private:
         QueryPerformanceCounter(&qpcNow);
         QueryPerformanceFrequency(&qpcFrequency);
         const auto now = Clock::now();
+        // Keep the correlated raw observation together with the pre-write
+        // count: writtenFrames in the published stats includes this pass's
+        // later buffer release and cannot reconstruct the estimate alone.
+        stats.clockPosition = position; stats.clockFrequency = frequency; stats.clockQpc100ns = qpc;
+        stats.paddingFrames = padding; stats.writeEstimateWrittenFrames = writtenFrames;
+        stats.clockQpcAgeKnown = false; stats.clockQpcAgeMs = 0;
+        if (qpc && qpcFrequency.QuadPart > 0) {
+            const double ageMs = double((static_cast<long double>(qpcNow.QuadPart) * 10000000 /
+                                        qpcFrequency.QuadPart - qpc) / 10000);
+            if (std::isfinite(ageMs)) { stats.clockQpcAgeMs = ageMs; stats.clockQpcAgeKnown = true; }
+        }
         const long double deviceFrames = frequency ? static_cast<long double>(position) * 44100 / frequency : 0;
         if (hr == S_OK && position && qpc && frequency && qpcFrequency.QuadPart > 0 &&
             deviceFrames <= static_cast<long double>(writtenFrames) + padding + 4410) {
@@ -127,12 +145,16 @@ private:
             if (ageNs >= 0 && ageNs < 1000000000 && queueNs < 1000000000) {
                 stats.endpointClockValid = true;
                 stats.deviceClockFrames = uint64_t(deviceFrames);
+                stats.writeQueueDelayMs = double(queueNs / 1000000);
+                stats.writePresentationOffsetMs = double(int64_t(queueNs - ageNs)) / 1000000;
                 return now + std::chrono::nanoseconds(int64_t(queueNs - ageNs));
             }
         }
         stats.endpointClockValid = false;
         // The new stream's clock can stay zero until data reaches the device.
         // This fallback is a conservative estimate, never acoustic evidence.
+        stats.writeQueueDelayMs = double(padding) * 1000 / 44100;
+        stats.writePresentationOffsetMs = double(uint64_t(padding) * 1000000000ULL / 44100 + uint64_t(latency) * 100) / 1000000;
         return now + std::chrono::nanoseconds(uint64_t(padding) * 1000000000ULL / 44100 + uint64_t(latency) * 100);
     }
 
@@ -195,6 +217,7 @@ private:
                     Clock::time_point epoch;
                     { std::lock_guard lock(mutex_); epoch = presentationEpoch_; }
                     stats.armed = true;
+                    { std::lock_guard lock(mutex_); stats.presentationLatencyFrames = stats_.presentationLatencyFrames; }
                     // Prime the device before Start; a future group barrier
                     // begins with silence, not an uninitialized render buffer.
                     BYTE* initial = nullptr;
@@ -224,6 +247,7 @@ private:
                         if (!available) continue;
                         const auto presentation = estimatedWriteTime(clock.Get(), frequency, stats.writtenFrames,
                                                                     padding, latency, stats);
+                        stats.writePresentationEpochOffsetMs = std::chrono::duration<double, std::milli>(presentation - epoch).count();
                         double desired = std::chrono::duration<double>(presentation - epoch).count() * 44100;
                         const UINT32 prefix = desired < 0 ? UINT32(std::min<double>(available, std::ceil(-desired))) : 0;
                         const UINT32 audible = available - prefix;

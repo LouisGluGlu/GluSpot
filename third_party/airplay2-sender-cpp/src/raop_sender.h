@@ -75,6 +75,8 @@ struct RaopDiagnostics {
     size_t queuedInputFrames = 0;
     uint32_t inputSampleRate = 0;
     uint32_t protocolLatencyFrames = 0, receiverLatencyFrames = 0;
+    // Our AP2 SETUP latencyMin request, not a receiver readback or measurement.
+    uint32_t requestedMinLatencyFrames = 0;
     bool receiverLatencyReported = false;
     bool coordinatedPlayback = false, coordinatedTimelineArmed = false;
     double receiverVolumePct = 0;

@@ -1511,6 +1511,27 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot().state, "error")
         self.assertIn("另一应用占用", self.controller.snapshot().status_message)
 
+    def test_current_capture_child_identity_is_forwarded_to_occupancy_and_spare_guard(self):
+        self._bluetooth_source_group()
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        helper = ProcessIdentity(450, 2000, r"C:\GluSpot\GluSpotAirPlay.exe")
+        self.group.owned_process_identity = lambda: helper
+        checked = []
+        guard = self.router.guards[-1]
+        guard.check = lambda **ownership: checked.append(("guard", ownership))
+        self.router.endpoint_is_unoccupied = lambda endpoint, source, **ownership: (
+            checked.append(("endpoint", ownership)) or ownership.get("owned_process") == helper)
+        self._source_check_due()
+        self.assertEqual(checked, [("guard", {"owned_process": helper}), ("endpoint", {"owned_process": helper})])
+        self.assertTrue(self.group.running)
+        self.assertEqual(self.controller.snapshot().state, "casting")
+        self.group.owned_process_identity = lambda: None
+        self._source_check_due()
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("另一应用占用", self.controller.snapshot().status_message)
+
     def test_unknown_spare_ownership_fails_closed_before_any_native_start(self):
         with patch.object(self.router, "endpoint_is_unoccupied", side_effect=OSError("ownership unavailable")):
             self.controller.toggle(HOME.id)
@@ -1878,6 +1899,37 @@ class AirPlayDiscoveryTests(unittest.TestCase):
     def test_receiver_parses_homepod_unicode_identity_and_selects_ipv4(self):
         device = receiver_from_service(self._info(SERVICE_TYPES[0]), SERVICE_TYPES[0])
         self.assertEqual(device, HOME)
+
+    def test_normal_ipv4_is_preferred_over_link_local_regardless_of_order(self):
+        for service_type in SERVICE_TYPES:
+            for addresses in (["169.254.107.134", "192.168.9.118"],
+                              ["192.168.9.118", "169.254.107.134"],
+                              ["169.254.107.134", "169.254.107.135", "192.168.9.118"]):
+                with self.subTest(service_type=service_type, addresses=addresses):
+                    info = self._info(service_type, addresses=addresses)
+                    device = receiver_from_service(info, service_type)
+                    self.assertEqual(device.host, "192.168.9.118")
+
+    def test_first_normal_ipv4_keeps_service_address_order(self):
+        info = self._info(SERVICE_TYPES[0],
+                          addresses=["169.254.107.134", "192.168.9.118", "10.0.0.8"])
+        self.assertEqual(receiver_from_service(info, SERVICE_TYPES[0]).host, "192.168.9.118")
+
+    def test_link_local_only_receiver_is_still_offered(self):
+        info = self._info(SERVICE_TYPES[0], addresses=["fe80::1", "169.254.107.134"])
+        self.assertEqual(receiver_from_service(info, SERVICE_TYPES[0]).host, "169.254.107.134")
+
+    def test_malformed_ipv4_candidates_do_not_hide_valid_address(self):
+        info = self._info(SERVICE_TYPES[0],
+                          addresses=["192.168.9.999", "192.168.9", "192.168.009.118",
+                                     "not-an-address", "192.168.9.118"])
+        self.assertEqual(receiver_from_service(info, SERVICE_TYPES[0]).host, "192.168.9.118")
+
+    def test_loopback_and_reserved_ipv4_are_rejected(self):
+        for address in ("127.0.0.1", "127.0.0.2", "240.0.0.1", "255.255.255.255"):
+            with self.subTest(address=address):
+                self.assertIsNone(receiver_from_service(
+                    self._info(SERVICE_TYPES[0], addresses=[address]), SERVICE_TYPES[0]))
 
     def test_device_kind_requires_explicit_model_and_discovery_never_invents_volume(self):
         for model, expected in (("AudioAccessory5,1", "homepod-mini"), ("AudioAccessory1,1", "homepod"),

@@ -15,9 +15,11 @@ SERVICE_TYPES = ("_airplay._tcp.local.", "_raop._tcp.local.")
 
 
 def receiver_from_service(info, service_type: str) -> AudioRouteDevice | None:
-    addresses = info.parsed_addresses()
-    host = next((str(ipaddress.ip_address(a)) for a in addresses
-                 if _usable_ipv4(a)), "")
+    addresses = [ipaddress.ip_address(a) for a in info.parsed_addresses()
+                 if _usable_ipv4(a)]
+    # Multi-interface receivers can advertise a link-local address first.
+    # Prefer their normal LAN address, retaining link-local-only receivers.
+    host = str(min(addresses, key=lambda ip: ip.is_link_local)) if addresses else ""
     if not host:
         return None
     properties = {}
@@ -48,7 +50,8 @@ def receiver_from_service(info, service_type: str) -> AudioRouteDevice | None:
 def _usable_ipv4(value) -> bool:
     try:
         ip = ipaddress.ip_address(value)
-        return ip.version == 4 and not ip.is_unspecified and not ip.is_multicast
+        return (ip.version == 4 and not ip.is_unspecified and not ip.is_multicast
+                and not ip.is_loopback and not ip.is_reserved)
     except ValueError:
         return False
 

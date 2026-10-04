@@ -86,6 +86,19 @@ class AirPlayGroupProcessTests(unittest.TestCase):
         self.assertNotIn("--endpoint", self.args)
         self.assertNotIn("shell", self.kwargs)
 
+    def test_group_spawn_binds_and_stop_releases_exact_capture_child_identity(self):
+        from api.windows_audio_sessions import ProcessIdentity
+        adapter = Mock()
+        adapter.process_identity.side_effect = lambda pid: ProcessIdentity(pid, 100, str(self.script.resolve()))
+        with patch("api.airplay_process.sys.platform", "win32"), patch(
+                "api.airplay_process._WindowsAudioSessionAdapter", return_value=adapter):
+            self._connected()
+        identity = self.sender.owned_process_identity()
+        self.assertEqual(identity.process_id, self.sender._process.pid)
+        self.assertEqual(identity.process_path, str(self.script.resolve()))
+        self.sender.stop()
+        self.assertIsNone(self.sender.owned_process_identity())
+
     def test_individual_receiver_volumes_are_confirmed_independently(self):
         self._connected()
         self.assertEqual(self.sender.receiver_volume_state("home")["volume"], .4)
