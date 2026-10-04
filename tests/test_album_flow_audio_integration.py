@@ -156,6 +156,32 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(panel._muted, panel._background), 4.5)
         marker.hide()
 
+    def test_displayed_backdrop_refreshes_material_without_repainting_lyrics(self):
+        panel = self._open_with_pointer()
+        # The helper settles the opening slide at its final crop location.
+        with patch("local.audio_output_panel.time.monotonic", return_value=108.0):
+            panel.sync_snapshot()
+            panel._capture_material(force=True)
+        before = QImage(panel._material)
+        captured_at = panel._material_at
+        state = self._background_state()
+        with patch.object(self.window, "render", side_effect=AssertionError("extra page repaint")):
+            with patch("local.audio_output_panel.time.monotonic", return_value=110.0):
+                panel.sync_snapshot()
+                panel._capture_material()
+        self.assertEqual(panel._material, before)
+        self.assertEqual(panel._material_at, captured_at)
+        self.assertEqual(self._background_state(), state)
+        self._render_page(112.0)
+        displayed = self._background_state()
+        self.assertNotEqual(displayed, state)
+        with patch.object(self.window, "render", side_effect=AssertionError("extra page repaint")):
+            with patch("local.audio_output_panel.time.monotonic", return_value=113.0):
+                panel._capture_material()
+        self.assertNotEqual(panel._material, before)
+        self.assertEqual(self._background_state(), displayed)
+        self.assertEqual(panel._material_at, 113.0)
+
     def test_circular_output_control_selects_fake_route_and_escape_dismisses_chooser(self):
         for fullscreen in (False, True):
             with self.subTest(fullscreen=fullscreen):
@@ -277,6 +303,10 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
         self.app.processEvents()
         stop_center = panel.stop_button.mapTo(panel.scroll.viewport(), panel.stop_button.rect().center())
         self.assertTrue(panel.scroll.viewport().rect().contains(stop_center))
+        self.assertIn("同步播放", panel.title_label.text())
+        self.assertIn("仅当前音乐软件", panel.scope_label.text())
+        self.assertLessEqual(panel.scope_label.heightForWidth(panel.scope_label.width()),
+                             panel.scope_label.height())
         self.provider.calls.clear()
         QTest.mouseClick(panel.stop_button, Qt.MouseButton.LeftButton)
         self.assertEqual(self.provider.calls, [("stop",)])

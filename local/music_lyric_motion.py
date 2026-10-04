@@ -803,6 +803,7 @@ class MusicLyricMotion:
     CLOCK_DISCONTINUITY_SECONDS = 0.55
     CLOCK_SAMPLE_CONFIRM_SECONDS = 0.06
     CLOCK_CORRECTION_SECONDS = 0.12
+    CLOCK_CORRECTION_MAX_RATE = 0.25
 
     def __init__(self):
         self.track_key = ""
@@ -856,11 +857,26 @@ class MusicLyricMotion:
             and position >= previous - 0.12
         ):
             self._clear_pending_clock()
-            # Small player-clock corrections may pause the front briefly, but
-            # must never un-read a character within the active sentence.
+            correction = 1.0 - math.exp(-elapsed / self.CLOCK_CORRECTION_SECONDS)
+            if playing:
+                # Correct the prediction at a bounded rate, including the
+                # final few milliseconds of error. Snapping that small tail
+                # to raw time made a backward correction wait until the player
+                # caught up, visibly holding several healthy paint frames.
+                # The error still converges to the source; this is not a new
+                # independent playback clock or an accumulated time offset.
+                maximum = elapsed * self.CLOCK_CORRECTION_MAX_RATE
+                # A precise source just ahead of prediction may retain its
+                # original small catch-up, so a valid row boundary is not held
+                # behind another confirmation frame. The same rate bound
+                # prevents even that catch-up from becoming a visual jump.
+                adjustment = deviation if 0.0 <= deviation <= 0.03 else deviation * correction
+                adjustment = max(-maximum, min(maximum, adjustment))
+                return expected + adjustment, False
+            # Paused observations retain the existing hold/explicit-seek
+            # behavior and must not acquire elapsed playback time.
             if abs(deviation) <= 0.03:
                 return max(previous, position), False
-            correction = 1.0 - math.exp(-elapsed / self.CLOCK_CORRECTION_SECONDS)
             return max(previous, expected + deviation * correction), False
         candidate_matches = (
             self.pending_clock_position is not None

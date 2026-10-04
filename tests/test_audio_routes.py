@@ -253,7 +253,9 @@ class _AppGuard:
 class AudioRouteControllerTests(unittest.TestCase):
     def setUp(self):
         self.backend, self.discovery, self.sender = _Backend(), _Discovery(), _Sender()
-        self.controller = AudioRouteController(self.backend, self.discovery, self.sender, start_worker=False)
+        self.router = _AppRouter(lambda: None, lambda _source: None)
+        self.controller = AudioRouteController(self.backend, self.discovery, self.sender,
+            app_router=self.router, start_worker=False)
         self.addCleanup(self.controller.close)
         self.controller._refresh_devices()
 
@@ -414,7 +416,7 @@ class AudioRouteControllerTests(unittest.TestCase):
         silent = self._poll_at(103.0, self._capture_stats(received=103.0))
         self.assertEqual(silent.status_message, self.controller.CAPTURE_SILENCE_MESSAGE)
         self.assertEqual(silent.state, "waiting_audio")
-        self.assertEqual(silent.active_id, "speakers")
+        self.assertEqual(silent.active_id, "")
         self.assertEqual(silent.pending_id, HOME.id)
         self.assertEqual(silent.cast_latency_seconds, 0.0)
         self.assertEqual(silent.event_serial, 0)
@@ -736,7 +738,8 @@ class AudioRouteControllerTests(unittest.TestCase):
 
     def test_legacy_constructor_options_do_not_restore_manual_runtime_mode(self):
         controller = AudioRouteController(_Backend(), _Discovery(), _Sender(),
-                                         start_worker=False, latency_seconds=3.2, auto_latency_enabled=False)
+            app_router=_AppRouter(lambda: None, lambda _source: None), start_worker=False,
+            latency_seconds=3.2, auto_latency_enabled=False)
         self.addCleanup(controller.close)
         controller._refresh_devices()
         controller.select(HOME.id)
@@ -979,8 +982,9 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.controller._step()
 
     def _stream(self, identity=HOME.id):
-        self.assertTrue(self.controller.toggle(identity))
-        self.controller._step()
+        # Protocol and ownership fixtures deliberately exercise a one-member
+        # group primitive. Public checkbox mode boundaries are tested below.
+        self.controller._begin_group((identity,))
         self.group.events = self.group.ready_events()
         self.controller._step()
         return self.controller.snapshot()
@@ -989,9 +993,8 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.controller._next_source_resolve_at = 0
         self.controller._step()
 
-    def test_first_homepod_toggle_captures_only_selected_music_process(self):
-        self.controller.toggle(HOME.id)
-        self.controller._step()
+    def test_group_primitive_captures_only_selected_music_process(self):
+        self.controller._begin_group((HOME.id,))
         snapshot = self.controller.snapshot()
         self.assertEqual(self.group.starts, [((HOME.id,), "speakers", 300, 1000)])
         self.assertEqual(self.single.starts, [])
@@ -1061,7 +1064,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
     def test_waiting_music_source_preserves_desired_members_and_limits_retry_frequency(self):
         self.source = None
         with patch("api.audio_route_controller.time.monotonic", return_value=100):
-            self.controller.toggle(HOME.id)
+            self.controller._begin_group((HOME.id,))
             self.controller._step()
             self.controller._refresh_devices()
             self.controller._step()
@@ -1077,7 +1080,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
     def test_empty_or_unknown_source_does_not_use_display_name_or_all_sound(self):
         self.controller.set_music_source("")
         self.controller._step()
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.assertEqual(self.controller.snapshot().state, "waiting_source")
         self.assertEqual(self.resolve_calls, [])
@@ -1139,7 +1142,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
     def test_multiple_source_endpoints_are_reported_instead_of_default_guessing(self):
         self.source = replace(self.source, sessions=self.source.sessions + (
             replace(self.source.sessions[0], endpoint_id="headphones", session_instance_id="second"),))
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.assertEqual(self.group.starts, [])
         self.assertEqual(self.controller.snapshot().state, "error")
@@ -1180,7 +1183,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot().state, "casting")
 
     def test_group_error_wins_over_streaming_and_clears_retry_intent(self):
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.group.events = [{"event": "streaming"}, {"event": "error", "message": "PTP timeline lost"}]
         self.controller._step()
@@ -1267,7 +1270,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot().member_ids, ())
 
     def test_transport_streaming_before_positive_stats_waits_then_confirms(self):
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.group.events = [{"event": "streaming"}]
         self.controller._step()
@@ -1279,7 +1282,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot().member_ids, (HOME.id,))
 
     def test_positive_stats_without_transport_streaming_do_not_claim_group_playback(self):
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.group.events = self.group.ready_events()[:2]
         self.controller._step()
@@ -1290,7 +1293,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot().state, "casting")
 
     def test_dither_only_or_missing_meaningful_evidence_cannot_confirm_group_streaming(self):
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         sample = self.group.ready_events()[1]
         sample["capture_signal"].update(meaningful_samples=0, last_meaningful_age_ms=None, peak=1 / 32768)
@@ -1305,7 +1308,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot().state, "waiting_audio")
 
     def test_stale_positive_stats_cannot_confirm_group_after_transport_readiness(self):
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         sample = self.group.ready_events()[1]
         sample["_received_at"] -= 10
@@ -1317,7 +1320,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot().state, "casting")
 
     def test_unrelated_all_sound_signal_cannot_authorize_music_group(self):
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         sample = self.group.ready_events()[1]
         sample["capture_signal"]["scope"] = "all_other_processes"
@@ -1480,7 +1483,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
 
     def test_music_shared_source_without_unused_spare_does_not_mute_other_application(self):
         self.router.occupied.add("speakers")
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.assertEqual(self.group.starts, [])
         self.assertEqual(self.backend.mute_calls, [])
@@ -1493,7 +1496,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.router.occupied.add("speakers")
         self.router.allow = True
         self.controller._refresh_devices()
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.assertEqual(self.group.starts, [((HOME.id,), "spare", 300, 1000)])
         self.assertIn(("prepare", "spare", "speakers"), self.router.calls)
@@ -1534,7 +1537,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
 
     def test_unknown_spare_ownership_fails_closed_before_any_native_start(self):
         with patch.object(self.router, "endpoint_is_unoccupied", side_effect=OSError("ownership unavailable")):
-            self.controller.toggle(HOME.id)
+            self.controller._begin_group((HOME.id,))
             self.controller._step()
         self.assertEqual(self.group.starts, [])
         self.assertEqual(self.backend.mute_calls, [])
@@ -1580,7 +1583,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
     def test_deferred_resume_record_does_not_block_waiting_source_or_run_idle_recovery(self):
         self.router.pending = {"stage": "resume_verification_pending"}
         self.source = None
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.assertEqual(self.controller.snapshot().state, "waiting_source")
         self.assertEqual(self.controller.snapshot().pending_ids, (HOME.id,))
@@ -1609,7 +1612,7 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
             raise RuntimeError("saved output still owned")
 
         self.router.recover_pending = failed_recovery
-        self.controller.toggle(HOME.id)
+        self.controller._begin_group((HOME.id,))
         self.controller._step()
         self.controller._step()
         self.assertEqual(self.controller.snapshot().state, "error")
@@ -1658,6 +1661,289 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertEqual(self.router.pending["stage"], "effective_recovery_required")
         self.assertEqual(self.controller.snapshot().state, "error")
         self.assertIn("require recovery", self.controller.snapshot().status_message)
+
+
+class AudioRouteModeBoundaryTests(unittest.TestCase):
+    """Exercise public checkbox sequences, including capture and restore order."""
+
+    setUp = AudioRouteGroupControllerTests.setUp
+
+    def _toggle(self, identity):
+        self.assertTrue(self.controller.toggle(identity))
+        self.controller._step()
+        self.assertFalse(self.single.running and self.group.running)
+        return self.controller.snapshot()
+
+    def _confirm_single(self):
+        self.single.events = [{"event": "streaming"}]
+        self.controller._step()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot.state, "casting")
+        self.assertEqual(snapshot.capture_scope, "all_system")
+        self.assertTrue(self.single.running)
+        self.assertFalse(self.group.running)
+        return snapshot
+
+    def _confirm_group(self):
+        self.group.events = self.group.ready_events()
+        self.controller._step()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot.state, "casting")
+        self.assertEqual(snapshot.capture_scope, "music_process_tree")
+        self.assertFalse(self.single.running)
+        self.assertTrue(self.group.running)
+        return snapshot
+
+    def test_checkbox_sequence_changes_one_two_one_zero_capture_scope(self):
+        scopes = []
+        snapshot = self._toggle(HOME.id)
+        scopes.append(snapshot.capture_scope)
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(snapshot.pending_id, HOME.id)
+        self.assertEqual(snapshot.active_id, "")
+        self.assertEqual(snapshot.pending_ids, ())
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(self.resolve_calls, [])
+        snapshot = self._confirm_single()
+        self.assertEqual(snapshot.active_id, HOME.id)
+
+        snapshot = self._toggle(OTHER_HOME.id)
+        scopes.append(snapshot.capture_scope)
+        self.assertEqual(self.group.starts, [((HOME.id, OTHER_HOME.id), "speakers", 300, 1000)])
+        self.assertEqual(snapshot.pending_ids, (HOME.id, OTHER_HOME.id))
+        self.assertEqual(snapshot.member_ids, ())
+        snapshot = self._confirm_group()
+        self.assertEqual(snapshot.member_ids, (HOME.id, OTHER_HOME.id))
+        self.assertEqual(snapshot.pending_ids, ())
+
+        snapshot = self._toggle(OTHER_HOME.id)
+        scopes.append(snapshot.capture_scope)
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers"), (HOME.id, "speakers")])
+        self.assertEqual(len(self.group.starts), 1)
+        self.assertEqual(snapshot.pending_id, HOME.id)
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(snapshot.pending_ids, ())
+        self.assertEqual(snapshot.group_id, "")
+        self._confirm_single()
+
+        snapshot = self._toggle(HOME.id)
+        scopes.append(snapshot.capture_scope)
+        self.assertEqual(scopes, ["all_system", "music_process_tree", "all_system", ""])
+        self.assertFalse(self.single.running)
+        self.assertFalse(self.group.running)
+        self.assertEqual(snapshot.state, "ready")
+        self.assertEqual(snapshot.active_id, "speakers")
+        self.assertEqual(snapshot.cast_source_id, "")
+        self.assertEqual(snapshot.pending_id, "")
+        self.assertEqual(snapshot.cast_latency_seconds, 0)
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
+    def test_one_receiver_can_cast_without_active_music_but_two_wait_for_music(self):
+        self.source = None
+        snapshot = self._toggle(HOME.id)
+        self.assertEqual(snapshot.state, "connecting")
+        self.assertEqual(snapshot.capture_scope, "all_system")
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self.assertEqual(self.resolve_calls, [])
+        self._confirm_single()
+
+        snapshot = self._toggle(OTHER_HOME.id)
+        self.assertEqual(snapshot.state, "waiting_source")
+        self.assertEqual(snapshot.capture_scope, "music_process_tree")
+        self.assertEqual(snapshot.pending_ids, (HOME.id, OTHER_HOME.id))
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(self.resolve_calls, ["cloudmusic.exe"])
+        self.assertEqual(self.group.starts, [])
+        self.assertFalse(self.single.running)
+        self.assertFalse(self.group.running)
+        self.assertEqual(len(self.single.starts), 1)
+
+    def test_single_sender_waits_for_unreturned_route_writes_and_can_retry_after_recovery(self):
+        self.router.pending = {"stage": "effective_recovery_required"}
+        snapshot = self._toggle(HOME.id)
+        self.assertEqual(snapshot.state, "error")
+        self.assertIn("上次输出恢复仍未完成", snapshot.status_message)
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(self.group.starts, [])
+        self.assertIn(("recover",), self.router.calls)
+        self.assertEqual(self.router.pending, {"stage": "effective_recovery_required"})
+        self.assertEqual(snapshot.pending_id, "")
+        self.assertEqual(snapshot.capture_scope, "")
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.selected, [])
+
+        self.router.pending = None
+        snapshot = self._toggle(HOME.id)
+        self.assertEqual(snapshot.state, "connecting")
+        self.assertEqual(snapshot.capture_scope, "all_system")
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self._confirm_single()
+
+    def test_waiting_group_shrinks_to_all_sound_receiver_without_music_source(self):
+        self.source = None
+        self._toggle(HOME.id)
+        self._toggle(OTHER_HOME.id)
+        snapshot = self._toggle(OTHER_HOME.id)
+        self.assertEqual(snapshot.state, "connecting")
+        self.assertEqual(snapshot.capture_scope, "all_system")
+        self.assertEqual(snapshot.pending_id, HOME.id)
+        self.assertEqual(snapshot.pending_ids, ())
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(snapshot.group_id, "")
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers"), (HOME.id, "speakers")])
+        self.assertEqual(self.group.starts, [])
+        self._confirm_single()
+
+    def test_two_device_music_silence_and_resume_preserve_sync_group_status(self):
+        self._toggle(HOME.id)
+        self._confirm_single()
+        self._toggle(OTHER_HOME.id)
+        before = self._confirm_group()
+        self.assertEqual(before.status_message, "正在同步播放到 2 个设备")
+        self.assertEqual(before.member_ids, (HOME.id, OTHER_HOME.id))
+        starts = (tuple(self.single.starts), tuple(self.group.starts))
+        stops = (self.single.stops, self.group.stops)
+        source = self.source
+        sampled_at = self.controller._capture_signal_received_at
+
+        silent = self.group.ready_events()[1]
+        silent["_received_at"] = sampled_at + 3.5
+        silent["capture_signal"].update(nonzero_samples=100, last_nonzero_age_ms=3500,
+            meaningful_samples=80, last_meaningful_age_ms=3500, peak=0.0)
+        self.group.events = [silent]
+        with patch("api.audio_route_controller.time.monotonic", return_value=sampled_at + 3.5):
+            self.controller._step()
+        quiet = self.controller.snapshot()
+        self.assertEqual(quiet.status_message, "已连接播放设备，暂未检测到音乐软件声音")
+
+        resumed = self.group.ready_events()[1]
+        resumed["_received_at"] = sampled_at + 4.0
+        resumed["capture_signal"].update(nonzero_samples=200, last_nonzero_age_ms=0,
+            meaningful_samples=160, last_meaningful_age_ms=0, peak=.3)
+        self.group.events = [resumed]
+        with patch("api.audio_route_controller.time.monotonic", return_value=sampled_at + 4.0):
+            self.controller._step()
+        recovered = self.controller.snapshot()
+        self.assertEqual(recovered.status_message, "正在同步播放到 2 个设备")
+        for snapshot in (quiet, recovered):
+            with self.subTest(status=snapshot.status_message):
+                self.assertEqual(snapshot.state, "casting")
+                self.assertEqual(snapshot.capture_scope, "music_process_tree")
+                self.assertEqual(snapshot.music_source_app_id, "cloudmusic.exe")
+                self.assertEqual(snapshot.member_ids, before.member_ids)
+                self.assertEqual(snapshot.group_id, before.group_id)
+                self.assertEqual(snapshot.cast_source_id, before.cast_source_id)
+                self.assertEqual(snapshot.pending_ids, ())
+        self.assertEqual(self.source, source)
+        self.assertEqual((tuple(self.single.starts), tuple(self.group.starts)), starts)
+        self.assertEqual((self.single.stops, self.group.stops), stops)
+        self.assertTrue(self.group.running)
+        self.assertFalse(self.single.running)
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
+    def test_current_local_default_does_not_implicitly_join_first_receiver(self):
+        self._toggle("headphones")
+        self.assertEqual(self.backend.selected, ["headphones"])
+        snapshot = self._toggle(HOME.id)
+        self.assertEqual(snapshot.capture_scope, "all_system")
+        self.assertEqual(snapshot.active_id, "")
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(snapshot.pending_ids, ())
+        self.assertEqual(self.single.starts, [(HOME.id, "headphones")])
+        self.assertEqual(self.group.starts, [])
+        snapshot = self._confirm_single()
+        self.assertEqual(snapshot.active_id, HOME.id)
+        self.assertEqual(self.backend.selected, ["headphones"])
+
+    def test_same_receiver_checkbox_cancels_connecting_and_casting_without_second_sender(self):
+        for confirmed in (False, True):
+            with self.subTest(confirmed=confirmed):
+                self._toggle(HOME.id)
+                if confirmed:
+                    self._confirm_single()
+                starts = tuple(self.single.starts)
+                snapshot = self._toggle(HOME.id)
+                self.assertEqual(tuple(self.single.starts), starts)
+                self.assertEqual(self.group.starts, [])
+                self.assertFalse(self.single.running)
+                self.assertFalse(self.group.running)
+                self.assertEqual(snapshot.state, "ready")
+                self.assertEqual(snapshot.active_id, "speakers")
+                self.assertEqual(snapshot.pending_id, "")
+                self.assertEqual(snapshot.pending_ids, ())
+                self.assertEqual(snapshot.member_ids, ())
+                self.assertEqual(snapshot.capture_scope, "")
+                self.assertEqual(snapshot.cast_latency_seconds, 0)
+
+    def test_two_queued_same_receiver_checkboxes_cancel_the_single_sender(self):
+        self.assertTrue(self.controller.toggle(HOME.id))
+        self.assertTrue(self.controller.toggle(HOME.id))
+        self.controller._step()
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self.assertEqual(self.group.starts, [])
+        self.assertFalse(self.single.running)
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.controller.snapshot().state, "ready")
+        self.assertEqual(self.controller.snapshot().pending_id, "")
+        self.assertEqual(self.controller.snapshot().capture_scope, "")
+
+    def test_group_to_single_restores_owned_mute_and_music_route_before_sender_start(self):
+        self.router.allow = True
+        self.source = replace(self.source, sessions=(replace(self.source.sessions[0], endpoint_id="headphones"),))
+        self._toggle(HOME.id)
+        self._confirm_single()
+        self._toggle("headphones")
+        self._confirm_group()
+        self.assertEqual(self.group.starts, [((HOME.id, "headphones"), "speakers", 300, 1000)])
+        self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"speakers"})
+        self.backend.mutes["speakers"] = True
+        self.group.needs_local_output_restore = True
+        order = []
+        original_stop = self.group.stop
+        original_mute = self.backend.set_endpoint_mute
+        original_restore = self.router.guards[-1].restore
+        original_start = self.single.start
+        self.group.stop = lambda: (order.append("group_stop"), original_stop())[-1]
+        self.backend.set_endpoint_mute = lambda identity, value: (order.append("mute_restore"), original_mute(identity, value))[-1]
+        self.router.guards[-1].restore = lambda: (order.append("app_restore"), original_restore())[-1]
+        self.single.start = lambda device, source: (order.append("single_start"), original_start(device, source))[-1]
+
+        snapshot = self._toggle("headphones")
+        self.assertEqual(order, ["group_stop", "mute_restore", "app_restore", "single_start"])
+        self.assertEqual({session.endpoint_id for session in self.source.sessions}, {"headphones"})
+        self.assertTrue(self.router.guards[-1].restored)
+        self.assertIsNone(self.controller._app_route_guard)
+        self.assertEqual(self.backend.mute_calls, [("speakers", False)])
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+        self.assertEqual(snapshot.capture_scope, "all_system")
+        self.assertEqual(snapshot.pending_id, HOME.id)
+        self.assertEqual(snapshot.pending_ids, ())
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(snapshot.group_id, "")
+        self.assertEqual(len(self.single.starts), 2)
+        self.assertEqual(len(self.group.starts), 1)
+
+    def test_removing_remote_from_public_bluetooth_group_restores_normal_local_output(self):
+        self._toggle(HOME.id)
+        self._confirm_single()
+        self._toggle("headphones")
+        self._confirm_group()
+        snapshot = self._toggle(HOME.id)
+        self.assertFalse(self.group.running)
+        self.assertFalse(self.single.running)
+        self.assertEqual(self.backend.selected, ["headphones"])
+        self.assertEqual(snapshot.state, "ready")
+        self.assertEqual(snapshot.active_id, "headphones")
+        self.assertEqual(snapshot.capture_scope, "")
+        self.assertEqual(snapshot.pending_id, "")
+        self.assertEqual(snapshot.pending_ids, ())
+        self.assertEqual(snapshot.member_ids, ())
+        self.assertEqual(snapshot.group_id, "")
 
 
 class AudioRouteDurableRecoveryTests(unittest.TestCase):
@@ -1732,6 +2018,14 @@ class AudioRouteDurableRecoveryTests(unittest.TestCase):
         self.timeline.clear()
 
     def _controller(self, router):
+        self.single = _Sender()
+        original_single_start = self.single.start
+
+        def start_single(device, endpoint):
+            self.timeline.append(("single_native", endpoint))
+            original_single_start(device, endpoint)
+
+        self.single.start = start_single
         self.group = _GroupSender()
         original_start = self.group.start_group
 
@@ -1740,7 +2034,7 @@ class AudioRouteDurableRecoveryTests(unittest.TestCase):
             original_start(devices, source, endpoint)
 
         self.group.start_group = start
-        controller = AudioRouteController(self.backend, self.discovery, _Sender(),
+        controller = AudioRouteController(self.backend, self.discovery, self.single,
             group_sender=self.group, source_resolver=lambda _app: self.source,
             app_router=router, start_worker=False)
         self.addCleanup(controller.close)
@@ -1773,7 +2067,7 @@ class AudioRouteDurableRecoveryTests(unittest.TestCase):
         self.journal.write_text(json.dumps(saved), encoding="utf-8")
         before = self.journal.read_text(encoding="utf-8")
         controller = self._controller(self._router())
-        controller.toggle(HOME.id)
+        controller._begin_group((HOME.id,))
         controller._step()
         self.assertEqual(controller.snapshot().state, "error")
         self.assertIn("上次输出尚未恢复", controller.snapshot().status_message)
@@ -1781,6 +2075,86 @@ class AudioRouteDurableRecoveryTests(unittest.TestCase):
         self.assertEqual(self.writes, [])
         self.assertEqual(self.backend.mute_calls, [])
         self.assertEqual(self.journal.read_text(encoding="utf-8"), before)
+
+    def test_single_sender_starts_only_after_crashed_music_route_is_restored(self):
+        self._leave_crashed_parent_journal()
+        controller = self._controller(self._router())
+        self.assertTrue(controller.toggle(HOME.id))
+        controller._step()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.source.sessions[0].endpoint_id, "speakers")
+        self.assertEqual(self.routes, {(30, 0): "", (30, 1): ""})
+        self.assertTrue(self.writes)
+        self.assertEqual(self.timeline[-1], ("single_native", "speakers"))
+        self.assertTrue(any(event[0] == "route" for event in self.timeline[:-1]))
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(controller.snapshot().state, "connecting")
+        self.assertEqual(controller.snapshot().capture_scope, "all_system")
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_invalid_durable_recovery_blocks_single_until_valid_record_is_restored(self):
+        self._leave_crashed_parent_journal()
+        valid = self.journal.read_text(encoding="utf-8")
+        saved = json.loads(valid)
+        saved["roles"][0]["owned_route"] = _PREFIX + "unrelated-output" + _RENDER_SUFFIX
+        invalid = json.dumps(saved)
+        self.journal.write_text(invalid, encoding="utf-8")
+        controller = self._controller(self._router())
+        self.assertTrue(controller.toggle(HOME.id))
+        controller._step()
+        self.assertEqual(controller.snapshot().state, "error")
+        self.assertIn("owned endpoint", controller.snapshot().status_message)
+        self.assertEqual(controller.snapshot().capture_scope, "")
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(self.group.starts, [])
+        self.assertFalse(self.single.running)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.journal.read_text(encoding="utf-8"), invalid)
+        self.assertEqual(self.source.sessions[0].endpoint_id, "spare")
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.selected, [])
+
+        self.journal.write_text(valid, encoding="utf-8")
+        self.assertTrue(controller.toggle(HOME.id))
+        controller._step()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.source.sessions[0].endpoint_id, "speakers")
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.timeline[-1], ("single_native", "speakers"))
+        self.assertEqual(controller.snapshot().capture_scope, "all_system")
+        self.single.events = [{"event": "streaming"}]
+        controller._step()
+        self.assertEqual(controller.snapshot().state, "casting")
+
+    def test_single_start_recovery_error_preserves_owned_journal_and_can_retry(self):
+        self._leave_crashed_parent_journal()
+        before = self.journal.read_text(encoding="utf-8")
+        router = self._router()
+        controller = self._controller(router)
+        with patch.object(router, "recover_pending", side_effect=OSError("recovery adapter unavailable")):
+            self.assertTrue(controller.toggle(HOME.id))
+            controller._step()
+        self.assertEqual(controller.snapshot().state, "error")
+        self.assertIn("recovery adapter unavailable", controller.snapshot().status_message)
+        self.assertEqual(self.single.starts, [])
+        self.assertEqual(self.group.starts, [])
+        self.assertEqual(self.journal.read_text(encoding="utf-8"), before)
+        self.assertEqual(self.source.sessions[0].endpoint_id, "spare")
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.selected, [])
+
+        self.assertTrue(controller.toggle(HOME.id))
+        controller._step()
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.single.starts, [(HOME.id, "speakers")])
+        self.assertEqual(self.source.sessions[0].endpoint_id, "speakers")
+        self.assertEqual(self.timeline[-1], ("single_native", "speakers"))
+        self.assertEqual(controller.snapshot().capture_scope, "all_system")
 
     def test_stop_queued_during_recovery_never_starts_helper_after_restore(self):
         self._leave_crashed_parent_journal()
@@ -1794,7 +2168,7 @@ class AudioRouteDurableRecoveryTests(unittest.TestCase):
             return result
 
         router.recover_pending = recover
-        controller.toggle(HOME.id)
+        controller._begin_group((HOME.id,))
         controller._step()
         self.assertEqual(self.group.starts, [])
         self.assertFalse(self.journal.exists())
@@ -1860,10 +2234,95 @@ class AudioRouteDurableRecoveryTests(unittest.TestCase):
         self.assertEqual(self.backend.selected, [])
         self.assertEqual(self.backend.volume_calls, [])
 
+    def test_paused_single_cast_keeps_resume_observation_and_repairs_music_on_resume(self):
+        controller, router = self._pause_and_stop_real_guard()
+        before = self.journal.read_text(encoding="utf-8")
+        writes = tuple(self.writes)
+        previous_single_starts = list(self.single.starts)
+        self.assertTrue(controller.toggle(HOME.id))
+        controller._step()
+        self.assertEqual(self.single.starts, previous_single_starts + [(HOME.id, "speakers")])
+        self.assertTrue(self.single.running)
+        self.assertEqual(self.journal.read_text(encoding="utf-8"), before)
+        self.assertEqual(tuple(self.writes), writes)
+        self.assertIsNone(router._lease)
+        self.assertTrue(controller._resume_recovery_pending)
+        self.single.events = [{"event": "streaming"}]
+        controller._step()
+        casting = controller.snapshot()
+        self.assertEqual(casting.state, "casting")
+        self.assertEqual(casting.capture_scope, "all_system")
+        starts = (tuple(self.single.starts), tuple(self.group.starts))
+        stops = (self.single.stops, self.group.stops)
+
+        self.source = replace(self.last_source, sessions=tuple(
+            replace(session, endpoint_id="spare") for session in self.last_source.sessions))
+        controller._next_route_recovery_at = 0
+        controller._step()
+        self.assertIsNone(router.pending_recovery())
+        self.assertFalse(controller._resume_recovery_pending)
+        self.assertEqual(self.source.sessions[0].endpoint_id, "headphones")
+        self.assertEqual(self.routes, {(30, 0): "", (30, 1): ""})
+        self.assertGreater(len(self.writes), len(writes))
+        self.assertEqual((tuple(self.single.starts), tuple(self.group.starts)), starts)
+        self.assertEqual((self.single.stops, self.group.stops), stops)
+        self.assertTrue(self.single.running)
+        self.assertFalse(self.group.running)
+        recovered = controller.snapshot()
+        self.assertEqual(recovered.state, "casting")
+        self.assertEqual(recovered.status_message, casting.status_message)
+        self.assertEqual(recovered.capture_scope, "all_system")
+        self.assertEqual(recovered.active_id, HOME.id)
+        self.assertEqual(recovered.cast_source_id, "speakers")
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+        self.assertEqual(self.backend.mute_calls, [])
+
+    def test_single_cast_resume_recovery_failure_stops_cast_and_keeps_retry_record(self):
+        controller, router = self._pause_and_stop_real_guard()
+        self.assertTrue(controller.toggle(HOME.id))
+        controller._step()
+        self.single.events = [{"event": "streaming"}]
+        controller._step()
+        self.source = replace(self.last_source, sessions=tuple(
+            replace(session, endpoint_id="spare") for session in self.last_source.sessions))
+        before = self.journal.read_text(encoding="utf-8")
+        starts = (tuple(self.single.starts), tuple(self.group.starts))
+        self.backend.mutes["speakers"] = True
+        self.single.needs_local_output_restore = True
+        controller._next_route_recovery_at = 0
+        with patch.object(router, "recover_pending", side_effect=OSError("resume adapter unavailable")):
+            controller._step()
+        failed = controller.snapshot()
+        self.assertEqual(failed.state, "error")
+        self.assertIn("原输出恢复待确认", failed.status_message)
+        self.assertIn("resume adapter unavailable", failed.status_message)
+        self.assertEqual(failed.capture_scope, "")
+        self.assertEqual(failed.pending_id, "")
+        self.assertEqual(failed.active_id, "speakers")
+        self.assertFalse(self.single.running)
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.backend.mute_calls, [("speakers", False)])
+        self.assertEqual(self.journal.read_text(encoding="utf-8"), before)
+        self.assertTrue(controller._resume_recovery_pending)
+        self.assertEqual(self.source.sessions[0].endpoint_id, "spare")
+
+        controller._next_route_recovery_at = 0
+        controller._step()
+        self.assertIsNone(router.pending_recovery())
+        self.assertFalse(controller._resume_recovery_pending)
+        self.assertEqual(self.source.sessions[0].endpoint_id, "headphones")
+        self.assertEqual((tuple(self.single.starts), tuple(self.group.starts)), starts)
+        self.assertFalse(self.single.running)
+        self.assertEqual(controller.snapshot().state, "ready")
+        self.assertEqual(controller.snapshot().status_message, "音乐软件输出恢复检查已结束")
+        self.assertEqual(self.backend.selected, [])
+        self.assertEqual(self.backend.volume_calls, [])
+
     def test_new_group_after_paused_stop_waits_then_resolves_fresh_restored_stream(self):
         controller, router = self._pause_and_stop_real_guard()
         starts = tuple(self.group.starts)
-        controller.toggle(HOME.id)
+        controller._begin_group((HOME.id,))
         controller._step()
         self.assertEqual(controller.snapshot().state, "waiting_source")
         self.assertEqual(controller.snapshot().pending_ids, (HOME.id,))

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 APP_NAME = "GluSpot"
-APP_VERSION = "6.409"
+APP_VERSION = "6.410"
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BRAND_ASSET_DIR = ROOT_DIR / "assets" / "brand"
 APP_ICON_PATH = BRAND_ASSET_DIR / "gluspot-card-center.ico"

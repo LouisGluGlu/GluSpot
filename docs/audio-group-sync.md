@@ -53,8 +53,10 @@ identify actual playback PIDs. Exact executable path/basename or packaged
 AUMID matching, ancestry and process creation times select one live root.
 Foreground-window PID and translated display names cannot authorize capture.
 Native capture holds and verifies that process handle and uses Windows
-`INCLUDE_TARGET_PROCESS_TREE`; the original all-other-process capture remains
-only in the legacy single-receiver path.
+`INCLUDE_TARGET_PROCESS_TREE`. The public checkbox interaction uses music-only
+capture for two or more outputs, and computer-wide capture for one AirPlay
+receiver. The chooser explicitly labels that scope change. A one-member native
+group remains an internal protocol/testing interface, not a hidden public mode.
 
 A read-only live probe resolved `cloudmusic.exe` to PID 24084 with creation
 token 134353908200167471 and an active Realtek render session. The separately

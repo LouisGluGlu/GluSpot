@@ -89,6 +89,7 @@ class _OutputRow(QAbstractButton):
         self.hover_fill, self.selected_fill = QColor(255, 255, 255, 14), QColor(245, 245, 247)
         self.label_font = QFont("Segoe UI", 10)
         self.delay_text = ""
+        self.grouped = False
         self._requested_volume: float | None = None
         self._request_until = 0.0
         self.volume_slider = _VolumeSlider(self)
@@ -112,7 +113,7 @@ class _OutputRow(QAbstractButton):
 
     def set_device(self, device):
         self.device = device
-        # A live HomePod session survives a transient mDNS disappearance.
+        # A live AirPlay session survives a transient mDNS disappearance.
         usable = bool(device.available or self.state in {"active", "pending"} and
                       device.transport == "airplay" and device.volume is not None)
         self.setEnabled(usable)
@@ -141,7 +142,7 @@ class _OutputRow(QAbstractButton):
         if self.state == "pending":
             return "正在连接…"
         if self.state == "active":
-            if self.device.route_state in {"active", "casting"}:
+            if self.grouped:
                 return "同步播放"
             return "正在投放" if self.device.transport == "airplay" else "当前输出"
         if not self.device.available:
@@ -246,6 +247,7 @@ class AudioOutputPanel(QWidget):
         self._appearance_elapsed = 0.0
         self._clock = MotionSimulationClock()
         self._action_error = ""
+        self._ui_key = None
         self._style_key = None
         self._max_height = 460
         self._material = QImage()
@@ -274,8 +276,8 @@ class AudioOutputPanel(QWidget):
         self.refresh_button.setToolTip("刷新设备")
         self.refresh_button.clicked.connect(self._refresh)
         self.add_button = QPushButton("＋")
-        self.add_button.setAccessibleName("通过 IP 地址添加 HomePod")
-        self.add_button.setToolTip("通过 IP 地址添加 HomePod")
+        self.add_button.setAccessibleName("通过 IP 地址添加 AirPlay 设备")
+        self.add_button.setToolTip("通过 IP 地址添加 AirPlay 设备")
         self.add_button.setEnabled(callable(getattr(provider, "add_homepod", None)))
         self.add_button.clicked.connect(self._add_homepod)
         self.close_button = QPushButton("×")
@@ -285,6 +287,9 @@ class AudioOutputPanel(QWidget):
             button.setFixedSize(28, 28)
             header.addWidget(button)
         layout.addLayout(header)
+        self.scope_label = QLabel()
+        self.scope_label.setWordWrap(True)
+        layout.addWidget(self.scope_label)
         self.status_label = QLabel("正在读取设备…")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
@@ -300,7 +305,7 @@ class AudioOutputPanel(QWidget):
         self.empty_label = QLabel("暂无可用输出设备")
         self.empty_label.setMargin(12)
         self.rows_layout.addWidget(self.empty_label)
-        self.stop_button = QPushButton("停止 HomePod 投放")
+        self.stop_button = QPushButton("停止投放")
         self.stop_button.setFixedHeight(30)
         self.stop_button.clicked.connect(self._stop)
         self.rows_layout.addWidget(self.stop_button)
@@ -344,6 +349,8 @@ class AudioOutputPanel(QWidget):
         minor = QFont(font)
         minor.setPixelSize(11)
         self.status_label.setFont(minor)
+        self.scope_label.setFont(minor)
+        self.scope_label.setStyleSheet(f"color: {self._muted.name()};")
         ink, muted = self._ink.name(), self._muted.name()
         fill = "0,0,0" if light else "255,255,255"
         self.setStyleSheet(f"""
@@ -366,23 +373,48 @@ class AudioOutputPanel(QWidget):
         row.sync_volume_style()
 
     def _capture_material(self, force=False):
-        """Blur a bounded half-size crop outside paint; never include child popups."""
+        """Blur the displayed backdrop without repainting the music page."""
         parent = self.parentWidget()
         if parent is None or not self.width() or not self.height():
             return
         now, geometry = time.monotonic(), self.geometry()
-        key = (geometry.x(), geometry.y(), geometry.width(), geometry.height(), self._style_key)
-        if not force and now - self._material_at < self.MATERIAL_INTERVAL:
-            return
+        backdrop = getattr(parent, "_background_cache", None)
+        backdrop_key = getattr(parent, "_background_cache_key", None)
+        # The music page stretches a small raster to its logical bounds. Its
+        # key records those bounds, so stale frames from a resize cannot be
+        # treated as a crop of the currently displayed page.
+        displayed = (isinstance(backdrop, QImage) and not backdrop.isNull()
+                     and isinstance(backdrop_key, tuple) and len(backdrop_key) >= 2
+                     and backdrop_key[:2] == (parent.width(), parent.height()))
+        geometry_key = (geometry.x(), geometry.y(), geometry.width(), geometry.height(), self._style_key)
+        key = geometry_key + (backdrop.cacheKey() if displayed else None,)
+        same_bounds = self._material_key is not None and self._material_key[:4] == geometry_key[:4]
+        if not force and same_bounds:
+            if displayed and key == self._material_key:
+                return
+            if isinstance(backdrop, QImage) and not displayed and self._material_key[:-1] == geometry_key:
+                # An unavailable music frame needs one fallback, rather than
+                # another full lyric/page render on every material interval.
+                return
+            if now - self._material_at < self.MATERIAL_INTERVAL:
+                return
         region = geometry.adjusted(-24, -24, 24, 24).intersected(parent.rect())
         if region.isEmpty():
             return
         source = QImage(max(1, math.ceil(region.width() / 2)), max(1, math.ceil(region.height() / 2)), QImage.Format.Format_RGBA8888)
         source.fill(self._background)
         with QPainter(source) as painter:
-            painter.scale(.5, .5)
-            # Omitting DrawChildren prevents recursive capture of this panel.
-            parent.render(painter, QPoint(), QRegion(region), QWidget.RenderFlag.DrawWindowBackground)
+            if displayed:
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                raster_region = QRectF(region.x() * backdrop.width() / parent.width(),
+                                       region.y() * backdrop.height() / parent.height(),
+                                       region.width() * backdrop.width() / parent.width(),
+                                       region.height() * backdrop.height() / parent.height())
+                painter.drawImage(QRectF(source.rect()), backdrop, raster_region)
+            else:
+                painter.scale(.5, .5)
+                # Omitting DrawChildren prevents recursive popup capture.
+                parent.render(painter, QPoint(), QRegion(region), QWidget.RenderFlag.DrawWindowBackground)
         bitmap = Image.frombytes("RGBA", (source.width(), source.height()), bytes(source.constBits()), "raw", "RGBA", source.bytesPerLine())
         bitmap = ImageEnhance.Color(bitmap).enhance(.35).filter(ImageFilter.GaussianBlur(9))
         light = relative_luminance(self._background) > .45
@@ -414,7 +446,8 @@ class AudioOutputPanel(QWidget):
                    if self.rows_layout.itemAt(i).widget() is not None and not self.rows_layout.itemAt(i).widget().isHidden()]
         height = sum(item.sizeHint().height() for item in visible) + max(0, len(visible) - 1) * self.rows_layout.spacing()
         status = self.status_label.sizeHint().height() + 9 if not self.status_label.isHidden() else 0
-        self.resize(self.width(), min(self._max_height, 67 + status + height))
+        scope = self.scope_label.heightForWidth(max(1, self.width() - 30)) + 9
+        self.resize(self.width(), min(self._max_height, 67 + scope + status + height))
         parent = self.parentWidget()
         if parent is not None:
             self._anchor.setY(max(12, min(self._anchor.y(), parent.height() - self.height() - 12)))
@@ -519,16 +552,36 @@ class AudioOutputPanel(QWidget):
         self.sync_snapshot()
 
     def _add_homepod(self):
-        host, accepted = QInputDialog.getText(self, "添加 HomePod", "同一局域网中的 HomePod IP 地址")
+        host, accepted = QInputDialog.getText(self, "添加 AirPlay 设备", "同一局域网中的 AirPlay 设备 IP 地址")
         if not accepted:
             return
         self._action_error = ""
         try:
             if not self.provider.add_homepod(host.strip()):
-                self._action_error = "请填写有效的 HomePod IP 地址。"
+                self._action_error = "请填写有效的 AirPlay 设备 IP 地址。"
         except Exception:
-            self._action_error = "暂时无法添加 HomePod，请稍后重试。"
+            self._action_error = "暂时无法添加 AirPlay 设备，请稍后重试。"
         self.sync_snapshot()
+
+    @staticmethod
+    def _route_members(snapshot):
+        pending = set(snapshot.pending_ids) or ({snapshot.pending_id} if snapshot.pending_id else set())
+        confirmed = set(snapshot.member_ids)
+        # Explicit members and pending targets own selection. In particular,
+        # a group's capture/default endpoint is not an implicit extra member.
+        if not confirmed and not pending and snapshot.active_id:
+            confirmed = {snapshot.active_id}
+        return confirmed, pending
+
+    def _maintain_visible_state(self, snapshot):
+        if self.isVisible() and self._appearance_elapsed >= self.APPEAR_SECONDS:
+            self._capture_material()
+        animating = (snapshot.pending_id or snapshot.pending_ids or any(
+            abs(row.progress - (1 if row.state == "active" else 0)) > .01 or row.elapsed < .5
+            for row in self._rows.values()))
+        if self.isVisible() and animating and not self._animation_timer.isActive():
+            self._clock.reset(time.monotonic())
+            self._animation_timer.start()
 
     def sync_snapshot(self):
         """Read provider state; never discover or perform device I/O in the UI."""
@@ -536,6 +589,7 @@ class AudioOutputPanel(QWidget):
         try:
             snapshot = self.provider.get_audio_route_snapshot()
         except Exception:
+            self._ui_key = None
             self.status_label.setText("音频设备暂时不可用。")
             self.status_label.show()
             self.stop_button.setEnabled(False)
@@ -544,6 +598,32 @@ class AudioOutputPanel(QWidget):
             self._fit_to_content()
             return
         self._snapshot = snapshot
+        ui_key = (snapshot, self._action_error, self._style_key, self.width(), self._max_height)
+        if ui_key == self._ui_key:
+            # Even an unchanged provider snapshot must retire a volume request
+            # that did not receive readback; no route action is issued here.
+            for row in self._rows.values():
+                if row._requested_volume is not None:
+                    row.set_device(row.device)
+            self._maintain_visible_state(snapshot)
+            return
+        self._ui_key = ui_key
+        confirmed, pending_ids = self._route_members(snapshot)
+        desired = pending_ids or confirmed
+        grouped = (snapshot.capture_scope == "music_process_tree" if snapshot.capture_scope else
+                   len(desired) > 1)
+        casting = any(d.transport == "airplay" and d.id in desired for d in snapshot.devices)
+        self.title_label.setText(f"同步播放 · {len(desired)} 个设备" if grouped else
+                                 "单设备投放" if casting else "音频输出")
+        if pending_ids:
+            scope = ("正在切换到同步播放 · 仅当前音乐软件" if grouped else
+                     "正在切换到单设备投放 · 电脑全部声音" if casting else
+                     "正在切换输出 · 电脑全部声音")
+        else:
+            scope = ("仅当前音乐软件 · 自动歌词补偿" if grouped else
+                     "电脑全部声音 · 自动歌词补偿" if casting else
+                     "电脑全部声音 · 多选时仅当前音乐软件")
+        self.scope_label.setText(scope)
         order = tuple(device.id for device in snapshot.devices)
         if order != self._device_order:
             for row in self._rows.values():
@@ -562,9 +642,10 @@ class AudioOutputPanel(QWidget):
             self._device_order = order
         for device in snapshot.devices:
             row = self._rows[device.id]
-            pending = device.id in snapshot.pending_ids or device.id == snapshot.pending_id
-            selected = device.id in snapshot.member_ids or device.id == snapshot.active_id
+            pending = device.id in pending_ids
+            selected = device.id in confirmed
             row.state = "pending" if pending else "active" if selected else "available"
+            row.grouped = grouped
             row.setChecked(row.state == "active")
             row.delay_text = f"+{snapshot.cast_latency_seconds:.2f}s" if row.state == "active" and device.transport == "airplay" else ""
             row.set_device(device)
@@ -575,7 +656,7 @@ class AudioOutputPanel(QWidget):
             row.update()
         self.empty_label.setVisible(not order)
         message = self._action_error or snapshot.status_message
-        if not self._action_error and ((snapshot.state == "casting" and message.startswith("正在投放到"))
+        if not self._action_error and ((snapshot.state == "casting" and message.startswith(("正在投放到", "正在同步播放到")))
                                       or message.startswith(("已调整 ", "已选择 "))):
             message = ""
         self.status_label.setText(message)
@@ -583,20 +664,12 @@ class AudioOutputPanel(QWidget):
         error = bool(self._action_error or snapshot.state in {"error", "failed"})
         error_color = "#a22d2d" if relative_luminance(self._background) > .45 else "#ffb9b3"
         self.status_label.setStyleSheet(f"color: {error_color if error else self._muted.name()};")
-        group_devices = set(snapshot.member_ids) | set(snapshot.pending_ids) | {snapshot.active_id, snapshot.pending_id}
-        casting = any(d.transport == "airplay" and d.id in group_devices for d in snapshot.devices)
-        grouped = len(set(snapshot.member_ids) | set(snapshot.pending_ids)) > 1
-        self.stop_button.setText("停止同步播放" if grouped else "停止 HomePod 投放")
+        self.stop_button.setText("停止同步播放" if grouped else "停止投放")
         self.stop_button.setEnabled(casting)
         self.stop_button.setVisible(casting)
         self._fit_to_content()
         self._sync_tab_order()
-        if self.isVisible() and self._appearance_elapsed >= self.APPEAR_SECONDS:
-            self._capture_material()
-        if self.isVisible() and (snapshot.pending_id or snapshot.pending_ids or any(abs(row.progress - (1 if row.state == "active" else 0)) > .01 or row.elapsed < .5 for row in self._rows.values())):
-            if not self._animation_timer.isActive():
-                self._clock.reset(time.monotonic())
-                self._animation_timer.start()
+        self._maintain_visible_state(snapshot)
 
     def _advance_animation(self, now: float | None = None):
         elapsed = self._clock.advance(time.monotonic() if now is None else now)

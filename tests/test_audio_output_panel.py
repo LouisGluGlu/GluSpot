@@ -101,7 +101,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         second = AudioRouteDevice("homepod-2", "书房 HomePod mini", "homepod-mini", "airplay", volume=.48)
         devices = tuple(replace(d, volume=.41, route_state="active") if d.id in {"homepod", "bluetooth"} else d
                         for d in self.provider.devices) + (replace(second, route_state="active"),)
-        self.provider.snapshot = AudioRouteSnapshot(devices, active_id="homepod", state="casting",
+        self.provider.snapshot = AudioRouteSnapshot(devices, active_id="local", state="casting",
             member_ids=("homepod", "homepod-2", "bluetooth"), group_id="session-1", capture_scope="music_process_tree")
         self.provider.toggle_audio_output = lambda device_id: self.provider.calls.append(("toggle", device_id)) or True
         self._open()
@@ -129,8 +129,79 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["bluetooth"].state, "pending")
         self.assertFalse(self.panel._rows["homepod"].isChecked())
         self.assertFalse(self.panel._rows["bluetooth"].isChecked())
+        self.assertFalse(self.panel._rows["local"].isChecked())
+        self.assertIn("同步播放", self.panel.title_label.text())
+        self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
         self.assertTrue(self.panel.stop_button.isEnabled())
         self.assertTrue(self.panel.stop_button.isVisible())
+
+    def test_single_receiver_sends_all_audio_even_with_active_route_evidence(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
+            capture_scope="all_system", devices=tuple(replace(d, route_state="active", volume=.41)
+                                                        if d.id == "homepod" else d for d in self.provider.devices))
+        self._open()
+        self.assertEqual(self.panel.title_label.text(), "单设备投放")
+        self.assertIn("电脑全部声音", self.panel.scope_label.text())
+        self.assertEqual(self.panel.stop_button.text(), "停止投放")
+        self.assertEqual(self.panel._rows["homepod"].subtitle, "正在投放")
+        self.assertTrue(self.panel._rows["homepod"].isChecked())
+        self.assertFalse(self.panel._rows["local"].isChecked())
+
+    def test_downgrade_shows_target_single_mode_without_counting_old_group(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
+            member_ids=("homepod", "bluetooth"), capture_scope="music_process_tree")
+        self._open()
+        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="local", state="connecting",
+            member_ids=(), pending_ids=("homepod",), pending_id="homepod", capture_scope="all_system")
+        self.panel.sync_snapshot()
+        self.assertEqual(self.panel.title_label.text(), "单设备投放")
+        self.assertIn("正在切换到单设备投放", self.panel.scope_label.text())
+        self.assertIn("电脑全部声音", self.panel.scope_label.text())
+        self.assertEqual(self.panel.stop_button.text(), "停止投放")
+        self.assertEqual(self.panel._rows["homepod"].state, "pending")
+        self.assertFalse(any(row.isChecked() for row in self.panel._rows.values()))
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
+            member_ids=(), pending_ids=(), pending_id="")
+        self.panel.sync_snapshot()
+        self.assertEqual(self.panel._rows["homepod"].subtitle, "正在投放")
+        self.assertTrue(self.panel._rows["homepod"].isChecked())
+
+    def test_capture_scope_owns_mode_even_when_transient_member_count_differs(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
+            member_ids=("homepod",), capture_scope="music_process_tree")
+        self._open()
+        self.assertEqual(self.panel.title_label.text(), "同步播放 · 1 个设备")
+        self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
+        self.assertNotIn("电脑全部声音", self.panel.scope_label.text())
+        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.assertEqual(self.panel._rows["homepod"].subtitle, "同步播放")
+        self.provider.snapshot = replace(self.provider.snapshot, capture_scope="all_system",
+            member_ids=(), pending_ids=("homepod", "bluetooth"), state="connecting")
+        self.panel.sync_snapshot()
+        self.assertEqual(self.panel.title_label.text(), "单设备投放")
+        self.assertIn("电脑全部声音", self.panel.scope_label.text())
+        self.assertEqual(self.panel.stop_button.text(), "停止投放")
+
+    def test_unchanged_snapshot_keeps_rows_and_layout_idle_but_recovers_after_read_error(self):
+        self._open()
+        self.panel._appearance_elapsed = 1
+        with patch.object(self.panel, "_fit_to_content") as fit, \
+                patch.object(self.panel, "_sync_tab_order") as tabs, \
+                patch.object(self.panel._rows["local"], "set_device") as row_update, \
+                patch.object(self.panel, "_capture_material") as material:
+            self.panel.sync_snapshot()
+            self.panel.sync_snapshot()
+        fit.assert_not_called()
+        tabs.assert_not_called()
+        row_update.assert_not_called()
+        self.assertEqual(material.call_count, 2)
+        with patch.object(self.provider, "get_audio_route_snapshot", side_effect=OSError("gone")):
+            self.panel.sync_snapshot()
+        self.assertFalse(self.panel._rows["local"].isEnabled())
+        self.panel.sync_snapshot()
+        self.assertTrue(self.panel._rows["local"].isEnabled())
+        self.assertFalse(self.panel.status_label.isVisible())
 
     def test_failure_retains_authoritative_active_output_and_exact_reason(self):
         self._open()
@@ -361,6 +432,20 @@ class AudioOutputPanelTests(unittest.TestCase):
         finally:
             panel.dismiss()
             page.close()
+
+    def test_missing_music_backdrop_uses_one_fallback_until_geometry_or_palette_changes(self):
+        self.owner._background_cache = QImage()
+        self.owner._background_cache_key = None
+        with patch.object(self.owner, "render", wraps=self.owner.render) as render:
+            self._open()
+            self.assertEqual(render.call_count, 1)
+            with patch("local.audio_output_panel.time.monotonic", return_value=500):
+                self.panel._capture_material()
+                self.panel._capture_material()
+            self.assertEqual(render.call_count, 1)
+            self.panel.move(self.panel.pos() + QPoint(-10, 0))
+            self.panel._capture_material()
+            self.assertEqual(render.call_count, 2)
 
     def test_cached_music_backdrop_drives_panel_tone_and_readable_neutral_ink(self):
         self._open()
