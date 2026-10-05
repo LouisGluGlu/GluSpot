@@ -118,6 +118,39 @@ class AirPlayGroupProcessTests(unittest.TestCase):
                          ["speakers", "m6"])
         self.assertAlmostEqual(self.sender.latency_estimate()["seconds"], 1.52)
 
+    def test_measured_hold_is_bound_to_its_local_argument_and_session_snapshot(self):
+        profile = {"m6": 8820}
+        self.sender._calibration_loader = lambda devices: profile
+        self._connected((HOME, SPEAKERS, M6))
+        index = self.args.index("--local-compensation-frames")
+        self.assertEqual(self.args[index - 2:index + 2],
+                         ["--local-endpoint", "m6", "--local-compensation-frames", "8820"])
+        profile["m6"] = 1
+        self.assertEqual(self.sender.diagnostics()["local_compensation_frames"], {"m6": 8820})
+        event = self._local_stats([self._render("speakers"), self._render("m6", extra_delay_frames=8820,
+                                 presentation_latency_frames=77175, local_presentation_latency_frames=85995)])
+        self.assertIsNotNone(self.sender._validated_local_renders(event))
+        for base, effective in ((66150, 74970), (77175, 77175), (77175, True)):
+            invalid = self._local_stats([self._render("speakers"), self._render("m6", extra_delay_frames=8820,
+                                        presentation_latency_frames=base, local_presentation_latency_frames=effective)])
+            self.assertIsNone(self.sender._validated_local_renders(invalid))
+        for value in (None, 0, 1, True):
+            event["local_renders"][1]["extra_delay_frames"] = value
+            self.assertIsNone(self.sender._validated_local_renders(event))
+
+    def test_invalid_measured_hold_never_stops_or_spawns_a_child(self):
+        for profile in ({"not-selected": 1}, {"home": 1}, {"m6": -1},
+                        {"m6": 22051}, {"m6": True}, {"m6": 1.5}, []):
+            self.sender._calibration_loader = lambda devices: profile
+            with self.subTest(profile=profile), self.assertRaises(ValueError):
+                self.sender.start_group((HOME, M6), SOURCE, "source")
+            self.assertIsNone(self.args)
+
+    def test_no_measurement_preserves_existing_arguments(self):
+        self.sender._calibration_loader = lambda devices: {}
+        self._connected((HOME, M6))
+        self.assertNotIn("--local-compensation-frames", self.args)
+
     def test_single_local_diagnostic_alias_does_not_choose_first_of_multiple_outputs(self):
         self._connected((HOME, M6))
         self.assertEqual(self.sender.diagnostics()["local_endpoint"], "m6")

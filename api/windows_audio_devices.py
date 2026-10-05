@@ -10,6 +10,8 @@ https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/Recompile
 https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/functiondiscoverykeys_devpkey.h
 https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/cfgmgr32.h
 https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/endpointvolume.idl
+https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/audioclient.idl
+https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/shared/devpkey.h
 https://github.com/frgnca/AudioDeviceCmdlets/blob/master/SOURCE/IPolicyConfig.cs
 
 PolicyConfig is an undocumented Windows interface, verified against the above
@@ -19,8 +21,11 @@ Changing a default cannot force an external player's pinned stream to migrate.
 from __future__ import annotations
 
 import ctypes
+import hashlib
+import json
 import math
 import re
+import struct
 import sys
 import threading
 import uuid
@@ -150,6 +155,25 @@ class WindowsAudioDevices:
                 raise RuntimeError("Audio endpoint volume requires Windows")
             return self._validate_volume(adapter.get_endpoint_volume(device_id))
 
+    def get_endpoint_calibration_fingerprint(self, device_id: str) -> str | None:
+        """Read current endpoint/driver evidence without starting an audio stream.
+
+        Missing evidence cannot validate a saved acoustic calibration. Endpoint
+        identity validation and closed-backend behavior retain the normal API
+        contract; unavailable or incomplete native evidence returns ``None``.
+        """
+        self._validate_endpoint_id(device_id)
+        with self._lock:
+            adapter = self._backend()
+            read = getattr(adapter, "get_endpoint_calibration_fingerprint", None)
+            if not callable(read):
+                return None
+            try:
+                value = read(device_id)
+            except (OSError, ValueError, RuntimeError, NotImplementedError):
+                return None
+            return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
     def set_endpoint_volume(self, device_id: str, volume: float) -> float:
         """Set and confirm master volume; never select, mute or unmute.
 
@@ -250,11 +274,55 @@ def _key(guid, pid):
 _FRIENDLY_NAME = _key("a45c254e-df1c-4efd-8020-67d146a850e0", 14)
 _FORM_FACTOR = _key("1da5d803-d492-4edd-8c23-e0c0ffee7f0e", 0)
 _CONTAINER_ID = _key("8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c", 2)
+_DISABLE_SYSFX = _key("1da5d803-d492-4edd-8c23-e0c0ffee7f0e", 5)
+_DRIVER_VERSION = _key("a8b865dd-2e3d-4094-ad97-e593a70c75d6", 3)
+_DRIVER_PROVIDER = _key("a8b865dd-2e3d-4094-ad97-e593a70c75d6", 9)
 _MM_ENUMERATOR = "bcde0395-e52f-467c-8e3d-c4579291692e"
 _IID_ENUMERATOR = "a95664d2-9614-4f35-a746-de8db63617e6"
 _POLICY_CONFIG = "870af99c-171d-4f9e-af0d-e63df40c2bc9"
 _IID_POLICY_CONFIG = "f8679f50-850a-41cf-9c72-430f290290c8"
 _IID_ENDPOINT_VOLUME = "5cdf2c82-841e-4546-9722-0cf74078229a"
+_IID_AUDIO_CLIENT = "1cb9ad4c-dbfa-4c32-b178-c2f568a703b2"
+
+
+def _calibration_fingerprint(format_blob, container, disable_sysfx, drivers) -> str | None:
+    """Hash complete native evidence; names/volume/defaults are not evidence."""
+    if not isinstance(format_blob, bytes) or not 18 <= len(format_blob) <= 530:
+        return None
+    tag, channels, rate, byte_rate, alignment, bits, extra = struct.unpack_from("<HHIIHHH", format_blob)
+    if (not tag or not channels or not rate or not byte_rate or not alignment or not bits or
+            extra != len(format_blob) - 18):
+        return None
+    if not isinstance(container, bytes) or len(container) != 16 or not any(container):
+        return None
+    if disable_sysfx != "unset" and (type(disable_sysfx) is not int or disable_sysfx not in (0, 1)):
+        return None
+    if not isinstance(drivers, (tuple, list)) or not drivers:
+        return None
+    rows, instances = [], set()
+    for row in drivers:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return None
+        if any(not isinstance(value, str) or not value.strip() or "\0" in value for value in row):
+            return None
+        instance, version, provider = (value.strip().casefold() for value in row)
+        if instance in instances:
+            return None
+        instances.add(instance)
+        rows.append((instance, version, provider))
+    # An audio endpoint's SWD node alone says nothing about its physical
+    # transport driver. At least one present container member must supply it.
+    if not any(not row[0].startswith("swd\\") for row in rows):
+        return None
+    canonical = {
+        "schema": "gluspot-endpoint-calibration-v1",
+        "mix_format": format_blob.hex(), "container": container.hex(),
+        # Explicit S_OK/VT_EMPTY is a known absent override, not proof that
+        # effects are enabled or disabled. Any later 0/1 override invalidates.
+        "sysfx_override": disable_sysfx, "drivers": sorted(rows),
+    }
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=True).encode("ascii")).hexdigest()
 
 
 def _check(hr, operation):
@@ -335,8 +403,8 @@ class _WindowsCoreAudioAdapter:
         finally:
             self._ole32.CoTaskMemFree(text)
 
-    def _endpoint_volume(self, scope, device_id):
-        """Activate SDK IAudioEndpointVolume for an explicit render ID."""
+    def _render_endpoint(self, scope, device_id):
+        """Resolve an explicit render endpoint; no audio stream is opened."""
         enumerator = scope.create(_MM_ENUMERATOR, _IID_ENUMERATOR)
         device = ctypes.c_void_p()
         _check(_call(enumerator, 5, (ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p)),
@@ -353,6 +421,11 @@ class _WindowsCoreAudioAdapter:
                "IMMEndpoint.GetDataFlow")
         if flow.value != 0:  # eRender
             raise ValueError("Audio endpoint controls require a render endpoint")
+        return device
+
+    def _endpoint_volume(self, scope, device_id):
+        """Activate SDK IAudioEndpointVolume for an explicit render ID."""
+        device = self._render_endpoint(scope, device_id)
         volume = ctypes.c_void_p()
         _check(_call(device, 3, (ctypes.POINTER(_GUID), _DWORD, ctypes.c_void_p,
                                ctypes.POINTER(ctypes.c_void_p)),
@@ -388,6 +461,78 @@ class _WindowsCoreAudioAdapter:
             _check(_call(volume, 7, (ctypes.c_float, ctypes.c_void_p), value, None),
                    "IAudioEndpointVolume.SetMasterVolumeLevelScalar")
 
+    def _mix_format(self, scope, device):
+        """Activate IAudioClient and read GetMixFormat only, never Initialize."""
+        client = ctypes.c_void_p()
+        _check(_call(device, 3, (ctypes.POINTER(_GUID), _DWORD, ctypes.c_void_p,
+                               ctypes.POINTER(ctypes.c_void_p)),
+                     ctypes.byref(_GUID.from_string(_IID_AUDIO_CLIENT)), 23, None,
+                     ctypes.byref(client)), "IMMDevice.Activate(IAudioClient)")
+        scope.own(client)
+        format_pointer = ctypes.c_void_p()
+        try:
+            _check(_call(client, 8, (ctypes.POINTER(ctypes.c_void_p),), ctypes.byref(format_pointer)),
+                   "IAudioClient.GetMixFormat")
+            if not format_pointer.value:
+                return None
+            # SDK WAVEFORMATEX is 18 bytes (2-byte structure packing). Its
+            # trailing cbSize declares the exact additional format evidence.
+            header = ctypes.string_at(format_pointer, 18)
+            extra = struct.unpack_from("<H", header, 16)[0]
+            if extra > 512:
+                return None
+            return ctypes.string_at(format_pointer, 18 + extra)
+        finally:
+            if format_pointer.value:
+                self._ole32.CoTaskMemFree(format_pointer)
+
+    def get_endpoint_calibration_fingerprint(self, device_id):
+        with _ComScope(self._ole32) as scope:
+            device = self._render_endpoint(scope, device_id)
+            state = _DWORD()
+            _check(_call(device, 6, (ctypes.POINTER(_DWORD),), ctypes.byref(state)), "IMMDevice.GetState")
+            if state.value != 1:  # DEVICE_STATE_ACTIVE
+                return None
+            store = ctypes.c_void_p()
+            _check(_call(device, 4, (_DWORD, ctypes.POINTER(ctypes.c_void_p)),
+                         0, ctypes.byref(store)), "IMMDevice.OpenPropertyStore")
+            scope.own(store)
+            container = self._property(store, _CONTAINER_ID)
+            disable = self._calibration_sysfx_state(store)
+            if not isinstance(container, bytes) or len(container) != 16 or not any(container):
+                return None
+            if disable != "unset" and (type(disable) is not int or disable not in (0, 1)):
+                return None
+            format_blob = self._mix_format(scope, device)
+            drivers = self._calibration_drivers(container)
+            # An endpoint becoming inactive during these observations cannot
+            # lend its old format/driver evidence to a saved calibration.
+            _check(_call(device, 6, (ctypes.POINTER(_DWORD),), ctypes.byref(state)), "IMMDevice.GetState")
+            if state.value != 1:
+                return None
+            return _calibration_fingerprint(format_blob, container, disable, drivers)
+
+    def _calibration_sysfx_state(self, store):
+        """Preserve raw override absence; do not infer the effective APO state.
+
+        PKEY_AudioEndpoint_Disable_SysFx specifies VT_UI4 0/1 in the SDK.
+        S_OK with VT_EMPTY is an explicitly absent override and is hashed as
+        ``unset``. Failed or differently typed reads cannot validate a profile.
+        """
+        value = _PROPVARIANT()
+        try:
+            hr = _call(store, 5, (ctypes.POINTER(_PROPERTYKEY), ctypes.POINTER(_PROPVARIANT)),
+                       ctypes.byref(_DISABLE_SYSFX), ctypes.byref(value))
+            if hr != 0:
+                return None
+            if value.vt == 0:
+                return "unset"
+            if value.vt == 19 and value.value.uint in (0, 1):
+                return int(value.value.uint)
+            return None
+        finally:
+            self._ole32.PropVariantClear(ctypes.byref(value))
+
     def _property(self, store, key):
         value = _PROPVARIANT()
         hr = _call(store, 5, (ctypes.POINTER(_PROPERTYKEY), ctypes.POINTER(_PROPVARIANT)),
@@ -405,27 +550,81 @@ class _WindowsCoreAudioAdapter:
         finally:
             self._ole32.PropVariantClear(ctypes.byref(value))
 
+    def _present_device_ids(self):
+        """Read present-only PnP identities using the existing cfgmgr ABI."""
+        cfg = self._cfg
+        for _attempt in range(2):  # PnP may change between length and MULTI_SZ reads.
+            length = _DWORD()
+            if cfg.CM_Get_Device_ID_List_SizeW(ctypes.byref(length), None, 0x100) != 0:
+                return None
+            if not 1 <= length.value <= 1_000_000:
+                return None
+            buffer = ctypes.create_unicode_buffer(length.value)
+            status = cfg.CM_Get_Device_ID_ListW(None, buffer, length, 0x100)
+            if status == 0:
+                break
+        else:
+            return None
+        return tuple(instance for instance in buffer[:].split("\0") if instance)
+
+    def _node_property(self, node, key, expected_type):
+        """Read one typed DEVPROP value with its SDK two-call byte length."""
+        prop_type, size = _DWORD(), _DWORD()
+        status = self._cfg.CM_Get_DevNode_PropertyW(node, ctypes.byref(key), ctypes.byref(prop_type),
+                                                  None, ctypes.byref(size), 0)
+        if status not in (0, 26) or prop_type.value != expected_type or not 1 <= size.value <= 65536:
+            return None  # CR_SUCCESS / CR_BUFFER_SMALL; unknown is not empty.
+        if expected_type == 13 and size.value != 16:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        status = self._cfg.CM_Get_DevNode_PropertyW(node, ctypes.byref(key), ctypes.byref(prop_type),
+                                                  buffer, ctypes.byref(size), 0)
+        if status != 0 or prop_type.value != expected_type or not 1 <= size.value <= len(buffer):
+            return None
+        raw = bytes(buffer[:size.value])
+        if expected_type == 13:
+            return raw if len(raw) == 16 and any(raw) else None
+        if expected_type == 0x12:  # DEVPROP_TYPE_STRING, UTF-16 with trailing NUL.
+            try:
+                value = raw.decode("utf-16-le")
+            except UnicodeError:
+                return None
+            if not value.endswith("\0") or not value[:-1].strip() or "\0" in value[:-1]:
+                return None
+            return value[:-1]
+        return None
+
+    def _calibration_drivers(self, container):
+        instances = self._present_device_ids()
+        if instances is None:
+            return None
+        drivers = []
+        for instance in instances:
+            node = _DWORD()
+            if self._cfg.CM_Locate_DevNodeW(ctypes.byref(node), instance, 0) != 0:
+                return None  # Enumeration changed; do not hash a partial set.
+            actual_container = self._node_property(node, _CONTAINER_ID, 13)
+            if actual_container != container:
+                continue
+            version = self._node_property(node, _DRIVER_VERSION, 0x12)
+            provider = self._node_property(node, _DRIVER_PROVIDER, 0x12)
+            if version is None or provider is None:
+                return None
+            drivers.append((instance, version, provider))
+        return tuple(drivers)
+
     def _bluetooth_containers(self):
         """Match endpoint container GUIDs to present Bluetooth PnP nodes.
 
         Friendly names are not evidence of transport. Missing driver properties
         result in an ordinary device, rather than a guessed Bluetooth badge.
         """
-        cfg = self._cfg
-        for _attempt in range(2):  # PnP may change between length and MULTI_SZ reads.
-            length = _DWORD()
-            if cfg.CM_Get_Device_ID_List_SizeW(ctypes.byref(length), None, 0x100) != 0:
-                return set()
-            if not 1 <= length.value <= 1_000_000:
-                return set()
-            buffer = ctypes.create_unicode_buffer(length.value)
-            status = cfg.CM_Get_Device_ID_ListW(None, buffer, length, 0x100)
-            if status == 0:
-                break
-        else:
+        instances = self._present_device_ids()
+        if instances is None:
             return set()
+        cfg = self._cfg
         containers = set()
-        for instance_id in buffer[:].split("\0"):
+        for instance_id in instances:
             if not instance_id.upper().startswith(("BTHENUM\\", "BTHLEDEVICE\\", "BTHHFENUM\\")):
                 continue
             node = _DWORD()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import re
+import struct
 import sys
 import unittest
 from types import SimpleNamespace
@@ -9,6 +11,8 @@ from unittest.mock import patch
 from api.windows_audio_devices import (
     AudioOutputDevice, WindowsAudioDevices, _ComScope, _Endpoint, _GUID,
     _PROPVARIANT, _WindowsCoreAudioAdapter,
+    _CONTAINER_ID, _DISABLE_SYSFX, _DRIVER_VERSION, _DRIVER_PROVIDER,
+    _IID_AUDIO_CLIENT, _calibration_fingerprint,
 )
 
 
@@ -277,8 +281,269 @@ class WindowsAudioDevicesTests(unittest.TestCase):
         self.assertEqual([d.kind for d in devices], ["airpods-pro", "headphones", "speaker"])
         self.assertFalse(devices[0].is_bluetooth)
 
+    def test_calibration_fingerprint_read_is_locked_and_has_no_output_mutations(self):
+        observed = []
+        def read(endpoint):
+            self.assertTrue(self.backend._lock._is_owned())
+            observed.append(endpoint)
+            return "a" * 64
+        self.adapter.get_endpoint_calibration_fingerprint = read
+        self.assertEqual(self.backend.get_endpoint_calibration_fingerprint("bt"), "a" * 64)
+        self.assertEqual(observed, ["bt"])
+        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.adapter.volume_calls, [])
+        self.assertEqual(self.adapter.mute_calls, [])
+
+    def test_calibration_fingerprint_unknown_backend_failure_and_malformed_hash_are_unknown(self):
+        self.assertIsNone(self.backend.get_endpoint_calibration_fingerprint("bt"))
+        for value in (None, "a" * 63, "A" * 64, "z" * 64, True, b"a" * 64):
+            self.adapter.get_endpoint_calibration_fingerprint = lambda _id, v=value: v
+            self.assertIsNone(self.backend.get_endpoint_calibration_fingerprint("bt"))
+        self.adapter.get_endpoint_calibration_fingerprint = lambda _id: (_ for _ in ()).throw(OSError("gone"))
+        self.assertIsNone(self.backend.get_endpoint_calibration_fingerprint("bt"))
+        backend = WindowsAudioDevices()
+        with patch("api.windows_audio_devices.sys.platform", "linux"):
+            self.assertIsNone(backend.get_endpoint_calibration_fingerprint("bt"))
+
+    def test_calibration_fingerprint_reuses_endpoint_identity_and_close_contract(self):
+        for endpoint in (None, "", "bt\0other"):
+            with self.assertRaises(ValueError):
+                self.backend.get_endpoint_calibration_fingerprint(endpoint)
+        self.backend.close()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            self.backend.get_endpoint_calibration_fingerprint("bt")
+
+
+class CalibrationFingerprintTests(unittest.TestCase):
+    def setUp(self):
+        self.format = struct.pack("<HHIIHHH", 3, 2, 48000, 384000, 8, 32, 0)
+        self.container = _GUID.from_string("11223344-5566-7788-99aa-bbccddeeff00").bytes()
+        self.drivers = (("SWD\\MMDEVAPI\\endpoint", "10.0.1.1", "Microsoft"),
+                        ("BTHENUM\\speaker", "10.0.2.1", "Microsoft"))
+
+    def fingerprint(self, **changes):
+        args = {"format_blob": self.format, "container": self.container,
+                "disable_sysfx": 0, "drivers": self.drivers}
+        args.update(changes)
+        return _calibration_fingerprint(**args)
+
+    def test_canonical_hash_is_stable_across_enumeration_order_and_pnp_case(self):
+        value = self.fingerprint()
+        self.assertRegex(value, r"^[0-9a-f]{64}$")
+        self.assertEqual(value, self.fingerprint(drivers=tuple(reversed(self.drivers))))
+        self.assertEqual(value, self.fingerprint(drivers=tuple(tuple(s.upper() for s in r) for r in self.drivers)))
+
+    def test_each_format_driver_container_and_effect_change_invalidates_evidence(self):
+        old = self.fingerprint()
+        variants = [
+            {"format_blob": struct.pack("<HHIIHHH", 3, 2, 44100, 352800, 8, 32, 0)},
+            {"container": _GUID.from_string("11223345-5566-7788-99aa-bbccddeeff00").bytes()},
+            {"disable_sysfx": 1},
+            {"disable_sysfx": "unset"},
+            {"drivers": (self.drivers[0], ("BTHENUM\\speaker", "10.0.3.1", "Microsoft"))},
+            {"drivers": (self.drivers[0], ("BTHENUM\\speaker", "10.0.2.1", "Other"))},
+            {"drivers": (self.drivers[0], ("BTHENUM\\replacement", "10.0.2.1", "Microsoft"))},
+            {"drivers": (self.drivers[1],)},
+        ]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertNotEqual(old, self.fingerprint(**variant))
+
+    def test_known_sysfx_override_absence_is_stable_and_distinct_from_enabled_disabled(self):
+        absent = self.fingerprint(disable_sysfx="unset")
+        self.assertRegex(absent, r"^[0-9a-f]{64}$")
+        self.assertEqual(absent, self.fingerprint(disable_sysfx="unset"))
+        self.assertNotEqual(absent, self.fingerprint(disable_sysfx=0))
+        self.assertNotEqual(absent, self.fingerprint(disable_sysfx=1))
+
+    def test_incomplete_or_malformed_evidence_cannot_validate_a_calibration(self):
+        variants = [
+            {"format_blob": None}, {"format_blob": self.format[:17]},
+            {"format_blob": self.format + b"\0"},
+            {"format_blob": struct.pack("<HHIIHHH", 0, 2, 48000, 384000, 8, 32, 0)},
+            {"container": None}, {"container": bytes(16)}, {"container": bytes(15)},
+            {"disable_sysfx": None}, {"disable_sysfx": True}, {"disable_sysfx": 2},
+            {"disable_sysfx": "unknown"},
+            {"drivers": None}, {"drivers": ()}, {"drivers": (self.drivers[0],)},
+            {"drivers": (self.drivers[1], self.drivers[1])},
+            {"drivers": (("BTHENUM\\speaker", "", "Microsoft"),)},
+            {"drivers": (("BTHENUM\\speaker", "1.0", None),)},
+            {"drivers": (("BTHENUM\\speaker\0another", "1.0", "Microsoft"),)},
+        ]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertIsNone(self.fingerprint(**variant))
+
 
 class NativeEndpointAbiTests(unittest.TestCase):
+    def test_mix_format_reads_only_sdk_activate_and_getmixformat_then_frees_memory(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        freed, calls = [], []
+        adapter._ole32 = SimpleNamespace(CoTaskMemFree=lambda pointer: freed.append(pointer.value))
+        scope = unittest.mock.MagicMock()
+        raw = ctypes.create_string_buffer(struct.pack("<HHIIHHH", 3, 2, 48000, 384000, 8, 32, 0))
+        def call(pointer, index, argtypes, *args):
+            calls.append((pointer, index, argtypes))
+            if pointer == "device":
+                self.assertEqual(index, 3)
+                self.assertEqual(args[0]._obj.bytes(), _GUID.from_string(_IID_AUDIO_CLIENT).bytes())
+                self.assertEqual(args[1:3], (23, None))
+                args[-1]._obj.value = 100
+            elif pointer.value == 100:
+                self.assertEqual(index, 8)  # No Initialize/Start/GetService.
+                self.assertEqual(argtypes, (ctypes.POINTER(ctypes.c_void_p),))
+                args[0]._obj.value = ctypes.addressof(raw)
+            return 0
+        with patch("api.windows_audio_devices._call", side_effect=call):
+            self.assertEqual(adapter._mix_format(scope, "device"), raw.raw[:18])
+        self.assertEqual([row[1] for row in calls], [3, 8])
+        self.assertEqual(freed, [ctypes.addressof(raw)])
+        scope.own.assert_called_once()
+
+    def test_mix_format_frees_allocated_buffer_on_failed_or_invalid_get(self):
+        for result, extra in ((-2147467259, 0), (0, 513)):
+            with self.subTest(result=result, extra=extra):
+                adapter = object.__new__(_WindowsCoreAudioAdapter)
+                freed = []
+                adapter._ole32 = SimpleNamespace(CoTaskMemFree=lambda pointer: freed.append(pointer.value))
+                scope = unittest.mock.MagicMock()
+                raw = ctypes.create_string_buffer(struct.pack("<HHIIHHH", 3, 2, 48000, 384000, 8, 32, extra))
+                def call(_pointer, index, _argtypes, *args):
+                    args[-1]._obj.value = 100 if index == 3 else ctypes.addressof(raw)
+                    return 0 if index == 3 else result
+                with patch("api.windows_audio_devices._call", side_effect=call):
+                    if result < 0:
+                        with self.assertRaisesRegex(OSError, "GetMixFormat"):
+                            adapter._mix_format(scope, "device")
+                    else:
+                        self.assertIsNone(adapter._mix_format(scope, "device"))
+                self.assertEqual(freed, [ctypes.addressof(raw)])
+
+    def test_fingerprint_requires_active_render_readonly_store_and_complete_native_evidence(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        adapter._ole32 = object()
+        scope = unittest.mock.MagicMock()
+        scope.__enter__.return_value = scope
+        container = _GUID.from_string("11223344-5566-7788-99aa-bbccddeeff00").bytes()
+        wave = struct.pack("<HHIIHHH", 3, 2, 48000, 384000, 8, 32, 0)
+        drivers = (("BTHENUM\\speaker", "10.0.1.1", "Microsoft"),)
+        calls = []
+        def call(pointer, index, argtypes, *args):
+            self.assertEqual(pointer, "device")
+            calls.append((index, args))
+            if index == 6: args[0]._obj.value = 1
+            elif index == 4:
+                self.assertEqual(args[0], 0)  # STGM_READ, never write.
+                args[-1]._obj.value = 200
+            else: self.fail(f"Unexpected COM mutation/stream method {index}")
+            return 0
+        def prop(_store, key):
+            if key is _CONTAINER_ID: return container
+            if key is _DISABLE_SYSFX: return 0
+            self.fail("Unexpected endpoint property")
+        with patch("api.windows_audio_devices._ComScope", return_value=scope), \
+             patch.object(adapter, "_render_endpoint", return_value="device") as endpoint, \
+             patch.object(adapter, "_property", side_effect=prop), \
+             patch.object(adapter, "_calibration_sysfx_state", return_value=0), \
+             patch.object(adapter, "_mix_format", return_value=wave), \
+             patch.object(adapter, "_calibration_drivers", return_value=drivers), \
+             patch("api.windows_audio_devices._call", side_effect=call):
+            self.assertEqual(adapter.get_endpoint_calibration_fingerprint("render-id"),
+                             _calibration_fingerprint(wave, container, 0, drivers))
+        endpoint.assert_called_once_with(scope, "render-id")
+        self.assertEqual([row[0] for row in calls], [6, 4, 6])
+
+    def test_fingerprint_rejects_unknown_effect_flag_before_audio_client_activation(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        adapter._ole32 = object()
+        scope = unittest.mock.MagicMock()
+        scope.__enter__.return_value = scope
+        def call(_pointer, index, _types, *args):
+            args[-1]._obj.value = 1 if index == 6 else 200
+            return 0
+        with patch("api.windows_audio_devices._ComScope", return_value=scope), \
+             patch.object(adapter, "_render_endpoint", return_value="device"), \
+             patch.object(adapter, "_property", side_effect=[bytes(range(16)), None]), \
+             patch.object(adapter, "_calibration_sysfx_state", return_value=None), \
+             patch.object(adapter, "_mix_format") as activate, \
+             patch("api.windows_audio_devices._call", side_effect=call):
+            self.assertIsNone(adapter.get_endpoint_calibration_fingerprint("render-id"))
+        activate.assert_not_called()
+
+    def test_missing_sysfx_property_is_unknown_even_when_getvalue_succeeds(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        cleared = []
+        adapter._ole32 = SimpleNamespace(PropVariantClear=lambda value: cleared.append(value._obj))
+        # Both current physical endpoints return S_OK/VT_EMPTY. This is not
+        # SDK VT_UI4/ENDPOINT_SYSFX_ENABLED and must not be guessed as zero.
+        with patch("api.windows_audio_devices._call", return_value=0):
+            self.assertIsNone(adapter._property("store", _DISABLE_SYSFX))
+        self.assertEqual(len(cleared), 1)
+
+    def test_calibration_sysfx_preserves_raw_absence_and_rejects_failed_or_wrong_typed_reads(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        cleared = []
+        adapter._ole32 = SimpleNamespace(PropVariantClear=lambda value: cleared.append(value._obj))
+        for result, vt, raw, expected in (
+            (0, 0, 0, "unset"), (0, 19, 0, 0), (0, 19, 1, 1),
+            (-2147467259, 0, 0, None), (1, 0, 0, None),
+            (0, 11, 0, None), (0, 19, 2, None), (0, 31, 0, None),
+        ):
+            def call(_pointer, index, types, key, value):
+                self.assertEqual(index, 5)
+                self.assertEqual(key._obj.pid, 5)
+                self.assertEqual(types, (ctypes.POINTER(type(_DISABLE_SYSFX)), ctypes.POINTER(_PROPVARIANT)))
+                value._obj.vt = vt; value._obj.value.uint = raw
+                return result
+            with self.subTest(result=result, vt=vt, raw=raw), \
+                 patch("api.windows_audio_devices._call", side_effect=call):
+                self.assertEqual(adapter._calibration_sysfx_state("store"), expected)
+        self.assertEqual(len(cleared), 8)
+
+    def test_typed_pnp_strings_use_byte_count_and_missing_fields_never_become_empty_values(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        raw = "Microsoft\0".encode("utf-16-le")
+        calls = []
+        def prop(_node, key, prop_type, buffer, size, flags):
+            self.assertEqual(key._obj.pid, 9)
+            self.assertEqual(flags, 0)
+            calls.append(buffer is None)
+            prop_type._obj.value = 0x12
+            size._obj.value = len(raw)
+            if buffer is None: return 26
+            ctypes.memmove(buffer, raw, len(raw)); return 0
+        adapter._cfg = SimpleNamespace(CM_Get_DevNode_PropertyW=prop)
+        self.assertEqual(adapter._node_property(1, _DRIVER_PROVIDER, 0x12), "Microsoft")
+        self.assertEqual(calls, [True, False])
+        adapter._cfg.CM_Get_DevNode_PropertyW = lambda *_args: 13
+        self.assertIsNone(adapter._node_property(1, _DRIVER_PROVIDER, 0x12))
+
+    def test_driver_rows_match_present_container_and_require_every_matching_driver_field(self):
+        adapter = object.__new__(_WindowsCoreAudioAdapter)
+        container = bytes(range(16))
+        instances = ("SWD\\endpoint", "BTHENUM\\speaker", "USB\\other")
+        def locate(out, instance, flags):
+            self.assertEqual(flags, 0)
+            out._obj.value = instances.index(instance)
+            return 0
+        adapter._cfg = SimpleNamespace(CM_Locate_DevNodeW=locate)
+        def prop(node, key, expected):
+            if key is _CONTAINER_ID:
+                self.assertEqual(expected, 13)
+                return container if node.value != 2 else bytes(16)
+            self.assertEqual(expected, 0x12)
+            return "10.0.1.1" if key is _DRIVER_VERSION else "Microsoft"
+        with patch.object(adapter, "_present_device_ids", return_value=instances), \
+             patch.object(adapter, "_node_property", side_effect=prop):
+            self.assertEqual(adapter._calibration_drivers(container),
+                             tuple((identity, "10.0.1.1", "Microsoft") for identity in instances[:2]))
+        with patch.object(adapter, "_present_device_ids", return_value=instances), \
+             patch.object(adapter, "_node_property", side_effect=lambda n, k, t: container if k is _CONTAINER_ID else None):
+            self.assertIsNone(adapter._calibration_drivers(container))
+        adapter._cfg.CM_Locate_DevNodeW = lambda *_args: 13
+        with patch.object(adapter, "_present_device_ids", return_value=instances):
+            self.assertIsNone(adapter._calibration_drivers(container))
+
     def test_endpoint_scalar_uses_sdk_float_and_never_setmute_or_default_output(self):
         adapter = object.__new__(_WindowsCoreAudioAdapter)
         adapter._ole32 = object()
@@ -452,6 +717,18 @@ class NativeEndpointAbiTests(unittest.TestCase):
         self.assertIsInstance(first, tuple)
         self.assertTrue(all(isinstance(device, AudioOutputDevice) and device.id for device in second))
         self.assertEqual(len({device.id for device in second}), len(second))
+
+    @unittest.skipUnless(sys.platform == "win32", "native read-only fingerprint requires Windows")
+    def test_native_fingerprint_is_read_only_or_explicitly_unknown(self):
+        backend = WindowsAudioDevices()
+        self.addCleanup(backend.close)
+        before = backend.list_outputs()
+        for endpoint in before[:2]:
+            value = backend.get_endpoint_calibration_fingerprint(endpoint.id)
+            self.assertTrue(value is None or re.fullmatch(r"[0-9a-f]{64}", value))
+        after = backend.list_outputs()
+        self.assertEqual([(d.id, d.is_default, d.volume, d.volume_muted) for d in before],
+                         [(d.id, d.is_default, d.volume, d.volume_muted) for d in after])
 
 
 if __name__ == "__main__":
