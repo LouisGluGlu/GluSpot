@@ -56,6 +56,57 @@ inline double slewRatio(double phaseErrorFrames) {
 inline int16_t interpolate(int16_t a, int16_t b, double fraction) {
     return int16_t(std::clamp(std::lround(double(a) + (double(b) - double(a)) * fraction), -32768L, 32767L));
 }
+
+// GetPosition and the caller's QPC observation are supplied together. Keeping
+// this calculation free of WASAPI and wall-clock reads lets offline fixtures
+// exercise the same units, presentation queue and invalid-clock fallback that
+// the production renderer uses. This is endpoint evidence, never an acoustic
+// Bluetooth delay measurement.
+struct WriteClockObservation {
+    HRESULT result = E_NOINTERFACE;
+    uint64_t position = 0, frequency = 0, qpc100ns = 0;
+    int64_t qpcNow = 0, qpcFrequency = 0;
+};
+inline std::chrono::nanoseconds estimatedWriteOffset(const WriteClockObservation& clock,
+    uint64_t writtenFrames, uint32_t padding, REFERENCE_TIME latency, LocalRenderDiagnostics& stats) {
+    // writtenFrames here precedes this pass's later ReleaseBuffer. Published
+    // writtenFrames includes that release and cannot reconstruct the estimate.
+    stats.clockPosition = clock.position; stats.clockFrequency = clock.frequency;
+    stats.clockQpc100ns = clock.qpc100ns;
+    stats.paddingFrames = padding; stats.writeEstimateWrittenFrames = writtenFrames;
+    stats.clockQpcAgeKnown = false; stats.clockQpcAgeMs = 0;
+    if (clock.qpc100ns && clock.qpcFrequency > 0) {
+        const double ageMs = double((static_cast<long double>(clock.qpcNow) * 10000000 /
+                                    clock.qpcFrequency - clock.qpc100ns) / 10000);
+        if (std::isfinite(ageMs)) { stats.clockQpcAgeMs = ageMs; stats.clockQpcAgeKnown = true; }
+    }
+    const long double deviceFrames = clock.frequency ?
+        static_cast<long double>(clock.position) * 44100 / clock.frequency : 0;
+    if (clock.result == S_OK && clock.position && clock.qpc100ns && clock.frequency &&
+        clock.qpcFrequency > 0 && deviceFrames <= static_cast<long double>(writtenFrames) + padding + 4410) {
+        // GetPosition's correlated QPC already observes endpoint presentation.
+        // Adding GetStreamLatency here would count the device pipeline twice.
+        const long double current100ns = static_cast<long double>(clock.qpcNow) * 10000000 / clock.qpcFrequency;
+        const long double ageNs = (current100ns - clock.qpc100ns) * 100;
+        const long double queueNs = std::max(0.0L, static_cast<long double>(writtenFrames) - deviceFrames) *
+            1000000000 / 44100;
+        if (ageNs >= 0 && ageNs < 1000000000 && queueNs < 1000000000) {
+            stats.endpointClockValid = true;
+            stats.deviceClockFrames = uint64_t(deviceFrames);
+            stats.writeQueueDelayMs = double(queueNs / 1000000);
+            stats.writePresentationOffsetMs = double(int64_t(queueNs - ageNs)) / 1000000;
+            return std::chrono::nanoseconds(int64_t(queueNs - ageNs));
+        }
+    }
+    stats.endpointClockValid = false;
+    // Initialization validates latency before this function is used. A new
+    // stream can keep position zero until data reaches the device; retain the
+    // existing padding/maximum-latency estimate without treating it as sound.
+    stats.writeQueueDelayMs = double(padding) * 1000 / 44100;
+    const uint64_t fallbackNs = uint64_t(padding) * 1000000000ULL / 44100 + uint64_t(latency) * 100;
+    stats.writePresentationOffsetMs = double(fallbackNs) / 1000000;
+    return std::chrono::nanoseconds(fallbackNs);
+}
 } // namespace local_render_detail
 
 class LocalAudioRenderer {
@@ -124,40 +175,9 @@ private:
         QueryPerformanceCounter(&qpcNow);
         QueryPerformanceFrequency(&qpcFrequency);
         const auto now = Clock::now();
-        // Keep the correlated raw observation together with the pre-write
-        // count: writtenFrames in the published stats includes this pass's
-        // later buffer release and cannot reconstruct the estimate alone.
-        stats.clockPosition = position; stats.clockFrequency = frequency; stats.clockQpc100ns = qpc;
-        stats.paddingFrames = padding; stats.writeEstimateWrittenFrames = writtenFrames;
-        stats.clockQpcAgeKnown = false; stats.clockQpcAgeMs = 0;
-        if (qpc && qpcFrequency.QuadPart > 0) {
-            const double ageMs = double((static_cast<long double>(qpcNow.QuadPart) * 10000000 /
-                                        qpcFrequency.QuadPart - qpc) / 10000);
-            if (std::isfinite(ageMs)) { stats.clockQpcAgeMs = ageMs; stats.clockQpcAgeKnown = true; }
-        }
-        const long double deviceFrames = frequency ? static_cast<long double>(position) * 44100 / frequency : 0;
-        if (hr == S_OK && position && qpc && frequency && qpcFrequency.QuadPart > 0 &&
-            deviceFrames <= static_cast<long double>(writtenFrames) + padding + 4410) {
-            // GetPosition's correlated QPC is already in 100 ns units. It
-            // observes endpoint presentation; adding GetStreamLatency again
-            // here would count the device pipeline twice.
-            const long double current100ns = static_cast<long double>(qpcNow.QuadPart) * 10000000 / qpcFrequency.QuadPart;
-            const long double ageNs = (current100ns - qpc) * 100;
-            const long double queueNs = std::max(0.0L, static_cast<long double>(writtenFrames) - deviceFrames) * 1000000000 / 44100;
-            if (ageNs >= 0 && ageNs < 1000000000 && queueNs < 1000000000) {
-                stats.endpointClockValid = true;
-                stats.deviceClockFrames = uint64_t(deviceFrames);
-                stats.writeQueueDelayMs = double(queueNs / 1000000);
-                stats.writePresentationOffsetMs = double(int64_t(queueNs - ageNs)) / 1000000;
-                return now + std::chrono::nanoseconds(int64_t(queueNs - ageNs));
-            }
-        }
-        stats.endpointClockValid = false;
-        // The new stream's clock can stay zero until data reaches the device.
-        // This fallback is a conservative estimate, never acoustic evidence.
-        stats.writeQueueDelayMs = double(padding) * 1000 / 44100;
-        stats.writePresentationOffsetMs = double(uint64_t(padding) * 1000000000ULL / 44100 + uint64_t(latency) * 100) / 1000000;
-        return now + std::chrono::nanoseconds(uint64_t(padding) * 1000000000ULL / 44100 + uint64_t(latency) * 100);
+        return now + local_render_detail::estimatedWriteOffset(
+            {hr, position, frequency, qpc, qpcNow.QuadPart, qpcFrequency.QuadPart},
+            writtenFrames, padding, latency, stats);
     }
 
     void run() {
