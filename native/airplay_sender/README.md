@@ -77,6 +77,33 @@ Run the actual helper's offline lifecycle pass with an active render endpoint:
 It checks invalid arguments, missing endpoint, refused local connection,
 partial-handshake stop, stdin EOF, connection timeout and real WASAPI capture.
 
+## Optional local presentation compensation
+
+Coordinated groups accept an optional `--local-compensation-frames` immediately
+after the associated `--local-endpoint`. The integer is 0–22050 frames at
+44.1 kHz (0–500 ms), appears at most once per endpoint, and defaults to zero.
+It is an explicit startup input for a separately validated measurement, not a
+Bluetooth-name default or an estimate from differences between device queues.
+No device-specific correction is embedded in the helper.
+
+The immutable value extends only that local renderer's presentation epoch.
+Other Windows outputs, AirPlay RTP/NTP, the shared protocol delay and the lyric
+estimate retain their existing schedule. It cannot be changed through stdin
+or by rebasing a running cursor. A new value requires the existing complete
+stop and group restart, with source mute and application routing restored.
+
+Named local stats report `extra_delay_frames` and
+`local_presentation_latency_frames`. The existing `presentation_latency_frames`
+remains the common protocol presentation delay. These fields confirm the
+applied scheduling value; they do not certify acoustic alignment.
+The shared history retains three seconds. The policy reserves 250 ms for the
+existing phase guard, one 352-frame publisher packet and two lookahead frames.
+The current 1.75 s base permits the complete 500 ms compensation bound; a
+2.25 s base permits at most 21696 extra frames (about 492 ms). Larger combined
+delays refuse arm and stop every peer. Offline tests cover startup silence and reads
+after repeated history wrapping; real receiver and speaker validation is
+still necessary.
+
 ## Parent process contract
 
 ```text

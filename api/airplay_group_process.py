@@ -20,6 +20,7 @@ import time
 
 from api.airplay_process import AirPlayProcess
 from api.audio_routes import AudioRouteDevice
+from api.audio_output_calibration import measured_local_holds, MAX_EXTRA_FRAMES
 from api.windows_audio_sessions import AudioSessionEvidence, MusicAudioSource
 
 
@@ -34,12 +35,13 @@ class AirPlayGroupProcess(AirPlayProcess):
     _LOCAL_COUNT_FIELDS = frozenset({"written_frames", "nonzero_samples", "meaningful_samples",
                                      "underrun_frames", "source_frame", "device_clock_frames",
                                      "presentation_latency_frames", "clock_position", "clock_frequency",
-                                     "clock_qpc_100ns", "padding_frames", "write_estimate_written_frames"})
+                                     "clock_qpc_100ns", "padding_frames", "write_estimate_written_frames",
+                                     "extra_delay_frames", "local_presentation_latency_frames"})
     _LOCAL_FLOAT_FIELDS = frozenset({"clock_qpc_age_ms", "write_queue_delay_ms",
                                      "write_presentation_offset_ms", "write_presentation_epoch_offset_ms",
                                      "stream_latency_ms", "buffer_duration_ms", "phase_error_ms", "resample_ratio"})
 
-    def __init__(self, executable=None, popen=None, *, source_id=""):
+    def __init__(self, executable=None, popen=None, *, source_id="", calibration_loader=None):
         super().__init__(executable, popen, source_id=source_id, exclusive_output=False)
         self._receiver_ids = ()
         self._member_evidence = {}
@@ -47,6 +49,8 @@ class AirPlayGroupProcess(AirPlayProcess):
         self._group_source_endpoint = ""
         self._local_endpoints = ()
         self._local_evidence = {}
+        self._calibration_loader = calibration_loader or measured_local_holds
+        self._local_compensation_frames = {}
 
     @classmethod
     def _endpoint_key(cls, endpoint_id):
@@ -129,6 +133,13 @@ class AirPlayGroupProcess(AirPlayProcess):
     def start_group(self, devices, source: MusicAudioSource, source_endpoint: str):
         """Start one helper; receiver order also defines command receiver indices."""
         receivers, local_endpoints = self._validate_group(devices, source, source_endpoint)
+        compensation = self._calibration_loader(devices)
+        if (not isinstance(compensation, dict) or any(
+                endpoint not in local_endpoints or type(frames) is not int
+                or not 0 <= frames <= MAX_EXTRA_FRAMES
+                for endpoint, frames in compensation.items())):
+            raise ValueError("输出设备的同步测量无效，请重新校准")
+        compensation = dict(compensation)
         if self._source_id and not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", self._source_id):
             raise ValueError("HomePod 发送端身份无效")
         args = [str(self.executable), "--group", "--music-pid", str(source.process_id),
@@ -138,6 +149,8 @@ class AirPlayGroupProcess(AirPlayProcess):
             args += ["--source-id", self._source_id]
         for local_endpoint in local_endpoints:
             args += ["--local-endpoint", local_endpoint]
+            if compensation.get(local_endpoint, 0):
+                args += ["--local-compensation-frames", str(compensation[local_endpoint])]
         for receiver in receivers:
             args += ["--receiver-id", receiver.id, "--host", receiver.host,
                      "--port", str(receiver.port), "--device-id", receiver.device_id or receiver.host,
@@ -158,6 +171,7 @@ class AirPlayGroupProcess(AirPlayProcess):
             self._group_source = source
             self._group_source_endpoint = source_endpoint
             self._local_endpoints = local_endpoints
+            self._local_compensation_frames = compensation
             self._local_evidence = {}
         if not self.executable.is_file():
             # A valid new attempt cannot inherit a stopped predecessor's mute
@@ -209,6 +223,16 @@ class AirPlayGroupProcess(AirPlayProcess):
                 return None
             if "meaningful_samples" not in render:
                 return None
+            expected_hold = self._local_compensation_frames.get(endpoint, 0)
+            if ((expected_hold and render.get("extra_delay_frames") != expected_hold)
+                    or ("extra_delay_frames" in render and render["extra_delay_frames"] != expected_hold)):
+                return None
+            if expected_hold:
+                base = render.get("presentation_latency_frames")
+                effective = render.get("local_presentation_latency_frames")
+                if (type(base) is not int or type(effective) is not int
+                        or base != 77175 or effective != base + expected_hold):
+                    return None
             for key in fields & render.keys():
                 value = render[key]
                 if key in self._LOCAL_BOOL_FIELDS:
@@ -357,6 +381,7 @@ class AirPlayGroupProcess(AirPlayProcess):
             source = self._group_source
             result.update({"schema_version": 1, "receiver_ids": self._receiver_ids,
                            "local_endpoints": self._local_endpoints,
+                           "local_compensation_frames": dict(self._local_compensation_frames),
                            "local_endpoint": self._local_endpoints[0] if len(self._local_endpoints) == 1 else "",
                            "local_renders": tuple(copy.deepcopy(self._local_evidence[endpoint])
                                for endpoint in self._local_endpoints if endpoint in self._local_evidence),

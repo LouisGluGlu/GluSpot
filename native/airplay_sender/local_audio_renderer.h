@@ -3,6 +3,7 @@
 // IAudioClock schedules the endpoint timeline; Bluetooth acoustic delay remains
 // unknown because Windows stream latency is not a microphone measurement.
 #pragma once
+#include "local_presentation_policy.h"
 #include <windows.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
@@ -32,6 +33,7 @@ struct LocalRenderDiagnostics {
     uint64_t writtenFrames = 0, nonzeroSamples = 0, meaningfulSamples = 0, underrunFrames = 0;
     uint64_t sourceFrame = 0, deviceClockFrames = 0;
     uint32_t presentationLatencyFrames = 0;
+    uint32_t extraDelayFrames = 0, localPresentationLatencyFrames = 0;
     uint64_t clockPosition = 0, clockFrequency = 0, clockQpc100ns = 0;
     uint64_t paddingFrames = 0, writeEstimateWrittenFrames = 0;
     bool clockQpcAgeKnown = false;
@@ -115,8 +117,11 @@ public:
     // PCM, returning false if the coordinator's bounded history lacks it.
     using Pull = std::function<bool(uint64_t, std::span<int16_t>)>;
     using Clock = std::chrono::steady_clock;
-    LocalAudioRenderer(std::wstring endpoint, Pull pull) : endpoint_(std::move(endpoint)), pull_(std::move(pull)) {
+    LocalAudioRenderer(std::wstring endpoint, Pull pull, uint32_t extraDelayFrames = 0)
+        : endpoint_(std::move(endpoint)), pull_(std::move(pull)), extraDelayFrames_(extraDelayFrames) {
         if (endpoint_.empty() || !pull_) throw std::invalid_argument("Explicit render endpoint and PCM history required");
+        if (extraDelayFrames_ > localMaxExtraDelayFrames)
+            throw std::invalid_argument("Local compensation must be between zero and 22050 frames");
         stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         begin_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!stop_ || !begin_) {
@@ -144,11 +149,15 @@ public:
     }
     bool arm(Clock::time_point sendStart, uint32_t latencyFrames) {
         std::lock_guard lock(mutex_);
-        if (!stats_.ready || stats_.armed || !error_.empty() || !latencyFrames || latencyFrames > 99225) return false;
-        const auto presentation = sendStart + std::chrono::nanoseconds(uint64_t(latencyFrames) * 1000000000ULL / 44100);
+        if (!stats_.ready || stats_.armed || !error_.empty() ||
+            !localPresentationFitsHistory(latencyFrames, extraDelayFrames_)) return false;
+        const auto localFrames = localPresentationFrames(latencyFrames, extraDelayFrames_);
+        const auto presentation = sendStart + localPresentationDelay(latencyFrames, extraDelayFrames_);
         if (presentation <= Clock::now()) return false;
         presentationEpoch_ = presentation;
         stats_.presentationLatencyFrames = latencyFrames;
+        stats_.extraDelayFrames = extraDelayFrames_;
+        stats_.localPresentationLatencyFrames = localFrames;
         stats_.armed = true;
         SetEvent(begin_);
         return true;
@@ -159,6 +168,7 @@ public:
 private:
     std::wstring endpoint_;
     Pull pull_;
+    const uint32_t extraDelayFrames_;
     HANDLE stop_ = nullptr, begin_ = nullptr;
     std::thread worker_;
     mutable std::mutex mutex_;
@@ -227,6 +237,7 @@ private:
                     if (FAILED(clock->GetFrequency(&frequency))) frequency = 0;
                 }
                 stats.ready = true;
+                stats.extraDelayFrames = extraDelayFrames_;
                 stats.streamLatencyMs = double(latency) / 10000;
                 stats.bufferDurationMs = double(capacity) * 1000 / 44100;
                 { std::lock_guard lock(mutex_); stats_ = stats; }
@@ -239,7 +250,11 @@ private:
                     Clock::time_point epoch;
                     { std::lock_guard lock(mutex_); epoch = presentationEpoch_; }
                     stats.armed = true;
-                    { std::lock_guard lock(mutex_); stats.presentationLatencyFrames = stats_.presentationLatencyFrames; }
+                    {
+                        std::lock_guard lock(mutex_);
+                        stats.presentationLatencyFrames = stats_.presentationLatencyFrames;
+                        stats.localPresentationLatencyFrames = stats_.localPresentationLatencyFrames;
+                    }
                     // Prime the device before Start; a future group barrier
                     // begins with silence, not an uninitialized render buffer.
                     BYTE* initial = nullptr;

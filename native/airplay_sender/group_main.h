@@ -1,4 +1,5 @@
 #pragma once
+#include "local_presentation_policy.h"
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -69,6 +70,7 @@ struct GroupArguments {
     uint64_t musicCreatedAt = 0;
     std::string sourceEndpoint;
     std::vector<std::string> localEndpoints;
+    std::vector<uint32_t> localCompensationFrames;
     std::string sourceId = "02:47:4C:55:53:50";
     std::vector<GroupReceiverArgument> receivers;
 };
@@ -78,6 +80,14 @@ inline uint64_t groupUnsigned(const std::string& value, uint64_t maximum, const 
     if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
         !result || result > maximum)
         throw std::invalid_argument(std::string("Invalid group ") + field);
+    return result;
+}
+inline uint32_t groupLocalCompensation(const std::string& value) {
+    uint32_t result = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+        result > localMaxExtraDelayFrames)
+        throw std::invalid_argument("Local compensation must be between zero and 22050 frames");
     return result;
 }
 inline void groupText(const std::string& text, size_t maximum, const char* field) {
@@ -109,6 +119,7 @@ inline bool groupSameEndpoint(const std::string& a, const std::string& b) {
 // --receiver-id begins a member and each of its four fields is explicit.
 inline GroupArguments parseGroupArguments(const std::vector<std::string>& arguments) {
     GroupArguments result;
+    bool compensationAllowed = false;
     std::set<std::string> global, memberFields, ids, endpoints;
     auto finishMember = [&] {
         if (result.receivers.empty()) return;
@@ -123,6 +134,8 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
     };
     for (size_t index = 0; index < arguments.size(); ++index) {
         const auto& key = arguments[index];
+        const bool followsLocalEndpoint = compensationAllowed;
+        compensationAllowed = false;
         if (key == "--group") {
             if (!global.insert(key).second) throw std::invalid_argument("Duplicate --group argument");
             continue;
@@ -146,6 +159,12 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
             if (result.localEndpoints.size() == 7)
                 throw std::invalid_argument("At most eight group outputs are supported, including an AirPlay receiver");
             result.localEndpoints.push_back(value);
+            result.localCompensationFrames.push_back(0);
+            compensationAllowed = true;
+        } else if (key == "--local-compensation-frames") {
+            if (!followsLocalEndpoint || result.localEndpoints.empty())
+                throw std::invalid_argument("Local compensation must immediately follow its local endpoint");
+            result.localCompensationFrames.back() = groupLocalCompensation(value);
         } else {
             if (!global.insert(key).second) throw std::invalid_argument("Duplicate group option");
             if (key == "--music-pid") result.musicPid = uint32_t(groupUnsigned(value, 0xffffffffULL, "music PID"));
@@ -265,7 +284,7 @@ inline std::optional<GroupVolumeCommand> groupVolumeCommand(const std::string& l
 // frame positions without becoming another consumer of the capture ring.
 class GroupPcmHistory {
 public:
-    static constexpr size_t capacityFrames = 44100 * 3;
+    static constexpr size_t capacityFrames = groupPcmHistoryFrames;
     bool append(uint64_t index, std::span<const int16_t> pcm) {
         std::lock_guard lock(mutex_);
         if (pcm.size() != 704 || index != head_ || index > UINT64_MAX - 352) return false;

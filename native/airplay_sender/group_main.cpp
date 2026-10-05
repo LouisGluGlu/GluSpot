@@ -196,6 +196,8 @@ void localRenderStats(std::ostream& out, const LocalRenderDiagnostics& d, const 
         << ",\"meaningful_samples\":" << d.meaningfulSamples << ",\"underrun_frames\":" << d.underrunFrames
         << ",\"source_frame\":" << d.sourceFrame << ",\"device_clock_frames\":" << d.deviceClockFrames
         << ",\"presentation_latency_frames\":" << d.presentationLatencyFrames
+        << ",\"extra_delay_frames\":" << d.extraDelayFrames
+        << ",\"local_presentation_latency_frames\":" << d.localPresentationLatencyFrames
         << ",\"clock_position\":" << d.clockPosition << ",\"clock_frequency\":" << d.clockFrequency
         << ",\"clock_qpc_100ns\":" << d.clockQpc100ns << ",\"clock_qpc_age_known\":" << (d.clockQpcAgeKnown ? "true" : "false")
         << ",\"clock_qpc_age_ms\":" << d.clockQpcAgeMs << ",\"padding_frames\":" << d.paddingFrames
@@ -308,9 +310,12 @@ int runGroupHelper(int argc, wchar_t** argv) {
         if (!capture.waitReady()) throw std::runtime_error(capture.error().empty() ? "Music capture initialization timed out" : capture.error());
         auto history = std::make_unique<GroupPcmHistory>();
 #if GLUSPOT_HAS_LOCAL_RENDERER
-        GroupLocalRendererSet<LocalAudioRenderer> locals(args.localEndpoints, [&history](const auto& endpoint) {
+        GroupLocalRendererSet<LocalAudioRenderer> locals(args.localEndpoints, [&history, &args](const auto& endpoint) {
+            const auto index = size_t(std::find(args.localEndpoints.begin(), args.localEndpoints.end(), endpoint) -
+                                      args.localEndpoints.begin());
             return std::make_unique<LocalAudioRenderer>(wide(endpoint),
-                [&history](uint64_t frame, std::span<int16_t> output) { return history->pull(frame, output); });
+                [&history](uint64_t frame, std::span<int16_t> output) { return history->pull(frame, output); },
+                args.localCompensationFrames.at(index));
         });
         if (const auto error = locals.prepare(); !error.empty()) throw std::runtime_error(error);
 #else

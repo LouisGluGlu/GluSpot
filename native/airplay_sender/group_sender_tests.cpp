@@ -406,6 +406,37 @@ void testGroupArgumentIdentityAndCommandIsolation() {
     CHECK(four.receivers.size() == 2 && four.localEndpoints ==
           std::vector<std::string>({"{Bluetooth-Output}", "{Wired-Output}"}),
           "two HomePods and independent Bluetooth/wired endpoints preserve all four ordered outputs");
+    CHECK(four.localCompensationFrames == std::vector<uint32_t>({0, 0}),
+          "existing commands keep zero compensation for every Windows output");
+    auto compensated = valid;
+    compensated.insert(compensated.end(), {"--local-compensation-frames", "11025",
+        "--local-endpoint", "{Wired-Output}", "--local-compensation-frames", "0"});
+    const auto adjusted = gluspot::parseGroupArguments(compensated);
+    CHECK(adjusted.localEndpoints == four.localEndpoints &&
+          adjusted.localCompensationFrames == std::vector<uint32_t>({11025, 0}) &&
+          adjusted.receivers[0].id == four.receivers[0].id &&
+          adjusted.sourceEndpoint == four.sourceEndpoint,
+          "extra delay belongs only to the immediately preceding explicit Windows endpoint");
+    for (const auto& value : {"22050", "0"}) {
+        auto args = valid; args.insert(args.end(), {"--local-compensation-frames", value});
+        CHECK(gluspot::parseGroupArguments(args).localCompensationFrames.front() ==
+              (value == std::string("0") ? 0u : 22050u), "zero and half-second bounds are accepted");
+    }
+    for (const auto& value : {"22051", "4294967296", "-1", "+1", "1.5", "1e3", "NaN", "inf",
+                             "true", "", " 1", "1 ", "1suffix"}) {
+        auto args = valid; args.insert(args.end(), {"--local-compensation-frames", value});
+        CHECK(rejects(args), "malformed or unbounded local compensation fails before device access");
+    }
+    auto duplicateCompensation = compensated;
+    duplicateCompensation.insert(duplicateCompensation.end(), {"--local-compensation-frames", "1"});
+    CHECK(rejects(duplicateCompensation), "a second compensation cannot alter the same endpoint");
+    auto detachedCompensation = valid;
+    detachedCompensation.insert(detachedCompensation.end(), {"--receiver-id", "new-receiver",
+        "--local-compensation-frames", "1"});
+    CHECK(rejects(detachedCompensation), "compensation cannot skip an intervening option");
+    auto missingEndpoint = valid;
+    missingEndpoint.insert(missingEndpoint.begin(), {"--local-compensation-frames", "1"});
+    CHECK(rejects(missingEndpoint), "compensation without an immediately preceding endpoint rejects");
     for (const auto& endpoint : {"{bluetooth-output}", "{Windows-Source}", "{windows-source}", ""}) {
         auto args = valid; args.insert(args.end(), {"--local-endpoint", endpoint});
         CHECK(rejects(args), "a repeated or source-equivalent Windows endpoint is never rendered twice or unmuted");

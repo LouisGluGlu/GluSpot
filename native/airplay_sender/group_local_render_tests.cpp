@@ -11,6 +11,8 @@ struct State {
     std::string endpoint;
     gluspot::LocalRenderDiagnostics stats;
     Clock::time_point start{};
+    Clock::time_point presentation{};
+    uint32_t extraDelayFrames = 0;
     std::string error;
     bool prepareOk = true, armOk = true, stopped = false, destroyed = false;
     double cursor = 0;
@@ -27,8 +29,13 @@ public:
     }
     bool waitReady() { return state_->stats.ready = state_->prepareOk && state_->error.empty(); }
     bool arm(Clock::time_point start, uint32_t frames) {
-        if (!state_->stats.ready || state_->stats.armed || !state_->armOk || state_->stopped) return false;
+        if (!state_->stats.ready || state_->stats.armed || !state_->armOk || state_->stopped ||
+            !gluspot::localPresentationFitsHistory(frames, state_->extraDelayFrames)) return false;
         state_->start = start; state_->stats.presentationLatencyFrames = frames;
+        state_->presentation = start + gluspot::localPresentationDelay(frames, state_->extraDelayFrames);
+        state_->stats.extraDelayFrames = state_->extraDelayFrames;
+        state_->stats.localPresentationLatencyFrames =
+            gluspot::localPresentationFrames(frames, state_->extraDelayFrames);
         state_->stats.armed = state_->stats.playing = true;
         return true;
     }
@@ -147,6 +154,94 @@ void everyInitializationAndArmFailureStopsPeers() {
     }
 }
 
+void optionalCompensationPreservesOtherEndpointEpoch() {
+    Rig rig;
+    auto factory = rig.factory();
+    Outputs outputs({"wired", "bluetooth"}, [&](const std::string& endpoint) {
+        auto renderer = factory(endpoint);
+        if (endpoint == "bluetooth") rig.states.back()->extraDelayFrames = 11025;
+        return renderer;
+    });
+    assert(outputs.prepare().empty());
+    const auto start = Clock::time_point(std::chrono::seconds(100));
+    assert(outputs.arm(start, 77175).empty());
+    assert(rig.states[0]->presentation == start + std::chrono::milliseconds(1750));
+    assert(rig.states[1]->presentation == start + std::chrono::milliseconds(2000));
+    assert(rig.states[0]->stats.presentationLatencyFrames == 77175 &&
+           rig.states[1]->stats.presentationLatencyFrames == 77175);
+    assert(rig.states[0]->stats.extraDelayFrames == 0 && rig.states[1]->stats.extraDelayFrames == 11025);
+    assert(rig.states[1]->stats.localPresentationLatencyFrames == 88200);
+    // The existing armed fence prevents any running-cursor epoch adjustment.
+    assert(!outputs.arm(start, 77175).empty());
+    assert(rig.states[0]->stopped && rig.states[1]->stopped);
+    // A compensated endpoint that exceeds the joint retention budget refuses
+    // arm normally, so the barrier fans out stop to an already armed peer.
+    Rig limited;
+    auto limitedFactory = limited.factory();
+    Outputs outOfBudget({"wired", "bluetooth"}, [&](const std::string& endpoint) {
+        auto renderer = limitedFactory(endpoint);
+        if (endpoint == "bluetooth") limited.states.back()->extraDelayFrames = 22050;
+        return renderer;
+    });
+    assert(outOfBudget.prepare().empty() && !outOfBudget.arm(start, 99225).empty());
+    assert(limited.states[0]->stats.armed && !limited.states[1]->stats.armed);
+    assert(limited.states[0]->stopped && limited.states[1]->stopped);
+}
+
+void compensationPolicyAndThreeSecondHistoryBudget() {
+    static_assert(gluspot::GroupPcmHistory::capacityFrames == gluspot::groupPcmHistoryFrames);
+    assert(gluspot::localPresentationDelay(77175, 0) == std::chrono::milliseconds(1750));
+    assert(gluspot::localPresentationDelay(77175, 22050) == std::chrono::milliseconds(2250));
+    constexpr uint32_t maximumExtra = gluspot::groupPcmHistoryFrames - gluspot::localHistoryMarginFrames - 99225;
+    static_assert(maximumExtra == 21696);
+    assert(gluspot::localPresentationDelay(99225, maximumExtra).count() == 2741972789);
+    assert(gluspot::GroupPcmHistory::capacityFrames -
+           gluspot::localPresentationFrames(99225, maximumExtra) == gluspot::localHistoryMarginFrames);
+    for (const auto& [base, extra] : std::vector<std::pair<uint32_t, uint32_t>>{
+            {0, 0}, {99226, 0}, {77175, 22051}, {77175, UINT32_MAX}, {UINT32_MAX, 0},
+            {99225, maximumExtra + 1}, {99225, 22050}}) {
+        bool rejected = false;
+        try { (void)gluspot::localPresentationDelay(base, extra); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        assert(rejected);
+    }
+    bool rejected = false;
+    try {
+        gluspot::LocalAudioRenderer renderer(L"not-opened",
+            [](uint64_t, std::span<int16_t>) { return false; }, 22051);
+    } catch (const std::invalid_argument&) { rejected = true; }
+    assert(rejected); // Out-of-budget construction cannot start a WASAPI worker.
+
+    Rig rig;
+    constexpr uint64_t queueFrames = 1764; // 40 ms clock-derived write delay.
+    std::array<int16_t, 886> pcm{}, repeated{}; // A 10 ms write plus interpolation lookahead.
+    for (uint64_t elapsed = 0; elapsed <= 60 * 44100; elapsed += 441) {
+        rig.publishUntil(elapsed + 1); // Production nextFrame can lead dueFrame by at most 352.
+        for (uint32_t base : {77175u, 99225u}) {
+            for (uint32_t extra : {0u, 11025u, 22050u}) {
+                if (!gluspot::localPresentationFitsHistory(base, extra)) continue;
+                const auto delay = gluspot::localPresentationFrames(base, extra);
+                // The production prefix emits silence while its own epoch is
+                // still in the future; compensation never asks for future PCM.
+                if (elapsed + queueFrames < delay) continue;
+                const auto first = elapsed + queueFrames - delay;
+                assert(first + pcm.size() / 2 <= rig.head);
+                assert(rig.history->pull(first, pcm) && rig.history->pull(first, repeated));
+                assert(pcm == repeated && std::all_of(pcm.begin(), pcm.end(), [](auto value) { return value == 3100; }));
+            }
+        }
+        // Worst permitted base+extra with a cursor at the phase-guard limit,
+        // and one publisher packet ahead still fits after each history wrap.
+        const auto maximumDelay = gluspot::localPresentationFrames(99225, maximumExtra);
+        if (elapsed >= maximumDelay + 11025) {
+            const auto first = elapsed - maximumDelay - 11025;
+            assert(rig.history->pull(first, pcm));
+        }
+    }
+    assert(rig.head > gluspot::GroupPcmHistory::capacityFrames);
+    assert(!rig.history->pull(0, pcm)); // Retention stays bounded at three seconds.
+}
+
 void disconnectedOutputCannotLeaveTheOtherPlaying() {
     Rig rig;
     Outputs outputs({"wired", "bluetooth"}, rig.factory());
@@ -169,6 +264,8 @@ void disconnectedOutputCannotLeaveTheOtherPlaying() {
 int main() {
     sharedTimelineIndependentDeviceClocks();
     everyInitializationAndArmFailureStopsPeers();
+    optionalCompensationPreservesOtherEndpointEpoch();
+    compensationPolicyAndThreeSecondHistoryBudget();
     disconnectedOutputCannotLeaveTheOtherPlaying();
     std::cout << "Multi-Windows renderer shared timeline, independent clocks and all-output lifecycle passed\n";
 }
