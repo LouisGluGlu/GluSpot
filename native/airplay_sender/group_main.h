@@ -29,6 +29,10 @@ inline uint32_t groupPresentationFrames(uint32_t rtpBuffer, uint32_t requestedMi
         throw std::invalid_argument("Unsupported group presentation latency policy");
     return rtpBuffer + requestedMin;
 }
+// Windows-only playback retains the established shared-history reserve. A
+// 250 ms reserve is insufficient for the supported one-second WASAPI queue;
+// this 1.75 s schedule is not a measured Bluetooth or acoustic correction.
+inline constexpr uint32_t windowsGroupPresentationFrames = 77175;
 
 // A setup-ready receiver must keep acknowledging authenticated /feedback,
 // including while another member is still pairing. Local audio handoff,
@@ -156,8 +160,8 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
             else member.name = value;
         } else if (key == "--local-endpoint") {
             groupText(value, 2048, "local output endpoint");
-            if (result.localEndpoints.size() == 7)
-                throw std::invalid_argument("At most eight group outputs are supported, including an AirPlay receiver");
+            if (result.localEndpoints.size() == 8)
+                throw std::invalid_argument("At most eight group outputs are supported");
             result.localEndpoints.push_back(value);
             result.localCompensationFrames.push_back(0);
             compensationAllowed = true;
@@ -175,8 +179,9 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
         }
     }
     finishMember();
-    if (!global.count("--group") || !result.musicPid || !result.musicCreatedAt || result.receivers.empty())
-        throw std::invalid_argument("Group requires a verified music process, source endpoint and HomePod");
+    if (!global.count("--group") || !result.musicPid || !result.musicCreatedAt ||
+        (result.receivers.empty() && result.localEndpoints.size() < 2))
+        throw std::invalid_argument("Group requires a verified music process, source endpoint and two outputs or AirPlay");
     groupText(result.sourceEndpoint, 2048, "source endpoint");
     if (result.receivers.size() + result.localEndpoints.size() > 8)
         throw std::invalid_argument("At most eight group outputs are supported");
@@ -200,6 +205,10 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
 template<class Renderer>
 class GroupLocalRendererSet {
 public:
+    struct Progress {
+        bool ready = false;
+        uint64_t writtenFrames = 0, nonzeroSamples = 0, meaningfulSamples = 0;
+    };
     struct Output {
         std::string endpoint;
         std::unique_ptr<Renderer> renderer;
@@ -251,6 +260,20 @@ public:
             const auto stats = output.renderer->diagnostics();
             return stats.ready && stats.armed && stats.playing && stats.meaningfulSamples > 0;
         });
+    }
+    Progress progress() const {
+        Progress result;
+        if (stopped_ || outputs_.empty()) return result;
+        result.ready = true;
+        result.writtenFrames = result.nonzeroSamples = result.meaningfulSamples = UINT64_MAX;
+        for (const auto& output : outputs_) {
+            const auto stats = output.renderer->diagnostics();
+            result.ready = result.ready && stats.ready && stats.armed && stats.playing;
+            result.writtenFrames = std::min(result.writtenFrames, stats.writtenFrames);
+            result.nonzeroSamples = std::min(result.nonzeroSamples, stats.nonzeroSamples);
+            result.meaningfulSamples = std::min(result.meaningfulSamples, stats.meaningfulSamples);
+        }
+        return result;
     }
     const std::vector<Output>& outputs() const { return outputs_; }
     void stop() noexcept {

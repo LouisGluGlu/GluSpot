@@ -684,8 +684,11 @@ class AudioOutputPanel(QWidget):
         error_color = "#a22d2d" if relative_luminance(self._background) > .45 else "#ffb9b3"
         self.status_label.setStyleSheet(f"color: {error_color if error else self._muted.name()};")
         self.stop_button.setText("停止同步播放" if grouped else "停止投放")
-        self.stop_button.setEnabled(casting)
-        self.stop_button.setVisible(casting)
+        # A music-only group owns its capture/render lifecycle even when all
+        # members are Windows outputs. It must remain explicitly stoppable.
+        stoppable = casting or grouped
+        self.stop_button.setEnabled(stoppable)
+        self.stop_button.setVisible(stoppable)
         self._fit_to_content()
         self._sync_tab_order()
         self._maintain_visible_state(snapshot)

@@ -217,7 +217,7 @@ void compensationPolicyAndThreeSecondHistoryBudget() {
     std::array<int16_t, 886> pcm{}, repeated{}; // A 10 ms write plus interpolation lookahead.
     for (uint64_t elapsed = 0; elapsed <= 60 * 44100; elapsed += 441) {
         rig.publishUntil(elapsed + 1); // Production nextFrame can lead dueFrame by at most 352.
-        for (uint32_t base : {77175u, 99225u}) {
+        for (uint32_t base : {gluspot::windowsGroupPresentationFrames, 99225u}) {
             for (uint32_t extra : {0u, 11025u, 22050u}) {
                 if (!gluspot::localPresentationFitsHistory(base, extra)) continue;
                 const auto delay = gluspot::localPresentationFrames(base, extra);
@@ -240,6 +240,32 @@ void compensationPolicyAndThreeSecondHistoryBudget() {
     }
     assert(rig.head > gluspot::GroupPcmHistory::capacityFrames);
     assert(!rig.history->pull(0, pcm)); // Retention stays bounded at three seconds.
+}
+
+void windowsOnlyBarrierAndProgressWithoutNetworkEvidence() {
+    Rig rig;
+    Outputs outputs({"bluetooth-a", "bluetooth-b"}, rig.factory());
+    assert(!outputs.progress().ready && outputs.progress().meaningfulSamples == 0);
+    assert(outputs.prepare().empty());
+    const auto start = Clock::time_point(std::chrono::seconds(100));
+    const auto reserve = gluspot::windowsGroupPresentationFrames;
+    assert(reserve == gluspot::groupPresentationFrames(66150, 11025));
+    assert(outputs.arm(start, reserve).empty());
+    assert(rig.states[0]->presentation == rig.states[1]->presentation);
+    assert(outputs.progress().ready && outputs.progress().writtenFrames == 0);
+    rig.publishUntil(1000, 0);
+    for (const auto& output : outputs.outputs()) assert(output.renderer->render(0, 441));
+    assert(outputs.progress().writtenFrames == 441 && outputs.progress().meaningfulSamples == 0);
+    assert(!outputs.hasMeaningfulPcm()); // Silence never confirms the local-only group.
+    rig.publishUntil(3000, 3100);
+    for (const auto& output : outputs.outputs()) assert(output.renderer->render(441, 441));
+    for (const auto& output : outputs.outputs()) assert(output.renderer->render(882, 441));
+    assert(outputs.progress().meaningfulSamples > 0 && outputs.hasMeaningfulPcm());
+    assert(outputs.progress().writtenFrames == 1323);
+    rig.states[1]->stats.playing = false;
+    assert(!outputs.progress().ready && !outputs.hasMeaningfulPcm());
+    outputs.stop();
+    assert(!outputs.progress().ready && outputs.progress().writtenFrames == 0);
 }
 
 void disconnectedOutputCannotLeaveTheOtherPlaying() {
@@ -267,5 +293,6 @@ int main() {
     optionalCompensationPreservesOtherEndpointEpoch();
     compensationPolicyAndThreeSecondHistoryBudget();
     disconnectedOutputCannotLeaveTheOtherPlaying();
+    windowsOnlyBarrierAndProgressWithoutNetworkEvidence();
     std::cout << "Multi-Windows renderer shared timeline, independent clocks and all-output lifecycle passed\n";
 }

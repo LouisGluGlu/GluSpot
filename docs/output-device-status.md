@@ -3,6 +3,8 @@
 The subsequent [connection-motion change](output-connection-motion.md) refines
 the representative ordering and pairing rules below: earliest two distinct
 confirmed kinds, with overlap only for the HomePod/HomePod mini pair.
+The [Windows-only group extension](island-device-and-windows-groups.md) also
+supports the pure Bluetooth/Windows combinations in the updated capacity table.
 
 This source change is isolated on `codex/output-device-status`, starting from
 `544aba8`. It follows the user's October 8 circular-button reference without
@@ -41,9 +43,9 @@ animation code is unchanged.
 
 | Playback topology | Current software limit |
 | --- | --- |
-| Bluetooth only | One selected output; pure Bluetooth multi-output sync is unsupported |
+| Bluetooth only | Up to eight independent active Windows render outputs, with a separate source |
 | Independent HomePod / HomePod mini receivers | Eight AirPlay outputs |
-| AirPlay mixed with wired / Bluetooth outputs | Eight playback outputs total, at least one AirPlay |
+| AirPlay mixed with wired / Bluetooth outputs | Eight playback outputs total |
 | Windows / Bluetooth members in an AirPlay group | At most seven, within the same total cap |
 
 The Python `AirPlayGroupProcess.MAX_SINKS` and native group validation both
@@ -53,8 +55,9 @@ an unselected, available and unoccupied source endpoint, normally non-Bluetooth;
 that capture endpoint does not count as a playback sink. No virtual endpoint
 is installed automatically.
 
-Seven Bluetooth outputs is a software endpoint budget, not an assurance that
-a Windows adapter can maintain seven concurrent A2DP streams. Each must be
+Eight pure-local Bluetooth outputs (seven with one AirPlay) is a software
+endpoint budget, not an assurance that an adapter can maintain that many
+concurrent A2DP streams. Each must be
 exposed as an independent active render endpoint. Multiple Bluetooth devices,
 eight HomePods, HomePod stereo pairs and the complete two-HomePod plus wired
 plus Bluetooth topology have not been verified on hardware. Previous listening

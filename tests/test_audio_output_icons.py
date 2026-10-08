@@ -35,7 +35,7 @@ class AudioOutputIconTests(unittest.TestCase):
         return image
 
     def test_source_assets_render_in_requested_tint_and_keep_native_alpha(self):
-        for kind in ("output", "speaker", "homepod", "homepod-mini", "airpods-pro", "headphones"):
+        for kind in ("output", "speaker", "homepod", "homepod-mini", "airpods-pro", "airpods", "headphones"):
             with self.subTest(kind=kind):
                 image = self._render(kind)
                 ink = [image.pixelColor(x, y) for y in range(80) for x in range(80)
@@ -61,10 +61,25 @@ class AudioOutputIconTests(unittest.TestCase):
     def test_generic_receivers_and_earphones_do_not_claim_model_specific_assets(self):
         with patch("local.audio_output_icons._svg_renderer", side_effect=AssertionError("unidentified model asset")):
             airplay = self._render("airplay")
-            headphones = self._render("airpods")
+            headphones = self._render("earbuds")
         self.assertNotEqual(bytes(airplay.constBits()), bytes(headphones.constBits()))
         for image in (airplay, headphones):
             self.assertGreater(sum(image.pixelColor(x, y).alpha() > 0 for y in range(80) for x in range(80)), 200)
+
+    def test_regular_airpods_supplied_asset_differs_from_pro_and_generic_headphones(self):
+        images = [self._render(kind) for kind in ("airpods", "airpods-pro", "headphones")]
+        self.assertEqual(len({bytes(image.constBits()) for image in images}), 3)
+        self.assertIsNotNone(_svg_renderer("airpods"))
+        # The new square regular-AirPods asset must retain its original aspect.
+        points = [(x, y) for y in range(80) for x in range(80)
+                  if images[0].pixelColor(x, y).alpha() > 50]
+        self.assertAlmostEqual((min(x for x, _ in points) + max(x for x, _ in points)) / 2.0,
+                               39.5, delta=2.0)
+        self.assertGreater(max(y for _, y in points) - min(y for _, y in points), 55)
+        regular = self._render_status(("airpods", "homepod-mini"))
+        pro = self._render_status(("airpods-pro", "homepod-mini"))
+        self.assertNotEqual(self._region_bytes(regular, 0, 0, 40, 49),
+                            self._region_bytes(pro, 0, 0, 40, 49))
 
     def test_repeated_icon_paints_reuse_bounded_svg_and_tint_caches(self):
         self._render("homepod-mini")

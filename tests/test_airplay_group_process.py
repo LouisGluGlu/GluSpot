@@ -118,6 +118,22 @@ class AirPlayGroupProcessTests(unittest.TestCase):
                          ["speakers", "m6"])
         self.assertAlmostEqual(self.sender.latency_estimate()["seconds"], 1.52)
 
+    def test_two_windows_outputs_spawn_one_existing_helper_without_receiver_or_system_capture(self):
+        self._connected((M6, SPEAKERS))
+        self.assertEqual(self.args.count("--music-pid"), 1)
+        self.assertEqual(self.args.count("--source-endpoint"), 1)
+        self.assertEqual([self.args[index + 1] for index, arg in enumerate(self.args)
+                          if arg == "--local-endpoint"], ["m6", "speakers"])
+        self.assertNotIn("--receiver-id", self.args)
+        self.assertNotIn("--host", self.args)
+        self.assertNotIn("--exclusive-output", self.args)
+        self.assertNotIn("--endpoint", self.args)
+        self.assertEqual(self.sender.receiver_states(), {})
+        self.assertEqual(self.sender.diagnostics()["local_endpoints"], ("m6", "speakers"))
+        # The legacy fixture reports network timing. It cannot validate a
+        # Windows-only timeline even when both named local rows are healthy.
+        self.assertIsNone(self.sender.latency_estimate())
+
     def test_measured_hold_is_bound_to_its_local_argument_and_session_snapshot(self):
         profile = {"m6": 8820}
         self.sender._calibration_loader = lambda devices: profile
@@ -222,7 +238,7 @@ class AirPlayGroupProcessTests(unittest.TestCase):
                 self.assertIsNone(self.args)
 
     def test_invalid_selection_and_host_never_spawns_fallback(self):
-        choices = ((), (M6,), (M6, SPEAKERS), (HOME, HOME), (HOME, replace(M6, id="source")),
+        choices = ((), (M6,), (HOME, HOME), (HOME, replace(M6, id="source")),
                    (HOME, SPEAKERS, replace(M6, id="SOURCE")),
                    (HOME, M6, replace(M6, id="M6")), (replace(HOME, available=False),),
                    (replace(HOME, host="0.0.0.0"),), (replace(HOME, host="239.0.0.1"),),

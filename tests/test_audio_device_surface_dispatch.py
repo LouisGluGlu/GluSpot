@@ -20,6 +20,7 @@ class AudioDeviceSurfaceDispatchTests(unittest.TestCase):
             music_fullscreen_overlay=surface,
             _music_surface_active=active,
             screen=Mock(return_value=object()),
+            on_audio_device_event=Mock(),
         )
         controller.audio_device_notice = SimpleNamespace(close=Mock(), present=Mock())
         controller._audio_device_event_serial = 0
@@ -47,13 +48,14 @@ class AudioDeviceSurfaceDispatchTests(unittest.TestCase):
         snapshot = self._event()
         controller, surface = self._controller(snapshot)
         LocalIslandApp._poll_audio_device_notice(controller)
-        controller.audio_device_notice.present.assert_called_once()
+        controller.window.on_audio_device_event.assert_called_once_with(snapshot, snapshot.devices[0])
+        controller.audio_device_notice.close.reset_mock()
         surface.isVisible.return_value = True
         controller.window._music_surface_active = True
         LocalIslandApp._poll_audio_device_notice(controller)
         controller.audio_device_notice.close.assert_called_once_with()
         surface.on_audio_device_event.assert_not_called()
-        self.assertEqual(controller.audio_device_notice.present.call_count, 1)
+        controller.audio_device_notice.present.assert_not_called()
 
     def test_visible_surface_receives_event_during_enter_and_return_transitions(self):
         for transition in ("_island_entering", "_island_returning"):
@@ -96,7 +98,7 @@ class AudioDeviceSurfaceDispatchTests(unittest.TestCase):
         controller.audio_device_notice.present.assert_not_called()
         surface.on_audio_device_event.assert_not_called()
 
-    def test_island_preserves_existing_notice_with_hidden_or_absent_surface(self):
+    def test_island_receives_inline_notice_with_hidden_or_absent_surface(self):
         for absent in (False, True):
             with self.subTest(absent=absent):
                 snapshot = self._event()
@@ -104,10 +106,11 @@ class AudioDeviceSurfaceDispatchTests(unittest.TestCase):
                 if absent:
                     controller.window.music_fullscreen_overlay = None
                 LocalIslandApp._poll_audio_device_notice(controller)
-                controller.audio_device_notice.present.assert_called_once_with(
-                    snapshot.event_name, snapshot.event_message, "airpods-pro", controller.window.screen.return_value)
+                controller.window.on_audio_device_event.assert_called_once_with(snapshot, snapshot.devices[0])
+                controller.audio_device_notice.present.assert_not_called()
                 surface.on_audio_device_event.assert_not_called()
-                controller.audio_device_notice.close.assert_not_called()
+                controller.audio_device_notice.close.assert_called_once_with()
+                controller.window.screen.assert_not_called()
 
     def test_event_is_not_replayed_when_returning_to_island(self):
         snapshot = self._event()

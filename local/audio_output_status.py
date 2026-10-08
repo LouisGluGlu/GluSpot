@@ -7,7 +7,7 @@ from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 
 
 _CONNECTED_KINDS = frozenset({
-    "speaker", "homepod", "homepod-mini", "airpods-pro", "headphones", "airplay", "device",
+    "speaker", "homepod", "homepod-mini", "airpods-pro", "airpods", "headphones", "airplay", "device",
 })
 
 
@@ -15,7 +15,7 @@ def _member_kind(kind: str, transport: str = "") -> str:
     key = str(kind or "").lower().replace("_", "-")
     key = {"homepodmini": "homepod-mini", "speakers": "speaker", "headphone": "headphones",
            "headset": "headphones", "earphone": "headphones", "earphones": "headphones",
-           "earbuds": "headphones", "airpods": "headphones"}.get(key, key)
+           "earbuds": "headphones"}.get(key, key)
     if not key:
         key = "airplay" if transport == "airplay" else "device"
     return key if key in _CONNECTED_KINDS else "device"

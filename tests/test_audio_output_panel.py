@@ -141,6 +141,59 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertTrue(self.panel.stop_button.isEnabled())
         self.assertTrue(self.panel.stop_button.isVisible())
 
+    def test_windows_only_group_has_music_scope_membership_volumes_and_stop_action(self):
+        devices = tuple(replace(device, route_state="active") if device.id in {"local", "bluetooth"}
+                        else device for device in self.provider.devices)
+        self.provider.snapshot = AudioRouteSnapshot(devices, active_id="bluetooth", state="casting",
+            member_ids=("local", "bluetooth"), group_id="windows-only", capture_scope="music_process_tree",
+            cast_source_id="spare")
+        self.provider.toggle_audio_output = lambda device_id: self.provider.calls.append(("toggle", device_id)) or True
+        self._open()
+        self.assertEqual(self.panel.title_label.text(), "同步播放 · 2 个设备")
+        self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
+        self.assertNotIn("电脑全部声音", self.panel.scope_label.text())
+        self.assertTrue(self.panel.stop_button.isVisible())
+        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        for identity in ("local", "bluetooth"):
+            self.assertTrue(self.panel._rows[identity].isChecked())
+            self.assertEqual(self.panel._rows[identity].subtitle, "同步播放")
+        self.assertFalse(self.panel._rows["homepod"].isChecked())
+        self.panel._rows["bluetooth"].volume_slider.setValue(55)
+        self.assertIn(("volume", "bluetooth", .55), self.provider.calls)
+        self.assertFalse(any(call[0] in {"toggle", "select"} for call in self.provider.calls))
+        self.panel.stop_button.click()
+        self.assertIn(("stop",), self.provider.calls)
+
+    def test_windows_only_pending_group_remains_stoppable_without_confirmed_members(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="local", state="waiting_source",
+            pending_ids=("local", "bluetooth"), capture_scope="music_process_tree", group_id="windows-only")
+        self._open()
+        self.assertEqual(self.panel.title_label.text(), "同步播放 · 2 个设备")
+        self.assertIn("正在切换到同步播放", self.panel.scope_label.text())
+        self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
+        for identity in ("local", "bluetooth"):
+            self.assertEqual(self.panel._rows[identity].state, "pending")
+            self.assertFalse(self.panel._rows[identity].isChecked())
+        self.assertTrue(self.panel.stop_button.isVisible())
+        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.panel.stop_button.click()
+        self.assertIn(("stop",), self.provider.calls)
+
+    def test_windows_only_group_downgrade_restores_single_all_system_scope_and_hides_stop(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth", state="casting",
+            member_ids=("local", "bluetooth"), capture_scope="music_process_tree", group_id="windows-only")
+        self._open()
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth", state="ready",
+            member_ids=(), capture_scope="", group_id="")
+        self.panel.sync_snapshot()
+        self.assertEqual(self.panel.title_label.text(), "音频输出")
+        self.assertIn("电脑全部声音", self.panel.scope_label.text())
+        self.assertTrue(self.panel._rows["bluetooth"].isChecked())
+        self.assertFalse(self.panel._rows["local"].isChecked())
+        self.assertFalse(self.panel.stop_button.isVisible())
+        self.assertFalse(self.panel.stop_button.isEnabled())
+
     def test_single_receiver_sends_all_audio_even_with_active_route_evidence(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
             capture_scope="all_system", devices=tuple(replace(d, route_state="active", volume=.41)

@@ -26,6 +26,12 @@ class AudioRouteDevice:
     volume_muted: bool = False
     route_state: str = "available"
     route_message: str = ""
+    # Optional driver-reported battery cache for this exact Windows device.
+    # Observation time is when the cache was read, not when the accessory
+    # measured its charge. Unknown remains None; 0% is a valid observation.
+    battery_percent: int | None = None
+    battery_source: str = ""
+    battery_observed_at: float | None = None
 
 
 @dataclass(frozen=True)

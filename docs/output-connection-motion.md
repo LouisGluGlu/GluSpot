@@ -1,5 +1,10 @@
 # Device arrival motion and Bluetooth feasibility
 
+The island design and Bluetooth-only group extension were subsequently
+implemented on `codex/island-device-battery`; see [current behavior and
+evidence](island-device-and-windows-groups.md). Below is the earlier
+window/full-screen change and its research baseline.
+
 The October 8 follow-up is isolated on `codex/output-connection-motion`, based
 on `23a2129`. It changes window/full-screen presentation and notification
 dispatch. Audio transport, latency scheduling and the 6.411 package are unchanged.
