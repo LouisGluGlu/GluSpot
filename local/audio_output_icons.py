@@ -19,9 +19,9 @@ _ICON_FILES = {
     "airpods-pro": "airpods.pro.svg",
 }
 
-_STATUS_KIND_ORDER = (
+_STATUS_KINDS = frozenset({
     "homepod", "homepod-mini", "airpods-pro", "headphones", "speaker", "airplay", "device",
-)
+})
 _OPAQUE_ALPHA_TABLE = bytes(0 if value == 0 else 255 for value in range(256))
 
 
@@ -117,14 +117,15 @@ def paint_audio_output_icon(painter: QPainter, rect: QRectF, kind: str, color: Q
     painter.restore()
 
 
-def _status_signature(kinds: tuple[str, ...]) -> tuple[tuple[str, ...], int]:
-    """A stable bounded-vocabulary visual key; count still covers every member."""
+def _status_signature(kinds: tuple[str, ...], count: int | None = None) -> tuple[tuple[str, ...], int]:
+    """Preserve the first two distinct kinds in connection order."""
     normalized = tuple(_icon_kind(kind) for kind in kinds)
-    if not normalized:
+    member_count = len(normalized) if count is None else max(0, int(count))
+    if not member_count:
         return ("output",), 0
-    unique = {kind if kind in _STATUS_KIND_ORDER else "device" for kind in normalized}
-    representatives = tuple(kind for kind in _STATUS_KIND_ORDER if kind in unique)
-    return representatives[:2], len(normalized)
+    representatives = tuple(dict.fromkeys(
+        kind if kind in _STATUS_KINDS else "device" for kind in normalized))[:2]
+    return representatives or ("device",), member_count
 
 
 def _glyph_image(kind: str, rect: QRectF) -> QImage:
@@ -169,13 +170,17 @@ def _status_mask(representatives: tuple[str, ...], count: int, diameter: int) ->
         elif len(representatives) == 1:
             rect = QRectF(diameter * .19, diameter * .11, diameter * .62, diameter * .51)
             paint_audio_output_icon(painter, rect, representatives[0], QColor(255, 255, 255))
-        else:
+        elif set(representatives) == {"homepod", "homepod-mini"}:
             rear = QRectF(diameter * .20, diameter * .105, diameter * .43, diameter * .43)
             front = QRectF(diameter * .43, diameter * .265, diameter * .40, diameter * .37)
-            paint_audio_output_icon(painter, rear, representatives[0], QColor(255, 255, 255))
-            front_glyph = _glyph_image(representatives[1], front)
+            paint_audio_output_icon(painter, rear, "homepod", QColor(255, 255, 255))
+            front_glyph = _glyph_image("homepod-mini", front)
             _clear_glyph_halo(painter, front_glyph, front, max(1, round(diameter * .012)))
             painter.drawImage(front, front_glyph)
+        else:
+            for kind, x in zip(representatives, (.14, .52)):
+                rect = QRectF(diameter * x, diameter * .13, diameter * .34, diameter * .48)
+                paint_audio_output_icon(painter, rect, kind, QColor(255, 255, 255))
         if count > 1:
             font = QFont("Segoe UI")
             font.setWeight(QFont.Weight.DemiBold)
@@ -202,18 +207,21 @@ def _tinted_status(representatives: tuple[str, ...], count: int, diameter: int, 
 
 
 def paint_audio_output_status(painter: QPainter, circle_rect: QRectF,
-                              kinds: tuple[str, ...], color: QColor) -> None:
+                              kinds: tuple[str, ...], color: QColor, *, count: int | None = None) -> None:
     """Paint connected device glyphs and the total member count inside a circle.
 
     Empty membership retains the output-link symbol. One device displays its
     supplied or generic glyph; homogeneous groups add a count below one glyph,
-    and mixed groups use two overlapping representatives above the total count.
+    and mixed groups use their first two distinct representatives above the
+    total count. Only the HomePod/HomePod mini pair overlaps; all other pairs
+    use ordered left/right slots. Pass an explicit count when kinds contains
+    only the tracker's representatives rather than all member kinds.
     The caller owns the face, ring and opacity. Device kinds must come from
     provider evidence, never display-name guesses in paint.
     """
     if not circle_rect.isValid() or circle_rect.isEmpty():
         return
-    representatives, count = _status_signature(kinds)
+    representatives, count = _status_signature(kinds, count)
     device = painter.device()
     dpr = max(1.0, float(device.devicePixelRatioF())) if device is not None else 1.0
     logical_diameter = min(circle_rect.width(), circle_rect.height())

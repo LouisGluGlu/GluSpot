@@ -112,10 +112,10 @@ class AudioRouteController:
             if candidate != self._snapshot:
                 self._snapshot = replace(candidate, revision=self._snapshot.revision + 1)
 
-    def _announce(self, name, message):
+    def _announce(self, name, message, identity=""):
         previous = self.snapshot()
         self._publish(event_serial=previous.event_serial + 1, event_name=name,
-                      event_message=message)
+                      event_message=message, event_device_id=str(identity))
 
     def _enqueue(self, operation, value=None):
         if self._closed.is_set():
@@ -228,7 +228,7 @@ class AudioRouteController:
         if self._baseline:
             for device in local:
                 if device.id not in previous_ids:
-                    self._announce(device.name, "蓝牙设备已接入" if device.is_bluetooth else "音频设备已接入")
+                    self._announce(device.name, "蓝牙设备已接入" if device.is_bluetooth else "音频设备已接入", device.id)
         self._baseline = True
         default_id = next((d.id for d in local if d.is_default), "")
         local_ids = {d.id for d in local}
@@ -461,7 +461,7 @@ class AudioRouteController:
                             raise RuntimeError("音乐软件的上次输出恢复仍未完成")
                         self._resume_recovery_pending = False
                     self._publish(pending_id="", state="ready", status_message=f"已选择 {device.name}")
-                    self._announce(device.name, "已切换音频输出")
+                    self._announce(device.name, "已切换音频输出", device.id)
                 else:
                     self._publish(pending_id="", state="error", status_message="无法确认实际音频输出，请刷新后重试")
             else:
@@ -921,7 +921,7 @@ class AudioRouteController:
                                    status_message=f"正在同步播放到 {len(self._group_member_ids)} 个设备")
                 self._publish(**changes)
                 self._latency_updated_at = time.monotonic()
-                self._announce(name, "HomePod 投放已连接")
+                self._announce(name, "HomePod 投放已连接", self._cast_id)
             elif event.get("event") == "stats":
                 self._observe_capture_signal(event)
                 if self._group_mode and self._group_streaming_seen:

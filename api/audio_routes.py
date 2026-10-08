@@ -49,3 +49,6 @@ class AudioRouteSnapshot:
     group_id: str = ""
     capture_scope: str = ""
     music_source_app_id: str = ""
+    # Device notices must identify endpoints independently of display names.
+    # Group-wide events deliberately leave this empty.
+    event_device_id: str = ""
