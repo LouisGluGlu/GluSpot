@@ -334,8 +334,10 @@ class LocalIslandApp:
             # Minimized/hidden music surfaces should not open a separate
             # popup or replay a stale connection animation when restored.
             return
-        self.audio_device_notice.present(route.event_name, route.event_message,
-                                        device.kind if device else "device", self.window.screen())
+        self.audio_device_notice.close()
+        handler = getattr(self.window, "on_audio_device_event", None)
+        if callable(handler):
+            handler(route, device)
 
     def _music_ambience_values_for_style(self, style: str) -> dict[str, float | int]:
         if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:

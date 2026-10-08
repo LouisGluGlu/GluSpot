@@ -27,6 +27,7 @@ from api.windows_audio_sessions import AudioSessionEvidence, MusicAudioSource
 class AirPlayGroupProcess(AirPlayProcess):
     MAX_SINKS = 8
     MAX_EVENT_CHARS = 65536
+    TIMING_METHODS = frozenset({"protocol_plus_input_queue", "windows_shared_pcm_clock"})
     _EVENTS = frozenset({"connecting", "waiting_audio", "streaming", "error", "stopped",
                          "stats", "mute_state", "receiver_volume"})
     _ENDPOINT_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
@@ -126,8 +127,8 @@ class AirPlayGroupProcess(AirPlayProcess):
                 locals_.append(device.id)
             else:
                 raise ValueError("所选设备不支持同步播放")
-        if not receivers:
-            raise ValueError("同步播放需要至少一台 AirPlay 设备")
+        if not receivers and len(locals_) < 2:
+            raise ValueError("同步播放需要至少两个电脑或蓝牙输出")
         return tuple(receivers), tuple(locals_)
 
     def start_group(self, devices, source: MusicAudioSource, source_endpoint: str):
@@ -264,10 +265,12 @@ class AirPlayGroupProcess(AirPlayProcess):
                     remembered.pop("local_render", None)
                     if locals_ is not None and len(self._local_endpoints) == 1:
                         remembered["local_render"] = dict(locals_[self._local_endpoints[0]])
-                    if locals_ is None or any(not all(render[key] is True for key in (
+                    timing = event.get("timing")
+                    expected_method = "protocol_plus_input_queue" if self._receiver_ids else "windows_shared_pcm_clock"
+                    if (not isinstance(timing, dict) or timing.get("method") != expected_method or
+                            locals_ is None or any(not all(render[key] is True for key in (
                             "ready", "armed", "playing")) or render["meaningful_samples"] == 0
-                            for render in locals_.values()):
-                        timing = event.get("timing")
+                            for render in locals_.values())):
                         remembered["timing"] = dict(timing, valid=False) if isinstance(timing, dict) else {"valid": False}
         super()._remember_native_event(state, remembered)
         with self._diagnostic_lock:

@@ -452,7 +452,18 @@ void testGroupArgumentIdentityAndCommandIsolation() {
     auto noReceivers = std::vector<std::string>{"--group", "--music-pid", "1234", "--music-created-at", "456789",
         "--source-endpoint", "{Windows-Source}", "--local-endpoint", "{Wired-Output}",
         "--local-endpoint", "{Bluetooth-Output}"};
-    CHECK(rejects(noReceivers), "the AirPlay timeline still requires at least one authenticated receiver");
+    const auto localOnly = gluspot::parseGroupArguments(noReceivers);
+    CHECK(localOnly.receivers.empty() && localOnly.localEndpoints.size() == 2,
+          "two Windows outputs reuse the shared group without an AirPlay receiver");
+    auto oneLocal = noReceivers; oneLocal.resize(oneLocal.size() - 2);
+    CHECK(rejects(oneLocal), "a single Windows device uses ordinary default output, never a hidden music-only group");
+    auto eightLocals = noReceivers;
+    for (int index = 0; index < 6; ++index)
+        eightLocals.insert(eightLocals.end(), {"--local-endpoint", "{Local-" + std::to_string(index) + '}'});
+    CHECK(gluspot::parseGroupArguments(eightLocals).localEndpoints.size() == 8,
+          "Windows-only groups share the eight-sink budget");
+    eightLocals.insert(eightLocals.end(), {"--local-endpoint", "{Local-Ninth}"});
+    CHECK(rejects(eightLocals), "nine Windows outputs reject before opening devices");
     CHECK(!gluspot::groupVolumeCommand("{\"command\":\"set_volume\",\"volume\":0.5}", 2),
           "legacy unnamed volume command cannot control an arbitrary group receiver");
     const auto command = gluspot::groupVolumeCommand("{\"command\":\"set_volume\",\"receiver\":1,\"volume\":3.5e-1}", 2);

@@ -197,6 +197,8 @@ from local.media_position_pipeline import (
     media_position_update_plan,
 )
 from local.music_background_renderer import NativeMusicBackgroundRenderer, SolidMusicBackgroundRenderer
+from local.audio_output_icons import paint_audio_output_icon
+from local.island_audio_device_motion import IslandAudioDeviceMotion, IslandDevicePayload, reliable_device_battery
 from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
 from local.music_surface_palette import MusicSurfacePalette, artwork_surface_palette, background_role_color, future_lyric_color, relative_luminance
 from local.music_surface_window import MusicSurfaceWindow
@@ -1263,6 +1265,8 @@ class IslandStackVisual(QWidget):
         self.tasker_music_hover_auto_expand_suppressed = False
         self.music_cover_rect = QRectF()
         self.music_fullscreen_overlay: MusicSurfaceWindow | None = None
+        self._audio_device_motion = IslandAudioDeviceMotion()
+        self._audio_device_event_serial = 0
         self._music_surface_active = False
         self._island_visible_before_music_surface = True
         self._music_windowed_preference = False
@@ -2441,6 +2445,11 @@ class IslandStackVisual(QWidget):
         return any(self._animation_dict_active(animation, now, 0.22) for animation in animations.values())
 
     def _active_visual_animation_plan(self, now: float):
+        motion = getattr(self, "_audio_device_motion", None)
+        if motion is not None and motion.active:
+            # Reuse the island's precise frame timer, including paused lyrics.
+            from local.island_presentation import ActiveVisualAnimationPlan
+            return ActiveVisualAnimationPlan(True, "audio_device")
         plan = presentation_active_visual_animation_plan(
             media_is_playing=getattr(self, "media_is_playing", False),
             finder_mode=getattr(self, "finder_mode", False),
@@ -4356,11 +4365,52 @@ class IslandStackVisual(QWidget):
         self._center_on_screen()
         self._force_super_topmost()
 
+    def hideEvent(self, event):
+        motion = getattr(self, "_audio_device_motion", None)
+        if motion is not None:
+            motion.clear(time.monotonic())
+        super().hideEvent(event)
+
+    def on_audio_device_event(self, route, device) -> None:
+        serial = int(getattr(route, "event_serial", 0) or 0)
+        if serial <= int(getattr(self, "_audio_device_event_serial", 0)):
+            return
+        self._audio_device_event_serial = serial
+        motion = getattr(self, "_audio_device_motion", None)
+        if motion is None:
+            return
+        now = time.monotonic()
+        if (not self.isVisible() or self.isMinimized()
+                or bool(getattr(self, "scene_suppressed", False))
+                or bool(getattr(self, "_music_surface_active", False))):
+            motion.clear(now)
+            return
+        name = str(getattr(device, "name", "") or getattr(route, "event_name", "") or "").strip()
+        if not name:
+            return
+        # Synthetic group notices have no accessory identity or battery.
+        identity = str(getattr(device, "id", "") or f"event:{serial}")
+        motion.announce(IslandDevicePayload(identity, name,
+            str(getattr(device, "kind", "device") or "device"),
+            reliable_device_battery(device)), now)
+        self.update()
+
+    def _audio_device_pose(self):
+        motion = getattr(self, "_audio_device_motion", None)
+        return motion.pose if motion is not None and not bool(getattr(self, "expanded", False)) else None
+
     def _tick(self):
         now = time.monotonic()
         anim_dt = self._animation_tick_delta_seconds(now)
         self.last_tick_at = now
         speed = self._animation_speed_factor()
+        notice_motion = getattr(self, "_audio_device_motion", None)
+        notice_changed = False
+        if notice_motion is not None:
+            if bool(getattr(self, "scene_suppressed", False)) or bool(getattr(self, "_music_surface_active", False)):
+                notice_motion.clear(now)
+            else:
+                notice_changed = notice_motion.advance(now)
         music_surface = getattr(self, "music_fullscreen_overlay", None)
         if music_surface is not None and music_surface.isVisible():
             self._refresh_media_data(now)
@@ -4377,7 +4427,7 @@ class IslandStackVisual(QWidget):
         self._handle_tick_overlay_clock_and_topmost(now, anim_dt)
 
         lyric_visual_changed = self._handle_music_lyric_tick(now, speed)
-        visual_data_changed = bool(visual_data_changed or lyric_visual_changed)
+        visual_data_changed = bool(visual_data_changed or lyric_visual_changed or notice_changed)
 
         if self.scene_suppressed:
             self._handle_scene_suppressed_tick(now)
@@ -9484,6 +9534,23 @@ class IslandStackVisual(QWidget):
         )
 
     def _music_target_width(self, expanded: bool | None = None) -> float:
+        base = self._base_music_target_width(expanded)
+        if bool(self.expanded if expanded is None else expanded):
+            return base
+        return self._audio_device_target_width(base)
+
+    def _audio_device_target_width(self, base: float) -> float:
+        pose = self._audio_device_pose()
+        if pose is None:
+            return base
+        metric = QFontMetrics(self._font(self._compact_primary_lyric_font_size(), QFont.Weight.Medium, shrink=False))
+        payloads = (pose.payload,) if pose.previous is None else (pose.previous, pose.payload)
+        desired = max(min(self._u(680), metric.horizontalAdvance(p.name)) + self._u(62) for p in payloads)
+        if any(p.battery_percent is not None for p in payloads):
+            desired = max(desired, base + self._u(64))
+        return base + (max(base, desired) - base) * pose.reveal
+
+    def _base_music_target_width(self, expanded: bool | None = None) -> float:
         expanded = self.expanded if expanded is None else expanded
         instrumental = self._is_instrumental_track()
         lyric_lines = self._music_lyric_measurement_lines(self.lyrics, expanded=expanded)
@@ -10916,7 +10983,7 @@ class IslandStackVisual(QWidget):
         return "\n".join(" ".join(part.strip(" -—·:：[]【】()（）").split()) for part in str(lyric).splitlines()).strip()
 
     def _stack_target_width(self, main_kind: IslandKind) -> float:
-        return positioning_stack_target_width(
+        base = positioning_stack_target_width(
             main_kind,
             music_width=self._music_target_width(self.expanded) if main_kind == IslandKind.MUSIC else 0.0,
             empty_text_width=self._empty_text_island_size()[0] if main_kind == IslandKind.EMPTY_TEXT else 0.0,
@@ -10924,6 +10991,9 @@ class IslandStackVisual(QWidget):
             default_stack_width=float(self.STACK_WIDTH),
             unit=self._u(1.0),
         )
+        if main_kind in {IslandKind.EMPTY_TEXT, IslandKind.TIME, IslandKind.THIN_BAR, IslandKind.PLUGIN}:
+            return self._audio_device_target_width(base)
+        return base
 
     def _taskbar_compact_active(self) -> bool:
         return str(getattr(self, "location_mode", "free") or "free") == "tasker"
@@ -11236,6 +11306,19 @@ class IslandStackVisual(QWidget):
         return self._u(self._edge_notch_music_height_raw())
 
     def _main_size_for_kind(self, main_kind: IslandKind, stack_w: float) -> tuple[float, float]:
+        width, height = self._base_main_size_for_kind(main_kind, stack_w)
+        pose = self._audio_device_pose()
+        if pose is not None and main_kind in {IslandKind.EMPTY_TEXT, IslandKind.TIME, IslandKind.THIN_BAR, IslandKind.PLUGIN}:
+            # Keep the existing main identity and SpringRect; reminders retain
+            # their priority. Tasker never grows beyond its selected zone.
+            if self._taskbar_compact_active():
+                width, _unused = self._taskbar_compact_music_size(stack_w, self._taskbar_height())
+            else:
+                width = min(stack_w, self._audio_device_target_width(width))
+                height += (max(height, self._u(34)) - height) * pose.reveal
+        return width, height
+
+    def _base_main_size_for_kind(self, main_kind: IslandKind, stack_w: float) -> tuple[float, float]:
         taskbar_compact = self._taskbar_compact_active()
         expanded = bool(getattr(self, "expanded", False)) and not self._drag_hides_auxiliary_visuals()
         unit = self._u(1.0)
@@ -12106,6 +12189,9 @@ class IslandStackVisual(QWidget):
                     painter.setClipPath(self._edge_notch_path(rect, self._edge_notch_edge()))
                 if visual.kind == IslandKind.MUSIC:
                     self._paint_music(painter, rect, self.expanded)
+                elif (self._audio_device_pose() is not None and not visual.folded
+                      and visual.kind in {IslandKind.PLUGIN, IslandKind.EMPTY_TEXT, IslandKind.TIME, IslandKind.THIN_BAR}):
+                    self._paint_audio_device_idle_island(painter, rect, visual.kind)
                 elif visual.kind == IslandKind.PLUGIN:
                     self._paint_plugin(painter, rect, visual.folded)
                 elif visual.kind == IslandKind.PLUGIN_PANEL:
@@ -12940,6 +13026,17 @@ class IslandStackVisual(QWidget):
             expanded_layout_style=self._normalize_music_expanded_layout_style(getattr(self, "music_expanded_layout_style", "standard")),
             lyric_color_fill_paints_background=self._active_lyric_color_fill_paints_background(ambience_style),
         )
+        if not expanded and self._audio_device_pose() is not None:
+            # Render the same background once, without content. Sampling this
+            # raster includes album/white-bridge transitions and never reads
+            # the desktop, a previous icon, or an audio provider from paint.
+            self._paint_audio_device_background(painter, rect, radius, plan)
+            self._paint_music_compact(painter, rect)
+            for step in plan.steps:
+                if step in {"border", "yaoguang_compact_frame_overlay"}:
+                    self._execute_music_surface_paint_step(step, painter, rect, radius, False, plan.ambience_style)
+            self._record_visual_paint_section("music.total", total_started_at)
+            return
         try:
             for step in plan.steps:
                 step_started_at = time.perf_counter()
@@ -14179,6 +14276,157 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_music_compact(self, painter: QPainter, rect: QRectF):
+        pose = self._audio_device_pose()
+        if pose is None:
+            self._paint_music_compact_base(painter, rect)
+            return
+        painter.save()
+        painter.setClipPath(self._music_shell_path(rect, self._music_shell_radius(rect, False), False), Qt.ClipOperation.IntersectClip)
+        opacity = painter.opacity()
+        if pose.reveal < 1.0:
+            self._paint_audio_device_faded_layer(painter, rect, 1.0-pose.reveal,
+                lambda layer: self._paint_music_compact_base(layer, rect))
+        self.music_button_rects = {}
+        self.music_cover_rect = QRectF()
+        painter.setOpacity(opacity * pose.reveal)
+        content_rect = self._yaoguang_compact_background_rect(rect) if self._effective_music_ambience_style() == "yaoguang" else rect
+        self._paint_audio_device_content(painter, content_rect, pose, keep_lyrics=True)
+        painter.restore()
+
+    def _paint_audio_device_faded_layer(self, painter, rect, opacity, paint):
+        combined = painter.opacity()*opacity
+        if combined <= 0:
+            return
+        if combined >= .999:
+            paint(painter)
+            return
+        # Existing lyric styles own per-line opacity. Composite their live
+        # render as one layer so those values cannot override a notice fade.
+        dpr = max(1.0, float(painter.device().devicePixelRatioF()))
+        image = QImage(max(1, math.ceil(rect.width()*dpr)), max(1, math.ceil(rect.height()*dpr)), QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as layer:
+            layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+            layer.translate(-rect.left(), -rect.top())
+            paint(layer)
+        painter.save()
+        painter.setOpacity(combined)
+        painter.drawImage(rect.topLeft(), image)
+        painter.restore()
+
+    def _paint_audio_device_background(self, painter, rect, radius, plan):
+        dpr = max(1.0, float(painter.device().devicePixelRatioF()))
+        size = (max(1, math.ceil(rect.width() * dpr)), max(1, math.ceil(rect.height() * dpr)))
+        image = getattr(self, "_audio_device_background_image", None)
+        if image is None or (image.width(), image.height()) != size or image.devicePixelRatioF() != dpr:
+            image = QImage(*size, QImage.Format.Format_ARGB32_Premultiplied)
+            image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as background:
+            background.setRenderHint(QPainter.RenderHint.Antialiasing)
+            background.translate(-rect.left(), -rect.top())
+            for step in plan.steps:
+                if step not in {"compact_content", "expanded_content", "border", "yaoguang_compact_frame_overlay"}:
+                    self._execute_music_surface_paint_step(step, background, rect, radius, False, plan.ambience_style)
+        self._audio_device_background_image = image
+        self._audio_device_background_rect = QRectF(rect)
+        painter.drawImage(rect.topLeft(), image)
+
+    def _audio_device_ink(self, rect: QRectF) -> QColor:
+        image = getattr(self, "_audio_device_background_image", None)
+        bounds = getattr(self, "_audio_device_background_rect", QRectF())
+        if image is None or image.isNull() or bounds.isEmpty():
+            return self._music_control_icon_color(246)
+        dpr = image.devicePixelRatioF()
+        luminances = []
+        for fx in (.30, .50, .70):
+            for fy in (.35, .50, .65):
+                x = min(image.width()-1, max(0, round((rect.left() + rect.width()*fx - bounds.left())*dpr)))
+                y = min(image.height()-1, max(0, round((rect.top() + rect.height()*fy - bounds.top())*dpr)))
+                color = image.pixelColor(x, y)
+                if color.alpha() >= 180:
+                    luminances.append(relative_luminance(color))
+        if not luminances:
+            return self._music_control_icon_color(246)
+        # Black/white contrast crossover, using the actual background only.
+        return QColor(24, 26, 29) if sum(luminances)/len(luminances) > .179 else QColor(244, 246, 248)
+
+    def _paint_audio_device_content(self, painter, rect, pose, *, keep_lyrics):
+        pad = min(self._u(12), rect.width()*.06)
+        glyph_size = max(1.0, min(self._u(31), rect.height()*.72, rect.width()*.22))
+        ring_size = max(1.0, min(self._u(24), rect.height()*.62, rect.width()*.19))
+        glyph = QRectF(rect.left()+pad, rect.center().y()-glyph_size/2, glyph_size, glyph_size)
+        ring = QRectF(rect.right()-pad-ring_size, rect.center().y()-ring_size/2, ring_size, ring_size)
+        center = QRectF(glyph.right()+pad, rect.top()+self._u(2), max(0, ring.left()-glyph.right()-pad*2), max(1, rect.height()-self._u(4)))
+        name_rect = QRectF(center.left(), center.top(), max(0, rect.right()-pad-center.left()), center.height())
+        payloads = [(pose.payload, 1.0)] if pose.previous is None else [(pose.previous, 1-pose.content_blend), (pose.payload, pose.content_blend)]
+        base_opacity = painter.opacity()
+        battery_weight = 0.0
+        font = self._font(min(self._compact_primary_lyric_font_size(), max(9, int(rect.height()*.46))), QFont.Weight.Medium, shrink=False)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for payload, weight in payloads:
+            if weight <= 0:
+                continue
+            painter.setOpacity(base_opacity*weight)
+            moved = glyph.translated(-self._u(6)*(1-pose.reveal), 0)
+            paint_audio_output_icon(painter, moved, payload.kind, self._audio_device_ink(glyph))
+            percent = payload.battery_percent
+            if percent is not None:
+                battery_weight += weight
+                ink = self._audio_device_ink(ring)
+                track = QColor(ink)
+                track.setAlpha(54)
+                stroke = min(self._u(3), ring_size*.13)
+                arc = ring.adjusted(stroke/2, stroke/2, -stroke/2, -stroke/2)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(track, stroke))
+                painter.drawEllipse(arc)
+                green = QColor(23, 135, 60) if ink.red() < 128 else QColor(80, 222, 119)
+                painter.setPen(QPen(green, stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                if percent > 0:
+                    painter.drawArc(arc, 90*16, -round(360*16*percent/100))
+            if percent is None or not keep_lyrics:
+                painter.setFont(font)
+                painter.setPen(self._audio_device_ink(name_rect))
+                text_bounds = name_rect if percent is None else center
+                label = QFontMetrics(font).elidedText(payload.name, Qt.TextElideMode.ElideRight, max(0, int(text_bounds.width())))
+                painter.drawText(text_bounds, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+        if keep_lyrics and battery_weight > 0 and center.width() > 2:
+            painter.setOpacity(base_opacity)
+            self._paint_audio_device_faded_layer(painter, center, battery_weight,
+                lambda layer: self._paint_compact_lyric_viewport(layer, center))
+        painter.restore()
+
+    def _paint_audio_device_idle_island(self, painter, rect, kind):
+        pose = self._audio_device_pose()
+        if pose is None:
+            return
+        opacity = painter.opacity()
+        painter.save()
+        if pose.reveal < 1:
+            def original(layer):
+                if kind == IslandKind.PLUGIN:
+                    self._paint_plugin(layer, rect, False)
+                elif kind == IslandKind.EMPTY_TEXT:
+                    self._paint_empty_text_island(layer, rect)
+                elif kind == IslandKind.TIME:
+                    self._paint_empty_time_island(layer, rect)
+                else:
+                    self._paint_thin_bar(layer, rect)
+            self._paint_audio_device_faded_layer(painter, rect, 1-pose.reveal, original)
+        painter.setOpacity(opacity*pose.reveal)
+        style = self._effective_music_ambience_style()
+        plan = presentation_music_surface_paint_plan(expanded=False, ambience_style=style,
+            expanded_layout_style="standard", lyric_color_fill_paints_background=self._active_lyric_color_fill_paints_background(style))
+        radius = self._music_shell_radius(rect, False)
+        self._paint_audio_device_background(painter, rect, radius, plan)
+        painter.setClipPath(self._music_shell_path(rect, radius, False), Qt.ClipOperation.IntersectClip)
+        self._paint_audio_device_content(painter, rect, pose, keep_lyrics=False)
+        painter.restore()
+
+    def _paint_music_compact_base(self, painter: QPainter, rect: QRectF):
         self.music_button_rects = {}
         if self._taskbar_cover_only_music_active(rect):
             self._paint_taskbar_cover_only_music(painter, rect)

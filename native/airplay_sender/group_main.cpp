@@ -235,19 +235,39 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
         aggregate.requestedMinLatencyFrames = d.requestedMinLatencyFrames;
         if (!d.lastError.empty()) aggregate.lastError = d.lastError;
     }
+    uint64_t timingFrames = aggregate.audioFramesSent;
+    uint32_t presentationFrames = aggregate.protocolLatencyFrames + aggregate.requestedMinLatencyFrames;
+    if (members.empty()) {
+        // Empty network membership is not UINT64_MAX transport success. The
+        // local renderers own playback evidence, separately from network stats.
+        aggregate.audioFramesSent = aggregate.nonzeroSamplesSent = aggregate.meaningfulSamplesSent = 0;
+        aggregate.eventConnected = aggregate.eventKeyed = false;
+        aggregate.protocolLatencyFrames = aggregate.requestedMinLatencyFrames = 0;
+        aggregate.coordinatedTimelineArmed = false;
+        presentationFrames = windowsGroupPresentationFrames;
+#if GLUSPOT_HAS_LOCAL_RENDERER
+        const auto progress = locals.progress();
+        timingFrames = progress.writtenFrames;
+        aggregate.coordinatedTimelineArmed = progress.ready;
+#else
+        timingFrames = 0;
+#endif
+    }
     const auto queued = capture.ring().availableRead() / 2 + conditionedFrames;
 #if GLUSPOT_HAS_LOCAL_RENDERER
     flowing = flowing && locals.hasMeaningfulPcm();
 #endif
-    const auto estimate = timing.sample({capture.frames.load(), aggregate.audioFramesSent, paddedFrames,
+    const auto estimate = timing.sample({capture.frames.load(), timingFrames, paddedFrames,
         capture.droppedSamples.load(), capture.discontinuities.load(), queued, 44100,
-        aggregate.protocolLatencyFrames + aggregate.requestedMinLatencyFrames, flowing});
+        presentationFrames, flowing});
     const auto signal = capture.signal(true);
     std::cout << "{\"event\":\"stats\",\"captured_frames\":" << capture.frames.load()
               << ",\"dropped_samples\":" << capture.droppedSamples.load() << ",\"discontinuities\":" << capture.discontinuities.load()
               << ",\"protocol\":"; protocol(std::cout, aggregate, paddedFrames, queued);
-    std::cout << ",\"timing\":{\"method\":\"protocol_plus_input_queue\",\"estimated_delay_ms\":" << estimate.delayMs()
-              << ",\"protocol_buffer_ms\":" << estimate.protocolBufferMs << ",\"input_queue_ms\":" << estimate.inputQueueMs
+    std::cout << ",\"timing\":{\"method\":" << quoted(members.empty() ? "windows_shared_pcm_clock" : "protocol_plus_input_queue")
+              << ",\"estimated_delay_ms\":" << estimate.delayMs()
+              << (members.empty() ? ",\"presentation_buffer_ms\":" : ",\"protocol_buffer_ms\":") << estimate.protocolBufferMs
+              << ",\"input_queue_ms\":" << estimate.inputQueueMs
               << ",\"rtp_buffer_ms\":" << 1000.0 * aggregate.protocolLatencyFrames / 44100
               << ",\"requested_min_latency_ms\":" << 1000.0 * aggregate.requestedMinLatencyFrames / 44100
               << ",\"valid\":" << (estimate.valid ? "true" : "false") << '}'
@@ -257,7 +277,10 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
     if (signal.lastNonzeroAgeMs) std::cout << *signal.lastNonzeroAgeMs; else std::cout << "null";
     std::cout << ",\"last_meaningful_age_ms\":";
     if (signal.lastMeaningfulAgeMs) std::cout << *signal.lastMeaningfulAgeMs; else std::cout << "null";
-    std::cout << ",\"peak\":" << signal.peak << "},\"group\":{\"method\":\"shared_pcm_rtp_ntp\",\"members\":" << members.size()
+    std::cout << ",\"peak\":" << signal.peak << "},\"group\":{\"method\":"
+              << quoted(members.empty() ? "shared_pcm_local_clock" : "shared_pcm_rtp_ntp")
+              << ",\"members\":" << members.size() + args.localEndpoints.size()
+              << ",\"airplay_members\":" << members.size()
               << ",\"timeline_frame\":" << timelineFrame << ",\"music_pid\":" << args.musicPid
               << ",\"music_created_at\":" << args.musicCreatedAt << ",\"local_endpoints\":[";
     for (size_t index = 0; index < args.localEndpoints.size(); ++index) {
@@ -411,14 +434,16 @@ int runGroupHelper(int argc, wchar_t** argv) {
                         fail("Cannot arm every receiver on the shared group timeline"); break;
                     }
                 if (failed) break;
-                const auto policy = members.front()->sender->diagnostics();
-                const auto presentationFrames = groupPresentationFrames(
-                    policy.protocolLatencyFrames, policy.requestedMinLatencyFrames);
-                if (!std::all_of(members.begin(), members.end(), [&policy](const auto& member) {
-                    const auto d = member->sender->diagnostics();
-                    return d.protocolLatencyFrames == policy.protocolLatencyFrames &&
-                           d.requestedMinLatencyFrames == policy.requestedMinLatencyFrames;
-                })) { fail("Receivers do not share the same presentation latency policy"); break; }
+                auto presentationFrames = windowsGroupPresentationFrames;
+                if (!members.empty()) {
+                    const auto policy = members.front()->sender->diagnostics();
+                    presentationFrames = groupPresentationFrames(policy.protocolLatencyFrames, policy.requestedMinLatencyFrames);
+                    if (!std::all_of(members.begin(), members.end(), [&policy](const auto& member) {
+                        const auto d = member->sender->diagnostics();
+                        return d.protocolLatencyFrames == policy.protocolLatencyFrames &&
+                               d.requestedMinLatencyFrames == policy.requestedMinLatencyFrames;
+                    })) { fail("Receivers do not share the same presentation latency policy"); break; }
+                }
 #if GLUSPOT_HAS_LOCAL_RENDERER
                 if (const auto error = locals.arm(sendStart, presentationFrames); !error.empty()) { fail(error); break; }
 #endif
@@ -467,7 +492,11 @@ int runGroupHelper(int argc, wchar_t** argv) {
 #if GLUSPOT_HAS_LOCAL_RENDERER
             localSignalReady = locals.hasMeaningfulPcm();
 #endif
-            if (groupArmed && localSignalReady && !streaming && std::all_of(members.begin(), members.end(), [&signal](const auto& member) {
+            bool sourceSignalReady = !members.empty();
+#if GLUSPOT_HAS_LOCAL_RENDERER
+            if (members.empty()) sourceSignalReady = hasStreamingSignal(signal, locals.progress().meaningfulSamples);
+#endif
+            if (groupArmed && sourceSignalReady && localSignalReady && !streaming && std::all_of(members.begin(), members.end(), [&signal](const auto& member) {
                     return hasStreamingSignal(signal, member->sender->diagnostics().meaningfulSamplesSent);
                 })) {
                 streaming = true;

@@ -262,8 +262,9 @@ and `--source-endpoint`. Each receiver is explicit and starts with
 `--receiver-id`, followed by `--host`, `--port`, `--device-id`, and `--name`.
 Repeat `--local-endpoint` once for each Windows/Bluetooth member. Every local
 output must be distinct from the suppressed source and from every other local
-output, with the original opaque endpoint ID retained. At least one AirPlay
-receiver and at most eight total outputs are allowed. Invalid arguments are rejected before Windows state or
+output, with the original opaque endpoint ID retained. A group accepts at least
+two Windows outputs without AirPlay, or the existing AirPlay membership, up to
+eight total playback outputs. Invalid arguments are rejected before Windows state or
 receiver networking is touched.
 
 The host uses one verified INCLUDE process-tree capture, an all-SETUP barrier,
@@ -275,6 +276,23 @@ and uses its own endpoint clock for continuous bounded drift correction. All
 renderers arm against the same presentation epoch; their reads never consume
 the shared history or another renderer’s cursor. It does
 not consume the capture ring or invent a Bluetooth acoustic delay.
+
+Without network receivers, the same capture, source mute guard, conditioned PCM
+history and local renderer barrier run against one steady-clock epoch. This
+path retains the existing 77175-frame (1.75 s) presentation reserve; reducing it
+to 250 ms would not cover the supported WASAPI render queues. The reserve is a
+scheduling budget, not measured Bluetooth delay. No socket, authentication or
+RTP sender is created. A separate available source endpoint remains required;
+the application routes verified music to an unoccupied spare when its current
+endpoint is a playback member, and restores that route on stop/failure.
+
+Pure-local stats identify `group.method: shared_pcm_local_clock`, total
+`group.members`, zero `group.airplay_members`, and
+`timing.method: windows_shared_pcm_clock`. Their timing base is
+`presentation_buffer_ms`, not a fictitious protocol buffer. Network counters
+remain zero; streaming and valid estimates require meaningful recent capture
+and every local renderer's actual PCM evidence. Independent Bluetooth radios,
+codec buffers and device DSP still require physical synchronization checks.
 
 Group stats append named `members`, `group.local_endpoints`, and a
 `local_renders` array whose entries include `endpoint_id` and per-output clock,

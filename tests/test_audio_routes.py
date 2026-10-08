@@ -1235,12 +1235,14 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertIn("空闲电脑输出", self.controller.snapshot().status_message)
         self.assertEqual(self.controller.snapshot().member_ids, ())
 
-    def test_windows_only_toggle_keeps_existing_explicit_default_selection(self):
+    def test_windows_only_second_checkbox_requires_safe_capture_spare(self):
         self.controller.toggle("headphones")
         self.controller._step()
-        self.assertEqual(self.backend.selected, ["headphones"])
+        self.assertEqual(self.backend.selected, [])
         self.assertEqual(self.group.starts, [])
-        self.assertEqual(self.controller.snapshot().active_id, "headphones")
+        self.assertEqual(self.controller.snapshot().active_id, "speakers")
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("空闲电脑输出", self.controller.snapshot().status_message)
 
     def test_remove_last_homepod_returns_remaining_bluetooth_to_local_selection(self):
         self._stream()
@@ -2040,7 +2042,10 @@ class AudioRouteModeBoundaryTests(unittest.TestCase):
         self.assertEqual(self.backend.volume_calls, [])
 
     def test_current_local_default_does_not_implicitly_join_first_receiver(self):
-        self._toggle("headphones")
+        # Explicit single-device selection remains available; a second checked
+        # Windows output now intentionally creates a music-only local group.
+        self.controller.select("headphones")
+        self.controller._step()
         self.assertEqual(self.backend.selected, ["headphones"])
         snapshot = self._toggle(HOME.id)
         self.assertEqual(snapshot.capture_scope, "all_system")

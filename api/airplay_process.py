@@ -29,6 +29,7 @@ class AirPlayProcess:
     CONNECT_TIMEOUT = 25.0
     TIMING_MAX_AGE = 2.0
     STOP_TIMEOUT = 1.5
+    TIMING_METHODS = frozenset({"protocol_plus_input_queue"})
 
     def __init__(self, executable=None, popen=None, *, source_id="", exclusive_output=True):
         self.executable = Path(executable) if executable is not None else engine_path()
@@ -252,8 +253,9 @@ class AirPlayProcess:
         """Fresh sender buffer estimate in seconds, or None; never acoustic latency.
 
         The fixed RTP buffer and the input queue have different sample rates.
-        Native stats convert each separately. Group mode also includes its
-        declared AP2 render lead; this is not measured receiver/network latency.
+        Native stats convert each separately. AirPlay groups include their
+        declared AP2 render lead; Windows-only groups identify their shared
+        presentation reserve separately. Neither measures acoustic latency.
         Reading this single retained snapshot does not touch the helper pipes.
         """
         with self._diagnostic_lock:
@@ -262,10 +264,12 @@ class AirPlayProcess:
             if (self._process is None or not self._last_stats_at or self._last_terminal or
                     self._stopped_at or age < 0 or age > self.TIMING_MAX_AGE or
                     not isinstance(timing, dict) or timing.get("valid") is not True or
-                    timing.get("method") != "protocol_plus_input_queue"):
+                    timing.get("method") not in self.TIMING_METHODS):
                 return None
+            base_key = ("presentation_buffer_ms" if timing["method"] == "windows_shared_pcm_clock"
+                        else "protocol_buffer_ms")
             values = tuple(timing.get(key) for key in (
-                "estimated_delay_ms", "protocol_buffer_ms", "input_queue_ms"))
+                "estimated_delay_ms", base_key, "input_queue_ms"))
             if any(isinstance(value, bool) or not isinstance(value, (int, float))
                    for value in values):
                 return None
@@ -277,9 +281,11 @@ class AirPlayProcess:
                 return None
             if not math.isclose(delay, protocol + queued, abs_tol=0.1):
                 return None
-            return {"seconds": delay / 1000.0, "source": timing["method"],
-                    "sample_age_seconds": age, "protocol_buffer_seconds": protocol / 1000.0,
-                    "input_queue_seconds": queued / 1000.0}
+            result = {"seconds": delay / 1000.0, "source": timing["method"],
+                      "sample_age_seconds": age, "input_queue_seconds": queued / 1000.0}
+            result["presentation_buffer_seconds" if base_key == "presentation_buffer_ms"
+                   else "protocol_buffer_seconds"] = protocol / 1000.0
+            return result
 
     @staticmethod
     def _read_events(process, events, on_event=None):

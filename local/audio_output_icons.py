@@ -17,10 +17,11 @@ _ICON_FILES = {
     "homepod": "homepod.fill.svg",
     "homepod-mini": "homepod.mini.fill.svg",
     "airpods-pro": "airpods.pro.svg",
+    "airpods": "airpods.fill.svg",
 }
 
 _STATUS_KINDS = frozenset({
-    "homepod", "homepod-mini", "airpods-pro", "headphones", "speaker", "airplay", "device",
+    "homepod", "homepod-mini", "airpods-pro", "airpods", "headphones", "speaker", "airplay", "device",
 })
 _OPAQUE_ALPHA_TABLE = bytes(0 if value == 0 else 255 for value in range(256))
 
@@ -29,8 +30,7 @@ def _icon_kind(kind: str) -> str:
     key = str(kind or "").lower().replace("_", "-")
     return {"link": "output", "homepodmini": "homepod-mini", "speakers": "speaker",
             "headphone": "headphones", "headset": "headphones", "earphone": "headphones",
-            "earphones": "headphones", "earbuds": "headphones",
-            "airpods": "headphones"}.get(key, key)
+            "earphones": "headphones", "earbuds": "headphones"}.get(key, key)
 
 
 @lru_cache(maxsize=8)

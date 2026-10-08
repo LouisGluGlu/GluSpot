@@ -143,7 +143,7 @@ class AudioRouteController:
         return self._enqueue("select", device_id)
 
     def toggle(self, device_id):
-        """One AirPlay output casts computer sound; two or more share music."""
+        """One output selects computer sound; two or more share only music."""
         current = self.snapshot()
         if not any(d.id == device_id and (d.available or device_id in
                    current.member_ids + current.pending_ids) for d in current.devices):
@@ -210,7 +210,8 @@ class AudioRouteController:
             raw = self._backend.list_outputs()
             local = tuple(AudioRouteDevice(d.id, d.name, d.kind, "windows", d.is_bluetooth, d.is_default,
                                            volume=self._volume_scalar(getattr(d, "volume", None)),
-                                           volume_muted=bool(getattr(d, "volume_muted", False)))
+                                           volume_muted=bool(getattr(d, "volume_muted", False)),
+                                           **self._battery_fields(d))
                           for d in raw)
         except Exception as exc:
             self._endpoint_error = True
@@ -242,8 +243,10 @@ class AudioRouteController:
             self._publish(state="error", status_message="同步播放的电脑或蓝牙设备已断开，请重新选择")
         elif (self._cast_source_id and default_id and default_id !=
               (self._cast_started_default_id if self._group_mode else self._cast_source_id)):
+            message = ("电脑输出已改变，同步播放已停止；请重新选择设备" if self._group_mode else
+                       "电脑输出已改变，HomePod 投放已停止；请重新选择 HomePod")
             self._end_cast()
-            self._publish(state="error", status_message="电脑输出已改变，HomePod 投放已停止；请重新选择 HomePod")
+            self._publish(state="error", status_message=message)
         current = self.snapshot()
         active = self._cast_id or default_id
         state = current.state
@@ -252,6 +255,27 @@ class AudioRouteController:
         self._publish(active_id=active, state=state)
         self._merge_devices()
         return True
+
+    @staticmethod
+    def _battery_fields(device):
+        """Accept only recent exact-device driver evidence from the worker."""
+        unknown = {"battery_percent": None, "battery_source": "", "battery_observed_at": None}
+        percent = getattr(device, "battery_percent", None)
+        source = getattr(device, "battery_source", "")
+        observed = getattr(device, "battery_observed_at", None)
+        if (not getattr(device, "is_bluetooth", False) or type(percent) is not int or
+                not 0 <= percent <= 100 or source != "windows-driver-cache" or
+                isinstance(observed, bool) or not isinstance(observed, (int, float))):
+            return unknown
+        try:
+            observed = float(observed)
+        except OverflowError:
+            return unknown
+        if (not math.isfinite(observed) or observed <= 0 or
+                not 0 <= time.time() - observed <= 30.0):
+            return unknown
+        return {"battery_percent": percent, "battery_source": source,
+                "battery_observed_at": observed}
 
     def _merge_devices(self):
         remote = {d.id: d for d in self._discovery.devices()}
@@ -506,10 +530,13 @@ class AudioRouteController:
         if device is None or not device.available and identity not in selected:
             self._publish(status_message="设备已断开，请刷新后重试")
             return
-        if device.transport == "windows" and not any(
-                devices.get(member) is not None and devices[member].transport == "airplay" for member in selected):
-            self._select(identity)
-            return
+        if not selected and device.transport == "windows":
+            # The chooser already marks the normal Windows default as checked.
+            # Checking another Windows output extends that explicit visible
+            # selection; a first AirPlay choice still casts alone as before.
+            active = devices.get(current.active_id)
+            if active is not None and active.transport == "windows" and active.available:
+                selected = [active.id]
         if identity in selected:
             selected.remove(identity)
         else:
@@ -517,16 +544,10 @@ class AudioRouteController:
         if len(selected) > AirPlayGroupProcess.MAX_SINKS:
             self._publish(status_message="同步播放最多支持 8 个输出设备")
             return
-        receivers = [member for member in selected if devices.get(member) is not None and devices[member].transport == "airplay"]
-        if not receivers:
-            local = next((member for member in selected if devices.get(member) is not None
-                          and devices[member].transport == "windows"), "")
+        if not selected:
             self._end_cast()
-            if local:
-                self._select(local)
-            else:
-                self._publish_stopped("同步播放已停止")
-                self._refresh_devices()
+            self._publish_stopped("同步播放已停止")
+            self._refresh_devices()
             return
         if len(selected) == 1:
             # Membership count is the public boundary, including when a group
@@ -629,7 +650,10 @@ class AudioRouteController:
             self._capture_session_started_at = time.monotonic()
             self._group_source = source
             self._group_sender.start_group(selected, source, source_endpoint)
-            self._cast_id = next(device.id for device in selected if device.transport == "airplay")
+            # _cast_id is the running helper's representative output identity,
+            # also used to fence stale events. A Windows-only group retains the
+            # same lifecycle instead of inventing another parallel sender path.
+            self._cast_id = next((device.id for device in selected if device.transport == "airplay"), selected[0].id)
             self._publish(state="connecting", pending_id=self._cast_id, cast_source_id=source_endpoint,
                           status_message="正在连接同步播放设备")
         except Exception as exc:
@@ -887,7 +911,8 @@ class AudioRouteController:
         if terminal is None:
             terminal = next((e for e in events if e.get("event") == "stopped"), None)
         if terminal is not None:
-            message = str(terminal.get("message") or "HomePod 投放已中断")[:240]
+            message = str(terminal.get("message") or
+                          ("同步播放已中断" if self._group_mode else "HomePod 投放已中断"))[:240]
             self._end_cast()
             self._refresh_devices()
             self._publish(state="error", status_message=message, pending_id="")

@@ -28,6 +28,7 @@ import re
 import struct
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -41,6 +42,9 @@ class AudioOutputDevice:
     is_default: bool = False
     volume: float | None = None
     volume_muted: bool = False
+    battery_percent: int | None = None
+    battery_source: str = ""
+    battery_observed_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,33 @@ class _Endpoint:
     name: str
     form_factor: int | None = None
     is_bluetooth: bool = False
+    battery_percent: int | None = None
+    battery_source: str = ""
+    battery_observed_at: float | None = None
+
+
+def _endpoint_kind(form_factor: int | None, name: str) -> str:
+    """Identify explicit headphone models without deciding their transport.
+
+    Python's Unicode ``\\b`` treats a Chinese owner's name and ``AirPods`` as
+    one word. ASCII model-token boundaries accept that normal device name while
+    rejecting identifiers such as ``NotAirPods`` or ``AirPodsPro``. Windows'
+    render form factor remains required; a speaker or PnP accessory name alone
+    cannot establish that it is an AirPods audio endpoint.
+    """
+    kind = {1: "speaker", 3: "headphones", 5: "headset"}.get(form_factor, "device")
+    if kind not in {"headphones", "headset"}:
+        return kind
+    model = re.search(r"(?<![A-Za-z0-9_])AirPods(?![A-Za-z0-9_])", name or "", re.IGNORECASE)
+    if model is None:
+        return kind
+    suffix = (name or "")[model.end():]
+    if re.match(r"\s+Max(?![A-Za-z0-9_])", suffix, re.IGNORECASE):
+        # The supplied regular/Pro earbuds assets do not represent AirPods Max.
+        return kind
+    if re.match(r"\s+Pro(?![A-Za-z0-9_])", suffix, re.IGNORECASE):
+        return "airpods-pro"
+    return "airpods"
 
 
 class WindowsAudioDevices:
@@ -96,13 +127,8 @@ class WindowsAudioDevices:
                     # An endpoint can vanish or lack volume support while the
                     # output list itself remains valid. Unknown is not zero.
                     volume, muted = None, False
-                kind = {1: "speaker", 3: "headphones", 5: "headset"}.get(endpoint.form_factor, "device")
-                if kind in {"headphones", "headset"} and re.search(
-                    r"\bAirPods\s+Pro\b", endpoint.name or "", re.IGNORECASE,
-                ):
-                    # Explicit model text selects a glyph only. The PnP
-                    # container remains the authority for Bluetooth transport.
-                    kind = "airpods-pro"
+                battery = self._validated_battery(endpoint) if endpoint.is_bluetooth else (None, "", None)
+                kind = _endpoint_kind(endpoint.form_factor, endpoint.name)
                 result.append(AudioOutputDevice(
                     id=endpoint.id,
                     name=endpoint.name or "音频设备",
@@ -111,6 +137,9 @@ class WindowsAudioDevices:
                     is_default=endpoint.id == default_id,
                     volume=volume,
                     volume_muted=muted,
+                    battery_percent=battery[0],
+                    battery_source=battery[1],
+                    battery_observed_at=battery[2],
                 ))
             return tuple(result)
 
@@ -216,6 +245,25 @@ class WindowsAudioDevices:
                 raise RuntimeError("Windows did not confirm the selected endpoint mute")
 
     @staticmethod
+    def _validated_battery(endpoint):
+        """Keep unavailable/stale driver evidence separate from an empty cell."""
+        percent = getattr(endpoint, "battery_percent", None)
+        source = getattr(endpoint, "battery_source", "")
+        observed = getattr(endpoint, "battery_observed_at", None)
+        if (type(percent) is not int or not 0 <= percent <= 100 or
+                source != "windows-driver-cache" or isinstance(observed, bool) or
+                not isinstance(observed, (int, float))):
+            return None, "", None
+        try:
+            observed = float(observed)
+        except OverflowError:
+            return None, "", None
+        age = time.time() - observed
+        if not math.isfinite(observed) or observed <= 0 or not 0 <= age <= 30.0:
+            return None, "", None
+        return percent, source, observed
+
+    @staticmethod
     def _validate_endpoint_id(device_id):
         if not isinstance(device_id, str) or not device_id or "\0" in device_id:
             raise ValueError("A valid output endpoint ID is required")
@@ -277,6 +325,9 @@ _CONTAINER_ID = _key("8c7ed206-3f8a-4827-b3ab-ae9e1faefc6c", 2)
 _DISABLE_SYSFX = _key("1da5d803-d492-4edd-8c23-e0c0ffee7f0e", 5)
 _DRIVER_VERSION = _key("a8b865dd-2e3d-4094-ad97-e593a70c75d6", 3)
 _DRIVER_PROVIDER = _key("a8b865dd-2e3d-4094-ad97-e593a70c75d6", 9)
+# Bluetooth HFP driver battery metadata observed on this Windows host. This
+# optional DEVPKEY is absent on many accessories, including the present AirPods.
+_BLUETOOTH_BATTERY_PERCENT = _key("104ea319-6ee2-4701-bd47-8ddbf425bbe5", 2)
 _MM_ENUMERATOR = "bcde0395-e52f-467c-8e3d-c4579291692e"
 _IID_ENUMERATOR = "a95664d2-9614-4f35-a746-de8db63617e6"
 _POLICY_CONFIG = "870af99c-171d-4f9e-af0d-e63df40c2bc9"
@@ -574,7 +625,8 @@ class _WindowsCoreAudioAdapter:
                                                   None, ctypes.byref(size), 0)
         if status not in (0, 26) or prop_type.value != expected_type or not 1 <= size.value <= 65536:
             return None  # CR_SUCCESS / CR_BUFFER_SMALL; unknown is not empty.
-        if expected_type == 13 and size.value != 16:
+        if (expected_type == 13 and size.value != 16 or
+                expected_type == 3 and size.value != 1):
             return None
         buffer = ctypes.create_string_buffer(size.value)
         status = self._cfg.CM_Get_DevNode_PropertyW(node, ctypes.byref(key), ctypes.byref(prop_type),
@@ -584,6 +636,8 @@ class _WindowsCoreAudioAdapter:
         raw = bytes(buffer[:size.value])
         if expected_type == 13:
             return raw if len(raw) == 16 and any(raw) else None
+        if expected_type == 3:  # DEVPROP_TYPE_BYTE; Boolean has a different type.
+            return raw[0] if len(raw) == 1 else None
         if expected_type == 0x12:  # DEVPROP_TYPE_STRING, UTF-16 with trailing NUL.
             try:
                 value = raw.decode("utf-16-le")
@@ -613,33 +667,53 @@ class _WindowsCoreAudioAdapter:
             drivers.append((instance, version, provider))
         return tuple(drivers)
 
-    def _bluetooth_containers(self):
-        """Match endpoint container GUIDs to present Bluetooth PnP nodes.
+    def _bluetooth_evidence(self):
+        """Join present remote-device containers and their optional battery cache.
 
-        Friendly names are not evidence of transport. Missing driver properties
-        result in an ordinary device, rather than a guessed Bluetooth badge.
+        A Bluetooth service can live in the computer's own container (e.g. a
+        serial COM port). A service-only match cannot turn Realtek into Bluetooth
+        or lend another accessory's battery to it. Physical DEV_<address> nodes
+        establish container ownership; present Bluetooth profile nodes inside
+        that exact container can then supply the byte-valued driver cache.
+        No addresses/names are guessed, paired, scanned or retained in snapshots.
         """
         instances = self._present_device_ids()
         if instances is None:
-            return set()
+            return set(), {}
         cfg = self._cfg
-        containers = set()
+        containers, nodes = set(), []
         for instance_id in instances:
-            if not instance_id.upper().startswith(("BTHENUM\\", "BTHLEDEVICE\\", "BTHHFENUM\\")):
+            upper_id = instance_id.upper()
+            if not upper_id.startswith(("BTHENUM\\", "BTHLE\\", "BTHLEDEVICE\\", "BTHHFENUM\\")):
                 continue
             node = _DWORD()
             if cfg.CM_Locate_DevNodeW(ctypes.byref(node), instance_id, 0) != 0:
                 continue
-            value = _GUID()
-            size, prop_type = _DWORD(16), _DWORD()
-            status = cfg.CM_Get_DevNode_PropertyW(node, ctypes.byref(_CONTAINER_ID), ctypes.byref(prop_type),
-                                               ctypes.byref(value), ctypes.byref(size), 0)
-            if status == 0 and prop_type.value == 13 and size.value == 16 and any(value.bytes()):
-                containers.add(value.bytes())  # DEVPROP_TYPE_GUID
-        return containers
+            container = self._node_property(node, _CONTAINER_ID, 13)
+            if container is None:
+                continue
+            nodes.append((node, container))
+            if re.fullmatch(r"(?:BTHENUM|BTHLE)\\DEV_[0-9A-F]{12}\\[^\\]+", upper_id):
+                containers.add(container)
+        values = {}
+        for node, container in nodes:
+            if container not in containers:
+                continue
+            percent = self._node_property(node, _BLUETOOTH_BATTERY_PERCENT, 3)
+            if type(percent) is int and 0 <= percent <= 100:
+                values.setdefault(container, set()).add(percent)
+        observed = time.time()
+        # Multiple disagreeing values cannot identify one device-level battery.
+        batteries = {container: (next(iter(samples)), "windows-driver-cache", observed)
+                     for container, samples in values.items() if len(samples) == 1}
+        return containers, batteries
+
+    def _bluetooth_containers(self):
+        """Compatibility seam: exact physical Bluetooth containers only."""
+        return self._bluetooth_evidence()[0]
 
     def snapshot(self):
-        bluetooth = self._bluetooth_containers()
+        bluetooth, batteries = self._bluetooth_evidence()
         with _ComScope(self._ole32) as scope:
             enumerator = scope.create(_MM_ENUMERATOR, _IID_ENUMERATOR)
             defaults = {}
@@ -676,7 +750,9 @@ class _WindowsCoreAudioAdapter:
                     name = self._property(store, _FRIENDLY_NAME)
                     factor = self._property(store, _FORM_FACTOR)
                     container = self._property(store, _CONTAINER_ID)
-                endpoints.append(_Endpoint(device_id, name or "音频设备", factor, container in bluetooth))
+                battery = batteries.get(container, (None, "", None))
+                endpoints.append(_Endpoint(device_id, name or "音频设备", factor,
+                                           container in bluetooth, *battery))
             return tuple(endpoints), defaults
 
     def set_defaults(self, device_id, previous_defaults):

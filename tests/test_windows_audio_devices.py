@@ -278,8 +278,46 @@ class WindowsAudioDevicesTests(unittest.TestCase):
             _Endpoint("speaker", "AirPods Pro speaker", 1, False),
         )
         devices = self.backend.list_outputs()
-        self.assertEqual([d.kind for d in devices], ["airpods-pro", "headphones", "speaker"])
+        self.assertEqual([d.kind for d in devices], ["airpods-pro", "airpods", "speaker"])
         self.assertFalse(devices[0].is_bluetooth)
+
+    def test_airpods_models_accept_chinese_owner_names_and_keep_separate_kinds(self):
+        cases = (
+            ("耳机 (无惧的AirPods Pro - Find My)", 3, "airpods-pro"),
+            ("无想的airpods pro", 5, "airpods-pro"),
+            ("小李的AirPods Pro第二代", 3, "airpods-pro"),
+            ("小李的AirPods", 3, "airpods"),
+            ("Headphones (AirPods 4)", 3, "airpods"),
+            ("AirPods (3rd generation)", 5, "airpods"),
+            ("Headphones (AirPods Max)", 3, "headphones"),
+            ("小李的AirPods Max", 5, "headset"),
+        )
+        for name, factor, expected in cases:
+            with self.subTest(name=name, factor=factor):
+                self.adapter.endpoints = (_Endpoint("bt", name, factor, True),)
+                device, = self.backend.list_outputs()
+                self.assertEqual(device.kind, expected)
+                self.assertTrue(device.is_bluetooth)
+        self.assertEqual(self.adapter.calls, [])
+        self.assertEqual(self.adapter.mute_calls, [])
+        self.assertEqual(self.adapter.volume_calls, [])
+
+    def test_airpods_model_names_need_full_tokens_and_headphone_form_factor(self):
+        cases = (
+            ("NotAirPods Pro", 3, "headphones"),
+            ("AirPodsPro", 3, "headphones"),
+            ("AirPods2", 5, "headset"),
+            ("AirPods Professional", 3, "airpods"),
+            ("AirPods Pro speaker", 1, "speaker"),
+            ("AirPods Pro - Find My", None, "device"),
+            ("AirPods", 999, "device"),
+        )
+        for name, factor, expected in cases:
+            with self.subTest(name=name, factor=factor):
+                self.adapter.endpoints = (_Endpoint("bt", name, factor, False),)
+                device, = self.backend.list_outputs()
+                self.assertEqual(device.kind, expected)
+                self.assertFalse(device.is_bluetooth)
 
     def test_calibration_fingerprint_read_is_locked_and_has_no_output_mutations(self):
         observed = []
@@ -667,7 +705,7 @@ class NativeEndpointAbiTests(unittest.TestCase):
 
     def test_bluetooth_transport_uses_present_pnp_container_guid_without_name_matching(self):
         container = _GUID.from_string("11223344-5566-7788-99aa-bbccddeeff00")
-        ids = "USB\\AirPods Bluetooth\0BTHENUM\\real-speaker\0BTHLEDEVICE\\real-headphone\0\0"
+        ids = "USB\\AirPods Bluetooth\0BTHENUM\\DEV_112233445566\\speaker\0BTHLE\\DEV_AABBCCDDEEFF\\headphone\0\0"
         looked_up = []
 
         def size(result, _filter, flags):
@@ -686,8 +724,12 @@ class NativeEndpointAbiTests(unittest.TestCase):
             return 0
 
         def property_value(node, _key, prop_type, result, result_size, _flags):
+            if _key._obj.pid != _CONTAINER_ID.pid or _key._obj.fmtid.bytes() != _CONTAINER_ID.fmtid.bytes():
+                return 37  # Driver battery metadata is absent in this fixture.
             prop_type._obj.value = 13
             result_size._obj.value = 16
+            if result is None:
+                return 26
             ctypes.memmove(result, ctypes.byref(container), 16)
             return 0
 
@@ -697,7 +739,7 @@ class NativeEndpointAbiTests(unittest.TestCase):
                                        CM_Locate_DevNodeW=locate,
                                        CM_Get_DevNode_PropertyW=property_value)
         self.assertEqual(adapter._bluetooth_containers(), {container.bytes()})
-        self.assertEqual(looked_up, ["BTHENUM\\real-speaker", "BTHLEDEVICE\\real-headphone"])
+        self.assertEqual(looked_up, ["BTHENUM\\DEV_112233445566\\speaker", "BTHLE\\DEV_AABBCCDDEEFF\\headphone"])
 
     def test_property_read_clears_allocated_variant_even_on_hresult_failure(self):
         adapter = object.__new__(_WindowsCoreAudioAdapter)
