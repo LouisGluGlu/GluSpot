@@ -5,10 +5,14 @@ import unittest
 from unittest.mock import patch
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QFontDatabase, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
-from local.audio_output_icons import _icon_mask, _svg_renderer, _tinted_icon, paint_audio_output_icon
+from local.audio_output_icons import (
+    _icon_mask, _status_mask, _svg_renderer, _tinted_icon, _tinted_status,
+    paint_audio_output_icon, paint_audio_output_status,
+)
+from local.branding import ROOT_DIR
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
@@ -17,6 +21,11 @@ class AudioOutputIconTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        # Windows' offscreen plugin does not enumerate system fonts. Register
+        # the existing bundled font so count verification exercises real digits.
+        if not QFontDatabase.families():
+            QFontDatabase.addApplicationFont(str(ROOT_DIR / "assets" / "fonts" / "AlibabaPuHuiTi" /
+                                                 "AlibabaPuHuiTi-Bold.ttf"))
 
     def _render(self, kind, color=QColor(40, 130, 210), width=80, height=80):
         image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
@@ -68,6 +77,123 @@ class AudioOutputIconTests(unittest.TestCase):
         self.assertEqual(_svg_renderer.cache_info().maxsize, 8)
         self.assertEqual(_icon_mask.cache_info().maxsize, 128)
         self.assertEqual(_tinted_icon.cache_info().maxsize, 256)
+
+    def _render_status(self, kinds, color=QColor(40, 130, 210), diameter=80):
+        image = QImage(diameter, diameter, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as painter:
+            paint_audio_output_status(painter, QRectF(image.rect()), kinds, color)
+        return image
+
+    def _region_bytes(self, image, x, y, width, height):
+        region = image.copy(x, y, width, height)
+        return bytes(region.constBits())
+
+    def test_status_never_draws_the_caller_owned_face_or_ring(self):
+        for kinds in ((), ("homepod",), ("homepod-mini",) * 5,
+                      ("homepod", "homepod-mini"), ("airpods-pro", "speaker", "device")):
+            with self.subTest(kinds=kinds):
+                image = self._render_status(kinds)
+                points = [(x, y) for y in range(80) for x in range(80)
+                          if image.pixelColor(x, y).alpha() > 0]
+                self.assertGreater(len(points), 200)
+                self.assertTrue(all((x - 39.5) ** 2 + (y - 39.5) ** 2 < 38 ** 2 for x, y in points))
+                self.assertEqual(image.pixelColor(40, 1).alpha(), 0)
+                self.assertEqual(image.pixelColor(1, 40).alpha(), 0)
+
+    def test_group_count_is_beneath_glyph_and_matches_total_members(self):
+        two = self._render_status(("homepod-mini",) * 2)
+        five = self._render_status(("homepod-mini",) * 5)
+        # The same model keeps the same glyph while the readable lower digit changes.
+        self.assertEqual(self._region_bytes(two, 0, 0, 80, 49),
+                         self._region_bytes(five, 0, 0, 80, 49))
+        self.assertNotEqual(self._region_bytes(two, 0, 52, 80, 28),
+                            self._region_bytes(five, 0, 52, 80, 28))
+        for image in (two, five):
+            self.assertGreater(sum(image.pixelColor(x, y).alpha() > 30
+                                   for y in range(52, 75) for x in range(22, 58)), 35)
+        mixed_two = self._render_status(("homepod", "homepod-mini"))
+        mixed_five = self._render_status(("homepod",) * 4 + ("homepod-mini",))
+        self.assertEqual(self._region_bytes(mixed_two, 0, 0, 80, 49),
+                         self._region_bytes(mixed_five, 0, 0, 80, 49))
+        self.assertNotEqual(self._region_bytes(mixed_two, 0, 52, 80, 28),
+                            self._region_bytes(mixed_five, 0, 52, 80, 28))
+
+    def test_group_model_composition_is_stable_when_selection_order_changes(self):
+        first = self._render_status(("homepod", "homepod-mini", "speaker"))
+        reordered = self._render_status(("speaker", "homepod_mini", "homepod"))
+        self.assertEqual(bytes(first.constBits()), bytes(reordered.constBits()))
+        homogeneous = self._render_status(("homepod",) * 3)
+        self.assertNotEqual(self._region_bytes(first, 0, 0, 80, 49),
+                            self._region_bytes(homogeneous, 0, 0, 80, 49))
+
+    def test_mixed_homepod_front_glyph_keeps_original_translucent_ink(self):
+        image = self._render_status(("homepod", "homepod-mini"), QColor(40, 130, 210), 200)
+        # Front mini body overlaps the rear HomePod, without accumulating its alpha.
+        body = image.pixelColor(108, 100)
+        self.assertAlmostEqual(body.alpha(), round(255 * .425), delta=2)
+        self.assertAlmostEqual(body.red(), 40, delta=3)
+        self.assertAlmostEqual(body.green(), 130, delta=3)
+        self.assertAlmostEqual(body.blue(), 210, delta=3)
+
+    def test_generic_device_headphones_speaker_and_receiver_are_distinct(self):
+        images = [self._render(kind) for kind in ("device", "headphones", "speaker", "airplay")]
+        self.assertEqual(len({bytes(image.constBits()) for image in images}), len(images))
+        unknown = self._render("unknown")
+        self.assertEqual(bytes(unknown.constBits()), bytes(images[0].constBits()))
+        headset = self._render("headset")
+        self.assertEqual(bytes(headset.constBits()), bytes(images[1].constBits()))
+        with patch("local.audio_output_icons._svg_renderer", side_effect=AssertionError("unidentified model asset")):
+            generic = self._render_status(("airplay", "headphones", "unknown"))
+        self.assertGreater(sum(generic.pixelColor(x, y).alpha() > 0
+                               for y in range(80) for x in range(80)), 200)
+
+    def test_status_repaints_reuse_bounded_composition_and_tint_caches(self):
+        first = self._render_status(("homepod", "homepod-mini"))
+        hits = _tinted_status.cache_info().hits
+        with patch("local.audio_output_icons._status_mask", side_effect=AssertionError("uncached composition")):
+            repeated = self._render_status(("homepod-mini", "homepod"))
+        self.assertEqual(bytes(first.constBits()), bytes(repeated.constBits()))
+        self.assertGreater(_tinted_status.cache_info().hits, hits)
+        self.assertEqual(_status_mask.cache_info().maxsize, 128)
+        self.assertEqual(_tinted_status.cache_info().maxsize, 256)
+
+    def test_status_preserves_painter_state_and_invalid_rect_is_a_no_op(self):
+        image = QImage(80, 80, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as painter:
+            painter.setOpacity(.4)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            before = bytes(image.constBits())
+            paint_audio_output_status(painter, QRectF(), ("homepod",), QColor(0, 0, 0))
+            self.assertEqual(bytes(image.constBits()), before)
+            paint_audio_output_status(painter, QRectF(image.rect()), ("homepod",), QColor(0, 0, 0))
+            self.assertAlmostEqual(painter.opacity(), .4)
+            self.assertEqual(painter.compositionMode(), QPainter.CompositionMode.CompositionMode_SourceOver)
+        self.assertLessEqual(max(image.pixelColor(x, y).alpha() for y in range(80) for x in range(80)), 87)
+
+    def test_status_counts_stay_readable_and_inside_circle_on_high_dpi_devices(self):
+        image = QImage(160, 160, QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(2)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as painter:
+            paint_audio_output_status(painter, QRectF(0, 0, 80, 80), ("homepod-mini",) * 8,
+                                      QColor(40, 130, 210, 128))
+        points = [(x, y) for y in range(160) for x in range(160)
+                  if image.pixelColor(x, y).alpha() > 0]
+        self.assertGreater(sum(y >= 104 for _, y in points), 150)
+        self.assertTrue(all((x - 79.5) ** 2 + (y - 79.5) ** 2 < 76 ** 2 for x, y in points))
+        self.assertLessEqual(max(image.pixelColor(x, y).alpha() for x, y in points), 128)
+
+    def test_status_shrinks_large_total_count_to_fit_without_model_name_guessing(self):
+        image = self._render_status(("unrecognized HomePod headphones",) * 1000)
+        generic = self._render_status(("device",) * 1000)
+        self.assertEqual(bytes(image.constBits()), bytes(generic.constBits()))
+        points = [(x, y) for y in range(52, 75) for x in range(80)
+                  if image.pixelColor(x, y).alpha() > 0]
+        self.assertGreater(len(points), 80)
+        self.assertGreaterEqual(min(x for x, _ in points), 15)
+        self.assertLessEqual(max(x for x, _ in points), 64)
 
 
 class MusicSurfaceCircleControlTests(unittest.TestCase):

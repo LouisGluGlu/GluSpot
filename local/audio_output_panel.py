@@ -456,7 +456,8 @@ class AudioOutputPanel(QWidget):
 
     def _sync_tab_order(self):
         controls = [self.refresh_button, self.add_button, self.close_button]
-        for row in self._rows.values():
+        for device_id in self._device_order:
+            row = self._rows[device_id]
             controls.append(row)
             if not row.volume_slider.isHidden():
                 controls.append(row.volume_slider)
@@ -483,7 +484,10 @@ class AudioOutputPanel(QWidget):
         self.layout().activate()
         self.rows_layout.activate()
         if self._snapshot:
-            active_row = self._rows.get(self._snapshot.pending_id or self._snapshot.active_id)
+            confirmed, pending = self._route_members(self._snapshot)
+            selected = pending or confirmed
+            active_row = next((self._rows[identity] for identity in self._device_order
+                               if identity in selected), None)
             if active_row:
                 self.scroll.ensureWidgetVisible(active_row, 0, 8)
         self.setFocus(Qt.FocusReason.PopupFocusReason)
@@ -566,7 +570,9 @@ class AudioOutputPanel(QWidget):
     @staticmethod
     def _route_members(snapshot):
         pending = set(snapshot.pending_ids) or ({snapshot.pending_id} if snapshot.pending_id else set())
-        confirmed = set(snapshot.member_ids)
+        # A published replacement target supersedes the previous group. Old
+        # member evidence must not remain selected during that transition.
+        confirmed = set(snapshot.member_ids) if not pending else set()
         # Explicit members and pending targets own selection. In particular,
         # a group's capture/default endpoint is not an implicit extra member.
         if not confirmed and not pending and snapshot.active_id:
@@ -598,8 +604,21 @@ class AudioOutputPanel(QWidget):
             self._fit_to_content()
             return
         self._snapshot = snapshot
+        confirmed, pending_ids = self._route_members(snapshot)
+        desired = pending_ids or confirmed
+        # Preserve provider order within both buckets; clicks alone cannot
+        # change selection, and the capture/default endpoint is not a member.
+        published_order = tuple(device.id for device in snapshot.devices)
+        order = tuple(identity for identity in published_order if identity in desired) + tuple(
+            identity for identity in published_order if identity not in desired)
+        if any(row.volume_slider.isSliderDown() for row in self._rows.values()):
+            # Moving a row underneath a held pointer changes the scrubber's
+            # coordinate system. Retain existing positions until release,
+            # while still accepting device additions/removals and new state.
+            retained = tuple(identity for identity in self._device_order if identity in published_order)
+            order = retained + tuple(identity for identity in order if identity not in retained)
         ui_key = (snapshot, self._action_error, self._style_key, self.width(), self._max_height)
-        if ui_key == self._ui_key:
+        if ui_key == self._ui_key and order == self._device_order:
             # Even an unchanged provider snapshot must retire a volume request
             # that did not receive readback; no route action is issued here.
             for row in self._rows.values():
@@ -608,8 +627,6 @@ class AudioOutputPanel(QWidget):
             self._maintain_visible_state(snapshot)
             return
         self._ui_key = ui_key
-        confirmed, pending_ids = self._route_members(snapshot)
-        desired = pending_ids or confirmed
         grouped = (snapshot.capture_scope == "music_process_tree" if snapshot.capture_scope else
                    len(desired) > 1)
         casting = any(d.transport == "airplay" and d.id in desired for d in snapshot.devices)
@@ -624,19 +641,21 @@ class AudioOutputPanel(QWidget):
                      "电脑全部声音 · 自动歌词补偿" if casting else
                      "电脑全部声音 · 多选时仅当前音乐软件")
         self.scope_label.setText(scope)
-        order = tuple(device.id for device in snapshot.devices)
         if order != self._device_order:
             for row in self._rows.values():
                 self.rows_layout.removeWidget(row)
             for device_id in tuple(self._rows):
                 if device_id not in order:
                     self._rows.pop(device_id).deleteLater()
-            for index, device in enumerate(snapshot.devices):
-                row = self._rows.get(device.id)
+            devices = {device.id: device for device in snapshot.devices}
+            for index, device_id in enumerate(order):
+                device = devices[device_id]
+                row = self._rows.get(device_id)
                 if row is None:
                     row = _OutputRow(device, self.rows_widget)
                     row.clicked.connect(lambda _checked=False, device_id=device.id: self._select(device_id))
                     row.volume_requested.connect(self._volume_changed)
+                    row.volume_slider.sliderReleased.connect(self.sync_snapshot)
                     self._rows[device.id] = row
                 self.rows_layout.insertWidget(index, row)
             self._device_order = order

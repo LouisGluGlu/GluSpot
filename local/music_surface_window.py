@@ -73,7 +73,8 @@ from local.music_surface_palette import (
     future_lyric_color as select_future_lyric_color,
 )
 from local.audio_output_panel import AudioOutputPanel
-from local.audio_output_icons import paint_audio_output_icon
+from local.audio_output_icons import paint_audio_output_status
+from local.audio_output_status import connected_output_kinds
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 
 
@@ -174,6 +175,7 @@ class MusicSurfaceWindow(QWidget):
         self._closing_for_shutdown = False
         self._button_rects: dict[str, QRectF] = {}
         self._audio_output_panel: AudioOutputPanel | None = None
+        self._audio_output_kinds: tuple[str, ...] = ()
         self._media_button_rects: dict[str, QRectF] = {}
         self._media_control_panel_rect = QRectF()
         self._transport_feedback: dict[str, tuple[float, QPointF, float, float]] = {}
@@ -405,6 +407,11 @@ class MusicSurfaceWindow(QWidget):
         # Qt coalesces updates to the actual compositor rate on 60 Hz panels.
         self._timer.setInterval(self.ANIMATION_FRAME_MS)
         self._timer.timeout.connect(self._on_animation_tick)
+        # Route snapshots are cached by the provider. Read them outside paint,
+        # only while visible, without attaching discovery to the lyric clock.
+        self._audio_output_status_timer = QTimer(self)
+        self._audio_output_status_timer.setInterval(200)
+        self._audio_output_status_timer.timeout.connect(self._sync_audio_output_status)
 
     @property
     def presentation_mode(self) -> str:
@@ -456,9 +463,13 @@ class MusicSurfaceWindow(QWidget):
         self._reset_control_idle()
         if self._closing_for_shutdown:
             self._timer.timeout.connect(self._on_animation_tick)
+            self._audio_output_status_timer.timeout.connect(self._sync_audio_output_status)
             self._mode_animation.finished.connect(self._finish_mode_transition)
             self.seekFinished.connect(self._on_seek_finished)
         self._closing_for_shutdown = False
+        # Hidden surfaces stop polling. Refresh before rendering the morph's
+        # destination bitmap so it cannot carry an old device/count on entry.
+        self._sync_audio_output_status()
         self._timer.start()
         if fullscreen is None:
             fullscreen = not bool(getattr(self.owner, "_music_windowed_preference", False))
@@ -828,6 +839,7 @@ class MusicSurfaceWindow(QWidget):
 
     def hideEvent(self, event):
         self._dismiss_audio_output_panel()
+        self._audio_output_status_timer.stop()
         if not self._hidden_lyric_pose_size.isValid():
             if self._mode_lyric_snapshot_size.isValid():
                 self._hidden_lyric_pose_size = QSize(self._mode_lyric_snapshot_size)
@@ -850,6 +862,8 @@ class MusicSurfaceWindow(QWidget):
 
     def showEvent(self, event):
         self._reset_control_idle()
+        self._sync_audio_output_status()
+        self._audio_output_status_timer.start()
         self._timer.start()
         super().showEvent(event)
 
@@ -1586,12 +1600,14 @@ class MusicSurfaceWindow(QWidget):
         self._restore_idle_cursor()
         self._closing_for_shutdown = True
         self._timer.stop()
+        self._audio_output_status_timer.stop()
         self._cancel_mode_transition()
         # Release bound receiver connections when this surface is closed,
         # before Qt/Python reclaim it and its child animation objects. An
         # explicit later show reattaches them through the existing entrypoint.
         self.close()
         self._timer.timeout.disconnect(self._on_animation_tick)
+        self._audio_output_status_timer.timeout.disconnect(self._sync_audio_output_status)
         self._mode_animation.finished.disconnect(self._finish_mode_transition)
         self.seekFinished.disconnect(self._on_seek_finished)
 
@@ -7232,6 +7248,22 @@ class MusicSurfaceWindow(QWidget):
     def _audio_output_available(self) -> bool:
         return callable(getattr(getattr(self.owner, "data_provider", None), "get_audio_route_snapshot", None))
 
+    def _sync_audio_output_status(self):
+        getter = getattr(getattr(self.owner, "data_provider", None), "get_audio_route_snapshot", None)
+        try:
+            kinds = connected_output_kinds(getter()) if callable(getter) else ()
+        except Exception:
+            kinds = ()
+        if kinds == self._audio_output_kinds:
+            return
+        self._audio_output_kinds = kinds
+        button = self._audio_output_button_rect(
+            self._window_control_base_rect(QRectF(self.rect())), self._surface_scale())
+        # Covers the control's short idle translation without repainting the
+        # full album background or perturbing the independent lyric animation.
+        margin = round(button.height() * 0.5) + 3
+        self.update(button.toAlignedRect().adjusted(-margin, -margin, margin, margin))
+
     def _audio_output_button_rect(self, button: QRectF, scale: float) -> QRectF:
         return self._obo_badge_rect(self._translation_button_rect(button, scale), scale)
 
@@ -7494,6 +7526,7 @@ class MusicSurfaceWindow(QWidget):
         audio_hovered = self._hovered_window_button == "audio_output"
         audio_pressed = self._pressed_window_button == "audio_output"
         audio_active = self._audio_output_panel is not None and self._audio_output_panel.isVisible()
+        audio_kinds = self._audio_output_kinds
         if audio_available:
             bounds = bounds.united(audio_button)
         translated = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
@@ -7523,9 +7556,10 @@ class MusicSurfaceWindow(QWidget):
 
             ink = QColor(255, 255, 255, 242)
             if audio_available:
-                face(audio_button, audio_hovered, audio_pressed, audio_active)
-                paint_audio_output_icon(layer, icon_rect(audio_button), "output",
-                                        QColor(80, 151, 220) if audio_active else ink)
+                face(audio_button, audio_hovered, audio_pressed, audio_active or bool(audio_kinds))
+                audio_ink = QColor(80, 151, 220) if audio_active else (
+                    QColor(44, 46, 48) if audio_kinds else ink)
+                paint_audio_output_status(layer, audio_button, audio_kinds, audio_ink)
             translation_symbol = self._translation_symbol_path(icon_rect(translation, 0.58))
             if translated:
                 # The vector symbol is removed from the face, so its ink is
@@ -7574,9 +7608,9 @@ class MusicSurfaceWindow(QWidget):
         self._paint_control_layer(
             painter, bounds, reveal, self._window_control_shift(button, reveal),
             ("window", key, round(scale, 3), show_obo, obo_active, translated,
-             translation_hovered, translation_pressed, hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active), draw,
+             translation_hovered, translation_pressed, hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds), draw,
             prewarm_default=(("window", key, round(scale, 3), show_obo, obo_active, translated,
-                               translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed, audio_active), draw_default),
+                               translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds), draw_default),
         )
 
     @staticmethod

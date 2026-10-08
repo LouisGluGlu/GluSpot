@@ -69,6 +69,10 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.panel._animation_timer.stop()
         self.panel._poll_timer.stop()
 
+    def _row_order(self):
+        return tuple(item.widget().device.id for index in range(self.panel.rows_layout.count())
+                     if (item := self.panel.rows_layout.itemAt(index)).widget() in self.panel._rows.values())
+
     def test_open_lists_actual_devices_and_only_queues_refresh(self):
         self._open()
         self.assertEqual(self.provider.calls, [("refresh",)])
@@ -88,9 +92,11 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertIn(("select", "homepod"), self.provider.calls)
         self.assertEqual(self.panel._rows["homepod"].state, "available")
         self.assertEqual(self.panel._rows["local"].state, "active")
+        self.assertEqual(self._row_order(), ("local", "bluetooth", "homepod"))
         self.provider.snapshot = replace(self.provider.snapshot, pending_id="homepod", state="connecting", status_message="正在连接客厅 HomePod")
         self.panel.sync_snapshot()
         self.assertEqual(self.panel._rows["homepod"].subtitle, "正在连接…")
+        self.assertEqual(self._row_order(), ("homepod", "local", "bluetooth"))
         self.assertEqual(self.panel.status_label.text(), "正在连接客厅 HomePod")
         self.assertTrue(self.panel.stop_button.isEnabled())
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", pending_id="", state="streaming")
@@ -146,6 +152,98 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["homepod"].subtitle, "正在投放")
         self.assertTrue(self.panel._rows["homepod"].isChecked())
         self.assertFalse(self.panel._rows["local"].isChecked())
+
+    def test_confirmed_selection_is_first_and_volume_polls_keep_layout_stable(self):
+        self._open()
+        rows = dict(self.panel._rows)
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
+        self.panel.sync_snapshot()
+        self.assertEqual(self._row_order(), ("bluetooth", "local", "homepod"))
+        self.assertEqual(self.panel._device_order, self._row_order())
+        self.assertEqual(self.panel.close_button.nextInFocusChain(), rows["bluetooth"])
+        self.assertEqual(rows["bluetooth"].volume_slider.nextInFocusChain(), rows["local"])
+        self.assertEqual(rows["local"].volume_slider.nextInFocusChain(), rows["homepod"])
+        with patch.object(self.panel.rows_layout, "insertWidget") as insert, \
+                patch.object(self.panel.rows_layout, "removeWidget") as remove:
+            self.provider.snapshot = replace(self.provider.snapshot, revision=1,
+                devices=tuple(replace(device, volume=.5) if device.id == "bluetooth" else device
+                              for device in self.provider.devices))
+            self.panel.sync_snapshot()
+            self.panel.sync_snapshot()
+        insert.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(self.panel._rows, rows)
+        self.assertEqual(rows["bluetooth"].volume_slider.value(), 50)
+
+    def test_group_members_sort_in_published_order_and_pending_replaces_old_group(self):
+        second = AudioRouteDevice("homepod-2", "书房 HomePod mini", "homepod-mini", "airplay")
+        devices = self.provider.devices + (second,)
+        self.provider.snapshot = AudioRouteSnapshot(devices, active_id="local", state="casting",
+            member_ids=("homepod-2", "homepod", "bluetooth"), capture_scope="music_process_tree",
+            cast_source_id="local")
+        self._open()
+        self.assertEqual(self._row_order(), ("bluetooth", "homepod", "homepod-2", "local"))
+        self.provider.snapshot = replace(self.provider.snapshot, state="connecting",
+            pending_ids=("homepod-2", "homepod"))
+        self.panel.sync_snapshot()
+        self.assertEqual(self._row_order(), ("homepod", "homepod-2", "local", "bluetooth"))
+        self.assertEqual(self.panel._rows["bluetooth"].state, "available")
+        self.assertEqual(self.panel._rows["local"].state, "available")
+        self.assertEqual(self.panel._rows["homepod"].state, "pending")
+        self.assertFalse(any(row.isChecked() for row in self.panel._rows.values()))
+
+    def test_failed_or_disconnected_target_returns_to_authoritative_output(self):
+        self.provider.snapshot = replace(self.provider.snapshot, pending_id="homepod", state="connecting")
+        self._open()
+        local = self.panel._rows["local"]
+        homepod = self.panel._rows["homepod"]
+        self.provider.snapshot = replace(self.provider.snapshot, pending_id="", state="error",
+            status_message="设备已断开，请刷新后重试",
+            devices=tuple(replace(device, available=False) if device.id == "homepod" else device
+                          for device in self.provider.devices))
+        self.panel.sync_snapshot()
+        self.assertEqual(self._row_order(), ("local", "bluetooth", "homepod"))
+        self.assertIs(self.panel._rows["local"], local)
+        self.assertIs(self.panel._rows["homepod"], homepod)
+        self.assertFalse(homepod.isEnabled())
+        self.provider.snapshot = replace(self.provider.snapshot,
+            devices=self.provider.devices[:2])
+        self.panel.sync_snapshot()
+        self.assertEqual(self._row_order(), ("local", "bluetooth"))
+        self.assertNotIn("homepod", self.panel._rows)
+        self.assertEqual(local.state, "active")
+
+    def test_empty_active_evidence_does_not_pin_the_default_source(self):
+        self.provider.snapshot = replace(self.provider.snapshot, devices=tuple(reversed(self.provider.devices)),
+                                         active_id="", state="error")
+        self._open()
+        self.assertEqual(self._row_order(), ("homepod", "bluetooth", "local"))
+        self.assertFalse(any(row.isChecked() for row in self.panel._rows.values()))
+
+    def test_reorder_waits_for_volume_drag_release_and_preserves_focus_and_request(self):
+        self._open()
+        self.app.processEvents()
+        rows = dict(self.panel._rows)
+        slider = rows["bluetooth"].volume_slider
+        slider.setFocus(Qt.FocusReason.MouseFocusReason)
+        slider.setSliderDown(True)
+        slider.setValue(79)
+        request_until = rows["bluetooth"]._request_until
+        before = tuple(self.provider.calls)
+        self.provider.snapshot = replace(self.provider.snapshot, pending_id="homepod", state="connecting")
+        self.panel.sync_snapshot()
+        self.assertEqual(self._row_order(), ("local", "bluetooth", "homepod"))
+        self.assertEqual(rows["homepod"].state, "pending")
+        self.assertEqual(tuple(self.provider.calls), before)
+        slider.setSliderDown(False)
+        self.app.processEvents()
+        self.assertEqual(self._row_order(), ("homepod", "local", "bluetooth"))
+        self.assertEqual(self.panel._rows, rows)
+        self.assertIs(self.app.focusWidget(), slider)
+        self.assertEqual(slider.value(), 79)
+        self.assertEqual(rows["bluetooth"]._requested_volume, .79)
+        self.assertEqual(rows["bluetooth"]._request_until, request_until)
+        self.assertEqual(tuple(self.provider.calls), before)
 
     def test_downgrade_shows_target_single_mode_without_counting_old_group(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
@@ -390,6 +488,20 @@ class AudioOutputPanelTests(unittest.TestCase):
         bottom = row.mapTo(self.panel.scroll.viewport(), row.rect().bottomLeft())
         self.assertGreaterEqual(top.y(), 0)
         self.assertLessEqual(bottom.y(), self.panel.scroll.viewport().height())
+
+    def test_long_group_list_opens_at_first_member_instead_of_capture_source(self):
+        self.owner.resize(640, 360)
+        extra = tuple(AudioRouteDevice(f"device-{index}", f"设备 {index}") for index in range(8))
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="local", state="casting",
+            devices=extra + self.provider.devices, member_ids=("homepod", "bluetooth"),
+            capture_scope="music_process_tree", cast_source_id="local")
+        self._open()
+        self.app.processEvents()
+        self.assertEqual(self._row_order()[:2], ("bluetooth", "homepod"))
+        self.assertEqual(self.panel.scroll.verticalScrollBar().value(), 0)
+        row = self.panel._rows["bluetooth"]
+        self.assertGreaterEqual(row.mapTo(self.panel.scroll.viewport(), row.rect().topLeft()).y(), 0)
+        self.assertEqual(self.panel._rows["local"].state, "available")
 
     def test_material_capture_excludes_children_and_is_rate_limited(self):
         self._open()

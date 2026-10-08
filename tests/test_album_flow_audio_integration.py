@@ -209,16 +209,21 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                                for color in (image.pixelColor(x, y),))
 
                 self.assertGreater(blue_pixels(open_face), blue_pixels(closed_face) + 8)
-                side_x, middle_y = open_face.width() // 5, open_face.height() // 2
+                side_x, middle_y = open_face.width() // 2, max(3, open_face.height() // 10)
                 face = open_face.pixelColor(side_x, middle_y)
                 self.assertEqual(face.alpha(), 255)
-                self.assertGreater(face.lightness(), closed_face.pixelColor(side_x, middle_y).lightness() + 100)
+                # Confirmed outputs keep the reference's pale face when the
+                # chooser is closed; opening changes device ink to blue.
+                self.assertGreater(closed_face.pixelColor(side_x, middle_y).lightness(), 200)
+                self.assertGreater(face.lightness(), 200)
                 self.assertGreater(face.lightness(), open_face.pixelColor(1, 1).lightness() + 80)
                 self.provider.calls.clear()
                 QTest.mouseClick(panel._rows["bluetooth"], Qt.MouseButton.LeftButton)
                 self.assertEqual(self.provider.calls, [("select", "bluetooth")])
                 self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
                 panel.sync_snapshot()
+                self.window._sync_audio_output_status()
+                self.assertEqual(self.window._audio_output_kinds, ("airpods-pro",))
                 self.assertEqual(panel._rows["bluetooth"].state, "active")
                 self.assertEqual(panel._rows["local"].state, "available")
                 with patch.object(self.window, "return_to_island") as return_to_island:
