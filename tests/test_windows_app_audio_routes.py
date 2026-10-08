@@ -9,7 +9,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from api.windows_app_audio_routes import WindowsAppAudioRoutes, _WindowsAppRouteAdapter, _PREFIX, _RENDER_SUFFIX
+from api.windows_app_audio_routes import (WindowsAppAudioRoutes, _WindowsAppRouteAdapter,
+    AppAudioRouteMigrationTimeout, _PREFIX, _RENDER_SUFFIX)
 from api.windows_audio_sessions import MusicAudioSource, AudioSessionEvidence, ProcessIdentity
 
 
@@ -116,6 +117,28 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(self.adapter.writes[2:], [
             (30, 1, "old-role-one"), (30, 0, _PREFIX + "bt" + _RENDER_SUFFIX), (30, 0, "")])
         self.assertFalse(self.journal.exists())
+
+    def test_migration_timeout_distinguishes_live_old_output_from_missing_or_new_owner(self):
+        guard = self.prepare()
+        guard.apply()
+        cases = ((source("bt"), "playback_stayed_on_source"),
+                 (None, "no_active_source"),
+                 (source("other"), "playback_on_other_output"),
+                 (replace(source("spare"), session_process_ids=(31,),
+                          sessions=(AudioSessionEvidence("spare", 31, "s31", "i31"),)), "unowned_audio_process"))
+        for fresh, reason in cases:
+            with self.subTest(reason=reason):
+                self.current = fresh
+                with self.assertRaises(AppAudioRouteMigrationTimeout) as caught:
+                    guard.wait_migrated(timeout=0)
+                evidence = caught.exception.evidence
+                self.assertEqual(evidence["reason"], reason)
+                self.assertEqual(evidence["target_endpoint"], "spare")
+                self.assertTrue(evidence["policy_confirmed"])
+                self.assertFalse(evidence["playback_verified"])
+                self.assertFalse(guard.migrated)
+        self.current = source("bt")
+        guard.restore()
 
     def test_same_source_sink_or_missing_spare_is_rejected_before_any_write(self):
         with self.assertRaisesRegex(ValueError, "must differ"):

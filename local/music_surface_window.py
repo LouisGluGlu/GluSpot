@@ -77,6 +77,7 @@ from local.audio_output_icons import paint_audio_output_status
 from local.audio_output_status import OutputMember, OutputMembershipTracker
 from local.audio_output_motion import OutputConnectionMotion, connection_capsule_rect, paint_connection_pose
 from local.music_surface_background import AlbumFlowBackgroundRenderer
+from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -135,7 +136,7 @@ class MusicSurfaceWindow(QWidget):
     TITLE_PIXEL_SIZE = 34
     ARTIST_PIXEL_SIZE = 22
     METADATA_MARQUEE_SECONDS = 5.0
-    METADATA_MARQUEE_HOLD_SECONDS = 5.0
+    METADATA_MARQUEE_HOLD_SECONDS = 30.0
     METADATA_MARQUEE_END_HOLD_SECONDS = 0.7
     METADATA_RASTER_CACHE_MAX_BYTES = 64 * 1024 * 1024
     METADATA_RASTER_CACHE_MAX_ENTRIES = 96
@@ -164,7 +165,7 @@ class MusicSurfaceWindow(QWidget):
         self.owner = owner
         self.setWindowTitle("GluSpot Music")
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
         self._fullscreen = False
@@ -365,6 +366,11 @@ class MusicSurfaceWindow(QWidget):
         self._previous_cover_cache_key = None
         self._previous_cover_cache = QImage()
         self._metadata_marquee_states: dict[str, tuple[object, str, float]] = {}
+        self._metadata_hit_rects: dict[str, QRectF] = {}
+        self._metadata_overflows: dict[str, float] = {}
+        self._metadata_hover_field = ""
+        self._metadata_hover_started_at = 0.0
+        self._metadata_returns: dict[str, tuple[float, float]] = {}
         self._metadata_marquee_moving = False
         self._metadata_animation_rect = QRect()
         self._metadata_next_motion_at = float("inf")
@@ -398,6 +404,10 @@ class MusicSurfaceWindow(QWidget):
         self._mode_transition_end = QRect()
         self._mode_transition_velocity = (0.0, 0.0, 0.0, 0.0)
         self._mode_transition_hermite = False
+        self._mode_corner_start = 0.0
+        self._mode_corner_end = 0.0
+        self._mode_glyph_start = PRESENTATION_GLYPH_STATES["island"]
+        self._mode_glyph_end = "island"
         self._mode_snapshot_control_rects: dict[str, QRectF] = {}
         self._mode_snapshot_size = QSize()
         self._mode_snapshot_title_fraction = 0.0
@@ -491,7 +501,12 @@ class MusicSurfaceWindow(QWidget):
             self._fullscreen = bool(fullscreen)
             frame = QImage(target.size(), QImage.Format.Format_ARGB32_Premultiplied)
             frame.fill(Qt.GlobalColor.transparent)
-            self.render(frame)
+            self._capturing_transition_snapshot = True
+            try:
+                self.render(frame, renderFlags=QWidget.RenderFlag.DrawWindowBackground
+                            | QWidget.RenderFlag.DrawChildren | QWidget.RenderFlag.IgnoreMask)
+            finally:
+                self._capturing_transition_snapshot = False
             self._fullscreen = False
             self._geometry_transition_snapshot = frame
             self._mode_lyric_snapshot_size = QSize(target.size())
@@ -499,6 +514,10 @@ class MusicSurfaceWindow(QWidget):
             self._remember_transition_controls(target.size(), bool(fullscreen))
             self._island_entering = True
             self._pending_fullscreen = bool(fullscreen)
+            self._mode_corner_start = self._island_corner_radius(self._island_origin_geometry)
+            self._mode_corner_end = 0.0 if fullscreen else self._window_corner_radius(target.size())
+            self._mode_glyph_start = PRESENTATION_GLYPH_STATES["fullscreen" if fullscreen else "windowed"]
+            self._mode_glyph_end = "windowed" if fullscreen else "island"
             self.showNormal()
             self.setGeometry(self._island_origin_geometry)
             self._mode_animation.setStartValue(QRect(self._island_origin_geometry))
@@ -518,6 +537,7 @@ class MusicSurfaceWindow(QWidget):
             self.setGeometry(self._normal_geometry)
             self.showNormal()
         self._sync_window_control_rects()
+        self._sync_surface_shape()
         if self.owner is not None:
             self.owner._music_windowed_preference = not bool(fullscreen)
         self.raise_()
@@ -525,12 +545,18 @@ class MusicSurfaceWindow(QWidget):
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def toggle_presentation_mode(self):
-        self._dismiss_audio_output_panel()
+        self._dismiss_audio_output_panel(immediate=True)
+        # The title/artist hit areas move with this geometry handoff. Return
+        # an actively hovered marquee from its current pose before resetting
+        # its idle wait; ordinary automatic marquees keep their own phase.
+        self._update_metadata_hover(None, time.monotonic())
         self._restore_idle_cursor()
         was_transitioning = self._pending_fullscreen is not None
         was_returning = self._island_returning
         target_fullscreen = not self._pending_fullscreen if was_transitioning else not self._fullscreen
         start = QRect(self.geometry())
+        start_corner = self._surface_corner_radius()
+        start_glyph = self._mode_glyph_state()
         velocity = self._current_mode_velocity()
         controls = self._transition_control_rects()
         title_fraction = self._transition_title_fraction()
@@ -563,6 +589,10 @@ class MusicSurfaceWindow(QWidget):
             self._fullscreen = False
 
         self._pending_fullscreen = bool(target_fullscreen)
+        self._mode_corner_start = start_corner
+        self._mode_corner_end = 0.0 if target_fullscreen else self._window_corner_radius(target.size())
+        self._mode_glyph_start = start_glyph
+        self._mode_glyph_end = "windowed" if target_fullscreen else "island"
         if not target_fullscreen:
             # Switching out of Qt full-screen can restore an arbitrary old
             # normal geometry. Put the window back at the captured frame so
@@ -609,6 +639,7 @@ class MusicSurfaceWindow(QWidget):
         self._mode_animation.start()
         self._mode_animation.pause()
         self._mode_animation.setCurrentTime(0)
+        self._sync_surface_shape()
         self._timer.setInterval(self._transition_frame_interval())
 
     def _transition_frame_interval(self) -> int:
@@ -627,6 +658,7 @@ class MusicSurfaceWindow(QWidget):
         self._mode_transition_elapsed += self._mode_transition_clock.advance(now)
         elapsed_ms = int(round(self._mode_transition_elapsed * 1000.0))
         self._mode_animation.setCurrentTime(min(self.MODE_TRANSITION_MS, elapsed_ms))
+        self._sync_surface_shape()
         self.update()
 
     @staticmethod
@@ -704,8 +736,17 @@ class MusicSurfaceWindow(QWidget):
             return QImage()
         self._capturing_transition_snapshot = True
         try:
-            pixmap = self.grab()
-            return pixmap.toImage() if not pixmap.isNull() else QImage()
+            # Keep the backing bitmap rectangular. The live, interpolated
+            # shell supplies clipping, so rounded source corners cannot grow
+            # into large transparent holes on the way to full screen.
+            dpr = max(1.0, self.devicePixelRatioF())
+            frame = QImage(round(self.width()*dpr), round(self.height()*dpr),
+                           QImage.Format.Format_ARGB32_Premultiplied)
+            frame.setDevicePixelRatio(dpr)
+            frame.fill(Qt.GlobalColor.transparent)
+            self.render(frame, renderFlags=QWidget.RenderFlag.DrawWindowBackground
+                        | QWidget.RenderFlag.DrawChildren | QWidget.RenderFlag.IgnoreMask)
+            return frame
         finally:
             self._capturing_transition_snapshot = False
 
@@ -765,6 +806,7 @@ class MusicSurfaceWindow(QWidget):
         self._geometry_transition_snapshot = QImage()
         self._island_entering = False
         self._sync_window_control_rects()
+        self._sync_surface_shape()
         self.update()
 
     def _rebase_snapshot_lyric_motion(self):
@@ -787,7 +829,7 @@ class MusicSurfaceWindow(QWidget):
             self._logical_line_spring.rescale(target.height() / max(1, source.height()), time.monotonic())
 
     def return_to_island(self):
-        self._dismiss_audio_output_panel()
+        self._dismiss_audio_output_panel(immediate=True)
         if self._island_returning:
             return
         self._restore_idle_cursor()
@@ -796,6 +838,8 @@ class MusicSurfaceWindow(QWidget):
         if self._pending_fullscreen is None and not self._island_returning and not self._fullscreen and self.geometry().isValid():
             self._normal_geometry = QRect(self.geometry())
         start = QRect(self.geometry())
+        start_corner = self._surface_corner_radius()
+        start_glyph = self._mode_glyph_state()
         velocity = self._current_mode_velocity()
         controls = self._transition_control_rects()
         title_fraction = self._transition_title_fraction()
@@ -822,6 +866,10 @@ class MusicSurfaceWindow(QWidget):
                 pass
         if self.isVisible() and target.isValid() and start.isValid() and not snapshot.isNull():
             self._island_returning = True
+            self._mode_corner_start = start_corner
+            self._mode_corner_end = self._island_corner_radius(target)
+            self._mode_glyph_start = start_glyph
+            self._mode_glyph_end = "fullscreen" if not bool(getattr(self.owner, "_music_windowed_preference", False)) else "windowed"
             self._geometry_transition_snapshot = snapshot
             self._mode_lyric_snapshot_size = lyric_snapshot_size
             self._mode_lyric_snapshot_track = lyric_snapshot_track
@@ -843,7 +891,8 @@ class MusicSurfaceWindow(QWidget):
             self.hide()
 
     def hideEvent(self, event):
-        self._dismiss_audio_output_panel()
+        self._update_metadata_hover(None, time.monotonic())
+        self._dismiss_audio_output_panel(immediate=True)
         self._audio_output_status_timer.stop()
         self._audio_output_motion.settle(self._audio_output_membership.current, time.monotonic())
         if not self._hidden_lyric_pose_size.isValid():
@@ -863,10 +912,81 @@ class MusicSurfaceWindow(QWidget):
     def resizeEvent(self, event):
         # The popup is anchored in the surface's current coordinate space.
         # Close it before resizing rather than leave hit areas off-screen.
-        self._dismiss_audio_output_panel()
+        self._dismiss_audio_output_panel(immediate=True)
+        self._sync_surface_shape()
         super().resizeEvent(event)
 
+    @staticmethod
+    def _album_art_radius(side: float) -> float:
+        return max(0.0, float(side))*0.055
+
+    def _window_corner_radius(self, size: QSize | None = None) -> float:
+        size = self.size() if size is None else size
+        scale = max(0.01, size.height()/self.REFERENCE_SURFACE_HEIGHT)
+        artwork_side = max(1.0, min(404.0*scale, size.height()-238.0*scale))
+        return self._album_art_radius(artwork_side)
+
+    def _island_corner_radius(self, geometry: QRect) -> float:
+        edge_notch = getattr(self.owner, "_edge_notch_active", None)
+        if callable(edge_notch) and edge_notch():
+            return 0.0  # The top-anchored island already supplies its own alpha silhouette.
+        radius = getattr(self.owner, "_music_shell_radius", None)
+        if callable(radius):
+            return max(0.0, float(radius(QRectF(geometry), bool(getattr(self.owner, "expanded", False)))))
+        return max(0.0, min(geometry.width(), geometry.height())*0.5)
+
+    def _surface_corner_radius(self) -> float:
+        if bool(getattr(self, "_capturing_transition_snapshot", False)):
+            return 0.0
+        if (getattr(self, "_pending_fullscreen", None) is not None
+                or bool(getattr(self, "_island_returning", False))):
+            progress = self._mode_animation.currentTime()/max(1, self.MODE_TRANSITION_MS)
+            progress = progress*progress*(3.0-2.0*progress)
+            return self._mode_corner_start+(self._mode_corner_end-self._mode_corner_start)*progress
+        return 0.0 if bool(getattr(self, "_fullscreen", False)) else self._window_corner_radius()
+
+    def _surface_shape_path(self) -> QPainterPath:
+        path = QPainterPath()
+        radius = min(self._surface_corner_radius(), self.width()*0.5, self.height()*0.5)
+        if radius > 0.001:
+            path.addRoundedRect(QRectF(self.rect()), radius, radius)
+        else:
+            path.addRect(QRectF(self.rect()))
+        return path
+
+    def _mode_glyph_state(self) -> tuple[float, float]:
+        if self._pending_fullscreen is None and not self._island_returning:
+            return PRESENTATION_GLYPH_STATES["windowed" if self._fullscreen else "island"]
+        fraction = self._mode_animation.currentTime()/max(1, self.MODE_TRANSITION_MS)
+        fraction = fraction*fraction*(3.0-2.0*fraction)
+        return tuple(a+(b-a)*fraction for a, b in
+                     zip(self._mode_glyph_start, PRESENTATION_GLYPH_STATES[self._mode_glyph_end]))
+
+    def _paint_transition_mode_glyph(self, painter: QPainter) -> None:
+        if self._capturing_transition_snapshot:
+            return
+        buttons = self._transition_control_rects()
+        button = buttons.get("mode", buttons.get("return", QRectF()))
+        if button.isEmpty():
+            return
+        side = button.width()*0.60
+        glyph = QRectF(button.center().x()-side/2.0, button.center().y()-side/2.0, side, side)
+        painter.save()
+        painter.setOpacity(self._control_reveal_at(time.monotonic())**0.75)
+        paint_presentation_glyph(painter, glyph, self._mode_glyph_end, QColor(255, 255, 255, 242),
+                                 previous=self._mode_glyph_state(), progress=0.0)
+        painter.restore()
+
+    def _sync_surface_shape(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        if self._surface_corner_radius() <= 0.001:
+            self.clearMask()
+        else:
+            self.setMask(QRegion(self._surface_shape_path().toFillPolygon().toPolygon()))
+
     def showEvent(self, event):
+        self._sync_surface_shape()
         self._reset_control_idle()
         self._sync_audio_output_status(settle=True)
         self._audio_output_status_timer.start()
@@ -1603,7 +1723,7 @@ class MusicSurfaceWindow(QWidget):
     def shutdown(self):
         if self._closing_for_shutdown:
             return
-        self._dismiss_audio_output_panel()
+        self._dismiss_audio_output_panel(immediate=True)
         self._restore_idle_cursor()
         self._closing_for_shutdown = True
         self._timer.stop()
@@ -5445,7 +5565,7 @@ class MusicSurfaceWindow(QWidget):
 
     @classmethod
     def _metadata_scroll_offset(cls, overflow: float, elapsed: float) -> tuple[float, bool]:
-        """Make one smooth round trip, then rest at the starting edge for 5 s."""
+        """Make one smooth round trip, then rest at the starting edge for 30 s."""
         if overflow <= 0.0:
             return 0.0, False
         start_hold = cls.METADATA_MARQUEE_HOLD_SECONDS
@@ -5478,6 +5598,48 @@ class MusicSurfaceWindow(QWidget):
         if phase < inbound_at:
             return inbound_at - phase
         return period + outbound_at - phase
+
+    def _metadata_marquee_pose(self, field: str, overflow: float, now: float):
+        state = self._metadata_marquee_states[field]
+        returning = self._metadata_returns.get(field)
+        if returning is not None:
+            started, fraction = returning
+            progress = max(0.0, min(1.0, (now - started) / 0.45))
+            if progress < 1.0:
+                return overflow * fraction * (0.5 + 0.5 * math.cos(math.pi * progress)), True, 0.0
+            self._metadata_returns.pop(field, None)
+        if field == self._metadata_hover_field:
+            cycle = self.METADATA_MARQUEE_SECONDS + self.METADATA_MARQUEE_END_HOLD_SECONDS
+            elapsed = self.METADATA_MARQUEE_HOLD_SECONDS + max(0.0, now - self._metadata_hover_started_at) % cycle
+        else:
+            elapsed = now - state[2]
+        offset, moving = self._metadata_scroll_offset(overflow, elapsed)
+        return offset, moving, self._metadata_next_motion_delay(elapsed)
+
+    def _update_metadata_hover(self, position: QPointF | None, now: float) -> None:
+        field = next((key for key, rect in self._metadata_hit_rects.items()
+                      if position is not None and rect.contains(position)
+                      and self._metadata_overflows.get(key, 0.0) > 0.0), "")
+        if field == self._metadata_hover_field:
+            return
+        previous = self._metadata_hover_field
+        if previous and previous in self._metadata_marquee_states:
+            overflow = self._metadata_overflows.get(previous, 0.0)
+            offset, _, _ = self._metadata_marquee_pose(previous, overflow, now)
+            state = self._metadata_marquee_states[previous]
+            # Return from the displayed position before beginning the new wait.
+            self._metadata_returns[previous] = (now, offset / max(1.0, overflow))
+            self._metadata_marquee_states[previous] = (*state[:2], now + 0.45)
+        if field and field in self._metadata_marquee_states:
+            overflow = self._metadata_overflows.get(field, 0.0)
+            offset, _, _ = self._metadata_marquee_pose(field, overflow, now)
+            self._metadata_returns.pop(field, None)
+            fraction = max(0.0, min(1.0, offset / max(1.0, overflow)))
+            outbound_elapsed = math.acos(1.0 - 2.0 * fraction) / math.pi * self.METADATA_MARQUEE_SECONDS * 0.5
+            self._metadata_hover_started_at = now - outbound_elapsed
+        self._metadata_hover_field = field
+        if self._metadata_animation_rect.isValid():
+            self.update(self._metadata_animation_rect)
 
     def _metadata_text_raster(
         self, text: str, font: QFont, color: QColor, dpr: float,
@@ -5656,7 +5818,12 @@ class MusicSurfaceWindow(QWidget):
             if state is None or state[:2] != key:
                 state = (identity, display_text, now)
                 self._metadata_marquee_states[field] = state
-            offset, moving = self._metadata_scroll_offset(overflow, now - state[2])
+                self._metadata_returns.pop(field, None)
+                if field == self._metadata_hover_field:
+                    self._metadata_hover_started_at = now
+            self._metadata_hit_rects[field] = QRectF(rect)
+            self._metadata_overflows[field] = overflow
+            offset, moving, next_delay = self._metadata_marquee_pose(field, overflow, now)
             if overflow > 0.0:
                 dirty = rect.adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect()
                 self._metadata_animation_rect = self._metadata_animation_rect.united(dirty)
@@ -5665,7 +5832,7 @@ class MusicSurfaceWindow(QWidget):
                 else:
                     self._metadata_next_motion_at = min(
                         self._metadata_next_motion_at,
-                        now + self._metadata_next_motion_delay(now - state[2]),
+                        now + next_delay,
                     )
         painter.save()
         painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
@@ -5691,6 +5858,11 @@ class MusicSurfaceWindow(QWidget):
         paint_started = time.perf_counter()
         if (self._pending_fullscreen is not None or self._island_returning) and not self._geometry_transition_snapshot.isNull():
             painter = QPainter(self)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setClipPath(self._surface_shape_path())
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.drawImage(QRectF(self.rect()), self._geometry_transition_snapshot)
             if (self._island_entering or self._island_returning) and not self._island_origin_snapshot.isNull():
@@ -5701,11 +5873,19 @@ class MusicSurfaceWindow(QWidget):
                     opacity = max(0.0, 1.0 - fraction / 0.38)
                 painter.setOpacity(opacity)
                 painter.drawImage(QRectF(self.rect()), self._island_origin_snapshot)
+            self._paint_transition_mode_glyph(painter)
             painter.end()
             self._record_paint_cost(paint_started, _event)
             return
         painter = QPainter(self)
+        # Reset just Qt's exposed paint region before antialiased clipping.
+        # Repainting a rounded edge must not accumulate its partial coverage
+        # on an old backing frame or repeatedly rendered preview bitmap.
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setClipPath(self._surface_shape_path())
         try:
             paint_region = _event.region()
             if paint_region.isEmpty():
@@ -5728,7 +5908,9 @@ class MusicSurfaceWindow(QWidget):
             painter, rect, primary, secondary, time.monotonic(),
             ambient_colors=palette.ambient_colors,
             ambient_weights=palette.ambient_weights,
-            advance_frame=paint_region is None or QRegion(self.rect()).subtracted(paint_region).isEmpty(),
+            advance_frame=paint_region is None or (
+                self.mask() if not self.mask().isEmpty() else QRegion(self.rect())
+            ).subtracted(paint_region).isEmpty(),
         )
         # Transport light is a native-resolution foreground layer of the
         # background. Its cached low-resolution composite was too faint after
@@ -5779,7 +5961,7 @@ class MusicSurfaceWindow(QWidget):
             painted_side = painted_cover.width()
             image = QImage(getattr(self.owner, "album_art", QImage()))
             path = QPainterPath()
-            path.addRoundedRect(painted_cover, painted_side * 0.055, painted_side * 0.055)
+            path.addRoundedRect(painted_cover, self._album_art_radius(painted_side), self._album_art_radius(painted_side))
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.setClipPath(path)
@@ -5886,6 +6068,7 @@ class MusicSurfaceWindow(QWidget):
                 painted_cover, painted_cover.width() * 0.055, painted_cover.height() * 0.055,
             )
         unobscured_path = cover_mask.subtracted(painted_mask) if cover_fraction > 0.0 else None
+        self._metadata_hit_rects.clear()
         if normal_metadata_exposed or center_metadata_exposed:
             # During the centerward travel, the artwork crosses the former
             # title slot.  Fade that slot through the narrow crossing and
@@ -6252,7 +6435,7 @@ class MusicSurfaceWindow(QWidget):
         lyric_height = max(120.0, content.height() - max(12.0, rect.height() * 0.035))
         lyric_font = self._surface_font(self.LYRIC_PIXEL_SIZE * surface_scale, QFont.Weight.Bold)
         secondary_font = self._surface_font(
-            max(1.0, (self.LYRIC_PIXEL_SIZE - 6.0) * surface_scale), QFont.Weight.Normal,
+            max(1.0, (self.LYRIC_PIXEL_SIZE - 6.0) * surface_scale * 0.5), QFont.Weight.Normal,
         )
         parenthetical_font = self._surface_font(
             max(1.0, (self.LYRIC_PIXEL_SIZE - 6.0) * surface_scale), QFont.Weight.Bold,
@@ -7330,10 +7513,10 @@ class MusicSurfaceWindow(QWidget):
     def _audio_output_button_rect(self, button: QRectF, scale: float) -> QRectF:
         return self._obo_badge_rect(self._translation_button_rect(button, scale), scale)
 
-    def _dismiss_audio_output_panel(self):
+    def _dismiss_audio_output_panel(self, *, immediate: bool = False):
         panel = getattr(self, "_audio_output_panel", None)
         if panel is not None:
-            panel.dismiss()
+            panel.dismiss(immediate=immediate)
 
     def _toggle_audio_output_panel(self):
         if self._audio_output_panel is not None and self._audio_output_panel.isVisible():
@@ -7346,8 +7529,9 @@ class MusicSurfaceWindow(QWidget):
             self._audio_output_panel = AudioOutputPanel(self.owner.data_provider, self)
             self._audio_output_panel.dismissed.connect(self._note_pointer_moved)
         button = self._audio_output_button_rect(self._window_control_base_rect(QRectF(self.rect())), self._surface_scale())
+        button.translate(self._window_control_shift(button, self._control_reveal_at(time.monotonic())))
         self._reset_control_idle()
-        self._audio_output_panel.open_at(QPoint(round(button.right()), round(button.bottom() + 12)))
+        self._audio_output_panel.open_at(QPoint(round(button.right()), round(button.bottom() + 12)), source_rect=button)
 
     def _toggle_translation(self):
         setter = getattr(self.owner, "set_enable_dual_line_lyrics", None)
@@ -7556,22 +7740,8 @@ class MusicSurfaceWindow(QWidget):
 
     @staticmethod
     def _paint_window_mode_icon(painter: QPainter, rect: QRectF, fullscreen: bool, color: QColor):
-        """Show the existing destination: a music window, or the island."""
-        painter.save()
-        painter.translate(rect.topLeft())
-        painter.scale(rect.width() / 24.0, rect.height() / 24.0)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(color, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
-                            Qt.PenJoinStyle.RoundJoin))
-        if fullscreen:
-            painter.drawRoundedRect(QRectF(5.5, 3.5, 16.5, 13.5), 2.0, 2.0)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(color)
-            painter.drawRoundedRect(QRectF(1.0, 13.0, 15.5, 6.5), 3.25, 3.25)
-        else:
-            painter.setPen(QPen(color, 2.8))
-            painter.drawRoundedRect(QRectF(2.0, 8.0, 20.0, 9.0), 4.5, 4.5)
-        painter.restore()
+        """Show the next destination in the existing three-mode route."""
+        paint_presentation_glyph(painter, rect, "windowed" if fullscreen else "island", color)
 
     def _paint_window_controls(self, painter: QPainter, rect: QRectF, *, paint_ink: bool = True):
         self._sync_window_control_rects(rect)
@@ -7669,7 +7839,8 @@ class MusicSurfaceWindow(QWidget):
                 layer.setPen(Qt.PenStyle.NoPen)
                 layer.drawPath(beta)
             face(button, hovered_state, pressed_state)
-            self._paint_window_mode_icon(layer, icon_rect(button, 0.60), self._fullscreen, ink)
+            if not self._capturing_transition_snapshot:
+                self._paint_window_mode_icon(layer, icon_rect(button, 0.60), self._fullscreen, ink)
             layer.restore()
 
         def draw_default(layer: QPainter):
@@ -7678,9 +7849,9 @@ class MusicSurfaceWindow(QWidget):
         self._paint_control_layer(
             painter, bounds, reveal, self._window_control_shift(button, reveal),
             ("window", key, round(scale, 3), show_obo, obo_active, translated,
-             translation_hovered, translation_pressed, hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None), draw,
+             translation_hovered, translation_pressed, hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw,
             prewarm_default=(("window", key, round(scale, 3), show_obo, obo_active, translated,
-                               translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None), draw_default),
+                               translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw_default),
         )
         if audio_available and audio_pose is not None:
             painter.save()
@@ -7985,6 +8156,9 @@ class MusicSurfaceWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         self._note_pointer_moved()
+        self._update_metadata_hover(
+            event.position() if not event.buttons() else None, time.monotonic(),
+        )
         if (self._pending_fullscreen is not None or self._island_returning) and not self._geometry_transition_snapshot.isNull():
             self._hovered_lyric_index = None
             self._hovered_window_button = ""
@@ -8012,6 +8186,7 @@ class MusicSurfaceWindow(QWidget):
             if window_button != self._hovered_window_button or media_button != self._hovered_media_command:
                 self._hovered_window_button = window_button
                 self._hovered_media_command = media_button
+                self.setToolTip({"mode": "切换到窗口", "return": "返回岛模式"}.get(window_button, ""))
                 self.update()
             if window_button or media_button:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -8197,6 +8372,7 @@ class MusicSurfaceWindow(QWidget):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self._update_metadata_hover(None, time.monotonic())
         self._restore_idle_cursor()
         self._hovered_window_button = ""
         self._hovered_media_command = ""

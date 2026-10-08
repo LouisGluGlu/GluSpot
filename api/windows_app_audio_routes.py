@@ -55,6 +55,13 @@ class _OwnedRole:
     restoring_route: str = ""
 
 
+class AppAudioRouteMigrationTimeout(RuntimeError):
+    """A confirmed policy write without confirmed live playback migration."""
+    def __init__(self, evidence):
+        super().__init__("Music playback did not migrate to the temporary output")
+        self.evidence = dict(evidence)
+
+
 class WindowsAppAudioRoutes:
     """Explicit route transaction factory; construction has no Windows effects.
 
@@ -657,8 +664,30 @@ class AppAudioRouteGuard:
                     self._save("migrated")
                 return fresh
             if time.monotonic() >= deadline:
-                raise RuntimeError("Music playback did not migrate to the temporary output")
+                raise AppAudioRouteMigrationTimeout(self._migration_evidence(fresh))
             time.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
+
+    def _migration_evidence(self, fresh):
+        """Bounded scalar failure evidence; policy readback is never readiness."""
+        endpoints = tuple(sorted({session.endpoint_id for session in fresh.sessions})) if fresh is not None else ()
+        pids = tuple(sorted(set(fresh.session_process_ids))) if fresh is not None else ()
+        original = tuple(sorted({session.endpoint_id for session in self.source.sessions}))
+        unowned = tuple(pid for pid in pids if pid not in self._handles)
+        if fresh is None or not fresh.sessions:
+            reason = "no_active_source"
+        elif unowned:
+            reason = "unowned_audio_process"
+        elif endpoints == original:
+            reason = "playback_stayed_on_source"
+        else:
+            reason = "playback_on_other_output"
+        return {"reason": reason, "target_endpoint": self.spare_endpoint,
+                "observed_at": time.monotonic(), "source_process_id": self.source.process_id,
+                "source_created_at_100ns": self.source.process_created_at_100ns,
+                "original_endpoints": original, "observed_endpoints": endpoints[:128],
+                "observed_process_ids": pids[:64], "unowned_process_ids": unowned[:64],
+                "active_session_count": len(fresh.sessions) if fresh is not None else 0,
+                "policy_confirmed": True, "playback_verified": False}
 
     def _observe_effective(self, endpoint):
         for role in self._roles:

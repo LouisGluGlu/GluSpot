@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
@@ -135,6 +135,29 @@ class IslandAudioDeviceSurfaceTests(unittest.TestCase):
                 base = backdrop.pixelColor(x - 12, y - 10)
                 differences += int(sum(abs(a - b) for a, b in zip(pixel.getRgb()[:3], base.getRgb()[:3])) > 40)
         self.assertGreater(differences, 80)
+
+    def test_name_is_centered_bold_and_device_glyph_is_larger(self):
+        self._notice(replace(PAYLOAD, battery_percent=None))
+        painter = Mock()
+        painter.opacity.return_value = 1.0
+        shell = QRectF(12, 10, 390, 50)
+        with patch("local.island_stack_visual.paint_audio_output_icon") as glyph:
+            self.visual._paint_audio_device_content(painter, shell, self.visual._audio_device_pose(), keep_lyrics=True)
+        bounds, alignment, _ = painter.drawText.call_args.args
+        self.assertAlmostEqual(bounds.center().x(), shell.center().x())
+        self.assertEqual(alignment, Qt.AlignmentFlag.AlignCenter)
+        self.assertEqual(painter.setFont.call_args.args[0].weight(), QFont.Weight.Bold)
+        self.assertGreater(glyph.call_args.args[1].height(), self.visual._u(31))
+
+    def test_battery_ring_is_thicker_without_exceeding_shell(self):
+        self._notice()
+        painter = Mock()
+        painter.opacity.return_value = 1.0
+        shell = QRectF(12, 10, 390, 50)
+        with patch("local.island_stack_visual.paint_audio_output_icon"), patch.object(self.visual, "_paint_audio_device_faded_layer"):
+            self.visual._paint_audio_device_content(painter, shell, self.visual._audio_device_pose(), keep_lyrics=True)
+        self.assertGreater(painter.setPen.call_args.args[0].widthF(), 3.0)
+        self.assertTrue(shell.contains(painter.drawEllipse.call_args.args[0]))
 
     def test_empty_battery_is_a_valid_ring_and_keeps_lyrics(self):
         self._notice(replace(PAYLOAD, battery_percent=0))

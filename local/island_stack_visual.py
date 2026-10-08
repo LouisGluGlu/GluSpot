@@ -202,6 +202,7 @@ from local.island_audio_device_motion import IslandAudioDeviceMotion, IslandDevi
 from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
 from local.music_surface_palette import MusicSurfacePalette, artwork_surface_palette, background_role_color, future_lyric_color, relative_luminance
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_mode_controls import ArtworkHoverMotion, paint_presentation_glyph
 from local.mydockfinder import FinderGlassMaterial, read_finder_material
 from local.plugin_presentation import (
     active_plugin_alerts as presentation_active_plugin_alerts,
@@ -1265,6 +1266,7 @@ class IslandStackVisual(QWidget):
         self.tasker_music_hover_auto_expand_suppressed = False
         self.music_cover_rect = QRectF()
         self.music_fullscreen_overlay: MusicSurfaceWindow | None = None
+        self._music_cover_hover_motion = ArtworkHoverMotion()
         self._audio_device_motion = IslandAudioDeviceMotion()
         self._audio_device_event_serial = 0
         self._music_surface_active = False
@@ -2445,6 +2447,10 @@ class IslandStackVisual(QWidget):
         return any(self._animation_dict_active(animation, now, 0.22) for animation in animations.values())
 
     def _active_visual_animation_plan(self, now: float):
+        cover_motion = getattr(self, "_music_cover_hover_motion", None)
+        if cover_motion is not None and cover_motion.active:
+            from local.island_presentation import ActiveVisualAnimationPlan
+            return ActiveVisualAnimationPlan(True, "album_cover_hover")
         motion = getattr(self, "_audio_device_motion", None)
         if motion is not None and motion.active:
             # Reuse the island's precise frame timer, including paused lyrics.
@@ -4366,6 +4372,9 @@ class IslandStackVisual(QWidget):
         self._force_super_topmost()
 
     def hideEvent(self, event):
+        cover_motion = getattr(self, "_music_cover_hover_motion", None)
+        if cover_motion is not None:
+            cover_motion.clear(time.monotonic())
         motion = getattr(self, "_audio_device_motion", None)
         if motion is not None:
             motion.clear(time.monotonic())
@@ -4404,6 +4413,7 @@ class IslandStackVisual(QWidget):
         anim_dt = self._animation_tick_delta_seconds(now)
         self.last_tick_at = now
         speed = self._animation_speed_factor()
+        cover_hover_changed = self._advance_music_cover_hover(now)
         notice_motion = getattr(self, "_audio_device_motion", None)
         notice_changed = False
         if notice_motion is not None:
@@ -4427,7 +4437,7 @@ class IslandStackVisual(QWidget):
         self._handle_tick_overlay_clock_and_topmost(now, anim_dt)
 
         lyric_visual_changed = self._handle_music_lyric_tick(now, speed)
-        visual_data_changed = bool(visual_data_changed or lyric_visual_changed or notice_changed)
+        visual_data_changed = bool(visual_data_changed or lyric_visual_changed or notice_changed or cover_hover_changed)
 
         if self.scene_suppressed:
             self._handle_scene_suppressed_tick(now)
@@ -7465,7 +7475,7 @@ class IslandStackVisual(QWidget):
         if key != self.hovered_key:
             self.hovered_key = key
             self.hover_started_at = now
-            self.hover_armed_key = key if key and not self.expanded and not (self._main_kind() == IslandKind.MESSAGE and self._is_message_hit(key)) else ""
+            self.hover_armed_key = key if key and key != "music:open_surface" and not self.expanded and not (self._main_kind() == IslandKind.MESSAGE and self._is_message_hit(key)) else ""
             if key:
                 self.hover_bounce_until = now + 1.0
             self.update()
@@ -9410,6 +9420,9 @@ class IslandStackVisual(QWidget):
                 return "music:open_surface"
             if taskbar_key is not None:
                 return taskbar_key
+        if (self._main_kind() == IslandKind.MUSIC
+                and getattr(self, "music_cover_rect", QRectF()).contains(point)):
+            return "music:open_surface"
         if self.expanded and self._main_kind() == IslandKind.MUSIC:
             if getattr(self, "music_cover_rect", QRectF()).contains(point):
                 return "music:open_surface"
@@ -9543,11 +9556,11 @@ class IslandStackVisual(QWidget):
         pose = self._audio_device_pose()
         if pose is None:
             return base
-        metric = QFontMetrics(self._font(self._compact_primary_lyric_font_size(), QFont.Weight.Medium, shrink=False))
+        metric = QFontMetrics(self._font(self._compact_primary_lyric_font_size(), QFont.Weight.Bold, shrink=False))
         payloads = (pose.payload,) if pose.previous is None else (pose.previous, pose.payload)
-        desired = max(min(self._u(680), metric.horizontalAdvance(p.name)) + self._u(62) for p in payloads)
+        desired = max(min(self._u(680), metric.horizontalAdvance(p.name)) + self._u(104) for p in payloads)
         if any(p.battery_percent is not None for p in payloads):
-            desired = max(desired, base + self._u(64))
+            desired = max(desired, base + self._u(80))
         return base + (max(base, desired) - base) * pose.reveal
 
     def _base_music_target_width(self, expanded: bool | None = None) -> float:
@@ -14175,10 +14188,47 @@ class IslandStackVisual(QWidget):
     def _paint_xiaomi_duotone_wave(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
         self._native_music_background_renderer().paint_sea_level_wave(painter, rect, radius, expanded)
 
+    def _advance_music_cover_hover(self, now: float) -> bool:
+        motion = getattr(self, "_music_cover_hover_motion", None)
+        if motion is None:
+            return False
+        if (bool(getattr(self, "scene_suppressed", False))
+                or bool(getattr(self, "_music_surface_active", False))):
+            changed = motion.value != 0.0
+            motion.clear(now)
+            return changed
+        cover = getattr(self, "music_cover_rect", QRectF())
+        hovered = (not cover.isEmpty() and cover.contains(getattr(self, "pointer_pos", QPointF(-1, -1)))
+                   and self._main_kind() == IslandKind.MUSIC)
+        return motion.advance(hovered, now)
+
+    def _paint_interactive_music_cover(self, painter: QPainter, rect: QRectF, radius: float,
+                                       image: QImage | None = None, cache_key: str | None = None):
+        motion = getattr(self, "_music_cover_hover_motion", None)
+        reveal = max(0.0, min(1.0, motion.value)) if motion is not None else 0.0
+        painter.save()
+        if motion is not None and abs(motion.scale-1.0) > 0.0001:
+            painter.translate(rect.center())
+            painter.scale(motion.scale, motion.scale)
+            painter.translate(-rect.center())
+        self._paint_cover(painter, rect, radius, image, cache_key)
+        if reveal > 0.001:
+            path = self._rounded_path(rect, radius)
+            painter.fillPath(path, QColor(0, 0, 0, round(112*reveal)))
+            side = min(rect.width(), rect.height())*0.57
+            glyph = QRectF(rect.center().x()-side/2.0, rect.center().y()-side/2.0, side, side)
+            painter.save()
+            painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+            painter.setOpacity(painter.opacity()*reveal)
+            mode = "windowed" if bool(getattr(self, "_music_windowed_preference", False)) else "fullscreen"
+            paint_presentation_glyph(painter, glyph, mode, QColor(255, 255, 255, 242))
+            painter.restore()
+        painter.restore()
+
     def _paint_cover(self, painter: QPainter, rect: QRectF, radius: float, image: QImage | None = None, cache_key: str | None = None):
         path = self._rounded_path(rect, radius)
         painter.save()
-        painter.setClipPath(path)
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
         album_art = image if isinstance(image, QImage) else getattr(self, "album_art", QImage())
         if not album_art.isNull():
             scaled_width = int(max(1, rect.width()))
@@ -14354,16 +14404,17 @@ class IslandStackVisual(QWidget):
 
     def _paint_audio_device_content(self, painter, rect, pose, *, keep_lyrics):
         pad = min(self._u(12), rect.width()*.06)
-        glyph_size = max(1.0, min(self._u(31), rect.height()*.72, rect.width()*.22))
-        ring_size = max(1.0, min(self._u(24), rect.height()*.62, rect.width()*.19))
+        glyph_size = max(1.0, min(self._u(39), rect.height()*.86, rect.width()*.22))
+        ring_size = max(1.0, min(self._u(29), rect.height()*.72, rect.width()*.19))
         glyph = QRectF(rect.left()+pad, rect.center().y()-glyph_size/2, glyph_size, glyph_size)
         ring = QRectF(rect.right()-pad-ring_size, rect.center().y()-ring_size/2, ring_size, ring_size)
         center = QRectF(glyph.right()+pad, rect.top()+self._u(2), max(0, ring.left()-glyph.right()-pad*2), max(1, rect.height()-self._u(4)))
-        name_rect = QRectF(center.left(), center.top(), max(0, rect.right()-pad-center.left()), center.height())
+        name_inset = pad * 2 + glyph_size
+        name_rect = rect.adjusted(name_inset, self._u(2), -name_inset, -self._u(2))
         payloads = [(pose.payload, 1.0)] if pose.previous is None else [(pose.previous, 1-pose.content_blend), (pose.payload, pose.content_blend)]
         base_opacity = painter.opacity()
         battery_weight = 0.0
-        font = self._font(min(self._compact_primary_lyric_font_size(), max(9, int(rect.height()*.46))), QFont.Weight.Medium, shrink=False)
+        font = self._font(min(self._compact_primary_lyric_font_size(), max(9, int(rect.height()*.46))), QFont.Weight.Bold, shrink=False)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         for payload, weight in payloads:
@@ -14378,7 +14429,7 @@ class IslandStackVisual(QWidget):
                 ink = self._audio_device_ink(ring)
                 track = QColor(ink)
                 track.setAlpha(54)
-                stroke = min(self._u(3), ring_size*.13)
+                stroke = min(self._u(4.5), ring_size*.17)
                 arc = ring.adjusted(stroke/2, stroke/2, -stroke/2, -stroke/2)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(track, stroke))
@@ -14392,7 +14443,7 @@ class IslandStackVisual(QWidget):
                 painter.setPen(self._audio_device_ink(name_rect))
                 text_bounds = name_rect if percent is None else center
                 label = QFontMetrics(font).elidedText(payload.name, Qt.TextElideMode.ElideRight, max(0, int(text_bounds.width())))
-                painter.drawText(text_bounds, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+                painter.drawText(text_bounds, Qt.AlignmentFlag.AlignCenter, label)
         if keep_lyrics and battery_weight > 0 and center.width() > 2:
             painter.setOpacity(base_opacity)
             self._paint_audio_device_faded_layer(painter, center, battery_weight,
@@ -14448,7 +14499,7 @@ class IslandStackVisual(QWidget):
         if self._compact_lyric_cover_enabled():
             cover = self._yaoguang_compact_cover_rect(rect) if yaoguang_compact else self._compact_cover_rect(rect)
             self.music_cover_rect = QRectF(cover)
-            self._paint_cover(painter, cover, self._compact_cover_radius(rect, two_line))
+            self._paint_interactive_music_cover(painter, cover, self._compact_cover_radius(rect, two_line))
             text_left = cover.right() + self._u(15 if two_line else 12)
         else:
             self.music_cover_rect = QRectF()
@@ -14481,7 +14532,7 @@ class IslandStackVisual(QWidget):
             cover = QRectF(cover.left(), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
         self.music_button_rects = {"music:toggle_play_pause": QRectF(button)}
-        self._paint_cover(painter, cover, self._compact_cover_radius(rect, False))
+        self._paint_interactive_music_cover(painter, cover, self._compact_cover_radius(rect, False))
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         radius = min(button.height() / 2.0, self._u(9.0))
@@ -15016,6 +15067,8 @@ class IslandStackVisual(QWidget):
     def _paint_album_island_slots(self, painter: QPainter, raw_slots: list[dict[str, object]]):
         slots = sorted(raw_slots, key=lambda slot: int(slot.get("z", 0)))
         for slot in slots:
+            if bool(slot["center"]):
+                self.music_cover_rect = QRectF(slot["rect"])
             painter.setOpacity(float(slot["alpha"]) / 255.0)
             radius = self._u(8.0 if bool(slot["center"]) else 6.0)
             self._paint_album_island_slot(painter, slot, radius)
@@ -15063,7 +15116,8 @@ class IslandStackVisual(QWidget):
             painter.shear(math.tan(math.radians(tilt)) * 0.34, 0.0)
             painter.translate(-center)
         cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
-        self._paint_cover(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
+        cover_painter = self._paint_interactive_music_cover if bool(slot.get("center")) else self._paint_cover
+        cover_painter(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
         painter.restore()
 
     def _paint_album_island_listened_text(self, painter: QPainter, rect: QRectF, slots: list[dict[str, object]]):
@@ -15115,7 +15169,7 @@ class IslandStackVisual(QWidget):
         cover_size = self._u(58)
         cover = QRectF(rect.left() + margin, rect.top() + self._u(14), cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
-        self._paint_cover(painter, cover, self._u(17))
+        self._paint_interactive_music_cover(painter, cover, self._u(17))
 
         controls_w = self._u(132)
         info = QRectF(cover.right() + self._u(15), cover.top() + self._u(2), rect.right() - cover.right() - controls_w - self._u(48), self._u(68))
@@ -15147,7 +15201,7 @@ class IslandStackVisual(QWidget):
         cover_size = max(self._u(48.0), min(self._u(66.0), info_panel.height() - self._u(26.0)))
         cover = QRectF(info_panel.left() + margin, info_panel.center().y() - cover_size / 2.0, cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
-        self._paint_cover(painter, cover, self._u(9.0))
+        self._paint_interactive_music_cover(painter, cover, self._u(9.0))
 
         button_size = self._u(42.0)
         gap = self._u(14.0 if rect.width() >= self._u(600.0) else 12.0)

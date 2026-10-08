@@ -15,7 +15,8 @@ from api.audio_route_controller import AudioRouteController
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.windows_audio_devices import AudioOutputDevice
 from api.windows_audio_sessions import AudioSessionEvidence, MusicAudioSource, ProcessIdentity
-from api.windows_app_audio_routes import WindowsAppAudioRoutes, _PREFIX, _RENDER_SUFFIX
+from api.windows_app_audio_routes import (WindowsAppAudioRoutes, AppAudioRouteMigrationTimeout,
+    _PREFIX, _RENDER_SUFFIX)
 from api.airplay_group_process import AirPlayGroupProcess
 
 
@@ -219,6 +220,7 @@ class _AppGuard:
     def __init__(self, owner, source, spare):
         self.owner, self.source, self.spare_endpoint = owner, source, spare
         self.restored = False
+        self.restoration_state = "not_restored"
 
     def apply(self):
         self.owner.calls.append(("apply", self.spare_endpoint))
@@ -248,6 +250,7 @@ class _AppGuard:
         if not self.restored:
             self.owner.write_source(self.source)
             self.restored = True
+            self.restoration_state = "active_output_verified"
 
 
 class AudioRouteControllerTests(unittest.TestCase):
@@ -1593,6 +1596,151 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.assertIn("did not migrate", self.controller.snapshot().status_message)
         self.assertTrue(self.router.guards[-1].restored)
         self.assertIsNone(self.controller._app_route_guard)
+
+    def test_pure_windows_group_retries_another_spare_only_after_effective_restoration(self):
+        self._add_group_spare("a-spare")
+        self._add_group_spare("z-spare")
+        original_wait = _AppGuard.wait_migrated
+
+        def wait(guard, **kwargs):
+            if guard.spare_endpoint == "a-spare":
+                raise AppAudioRouteMigrationTimeout({"reason": "playback_stayed_on_source"})
+            self.assertTrue(self.router.guards[0].restored)
+            self.assertEqual(self.source.sessions[0].endpoint_id, "speakers")
+            return original_wait(guard, **kwargs)
+
+        with patch.object(_AppGuard, "wait_migrated", wait):
+            self.controller._begin_group(("speakers", "headphones"))
+        self.assertEqual(self.group.starts, [(("speakers", "headphones"), "z-spare", 300, 1000)])
+        calls = self.router.calls
+        self.assertLess(calls.index(("restore", "a-spare")), calls.index(("prepare", "z-spare", "speakers")))
+        self.assertEqual(self.backend.mute_calls, [])
+        self.assertEqual(self.backend.selected, [])
+        evidence = self.controller.diagnostics()["app_route_migration"]
+        self.assertEqual([attempt["state"] for attempt in evidence["attempts"]],
+                         ["restored_after_timeout", "playback_verified"])
+        evidence["attempts"][0]["state"] = "forged"
+        self.assertEqual(self.controller.diagnostics()["app_route_migration"]["attempts"][0]["state"],
+                         "restored_after_timeout")
+
+    def test_no_active_or_new_audio_process_timeout_does_not_try_other_spares(self):
+        self._add_group_spare("a-spare")
+        self._add_group_spare("z-spare")
+        for reason, message in (("no_active_source", "继续播放"),
+                                ("unowned_audio_process", "音频进程"),
+                                ("playback_on_other_output", "其他输出")):
+            with self.subTest(reason=reason):
+                before = len(self.router.guards)
+                with patch.object(_AppGuard, "wait_migrated",
+                                  side_effect=AppAudioRouteMigrationTimeout({"reason": reason})):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        self.controller._route_music_to_spare(self.source, ("speakers", "headphones"))
+                self.assertEqual(len(self.router.guards), before + 1)
+                self.assertTrue(self.router.guards[-1].restored)
+        self.assertEqual(self.group.starts, [])
+
+    def test_spare_retry_stops_when_music_identity_or_effective_source_changes_after_restore(self):
+        self._add_group_spare("a-spare")
+        self._add_group_spare("z-spare")
+        initial = self.source
+        original_restore = _AppGuard.restore
+        for fresh in (None, replace(initial, process_created_at_100ns=2000),
+                      replace(initial, sessions=(replace(initial.sessions[0], endpoint_id="headphones"),))):
+            with self.subTest(fresh=fresh):
+                self.source = initial
+                before = len(self.router.guards)
+
+                def restore(guard):
+                    original_restore(guard)
+                    self.source = fresh
+
+                with patch.object(_AppGuard, "wait_migrated", side_effect=AppAudioRouteMigrationTimeout(
+                        {"reason": "playback_stayed_on_source"})), patch.object(_AppGuard, "restore", restore):
+                    with self.assertRaisesRegex(RuntimeError, "未切换到同步采集输出"):
+                        self.controller._route_music_to_spare(initial, ("speakers", "headphones"))
+                self.assertEqual(len(self.router.guards), before + 1)
+        self.source = initial
+
+    def test_spare_retry_restoration_failure_keeps_owner_and_does_not_prepare_second_target(self):
+        self._add_group_spare("a-spare")
+        self._add_group_spare("z-spare")
+        self.router.restore_error = "effective output restoration failed"
+        with patch.object(_AppGuard, "wait_migrated", side_effect=AppAudioRouteMigrationTimeout(
+                {"reason": "playback_stayed_on_source"})):
+            with self.assertRaisesRegex(RuntimeError, "restoration failed"):
+                self.controller._route_music_to_spare(self.source, ("speakers", "headphones"))
+        self.assertEqual(len(self.router.guards), 1)
+        self.assertIs(self.controller._app_route_guard, self.router.guards[0])
+        self.assertFalse(self.router.guards[0].restored)
+        self.assertEqual(self.controller.diagnostics()["app_route_migration"]["last_attempt"]["state"],
+                         "restoration_required")
+        self.router.restore_error = ""
+
+    def test_external_route_preserved_or_paused_restore_prevents_another_spare_write(self):
+        self._add_group_spare("a-spare")
+        self._add_group_spare("z-spare")
+        original_restore = _AppGuard.restore
+        for state in ("external_output_preserved", "policy_restored_no_active_stream"):
+            with self.subTest(state=state):
+                before = len(self.router.guards)
+
+                def restore(guard):
+                    original_restore(guard)
+                    guard.restoration_state = state
+
+                with patch.object(_AppGuard, "wait_migrated", side_effect=AppAudioRouteMigrationTimeout(
+                        {"reason": "playback_stayed_on_source"})), patch.object(_AppGuard, "restore", restore):
+                    with self.assertRaisesRegex(RuntimeError, "未切换到同步采集输出"):
+                        self.controller._route_music_to_spare(self.source, ("speakers", "headphones"))
+                self.assertEqual(len(self.router.guards), before + 1)
+
+    def test_spare_migration_retry_is_bounded_and_never_starts_from_unverified_policy(self):
+        for index in range(4):
+            self._add_group_spare(f"spare-{index}")
+        with patch.object(_AppGuard, "wait_migrated", side_effect=AppAudioRouteMigrationTimeout(
+                {"reason": "playback_stayed_on_source"})):
+            self.controller._begin_group(("speakers", "headphones"))
+        self.assertEqual(len(self.router.guards), self.controller.MAX_MIGRATION_ATTEMPTS)
+        self.assertTrue(all(guard.restored for guard in self.router.guards))
+        self.assertEqual(self.group.starts, [])
+        self.assertIsNone(self.controller._app_route_guard)
+        self.assertEqual(self.controller.snapshot().state, "error")
+        self.assertIn("系统默认", self.controller.snapshot().status_message)
+
+    def test_spare_retry_deduplicates_ids_and_ascii_case_aliases_before_counting_attempts(self):
+        for identity in ("a-spare", "a-spare", "A-SPARE", "b-spare", "c-spare"):
+            self._add_group_spare(identity)
+        original_wait = _AppGuard.wait_migrated
+
+        def wait(guard, **kwargs):
+            if guard.spare_endpoint != "c-spare":
+                raise AppAudioRouteMigrationTimeout({"reason": "playback_stayed_on_source"})
+            return original_wait(guard, **kwargs)
+
+        with patch.object(_AppGuard, "wait_migrated", wait):
+            self.controller._begin_group(("speakers", "headphones"))
+        targets = [guard.spare_endpoint for guard in self.router.guards]
+        self.assertEqual([target.lower() for target in targets], ["a-spare", "b-spare", "c-spare"])
+        self.assertEqual(targets[0], "A-SPARE")  # The selected opaque ID is not rewritten.
+        self.assertEqual(self.group.starts, [(("speakers", "headphones"), "c-spare", 300, 1000)])
+        self.assertTrue(all(guard.restored for guard in self.router.guards[:-1]))
+        self.assertEqual(len(self.controller.diagnostics()["app_route_migration"]["attempts"]), 3)
+
+    def test_queued_stop_after_failed_migration_restoration_prevents_next_spare_write(self):
+        self._add_group_spare("a-spare")
+        self._add_group_spare("z-spare")
+        original_restore = _AppGuard.restore
+
+        def restore(guard):
+            original_restore(guard)
+            self.controller.stop_cast()
+
+        with patch.object(_AppGuard, "wait_migrated", side_effect=AppAudioRouteMigrationTimeout(
+                {"reason": "playback_stayed_on_source"})), patch.object(_AppGuard, "restore", restore):
+            with self.assertRaisesRegex(RuntimeError, "已取消"):
+                self.controller._route_music_to_spare(self.source, ("speakers", "headphones"))
+        self.assertEqual(len(self.router.guards), 1)
+        self.assertEqual(self.group.starts, [])
 
     def test_queued_stop_cancels_route_wait_then_clears_preserved_intent_without_native_start(self):
         self.router.allow = True
