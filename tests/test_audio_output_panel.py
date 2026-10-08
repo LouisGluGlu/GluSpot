@@ -61,7 +61,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.panel = AudioOutputPanel(self.provider, self.owner)
 
     def tearDown(self):
-        self.panel.dismiss()
+        self.panel.dismiss(immediate=True)
         self.owner.close()
 
     def _open(self):
@@ -213,9 +213,10 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.panel.sync_snapshot()
         self.assertEqual(self._row_order(), ("bluetooth", "local", "homepod"))
         self.assertEqual(self.panel._device_order, self._row_order())
-        self.assertEqual(self.panel.close_button.nextInFocusChain(), rows["bluetooth"])
+        self.assertTrue(self.panel.close_button.isHidden())
+        self.assertEqual(rows["bluetooth"].nextInFocusChain(), rows["bluetooth"].volume_slider)
         self.assertEqual(rows["bluetooth"].volume_slider.nextInFocusChain(), rows["local"])
-        self.assertEqual(rows["local"].volume_slider.nextInFocusChain(), rows["homepod"])
+        self.assertEqual(rows["local"].nextInFocusChain(), rows["homepod"])
         with patch.object(self.panel.rows_layout, "insertWidget") as insert, \
                 patch.object(self.panel.rows_layout, "removeWidget") as remove:
             self.provider.snapshot = replace(self.provider.snapshot, revision=1,
@@ -274,6 +275,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertFalse(any(row.isChecked() for row in self.panel._rows.values()))
 
     def test_reorder_waits_for_volume_drag_release_and_preserves_focus_and_request(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
         self._open()
         self.app.processEvents()
         rows = dict(self.panel._rows)
@@ -285,14 +287,16 @@ class AudioOutputPanelTests(unittest.TestCase):
         before = tuple(self.provider.calls)
         self.provider.snapshot = replace(self.provider.snapshot, pending_id="homepod", state="connecting")
         self.panel.sync_snapshot()
-        self.assertEqual(self._row_order(), ("local", "bluetooth", "homepod"))
+        self.assertEqual(self._row_order(), ("bluetooth", "local", "homepod"))
         self.assertEqual(rows["homepod"].state, "pending")
         self.assertEqual(tuple(self.provider.calls), before)
         slider.setSliderDown(False)
         self.app.processEvents()
         self.assertEqual(self._row_order(), ("homepod", "local", "bluetooth"))
         self.assertEqual(self.panel._rows, rows)
-        self.assertIs(self.app.focusWidget(), slider)
+        # Replacement removes selected-device volume editing after release,
+        # while keyboard focus remains on that device's route button.
+        self.assertIs(self.app.focusWidget(), rows["bluetooth"])
         self.assertEqual(slider.value(), 79)
         self.assertEqual(rows["bluetooth"]._requested_volume, .79)
         self.assertEqual(rows["bluetooth"]._request_until, request_until)
@@ -445,6 +449,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertIn(("select", "local"), self.provider.calls)
 
     def test_volume_pointer_scrub_only_queues_volume_and_poll_does_not_reset_drag(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
         self._open()
         self.app.processEvents()
         row = self.panel._rows["bluetooth"]
@@ -604,13 +609,19 @@ class AudioOutputPanelTests(unittest.TestCase):
         with patch.object(self.owner, "render", wraps=self.owner.render) as render:
             self._open()
             self.assertEqual(render.call_count, 1)
+            # The chooser now morphs from the source icon. Settle the pose and
+            # establish the final crop before checking its idle cache.
+            self.panel._reveal = 1.0
+            self.panel._apply_reveal_pose()
+            self.panel._capture_material(force=True)
+            render.reset_mock()
             with patch("local.audio_output_panel.time.monotonic", return_value=500):
                 self.panel._capture_material()
                 self.panel._capture_material()
-            self.assertEqual(render.call_count, 1)
+            self.assertEqual(render.call_count, 0)
             self.panel.move(self.panel.pos() + QPoint(-10, 0))
             self.panel._capture_material()
-            self.assertEqual(render.call_count, 2)
+            self.assertEqual(render.call_count, 1)
 
     def test_cached_music_backdrop_drives_panel_tone_and_readable_neutral_ink(self):
         self._open()
@@ -653,10 +664,10 @@ class AudioOutputPanelTests(unittest.TestCase):
             self._open()
         self.panel._advance_animation(103.0)
         self.assertLessEqual(self.panel._appearance_elapsed, 1 / 30.0 + 1e-8)
-        self.assertLess(self.panel._opacity.opacity(), 0.1)
+        self.assertLess(self.panel.reveal_progress, .25)
         self.panel._animation_timer.start()
         self.panel._poll_timer.start()
-        self.panel.dismiss()
+        self.panel.dismiss(immediate=True)
         self.assertFalse(self.panel._animation_timer.isActive())
         self.assertFalse(self.panel._poll_timer.isActive())
 

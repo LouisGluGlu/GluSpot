@@ -6,6 +6,7 @@ snapshots. Selecting another output cancels the prior sender before switching.
 from __future__ import annotations
 
 from collections import deque
+import copy
 from dataclasses import replace
 import ipaddress
 import math
@@ -17,6 +18,7 @@ from api.airplay_process import AirPlayProcess
 from api.airplay_group_process import AirPlayGroupProcess
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.windows_audio_sessions import MusicAudioSource, resolve_music_audio_source
+from api.windows_app_audio_routes import AppAudioRouteMigrationTimeout, WindowsAppAudioRoutes
 
 
 class AudioRouteController:
@@ -25,6 +27,7 @@ class AudioRouteController:
     CAPTURE_SILENCE_SECONDS = 3.0
     CAPTURE_SILENCE_MESSAGE = "已连接 HomePod，暂未检测到电脑声音"
     APP_ROUTE_RESUME_MESSAGE = "原输出设置已恢复，等待音乐继续播放"
+    MAX_MIGRATION_ATTEMPTS = 3
     _ENDPOINT_ASCII_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
     def __init__(self, backend=None, discovery=None, sender=None, *, latency_seconds=1.5,
@@ -40,6 +43,7 @@ class AudioRouteController:
         self._source_resolver = source_resolver or resolve_music_audio_source
         self._app_router = app_router
         self._app_route_guard = None
+        self._route_migration_diagnostics = None
         self._resume_recovery_pending = False
         self._next_route_recovery_at = 0.0
         self._remaining_commands = ()
@@ -101,7 +105,13 @@ class AudioRouteController:
     def diagnostics(self):
         sender = self._active_sender() if self._cast_id or self._group_mode else self._last_sender
         read = getattr(sender, "diagnostics", None)
-        return read() if callable(read) else {}
+        result = read() if callable(read) else {}
+        result = dict(result) if isinstance(result, dict) else {}
+        with self._lock:
+            migration = copy.deepcopy(self._route_migration_diagnostics)
+        if migration is not None:
+            result["app_route_migration"] = migration
+        return result
 
     def _active_sender(self):
         return self._group_sender if self._group_mode else self._sender
@@ -699,26 +709,87 @@ class AudioRouteController:
                              if device.id.translate(self._ENDPOINT_ASCII_FOLD) not in excluded_keys
                              and device.available and not device.is_bluetooth),
                             key=lambda device: (device.is_default, device.kind != "speaker", device.id))
-        guard = None
+        # A repeated inventory entry or ASCII-case alias is still one physical
+        # candidate. Preserve the actual opaque ID for Windows, normalizing
+        # only its comparison key before counting migration attempts.
+        distinct_candidates = {}
         for candidate in candidates:
+            distinct_candidates.setdefault(candidate.id.translate(self._ENDPOINT_ASCII_FOLD), candidate)
+        candidates = tuple(distinct_candidates.values())
+        attempts = []
+        migration_timeout = None
+        with self._lock:
+            self._route_migration_diagnostics = {"source_app_id": source.source_app_id, "attempts": ()}
+
+        def record(attempt):
+            with self._lock:
+                self._route_migration_diagnostics = {"source_app_id": source.source_app_id,
+                    "attempts": copy.deepcopy(tuple(attempts)), "last_attempt": copy.deepcopy(attempt)}
+
+        for candidate in candidates:
+            if len(attempts) >= self.MAX_MIGRATION_ATTEMPTS:
+                break
             if self._route_setup_cancelled():
                 raise RuntimeError("同步播放设备设置已取消")
             try:
                 guard = router.prepare(source, candidate.id, route_witness)
-                break
             except (ValueError, RuntimeError, OSError):
                 continue
-        if guard is None:
-            raise RuntimeError("同步播放需要一个未参与播放的空闲电脑输出；请保留可用的 HDMI、USB 或其他输出作为音乐来源")
-        self._app_route_guard = guard
-        self._publish(state="connecting", status_message="正在为音乐软件准备同步播放来源")
-        guard.apply()
-        migrated = guard.wait_migrated(timeout=5.0, cancelled=self._route_setup_cancelled)
-        if (not isinstance(migrated, MusicAudioSource)
-                or migrated.source_app_id != self._music_source_app_id
-                or {session.endpoint_id for session in migrated.sessions} != {guard.spare_endpoint}):
-            raise RuntimeError("无法确认音乐软件的同步播放来源")
-        return migrated
+            self._app_route_guard = guard
+            attempt = {"target_endpoint": candidate.id, "state": "preparing"}
+            attempts.append(attempt)
+            record(attempt)
+            self._publish(state="connecting", status_message="正在为音乐软件准备同步播放来源")
+            guard.apply()
+            try:
+                migrated = guard.wait_migrated(timeout=5.0, cancelled=self._route_setup_cancelled)
+            except AppAudioRouteMigrationTimeout as error:
+                migration_timeout = error
+                attempt.update(state="migration_timeout", evidence=error.evidence)
+                record(attempt)
+                # A failed policy target is not the only possible source. Try
+                # another spare only after both policies AND actual playback
+                # return to the exact original source. Every other failure
+                # (identity/ownership/cancellation) remains a hard stop.
+                try:
+                    guard.restore()
+                except (OSError, ValueError, RuntimeError):
+                    attempt["state"] = "restoration_required"
+                    record(attempt)
+                    raise
+                self._app_route_guard = None
+                attempt.update(state="restored_after_timeout",
+                               restoration_state=getattr(guard, "restoration_state", "unknown"))
+                record(attempt)
+                if self._route_setup_cancelled():
+                    raise RuntimeError("同步播放设备设置已取消")
+                if (error.evidence.get("reason") != "playback_stayed_on_source"
+                        or attempt["restoration_state"] != "active_output_verified"):
+                    break
+                fresh = self._source_resolver(self._music_source_app_id)
+                if (not WindowsAppAudioRoutes._same_source(source, fresh)
+                        or fresh.source_app_id != self._music_source_app_id or not fresh.sessions
+                        or {session.endpoint_id for session in fresh.sessions} != original_endpoints):
+                    break
+                source = fresh
+                self._publish(state="connecting", status_message="正在尝试另一个空闲音乐来源输出")
+                continue
+            if (not isinstance(migrated, MusicAudioSource)
+                    or migrated.source_app_id != self._music_source_app_id or not migrated.sessions
+                    or {session.endpoint_id for session in migrated.sessions} != {guard.spare_endpoint}):
+                raise RuntimeError("无法确认音乐软件的同步播放来源")
+            attempt.update(state="playback_verified", playback_verified=True)
+            record(attempt)
+            return migrated
+        if migration_timeout is not None:
+            reason = migration_timeout.evidence.get("reason")
+            message = {
+                "no_active_source": "切换期间未检测到音乐软件正在播放；请继续播放后重试同步输出",
+                "unowned_audio_process": "播放器的音频进程在切换期间改变；请重新选择同步输出设备",
+                "playback_on_other_output": "音乐软件仍在其他输出播放，无法确认同步来源；请在播放器中选择系统默认输出后重试",
+            }.get(reason, "音乐软件未切换到同步采集输出；请将播放器输出设为系统默认，暂停后继续播放，再重试")
+            raise RuntimeError(message) from migration_timeout
+        raise RuntimeError("同步播放需要一个未参与播放的空闲电脑输出；请保留可用的 HDMI、USB 或其他输出作为音乐来源")
 
     def _get_app_router(self):
         if self._app_router is None:

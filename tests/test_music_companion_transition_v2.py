@@ -222,7 +222,7 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         regular_translation = self._paint(before_frame, "月光继续歌唱")
         self.assertGreater(before.progress, 0.5)
         self.assertEqual(before.color, (220, 220, 220, 255))
-        self.assertEqual(before.pixel_size, regular_translation.pixel_size)
+        self.assertAlmostEqual(before.pixel_size / 2, regular_translation.pixel_size, delta=0.5)
         self.assertEqual(before.pixel_size, round((self.window.LYRIC_PIXEL_SIZE - 6) * self.window._surface_scale()))
         self.assertEqual(before.weight, int(QFont.Weight.Bold))
         self.assertEqual(regular_translation.weight, int(QFont.Weight.Normal))

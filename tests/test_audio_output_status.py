@@ -275,7 +275,7 @@ class MusicSurfaceOutputStatusTests(unittest.TestCase):
     def test_entry_bitmap_uses_current_hidden_route(self):
         self.window._audio_output_kinds = ("speaker",)
         observed = []
-        with patch.object(self.window, "render", side_effect=lambda _frame: observed.append(
+        with patch.object(self.window, "render", side_effect=lambda _frame, *args, **kwargs: observed.append(
                 self.window._audio_output_kinds)):
             self.window.show_from_island(fullscreen=False, origin_geometry=QRect(20, 20, 200, 100))
         self.assertEqual(observed, [("homepod-mini",)])

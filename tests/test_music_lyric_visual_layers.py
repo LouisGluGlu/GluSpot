@@ -81,7 +81,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertEqual(bracket_translation.font().weight(), QFont.Weight.Normal)
         self.assertLess(secondary_layout.font().pixelSize(), primary_layout.font().pixelSize())
         scale = self.window._surface_scale()
-        self.assertEqual(secondary_layout.font().pixelSize(), round((self.window.LYRIC_PIXEL_SIZE - 6) * scale))
+        self.assertEqual(secondary_layout.font().pixelSize(), round((self.window.LYRIC_PIXEL_SIZE - 6) * scale * 0.5))
         self.assertEqual(parenthetical_layout.font().pixelSize(), round((self.window.LYRIC_PIXEL_SIZE - 6) * scale))
         self.assertGreater(secondary_top, self.window._song_layouts[0][1])
         self.assertAlmostEqual(parenthetical_top, self.window._song_layouts[0][1])
