@@ -10,7 +10,7 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
-from local.audio_output_status import connected_output_kinds
+from local.audio_output_status import OutputMembershipTracker, connected_output_kinds
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
@@ -26,6 +26,11 @@ DEVICES = (
 
 
 class ConnectedOutputStatusTests(unittest.TestCase):
+    def _group(self, *identities, devices=DEVICES, **changes):
+        snapshot = AudioRouteSnapshot(devices, active_id="source", state="casting",
+                                      member_ids=identities, cast_source_id="source")
+        return replace(snapshot, **changes) if changes else snapshot
+
     def test_single_local_uses_explicit_device_kind(self):
         for identity, kind in (("buds", "airpods-pro"), ("m6", "speaker")):
             with self.subTest(identity=identity):
@@ -65,6 +70,131 @@ class ConnectedOutputStatusTests(unittest.TestCase):
         self.assertEqual(connected_output_kinds(replace(snapshot, state="ready")), ())
         self.assertEqual(connected_output_kinds(None), ())
 
+    def test_tracker_baseline_does_not_replay_a_connection(self):
+        tracker = OutputMembershipTracker()
+        first = tracker.update(self._group("mini", "pod"))
+        self.assertTrue(first.baseline)
+        self.assertEqual(first.added, ())
+        self.assertEqual(first.current.count, 2)
+        self.assertEqual(first.current.representatives, ("homepod-mini", "homepod"))
+        tracker.reset()
+        again = tracker.update(self._group("buds"))
+        self.assertTrue(again.baseline)
+        self.assertEqual(again.added, ())
+
+    def test_same_kind_before_second_kind_keeps_first_connection_slots(self):
+        devices = DEVICES + (AudioRouteDevice("mini2", "Mini 2", kind="homepod-mini", transport="airplay"),)
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("mini", devices=devices))
+        second = tracker.update(self._group("mini2", "mini", devices=devices))
+        self.assertEqual(tuple(member.id for member in second.current.members), ("mini", "mini2"))
+        self.assertEqual(second.current.representatives, ("homepod-mini",))
+        self.assertEqual(tuple(member.id for member in second.added), ("mini2",))
+        third = tracker.update(self._group("pod", "mini2", "mini", devices=devices))
+        self.assertEqual(tuple(member.id for member in third.current.members), ("mini", "mini2", "pod"))
+        self.assertEqual(third.current.representatives, ("homepod-mini", "homepod"))
+        self.assertEqual(third.current.count, 3)
+        self.assertEqual(tuple(member.id for member in third.added), ("pod",))
+
+    def test_reverse_homepod_order_and_later_kinds_do_not_replace_first_pair(self):
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("pod"))
+        second = tracker.update(self._group("mini", "pod"))
+        self.assertEqual(second.current.representatives, ("homepod", "homepod-mini"))
+        third = tracker.update(self._group("buds", "mini", "pod"))
+        self.assertEqual(third.current.representatives, ("homepod", "homepod-mini"))
+        self.assertEqual(third.current.count, 3)
+        self.assertEqual(tuple(member.id for member in third.added), ("buds",))
+
+    def test_earbuds_then_homepod_keeps_side_by_side_pair_after_mini_arrives(self):
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("buds"))
+        tracker.update(self._group("pod", "buds"))
+        third = tracker.update(self._group("mini", "pod", "buds"))
+        self.assertEqual(third.current.representatives, ("airpods-pro", "homepod"))
+        self.assertEqual(tuple(member.id for member in third.current.members), ("buds", "pod", "mini"))
+        self.assertEqual(third.current.count, 3)
+
+    def test_reorder_and_volume_updates_do_not_report_new_connections(self):
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("buds", "mini", "m6"))
+        changed_volume = tuple(replace(device, volume=.35) for device in reversed(DEVICES))
+        update = tracker.update(self._group("m6", "mini", "buds", devices=changed_volume, revision=8))
+        self.assertFalse(update.changed)
+        self.assertEqual(update.added, ())
+        self.assertEqual(update.removed, ())
+        self.assertEqual(update.current.representatives, ("airpods-pro", "homepod-mini"))
+
+    def test_pending_sender_restart_holds_only_the_previous_confirmed_members(self):
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("mini", "m6"))
+        for state in ("waiting_source", "connecting", "waiting_audio"):
+            pending = AudioRouteSnapshot(DEVICES, active_id="source", state=state,
+                pending_id="pod", pending_ids=("mini", "m6", "pod"), cast_source_id="source")
+            update = tracker.update(pending)
+            self.assertTrue(update.held_pending)
+            self.assertFalse(update.changed)
+            self.assertEqual(update.current.count, 2)
+            self.assertEqual(update.added, ())
+        confirmed = tracker.update(self._group("pod", "m6", "mini"))
+        self.assertFalse(confirmed.held_pending)
+        self.assertEqual(confirmed.current.representatives, ("homepod-mini", "speaker"))
+        self.assertEqual(tuple(member.id for member in confirmed.added), ("pod",))
+        self.assertEqual(confirmed.current.count, 3)
+
+    def test_initial_pending_is_not_a_connected_device(self):
+        tracker = OutputMembershipTracker()
+        pending = tracker.update(AudioRouteSnapshot(DEVICES, active_id="source", pending_id="mini",
+                                                    state="connecting", cast_source_id="source"))
+        self.assertEqual(pending.current.count, 0)
+        self.assertEqual(pending.added, ())
+        confirmed = tracker.update(self._group("mini"))
+        self.assertEqual(tuple(member.id for member in confirmed.added), ("mini",))
+
+    def test_removals_rederive_earliest_remaining_distinct_kinds(self):
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("buds", "pod", "mini", "m6"))
+        update = tracker.update(self._group("m6", "mini", "pod"))
+        self.assertEqual(tuple(member.id for member in update.current.members), ("pod", "mini", "m6"))
+        self.assertEqual(update.current.representatives, ("homepod", "homepod-mini"))
+        self.assertEqual(tuple(member.id for member in update.removed), ("buds",))
+        self.assertEqual(update.added, ())
+        rejoined = tracker.update(self._group("buds", "m6", "mini", "pod"))
+        self.assertEqual(tuple(member.id for member in rejoined.current.members), ("pod", "mini", "m6", "buds"))
+        self.assertEqual(rejoined.current.representatives, ("homepod", "homepod-mini"))
+
+    def test_failure_clears_held_members_and_recovered_route_is_new_confirmation(self):
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("mini", "pod"))
+        failed = tracker.update(self._group("mini", "pod", state="error", pending_ids=("mini", "pod")))
+        self.assertEqual(failed.current.count, 0)
+        self.assertFalse(failed.held_pending)
+        self.assertEqual(tuple(member.id for member in failed.removed), ("mini", "pod"))
+        recovered = tracker.update(AudioRouteSnapshot(DEVICES, active_id="buds", state="ready"))
+        self.assertEqual(recovered.current.representatives, ("airpods-pro",))
+        self.assertEqual(tuple(member.id for member in recovered.added), ("buds",))
+        self.assertEqual(tracker.update(None).current.count, 0)
+
+    def test_discovery_absence_preserves_confirmed_metadata_without_name_guessing(self):
+        tracker = OutputMembershipTracker()
+        tracker.update(self._group("mini"))
+        absent = tracker.update(self._group("mini", devices=()))
+        self.assertEqual(absent.current.representatives, ("homepod-mini",))
+        self.assertEqual(absent.current.members[0].name, "Living room")
+        unknown = tracker.update(self._group("mini", "unknown", devices=()))
+        self.assertEqual(unknown.added[0].name, "未识别设备")
+        self.assertEqual(unknown.current.representatives, ("homepod-mini", "device"))
+        misleading = DEVICES + (AudioRouteDevice("unknown", "My HomePod", kind="anything"),)
+        self.assertEqual(tracker.update(self._group("mini", "unknown", devices=misleading)).current.representatives,
+                         ("homepod-mini", "device"))
+
+    def test_aliases_do_not_duplicate_a_representative(self):
+        aliases = (AudioRouteDevice("a", "A", kind="headset"), AudioRouteDevice("b", "B", kind="headphones"),
+                   AudioRouteDevice("c", "C", kind="homepodmini", transport="airplay"))
+        update = OutputMembershipTracker().update(self._group("a", "b", "c", devices=aliases))
+        self.assertEqual(update.current.representatives, ("headphones", "homepod-mini"))
+        self.assertEqual(update.current.count, 3)
+
 
 class MusicSurfaceOutputStatusTests(unittest.TestCase):
     @classmethod
@@ -95,7 +225,8 @@ class MusicSurfaceOutputStatusTests(unittest.TestCase):
             self.window._sync_audio_output_status()
         self.assertEqual(self.window._audio_output_kinds, ("homepod-mini",))
         self.assertEqual(update.call_count, 1)
-        self.assertLess(update.call_args.args[0].width(), self.window.width() // 4)
+        self.assertLess(update.call_args.args[0].width(), self.window.width() // 2)
+        self.assertLess(update.call_args.args[0].height(), self.window.height() // 4)
         self.getter.side_effect = AssertionError("provider read during paint")
         image = self._controls()
         circle = self.window._button_rects["audio_output"].toAlignedRect()

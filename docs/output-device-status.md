@@ -1,5 +1,9 @@
 # Output selection and connected device status
 
+The subsequent [connection-motion change](output-connection-motion.md) refines
+the representative ordering and pairing rules below: earliest two distinct
+confirmed kinds, with overlap only for the HomePod/HomePod mini pair.
+
 This source change is isolated on `codex/output-device-status`, starting from
 `544aba8`. It follows the user's October 8 circular-button reference without
 changing audio routing, native scheduling or the 6.411 release package.

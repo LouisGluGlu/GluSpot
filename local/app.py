@@ -308,10 +308,32 @@ class LocalIslandApp:
 
     def _poll_audio_device_notice(self):
         route = self.data_provider.get_audio_route_snapshot()
+        surface = getattr(self.window, "music_fullscreen_overlay", None)
+        surface_visible = surface is not None and surface.isVisible()
+        music_surface_owned = surface_visible or bool(getattr(self.window, "_music_surface_active", False))
+        if music_surface_owned:
+            # A notice that started on the island must not float over the
+            # music surface when it opens, even without a newer route event.
+            self.audio_device_notice.close()
         if route.event_serial <= self._audio_device_event_serial:
             return
         self._audio_device_event_serial = route.event_serial
-        device = next((d for d in route.devices if d.name == route.event_name), None)
+        identity = str(getattr(route, "event_device_id", "") or "")
+        if identity:
+            device = next((d for d in route.devices if d.id == identity), None)
+        else:
+            # Older snapshots only have a label. Two endpoints may share it;
+            # retain a generic glyph rather than inventing a device identity.
+            matches = tuple(d for d in route.devices if d.name == route.event_name)
+            device = matches[0] if len(matches) == 1 else None
+        if music_surface_owned:
+            if surface_visible and not surface.isMinimized():
+                handler = getattr(surface, "on_audio_device_event", None)
+                if callable(handler):
+                    handler(route, device)
+            # Minimized/hidden music surfaces should not open a separate
+            # popup or replay a stale connection animation when restored.
+            return
         self.audio_device_notice.present(route.event_name, route.event_message,
                                         device.kind if device else "device", self.window.screen())
 

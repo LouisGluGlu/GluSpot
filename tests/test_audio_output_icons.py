@@ -78,11 +78,11 @@ class AudioOutputIconTests(unittest.TestCase):
         self.assertEqual(_icon_mask.cache_info().maxsize, 128)
         self.assertEqual(_tinted_icon.cache_info().maxsize, 256)
 
-    def _render_status(self, kinds, color=QColor(40, 130, 210), diameter=80):
+    def _render_status(self, kinds, color=QColor(40, 130, 210), diameter=80, *, count=None):
         image = QImage(diameter, diameter, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         with QPainter(image) as painter:
-            paint_audio_output_status(painter, QRectF(image.rect()), kinds, color)
+            paint_audio_output_status(painter, QRectF(image.rect()), kinds, color, count=count)
         return image
 
     def _region_bytes(self, image, x, y, width, height):
@@ -119,13 +119,41 @@ class AudioOutputIconTests(unittest.TestCase):
         self.assertNotEqual(self._region_bytes(mixed_two, 0, 52, 80, 28),
                             self._region_bytes(mixed_five, 0, 52, 80, 28))
 
-    def test_group_model_composition_is_stable_when_selection_order_changes(self):
+    def test_composition_uses_first_two_distinct_connection_kinds(self):
         first = self._render_status(("homepod", "homepod-mini", "speaker"))
         reordered = self._render_status(("speaker", "homepod_mini", "homepod"))
-        self.assertEqual(bytes(first.constBits()), bytes(reordered.constBits()))
+        self.assertNotEqual(self._region_bytes(first, 0, 0, 80, 49),
+                            self._region_bytes(reordered, 0, 0, 80, 49))
+        later = self._render_status(("homepod", "homepod-mini", "airpods-pro", "speaker"))
+        self.assertEqual(self._region_bytes(first, 0, 0, 80, 49),
+                         self._region_bytes(later, 0, 0, 80, 49))
         homogeneous = self._render_status(("homepod",) * 3)
         self.assertNotEqual(self._region_bytes(first, 0, 0, 80, 49),
                             self._region_bytes(homogeneous, 0, 0, 80, 49))
+
+    def test_only_homepod_pair_overlaps_and_other_pairs_keep_ordered_sides(self):
+        pod_first = self._render_status(("homepod", "homepod-mini"))
+        mini_first = self._render_status(("homepod-mini", "homepod"))
+        self.assertEqual(bytes(pod_first.constBits()), bytes(mini_first.constBits()))
+        for pair in (("airpods-pro", "homepod"), ("homepod-mini", "headphones"),
+                     ("speaker", "airplay"), ("device", "homepod")):
+            with self.subTest(pair=pair):
+                ordered = self._render_status(pair)
+                reversed_order = self._render_status(tuple(reversed(pair)))
+                self.assertNotEqual(self._region_bytes(ordered, 0, 0, 80, 49),
+                                    self._region_bytes(reversed_order, 0, 0, 80, 49))
+                # Two glyphs have a clear central gap; generic pairs do not
+                # borrow the HomePod-only front/back overlap.
+                self.assertTrue(all(ordered.pixelColor(x, y).alpha() == 0
+                                    for y in range(8, 49) for x in range(39, 41)))
+
+    def test_explicit_total_count_matches_full_membership_composition(self):
+        representatives = self._render_status(("airpods-pro", "homepod"), count=5)
+        full = self._render_status(("airpods-pro", "airpods-pro", "homepod", "speaker", "homepod-mini"))
+        self.assertEqual(bytes(representatives.constBits()), bytes(full.constBits()))
+        homogeneous = self._render_status(("homepod-mini",), count=3)
+        all_minis = self._render_status(("homepod-mini",) * 3)
+        self.assertEqual(bytes(homogeneous.constBits()), bytes(all_minis.constBits()))
 
     def test_mixed_homepod_front_glyph_keeps_original_translucent_ink(self):
         image = self._render_status(("homepod", "homepod-mini"), QColor(40, 130, 210), 200)
@@ -152,7 +180,7 @@ class AudioOutputIconTests(unittest.TestCase):
         first = self._render_status(("homepod", "homepod-mini"))
         hits = _tinted_status.cache_info().hits
         with patch("local.audio_output_icons._status_mask", side_effect=AssertionError("uncached composition")):
-            repeated = self._render_status(("homepod-mini", "homepod"))
+            repeated = self._render_status(("homepod", "homepod-mini"))
         self.assertEqual(bytes(first.constBits()), bytes(repeated.constBits()))
         self.assertGreater(_tinted_status.cache_info().hits, hits)
         self.assertEqual(_status_mask.cache_info().maxsize, 128)
