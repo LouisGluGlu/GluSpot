@@ -1362,24 +1362,25 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             100,
         )
 
-    def test_metadata_marquee_round_trip_then_pauses_thirty_seconds_at_start(self):
+    def test_metadata_marquee_round_trip_starts_every_fifteen_seconds(self):
         offset = self.window._metadata_scroll_offset
         self.assertEqual(offset(0.0, 1.5), (0.0, False))
         self.assertEqual(offset(140.0, 0.0), (0.0, False))
-        self.assertEqual(offset(140.0, 29.999), (0.0, False))
-        self.assertAlmostEqual(offset(140.0, 32.5)[0], 140.0)
-        self.assertAlmostEqual(offset(140.0, 33.2)[0], 140.0)
-        outbound = [offset(140.0, at)[0] for at in (30.0, 30.7, 31.5, 32.5)]
-        inbound = [offset(140.0, at)[0] for at in (33.2, 33.9, 34.8, 35.7)]
+        self.assertEqual(offset(140.0, 14.999), (0.0, False))
+        self.assertAlmostEqual(offset(140.0, 17.5)[0], 140.0)
+        self.assertAlmostEqual(offset(140.0, 18.2)[0], 140.0)
+        outbound = [offset(140.0, at)[0] for at in (15.0, 15.7, 16.5, 17.5)]
+        inbound = [offset(140.0, at)[0] for at in (18.2, 18.9, 19.8, 20.7)]
         self.assertEqual(outbound, sorted(outbound))
         self.assertEqual(inbound, sorted(inbound, reverse=True))
-        self.assertTrue(offset(140.0, 30.7)[1])
-        self.assertTrue(offset(140.0, 33.9)[1])
-        for at in (35.7, 37.0, 65.69):
+        self.assertTrue(offset(140.0, 15.7)[1])
+        self.assertTrue(offset(140.0, 18.9)[1])
+        for at in (20.7, 22.0, 29.99):
             self.assertEqual(offset(140.0, at), (0.0, False))
-        self.assertGreater(offset(140.0, 65.8)[0], 0.0)
-        self.assertAlmostEqual(self.window._metadata_next_motion_delay(0.0), 30.0)
-        self.assertAlmostEqual(self.window._metadata_next_motion_delay(32.7), 0.5)
+        self.assertGreater(offset(140.0, 30.1)[0], 0.0)
+        self.assertGreater(offset(140.0, 45.1)[0], 0.0)
+        self.assertAlmostEqual(self.window._metadata_next_motion_delay(0.0), 15.0)
+        self.assertAlmostEqual(self.window._metadata_next_motion_delay(17.7), 0.5)
 
     def test_metadata_hover_starts_immediately_and_leaving_returns_before_new_wait(self):
         window = self.window
@@ -1394,8 +1395,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertAlmostEqual(window._metadata_marquee_pose("title", 200.0, 103.0)[0], visible)
         self.assertLess(window._metadata_marquee_pose("title", 200.0, 103.2)[0], visible)
         self.assertEqual(window._metadata_marquee_pose("title", 200.0, 103.5)[0], 0.0)
-        self.assertEqual(window._metadata_marquee_pose("title", 200.0, 133.44)[0], 0.0)
-        self.assertGreater(window._metadata_marquee_pose("title", 200.0, 134.0)[0], 0.0)
+        self.assertEqual(window._metadata_marquee_pose("title", 200.0, 118.44)[0], 0.0)
+        self.assertGreater(window._metadata_marquee_pose("title", 200.0, 119.0)[0], 0.0)
 
     def test_translation_uses_half_the_previous_font_in_both_window_modes(self):
         self.owner.timed_lyrics = [(0.0, "first line"), (4.0, "second line")]
@@ -1439,7 +1440,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 painter, clip, artist, font, 100.0, "track-a", field="artist",
             )
             self.window._paint_scrolling_metadata(
-                painter, clip, title, font, 130.5, "track-a", field="title",
+                painter, clip, title, font, 115.5, "track-a", field="title",
             )
         self.assertTrue(self.window._metadata_marquee_moving)
         self.assertTrue(self.window._metadata_animation_rect.contains(clip.center().toPoint()))
@@ -1472,11 +1473,11 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.window.render(image)
         self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
         self.assertEqual(self.window._metadata_marquee_states["artist"][2], 100.0)
-        with patch("local.music_surface_window.time.monotonic", return_value=130.5):
+        with patch("local.music_surface_window.time.monotonic", return_value=115.5):
             self.window.render(image)
         self.assertTrue(self.window._metadata_marquee_moving)
         self.window._fullscreen = True
-        with patch("local.music_surface_window.time.monotonic", return_value=131.0):
+        with patch("local.music_surface_window.time.monotonic", return_value=116.0):
             self.window.render(image)
         self.assertEqual(self.window._metadata_marquee_states["title"][2], 100.0)
         self.assertEqual(self.window._metadata_marquee_states["artist"][2], 100.0)

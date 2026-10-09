@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -65,7 +65,7 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
 
     def _open_with_pointer(self, fullscreen=False, now=100.0):
         if self.window._audio_output_panel is not None:
-            self.window._audio_output_panel.dismiss()
+            self.window._audio_output_panel.dismiss(immediate=True)
         self.window._fullscreen = fullscreen
         self.window._reset_control_idle(now=now)
         self._render_page(now)
@@ -78,9 +78,14 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window._moving)
         panel._animation_timer.stop()
         panel._poll_timer.stop()
-        panel._appearance_elapsed = 1.0
-        panel._opacity.setOpacity(1.0)
-        panel.move(panel._anchor)
+        # Exercise the real trajectory, including its bounded row overshoot,
+        # before pointer actions can belong to the displayed native rows.
+        panel._clock.reset(now + .5)
+        for index in range(60):
+            panel._advance_animation(now + .5 + (index + 1) / 60)
+        panel._animation_timer.stop()
+        self.assertTrue(panel._native_content_ready())
+        self.assertFalse(panel._scroll_opacity.isEnabled())
         return panel
 
     def _mixed_snapshot(self, pending=False):
@@ -185,6 +190,8 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
     def test_circular_output_control_selects_fake_route_and_escape_dismisses_chooser(self):
         for fullscreen in (False, True):
             with self.subTest(fullscreen=fullscreen):
+                self.provider.snapshot = replace(self.provider.snapshot, active_id="local")
+                self.window._sync_audio_output_status()
                 self.window._fullscreen = fullscreen
                 self.window._reset_control_idle(now=100.0)
                 closed_page = self._render_page(100.0)
@@ -199,24 +206,27 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 with patch.object(self.provider, "get_audio_route_snapshot",
                                   side_effect=AssertionError("provider read during paint")):
                     open_page = self._render_page(100.5)
+                    controls = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                    controls.fill(Qt.GlobalColor.transparent)
+                    with QPainter(controls) as painter, patch(
+                            "local.music_surface_window.time.monotonic", return_value=100.5):
+                        self.window._paint_window_controls(painter, QRectF(self.window.rect()))
                 closed_face = closed_page.copy(output.toAlignedRect())
-                open_face = open_page.copy(output.toAlignedRect())
-
-                def blue_pixels(image):
-                    return sum(color.blue() > 180 and color.blue() > color.red() + 45
-                               and color.green() > 100
-                               for y in range(image.height()) for x in range(image.width())
-                               for color in (image.pixelColor(x, y),))
-
-                self.assertGreater(blue_pixels(open_face), blue_pixels(closed_face) + 8)
-                side_x, middle_y = open_face.width() // 2, max(3, open_face.height() // 10)
-                face = open_face.pixelColor(side_x, middle_y)
-                self.assertEqual(face.alpha(), 255)
-                # Confirmed outputs keep the reference's pale face when the
-                # chooser is closed; opening changes device ink to blue.
-                self.assertGreater(closed_face.pixelColor(side_x, middle_y).lightness(), 200)
-                self.assertGreater(face.lightness(), 200)
-                self.assertGreater(face.lightness(), open_face.pixelColor(1, 1).lightness() + 80)
+                suppressed = controls.copy(output.toAlignedRect())
+                self.assertTrue(all(suppressed.pixelColor(x, y).alpha() == 0
+                    for y in range(suppressed.height()) for x in range(suppressed.width())))
+                # The same source slot now becomes the chooser, whose first
+                # selected row owns the pale volume capsule. No second blue
+                # button remains above it, and adjacent controls stay drawn.
+                self.assertAlmostEqual(panel.y(), output.top(), delta=1)
+                self.assertAlmostEqual(panel.x() + panel.width(), output.right(), delta=1)
+                row = panel._rows["local"]
+                white = row.mapTo(self.window, QPoint(8, row.height() // 2))
+                self.assertGreater(open_page.pixelColor(white).lightness(), 200)
+                self.assertGreater(closed_face.pixelColor(closed_face.width() // 2, 3).lightness(), 200)
+                self.assertGreater(sum(controls.pixelColor(x, y).alpha() > 0
+                    for y in range(round(translation.top()), round(translation.bottom()))
+                    for x in range(round(translation.left()), round(translation.right()))), 100)
                 self.provider.calls.clear()
                 QTest.mouseClick(panel._rows["bluetooth"], Qt.MouseButton.LeftButton)
                 self.assertEqual(self.provider.calls, [("select", "bluetooth")])
@@ -229,6 +239,12 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 with patch.object(self.window, "return_to_island") as return_to_island:
                     QTest.keyClick(panel, Qt.Key.Key_Escape)
                 return_to_island.assert_not_called()
+                self.assertTrue(panel.is_closing)
+                panel._clock.reset(200)
+                for index in range(60):
+                    panel._advance_animation(200 + (index + 1) / 60)
+                    if not panel.isVisible():
+                        break
                 self.assertFalse(panel.isVisible())
                 self.assertFalse(panel._animation_timer.isActive())
                 self.assertFalse(panel._poll_timer.isActive())
@@ -302,6 +318,12 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
     def test_compact_mixed_stop_is_scroll_accessible_and_waits_for_authoritative_snapshot(self):
         self.window.resize(640, 360)
         self.provider.snapshot = self._mixed_snapshot()
+        # The compact density now fits the original four rows without
+        # scrolling. Retain this footer-in-a-long-list integration scenario
+        # by supplying additional actual (unselected) fake endpoints.
+        self.provider.snapshot = replace(self.provider.snapshot, devices=self.provider.snapshot.devices + tuple(
+            AudioRouteDevice(f"extra-{index}", f"Additional output {index}", kind="speaker")
+            for index in range(5)))
         panel = self._open_with_pointer()
         self.assertGreater(panel.scroll.verticalScrollBar().maximum(), 0)
         panel.scroll.ensureWidgetVisible(panel.stop_button)

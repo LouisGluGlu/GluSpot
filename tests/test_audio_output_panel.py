@@ -451,6 +451,8 @@ class AudioOutputPanelTests(unittest.TestCase):
     def test_volume_pointer_scrub_only_queues_volume_and_poll_does_not_reset_drag(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
         self._open()
+        self.panel._reveal = 1.0
+        self.panel._apply_reveal_pose()
         self.app.processEvents()
         row = self.panel._rows["bluetooth"]
         slider = row.volume_slider
@@ -586,7 +588,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         page.show()
         panel = AudioOutputPanel(self.provider, page)
         try:
-            panel.open_at(QPoint(580, 50))
+            # Position the compact chooser across the painted backdrop edge.
+            panel.open_at(QPoint(440, 50))
             panel._animation_timer.stop()
             panel._poll_timer.stop()
             material = panel._material
