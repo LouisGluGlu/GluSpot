@@ -4447,7 +4447,12 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.window._draw_future_wrapped_layout(
                 painter, layout, origin, text, font, 154.0, height,
             )
-        self.assertGreaterEqual(len(self.window._lyric_raster_cache), 1)
+        expected = QImage(output.size(), output.format())
+        expected.fill(Qt.GlobalColor.black)
+        with QPainter(expected) as painter:
+            painter.setPen(colors[0])
+            layout.draw(painter, origin)
+        self.assertEqual(bytes(output.constBits()), bytes(expected.constBits()))
 
         with patch.object(self.window, "_paint_lifted_run") as draw_run:
             with QPainter(output) as painter:

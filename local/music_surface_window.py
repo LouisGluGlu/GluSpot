@@ -69,6 +69,7 @@ from local.music_lyric_presentation import (
 from local.music_surface_palette import (
     MusicSurfacePalette,
     artwork_surface_palette,
+    cached_artwork_surface_palette,
     background_role_color,
     future_lyric_color as select_future_lyric_color,
 )
@@ -106,6 +107,7 @@ class MusicSurfaceWindow(QWidget):
     """Frameless full-screen/windowed music surface owned by the V2 island."""
 
     seekFinished = Signal(bool, float, str)
+    artworkPaletteReady = Signal(int, object, object)
     RESIZE_MARGIN = 9
     TITLE_BAR_HEIGHT = 58
     MODE_TRANSITION_MS = 340
@@ -146,6 +148,8 @@ class MusicSurfaceWindow(QWidget):
     TRANSPORT_LIGHT_FADE_SECONDS = 0.22
     TRANSPORT_LIGHT_CREST_FRACTION = 0.79
     TRANSPORT_LIGHT_SPRITE_SIZE = 384
+    ARTWORK_SCALE_CACHE_LIMIT = 24
+    ARTWORK_SCALE_CACHE_BYTES = 64 * 1024 * 1024
     OBO_REVEAL_SECONDS = 3.0
     ANIMATION_FRAME_MS = 8
     EMPHASIS_FRAME_MS = 4
@@ -239,6 +243,11 @@ class MusicSurfaceWindow(QWidget):
         self._future_tone_backdrop = QColor(12, 15, 22)
         self._art_palette_cache_key = None
         self._art_palette_cache: MusicSurfacePalette | None = None
+        self._art_palette_worker_token = 0
+        self._art_palette_active_token = None
+        self._art_palette_worker_key = None
+        self._art_palette_pending = None
+        self._art_palette_failed_key = None
         self._lyric_layout_cache: dict[tuple[str, str, int], tuple[QTextLayout, float]] = {}
         self._font_height_cache: dict[tuple[str, float], float] = {}
         self._display_lyrics_cache_key = None
@@ -322,6 +331,8 @@ class MusicSurfaceWindow(QWidget):
         self._last_full_animation_update_at = -1.0
         self._cover_cache_key = None
         self._cover_cache = QImage()
+        self._artwork_scale_cache: OrderedDict[tuple, QImage] = OrderedDict()
+        self._artwork_scale_cache_bytes = 0
         self._preview_cover_cache_key = None
         self._preview_cover_cache = QImage()
         self._cover_scale_from = 1.0
@@ -389,6 +400,7 @@ class MusicSurfaceWindow(QWidget):
         self._metadata_prewarm_token = None
         self._metadata_prewarm_queue: deque[tuple[str, QFont, QColor, float, object]] = deque()
         self.seekFinished.connect(self._on_seek_finished)
+        self.artworkPaletteReady.connect(self._on_artwork_palette_ready)
         self._geometry_transition_snapshot = QImage()
         self._island_origin_snapshot = QImage()
         self._island_origin_geometry = QRect()
@@ -1426,6 +1438,12 @@ class MusicSurfaceWindow(QWidget):
         self._cover_cache_key = None
         self._preview_cover_cache_key = None
         self._previous_cover_cache_key = None
+        self._artwork_scale_cache.clear()
+        self._artwork_scale_cache_bytes = 0
+        self._art_palette_worker_token += 1
+        self._art_palette_pending = None
+        self._art_palette_failed_key = None
+        self._art_palette_cache_key = None
         image = QImage(getattr(self.owner, "album_art", QImage()))
         self._art_loading_track_key = self._track_visual[0] if self._track_visual else (
             str(getattr(self.owner, "media_track_id", "") or "") or (
@@ -1829,6 +1847,11 @@ class MusicSurfaceWindow(QWidget):
         self._audio_output_status_timer.timeout.disconnect(self._sync_audio_output_status)
         self._mode_animation.finished.disconnect(self._finish_mode_transition)
         self.seekFinished.disconnect(self._on_seek_finished)
+        self._art_palette_worker_token += 1
+        self._art_palette_pending = None
+        # Keep the self-owned result connection until QObject destruction.
+        # A reopened surface waits for this one worker to release its slot;
+        # the generation check prevents its retired result changing the UI.
 
     def closeEvent(self, event):
         self._restore_idle_cursor()
@@ -1848,9 +1871,85 @@ class MusicSurfaceWindow(QWidget):
         secondary = self._owner_color("secondary_color", QColor(9, 12, 22))
         key = (image.cacheKey(), album.rgba(), secondary.rgba())
         if key != self._art_palette_cache_key or self._art_palette_cache is None:
-            self._art_palette_cache = artwork_surface_palette(image, album, secondary)
-            self._art_palette_cache_key = key
+            cached = cached_artwork_surface_palette(image, album, secondary)
+            runner = getattr(self.owner, "_run_background", None)
+            if cached is not None:
+                self._art_palette_cache, self._art_palette_cache_key = cached, key
+            elif image.isNull() or not callable(runner):
+                self._art_palette_cache = artwork_surface_palette(image, album, secondary)
+                self._art_palette_cache_key = key
+            elif self._art_palette_failed_key != key and not self._closing_for_shutdown:
+                if (self._art_palette_worker_key != key
+                        or self._art_palette_active_token != self._art_palette_worker_token):
+                    self._art_palette_pending = (key, image, album, secondary)
+                self._start_artwork_palette_worker()
+            if self._art_palette_cache is None:
+                # Hold a real provider tone on first open; subsequent misses
+                # retain the last complete displayed palette until ready.
+                # The existing 1.2 s field retarget keeps the handoff smooth.
+                self._art_palette_cache = artwork_surface_palette(QImage(), album, secondary)
         return self._art_palette_cache
+
+    def _start_artwork_palette_worker(self):
+        """One extraction in flight; rapid arrivals replace its pending successor."""
+        if self._art_palette_worker_key is not None or self._art_palette_pending is None:
+            return
+        key, image, album, secondary = self._art_palette_pending
+        self._art_palette_pending = None
+        self._art_palette_worker_key = key
+        self._art_palette_worker_token += 1
+        token = self._art_palette_worker_token
+        self._art_palette_active_token = token
+        cached = cached_artwork_surface_palette(image, album, secondary)
+        if cached is not None:
+            self._on_artwork_palette_ready(token, key, cached)
+            return
+        deliver = self.artworkPaletteReady
+
+        def prepare():
+            # These immutable value snapshots are the complete worker payload.
+            # Only signal emission is allowed; never inspect a QWidget or
+            # paint from this worker thread.
+            try:
+                result = artwork_surface_palette(image, album, secondary)
+            except Exception:
+                result = None
+            try:
+                deliver.emit(token, key, result)
+            except RuntimeError:
+                pass  # Qt may already have disposed the hidden surface.
+
+        try:
+            self.owner._run_background("ArtworkPalette", prepare)
+        except Exception:
+            self._art_palette_worker_key = None
+            self._art_palette_active_token = None
+            self._art_palette_failed_key = key
+
+    @Slot(int, object, object)
+    def _on_artwork_palette_ready(self, token: int, key, result):
+        if token != self._art_palette_active_token:
+            return
+        self._art_palette_worker_key = None
+        self._art_palette_active_token = None
+        if self._closing_for_shutdown:
+            return
+        image = QImage(getattr(self.owner, "album_art", QImage()))
+        album = self._owner_color("album_color", QColor(27, 36, 60))
+        secondary = self._owner_color("secondary_color", QColor(9, 12, 22))
+        current = (image.cacheKey(), album.rgba(), secondary.rgba())
+        if token == self._art_palette_worker_token and key == current:
+            if result is not None:
+                self._art_palette_cache, self._art_palette_cache_key = result, key
+                self._art_palette_failed_key = None
+                self.update()
+            else:
+                self._art_palette_failed_key = key
+        if self._art_palette_pending is not None:
+            if self._art_palette_pending[0] == current and current != self._art_palette_cache_key:
+                self._start_artwork_palette_worker()
+            else:
+                self._art_palette_pending = None
 
     def _visual_track_identity(self) -> str:
         return str(getattr(self.owner, "media_track_id", "") or "") or (
@@ -2333,6 +2432,27 @@ class MusicSurfaceWindow(QWidget):
         image.setDevicePixelRatio(source.devicePixelRatio())
         self._preview_cover_cache_key = key
         self._preview_cover_cache = image
+        return image
+
+    def _scaled_artwork_image(self, source: QImage, pixels: int, dpr: float) -> QImage:
+        """Reuse full-quality current/previous covers with a bounded pixel budget."""
+        key = (source.cacheKey(), int(pixels), round(float(dpr), 3))
+        cached = self._artwork_scale_cache.get(key)
+        if cached is not None:
+            self._artwork_scale_cache.move_to_end(key)
+            return QImage(cached)
+        image = source.scaled(max(1, int(pixels)), max(1, int(pixels)),
+                              Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                              Qt.TransformationMode.SmoothTransformation)
+        image.setDevicePixelRatio(dpr)
+        cost = image.sizeInBytes()
+        if cost <= self.ARTWORK_SCALE_CACHE_BYTES:
+            self._artwork_scale_cache[key] = QImage(image)
+            self._artwork_scale_cache_bytes += cost
+            while (len(self._artwork_scale_cache) > self.ARTWORK_SCALE_CACHE_LIMIT
+                   or self._artwork_scale_cache_bytes > self.ARTWORK_SCALE_CACHE_BYTES):
+                _old_key, old_image = self._artwork_scale_cache.popitem(last=False)
+                self._artwork_scale_cache_bytes -= old_image.sizeInBytes()
         return image
 
     @staticmethod
@@ -5537,13 +5657,12 @@ class MusicSurfaceWindow(QWidget):
                 painter.restore()
             return
         blur_level = layers[0][0]
-        if not any(abs(value) >= 0.01 for value in line_offsets):
-            self._draw_cached_wrapped_layout(
-                painter, layout, origin, text, font, width, height, color,
-                blur_level=blur_level,
-            )
-            return
-        if not blur_level and layout.lineCount() > 1:
+        if not blur_level:
+            # Keep the already-shaped text on the same native glyph grid
+            # while its spring moves and after it settles. A cached bitmap
+            # rounds a fractional origin differently from QTextLine.draw;
+            # switching to it at rest shifted low-perception rows sideways.
+            # This also shares the whole-block wipe's glyph placement.
             painter.save()
             painter.setPen(QColor(color))
             for line_index in range(layout.lineCount()):
@@ -5552,6 +5671,12 @@ class MusicSurfaceWindow(QWidget):
                     painter, QPointF(origin.x(), origin.y() + offset),
                 )
             painter.restore()
+            return
+        if not any(abs(value) >= 0.01 for value in line_offsets):
+            self._draw_cached_wrapped_layout(
+                painter, layout, origin, text, font, width, height, color,
+                blur_level=blur_level,
+            )
             return
         image, padding = self._lyric_raster(
             text, font, width, height, layout, color,
@@ -6181,12 +6306,7 @@ class MusicSurfaceWindow(QWidget):
                     preview_cover,
                 )
                 if cover_key != self._cover_cache_key:
-                    self._cover_cache = image.scaled(
-                        max(1, cover_key[1]), max(1, cover_key[2]),
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                    self._cover_cache.setDevicePixelRatio(dpr)
+                    self._cover_cache = self._scaled_artwork_image(image, cover_key[1], dpr)
                     self._cover_cache_key = cover_key
                 cover_image = self._cover_cache
                 if preview_cover:
@@ -6208,12 +6328,7 @@ class MusicSurfaceWindow(QWidget):
                     round(dpr, 3),
                 )
                 if previous_key != self._previous_cover_cache_key:
-                    self._previous_cover_cache = previous[3].scaled(
-                        max(1, previous_key[1]), max(1, previous_key[2]),
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                    self._previous_cover_cache.setDevicePixelRatio(dpr)
+                    self._previous_cover_cache = self._scaled_artwork_image(previous[3], previous_key[1], dpr)
                     self._previous_cover_cache_key = previous_key
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 painter.drawImage(painted_cover, self._previous_cover_cache)
@@ -7825,6 +7940,11 @@ class MusicSurfaceWindow(QWidget):
         if self._control_reveal_target < 1.0:
             return
         now = time.monotonic()
+        if self._previous_track_visual is not None and now - self._track_transition_at < .36:
+            # Album changes continually retint the transport glyphs. Blurring
+            # those transient colors evicts useful levels and competes with
+            # the visible transition; resume in its existing quiet lead-in.
+            return
         idle_elapsed = now - self._control_last_motion_at
         idle_seconds = (
             self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen
@@ -8128,8 +8248,48 @@ class MusicSurfaceWindow(QWidget):
                 )
         painter.restore()
 
+    @staticmethod
+    @lru_cache(maxsize=2)
+    def _transport_light_gradient(gold: bool = False) -> QRadialGradient:
+        """One normalized profile, rasterized at the actual display resolution."""
+        light = QRadialGradient(QPointF(0.0, 0.0), 1.0)
+        if gold:
+            # This one-off confirmation wave is roughly twice as thick
+            # as the ordinary artwork ripple, with a warm radial blend.
+            for stop, color in (
+                (0.0, QColor(190, 128, 20, 0)),
+                (0.53, QColor(190, 128, 20, 0)),
+                (0.58, QColor(204, 139, 27, 10)),
+                (0.62, QColor(218, 158, 36, 25)),
+                (0.66, QColor(232, 181, 49, 48)),
+                (0.71, QColor(245, 209, 87, 68)),
+                (0.77, QColor(255, 234, 150, 80)),
+                (0.80, QColor(255, 246, 187, 84)),
+                (0.84, QColor(253, 223, 110, 77)),
+                (0.89, QColor(234, 183, 55, 57)),
+                (0.94, QColor(210, 146, 27, 37)),
+                (0.98, QColor(188, 122, 18, 12)),
+                (1.0, QColor(188, 122, 18, 0)),
+            ):
+                light.setColorAt(stop, color)
+        else:
+            # Keep a readable thick crest without washing across half of
+            # the music surface. The shoulders stay translucent.
+            light.setColorAt(0.0, QColor(255, 255, 255, 0))
+            light.setColorAt(0.66, QColor(255, 255, 255, 0))
+            light.setColorAt(0.69, QColor(239, 225, 255, 10))
+            light.setColorAt(0.73, QColor(246, 234, 255, 32))
+            light.setColorAt(0.77, QColor(250, 244, 255, 65))
+            light.setColorAt(0.80, QColor(255, 252, 255, 78))
+            light.setColorAt(0.83, QColor(255, 255, 255, 70))
+            light.setColorAt(0.87, QColor(250, 251, 255, 45))
+            light.setColorAt(0.91, QColor(236, 240, 255, 16))
+            light.setColorAt(0.94, QColor(218, 226, 255, 0))
+            light.setColorAt(1.0, QColor(218, 226, 255, 0))
+        return light
+
     def _cached_transport_light_sprite(self, *, gold: bool = False) -> QImage:
-        """A cached soft annulus so each frame only scales one image."""
+        """Small reference raster for previews; live waves use the native profile."""
         cached = self._obo_reveal_light_sprite if gold else self._transport_light_sprite
         if not cached.isNull():
             return cached
@@ -8137,44 +8297,9 @@ class MusicSurfaceWindow(QWidget):
         image = QImage(side, side, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         with QPainter(image) as layer:
-            layer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            area = QRectF(image.rect())
-            center = area.center()
-            light = QRadialGradient(center, side * 0.5)
-            if gold:
-                # This one-off confirmation wave is roughly twice as thick
-                # as the ordinary artwork ripple, with a warm radial blend.
-                for stop, color in (
-                    (0.0, QColor(190, 128, 20, 0)),
-                    (0.53, QColor(190, 128, 20, 0)),
-                    (0.58, QColor(204, 139, 27, 10)),
-                    (0.62, QColor(218, 158, 36, 25)),
-                    (0.66, QColor(232, 181, 49, 48)),
-                    (0.71, QColor(245, 209, 87, 68)),
-                    (0.77, QColor(255, 234, 150, 80)),
-                    (0.80, QColor(255, 246, 187, 84)),
-                    (0.84, QColor(253, 223, 110, 77)),
-                    (0.89, QColor(234, 183, 55, 57)),
-                    (0.94, QColor(210, 146, 27, 37)),
-                    (0.98, QColor(188, 122, 18, 12)),
-                    (1.0, QColor(188, 122, 18, 0)),
-                ):
-                    light.setColorAt(stop, color)
-            else:
-                # Keep a readable thick crest without washing across half of
-                # the music surface. The shoulders stay translucent.
-                light.setColorAt(0.0, QColor(255, 255, 255, 0))
-                light.setColorAt(0.66, QColor(255, 255, 255, 0))
-                light.setColorAt(0.69, QColor(239, 225, 255, 10))
-                light.setColorAt(0.73, QColor(246, 234, 255, 32))
-                light.setColorAt(0.77, QColor(250, 244, 255, 65))
-                light.setColorAt(0.80, QColor(255, 252, 255, 78))
-                light.setColorAt(0.83, QColor(255, 255, 255, 70))
-                light.setColorAt(0.87, QColor(250, 251, 255, 45))
-                light.setColorAt(0.91, QColor(236, 240, 255, 16))
-                light.setColorAt(0.94, QColor(218, 226, 255, 0))
-                light.setColorAt(1.0, QColor(218, 226, 255, 0))
-            layer.fillRect(area, light)
+            layer.translate(side * 0.5, side * 0.5)
+            layer.scale(side * 0.5, side * 0.5)
+            layer.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0), self._transport_light_gradient(gold))
         if gold:
             self._obo_reveal_light_sprite = image
         else:
@@ -8205,9 +8330,15 @@ class MusicSurfaceWindow(QWidget):
                 continue
             radius = max_radius * frame[1]
             painter.setOpacity(frame[2])
-            painter.drawImage(QRectF(origin.x() - radius, origin.y() - radius,
-                                     2.0 * radius, 2.0 * radius),
-                              self._cached_transport_light_sprite(gold=command == "obo_reveal"))
+            # Never enlarge a fixed 384 px circle into thousands of display
+            # pixels. Native radial sampling keeps the crest round at every
+            # radius/DPR and avoids a cold, full-screen sprite allocation.
+            painter.save()
+            painter.translate(origin)
+            painter.scale(radius, radius)
+            painter.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0),
+                             self._transport_light_gradient(command == "obo_reveal"))
+            painter.restore()
         painter.restore()
 
     def _paint_media_controls(

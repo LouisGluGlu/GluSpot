@@ -37,13 +37,14 @@ TIME_REMINDER_ICON_DIR = ROOT_DIR / "assets" / "logos"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, Qt, QTimer, Slot
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QCursor,
     QFont,
     QFontDatabase,
+    QFontInfo,
     QFontMetrics,
     QGuiApplication,
     QImage,
@@ -80,7 +81,7 @@ from local.audio_reactive_engine import (
 )
 from local.album_art_pipeline import album_art_bytes_signature, album_art_update_plan
 from local.album_island_projection import album_cover_projection
-from local.music_lyric_motion import LogicalLineSpringChain, MusicLyricMotion
+from local.music_lyric_motion import GLYPH_FLOAT_LIFT, LogicalLineSpringChain, MusicLyricMotion
 from local.music_lyric_reading import (
     LyricReadingRenderer,
     apply_cjk_letter_spacing,
@@ -204,6 +205,7 @@ from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_spar
 from local.music_surface_palette import (
     MusicSurfacePalette,
     artwork_surface_palette,
+    cached_artwork_surface_palette,
     relative_luminance,
     solid_album_background_color,
     solid_album_ink_color,
@@ -517,6 +519,10 @@ class SpringRect:
         velocity += acceleration * dt
         value += velocity * dt
         return value, velocity
+
+
+class _IslandArtworkPaletteBridge(QObject):
+    ready = Signal(int, object, object)
 
 
 class TaskbarDropOverlay(QWidget):
@@ -1267,6 +1273,7 @@ class IslandStackVisual(QWidget):
         self.timed_lyric_units: list[tuple[object, ...]] = []
         self.timed_lyric_timing_kinds: list[str] = []
         self.album_art = QImage()
+        self._initialize_solid_album_palette_worker()
         self.album_art_signature = ""
         self.album_art_source = ""
         self.album_art_lookup_state = ""
@@ -4447,6 +4454,7 @@ class IslandStackVisual(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._resume_solid_album_palette_worker()
         if bool(getattr(self, "_music_surface_active", False)):
             self.hide()
             return
@@ -9406,6 +9414,7 @@ class IslandStackVisual(QWidget):
         super().leaveEvent(event)
 
     def closeEvent(self, event):
+        self._close_solid_album_palette_worker()
         music_surface = getattr(self, "music_fullscreen_overlay", None)
         if music_surface is not None:
             try:
@@ -9857,7 +9866,7 @@ class IslandStackVisual(QWidget):
             if title and artist:
                 return f"{title} · {artist}"
             return title or artist or "纯音乐"
-        current = self._clean_lyric_for_width(self.lyrics[self.lyric_index]) if self.lyrics else ""
+        current = self._clean_lyric_for_width(self.lyrics[self._island_display_row_index()]) if self.lyrics else ""
         return current or self.track_title or self.artist or "正在播放"
 
     def _lyric_display_lines(self, lyric: str) -> list[str]:
@@ -10372,8 +10381,7 @@ class IslandStackVisual(QWidget):
         candidate.setAlpha(255)
         return candidate
 
-    def _solid_album_surface_palette(self) -> MusicSurfacePalette:
-        """Reuse the full-screen artwork roles without replacing other island styles."""
+    def _solid_album_palette_request(self):
         image = QImage(getattr(self, "album_art", QImage()))
         primary = QColor(getattr(self, "album_color", QColor()))
         secondary = QColor(getattr(self, "secondary_color", QColor()))
@@ -10389,17 +10397,190 @@ class IslandStackVisual(QWidget):
         if not secondary.isValid():
             secondary = QColor(primary)
         key = (image.cacheKey(), primary.rgba(), secondary.rgba(), fallback.rgba())
+        return key, image, primary, secondary
+
+    def _solid_album_surface_palette(self) -> MusicSurfacePalette:
+        """Read prepared cover roles without cold extraction on the GUI thread."""
+        key, image, primary, secondary = self._solid_album_palette_request()
         cached_key = getattr(self, "_solid_album_palette_cache_key", None)
         cached = getattr(self, "_solid_album_palette_cache", None)
+        # Value-only legacy renderer fixtures do not construct a QWidget or
+        # its queued signal bridge. They can retain exact steady-state role
+        # checks; every normally constructed application island is async.
+        if not bool(getattr(self, "_solid_album_palette_async_enabled", False)):
+            if key != cached_key or cached is None:
+                cached = (MusicSurfacePalette(primary, QColor(primary), QColor(primary))
+                          if image.isNull() else artwork_surface_palette(image, primary, secondary))
+                self._solid_album_palette_cache_key = key
+                self._solid_album_palette_cache = cached
+            return cached
         if key != cached_key or cached is None:
-            if image.isNull():
-                source = QColor(primary)
-                cached = MusicSurfacePalette(source, QColor(source), QColor(source))
+            if key != self._solid_album_palette_requested_key:
+                self._solid_album_palette_generation += 1
+                self._solid_album_palette_requested_key = key
+                self._solid_album_palette_pending = None
+                self._solid_album_palette_failed_key = None
+            waiting_for_cover = image.isNull() and str(getattr(self, "album_art_lookup_state", "") or "") == "pending"
+            if waiting_for_cover and self._solid_album_palette_cache is not None:
+                return self._displayed_solid_album_palette()
+            prepared = cached_artwork_surface_palette(image, primary, secondary)
+            if prepared is not None:
+                self._solid_album_palette_pending = None
+                self._accept_solid_album_palette(key, prepared)
+            elif image.isNull():
+                self._accept_solid_album_palette(
+                    key, MusicSurfacePalette(primary, QColor(primary), QColor(primary)),
+                )
+            elif not self._solid_album_palette_closed and key != self._solid_album_palette_failed_key:
+                surface = getattr(self, "music_fullscreen_overlay", None)
+                # The visible large surface uses the same shared cache and
+                # already queues this cover. Avoid a second extraction while
+                # it owns presentation; return-to-island will hit its result.
+                large_surface_visible = surface is not None and surface.isVisible()
+                if not large_surface_visible:
+                    if (self._solid_album_palette_worker_key != key
+                            or self._solid_album_palette_active_token != self._solid_album_palette_generation):
+                        self._solid_album_palette_pending = (key, image, primary, secondary)
+                    self._start_solid_album_palette_worker()
+            if self._solid_album_palette_cache is None:
+                self._solid_album_palette_cache = MusicSurfacePalette(
+                    primary, QColor(primary), QColor(primary),
+                )
+        return self._displayed_solid_album_palette()
+
+    def _initialize_solid_album_palette_worker(self) -> None:
+        self._solid_album_palette_async_enabled = True
+        self._solid_album_palette_generation = 0
+        self._solid_album_palette_active_token = None
+        self._solid_album_palette_worker_key = None
+        self._solid_album_palette_pending = None
+        self._solid_album_palette_requested_key = None
+        self._solid_album_palette_failed_key = None
+        self._solid_album_palette_closed = False
+        self._solid_album_palette_cache_key = None
+        self._solid_album_palette_cache = None
+        self._solid_album_palette_blend_from = None
+        self._solid_album_palette_blend_started_at = 0.0
+        self._solid_album_palette_bridge = _IslandArtworkPaletteBridge(self)
+        self._solid_album_palette_bridge.ready.connect(self._on_solid_album_palette_ready, Qt.ConnectionType.QueuedConnection)
+        self._solid_album_palette_blend_timer = QTimer(self)
+        self._solid_album_palette_blend_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._solid_album_palette_blend_timer.setInterval(16)
+        self._solid_album_palette_blend_timer.timeout.connect(self._advance_solid_album_palette_blend)
+
+    def _close_solid_album_palette_worker(self) -> None:
+        if not bool(getattr(self, "_solid_album_palette_async_enabled", False)):
+            return
+        self._solid_album_palette_closed = True
+        self._solid_album_palette_generation += 1
+        self._solid_album_palette_pending = None
+        self._solid_album_palette_blend_timer.stop()
+        # Keep the one outstanding job owned until its queued completion.
+        # A close/show on the same QWidget must not launch a second worker.
+        # QObject automatically releases this bridge connection on deletion.
+
+    def _resume_solid_album_palette_worker(self) -> None:
+        if bool(getattr(self, "_solid_album_palette_async_enabled", False)) and self._solid_album_palette_closed:
+            self._solid_album_palette_closed = False
+            self._solid_album_palette_requested_key = None
+            self._solid_album_palette_failed_key = None
+
+    def _start_solid_album_palette_worker(self) -> None:
+        if (self._solid_album_palette_closed or self._solid_album_palette_active_token is not None
+                or self._solid_album_palette_pending is None):
+            return
+        key, image, primary, secondary = self._solid_album_palette_pending
+        self._solid_album_palette_pending = None
+        prepared = cached_artwork_surface_palette(image, primary, secondary)
+        if prepared is not None:
+            self._accept_solid_album_palette(key, prepared)
+            return
+        token = self._solid_album_palette_generation
+        self._solid_album_palette_active_token = token
+        self._solid_album_palette_worker_key = key
+        bridge = self._solid_album_palette_bridge
+
+        def prepare():
+            # Only immutable value payloads and a signal bridge survive in
+            # this closure. No QWidget, owner, geometry or painter is touched.
+            try:
+                result = artwork_surface_palette(image, primary, secondary)
+            except Exception:
+                result = None
+            try:
+                bridge.ready.emit(token, key, result)
+            except RuntimeError:
+                pass
+
+        try:
+            self._run_background("SolidArtworkPalette", prepare)
+        except Exception:
+            self._solid_album_palette_active_token = None
+            self._solid_album_palette_worker_key = None
+            self._solid_album_palette_failed_key = key
+
+    @Slot(int, object, object)
+    def _on_solid_album_palette_ready(self, token: int, key, result) -> None:
+        if token != self._solid_album_palette_active_token:
+            return
+        self._solid_album_palette_active_token = None
+        self._solid_album_palette_worker_key = None
+        if self._solid_album_palette_closed:
+            return
+        if token == self._solid_album_palette_generation and key == self._solid_album_palette_requested_key:
+            # Observe actual current values too: a provider can replace art
+            # between the last paint and queued GUI delivery.
+            current, _image, _primary, _secondary = self._solid_album_palette_request()
+            if current == key:
+                if result is not None:
+                    self._accept_solid_album_palette(key, result)
+                    self._solid_album_palette_failed_key = None
+                else:
+                    self._solid_album_palette_failed_key = key
+        if self._solid_album_palette_pending is not None:
+            if self._solid_album_palette_pending[0] == self._solid_album_palette_requested_key:
+                self._start_solid_album_palette_worker()
             else:
-                cached = artwork_surface_palette(image, primary, secondary)
-            self._solid_album_palette_cache_key = key
-            self._solid_album_palette_cache = cached
-        return cached
+                self._solid_album_palette_pending = None
+
+    def _accept_solid_album_palette(self, key, palette: MusicSurfacePalette) -> None:
+        previous = self._displayed_solid_album_palette()
+        self._solid_album_palette_cache_key = key
+        self._solid_album_palette_cache = palette
+        if previous is not None and solid_album_background_color(previous) != solid_album_background_color(palette):
+            self._solid_album_palette_blend_from = previous
+            self._solid_album_palette_blend_started_at = time.monotonic()
+            self._solid_album_palette_blend_timer.start()
+        else:
+            self._solid_album_palette_blend_from = None
+            self._solid_album_palette_blend_timer.stop()
+        self.update()
+
+    def _displayed_solid_album_palette(self) -> MusicSurfacePalette | None:
+        target = getattr(self, "_solid_album_palette_cache", None)
+        previous = getattr(self, "_solid_album_palette_blend_from", None)
+        if target is None or previous is None:
+            return target
+        elapsed = max(0.0, time.monotonic() - self._solid_album_palette_blend_started_at)
+        fraction = min(1.0, elapsed / 0.42)
+        if fraction >= 1.0:
+            self._solid_album_palette_blend_from = None
+            return target
+        fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+        return MusicSurfacePalette(
+            self._mix_color(previous.primary, target.primary, fraction),
+            self._mix_color(previous.secondary, target.secondary, fraction),
+            self._mix_color(previous.characteristic, target.characteristic, fraction),
+            target.ambient_colors, target.ambient_weights,
+            self._mix_color(solid_album_background_color(previous), solid_album_background_color(target), fraction),
+        )
+
+    def _advance_solid_album_palette_blend(self) -> None:
+        if self._solid_album_palette_closed or self._solid_album_palette_blend_from is None:
+            self._solid_album_palette_blend_timer.stop()
+            return
+        self._displayed_solid_album_palette()
+        self.update()
 
     def _solid_album_palette_colors(self) -> tuple[QColor, QColor, QColor]:
         palette = self._solid_album_surface_palette()
@@ -11008,11 +11189,18 @@ class IslandStackVisual(QWidget):
             )
         self.album_history = history[:6]
 
+    def _island_display_row_index(self) -> int:
+        lyrics = getattr(self, "lyrics", ()) or ()
+        index = int(getattr(self, "lyric_index", 0))
+        if getattr(self, "_island_lyric_frame_at", None) is not None:
+            phase = self._island_display_phase()
+            index = int(phase.get("visual_focus_index", phase.get("active_index", index)))
+        return index % len(lyrics) if lyrics else 0
+
     def _current_lyric_display_lines(self) -> list[str]:
         if not self.lyrics:
             return []
-        index = int(getattr(self, "lyric_index", 0)) % len(self.lyrics)
-        return self._lyric_display_lines(self.lyrics[index])
+        return self._lyric_display_lines(self.lyrics[self._island_display_row_index()])
 
     def _has_current_two_line_lyric(self) -> bool:
         return len(self._current_lyric_display_lines()) > 1
@@ -11307,7 +11495,24 @@ class IslandStackVisual(QWidget):
     def _compact_music_content_height_raw(self) -> float:
         if self._should_paint_album_island():
             return self._album_island_compact_music_height()
-        height = 80.0 if bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric() else 46.0
+        two_line = bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric()
+        height = 80.0 if two_line else 46.0
+        lines = self._current_lyric_display_lines() if getattr(self, "lyrics", None) else ()
+        if lines:
+            size = self._compact_primary_lyric_font_size()
+            if two_line:
+                secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
+                primary_size, secondary_size = self._compact_dual_line_font_sizes(size, secondary_bold)
+                content_height = (
+                    self._island_lyric_row_content_height(lines[0], primary_size, True)
+                    + self._u(1.0)
+                    + self._island_lyric_row_content_height(lines[1], secondary_size, secondary_bold)
+                    + self._u(4.0)
+                )
+            else:
+                content_height = self._island_lyric_row_content_height(lines[0], size, True)
+            top, bottom = self._compact_lyric_vertical_padding(two_line)
+            height = max(height, (content_height + top + bottom) / self._u(1.0))
         if (
             self._effective_music_ambience_style() == "yaoguang"
             and self._yaoguang_height_mode_key() == "spacious"
@@ -11319,7 +11524,9 @@ class IslandStackVisual(QWidget):
     def _notch_music_needs_content_height(self) -> bool:
         if self._should_paint_album_island():
             return True
-        return bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric()
+        return bool(getattr(self, "lyrics", None)) and (
+            self._has_current_two_line_lyric() or self._compact_music_content_height_raw() > 46.0
+        )
 
     def _edge_notch_music_height_raw(self) -> float:
         height = self._compact_music_content_height_raw()
@@ -12103,13 +12310,26 @@ class IslandStackVisual(QWidget):
             motion.vy = 0.0
 
     def paintEvent(self, event):
+        # Layout and ink must consume one verified source snapshot. A queued
+        # timer can still hold the old row when this first visible frame is
+        # painted; measuring that old row and then painting a new bilingual
+        # row would leave its translation outside the old one-line shell.
+        self._island_lyric_frame_at = time.monotonic()
+        self._island_lyric_frame_phase = None
+        try:
+            self._paint_island_frame(event)
+        finally:
+            self._island_lyric_frame_at = None
+            self._island_lyric_frame_phase = None
+
+    def _paint_island_frame(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         if getattr(self, "high_quality_font_rendering", False):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        now = time.monotonic()
+        now = self._island_lyric_frame_at
         dt = (now - self.last_frame_at) * self._animation_speed_factor()
         self.last_frame_at = now
 
@@ -14615,34 +14835,59 @@ class IslandStackVisual(QWidget):
             self._paint_music_control_button(painter, br, command, 206 if index != 1 else 226, radius=radius)
         painter.restore()
 
+    def _island_lyric_row_content_height(self, text: str, size: float, bold: bool) -> float:
+        """Reserve the shaped line and its full reading travel before clipping.
+
+        Island fonts use point sizes. Raw settings units therefore cannot
+        stand in for actual Qt line height, especially for the serif face or
+        fallback glyphs. The same bounded shaped-line cache serves the block
+        renderer, so measuring does not rasterize every word on every frame.
+        """
+        font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        renderer = getattr(self, "_wave_reading_renderer", None)
+        if not isinstance(renderer, LyricReadingRenderer):
+            renderer = self._wave_reading_renderer = LyricReadingRenderer()
+        layout = renderer.whole_line(text or "Mg国", font)
+        line_height = layout.lineAt(0).height() if layout.lineCount() else float(QFontMetrics(font).height())
+        pixel_size = max(1.0, float(QFontInfo(font).pixelSize()))
+        lift = GLYPH_FLOAT_LIFT * pixel_size / 38.0
+        return line_height + 2.0 * lift + self._u(2.0)
+
+    def _fit_island_lyric_row_size(self, text: str, size: int, bold: bool, height: float) -> int:
+        # A taskbar or a spring that is still opening owns its shell height.
+        # Fit ink inside that live geometry instead of clipping it while the
+        # next full-height target is being reached.
+        size = int(size)
+        while size > 8 and self._island_lyric_row_content_height(text, size, bold) > height:
+            size -= 1
+        return size
+
     def _compact_dual_line_lyric_rows(
         self,
         rect: QRectF,
         compact_size: int,
         secondary_bold: bool,
+        texts: tuple[str, str] = ("Mg国", "Mg国"),
     ) -> tuple[QRectF, QRectF, int, int]:
         primary_size, secondary_size = self._compact_dual_line_font_sizes(compact_size, secondary_bold)
         try:
             yaoguang_compact = self._effective_music_ambience_style() == "yaoguang"
         except Exception:
             yaoguang_compact = False
-        min_primary_size = 11 if yaoguang_compact else 12
+        min_primary_size = 8
         min_secondary_size = 8
         top_inset = self._u(4.0 if yaoguang_compact else 2.0)
         bottom_inset = self._u(4.0 if yaoguang_compact else 2.0)
         gap = self._u(1.0)
 
         def measured_rows() -> tuple[float, float, float]:
-            primary_font = self._wave_stream_font(primary_size, QFont.Weight.Bold)
-            secondary_weight = QFont.Weight.Bold if secondary_bold else QFont.Weight.Normal
-            secondary_font = self._wave_stream_font(secondary_size, secondary_weight)
-            primary_h = max(float(QFontMetrics(primary_font).height()) + self._u(2.0), self._u(float(primary_size) + 5.0))
-            secondary_h = max(float(QFontMetrics(secondary_font).height()) + self._u(1.0), self._u(float(secondary_size) + 4.0))
+            primary_h = self._island_lyric_row_content_height(texts[0], primary_size, True)
+            secondary_h = self._island_lyric_row_content_height(texts[1], secondary_size, secondary_bold)
             return primary_h, secondary_h, primary_h + gap + secondary_h
 
         primary_h, secondary_h, total_h = measured_rows()
         available_h = max(1.0, rect.height() - top_inset - bottom_inset)
-        for _ in range(6):
+        for _ in range(max(primary_size, secondary_size)):
             if total_h <= available_h or (primary_size <= min_primary_size and secondary_size <= min_secondary_size):
                 break
             if primary_size > min_primary_size:
@@ -14681,8 +14926,8 @@ class IslandStackVisual(QWidget):
         if not lines:
             painter.restore()
             return
-        phase = self._lyric_phase(time.monotonic())
-        source_index = int(getattr(self, "lyric_index", 0))
+        phase = self._island_display_phase()
+        source_index = int(phase.get("active_index", getattr(self, "lyric_index", 0)))
         index = int(phase.get("visual_focus_index", source_index)) % len(lines)
         if index != source_index:
             phase = dict(phase)
@@ -14698,7 +14943,9 @@ class IslandStackVisual(QWidget):
         if len(display_lines) > 1 and rect.height() >= self._u(48.0):
             secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
             secondary_spacing = int(getattr(self, "dual_line_secondary_spacing", 100))
-            first, second, primary_size, secondary_size = self._compact_dual_line_lyric_rows(rect, compact_size, secondary_bold)
+            first, second, primary_size, secondary_size = self._compact_dual_line_lyric_rows(
+                rect, compact_size, secondary_bold, (display_lines[0], display_lines[1]),
+            )
             if "whole_block_progress" in phase:
                 self._paint_wave_stream_whole_block(painter, (
                     (first, display_lines[0], primary_size, True, base_text, live_text, None),
@@ -14709,7 +14956,9 @@ class IslandStackVisual(QWidget):
                 self._paint_live_lyric_text(painter, first, display_lines[0], primary_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
                 self._paint_live_lyric_text(painter, second, display_lines[1], secondary_size, self._music_lyric_base_text_color(96), self._music_lyric_text_color(204), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
         else:
-            self._paint_live_lyric_text(painter, rect, display_lines[0] if display_lines else lines[index], compact_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
+            text = display_lines[0] if display_lines else lines[index]
+            compact_size = self._fit_island_lyric_row_size(text, compact_size, True, rect.height())
+            self._paint_live_lyric_text(painter, rect, text, compact_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
         painter.restore()
 
     def _paint_gelv_compact_lyrics(self, painter: QPainter, rect: QRectF):
@@ -15364,6 +15613,16 @@ class IslandStackVisual(QWidget):
             return False
         return not self._island_song_has_genuine_unit_timing()
 
+    def _island_display_phase(self, now: float | None = None) -> dict[str, float]:
+        frame_at = getattr(self, "_island_lyric_frame_at", None)
+        if frame_at is not None:
+            phase = getattr(self, "_island_lyric_frame_phase", None)
+            if phase is None:
+                phase = self._lyric_phase(frame_at)
+                self._island_lyric_frame_phase = phase
+            return phase
+        return self._lyric_phase(time.monotonic() if now is None else now)
+
     def _lyric_phase(self, now: float) -> dict[str, float]:
         estimated_position = self._stable_lyric_source_position(now)
         lyric_offset = self._effective_lyric_offset_seconds()
@@ -15380,10 +15639,21 @@ class IslandStackVisual(QWidget):
             now=now,
             media_is_playing=getattr(self, "media_is_playing", False),
             transition_kind=getattr(self, "lyric_transition_kind", ""),
+            position_selects_active_index=True,
+            lead_seconds=0.0 if str(getattr(self, "media_position_source", "") or "").endswith("-uia-lyrics") else 0.12,
         )
         phase = dict(paint_state.phase)
         index = paint_state.cache.active_index
+        phase["active_index"] = index
         timed = getattr(self, "timed_lyrics", ()) or ()
+        if timed and index == len(timed) - 1:
+            # Tail rows have no following timestamp. Their existing fallback
+            # span remains, but an old owner's changed_at is not a new song
+            # clock when a first visible paint already belongs to the tail.
+            elapsed = max(0.0, estimated_position + lyric_offset - float(timed[index][0]))
+            span = max(0.35, float(phase.get("span", 2.45)))
+            phase.update(progress=min(1.0, elapsed / span), elapsed=elapsed,
+                         remaining=max(0.0, span - elapsed))
         kinds = getattr(self, "timed_lyric_timing_kinds", ()) or ()
         unit_rows = getattr(self, "timed_lyric_units", ()) or ()
         song_has_real_units = self._island_song_has_genuine_unit_timing()
@@ -15526,19 +15796,23 @@ class IslandStackVisual(QWidget):
         if active and len(lines) > 1:
             secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
             secondary_spacing = int(getattr(self, "dual_line_secondary_spacing", 100))
-            first_h = row.height() * 0.56
+            primary_size = max(13, size - 1)
+            secondary_size = self._dual_line_secondary_font_size()
+            primary_h = self._island_lyric_row_content_height(lines[0], primary_size, True)
+            secondary_h = self._island_lyric_row_content_height(lines[1], secondary_size, secondary_bold)
+            first_h = max(primary_h, row.height() - secondary_h - self._u(1.0))
             first = QRectF(row.left(), row.top(), row.width(), first_h)
-            second = QRectF(row.left(), first.bottom() - self._u(1.0), row.width(), row.bottom() - first.bottom())
+            second = QRectF(row.left(), first.bottom() + self._u(1.0), row.width(), secondary_h)
             if "whole_block_progress" in phase:
                 self._paint_wave_stream_whole_block(painter, (
-                    (first, lines[0], max(13, size - 1), True,
+                    (first, lines[0], primary_size, True,
                      self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), None),
-                    (second, lines[1], self._dual_line_secondary_font_size(), secondary_bold,
+                    (second, lines[1], secondary_size, secondary_bold,
                      self._music_lyric_base_text_color(92), self._music_lyric_text_color(max(84, int(alpha * 0.74))), secondary_spacing),
                 ), phase)
             else:
-                self._paint_live_lyric_text(painter, first, lines[0], max(13, size - 1), self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), True, phase, centered=True, centered_scroll=True)
-                self._paint_live_lyric_text(painter, second, lines[1], self._dual_line_secondary_font_size(), self._music_lyric_base_text_color(92), self._music_lyric_text_color(max(84, int(alpha * 0.74))), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
+                self._paint_live_lyric_text(painter, first, lines[0], primary_size, self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), True, phase, centered=True, centered_scroll=True)
+                self._paint_live_lyric_text(painter, second, lines[1], secondary_size, self._music_lyric_base_text_color(92), self._music_lyric_text_color(max(84, int(alpha * 0.74))), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
             return
         text = lines[0] if len(lines) == 1 else "  ".join(lines[:2])
         if active:
@@ -15562,7 +15836,7 @@ class IslandStackVisual(QWidget):
             return
         if len(self.lyrics) <= 1 and self._is_instrumental_track():
             now = time.monotonic()
-            phase = self._lyric_phase(now)
+            phase = self._island_display_phase(now)
             row = QRectF(rect.left(), rect.center().y() - self._u(17.0), rect.width(), self._u(34.0))
             text = self.lyrics[0] if self.lyrics else getattr(self, "no_lyrics_text", "暂无歌词")
             self._paint_live_lyric_text(
@@ -15581,17 +15855,33 @@ class IslandStackVisual(QWidget):
             return
         active_size = max(14, min(24, int(getattr(self, "lyric_font_size", 18))))
         side_size = max(10, active_size - 7)
-        now = time.monotonic()
-        active_phase = self._lyric_phase(now)
-        source_index = max(0, min(len(self.lyrics) - 1, int(self.lyric_index)))
+        now = getattr(self, "_island_lyric_frame_at", None)
+        now = time.monotonic() if now is None else now
+        active_phase = self._island_display_phase(now)
+        source_index = max(0, min(len(self.lyrics) - 1, int(active_phase.get("active_index", self.lyric_index))))
         active_index = max(0, min(
             len(self.lyrics) - 1,
             int(active_phase.get("visual_focus_index", source_index)),
         ))
         active_lines = self._lyric_display_lines(self.lyrics[active_index])
-        active_line_h = self._u(max(30.0, active_size + 12.0))
-        active_h = active_line_h * (1.55 if len(active_lines) > 1 else 1.0)
-        side_h = self._u(max(22.0, side_size + 11.0))
+        active_line_h = max(
+            self._u(max(30.0, active_size + 12.0)),
+            self._island_lyric_row_content_height(active_lines[0] if active_lines else "", active_size, True),
+        )
+        if len(active_lines) > 1:
+            secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
+            active_h = max(
+                active_line_h * 1.55,
+                self._island_lyric_row_content_height(active_lines[0], max(13, active_size - 1), True)
+                + self._u(1.0)
+                + self._island_lyric_row_content_height(active_lines[1], self._dual_line_secondary_font_size(), secondary_bold),
+            )
+        else:
+            active_h = active_line_h
+        side_h = max(
+            self._u(max(22.0, side_size + 11.0)),
+            self._island_lyric_row_content_height("Mg国", side_size, False),
+        )
         gap = self._u(7.0 if len(active_lines) > 1 else 9.0)
         center_row = QRectF(rect.left(), rect.center().y() - active_h / 2.0, rect.width(), active_h)
         is_seek_transition = (

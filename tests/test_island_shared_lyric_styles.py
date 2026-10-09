@@ -191,6 +191,9 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
         for style in ("wave_stream", "gelv_songscatter"):
             visual = self._visual(style)
             visual.lyrics = [f"Sentence {index}" for index in range(80)]
+            # Compare the shared motion with identical measured typography;
+            # native serif/sans line heights need different safe ink slots.
+            visual._wave_stream_font = lambda size, *_args, **_kwargs: QFont("Arial", int(size))
             visual.enable_dual_line_lyrics = False
             visual.media_is_playing = False
             visual._music_lyric_tick_plan = lambda *_args: SimpleNamespace(
