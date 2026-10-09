@@ -1292,6 +1292,12 @@ class MusicSurfaceWindow(QWidget):
         self.update(self._transport_icon_dirty_rect(center, scale))
 
     def _artwork_is_loading(self) -> bool:
+        lookup_state = str(getattr(self.owner, "album_art_lookup_state", "") or "").casefold()
+        if lookup_state == "failed":
+            # A completed failed lookup keeps its best available cover. It is
+            # no longer an in-flight download, and must not hold lyric feedback
+            # behind a permanently repeating artwork ring.
+            return False
         image = QImage(getattr(self.owner, "album_art", QImage()))
         source = str(getattr(self.owner, "album_art_source", "") or "")
         # Acquisition provenance belongs to the provider. Resizing the
@@ -1309,7 +1315,8 @@ class MusicSurfaceWindow(QWidget):
         return image.cacheKey()
 
     def _should_blur_preview(self, image: QImage) -> bool:
-        if not self._art_loading_waiting or image.isNull():
+        failed = str(getattr(self.owner, "album_art_lookup_state", "") or "").casefold() == "failed"
+        if (not self._art_loading_waiting and not failed) or image.isNull():
             return False
         if self._track_visual is None or self._art_loading_track_key != self._track_visual[0]:
             return False

@@ -66,9 +66,13 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
 
         self.owner.album_art_lookup_state = "failed"
         self.render(103.1)
-        self.assertTrue(self.window._art_loading_waiting)
+        self.assertFalse(self.window._art_loading_waiting)
         self.assertTrue(self.window._should_blur_preview(preview))
         self.assertIn("art_loading", self.window._transport_feedback)
+        self.render(107.0)
+        self.window._update_transport_feedback_regions(107.0)
+        self.assertNotIn("art_loading", self.window._transport_feedback)
+        self.assertTrue(self.window._should_blur_preview(preview))
 
     def test_elapsed_time_cannot_promote_a_small_preview(self):
         preview = self.start("late-track")
@@ -116,7 +120,8 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         old_preview = self.start("old-track")
         self.owner.album_art_lookup_state = "failed"
         self.render(101.4)
-        self.assertTrue(self.window._art_loading_waiting)
+        self.assertFalse(self.window._art_loading_waiting)
+        self.assertTrue(self.window._should_blur_preview(old_preview))
 
         new_preview = self.start("new-track", 101.6)
         self.assertTrue(self.window._art_loading_waiting)

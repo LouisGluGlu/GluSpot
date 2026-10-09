@@ -53,6 +53,10 @@ class _OwnedRole:
     external_change: bool = False
     original_effective_endpoint: str = ""
     restoring_route: str = ""
+    recovery_endpoint: str = ""
+    recovery_policy: str | None = None
+    recovery_reason: str = ""
+    default_clear_intent: bool = False
 
 
 class AppAudioRouteMigrationTimeout(RuntimeError):
@@ -125,6 +129,24 @@ class WindowsAppAudioRoutes:
 
     def prepare(self, source: MusicAudioSource, spare_endpoint: str, local_endpoint: str):
         """Read all evidence before a caller explicitly invokes guard.apply()."""
+        return self._prepare(source, spare_endpoint, local_endpoint)
+
+    def prepare_default_follow(self, source: MusicAudioSource):
+        """Prepare an explicit one-app repair to the shared Windows default.
+
+        No capture/suppression or other application's policy is involved. The
+        target must remain the uniquely verified default throughout apply and
+        migration; ordinary group spare preparation stays exclusive.
+        """
+        with self._lock:
+            if not isinstance(source, MusicAudioSource) or not source.sessions:
+                raise ValueError("A verified music source with current sessions is required")
+            origins = {session.endpoint_id for session in source.sessions}
+            if len(origins) != 1:
+                raise RuntimeError("Original effective music output is not uniquely evidenced")
+            return self._prepare(source, self._default_endpoint(), next(iter(origins)), default_follow=True)
+
+    def _prepare(self, source, spare_endpoint, local_endpoint, *, default_follow=False):
         with self._lock:
             if self._active is not None:
                 raise RuntimeError("An app audio route still requires restoration")
@@ -139,7 +161,7 @@ class WindowsAppAudioRoutes:
                 raise ValueError("A verified music source with current sessions is required")
             WindowsAudioDevices._validate_endpoint_id(spare_endpoint)
             WindowsAudioDevices._validate_endpoint_id(local_endpoint)
-            if spare_endpoint == local_endpoint:
+            if spare_endpoint == local_endpoint and not default_follow:
                 raise ValueError("Capture source and delayed local output must differ")
             active = {output.id for output in self._devices.list_outputs()}
             if spare_endpoint not in active or local_endpoint not in active:
@@ -168,7 +190,8 @@ class WindowsAppAudioRoutes:
                     fresh = self._resolver(source.source_app_id)
                     if not self._same_source(source, fresh) or not fresh.sessions:
                         raise RuntimeError("Music source changed while restoring prior output routing")
-                guard = AppAudioRouteGuard(self, fresh, spare_endpoint, local_endpoint)
+                guard = AppAudioRouteGuard(self, fresh, spare_endpoint, local_endpoint,
+                                          default_follow=default_follow)
             except Exception:
                 self._release_journal()
                 raise
@@ -291,7 +314,30 @@ class WindowsAppAudioRoutes:
                     WindowsAudioDevices._validate_endpoint_id(role["original_effective_endpoint"])
                 restoring = _route_text(role.get("restoring_route", ""))
                 expected_restore = role["original"] or _PREFIX + role.get("original_effective_endpoint", "") + _RENDER_SUFFIX
-                if restoring and restoring != expected_restore:
+                reason = role.get("recovery_reason", "")
+                recovery = role.get("recovery_endpoint", "")
+                policy = role.get("recovery_policy")
+                if reason not in ("", "output_disconnected", "default_changed", "explicit_default"):
+                    raise ValueError("App route recovery fallback reason is invalid")
+                if recovery:
+                    WindowsAudioDevices._validate_endpoint_id(recovery)
+                if reason:
+                    original_endpoint_route = _PREFIX + role.get("original_effective_endpoint", "") + _RENDER_SUFFIX
+                    if (policy != "" or (reason != "explicit_default" and role["original"] not in ("", original_endpoint_route))
+                            or (reason == "output_disconnected" and recovery == role.get("original_effective_endpoint", ""))
+                            or (reason == "default_changed" and (role["original"] or not recovery
+                                or not value.get("original_default_endpoint")
+                                or recovery == value["original_default_endpoint"]))
+                            or (reason == "explicit_default" and role.get("default_clear_intent") is not True)):
+                        raise ValueError("App route recovery fallback exceeds its original ownership")
+                elif recovery or policy is not None:
+                    raise ValueError("App route recovery fallback has no reason")
+                if type(role.get("default_clear_intent", False)) is not bool:
+                    raise ValueError("App route default-clear ownership is invalid")
+                allowed_restore = {expected_restore}
+                if reason and recovery:
+                    allowed_restore.add(_PREFIX + recovery + _RENDER_SUFFIX)
+                if restoring and restoring not in allowed_restore:
                     raise ValueError("App route recovery has an unrelated restoring policy")
             if value.get("stage") == "resume_verification_pending" and not all(
                     role["restored"] or role["external_change"] for role in value["roles"]):
@@ -345,12 +391,45 @@ class WindowsAppAudioRoutes:
                 raise ValueError("App route recovery source identity is invalid")
             fresh = self._resolver(app_id)
             deferred = value.get("stage") == "resume_verification_pending"
-            paused_saved_source = fresh is None and deferred
-            if fresh is None and deferred:
-                # Paused sources are deliberately absent from the active-only
-                # resolver. Reconstruct only their previously held identities;
-                # a checked inactive session must independently prove no stream
-                # is running before the observation can remain nonblocking.
+            paused_saved_source = fresh is None
+            if fresh is None:
+                if deferred:
+                    if self._adapter is None:
+                        if sys.platform != "win32":
+                            raise RuntimeError("Application route recovery requires Windows")
+                        self._adapter = _WindowsAppRouteAdapter()
+                    old_owners = [ProcessIdentity(**role["identity"]) for role in value["roles"]]
+                    if all(self._adapter.process_identity(identity.process_id) != identity for identity in old_owners):
+                        # Every policy was already returned. None of the old
+                        # initialized streams can survive its process creation
+                        # identity. Retire this observation without querying or
+                        # writing any replacement PID's application policy.
+                        self._journal.unlink()
+                        self._release_journal()
+                        return True
+                if not deferred:
+                    active = {output.id for output in self._devices.list_outputs()}
+                    original_endpoints = {role.get("original_effective_endpoint", "") for role in value["roles"]}
+                    if not original_endpoints - active:
+                        # Active-only resolution can also be absent because of
+                        # ambiguity. Without a removed endpoint or checked idle
+                        # ownership, do not reconstruct a live routing tree.
+                        if self._adapter is None:
+                            if sys.platform != "win32":
+                                raise RuntimeError("Application route recovery requires Windows")
+                            self._adapter = _WindowsAppRouteAdapter()
+                        selected = {role["identity"]["process_id"] for role in value["roles"]}
+                        states = tuple(self._adapter.session_owners())
+                        if (not any(pid in selected and not system and state in (0, 2)
+                                    for _endpoint, pid, _single, system, state in states)
+                                or any(type(state) is not int or state not in (0, 1, 2)
+                                       or (state == 1 and (pid in selected or (not single and not system)))
+                                       for _endpoint, pid, single, system, state in states)):
+                            raise RuntimeError("Restart the same music application to restore its pending output route")
+                # The active-only resolver also loses a live music process
+                # when its output is unplugged. Exact saved process identities
+                # can still authorize returning our own policy; they never
+                # authorize routing a replacement PID or claiming live audio.
                 try:
                     fresh = MusicAudioSource(app_id, saved_source["process_id"],
                         saved_source["process_created_at_100ns"], saved_source["process_path"],
@@ -408,13 +487,15 @@ class WindowsAppAudioRoutes:
                         guard._handles[identity.process_id] = self._adapter.hold_process(identity)
                     guard._roles.append(_OwnedRole(identity, saved["role"], saved["original"], saved["owned_route"],
                         saved["intent"], saved["restored"], saved["external_change"],
-                        saved.get("original_effective_endpoint", ""), saved.get("restoring_route", "")))
+                        saved.get("original_effective_endpoint", ""), saved.get("restoring_route", ""),
+                        saved.get("recovery_endpoint", ""), saved.get("recovery_policy"),
+                        saved.get("recovery_reason", ""), saved.get("default_clear_intent", False)))
                 if deferred:
                     externally_changed = False
                     for role in guard._roles:
                         guard._fence(role)
                         current = _route_text(self._adapter.get_route(role.identity.process_id, role.role))
-                        if current != role.original:
+                        if current != (role.recovery_policy if role.recovery_policy is not None else role.original):
                             externally_changed = True
                         # The old temporary write was already returned. Any
                         # newer policy belongs to the user, even if it happens
@@ -431,7 +512,16 @@ class WindowsAppAudioRoutes:
                         # observation; rebinding the old endpoint would undo it.
                         guard._finish_restoration("external_output_preserved")
                         return True
-                    expected = {role.original_effective_endpoint for role in guard._roles}
+                    expected = {role.recovery_endpoint or role.original_effective_endpoint for role in guard._roles}
+                    active = {output.id for output in self._devices.list_outputs()}
+                    if expected - active:
+                        # The old initialized stream cannot return to an
+                        # unplugged output. Recalculate only our already owned
+                        # restoration plan against the current inventory.
+                        guard._save("recovering")
+                        self._active = guard
+                        guard.restore()
+                        return True
                     if len(expected) != 1 or not next(iter(expected)):
                         raise RuntimeError("Deferred playback has no unique original output")
                     observation = guard._observe_effective(next(iter(expected)))
@@ -519,8 +609,9 @@ class WindowsAppAudioRoutes:
 
 
 class AppAudioRouteGuard:
-    def __init__(self, owner, source, spare, local):
+    def __init__(self, owner, source, spare, local, *, default_follow=False):
         self._owner, self.source = owner, source
+        self._default_follow = default_follow
         self.spare_endpoint, self.local_endpoint = spare, local
         self.original_default_endpoint = owner._default_endpoint()
         self._handles, self._roles = {}, []
@@ -562,6 +653,10 @@ class AppAudioRouteGuard:
         return self._restoration_state
 
     def _verify_spare(self, *, owned_process=None):
+        if getattr(self, "_default_follow", False):
+            if self._owner._default_endpoint() != self.spare_endpoint:
+                raise RuntimeError("Windows default changed during default-following preparation")
+            return
         selected = {entry.identity.process_id for entry in self._roles}
         if not self._owner._endpoint_owners_allowed(self.spare_endpoint, selected,
                                                     owned_process=owned_process):
@@ -585,6 +680,8 @@ class AppAudioRouteGuard:
         # large to save the recovery information after Windows was changed.
         future = dict(value, stage="effective_recovery_required", roles=[dict(role,
             intent=False, restored=False, external_change=False,
+            recovery_endpoint=role["original_effective_endpoint"], recovery_policy="",
+            recovery_reason="output_disconnected",
             restoring_route=role["original"] or _PREFIX + role["original_effective_endpoint"] + _RENDER_SUFFIX)
             for role in value["roles"]])
         if max(len(encoded), len(json.dumps(future, ensure_ascii=False).encode("utf-8"))) > 1024 * 1024:
@@ -616,6 +713,8 @@ class AppAudioRouteGuard:
             try:
                 for role in self._roles:
                     self._fence(role)
+                    if self._default_follow:
+                        self._verify_spare()
                     if role.original == role.owned_route:
                         role.restored = True
                         continue
@@ -627,6 +726,8 @@ class AppAudioRouteGuard:
                     if _route_text(self._owner._adapter.get_route(role.identity.process_id, role.role)) != role.owned_route:
                         raise RuntimeError("Windows did not confirm the temporary application output")
                     self._save("owned")
+                if self._default_follow:
+                    self._verify_spare()
                 self._applied = True
             except Exception:
                 try:
@@ -689,7 +790,7 @@ class AppAudioRouteGuard:
                 "active_session_count": len(fresh.sessions) if fresh is not None else 0,
                 "policy_confirmed": True, "playback_verified": False}
 
-    def _observe_effective(self, endpoint):
+    def _observe_effective(self, endpoint, *, allow_missing_stream=False):
         for role in self._roles:
             self._fence(role)
         fresh = self._owner._resolver(self.source.source_app_id)
@@ -712,12 +813,12 @@ class AppAudioRouteGuard:
                 return "unverified"
             if pid in selected and not system and state in (0, 2):
                 observed_idle = True
-        return "policy_restored_no_active_stream" if observed_idle else "unverified"
+        return "policy_restored_no_active_stream" if observed_idle or allow_missing_stream else "unverified"
 
-    def _wait_effective(self, endpoint, timeout):
+    def _wait_effective(self, endpoint, timeout, *, allow_missing_stream=False):
         deadline = time.monotonic() + timeout
         while True:
-            observation = self._observe_effective(endpoint)
+            observation = self._observe_effective(endpoint, allow_missing_stream=allow_missing_stream)
             if observation != "unverified":
                 return observation
             if time.monotonic() >= deadline:
@@ -736,6 +837,66 @@ class AppAudioRouteGuard:
             self._owner._active = None
         self._owner._release_journal()
 
+    def follow_system_default(self, *, timeout=5.0):
+        """Commit an explicitly requested music-app return to Windows default.
+
+        The caller must first apply and prove migration to the uniquely current
+        default endpoint. Ordinary device switching does not invoke this API.
+        Clear intent is durable before each owned write, and a failed commit
+        restores the captured policies under the original process identities.
+        """
+        with self._owner._lock:
+            if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                    or not math.isfinite(timeout) or not 0 <= timeout <= 30):
+                raise ValueError("A bounded default-following wait is required")
+            if not self.migrated or self._owner._default_endpoint() != self.spare_endpoint:
+                raise RuntimeError("Verified migration to the current Windows default is required")
+            for role in self._roles:
+                self._fence(role)
+                if self._owner._adapter.get_route(role.identity.process_id, role.role) != role.owned_route:
+                    raise RuntimeError("Music output changed before default-following commit")
+            try:
+                for role in self._roles:
+                    self._fence(role)
+                    if self._owner._default_endpoint() != self.spare_endpoint:
+                        raise RuntimeError("Windows default changed during default-following commit")
+                    current = self._owner._adapter.get_route(role.identity.process_id, role.role)
+                    if current != role.owned_route:
+                        raise RuntimeError("Music output changed during default-following commit")
+                    role.intent, role.restored = True, False
+                    role.default_clear_intent = True
+                    role.recovery_endpoint, role.recovery_policy = self.spare_endpoint, ""
+                    role.recovery_reason = "explicit_default"
+                    role.restoring_route = role.owned_route
+                    self._save("default_follow_clear_intent")
+                    self._owner._adapter.set_route(role.identity.process_id, role.role, "")
+                    if self._owner._adapter.get_route(role.identity.process_id, role.role) != "":
+                        raise RuntimeError("Windows did not confirm default-following music output")
+                observation = self._wait_effective(self.spare_endpoint, timeout)
+                if self._owner._default_endpoint() != self.spare_endpoint:
+                    raise RuntimeError("Windows default changed before default-following proof")
+                for role in self._roles:
+                    self._fence(role)
+                    if self._owner._adapter.get_route(role.identity.process_id, role.role) != "":
+                        raise RuntimeError("Music output changed before default-following proof")
+                    role.restored = True
+                self._finish_restoration(observation,
+                    deferred=observation == "policy_restored_no_active_stream")
+            except Exception as error:
+                # The durable clear flag authorizes returning only the empty
+                # values written here. An unrelated newer user policy remains
+                # external and is preserved by the normal restoration path.
+                for role in self._roles:
+                    role.recovery_endpoint, role.recovery_policy = "", None
+                    role.recovery_reason, role.restoring_route = "", ""
+                    role.restored = False
+                self._save("default_follow_rollback_intent")
+                try:
+                    self.restore(timeout=timeout)
+                except Exception as cleanup_error:
+                    raise RuntimeError(f"Default-following repair failed: {error}; prior output recovery pending: {cleanup_error}") from error
+                raise
+
     def restore(self, *, timeout=5.0):
         with self._owner._lock:
             if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
@@ -743,68 +904,125 @@ class AppAudioRouteGuard:
                 raise ValueError("A bounded effective-playback restoration wait is required")
             if self._closed:
                 return
+            if not any(role.intent and not role.restored and not role.external_change for role in self._roles):
+                # A read-only prepared guard owns handles/lease, not output
+                # writes. Release it even if device enumeration now fails.
+                self._finish_restoration("external_output_preserved" if any(role.external_change for role in self._roles)
+                                         else "policy_restored")
+                return
             deadline = time.monotonic() + timeout
             failures = []
             restore_endpoint = ""
             restored_roles = []
             observation = "policy_restored"
+            inventory_known = True
+            try:
+                outputs = self._owner._devices.list_outputs()
+            except (OSError, ValueError, RuntimeError) as error:
+                # Returning an owned policy does not require guessing which
+                # endpoints remain active. Enumeration failure prevents the
+                # live rebind/proof, but must not strand our temporary pin.
+                inventory_known = False
+                outputs = ()
+                failures.append(f"Audio output inventory unavailable during restoration: {error}")
+            active_endpoints = {output.id for output in outputs}
+            defaults = {output.id for output in outputs if getattr(output, "is_default", False)}
+            current_default = next(iter(defaults)) if len(defaults) == 1 else ""
+            missing_stream_allowed = False
             # An empty policy alone did not relocate the user's real stream in
             # a physical test. Explicitly rebind default-following owned roles
             # to their prior effective endpoint before clearing the policy.
             for role in reversed(self._roles):
+                if not inventory_known:
+                    break
                 if not role.intent or role.restored or role.external_change:
                     continue
                 try:
                     self._fence(role)
                     current = _route_text(self._owner._adapter.get_route(role.identity.process_id, role.role))
-                    expected = role.original or _PREFIX + role.original_effective_endpoint + _RENDER_SUFFIX
                     if not role.original_effective_endpoint:
                         raise RuntimeError("Original effective music output is missing from recovery evidence")
-                    if current not in (role.owned_route, role.original, role.restoring_route):
+                    previous_policy = role.recovery_policy if role.recovery_policy is not None else role.original
+                    owned_values = (role.owned_route, role.original, role.restoring_route, previous_policy)
+                    if current not in owned_values and not (role.default_clear_intent and current == ""):
                         role.external_change = True
                         continue
+                    target = role.original_effective_endpoint
+                    final_policy = role.original
+                    canonical_original = _PREFIX + target + _RENDER_SUFFIX
+                    if role.recovery_reason == "explicit_default":
+                        target, final_policy = current_default, ""
+                        missing_stream_allowed = not target
+                    elif target not in active_endpoints and role.original in ("", canonical_original):
+                        # Unplugged endpoints must not become persisted app
+                        # pins. Only return policies we temporarily replaced;
+                        # leave a user's newer unrelated policy untouched.
+                        target, final_policy = current_default, ""
+                        role.recovery_reason = "output_disconnected"
+                        missing_stream_allowed = True
+                    elif (not role.original and self.original_default_endpoint and current_default
+                          and current_default != self.original_default_endpoint):
+                        target = current_default
+                        role.recovery_reason = "default_changed"
+                    else:
+                        role.recovery_reason = ""
+                    role.recovery_endpoint = target if role.recovery_reason else ""
+                    role.recovery_policy = final_policy if role.recovery_reason else None
+                    expected = (final_policy or _PREFIX + target + _RENDER_SUFFIX) if target else final_policy
                     role.restoring_route = expected
                     self._save("effective_restore_intent")
                     if current != expected:
                         self._owner._adapter.set_route(role.identity.process_id, role.role, expected)
                     if self._owner._adapter.get_route(role.identity.process_id, role.role) != expected:
                         raise RuntimeError("Windows did not confirm the original effective music output policy")
-                    restore_endpoint = role.original_effective_endpoint
+                    if target:
+                        restore_endpoint = target
                 except (OSError, ValueError, RuntimeError) as error:
                     failures.append(str(error))
             if restore_endpoint and not failures and not any(role.external_change for role in self._roles):
                 try:
-                    observation = self._wait_effective(restore_endpoint, max(0, deadline - time.monotonic()))
+                    observation = self._wait_effective(restore_endpoint, max(0, deadline - time.monotonic()),
+                                                       allow_missing_stream=missing_stream_allowed)
                 except (OSError, ValueError, RuntimeError) as error:
                     failures.append(str(error))
-            if failures:
-                self._save("effective_recovery_required")
-                raise RuntimeError("; ".join(dict.fromkeys(failures)))
+            # Even an unverified or failed live rebind must return the owned
+            # temporary policy. Keep the journal actionable, but do not leave
+            # the player pinned to a disconnected source while waiting.
             for role in reversed(self._roles):
                 if not role.intent or role.restored or role.external_change:
                     continue
                 try:
                     self._fence(role)
                     current = _route_text(self._owner._adapter.get_route(role.identity.process_id, role.role))
-                    if current == role.original:
+                    final_policy = role.recovery_policy if role.recovery_policy is not None else role.original
+                    if current == final_policy:
                         restored_roles.append(role)
-                    elif current not in (role.owned_route, role.restoring_route):
+                    elif current not in (role.owned_route, role.restoring_route) and not (role.default_clear_intent and current == ""):
                         role.external_change = True  # Retain the user's newer choice.
                     else:
-                        self._owner._adapter.set_route(role.identity.process_id, role.role, role.original)
-                        if self._owner._adapter.get_route(role.identity.process_id, role.role) != role.original:
+                        self._save("policy_restore_intent")
+                        self._owner._adapter.set_route(role.identity.process_id, role.role, final_policy)
+                        if self._owner._adapter.get_route(role.identity.process_id, role.role) != final_policy:
                             raise RuntimeError("Windows did not confirm restored application output")
                         restored_roles.append(role)
                 except (OSError, ValueError, RuntimeError) as error:
                     failures.append(str(error))
             if failures:
-                self._save("recovery_required")
+                self._save("effective_recovery_required")
                 raise RuntimeError("; ".join(dict.fromkeys(failures)))
             # Policy clearing can rebind a live stream again. Preserve intent
             # until the actual effective output is also proven after Clear.
             if restore_endpoint and not any(role.external_change for role in self._roles):
                 try:
-                    observation = self._wait_effective(restore_endpoint, max(0, deadline - time.monotonic()))
+                    observation = self._wait_effective(restore_endpoint, max(0, deadline - time.monotonic()),
+                                                       allow_missing_stream=missing_stream_allowed)
+                except (OSError, ValueError, RuntimeError):
+                    self._save("effective_recovery_required")
+                    raise
+            if not restore_endpoint and missing_stream_allowed:
+                try:
+                    observation = self._wait_effective("", max(0, deadline - time.monotonic()),
+                                                       allow_missing_stream=True)
                 except (OSError, ValueError, RuntimeError):
                     self._save("effective_recovery_required")
                     raise
