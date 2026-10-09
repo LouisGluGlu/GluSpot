@@ -426,13 +426,6 @@ class SolidMusicBackgroundRenderer(_HostBackedRenderer):
         shell = self._music_shell_path(rect, radius)
         base = context.palette.solid_album_background
         painter.fillPath(shell, base)
-        painter.setClipPath(shell)
-        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
-        sheen.setColorAt(0.00, QColor(255, 255, 255, 28))
-        sheen.setColorAt(0.42, QColor(255, 255, 255, 0))
-        sheen.setColorAt(1.00, QColor(0, 0, 0, 38))
-        painter.fillRect(rect, sheen)
-        self.paint_reactive_accent(painter, rect, radius, "solid_album", light_surface=True, context=context)
         painter.restore()
 
     def reactive_album_accent_pair(self, light_surface: bool, context: MusicBackgroundRenderContext | None = None) -> tuple[QColor, QColor]:

@@ -58,13 +58,7 @@ DEFAULT_MUSIC_AMBIENCE_VALUES = {
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
     },
-    "duotone_full": {
-        "ambient_intensity": 0.0,
-        "music_flow_intensity": 0.74,
-        "compact_duotone_balance": 50,
-        "expanded_duotone_balance": 50,
-    },
-    "pure_black": {
+    "system": {
         "ambient_intensity": 0.0,
         "music_flow_intensity": 0.74,
         "compact_duotone_balance": 50,
@@ -76,13 +70,34 @@ DEFAULT_MUSIC_AMBIENCE_VALUES = {
         "compact_duotone_balance": 50,
         "expanded_duotone_balance": 50,
     },
-    "pure_white": {
-        "ambient_intensity": 0.0,
-        "music_flow_intensity": 0.74,
-        "compact_duotone_balance": 50,
-        "expanded_duotone_balance": 50,
-    },
 }
+
+
+def normalize_music_ambience_style(value) -> str:
+    style = str(value or "sea_level").strip().lower()
+    if style in {"pure_black", "pure_white"}:
+        return "system"
+    return style if style in DEFAULT_MUSIC_AMBIENCE_VALUES else "sea_level"
+
+
+def normalize_music_ambience_values(value, preferred_style=None) -> dict:
+    """Retain saved values when retired background names migrate to one mode."""
+    result = copy.deepcopy(DEFAULT_MUSIC_AMBIENCE_VALUES)
+    if not isinstance(value, dict):
+        return result
+    # Canonical entries win over aliases; the selected legacy mode wins its pair.
+    aliases = [style for style in value if style not in result]
+    if preferred_style in aliases:
+        aliases.remove(preferred_style)
+        aliases.append(preferred_style)
+    for style in aliases + [style for style in value if style in result]:
+        if style not in {"pure_black", "pure_white", "duotone_full"} and style not in result:
+            continue
+        values = value[style]
+        if isinstance(values, dict):
+            target = normalize_music_ambience_style(style)
+            result[target].update({key: values[key] for key in result[target] if key in values})
+    return result
 
 DEFAULT_MUSIC_APP_PROFILES = {
     "netease": {
@@ -342,16 +357,21 @@ class SettingsManager(QObject):
                 return
             migrated = any(key in data for key in _REMOVED_VISUAL_SETTING_KEYS)
             self._settings.update({key: value for key, value in data.items() if key not in _REMOVED_VISUAL_SETTING_KEYS})
+            original_style = self._settings.get("v2_music_ambience_style")
             for key in ("v2_music_ambience_style", "v2_music_background_follow_previous_style"):
-                if str(self._settings.get(key, "") or "").strip().lower() in _REMOVED_MUSIC_AMBIENCE_STYLES:
-                    self._settings[key] = "sea_level"
-                    migrated = True
+                raw = self._settings.get(key, "")
+                canonical = normalize_music_ambience_style(raw) if raw or key == "v2_music_ambience_style" else ""
+                self._settings[key] = canonical
+                migrated = migrated or raw != canonical
             ambience_values = self._settings.get("v2_music_ambience_values")
-            if isinstance(ambience_values, dict):
-                self._settings["v2_music_ambience_values"] = {
-                    style: values for style, values in ambience_values.items() if style in DEFAULT_MUSIC_AMBIENCE_VALUES
-                }
-                migrated = migrated or ambience_values != self._settings["v2_music_ambience_values"]
+            self._settings["v2_music_ambience_values"] = normalize_music_ambience_values(ambience_values, original_style)
+            migrated = migrated or ambience_values != self._settings["v2_music_ambience_values"]
+            if str(self._settings.get("v2_lyric_flow_style")) not in {"wave_stream", "gelv_songscatter", "album_island"}:
+                self._settings["v2_lyric_flow_style"] = "wave_stream"
+                migrated = True
+            if self._settings.get("v2_album_island_secondary_style") != "perspective_dim":
+                self._settings["v2_album_island_secondary_style"] = "perspective_dim"
+                migrated = True
             self._settings["v2_music_sparse_highlight_seconds_per_unit"] = normalize_sparse_seconds_per_unit(
                 self._settings.get("v2_music_sparse_highlight_seconds_per_unit")
             )
@@ -400,10 +420,13 @@ class SettingsManager(QObject):
         if key in _REMOVED_VISUAL_SETTING_KEYS:
             return
         if key in {"v2_music_ambience_style", "v2_music_background_follow_previous_style"}:
-            if str(value or "").strip().lower() in _REMOVED_MUSIC_AMBIENCE_STYLES:
-                value = "sea_level"
-        if key == "v2_music_ambience_values" and isinstance(value, dict):
-            value = {style: values for style, values in value.items() if style in DEFAULT_MUSIC_AMBIENCE_VALUES}
+            value = normalize_music_ambience_style(value) if value or key == "v2_music_ambience_style" else ""
+        if key == "v2_music_ambience_values":
+            value = normalize_music_ambience_values(value)
+        if key == "v2_lyric_flow_style" and str(value) not in {"wave_stream", "gelv_songscatter", "album_island"}:
+            value = "wave_stream"
+        if key == "v2_album_island_secondary_style":
+            value = "perspective_dim"
         if key == "v2_music_sparse_highlight_seconds_per_unit":
             value = normalize_sparse_seconds_per_unit(value)
         if key == "v2_music_surface_reading_lift_level":

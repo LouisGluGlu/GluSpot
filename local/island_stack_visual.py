@@ -79,6 +79,7 @@ from local.audio_reactive_engine import (
     live_audio_availability_request_plan,
 )
 from local.album_art_pipeline import album_art_bytes_signature, album_art_update_plan
+from local.album_island_projection import album_cover_projection
 from local.music_lyric_motion import LogicalLineSpringChain, MusicLyricMotion
 from local.music_lyric_reading import (
     LyricReadingRenderer,
@@ -200,7 +201,13 @@ from local.music_background_renderer import NativeMusicBackgroundRenderer, Solid
 from local.audio_output_icons import paint_audio_output_icon
 from local.island_audio_device_motion import IslandAudioDeviceMotion, IslandDevicePayload, reliable_device_battery
 from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
-from local.music_surface_palette import MusicSurfacePalette, artwork_surface_palette, background_role_color, future_lyric_color, relative_luminance
+from local.music_surface_palette import (
+    MusicSurfacePalette,
+    artwork_surface_palette,
+    relative_luminance,
+    solid_album_background_color,
+    solid_album_ink_color,
+)
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_mode_controls import ArtworkHoverMotion, paint_presentation_glyph
 from local.mydockfinder import FinderGlassMaterial, read_finder_material
@@ -280,6 +287,7 @@ from local.settings_store import (
     MUSIC_READING_GRADIENT_DEFAULT_STEPS,
     MUSIC_READING_LIFT_DEFAULT_LEVEL,
     MUSIC_READING_STRATEGY_DEFAULT,
+    normalize_music_ambience_style,
     normalize_music_reading_gradient_steps,
     normalize_music_reading_lift_level,
     normalize_music_reading_strategy,
@@ -440,6 +448,7 @@ from local.taskbar_positioning import (
 )
 from local.ui_theme import (
     app_dark_mode,
+    system_dark_mode,
     is_theme_change_event,
     music_background_light_sync_plan,
     music_ambience_theme_category,
@@ -1139,20 +1148,23 @@ class IslandStackVisual(QWidget):
         "Noto Serif SC ExtraBold",
         "JiangChengXieSong 700W",
     )
-    MUSIC_AMBIENCE_STYLES = ("sea_level", "duotone_full", "pure_black", "solid_album", "pure_white")
+    MUSIC_AMBIENCE_STYLES = ("sea_level", "solid_album", "system")
     MUSIC_EXPANDED_LAYOUT_STYLES = ("standard", "dual_panel")
     COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "bilateral_diffraction", "pure_white")
-    COLOR_FILL_BLOCKED_AMBIENCE_STYLES = {"sea_level", "duotone_full", "solid_album"}
+    COLOR_FILL_BLOCKED_AMBIENCE_STYLES = {"sea_level", "solid_album"}
     EMBER_COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "pure_white")
     EMBER_COLOR_BACK_GRAY_AMBIENCE_STYLES = ("sea_level", "duotone_full", "solid_album")
-    LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "ember_fade", "album_island")
-    ALBUM_ISLAND_SECONDARY_STYLES = ("shrink_dim", "perspective_dim")
+    LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "album_island")
+    ALBUM_ISLAND_SECONDARY_STYLES = ("perspective_dim",)
     # The island reuses a scaled cache, while the music window needs enough
     # source pixels for a 4K desktop. Keep the decoded source bounded, but do
     # not destroy the original cover by reducing it to an island thumbnail.
     CURRENT_ALBUM_ART_MAX_SIDE = 2560
     STORED_ALBUM_ART_MAX_SIDE = 192
-    SCALED_ALBUM_ART_CACHE_LIMIT = 3
+    # Seven members in compact and expanded poses must coexist; a few recent
+    # sizes survive the mode transition without resizing the full row again.
+    SCALED_ALBUM_ART_CACHE_LIMIT = 24
+    SCALED_ALBUM_ART_CACHE_PIXEL_BUDGET = 2 * 1024 * 1024
     LYRIC_LAYOUT_CACHE_LIMIT = 40
     REPRESENTATIVE_WIDTH_CACHE_LIMIT = 8
     STABLE_RENDER_FPS = 30
@@ -2192,6 +2204,10 @@ class IslandStackVisual(QWidget):
         return "bold" if value in {"bold", "heavy", "900w", "900"} else "normal"
 
     def _wave_stream_font_families(self) -> list[str]:
+        # Both reading styles share one layout and renderer. Gelv changes
+        # only the embedded lyric typeface, including measurement caches.
+        if self._gelv_enabled():
+            return self._gelv_font_families()
         primary = self.WAVE_FONT_FAMILY_HEAVY if self._wave_font_weight_key() == "heavy" else self.WAVE_FONT_FAMILY_BOLD
         families = [primary]
         for family in (self.WAVE_FONT_FAMILY_BOLD, *self.WAVE_FONT_FALLBACK_FAMILIES):
@@ -2203,7 +2219,9 @@ class IslandStackVisual(QWidget):
         font = QFont()
         font.setFamilies(self._wave_stream_font_families())
         font.setPointSize(self._font_size(size, shrink=shrink))
-        if self._wave_font_weight_key() == "heavy":
+        if self._gelv_enabled():
+            font.setWeight(max(weight, QFont.Weight.ExtraBold))
+        elif self._wave_font_weight_key() == "heavy":
             font.setWeight(max(weight, QFont.Weight.Black))
         else:
             font.setWeight(max(weight, QFont.Weight.Bold))
@@ -2834,7 +2852,7 @@ class IslandStackVisual(QWidget):
         if (
             isinstance(spring, LogicalLineSpringChain)
             and bool(getattr(self, "expanded", False))
-            and str(getattr(self, "lyric_flow_style", "wave_stream")) == "wave_stream"
+            and str(getattr(self, "lyric_flow_style", "wave_stream")) in {"wave_stream", "gelv_songscatter"}
             and not bool(getattr(self, "scene_suppressed", False))
         ):
             first, last = spring.visible_range or (0, 0)
@@ -2970,12 +2988,10 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
 
     def set_music_ambience_style(self, style: str, notify: bool = True):
-        style = str(style or "sea_level").lower()
-        if style in ("album_mist", "xiaomi_duotone"):
-            style = "sea_level"
-        if style not in self.MUSIC_AMBIENCE_STYLES:
-            style = "sea_level"
+        style = normalize_music_ambience_style(style)
         self.music_ambience_style = style
+        if style == "system":
+            self._refresh_music_system_theme(force=True)
         if not self._lyric_color_fill_background_available():
             self.wave_color_fill_enabled = False
             self.gelv_color_fill_enabled = False
@@ -3054,6 +3070,13 @@ class IslandStackVisual(QWidget):
                 pass
 
     def _sync_music_background_to_light_state(self, light: bool, enabled: bool, force: bool = False) -> bool:
+        if (
+            normalize_music_ambience_style(getattr(self, "music_ambience_style", "sea_level")) == "system"
+            and not self._music_background_follow_previous_style()
+        ):
+            # An explicit system surface follows Windows, rather than an
+            # application schedule or a sampled taskbar material.
+            return False
         plan = music_background_light_sync_plan(
             light=light,
             enabled=enabled,
@@ -3071,19 +3094,24 @@ class IslandStackVisual(QWidget):
         return True
 
     def _sync_music_background_to_theme(self, force: bool = False):
+        system_changed = False
+        if normalize_music_ambience_style(getattr(self, "music_ambience_style", "sea_level")) == "system":
+            system_changed = self._refresh_music_system_theme(force=force)
+            if not self._music_background_follow_previous_style():
+                return system_changed
         getter = getattr(self, "settings_getter", None)
         enabled = self._music_background_follow_theme_enabled()
         if not enabled:
-            return False
+            return system_changed
         now = time.monotonic()
         if not force and now - float(getattr(self, "_last_theme_follow_checked_at", 0.0) or 0.0) < 2.0:
-            return False
+            return system_changed
         self._last_theme_follow_checked_at = now
         dark = app_dark_mode(getter if callable(getter) else None)
         if not force and dark == getattr(self, "_last_theme_follow_dark", None):
-            return False
+            return system_changed
         self._last_theme_follow_dark = dark
-        return self._sync_music_background_to_light_state(light=not dark, enabled=enabled, force=force)
+        return self._sync_music_background_to_light_state(light=not dark, enabled=enabled, force=force) or system_changed
 
     def _sync_music_background_to_taskbar_color(self, force: bool = False) -> bool:
         if not self._tasker_follow_taskbar_color_enabled():
@@ -3097,9 +3125,25 @@ class IslandStackVisual(QWidget):
     def _coerce_music_ambience_for_color_fill(self):
         return
 
+    def _refresh_music_system_theme(self, force: bool = False) -> bool:
+        """Poll once per two seconds, or immediately on a native theme event."""
+        now = time.monotonic()
+        previous = getattr(self, "_music_system_dark", None)
+        checked_at = getattr(self, "_music_system_theme_checked_at", None)
+        if not force and previous is not None and checked_at is not None and now - float(checked_at) < 2.0:
+            return False
+        dark = system_dark_mode()
+        self._music_system_theme_checked_at = now
+        self._music_system_dark = dark
+        return previous is None or bool(previous) != dark
+
     def _effective_music_ambience_style(self) -> str:
-        style = str(getattr(self, "music_ambience_style", "sea_level") or "sea_level")
-        return style if style in self.MUSIC_AMBIENCE_STYLES else "sea_level"
+        style = normalize_music_ambience_style(getattr(self, "music_ambience_style", "sea_level"))
+        if style == "system":
+            if getattr(self, "_music_system_dark", None) is None:
+                self._refresh_music_system_theme(force=True)
+            return "pure_black" if bool(self._music_system_dark) else "pure_white"
+        return style
 
     def _active_lyric_color_fill_paints_background(self, ambience_style: str | None = None) -> bool:
         if not self._active_lyric_color_fill_enabled():
@@ -3114,7 +3158,7 @@ class IslandStackVisual(QWidget):
     def _music_lyric_text_color(self, alpha: int = 246) -> QColor:
         alpha = max(0, min(255, int(alpha)))
         if self._effective_music_ambience_style() == "solid_album":
-            return QColor(255, 255, 255, alpha)
+            return solid_album_ink_color(self._solid_album_background_color(), alpha)
         if self._effective_music_ambience_style() == "pure_white":
             return QColor(0, 0, 0, alpha)
         return QColor(255, 255, 255, alpha)
@@ -3141,13 +3185,13 @@ class IslandStackVisual(QWidget):
 
     def _music_control_fill_color(self, alpha: int = 24) -> QColor:
         alpha = max(0, min(255, int(alpha)))
-        if self._pure_white_music_active():
+        if self._music_lyric_text_color(255).lightness() < 128:
             return QColor(246, 247, 248, alpha)
         return QColor(18, 20, 24, alpha)
 
     def _music_control_icon_spec(self, command: str) -> dict[str, object]:
         command_key = str(command or "")
-        light_icon = not self._pure_white_music_active()
+        light_icon = self._music_lyric_text_color(255).lightness() >= 128
         suffix = " (1)" if light_icon else ""
         mirrored = False
         if command_key == "music:toggle_play_pause":
@@ -3755,12 +3799,11 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def _compact_lyric_cover_enabled(self) -> bool:
-        if self._ember_enabled():
-            return bool(getattr(self, "ember_show_cover", True))
         return bool(getattr(self, "compact_lyric_show_cover", True))
 
     def set_lyric_flow_style(self, style: str, notify: bool = True):
         style = str(style or "wave_stream").strip()
+        # Removed Ember Fade selections reopen with the canonical reader.
         if style not in self.LYRIC_FLOW_STYLES:
             style = "wave_stream"
         self.lyric_flow_style = style
@@ -9639,7 +9682,7 @@ class IslandStackVisual(QWidget):
             return max(self._u(300.0), min(self._u(760.0), required))
 
         compact_text = self._compact_music_measurement_text()
-        compact_metric = QFontMetrics(self._font(compact_lyric_size, QFont.Weight.Bold, shrink=False))
+        compact_metric = QFontMetrics(self._wave_stream_font(compact_lyric_size, QFont.Weight.Bold, shrink=False))
         title_metric = QFontMetrics(self._font(11, QFont.Weight.Bold, shrink=False))
         content_w = min(
             float(compact_metric.horizontalAdvance(compact_text)),
@@ -9652,28 +9695,6 @@ class IslandStackVisual(QWidget):
             self._music_lyric_measurement_width_cap(expanded=False),
         )
         current_dual_w = self._current_compact_dual_line_width(compact_lyric_size)
-        if self._gelv_enabled():
-            active_size, next_size = self._gelv_line_sizes(taskbar=False)
-            dual_size = self._gelv_dual_line_size(taskbar=False)
-            second_size = dual_size if (self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()) else next_size
-            gelv_lines = self._gelv_display_lines()
-            gelv_w = max(
-                (
-                    self._gelv_layout_width(line, active_size if index == 0 else second_size)
-                    for index, line in enumerate(gelv_lines)
-                    if line
-                ),
-                default=0.0,
-            )
-            current_dual_w = max(current_dual_w, min(gelv_w, self._music_lyric_measurement_width_cap(expanded=False)))
-        if self._ember_enabled():
-            ember_lines = self._ember_current_display_lines(expanded=False)
-            ember_size = self._ember_base_font_size(expanded=False, line_count=max(1, len(ember_lines)))
-            ember_w = max(
-                (self._ember_layout(line, ember_size).total_width for line in ember_lines if line),
-                default=0.0,
-            )
-            current_dual_w = max(current_dual_w, min(ember_w, self._music_lyric_measurement_width_cap(expanded=False)))
         return self._compact_music_target_width_from_content(content_w, title_w, artist_w, lyric_w, current_dual_w, instrumental)
 
     def _music_lyric_measurement_width_cap(self, expanded: bool) -> float:
@@ -9895,7 +9916,7 @@ class IslandStackVisual(QWidget):
         )
 
     def _lyric_color_fill_background_available(self) -> bool:
-        style = str(getattr(self, "music_ambience_style", "sea_level") or "sea_level")
+        style = self._effective_music_ambience_style()
         return style not in self.COLOR_FILL_BLOCKED_AMBIENCE_STYLES or self._yaoguang_colorful_unlocked()
 
     def _gelv_color_fill_available(self) -> bool:
@@ -9928,20 +9949,11 @@ class IslandStackVisual(QWidget):
         return bool(getattr(self, "wave_word_fill_enabled", False))
 
     def _active_lyric_color_fill_enabled(self) -> bool:
-        style = str(getattr(self, "lyric_flow_style", "wave_stream"))
-        if style == "gelv_songscatter":
-            return self._gelv_color_theme_enabled()
-        if style == "wave_stream":
-            return False
-        if style == "ember_fade":
-            return self._ember_color_theme_enabled()
+        # The shared continuous reading front ignores historical effect
+        # switches. Keeping their saved values does not change live paint.
         return False
 
     def _active_lyric_fill_color(self) -> QColor:
-        if self._ember_enabled():
-            return self._ember_fill_color()
-        if self._gelv_enabled():
-            return self._gelv_fill_color()
         return self._wave_fill_color()
 
     def _dual_line_lyrics_allowed(self) -> bool:
@@ -10355,9 +10367,10 @@ class IslandStackVisual(QWidget):
 
     def _solid_album_fallback_color(self, color: QColor | str | None = None) -> QColor:
         candidate = QColor(color) if color is not None else QColor(str(getattr(self, "solid_album_background_fallback", "#16BCFF")))
-        if not self._solid_album_color_usable(candidate):
+        if not candidate.isValid():
             candidate = QColor("#16BCFF")
-        return self._saturated_solid_album_color(candidate)
+        candidate.setAlpha(255)
+        return candidate
 
     def _solid_album_surface_palette(self) -> MusicSurfacePalette:
         """Reuse the full-screen artwork roles without replacing other island styles."""
@@ -10393,26 +10406,10 @@ class IslandStackVisual(QWidget):
         return (QColor(palette.primary), QColor(palette.secondary), QColor(palette.characteristic))
 
     def _solid_album_background_color(self) -> QColor:
-        palette = self._solid_album_surface_palette()
-        source = palette.primary if palette.uses_primary_fallback else palette.secondary
-        return background_role_color(source)
+        return solid_album_background_color(self._solid_album_surface_palette())
 
     def _solid_album_unread_color(self, alpha: int) -> QColor:
-        palette = self._solid_album_surface_palette()
-        backdrop = self._solid_album_background_color()
-        key = (palette.primary.rgba(), palette.characteristic.rgba(), backdrop.rgba())
-        if key != getattr(self, "_solid_album_unread_cache_key", None):
-            self._solid_album_unread_cache_key = key
-            self._solid_album_unread_cache = future_lyric_color(
-                palette.characteristic, backdrop,
-                use_light=relative_luminance(backdrop) < 0.11,
-                primary=palette.primary,
-            )
-        tone = QColor(self._solid_album_unread_cache)
-        # Compact ink needs more opacity than the old black-on-bright style,
-        # but keep the caller's hierarchy: 82 stays dimmer than 132.
-        tone.setAlpha(0 if alpha <= 0 else min(242, round(242 * math.sqrt(alpha / 132.0))))
-        return tone
+        return solid_album_ink_color(self._solid_album_background_color(), alpha)
 
     def _yaoguang_color_usable(self, color: QColor) -> bool:
         if not color.isValid():
@@ -10538,28 +10535,20 @@ class IslandStackVisual(QWidget):
         step = self._album_island_step_px(cover, stage, center)
         center_x = stage.center().x()
         center_y = stage.center().y()
-        secondary_style = str(getattr(self, "album_island_secondary_style", "perspective_dim") or "perspective_dim")
-        if secondary_style not in self.ALBUM_ISLAND_SECONDARY_STYLES:
-            secondary_style = "perspective_dim"
         perspective_amount = max(0, min(200, int(getattr(self, "album_island_perspective_amount", 100)))) / 100.0
         sides = list(range(-left_count, 0)) + [0] + list(range(1, right_count + 1))
         slots: list[dict[str, object]] = []
         for side in sides:
             distance = abs(side)
             perspective = None
-            if secondary_style == "perspective_dim":
-                scale = max(0.78, 1.0 - 0.08 * distance)
-                alpha = max(92, 255 - 48 * distance)
-                squeeze = min(0.42, (0.10 + 0.055 * distance) * perspective_amount)
-                if side < 0:
-                    perspective = {"left_height": 1.0, "right_height": 1.0 - squeeze}
-                elif side > 0:
-                    perspective = {"left_height": 1.0 - squeeze, "right_height": 1.0}
-                tilt = 0.0
-            else:
-                scale = max(0.48, 1.0 - 0.16 * distance)
-                alpha = max(76, 255 - 56 * distance)
-                tilt = 0.0
+            scale = max(0.78, 1.0 - 0.08 * distance)
+            alpha = max(92, 255 - 48 * distance)
+            squeeze = min(0.42, (0.10 + 0.055 * distance) * perspective_amount)
+            if side < 0:
+                perspective = {"left_height": 1.0, "right_height": 1.0 - squeeze}
+            elif side > 0:
+                perspective = {"left_height": 1.0 - squeeze, "right_height": 1.0}
+            tilt = 0.0
             size = cover * scale
             animated_side = float(side)
             if eased_transition < 1.0:
@@ -11318,12 +11307,7 @@ class IslandStackVisual(QWidget):
     def _compact_music_content_height_raw(self) -> float:
         if self._should_paint_album_island():
             return self._album_island_compact_music_height()
-        if self._gelv_enabled():
-            height = self._gelv_compact_music_height()
-        elif self._ember_enabled():
-            height = self._ember_compact_music_height()
-        else:
-            height = 80.0 if bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric() else 46.0
+        height = 80.0 if bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric() else 46.0
         if (
             self._effective_music_ambience_style() == "yaoguang"
             and self._yaoguang_height_mode_key() == "spacious"
@@ -11335,10 +11319,6 @@ class IslandStackVisual(QWidget):
     def _notch_music_needs_content_height(self) -> bool:
         if self._should_paint_album_island():
             return True
-        if self._gelv_enabled():
-            return len(self._gelv_display_lines()) > 1
-        if self._ember_enabled():
-            return len(self._ember_current_display_lines(expanded=False)) > 1
         return bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric()
 
     def _edge_notch_music_height_raw(self) -> float:
@@ -13215,6 +13195,12 @@ class IslandStackVisual(QWidget):
         return path
 
     def _paint_dual_panel_music_background(self, painter: QPainter, rect: QRectF, radius: float, ambience_style: str):
+        if ambience_style == "solid_album":
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.fillPath(self._music_shell_path(rect, radius, True), self._solid_album_background_color())
+            painter.restore()
+            return
         lyric_panel, info_panel = self._dual_panel_music_rects(rect)
         lower_light = ambience_style == "pure_white"
         lower_fill = QColor(255, 255, 255, 255) if lower_light else QColor(0, 0, 0, 255)
@@ -13405,6 +13391,8 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_music_surface_transition_wash(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
+        if self._solid_album_music_active():
+            return
         mode = str(getattr(self, "music_surface_transition_mode", "") or "")
         started_at = float(getattr(self, "music_surface_transition_started_at", 0.0) or 0.0)
         if not mode or started_at <= 0.0:
@@ -13504,9 +13492,6 @@ class IslandStackVisual(QWidget):
         return QRectF(left, top, max(1.0, right - left), max(1.0, bottom - top))
 
     def _compact_cover_rect(self, rect: QRectF) -> QRectF:
-        if self._gelv_enabled():
-            cover_size = min(rect.height() - self._u(12.0), self._u(38.0))
-            return QRectF(rect.left() + self._u(9), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
         two_line = self._has_current_two_line_lyric()
         if self._taskbar_edge_compact_active():
             top_padding, bottom_padding = self._compact_lyric_vertical_padding(two_line, rect)
@@ -14038,7 +14023,7 @@ class IslandStackVisual(QWidget):
         self._native_music_background_renderer().paint_bilateral_diffraction_ambience(painter, rect, radius, expanded)
 
     def _paint_bottom_ambience(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
-        style = getattr(self, "music_ambience_style", "sea_level")
+        style = self._effective_music_ambience_style()
         if style in {"pure_black", "bilateral_diffraction"}:
             return
         if style == "duotone_full":
@@ -14160,7 +14145,7 @@ class IslandStackVisual(QWidget):
         return self._native_music_background_renderer().sea_level_wave_path(rect, center_y, amplitude, thickness, phase, layer)
 
     def _paint_music_light_wave(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
-        style = getattr(self, "music_ambience_style", "sea_level")
+        style = self._effective_music_ambience_style()
         if style in {"pure_black", "bilateral_diffraction"}:
             return
         if style == "duotone_full":
@@ -14302,9 +14287,20 @@ class IslandStackVisual(QWidget):
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                scaled_cache[scaled_key] = scaled
-                while len(scaled_cache) > int(getattr(self, "SCALED_ALBUM_ART_CACHE_LIMIT", 4)):
-                    scaled_cache.pop(next(iter(scaled_cache)))
+                # Aspect-fill can produce a tall or wide raster from unusual
+                # artwork. Bound retained pixels as well as item count; hits
+                # skip this accounting, and an oversized item stays transient.
+                pixel_budget = int(getattr(self, "SCALED_ALBUM_ART_CACHE_PIXEL_BUDGET", 2 * 1024 * 1024))
+                scaled_pixels = scaled.width() * scaled.height() * scaled.depth() // 8
+                if scaled_pixels <= pixel_budget:
+                    scaled_cache[scaled_key] = scaled
+                    retained_pixels = sum(
+                        cached.width() * cached.height() * cached.depth() // 8
+                        for cached in scaled_cache.values()
+                    )
+                    while len(scaled_cache) > int(getattr(self, "SCALED_ALBUM_ART_CACHE_LIMIT", 24)) or retained_pixels > pixel_budget:
+                        discarded = scaled_cache.pop(next(iter(scaled_cache)))
+                        retained_pixels -= discarded.width() * discarded.height() * discarded.depth() // 8
             source = QRectF(
                 (scaled.width() - rect.width()) / 2.0,
                 (scaled.height() - rect.height()) / 2.0,
@@ -14548,7 +14544,7 @@ class IslandStackVisual(QWidget):
             self._paint_album_island_compact(painter, rect)
             self._paint_taskbar_music_hover_overlay(painter, rect)
             return
-        two_line = self._has_current_two_line_lyric() and not self._gelv_enabled()
+        two_line = self._has_current_two_line_lyric()
         top_padding, bottom_padding = self._compact_lyric_vertical_padding(two_line, rect)
         yaoguang_compact = self._effective_music_ambience_style() == "yaoguang"
         if self._compact_lyric_cover_enabled():
@@ -14679,14 +14675,6 @@ class IslandStackVisual(QWidget):
             painter.setClipPath(clip_path, Qt.ClipOperation.IntersectClip)
         if self._should_paint_album_island():
             self._paint_album_island(painter, rect)
-            painter.restore()
-            return
-        if self._ember_enabled():
-            self._paint_ember_lyrics(painter, rect, expanded=False)
-            painter.restore()
-            return
-        if self._gelv_enabled():
-            self._paint_gelv_compact_lyrics(painter, rect)
             painter.restore()
             return
         lines = self._compact_lyric_lines()
@@ -15148,18 +15136,9 @@ class IslandStackVisual(QWidget):
         perspective = slot.get("perspective")
         painter.save()
         if isinstance(perspective, dict) and not bool(slot.get("center")):
-            left_h = max(0.45, min(1.0, float(perspective.get("left_height", 1.0) or 1.0)))
-            right_h = max(0.45, min(1.0, float(perspective.get("right_height", 1.0) or 1.0)))
-            left_top = rect.center().y() - rect.height() * left_h / 2.0
-            left_bottom = rect.center().y() + rect.height() * left_h / 2.0
-            right_top = rect.center().y() - rect.height() * right_h / 2.0
-            right_bottom = rect.center().y() + rect.height() * right_h / 2.0
-            path = QPainterPath(QPointF(rect.left(), left_top))
-            path.lineTo(QPointF(rect.right(), right_top))
-            path.lineTo(QPointF(rect.right(), right_bottom))
-            path.lineTo(QPointF(rect.left(), left_bottom))
-            path.closeSubpath()
-            painter.setClipPath(path)
+            painter.setWorldTransform(album_cover_projection(rect, perspective), combine=True)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.setOpacity(float(slot["alpha"]) / 255.0)
             cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
             self._paint_cover(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
@@ -15249,7 +15228,7 @@ class IslandStackVisual(QWidget):
         lyric_viewport = lyric_panel.adjusted(self._u(30.0), self._u(16.0), -self._u(30.0), -self._u(14.0))
         self._paint_lyric_viewport(painter, lyric_viewport)
 
-        lower_light = self._effective_music_ambience_style() == "pure_white"
+        lower_light = self._music_lyric_text_color(255).lightness() < 128
         title_color = QColor(0, 0, 0, 242) if lower_light else QColor(255, 255, 255, 242)
         artist_color = QColor(0, 0, 0, 184) if lower_light else QColor(255, 255, 255, 172)
         margin = self._u(22.0)
@@ -15459,7 +15438,7 @@ class IslandStackVisual(QWidget):
             if estimated is not None:
                 phase["progress"] = estimated
         phase["whole_row"] = self._island_whole_row_reading(index)
-        if phase["whole_row"] and str(getattr(self, "lyric_flow_style", "wave_stream")) == "wave_stream" and normalize_music_reading_strategy(getattr(
+        if phase["whole_row"] and str(getattr(self, "lyric_flow_style", "wave_stream")) in {"wave_stream", "gelv_songscatter"} and normalize_music_reading_strategy(getattr(
             self, "music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT,
         )) == "low_perception":
             if 0 <= index < len(timed):
@@ -15565,7 +15544,11 @@ class IslandStackVisual(QWidget):
         if active:
             self._paint_live_lyric_text(painter, row, text, size, self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), bold, phase, centered=True, centered_scroll=True)
         else:
-            self._paint_scrolling_text(painter, row, text, size, self._music_lyric_text_color(max(0, min(255, alpha))), bold, centered=True, centered_scroll=True)
+            self._paint_scrolling_text(
+                painter, row, text, size, self._music_lyric_text_color(max(0, min(255, alpha))),
+                bold, centered=True, centered_scroll=True,
+                font=self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal),
+            )
 
     def _paint_lyric_viewport(self, painter: QPainter, rect: QRectF):
         painter.save()
@@ -15575,14 +15558,6 @@ class IslandStackVisual(QWidget):
             return
         if self._should_paint_album_island():
             self._paint_album_island(painter, rect)
-            painter.restore()
-            return
-        if self._ember_enabled():
-            self._paint_ember_lyrics(painter, rect, expanded=True)
-            painter.restore()
-            return
-        if self._gelv_enabled():
-            self._paint_gelv_expanded_lyrics(painter, rect)
             painter.restore()
             return
         if len(self.lyrics) <= 1 and self._is_instrumental_track():
@@ -18942,8 +18917,10 @@ class IslandStackVisual(QWidget):
         bold: bool,
         centered: bool = False,
         centered_scroll: bool = False,
+        *,
+        font: QFont | None = None,
     ):
-        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        font = font if font is not None else self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
         painter.setFont(font)
         painter.setPen(color)
         fm = QFontMetrics(font)
