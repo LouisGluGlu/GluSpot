@@ -136,7 +136,7 @@ class MusicSurfaceWindow(QWidget):
     TITLE_PIXEL_SIZE = 34
     ARTIST_PIXEL_SIZE = 22
     METADATA_MARQUEE_SECONDS = 5.0
-    METADATA_MARQUEE_HOLD_SECONDS = 30.0
+    METADATA_MARQUEE_HOLD_SECONDS = 15.0
     METADATA_MARQUEE_END_HOLD_SECONDS = 0.7
     METADATA_RASTER_CACHE_MAX_BYTES = 64 * 1024 * 1024
     METADATA_RASTER_CACHE_MAX_ENTRIES = 96
@@ -368,6 +368,9 @@ class MusicSurfaceWindow(QWidget):
         self._metadata_marquee_states: dict[str, tuple[object, str, float]] = {}
         self._metadata_hit_rects: dict[str, QRectF] = {}
         self._metadata_overflows: dict[str, float] = {}
+        self._metadata_slot_widths: dict[str, float] = {}
+        self._metadata_reveal_pending: dict[str, tuple[object, str]] = {}
+        self._metadata_scroll_after_hide: dict[str, tuple[object, str]] = {}
         self._metadata_hover_field = ""
         self._metadata_hover_started_at = 0.0
         self._metadata_returns: dict[str, tuple[float, float]] = {}
@@ -983,7 +986,68 @@ class MusicSurfaceWindow(QWidget):
         if self._surface_corner_radius() <= 0.001:
             self.clearMask()
         else:
-            self.setMask(QRegion(self._surface_shape_path().toFillPolygon().toPolygon()))
+            # The native hit region must include the antialiased fringe. An
+            # exact binary region cuts off partial-alpha pixels at the curve.
+            path = QPainterPath()
+            radius = self._surface_corner_radius()
+            path.addRoundedRect(QRectF(self.rect()).adjusted(-2, -2, 2, 2), radius, radius)
+            self.setMask(QRegion(path.toFillPolygon().toPolygon()).intersected(QRegion(self.rect())))
+
+    def _apply_surface_edge_alpha(self, painter: QPainter) -> None:
+        """Cache corner coverage and, when needed, one-pixel edge fringes."""
+        radius = min(self._surface_corner_radius(), self.width()*0.5, self.height()*0.5)
+        if radius <= 0.001:
+            return
+        dpr = max(1.0, float(painter.device().devicePixelRatioF()))
+        key = (self.width(), self.height(), radius, dpr)
+        cached = getattr(self, "_surface_edge_alpha_cache", None)
+        if cached is None or cached[0] != key:
+            side = int(math.ceil(radius*dpr)) + 2
+            pixel_width = int(math.ceil(self.width()*dpr))
+            pixel_height = int(math.ceil(self.height()*dpr))
+            # Partition tiny transition surfaces at integer physical pixels so
+            # the four patches never multiply coverage in overlapping areas.
+            left = min(side, (pixel_width + 1)//2)
+            right = min(side, pixel_width//2)
+            top = min(side, (pixel_height + 1)//2)
+            bottom = min(side, pixel_height//2)
+            patches = [(0, 0, left, top), (pixel_width-right, 0, right, top),
+                       (0, pixel_height-bottom, left, bottom),
+                       (pixel_width-right, pixel_height-bottom, right, bottom)]
+            # An odd logical extent at fractional DPR can end inside a pixel.
+            # Preserve that same coverage along the straight edge between the
+            # corners, rather than make it jump to opaque at each patch seam.
+            if pixel_width - self.width()*dpr > 0.001:
+                patches.append((pixel_width-1, top, 1, pixel_height-top-bottom))
+            if pixel_height - self.height()*dpr > 0.001:
+                patches.append((left, pixel_height-1, pixel_width-left-right, 1))
+            images, origins = [], []
+            for x, y, width, height in patches:
+                if width <= 0 or height <= 0:
+                    continue
+                mask = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+                mask.fill(Qt.GlobalColor.transparent)
+                with QPainter(mask) as edge:
+                    edge.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    edge.translate(-x, -y)
+                    edge.scale(dpr, dpr)
+                    edge.setPen(Qt.PenStyle.NoPen)
+                    edge.setBrush(Qt.GlobalColor.white)
+                    edge.drawRoundedRect(QRectF(self.rect()), radius, radius)
+                mask.setDevicePixelRatio(dpr)
+                images.append(mask)
+                origins.append(QPointF(x/dpr, y/dpr))
+            # A fractional-DPR right/bottom corner has its own pixel phase.
+            # Mirroring the top-left patch would shift its antialiased fringe.
+            cached = (key, tuple(images), tuple(origins))
+            self._surface_edge_alpha_cache = cached
+        painter.save()
+        painter.setClipping(False)
+        painter.setOpacity(1.0)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        for image, origin in zip(cached[1], cached[2]):
+            painter.drawImage(origin, image)
+        painter.restore()
 
     def showEvent(self, event):
         self._sync_surface_shape()
@@ -1057,6 +1121,8 @@ class MusicSurfaceWindow(QWidget):
         self._control_layer_next_prewarm_at = 0.0
         self._control_prewarm_remaining = 2 * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
         self._control_prewarm_requested = False
+        self._metadata_reveal_pending.clear()
+        self._metadata_scroll_after_hide.clear()
 
     @staticmethod
     def _control_spring_progress(progress: float) -> float:
@@ -1071,6 +1137,15 @@ class MusicSurfaceWindow(QWidget):
     def _control_reveal_at(self, now: float) -> float:
         """Return 1 for visible controls and 0 after mode-specific pointer idling."""
         instant = float(now)
+        panel = getattr(self, "_audio_output_panel", None)
+        if panel is not None and panel.isVisible():
+            # The chooser owns the source control while unfolding or closing.
+            # Keep its neighbours and metadata in that same visible layout;
+            # dismissed re-arms the ordinary idle timer through its callback.
+            self._control_last_motion_at = instant
+            self._control_reveal_from = self._control_reveal_target = 1.0
+            self._sync_idle_cursor()
+            return 1.0
         idle_seconds = (
             self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen
             else self.WINDOWED_CONTROL_IDLE_SECONDS
@@ -1106,6 +1181,7 @@ class MusicSurfaceWindow(QWidget):
         reveal = self._control_reveal_at(instant)
         self._control_last_motion_at = instant
         if self._control_reveal_target < 1.0:
+            self._metadata_controls_revealing()
             self._control_reveal_from = reveal
             self._control_reveal_target = 1.0
             self._control_transition_started_at = instant
@@ -1120,6 +1196,7 @@ class MusicSurfaceWindow(QWidget):
 
     def _update_control_animation_regions(self, now: float, *, force: bool = False):
         reveal = self._control_reveal_at(now)
+        self._update_metadata_control_state(now, reveal)
         changed = abs(reveal - self._control_last_tick_reveal) > 0.001
         self._control_last_tick_reveal = reveal
         if not force and not self._controls_animating(now) and not changed:
@@ -1474,6 +1551,14 @@ class MusicSurfaceWindow(QWidget):
         self.update(ink)
 
     def _on_animation_tick(self):
+        previous = getattr(self, "_frame_lyric_cache", None)
+        self._frame_lyric_cache = {}
+        try:
+            self._advance_surface_animation_tick()
+        finally:
+            self._frame_lyric_cache = previous
+
+    def _advance_surface_animation_tick(self):
         """Keep the moving lyric local while ambient/cover frames refresh slowly.
 
         A shorter timeout cannot force extra display frames.  Match a faster
@@ -1830,7 +1915,13 @@ class MusicSurfaceWindow(QWidget):
         # is not a sung line. A sparse song uses the same centered-art layout
         # as a song with no usable lyrics.
         if timed:
-            centered = sum(text != INTRO_COUNTDOWN_TEXT for _start, text in timed) <= 3
+            sung = 0
+            for _start, text in timed:
+                if text != INTRO_COUNTDOWN_TEXT:
+                    sung += 1
+                    if sung > 3:
+                        break
+            centered = sung <= 3
         else:
             centered = sum(str(line).strip() not in {"", "暂无歌词", placeholder} for line in lines) <= 3
         if centered:
@@ -2340,6 +2431,17 @@ class MusicSurfaceWindow(QWidget):
         return (color,) * layout.lineCount()
 
     def _display_lyrics(self) -> tuple[list[str], list[tuple[float, str]]]:
+        # Each GUI tick/paint sees one consistent provider snapshot. Keep the
+        # complete value check between frames (including in-place edits), but
+        # avoid rebuilding a long song's signature for every helper in one.
+        frame = getattr(self, "_frame_lyric_cache", None)
+        if frame is None:
+            return self._resolve_display_lyrics()
+        if "lyrics" not in frame:
+            frame["lyrics"] = self._resolve_display_lyrics()
+        return frame["lyrics"]
+
+    def _resolve_display_lyrics(self) -> tuple[list[str], list[tuple[float, str]]]:
         # Provider lists can be replaced or edited in place.  A cheap complete
         # value signature catches both without rerunning the coalescer and
         # display-only bilingual regex for every row at 120+ Hz.
@@ -5572,23 +5674,25 @@ class MusicSurfaceWindow(QWidget):
 
     @classmethod
     def _metadata_scroll_offset(cls, overflow: float, elapsed: float) -> tuple[float, bool]:
-        """Make one smooth round trip, then rest at the starting edge for 30 s."""
+        """Start one smooth round trip every 15 s, including its travel time."""
         if overflow <= 0.0:
             return 0.0, False
         start_hold = cls.METADATA_MARQUEE_HOLD_SECONDS
         end_hold = cls.METADATA_MARQUEE_END_HOLD_SECONDS
         travel = cls.METADATA_MARQUEE_SECONDS * 0.5
-        period = start_hold + travel * 2.0 + end_hold
-        phase = max(0.0, elapsed) % period
-        if phase < start_hold:
+        period = max(start_hold, travel * 2.0 + end_hold)
+        if elapsed < start_hold:
             return 0.0, False
-        if phase < start_hold + travel:
-            progress = (phase - start_hold) / travel
+        phase = (elapsed - start_hold) % period
+        if phase < travel:
+            progress = phase / travel
             return overflow * (0.5 - 0.5 * math.cos(math.pi * progress)), True
-        if phase < start_hold + travel + end_hold:
+        if phase < travel + end_hold:
             return overflow, False
-        progress = (phase - start_hold - travel - end_hold) / travel
-        return overflow * (0.5 + 0.5 * math.cos(math.pi * progress)), True
+        if phase < travel * 2.0 + end_hold - 1e-9:
+            progress = (phase - travel - end_hold) / travel
+            return overflow * (0.5 + 0.5 * math.cos(math.pi * progress)), True
+        return 0.0, False
 
     @classmethod
     def _metadata_next_motion_delay(cls, elapsed: float) -> float:
@@ -5596,17 +5700,18 @@ class MusicSurfaceWindow(QWidget):
         start_hold = cls.METADATA_MARQUEE_HOLD_SECONDS
         travel = cls.METADATA_MARQUEE_SECONDS * 0.5
         end_hold = cls.METADATA_MARQUEE_END_HOLD_SECONDS
-        period = start_hold + travel * 2.0 + end_hold
-        phase = max(0.0, elapsed) % period
-        outbound_at = start_hold
-        inbound_at = start_hold + travel + end_hold
-        if phase < outbound_at:
-            return outbound_at - phase
+        period = max(start_hold, travel * 2.0 + end_hold)
+        if elapsed < start_hold:
+            return start_hold - max(0.0, elapsed)
+        phase = (elapsed - start_hold) % period
+        inbound_at = travel + end_hold
         if phase < inbound_at:
             return inbound_at - phase
-        return period + outbound_at - phase
+        return period - phase
 
     def _metadata_marquee_pose(self, field: str, overflow: float, now: float):
+        if overflow <= 0.0:
+            return 0.0, False, float("inf")
         state = self._metadata_marquee_states[field]
         returning = self._metadata_returns.get(field)
         if returning is not None:
@@ -5622,6 +5727,77 @@ class MusicSurfaceWindow(QWidget):
             elapsed = now - state[2]
         offset, moving = self._metadata_scroll_offset(overflow, elapsed)
         return offset, moving, self._metadata_next_motion_delay(elapsed)
+
+    def _metadata_control_overflow(self, field: str, reveal: float) -> float:
+        """Measure a settled control layout using the same exact ink as paint.
+
+        The slot keeps its width as controls hide, while its font grows. Do
+        not restart a marquee on intermediate font or viewport changes.
+        """
+        state = self._metadata_marquee_states.get(field)
+        width = self._metadata_slot_widths.get(field)
+        if state is None or width is None:
+            return self._metadata_overflows.get(field, 0.0)
+        scale = self._surface_scale()
+        base_size = self.TITLE_PIXEL_SIZE if field == "title" else self.ARTIST_PIXEL_SIZE
+        extra_size = 12.0 if field == "title" else 8.0
+        weight = QFont.Weight.Bold if field == "title" else QFont.Weight.Medium
+        font = self._surface_font(base_size * scale, weight)
+        text_width = self._metadata_text_metrics(
+            state[1], font, max(1.0, float(self.devicePixelRatioF())),
+        )[1]
+        if reveal < 0.999:
+            text_width *= (base_size + extra_size) * scale / font.pixelSize()
+        return max(0.0, text_width - width)
+
+    def _metadata_controls_revealing(self) -> None:
+        """Capture one reveal event; ordinary pointer moves cannot retrigger it."""
+        self._metadata_reveal_pending = {
+            field: state[:2] for field, state in self._metadata_marquee_states.items()
+            if field in self._metadata_hit_rects
+            and self._metadata_control_overflow(field, 0.0) > 0.0
+        }
+        self._metadata_scroll_after_hide.clear()
+
+    def _start_metadata_marquee_once(self, field: str, overflow: float, now: float) -> None:
+        state = self._metadata_marquee_states.get(field)
+        if state is None or overflow <= 0.0 or field == self._metadata_hover_field:
+            return
+        offset, moving, _delay = self._metadata_marquee_pose(field, overflow, now)
+        # A reveal during an existing trip preserves that trip and its timing.
+        if moving and field not in self._metadata_returns:
+            return
+        self._metadata_returns.pop(field, None)
+        fraction = max(0.0, min(1.0, offset / max(1.0, overflow)))
+        outbound = math.acos(1.0 - 2.0 * fraction) / math.pi * self.METADATA_MARQUEE_SECONDS * 0.5
+        self._metadata_marquee_states[field] = (
+            *state[:2], now - self.METADATA_MARQUEE_HOLD_SECONDS - outbound,
+        )
+        self._metadata_next_motion_at = min(self._metadata_next_motion_at, now)
+        if self._metadata_animation_rect.isValid():
+            self.update(self._metadata_animation_rect)
+
+    def _update_metadata_control_state(self, now: float, reveal: float) -> None:
+        """Resolve each field once after the control animation has settled."""
+        if self._control_reveal_target > 0.0 and reveal >= 0.999:
+            pending, self._metadata_reveal_pending = self._metadata_reveal_pending, {}
+            for field, key in pending.items():
+                state = self._metadata_marquee_states.get(field)
+                if state is None or state[:2] != key:
+                    continue
+                overflow = self._metadata_control_overflow(field, 1.0)
+                if overflow > 0.0:
+                    self._start_metadata_marquee_once(field, overflow, now)
+                else:
+                    self._metadata_scroll_after_hide[field] = key
+        elif self._control_reveal_target <= 0.0 and reveal <= 0.001:
+            pending, self._metadata_scroll_after_hide = self._metadata_scroll_after_hide, {}
+            for field, key in pending.items():
+                state = self._metadata_marquee_states.get(field)
+                if state is not None and state[:2] == key:
+                    self._start_metadata_marquee_once(
+                        field, self._metadata_control_overflow(field, 0.0), now,
+                    )
 
     def _update_metadata_hover(self, position: QPointF | None, now: float) -> None:
         field = next((key for key, rect in self._metadata_hit_rects.items()
@@ -5826,9 +6002,12 @@ class MusicSurfaceWindow(QWidget):
                 state = (identity, display_text, now)
                 self._metadata_marquee_states[field] = state
                 self._metadata_returns.pop(field, None)
+                self._metadata_reveal_pending.pop(field, None)
+                self._metadata_scroll_after_hide.pop(field, None)
                 if field == self._metadata_hover_field:
                     self._metadata_hover_started_at = now
             self._metadata_hit_rects[field] = QRectF(rect)
+            self._metadata_slot_widths[field] = rect.width()
             self._metadata_overflows[field] = overflow
             offset, moving, next_delay = self._metadata_marquee_pose(field, overflow, now)
             if overflow > 0.0:
@@ -5862,6 +6041,14 @@ class MusicSurfaceWindow(QWidget):
         painter.restore()
 
     def paintEvent(self, _event):
+        previous = getattr(self, "_frame_lyric_cache", None)
+        self._frame_lyric_cache = {}
+        try:
+            self._paint_surface_frame(_event)
+        finally:
+            self._frame_lyric_cache = previous
+
+    def _paint_surface_frame(self, _event):
         paint_started = time.perf_counter()
         if (self._pending_fullscreen is not None or self._island_returning) and not self._geometry_transition_snapshot.isNull():
             painter = QPainter(self)
@@ -5869,7 +6056,7 @@ class MusicSurfaceWindow(QWidget):
             painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setClipPath(self._surface_shape_path())
+            painter.setClipRect(self.rect())
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.drawImage(QRectF(self.rect()), self._geometry_transition_snapshot)
             if (self._island_entering or self._island_returning) and not self._island_origin_snapshot.isNull():
@@ -5881,6 +6068,7 @@ class MusicSurfaceWindow(QWidget):
                 painter.setOpacity(opacity)
                 painter.drawImage(QRectF(self.rect()), self._island_origin_snapshot)
             self._paint_transition_mode_glyph(painter)
+            self._apply_surface_edge_alpha(painter)
             painter.end()
             self._record_paint_cost(paint_started, _event)
             return
@@ -5892,7 +6080,7 @@ class MusicSurfaceWindow(QWidget):
         painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setClipPath(self._surface_shape_path())
+        painter.setClipRect(self.rect())
         try:
             paint_region = _event.region()
             if paint_region.isEmpty():
@@ -6075,8 +6263,10 @@ class MusicSurfaceWindow(QWidget):
                 painted_cover, painted_cover.width() * 0.055, painted_cover.height() * 0.055,
             )
         unobscured_path = cover_mask.subtracted(painted_mask) if cover_fraction > 0.0 else None
-        self._metadata_hit_rects.clear()
         if normal_metadata_exposed or center_metadata_exposed:
+            self._metadata_hit_rects.clear()
+            if normal_opacity <= 0.001:
+                self._metadata_slot_widths.clear()
             # During the centerward travel, the artwork crosses the former
             # title slot.  Fade that slot through the narrow crossing and
             # never let its glyphs paint over the cover itself.
@@ -7389,6 +7579,7 @@ class MusicSurfaceWindow(QWidget):
         if self._control_prewarm_requested and (window_control_exposed or media_control_exposed):
             self._control_prewarm_requested = False
             self._control_prewarm_remaining = max(0, self._control_prewarm_remaining - 1)
+        self._apply_surface_edge_alpha(painter)
         painter.end()
         self._record_paint_cost(paint_started, _event)
 
@@ -7538,7 +7729,8 @@ class MusicSurfaceWindow(QWidget):
         button = self._audio_output_button_rect(self._window_control_base_rect(QRectF(self.rect())), self._surface_scale())
         button.translate(self._window_control_shift(button, self._control_reveal_at(time.monotonic())))
         self._reset_control_idle()
-        self._audio_output_panel.open_at(QPoint(round(button.right()), round(button.bottom() + 12)), source_rect=button)
+        self._audio_output_panel.open_at(QPoint(round(button.right()), round(button.top())), source_rect=button)
+        self._update_audio_output_region()
 
     def _toggle_translation(self):
         setter = getattr(self.owner, "set_enable_dual_line_lyrics", None)
@@ -7774,7 +7966,7 @@ class MusicSurfaceWindow(QWidget):
         audio_kinds = self._audio_output_kinds
         audio_count = len(audio_kinds)
         audio_pose = self._audio_output_motion.pose
-        if audio_available and audio_pose is None:
+        if audio_available and not audio_active and audio_pose is None:
             bounds = bounds.united(audio_button)
         translated = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
         translation_hovered = self._hovered_window_button == "translation"
@@ -7802,7 +7994,7 @@ class MusicSurfaceWindow(QWidget):
                               target.center().y() - side / 2.0, side, side)
 
             ink = QColor(255, 255, 255, 242)
-            if audio_available and audio_pose is None:
+            if audio_available and not audio_active and audio_pose is None:
                 face(audio_button, audio_hovered, audio_pressed, audio_active or bool(audio_kinds))
                 audio_ink = QColor(80, 151, 220) if audio_active else (
                     QColor(44, 46, 48) if audio_kinds else ink)
@@ -7860,7 +8052,7 @@ class MusicSurfaceWindow(QWidget):
             prewarm_default=(("window", key, round(scale, 3), show_obo, obo_active, translated,
                                translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw_default),
         )
-        if audio_available and audio_pose is not None:
+        if audio_available and not audio_active and audio_pose is not None:
             painter.save()
             painter.setOpacity(reveal ** .75)
             painter.translate(self._window_control_shift(button, reveal))

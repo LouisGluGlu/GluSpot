@@ -280,17 +280,25 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         self._controls(103.0)
         self.assertEqual(self.window._button_rects, {})
 
-    def test_output_open_state_tints_blue_without_reading_provider_in_paint(self):
-        self.window._audio_output_panel = SimpleNamespace(isVisible=lambda: True)
+    def test_output_open_state_yields_its_slot_without_reading_provider_in_paint(self):
         self.window._reset_control_idle(100.0)
+        closed = self._controls()
+        self.window._audio_output_panel = SimpleNamespace(isVisible=lambda: True)
         with patch.object(self.owner.data_provider, "get_audio_route_snapshot", side_effect=AssertionError("paint read")):
             image = self._controls()
         output = self.window._button_rects["audio_output"].toAlignedRect()
-        blue = [image.pixelColor(x, y) for y in range(output.top(), output.bottom())
-                for x in range(output.left(), output.right()) if image.pixelColor(x, y).blue()
-                > image.pixelColor(x, y).red() + 80]
-        self.assertGreater(len(blue), 60)
-        self.assertGreater(image.pixelColor(output.center().x(), output.top() + 5).red(), 200)
+        self.assertTrue(any(closed.pixelColor(x, y).alpha() > 0
+            for y in range(output.top(), output.bottom()) for x in range(output.left(), output.right())))
+        self.assertTrue(all(image.pixelColor(x, y).alpha() == 0
+            for y in range(output.top(), output.bottom()) for x in range(output.left(), output.right())))
+        # The fused menu takes only the output slot. Translation and the
+        # destination keep exactly the same cached frame and hit rectangles.
+        for identity in ("translation", "return"):
+            bounds = self.window._button_rects[identity].toAlignedRect()
+            self.assertEqual(bytes(closed.copy(bounds).constBits()), bytes(image.copy(bounds).constBits()))
+        self.window._audio_output_panel = None
+        restored = self._controls()
+        self.assertEqual(bytes(closed.constBits()), bytes(restored.constBits()))
 
     def test_translation_active_uses_transparent_symbol_cutout(self):
         self.owner.enable_dual_line_lyrics = True

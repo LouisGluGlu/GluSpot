@@ -2760,6 +2760,7 @@ class IslandStackVisual(QWidget):
         )
 
     def _handle_tick_follow_refresh(self, now: float):
+        self._refresh_top_notch_position()
         if self._tick_follow_refresh_plan(now, active=self._taskbar_compact_active()).should_refresh:
             self._refresh_taskbar_follow_position()
         if self._tick_follow_refresh_plan(
@@ -4155,6 +4156,43 @@ class IslandStackVisual(QWidget):
         finally:
             self._restoring_position = False
 
+    def _top_notch_anchor_locked(self) -> bool:
+        return (
+            str(getattr(self, "location_mode", "free") or "free") == "top"
+            and not bool(getattr(self, "finder_mode", False))
+            and not bool(getattr(self, "attach_to_real_finder", False))
+            and not bool(getattr(self, "dragging", False))
+            and not bool(getattr(self, "drag_candidate", False))
+            and not bool(getattr(self, "_music_surface_active", False))
+        )
+
+    def _refresh_top_notch_position(self) -> bool:
+        if not self._top_notch_anchor_locked() or bool(getattr(self, "_restoring_position", False)):
+            return False
+        kind = self._main_kind()
+        # Downward layout has a fixed local top; it does not need the current
+        # text width/height, which can be expensive to measure on every tick.
+        main_top = self._main_top_for_direction(kind, 0.0, 1)
+        current = QPoint(self.pos())
+        probe = self.mapToGlobal(QPoint(self.width() // 2, int(round(main_top + self._u(16.0)))))
+        screen = QGuiApplication.screenAt(probe) or self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return False
+        target = QPoint(current.x(), int(round(screen.geometry().top() - main_top)))
+        direction_changed = int(getattr(self, "stack_direction", 1) or 1) != 1
+        self.stack_direction = 1
+        moved = target != current
+        if moved:
+            # Platform moves and re-show geometry must not become a new free
+            # placement. The native move can synchronously emit moveEvent.
+            self._restoring_position = True
+            try:
+                self.move(target)
+            finally:
+                self._restoring_position = False
+        self.save_last_position(target)
+        return moved or direction_changed
+
     def _standalone_canvas_width(self) -> float:
         return self._u(1180.0)
 
@@ -4300,11 +4338,12 @@ class IslandStackVisual(QWidget):
             return False
         if str(getattr(self, "location_mode", "free") or "free") == "finder" or bool(getattr(self, "finder_mode", False)):
             return False
+        previous = getattr(self, "last_window_position", None)
+        self._refresh_top_notch_position()
         try:
             pos = self.pos()
         except Exception:
             return False
-        previous = getattr(self, "last_window_position", None)
         self.save_last_position(pos)
         return previous != getattr(self, "last_window_position", None)
 
@@ -4369,6 +4408,7 @@ class IslandStackVisual(QWidget):
             self.hide()
             return
         self._center_on_screen()
+        self._refresh_top_notch_position()
         self._force_super_topmost()
 
     def hideEvent(self, event):
@@ -11455,6 +11495,8 @@ class IslandStackVisual(QWidget):
         return str(getattr(self, "drag_press_key", "") or "") != "taskbar:left-handle"
 
     def _vertical_stack_direction(self, main_kind: IslandKind, main_h: float, screen_geo) -> int:
+        if self._top_notch_anchor_locked():
+            return 1
         taskbar_compact = self._taskbar_compact_active()
         taskbar = QRectF(getattr(self, "last_taskbar_rect", QRectF())) if taskbar_compact else QRectF()
         mode = str(getattr(self, "expand_direction", "auto") or "auto")
@@ -12070,6 +12112,16 @@ class IslandStackVisual(QWidget):
             return False
         return self._apply_motion_snap_to_target(visual.key, plan.target_rect, plan.target_opacity)
 
+    def _pin_top_notch_main_motion(self, visual: StackVisual) -> None:
+        if visual.z_index != 10 or not self._top_notch_anchor_locked():
+            return
+        motion = self.motions.get(visual.key)
+        if motion is not None:
+            # Only the attached edge is fixed. Width, height and opacity keep
+            # their existing springs when lyrics, devices or main kinds change.
+            motion.y = visual.rect.top()
+            motion.vy = 0.0
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -12138,6 +12190,7 @@ class IslandStackVisual(QWidget):
                 response=motion_plan.response,
                 damping=motion_plan.damping,
             )
+            self._pin_top_notch_main_motion(visual)
 
         for key in list(self.motions):
             if key not in targets:
@@ -12194,6 +12247,8 @@ class IslandStackVisual(QWidget):
                 )
                 painter.setOpacity(context_plan.opacity)
                 rect = QRectF(context_plan.rect)
+                if visual.z_index == 10 and self._top_notch_anchor_locked():
+                    rect.moveTop(visual.rect.top())
                 if context_plan.paint_taskbar_left_handle:
                     self._paint_taskbar_left_handle(painter, rect)
                 if context_plan.paint_edge_notch_backing:
