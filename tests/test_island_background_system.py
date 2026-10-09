@@ -26,6 +26,16 @@ class IslandBackgroundSystemTests(unittest.TestCase):
         self.visual.finder_mode = False
         self.visual.music_surface_transition_mode = ""
         self.visual.music_surface_transition_started_at = 0.0
+        # These existing checks assert exact settled color roles. Pump a
+        # deterministic worker result instead of waiting on real threads;
+        # queued runtime lifecycle and interpolation have separate tests.
+        self.visual._run_background = lambda _name, callback: callback()
+
+    def _settle_palette(self):
+        self.visual._solid_album_surface_palette()
+        self.app.processEvents()
+        self.visual._solid_album_palette_blend_from = None
+        self.visual._solid_album_palette_blend_timer.stop()
 
     def tearDown(self):
         self.visual.close()
@@ -40,6 +50,7 @@ class IslandBackgroundSystemTests(unittest.TestCase):
         self.visual.album_color = QColor("#16BCFF")
         self.visual.secondary_color = QColor("#E32984")
         self.visual.music_ambience_style = "solid_album"
+        self._settle_palette()
 
     def _background(self):
         image = QImage(340, 100, QImage.Format.Format_ARGB32_Premultiplied)
@@ -123,6 +134,7 @@ class IslandBackgroundSystemTests(unittest.TestCase):
         self._cover("#1966DA")
         with QPainter(self.visual.album_art) as painter:
             painter.fillRect(0, 54, 72, 18, QColor("#B46E34"))
+        self._settle_palette()
         self.assertEqual(self.visual._solid_album_background_color().name().upper(), "#1966DA")
 
     def test_palette_cache_detects_in_place_artwork_change(self):
@@ -130,6 +142,7 @@ class IslandBackgroundSystemTests(unittest.TestCase):
         first = self.visual._solid_album_surface_palette()
         self.assertIs(first, self.visual._solid_album_surface_palette())
         self.visual.album_art.fill(QColor("#E3DDCC"))
+        self._settle_palette()
         self.assertEqual(self.visual._solid_album_background_color().name().upper(), "#E3DDCC")
         self.assertIsNot(first, self.visual._solid_album_surface_palette())
 
