@@ -45,6 +45,7 @@ class AudioRouteController:
         self._app_route_guard = None
         self._route_migration_diagnostics = None
         self._resume_recovery_pending = False
+        self._route_recovery_pending = False
         self._next_route_recovery_at = 0.0
         self._remaining_commands = ()
         self._last_sender = self._sender
@@ -458,11 +459,14 @@ class AudioRouteController:
                 if app_guard is not None:
                     try:
                         app_guard.restore()
+                        self._route_recovery_pending = False
                         if getattr(app_guard, "restoration_state", "") == "policy_restored_no_active_stream":
                             self._resume_recovery_pending = True
                             self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
                     except Exception:
                         self._app_route_guard = app_guard  # Retain actionable recovery ownership.
+                        self._route_recovery_pending = True
+                        self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
                         raise
 
     def _select(self, identity):
@@ -813,6 +817,7 @@ class AudioRouteController:
             self._publish(state="error", status_message=f"{message}；音乐输出恢复记录无法确认：{str(exc)[:120]}")
             return
         self._resume_recovery_pending = stage == "resume_verification_pending"
+        self._route_recovery_pending = bool(stage) and not self._resume_recovery_pending
         self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
         if stage and not self._resume_recovery_pending:
             self._publish(state="error", status_message=f"{message}；音乐软件的原输出仍需恢复")
@@ -824,12 +829,19 @@ class AudioRouteController:
         # A paused stop can prove policy restoration without proving a live
         # stream's endpoint. Keep that durable observation through resume;
         # never recover an active group's intentionally owned route here.
-        if (not self._resume_recovery_pending or self._group_mode
-                or self._app_route_guard is not None or self._closed.is_set()
+        if (not (self._resume_recovery_pending or self._route_recovery_pending) or self._group_mode
+                or (self._app_route_guard is not None and not self._route_recovery_pending) or self._closed.is_set()
                 or time.monotonic() < self._next_route_recovery_at):
             return
         self._next_route_recovery_at = time.monotonic() + self.POLL_SECONDS
+        recovering_owned = self._route_recovery_pending
         try:
+            if self._app_route_guard is not None:
+                # A failed disconnect cleanup still owns this exact guard.
+                # Retry policy return after the helper has been reaped; never
+                # start another sender or change the global default here.
+                self._app_route_guard.restore()
+                self._app_route_guard = None
             self._app_router.recover_pending()
             stage = self._pending_app_route_stage()
             if stage and stage != "resume_verification_pending":
@@ -844,8 +856,9 @@ class AudioRouteController:
                 self._publish(state="error", status_message=f"音乐软件原输出恢复待确认：{str(exc)[:160]}")
             return
         self._resume_recovery_pending = bool(stage)
+        self._route_recovery_pending = False
         current = self.snapshot()
-        if not stage and (current.state == "ready" or current.status_message.startswith("音乐软件原输出恢复待确认：")):
+        if not stage and (recovering_owned or current.state == "ready" or current.status_message.startswith("音乐软件原输出恢复待确认：")):
             # A newer user output policy can legitimately end this observation
             # too. Clearing its record alone is not proof of the old endpoint.
             self._publish(state="ready", status_message="音乐软件输出恢复检查已结束")

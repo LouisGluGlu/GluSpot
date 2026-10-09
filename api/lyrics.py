@@ -1671,9 +1671,10 @@ class LocalLyricsStore:
         if not query:
             return None
         payload = self._fetch_json(
-            "https://music.163.com/api/search/get/web",
+            "https://music.163.com/api/cloudsearch/pc",
             params={"type": "1", "s": query, "offset": "0", "limit": "8"},
             headers=self._netease_headers(),
+            method="POST",
         )
         songs = self._extract_list(payload, ("result", "songs"), ("songs",))
         candidate = self._pick_best_candidate(
@@ -1686,7 +1687,11 @@ class LocalLyricsStore:
             return None
         lyric_payload = self._fetch_json(
             "https://music.163.com/api/song/lyric",
-            params={"id": str(song_id), "lv": "1", "kv": "1", "tv": "-1", "rv": "1", "yv": "-1"},
+            # Version 1 asks for changes relative to an already-held version.
+            # Newly requested tracks may themselves be version 1, yielding an
+            # empty successful response. We have no source-version payload to
+            # reuse here, so explicitly request every current lyric section.
+            params={"id": str(song_id), "lv": "-1", "kv": "-1", "tv": "-1", "rv": "-1", "yv": "-1"},
             headers=self._netease_headers(),
         )
         lyric_text = self._extract_netease_lyric_text(
@@ -1923,7 +1928,7 @@ class LocalLyricsStore:
         title = str(candidate.get("name") or candidate.get("title") or "")
         artists = candidate.get("artists") or candidate.get("ar") or []
         artist_names = self._join_names(artists)
-        album = candidate.get("album") or {}
+        album = candidate.get("album") or candidate.get("al") or {}
         if isinstance(album, dict):
             album_title = str(album.get("name") or album.get("title") or "")
         else:
@@ -2132,8 +2137,8 @@ class LocalLyricsStore:
             return original, translated
         return original
 
-    def _fetch_json(self, url: str, params: dict[str, str] | None = None, headers: dict[str, str] | None = None) -> Any | None:
-        text = self._fetch_text(url, params=params, headers=headers)
+    def _fetch_json(self, url: str, params: dict[str, str] | None = None, headers: dict[str, str] | None = None, *, method: str = "GET") -> Any | None:
+        text = self._fetch_text(url, params=params, headers=headers, method=method)
         if not text:
             return None
         raw = text.strip()
@@ -2154,9 +2159,10 @@ class LocalLyricsStore:
                     return None
             return None
 
-    def _fetch_text(self, url: str, params: dict[str, str] | None = None, headers: dict[str, str] | None = None) -> str:
+    def _fetch_text(self, url: str, params: dict[str, str] | None = None, headers: dict[str, str] | None = None, *, method: str = "GET") -> str:
         query = urlencode(params or {}, doseq=True)
-        full_url = f"{url}?{query}" if query else url
+        post = method.upper() == "POST"
+        full_url = f"{url}?{query}" if query and not post else url
         request_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json,text/plain,*/*",
@@ -2164,7 +2170,9 @@ class LocalLyricsStore:
         }
         if headers:
             request_headers.update(headers)
-        request = Request(full_url, headers=request_headers)
+        if post:
+            request_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        request = Request(full_url, data=query.encode("utf-8") if post else None, headers=request_headers)
         try:
             with urlopen(request, timeout=self.request_timeout) as response:
                 data = response.read()

@@ -4896,6 +4896,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
         # A provider label can update ahead of the actual displayed bytes.
         self.owner.album_art_source = "original"
+        self.owner.album_art_lookup_state = "ready"
         self.owner.album_art_signature = "new-label-only"
         self.window._track_transition(10.2, QColor(62, 37, 82), QColor(33, 23, 46))
         self.assertTrue(self.window._art_loading_waiting)
@@ -4904,6 +4905,79 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.owner.album_art_signature = "original"
         self.window._track_transition(10.4, QColor(73, 42, 90), QColor(33, 23, 46))
         self.assertFalse(self.window._art_loading_waiting)
+
+    def test_failed_null_artwork_does_not_hold_resolved_genuine_lyrics(self):
+        self.window.resize(960, 540)
+        self.owner.media_track_id = "failed-artwork"
+        self.owner.track_title = "Timed song"
+        self.owner.artist = "Artist"
+        self.owner.album_art = QImage()
+        self.owner.album_art_source = ""
+        self.owner.album_art_lookup_state = "failed"
+        self.owner.music_surface_reading_strategy = "gold"
+        self.owner.timed_lyrics = [(0.0, "Shine on"), (4.0, "Next line")]
+        self.owner.timed_lyric_units = [(
+            SimpleNamespace(start_seconds=0.0, end_seconds=1.0, text="Shine "),
+            SimpleNamespace(start_seconds=1.0, end_seconds=2.0, text="on"),
+        ), ()]
+        self.owner.timed_lyric_timing_kinds = ["unit", "line"]
+
+        self.window._track_transition(10.0, QColor(61, 39, 80), QColor(29, 25, 44))
+        self.assertFalse(self.window._artwork_is_loading())
+        self.assertFalse(self.window._art_loading_waiting)
+        self.assertNotIn("art_loading", self.window._transport_feedback)
+        self.assertEqual(self.window._display_lyrics()[1], self.owner.timed_lyrics)
+        self.window._update_transport_feedback_regions(10.1)
+        self.assertIn("obo_reveal", self.window._transport_feedback)
+
+    def test_failed_thumbnail_finishes_ring_and_preserves_soft_fallback(self):
+        self.window.resize(960, 540)
+        self.owner.media_track_id = "failed-thumbnail"
+        self.owner.track_title = "Timed song"
+        self.owner.artist = "Artist"
+        self.owner.album_art = QImage(96, 96, QImage.Format.Format_RGB32)
+        self.owner.album_art.fill(QColor(61, 39, 80))
+        self.owner.album_art_source = "thumbnail"
+        self.owner.album_art_lookup_state = "pending"
+        self.owner.timed_lyrics = [(0.0, "Current lyric"), (4.0, "Next line")]
+        image_key = self.owner.album_art.cacheKey()
+
+        self.window._track_transition(10.0, QColor(61, 39, 80), QColor(29, 25, 44))
+        self.assertTrue(self.window._art_loading_waiting)
+        self.assertTrue(self.window._should_blur_preview(self.owner.album_art))
+        self.window._update_transport_feedback_regions(11.5)
+        ring = self.window._transport_feedback["art_loading"]
+        self.owner.album_art_lookup_state = "failed"
+        self.window._track_transition(11.6, QColor(61, 39, 80), QColor(29, 25, 44))
+        self.assertFalse(self.window._art_loading_waiting)
+        self.assertTrue(self.window._should_blur_preview(self.owner.album_art))
+        self.assertEqual(self.window._transport_feedback["art_loading"], ring)
+        self.window._update_transport_feedback_regions(15.0)
+        self.assertNotIn("art_loading", self.window._transport_feedback)
+
+        target = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        with (
+            patch("local.music_surface_window.time.monotonic", return_value=15.1),
+            patch.object(self.window, "_blurred_preview_cover", wraps=self.window._blurred_preview_cover) as blur,
+        ):
+            self.window.render(target)
+            blur.assert_called()
+        self.assertEqual(self.owner.album_art.cacheKey(), image_key)
+        self.assertEqual(self.window._display_lyrics()[1], self.owner.timed_lyrics)
+
+    def test_pending_retry_after_failed_lookup_restores_artwork_loading(self):
+        self.window.resize(960, 540)
+        self.owner.media_track_id = "artwork-retry"
+        self.owner.track_title = "Timed song"
+        self.owner.album_art = QImage()
+        self.owner.album_art_lookup_state = "failed"
+        self.window._track_transition(10.0, QColor(61, 39, 80), QColor(29, 25, 44))
+        self.assertFalse(self.window._art_loading_waiting)
+        self.owner.album_art_lookup_state = "pending"
+        self.window._track_transition(11.0, QColor(61, 39, 80), QColor(29, 25, 44))
+        self.assertTrue(self.window._artwork_is_loading())
+        self.assertTrue(self.window._art_loading_waiting)
+        self.assertIn("art_loading", self.window._transport_feedback)
 
     def test_preview_cover_blurs_once_and_original_uses_sharp_raster(self):
         image = QImage(120, 120, QImage.Format.Format_RGB32)

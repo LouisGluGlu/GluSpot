@@ -3819,6 +3819,22 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
             "ready",
         )
 
+    def test_completed_smaller_original_keeps_best_variant_without_permanent_pending(self):
+        provider = self.provider()
+        preview, original = self.png(800), self.png(640)
+        provider._queue_art_cache = {self.raw_url: preview, self.upgraded_url: original}
+        scheduled = []
+        provider._schedule_queue_album_art_prefetch = lambda url: scheduled.append(url) or True
+        track = SimpleNamespace(album_art_url=self.raw_url, album_art_bytes=preview)
+        selected = provider._queue_album_art_bytes(track)
+        self.assertEqual(selected, preview)
+        self.assertEqual(scheduled, [])
+        self.assertFalse(provider._album_art_url_is_preview(self.raw_url, selected))
+        provider._current_art_lookup_lock = threading.Lock()
+        provider._current_art_url_by_track_id = {"track": self.raw_url}
+        self.assertEqual(provider._current_artwork_lookup_state(
+            "track", selected, eligible=True, online_art=selected, source="thumbnail"), "ready")
+
     def test_visual_handoff_preserves_known_500_preview_provenance(self):
         provider = self.provider()
         preview, original = self.png(500), self.png(1417)

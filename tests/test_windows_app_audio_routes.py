@@ -101,6 +101,60 @@ class AppRouteTests(unittest.TestCase):
         guard.restore()
         self.assertEqual(self.adapter.closed, [(30, 100)])
 
+    def test_read_only_guard_release_does_not_depend_on_disconnected_device_inventory(self):
+        guard = self.prepare()
+        self.devices.list_outputs = lambda: (_ for _ in ()).throw(OSError("output inventory unavailable"))
+        guard.restore(timeout=0)
+        self.assertEqual(self.adapter.writes, [])
+        self.assertEqual(self.adapter.closed, [(30, 100)])
+        self.assertIsNone(self.backend._active)
+        self.assertIsNone(self.backend._lease)
+
+    def test_inventory_failure_returns_owned_policy_and_keeps_effective_proof_pending(self):
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        original_inventory = self.devices.list_outputs
+        self.devices.list_outputs = lambda: (_ for _ in ()).throw(OSError("device query failed"))
+        before = len(self.adapter.writes)
+        with self.assertRaisesRegex(RuntimeError, "inventory unavailable.*device query failed"):
+            guard.restore(timeout=0)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): "old-role-one"})
+        self.assertEqual(self.adapter.writes[before:], [(30, 1, "old-role-one"), (30, 0, "")])
+        pending = self.backend.pending_recovery()
+        self.assertEqual(pending["stage"], "effective_recovery_required")
+        self.assertTrue(all(not role["restored"] for role in pending["roles"]))
+        self.assertTrue(all(not role["recovery_reason"] for role in pending["roles"]))
+        self.assertFalse(guard._closed)
+        self.devices.list_outputs = original_inventory
+        guard.restore(timeout=0)
+        self.assertEqual(guard.restoration_state, "active_output_verified")
+        self.assertFalse(self.journal.exists())
+
+    def test_inventory_failure_does_not_overwrite_external_policy_or_reused_pid(self):
+        for pid_reused in (False, True):
+            with self.subTest(pid_reused=pid_reused):
+                guard = self.prepare()
+                guard.apply()
+                newer = _PREFIX + "user-choice" + _RENDER_SUFFIX
+                self.adapter.routes[(30, 1)] = newer
+                original_inventory = self.devices.list_outputs
+                self.devices.list_outputs = lambda: (_ for _ in ()).throw(OSError("device query failed"))
+                before = len(self.adapter.writes)
+                if pid_reused:
+                    self.adapter.identities[30] = ProcessIdentity(30, 200, r"C:\Music\cloudmusic.exe")
+                with self.assertRaisesRegex(RuntimeError, "inventory unavailable"):
+                    guard.restore(timeout=0)
+                self.assertEqual(self.adapter.routes[(30, 1)], newer)
+                if pid_reused:
+                    self.assertEqual(self.adapter.writes[before:], [])
+                else:
+                    self.assertEqual(self.adapter.writes[before:], [(30, 0, "")])
+                self.assertEqual(self.backend.pending_recovery()["stage"], "effective_recovery_required")
+                self.devices.list_outputs = original_inventory
+                self.adapter.identities[30] = ProcessIdentity(30, 100, r"C:\Music\cloudmusic.exe")
+                guard.restore(timeout=0)
+
     def test_policy_write_requires_live_session_migration_before_group_ready(self):
         guard = self.prepare()
         guard.apply()
@@ -507,14 +561,22 @@ class AppRouteTests(unittest.TestCase):
                 self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
                 self.assertIsNone(self.backend._lease)
 
-    def test_deferred_paused_pid_reuse_cannot_be_treated_as_idle_original_source(self):
+    def test_deferred_paused_pid_reuse_retires_only_old_returned_policy_observation(self):
         self.paused_restore()
         self.adapter.identities[30] = ProcessIdentity(30, 200, r"C:\Music\cloudmusic.exe")
         before = list(self.adapter.writes)
-        with self.assertRaisesRegex(RuntimeError, "identity changed"):
-            self.backend.recover_pending()
+        self.assertTrue(self.backend.recover_pending())
         self.assertEqual(self.adapter.writes, before)
-        self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+        self.assertIsNone(self.backend.pending_recovery())
+        self.assertIsNone(self.backend._lease)
+
+    def test_returned_policy_observation_after_music_process_exit_never_blocks_another_output(self):
+        self.paused_restore()
+        self.adapter.identities.pop(30)
+        before = list(self.adapter.writes)
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertIsNone(self.backend.pending_recovery())
         self.assertIsNone(self.backend._lease)
 
     def test_active_restarted_process_does_not_inherit_old_observation_write_authority(self):
@@ -652,7 +714,300 @@ class AppRouteTests(unittest.TestCase):
         self.assertEqual(saved["stage"], "effective_recovery_required")
         self.assertTrue(any(role["restoring_route"] for role in saved["roles"]))
         self.assertFalse(guard._closed)
+        # A failed playback proof retains recovery intent, not a persisted pin
+        # that would make future Windows output selections ineffective.
+        self.assertEqual(self.adapter.routes[(30, 0)], "")
+
+    def test_disconnect_returns_only_owned_policies_to_current_default(self):
+        self.adapter.routes[(30, 1)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        self.devices.list_outputs = lambda: (SimpleNamespace(id="spare", is_default=True),)
+        self.adapter.on_set = lambda _pid, _role, _value: setattr(self, "current", source("spare"))
+        before = len(self.adapter.writes)
+        guard.restore(timeout=0)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        self.assertTrue(all(value != _PREFIX + "bt" + _RENDER_SUFFIX
+                            for _pid, _role, value in self.adapter.writes[before:]))
+        self.assertEqual(guard.restoration_state, "active_output_verified")
+        self.assertFalse(self.journal.exists())
+
+    def test_default_change_returns_default_following_roles_without_forcing_old_output(self):
+        self.adapter.routes[(30, 1)] = ""
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        self.default_endpoint = "spare"
+        self.adapter.on_set = lambda _pid, _role, _value: setattr(self, "current", source("spare"))
+        before = len(self.adapter.writes)
+        guard.restore(timeout=0)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        self.assertTrue(all(value != _PREFIX + "bt" + _RENDER_SUFFIX
+                            for _pid, _role, value in self.adapter.writes[before:]))
+        self.assertFalse(self.journal.exists())
+
+    def test_disconnect_during_recovery_without_active_stream_clears_owned_pins_and_defers_proof(self):
+        self.adapter.routes[(30, 1)] = ""
+        guard = self.prepare()
+        guard.apply()
+        saved = self.journal.read_text(encoding="utf-8")
+        self.close_backend(self.backend)
+        self.journal.write_text(saved, encoding="utf-8")
+        self.current = None
+        self.adapter.owners, self.adapter.states = (), ()
+        self.adapter.routes = {(30, 0): guard._roles[0].owned_route, (30, 1): guard._roles[1].owned_route}
+        self.devices.list_outputs = lambda: (SimpleNamespace(id="spare", is_default=True),)
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        pending = self.backend.pending_recovery()
+        self.assertEqual(pending["stage"], "resume_verification_pending")
+        self.assertTrue(all(role["restored"] for role in pending["roles"]))
+        self.assertTrue(all(role["recovery_endpoint"] == "spare" for role in pending["roles"]))
+        self.current = source("spare")
+        self.adapter.states = (("spare", 30, True, False, 1),)
+        before = list(self.adapter.writes)
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertFalse(self.journal.exists())
+
+    def test_disconnect_keeps_newer_external_application_policy_untouched(self):
+        self.adapter.routes[(30, 1)] = ""
+        guard = self.prepare()
+        guard.apply()
+        newer = _PREFIX + "user-choice" + _RENDER_SUFFIX
+        self.adapter.routes[(30, 0)] = newer
+        self.devices.list_outputs = lambda: (SimpleNamespace(id="spare", is_default=True),)
+        self.current = source("spare")
+        guard.restore(timeout=0)
+        self.assertEqual(self.adapter.routes[(30, 0)], newer)
+        self.assertEqual(self.adapter.routes[(30, 1)], "")
+        self.assertEqual(guard.restoration_state, "external_output_preserved")
+
+    def test_failed_disconnect_playback_proof_still_clears_temporary_policies(self):
+        self.adapter.routes[(30, 1)] = ""
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("wrong")
+        self.adapter.on_set = None
+        self.devices.list_outputs = lambda: (SimpleNamespace(id="spare", is_default=True),)
+        with self.assertRaisesRegex(RuntimeError, "has not been restored"):
+            guard.restore(timeout=0)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        self.assertEqual(self.backend.pending_recovery()["stage"], "effective_recovery_required")
+        self.assertFalse(guard._closed)
+        self.current = source("spare")
+        guard.restore(timeout=0)
+        self.assertFalse(self.journal.exists())
+
+    def test_no_outputs_clears_owned_disconnected_pins_then_verifies_new_default_on_reconnect(self):
+        self.adapter.routes[(30, 1)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        guard = self.prepare()
+        guard.apply()
+        self.current = None
+        self.adapter.owners, self.adapter.states = (), ()
+        self.devices.list_outputs = lambda: ()
+        guard.restore(timeout=0)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        self.assertEqual(guard.restoration_state, "policy_restored_no_active_stream")
+        self.assertEqual(self.backend.pending_recovery()["stage"], "resume_verification_pending")
+        self.devices.list_outputs = lambda: (SimpleNamespace(id="spare", is_default=True),)
+        self.current = source("spare")
+        self.adapter.states = (("spare", 30, True, False, 1),)
+        self.adapter.on_set = None
+        self.assertTrue(self.backend.recover_pending())
+        self.assertFalse(self.journal.exists())
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+
+    def test_disconnect_recovery_record_cannot_replace_unrelated_saved_application_policy(self):
+        self.adapter.routes[(30, 1)] = ""
+        guard = self.prepare()
+        guard.apply()
+        self.devices.list_outputs = lambda: (SimpleNamespace(id="spare", is_default=True),)
+        self.current = source("wrong")
+        self.adapter.on_set = None
+        with self.assertRaises(RuntimeError):
+            guard.restore(timeout=0)
+        saved = self.journal.read_text(encoding="utf-8")
+        value = json.loads(saved)
+        value["roles"][0]["original"] = "unrelated-user-pin"
+        self.journal.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "exceeds its original ownership"):
+            self.backend.pending_recovery()
+        self.journal.write_text(saved, encoding="utf-8")
+        self.current = source("spare")
+        guard.restore(timeout=0)
+
+    def test_explicit_default_follow_commit_clears_only_proven_music_roles(self):
+        self.adapter.routes[(30, 0)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        self.adapter.routes[(30, 1)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        guard.wait_migrated(timeout=0)
+        self.default_endpoint = "spare"
+        guard.follow_system_default(timeout=0)
+        self.assertEqual(self.adapter.routes, {(30, 0): "", (30, 1): ""})
+        self.assertEqual(self.current.sessions[0].endpoint_id, "spare")
+        self.assertEqual(guard.restoration_state, "active_output_verified")
+        self.assertFalse(self.journal.exists())
+        self.assertIsNone(self.backend._active)
+
+    def test_explicit_default_repair_accepts_shared_target_without_touching_other_application(self):
+        self.default_endpoint = "spare"
+        self.adapter.identities[99] = ProcessIdentity(99, 200, r"C:\Meeting\meeting.exe")
+        self.adapter.routes.update({(99, 0): "meeting-role-zero", (99, 1): "meeting-role-one"})
+        self.adapter.owners = (("bt", 30, True, False), ("spare", 99, True, False))
+        guard = self.backend.prepare_default_follow(self.current)
+        self.assertEqual(self.adapter.writes, [])
+        guard.apply()
+        self.current = source("spare")
+        guard.wait_migrated(timeout=0)
+        guard.follow_system_default(timeout=0)
+        self.assertEqual(self.adapter.routes[(30, 0)], "")
+        self.assertEqual(self.adapter.routes[(30, 1)], "")
+        self.assertEqual(self.adapter.routes[(99, 0)], "meeting-role-zero")
+        self.assertEqual(self.adapter.routes[(99, 1)], "meeting-role-one")
+        self.assertTrue(all(pid == 30 for pid, _role, _value in self.adapter.writes))
+        self.assertFalse(self.journal.exists())
+
+    def test_ordinary_group_prepare_still_rejects_shared_spare_even_when_default(self):
+        self.default_endpoint = "spare"
+        self.adapter.owners = (("bt", 30, True, False), ("spare", 99, True, False))
+        with self.assertRaisesRegex(RuntimeError, "occupied"):
+            self.prepare()
+        self.assertEqual(self.adapter.writes, [])
+        self.assertFalse(self.journal.exists())
+        self.assertIsNone(self.backend._active)
+
+    def test_shared_default_repair_refuses_changed_default_before_apply_without_policy_writes(self):
+        self.default_endpoint = "spare"
+        self.adapter.owners = (("bt", 30, True, False), ("spare", 99, True, False))
+        guard = self.backend.prepare_default_follow(self.current)
+        self.default_endpoint = "bt"
+        with self.assertRaisesRegex(RuntimeError, "default changed"):
+            guard.apply()
+        self.assertEqual(self.adapter.writes, [])
+        guard.restore(timeout=0)
+
+    def test_shared_default_repair_checks_default_between_owned_role_writes(self):
+        self.default_endpoint = "spare"
+        self.adapter.routes[(30, 0)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        self.adapter.routes[(30, 1)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        guard = self.backend.prepare_default_follow(self.current)
+        original_callback = self.adapter.on_set
+        def switch_default(pid, role, value):
+            original_callback(pid, role, value)
+            if value == _PREFIX + "spare" + _RENDER_SUFFIX:
+                self.default_endpoint = "bt"
+        self.adapter.on_set = switch_default
+        with self.assertRaisesRegex(RuntimeError, "default changed"):
+            guard.apply()
+        self.assertEqual(self.adapter.writes.count((30, 0, _PREFIX + "spare" + _RENDER_SUFFIX)), 1)
+        self.assertNotIn((30, 1, _PREFIX + "spare" + _RENDER_SUFFIX), self.adapter.writes)
         self.assertEqual(self.adapter.routes[(30, 0)], _PREFIX + "bt" + _RENDER_SUFFIX)
+        self.assertEqual(self.adapter.routes[(30, 1)], _PREFIX + "bt" + _RENDER_SUFFIX)
+        self.assertFalse(self.journal.exists())
+
+    def test_shared_default_repair_refuses_changed_default_during_migration(self):
+        self.default_endpoint = "spare"
+        guard = self.backend.prepare_default_follow(self.current)
+        guard.apply()
+        self.current = source("spare")
+        self.default_endpoint = "bt"
+        before = list(self.adapter.writes)
+        with self.assertRaisesRegex(RuntimeError, "default changed"):
+            guard.wait_migrated(timeout=0)
+        self.assertEqual(self.adapter.writes, before)
+        guard.restore(timeout=0)
+
+    def test_default_repair_requires_no_spare_when_music_already_plays_on_only_output(self):
+        self.adapter.routes[(30, 1)] = ""
+        self.devices.list_outputs = lambda: (SimpleNamespace(id="bt", is_default=True),)
+        self.adapter.owners = (("bt", 30, True, False), ("bt", 99, True, False))
+        guard = self.backend.prepare_default_follow(self.current)
+        self.assertEqual(guard.spare_endpoint, guard.local_endpoint)
+        guard.apply()
+        guard.wait_migrated(timeout=0)
+        guard.follow_system_default(timeout=0)
+        self.assertEqual(self.adapter.routes[(30, 0)], "")
+        self.assertEqual(self.adapter.routes[(30, 1)], "")
+        self.assertFalse(self.journal.exists())
+
+    def test_default_follow_requires_migration_and_exact_current_default(self):
+        guard = self.prepare()
+        guard.apply()
+        before = list(self.adapter.writes)
+        with self.assertRaisesRegex(RuntimeError, "Verified migration"):
+            guard.follow_system_default(timeout=0)
+        self.current = source("spare")
+        guard.wait_migrated(timeout=0)
+        with self.assertRaisesRegex(RuntimeError, "Verified migration"):
+            guard.follow_system_default(timeout=0)
+        self.assertEqual(self.adapter.writes, before)
+        guard.restore(timeout=0)
+
+    def test_failed_default_follow_commit_rolls_back_owned_empty_values_and_proves_previous_output(self):
+        self.adapter.routes[(30, 0)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        self.adapter.routes[(30, 1)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        self.default_endpoint = "spare"
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        guard.wait_migrated(timeout=0)
+        original_callback = self.adapter.on_set
+        def clear_rebind(pid, role, value):
+            original_callback(pid, role, value)
+            if value == "":
+                self.current = source("wrong")
+        self.adapter.on_set = clear_rebind
+        with self.assertRaisesRegex(RuntimeError, "has not been restored"):
+            guard.follow_system_default(timeout=0)
+        self.assertEqual(self.adapter.routes, {(30, 0): _PREFIX + "bt" + _RENDER_SUFFIX,
+                                              (30, 1): _PREFIX + "bt" + _RENDER_SUFFIX})
+        self.assertEqual(self.current.sessions[0].endpoint_id, "bt")
+        self.assertFalse(self.journal.exists())
+
+    def test_default_follow_never_overwrites_newer_user_policy_during_commit(self):
+        self.default_endpoint = "spare"
+        self.adapter.routes[(30, 1)] = ""
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        guard.wait_migrated(timeout=0)
+        newer = _PREFIX + "user-choice" + _RENDER_SUFFIX
+        original_callback = self.adapter.on_set
+        def external_change(pid, role, value):
+            original_callback(pid, role, value)
+            if role == 0 and value == "":
+                self.adapter.routes[(30, 1)] = newer
+        self.adapter.on_set = external_change
+        with self.assertRaisesRegex(RuntimeError, "changed during"):
+            guard.follow_system_default(timeout=0)
+        self.assertEqual(self.adapter.routes[(30, 1)], newer)
+        self.assertEqual(guard.restoration_state, "external_output_preserved")
+
+    def test_default_follow_paused_commit_keeps_observation_for_committed_default_policy(self):
+        self.adapter.routes[(30, 0)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        self.adapter.routes[(30, 1)] = _PREFIX + "bt" + _RENDER_SUFFIX
+        self.default_endpoint = "spare"
+        guard = self.prepare()
+        guard.apply()
+        self.current = source("spare")
+        guard.wait_migrated(timeout=0)
+        self.pause_source()
+        guard.follow_system_default(timeout=0)
+        self.assertEqual(guard.restoration_state, "policy_restored_no_active_stream")
+        pending = self.backend.pending_recovery()
+        self.assertEqual(pending["stage"], "resume_verification_pending")
+        self.assertTrue(all(role["default_clear_intent"] and role["recovery_policy"] == ""
+                            for role in pending["roles"]))
+        before = list(self.adapter.writes)
+        self.assertFalse(self.backend.recover_pending())
+        self.current = source("spare")
+        self.assertTrue(self.backend.recover_pending())
+        self.assertEqual(self.adapter.writes, before)
+        self.assertFalse(self.journal.exists())
 
     def test_explicit_prior_source_playback_recovery_preserves_empty_policy(self):
         self.adapter.routes[(30, 1)] = ""

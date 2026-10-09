@@ -1798,6 +1798,26 @@ class AudioRouteGroupControllerTests(unittest.TestCase):
         self.controller._end_cast()
         self.assertIsNone(self.controller._app_route_guard)
 
+    def test_failed_disconnect_cleanup_retries_owned_guard_without_restarting_playback(self):
+        self._bluetooth_source_group()
+        guard = self.router.guards[-1]
+        starts = list(self.group.starts)
+        self.router.restore_error = "owned application output recovery pending"
+        self.controller.stop_cast()
+        with self.assertRaisesRegex(RuntimeError, "recovery pending"):
+            self.controller._step()
+        self.assertTrue(self.controller._route_recovery_pending)
+        self.assertIs(self.controller._app_route_guard, guard)
+        self.router.restore_error = ""
+        self.controller._next_route_recovery_at = 0
+        self.controller._step()
+        self.assertTrue(guard.restored)
+        self.assertIsNone(self.controller._app_route_guard)
+        self.assertFalse(self.controller._route_recovery_pending)
+        self.assertFalse(self.group.running)
+        self.assertEqual(self.group.starts, starts)
+        self.assertEqual(self.backend.selected, [])
+
     def test_member_rebuild_restores_old_app_route_before_new_owned_transaction(self):
         self._bluetooth_source_group()
         self.group.events = self.group.ready_events()

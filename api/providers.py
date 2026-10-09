@@ -1411,9 +1411,12 @@ class WindowsMediaProvider:
             small_request = False
         if not small_request:
             return False
-        # Reading the upgraded cache proves that these are the target URL's
-        # real bytes, even when the source original is smaller than 2560.
-        return getattr(self, "_queue_art_cache", {}).get(normalized, b"") != content
+        # A completed request for this same artwork object proves acquisition
+        # finished, even if its native resolution is below the requested side.
+        # Keep the sharpest cached variant; different bytes do not mean another
+        # download is pending when both valid variants have already arrived.
+        upgraded = getattr(self, "_queue_art_cache", {}).get(normalized, b"")
+        return self._album_art_min_side(upgraded) < self.CURRENT_ART_PREVIEW_SIDE
 
     def _current_online_album_art_bytes(self, track_id: str) -> bytes:
         url = str(getattr(self, "_current_art_url_by_track_id", {}).get(str(track_id or ""), "") or "").strip()
@@ -1636,14 +1639,15 @@ class WindowsMediaProvider:
         query = " ".join(part for part in (str(title or "").strip(), str(artist or "").strip()) if part)
         if not query:
             return ""
-        endpoint = "https://music.163.com/api/search/get/web?" + urlencode(
-            {"type": "1", "s": query, "offset": "0", "limit": "8"}
-        )
+        endpoint = "https://music.163.com/api/cloudsearch/pc"
+        body = urlencode({"type": "1", "s": query, "offset": "0", "limit": "8"}).encode("utf-8")
         request = Request(
             endpoint,
+            data=body,
             headers={
                 "User-Agent": ARTWORK_USER_AGENT,
                 "Referer": "https://music.163.com/",
+                "Content-Type": "application/x-www-form-urlencoded",
             },
         )
         deadline = min(time.monotonic() + 3.0, deadline) if deadline is not None else time.monotonic() + 3.0
@@ -1655,7 +1659,10 @@ class WindowsMediaProvider:
                 raise ValueError("NetEase artwork API status is invalid") from exc
             if response_code != 200:
                 raise ValueError(f"NetEase artwork API returned {response_code}")
-        songs = payload.get("result", {}).get("songs", []) if isinstance(payload, dict) else []
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            raise ValueError("NetEase artwork search returned an unsupported result")
+        songs = result.get("songs", [])
         matches = []
         for candidate in songs if isinstance(songs, list) else ():
             if not isinstance(candidate, dict):
