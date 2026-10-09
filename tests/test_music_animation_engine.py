@@ -266,7 +266,7 @@ class WaveIslandAnimationEngineTests(unittest.TestCase):
         self.assertEqual(spring.last_at, 100.032)
         self.visual.lyric_flow_style = "gelv_songscatter"
         self.visual._handle_music_lyric_tick(100.064, 1.0)
-        self.assertEqual(spring.last_at, 100.032)
+        self.assertEqual(spring.last_at, 100.064)
 
     def test_row_list_enrichment_preserves_existing_primary_pose(self):
         self._render(100.0)

@@ -102,6 +102,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     ) -> IslandStackVisual:
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.music_ambience_style = ambience_style
+        # Legacy fixture names describe the rendered neutral tone; the
+        # product stores only system and tests must not depend on host theme.
+        if ambience_style in {"pure_black", "pure_white"}:
+            visual._music_system_dark = ambience_style == "pure_black"
         visual.music_expanded_layout_style = "standard"
         visual.album_color = QColor(28, 130, 220)
         visual.secondary_color = QColor(230, 70, 120)
@@ -3742,7 +3746,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     def test_music_control_icon_specs_use_svg_assets_and_theme_tone(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.media_is_playing = False
-        visual._pure_white_music_active = lambda: True
+        visual.music_ambience_style = "system"
+        with patch("local.island_stack_visual.system_dark_mode", return_value=False):
+            visual._refresh_music_system_theme(force=True)
 
         play = visual._music_control_icon_spec("music:toggle_play_pause")
         previous = visual._music_control_icon_spec("music:previous")
@@ -3762,7 +3768,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(str(pause["path"]).endswith("暂停.svg"))
         self.assertTrue(pause["path"].exists())
 
-        visual._pure_white_music_active = lambda: False
+        with patch("local.island_stack_visual.system_dark_mode", return_value=True):
+            visual._refresh_music_system_theme(force=True)
         dark_background_play = visual._music_control_icon_spec("music:toggle_play_pause")
         self.assertTrue(str(dark_background_play["path"]).endswith("暂停 (1).svg"))
         self.assertTrue(dark_background_play["path"].exists())
@@ -5903,7 +5910,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         image.fill(Qt.GlobalColor.transparent)
         painter = QPainter(image)
 
-        for index in range(7):
+        for index in range(31):
             visual._paint_cover(
                 painter,
                 QRectF(8.0 + index, 8.0, 42.0 + index, 42.0),
@@ -5913,7 +5920,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             )
         painter.end()
 
-        self.assertLessEqual(len(visual._scaled_album_art_cache), 4)
+        self.assertEqual(len(visual._scaled_album_art_cache), visual.SCALED_ALBUM_ART_CACHE_LIMIT)
+        self.assertLessEqual(sum(cover.sizeInBytes() for cover in visual._scaled_album_art_cache.values()), visual.SCALED_ALBUM_ART_CACHE_PIXEL_BUDGET)
 
     def test_lyric_layout_cache_keeps_small_recent_working_set(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -7038,9 +7046,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.update = lambda: None
         visual._notify_settings_changed = lambda: None
 
-        self.assertTrue(visual._sync_music_background_to_taskbar_color(force=True))
-        self.assertEqual(visual.music_ambience_style, "pure_white")
-        self.assertEqual(saved["v2_music_ambience_style"], "pure_white")
+        with patch("local.island_stack_visual.system_dark_mode", return_value=False):
+            self.assertTrue(visual._sync_music_background_to_taskbar_color(force=True))
+        self.assertEqual(visual.music_ambience_style, "system")
+        self.assertEqual(saved["v2_music_ambience_style"], "system")
         self.assertEqual(saved["v2_music_background_follow_previous_style"], "sea_level")
 
         visual.taskbar_material_is_light = False
@@ -7048,10 +7057,11 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual.music_ambience_style, "sea_level")
         self.assertEqual(saved["v2_music_background_follow_previous_style"], "")
 
-    def test_pure_white_music_background_uses_dark_lyric_text(self):
+    def test_system_light_music_background_uses_dark_lyric_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "tasker"
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
 
         self.assertEqual(visual._music_lyric_text_color().black(), 255)
 
@@ -7064,14 +7074,16 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.update = lambda: None
         visual._notify_settings_changed = lambda: None
 
-        visual.set_music_ambience_style("pure_white", notify=False)
+        with patch("local.island_stack_visual.system_dark_mode", return_value=False):
+            visual.set_music_ambience_style("pure_white", notify=False)
 
-        self.assertEqual(visual.music_ambience_style, "pure_white")
+        self.assertEqual(visual.music_ambience_style, "system")
         self.assertEqual(visual._music_lyric_text_color().black(), 255)
 
-    def test_pure_white_expanded_music_title_and_artist_use_dark_text(self):
+    def test_system_light_expanded_music_title_and_artist_use_dark_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.track_title = "Title"
         visual.artist = "Artist"
         visual.media_is_playing = True
@@ -7092,9 +7104,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual([color.black() for color in colors[:2]], [255, 255])
 
-    def test_pure_white_album_island_expanded_title_and_artist_use_dark_text(self):
+    def test_system_light_album_island_expanded_title_and_artist_use_dark_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.track_title = "Title"
         visual.artist = "Artist"
         visual.media_is_playing = True
@@ -7440,9 +7453,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual._ember_base_font_size(expanded=False, line_count=1), 21)
         self.assertEqual(visual._ember_base_font_size(expanded=True, line_count=1), 21)
 
-    def test_pure_white_gelv_line_keeps_black_base_and_allows_word_fill(self):
+    def test_system_light_legacy_gelv_helper_keeps_black_base_and_allows_word_fill(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.gelv_color_fill_enabled = True
         visual.gelv_word_fill_enabled = True
         visual.album_color = QColor("#00D7FF")
@@ -7469,7 +7483,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     def test_gelv_songscatter_theme_matrix_splits_color_and_word_fill(self):
         def capture(color_theme: bool, word_fill: bool) -> dict[str, object]:
             visual = IslandStackVisual.__new__(IslandStackVisual)
-            visual.music_ambience_style = "pure_white"
+            visual.music_ambience_style = "system"
+            visual._music_system_dark = False
             visual.gelv_color_fill_enabled = color_theme
             visual.gelv_word_fill_enabled = word_fill
             visual.album_color = QColor("#00D7FF")
@@ -8066,7 +8081,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         italic = visual._ember_font(18, back_layer=False)
         self.assertTrue(italic.italic())
 
-    def test_ember_split_mode_three_lines_grows_free_island_but_stick_scrolls(self):
+    def test_removed_ember_split_settings_do_not_grow_live_island(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "ember_fade"
         visual.ember_line_mode = "split"
@@ -8088,7 +8103,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual._ember_effective_line_mode(expanded=False), "split")
         self.assertEqual(len(visual._ember_current_display_lines(expanded=False)), 3)
         free_height = visual._compact_music_content_height_raw()
-        self.assertGreaterEqual(free_height, 92.0)
+        self.assertEqual(free_height, 46.0)
 
         visual.location_mode = "stick"
         self.assertEqual(visual._ember_effective_line_mode(expanded=False), "scroll")
@@ -8190,12 +8205,12 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual._ember_effective_line_mode(expanded=False), "scroll")
         self.assertEqual(len(visual._ember_current_display_lines(expanded=False)), 1)
 
-    def test_ember_show_cover_switch_controls_compact_cover_independently(self):
+    def test_removed_ember_cover_switch_does_not_override_shared_cover_setting(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "ember_fade"
         visual.compact_lyric_show_cover = True
         visual.ember_show_cover = False
-        self.assertFalse(visual._compact_lyric_cover_enabled())
+        self.assertTrue(visual._compact_lyric_cover_enabled())
 
         visual.lyric_flow_style = "wave_stream"
         self.assertTrue(visual._compact_lyric_cover_enabled())
@@ -8238,9 +8253,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual([len(line.split()) for line in words], [5, 4])
         self.assertEqual([len(line) for line in cjk], [7, 6])
 
-    def test_ember_front_color_defaults_to_black_on_pure_white_background(self):
+    def test_legacy_ember_front_color_defaults_to_black_on_system_light_background(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.ember_color_fill_enabled = False
 
         color = visual._ember_front_read_color()
@@ -9292,7 +9308,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             metrics = QFontMetrics(visual._gelv_font(float(row["size"])))
             self.assertGreaterEqual(row["rect"].height(), metrics.height() + 1.0)
 
-    def test_gelv_compact_music_size_adapts_to_independent_font_settings(self):
+    def test_gelv_compact_music_size_ignores_legacy_independent_font_settings(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.expanded = False
         visual.lyric_flow_style = "gelv_songscatter"
@@ -9306,7 +9322,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.gelv_secondary_font_size = 18
         _large_w, large_h = visual._main_size_for_kind(IslandKind.MUSIC, 420.0)
 
-        self.assertGreater(large_h, small_h)
+        self.assertEqual(large_h, small_h)
+        visual.lyric_flow_style = "wave_stream"
+        _wave_w, wave_h = visual._main_size_for_kind(IslandKind.MUSIC, 420.0)
+        self.assertEqual(wave_h, large_h)
 
     def test_gelv_compact_rows_are_tighter_than_expanded_rows(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -9830,13 +9849,17 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertLess(x_late, x_start)
 
-    def test_compact_lyric_viewport_routes_to_gelv_renderer(self):
+    def test_compact_gelv_viewport_routes_to_shared_continuous_reader(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "gelv_songscatter"
         visual.lyrics = ["当前歌词", "下一句"]
         visual.lyric_index = 0
+        visual._should_paint_album_island = lambda: False
+        visual._compact_lyric_lines = lambda: visual.lyrics
+        visual._lyric_phase = lambda _now: {"progress": 0.4}
+        visual._paint_live_lyric_text = lambda *_args, **_kwargs: calls.append("shared")
         calls = []
-        visual._paint_gelv_compact_lyrics = lambda *_args: calls.append("gelv")
+        visual._paint_gelv_compact_lyrics = lambda *_args: self.fail("Legacy scatter renderer must not run")
         image = QImage(300, 90, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -9844,9 +9867,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._paint_compact_lyric_viewport(painter, QRectF(0.0, 0.0, 260.0, 70.0))
         painter.end()
 
-        self.assertEqual(calls, ["gelv"])
+        self.assertEqual(calls, ["shared"])
 
-    def test_lyric_viewports_route_to_ember_renderer_when_selected(self):
+    def test_removed_ember_selection_uses_shared_lyric_viewports(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "ember_fade"
         visual.lyrics = ["current lyric", "next lyric"]
@@ -9861,10 +9884,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._lyric_phase = lambda _now: {"progress": 0.5, "confidence": 1.0}
         visual._lyric_transition_progress = lambda _duration: (1.0, 1.0)
         visual._current_lyric_display_lines = lambda: ["current lyric"]
-        visual._paint_live_lyric_text = lambda *_args, **_kwargs: None
-        visual._paint_expanded_lyric_row = lambda *_args, **_kwargs: None
         calls = []
-        visual._paint_ember_lyrics = lambda _painter, _rect, expanded=False: calls.append(expanded)
+        visual._paint_live_lyric_text = lambda *_args, **_kwargs: calls.append("compact")
+        visual._paint_expanded_lyric_row = lambda *_args, **_kwargs: calls.append("expanded")
+        visual._paint_ember_lyrics = lambda *_args, **_kwargs: self.fail("Removed Ember renderer must not run")
         image = QImage(320, 140, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -9873,7 +9896,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._paint_lyric_viewport(painter, QRectF(0.0, 0.0, 300.0, 110.0))
         painter.end()
 
-        self.assertEqual(calls, [False, True])
+        self.assertEqual(calls[0], "compact")
+        self.assertIn("expanded", calls)
 
     def test_ember_renderer_paints_visible_text_pixels(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -10281,7 +10305,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(QRectF(center_slot["rect"]).center().x(), 180.0)
         self.assertGreater(QRectF(right_slot["rect"]).center().x(), QRectF(center_slot["rect"]).center().x())
 
-    def test_album_island_secondary_shrink_style_removes_perspective_tilt(self):
+    def test_album_island_legacy_shrink_style_uses_canonical_perspective(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.album_island_cover_count = 5
         visual.album_island_cover_size = 30
@@ -10301,6 +10325,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         side_slots = [slot for slot in slots if not bool(slot["center"])]
         self.assertTrue(side_slots)
         self.assertTrue(all(abs(float(slot["tilt"])) <= 0.01 for slot in side_slots))
+        self.assertTrue(all(isinstance(slot["perspective"], dict) for slot in side_slots))
+        self.assertLess(side_slots[0]["perspective"]["right_height"], side_slots[0]["perspective"]["left_height"])
 
     def test_album_island_secondary_perspective_style_keeps_flatter_side_covers(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -12717,7 +12743,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._notify_settings_changed = lambda: None
 
         visual.set_music_ambience_style("pure_black", notify=False)
-        self.assertEqual(visual.music_ambience_style, "pure_black")
+        self.assertEqual(visual.music_ambience_style, "system")
+
+        visual.set_music_ambience_style("pure_white", notify=False)
+        self.assertEqual(visual.music_ambience_style, "system")
+
+        visual.set_music_ambience_style("duotone_full", notify=False)
+        self.assertEqual(visual.music_ambience_style, "sea_level")
 
         visual.set_music_ambience_style("bilateral_diffraction", notify=False)
         self.assertEqual(visual.music_ambience_style, "sea_level")
@@ -12728,7 +12760,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.set_music_ambience_style("solid_album", notify=False)
         self.assertEqual(visual.music_ambience_style, "solid_album")
 
-    def test_solid_album_background_blocks_color_fill_and_uses_album_tinted_unread_lyrics(self):
+    def test_solid_album_background_blocks_color_fill_and_uses_contrast_neutral_unread_lyrics(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.music_ambience_style = "solid_album"
         visual.lyric_flow_style = "wave_stream"
@@ -12739,8 +12771,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertFalse(visual._active_lyric_color_fill_enabled())
         unread = visual._music_lyric_base_text_color()
-        self.assertGreater(unread.red(), unread.blue() + 35)
-        self.assertGreater(unread.alpha(), 200)
+        self.assertEqual(unread.getRgb(), (255, 255, 255, 132))
         self.assertLess(visual._music_lyric_base_text_color(82).alpha(), unread.alpha())
         self.assertEqual(visual._music_lyric_text_color().getRgb()[:3], (255, 255, 255))
 
@@ -12762,7 +12793,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(unread.green(), unread.blue())
         self.assertNotEqual(color.name().upper(), "#16BCFF")
 
-    def test_solid_album_multicolor_roles_choose_warm_secondary_and_stable_characteristic_ink(self):
+    def test_solid_album_preserves_role_extraction_but_displays_original_primary_and_neutral_ink(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.music_ambience_style = "solid_album"
         art = QImage(100, 100, QImage.Format.Format_RGB32)
@@ -12781,8 +12812,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertGreater(palette.secondary.red(), palette.secondary.blue() + 60)
         self.assertGreater(palette.characteristic.red(), palette.characteristic.blue() + 80)
-        self.assertGreater(backdrop.red(), backdrop.blue() + 25)
-        self.assertGreater(unread.red(), unread.blue() + 55)
+        self.assertEqual(backdrop.getRgb(), (8, 9, 12, 255))
+        self.assertEqual(unread.getRgb(), (255, 255, 255, 132))
         self.assertEqual(unread.rgba(), repeat.rgba())
         composite = MusicSurfaceWindow._composited_color(unread, backdrop)
         self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(composite, backdrop), 2.0)
@@ -12799,8 +12830,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         image = self._paint_music_background_image(visual)
         samples = [image.pixelColor(x, 48) for x in (45, 160, 255)]
 
-        self.assertTrue(all(color.red() > color.blue() + 20 for color in samples))
-        self.assertLess(max(color.red() for color in samples) - min(color.red() for color in samples), 28)
+        self.assertTrue(all(color.getRgb() == (8, 9, 12, 255) for color in samples))
 
     def test_solid_album_reactive_light_stays_with_artwork_roles_not_provider_blue(self):
         visual = self._reactive_music_background_visual(
@@ -12822,7 +12852,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         image = self._paint_music_background_image(visual)
         for x in (42, 75, 160, 245, 258):
             sample = image.pixelColor(x, 48)
-            self.assertGreaterEqual(sample.red(), sample.blue())
+            self.assertEqual(sample.getRgb(), (8, 9, 12, 255))
 
         visual.album_art.fill(QColor(210, 210, 210))
         monochrome = self._paint_music_background_image(visual)
@@ -12839,6 +12869,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             ("pure_white", (0, 0, 0)),
         ):
             visual.music_ambience_style = style
+            visual._music_system_dark = style != "pure_white"
             self.assertEqual(visual._music_lyric_base_text_color().getRgb()[:3], expected)
 
     def test_ember_scroll_line_starts_at_left_edge_and_advances_by_line_progress(self):
@@ -12875,14 +12906,14 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertFalse(visual._active_lyric_color_fill_enabled())
 
         visual.set_music_ambience_style("duotone_full", notify=False)
-        self.assertEqual(visual.music_ambience_style, "duotone_full")
+        self.assertEqual(visual.music_ambience_style, "sea_level")
         self.assertFalse(visual._active_lyric_color_fill_enabled())
 
         visual.set_music_ambience_style("solid_album", notify=False)
         self.assertEqual(visual.music_ambience_style, "solid_album")
         self.assertFalse(visual._active_lyric_color_fill_enabled())
 
-    def test_gelv_and_ember_color_fill_preserve_intent_on_conflicting_ambience(self):
+    def test_legacy_gelv_and_ember_color_fill_settings_stay_inactive(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.album_color = QColor(80, 120, 170)
         visual.music_ambience_style = "sea_level"
@@ -12897,7 +12928,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.gelv_color_fill_enabled)
         self.assertFalse(visual._active_lyric_color_fill_enabled())
         visual.music_ambience_style = "pure_black"
-        self.assertTrue(visual._active_lyric_color_fill_enabled())
+        self.assertFalse(visual._active_lyric_color_fill_enabled())
 
         visual.lyric_flow_style = "wave_stream"
         visual.music_ambience_style = "sea_level"
@@ -12917,7 +12948,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.ember_color_fill_enabled)
         self.assertFalse(visual._active_lyric_color_fill_enabled())
         visual.music_ambience_style = "pure_black"
-        self.assertTrue(visual._active_lyric_color_fill_enabled())
+        self.assertFalse(visual._active_lyric_color_fill_enabled())
 
     def test_music_surface_paint_plan_orders_solid_album_background_before_content(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)

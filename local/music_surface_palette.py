@@ -24,6 +24,9 @@ class MusicSurfacePalette:
     # Original opacity-weighted coverage in ambient_colors order. A family
     # and its tonal variant overlap, so these fractions need not sum to one.
     ambient_weights: tuple[float, ...] = ()
+    # The flat island keeps this occupied source color before the moving
+    # surface's chroma, shadow and neutral-role adjustments.
+    source_primary: QColor | None = None
 
     @property
     def uses_primary_fallback(self) -> bool:
@@ -33,6 +36,26 @@ class MusicSurfacePalette:
         families rather than exact RGB equality to keep this fallback stable.
         """
         return _same_color_family(self.primary, self.characteristic)
+
+
+def solid_album_background_color(palette: MusicSurfacePalette) -> QColor:
+    """Use the occupied cover tone unchanged for the flat music island."""
+    source = palette.source_primary
+    if source is None:
+        source = palette.ambient_colors[0] if palette.ambient_colors else palette.primary
+    color = QColor(source)
+    if not color.isValid():
+        color = QColor(56, 56, 56)
+    color.setAlpha(255)
+    return color
+
+
+def solid_album_ink_color(backdrop: QColor, alpha: int = 246) -> QColor:
+    """Choose the higher-contrast neutral ink without altering the backdrop."""
+    black, white = QColor(0, 0, 0), QColor(255, 255, 255)
+    color = black if _contrast_ratio(black, backdrop) >= _contrast_ratio(white, backdrop) else white
+    color.setAlpha(max(0, min(255, int(alpha))))
+    return color
 
 
 def background_role_color(source: QColor) -> QColor:
@@ -387,6 +410,7 @@ def artwork_surface_palette(
         return MusicSurfacePalette(
             primary_fallback, secondary_fallback, primary_fallback,
             colors, weights,
+            source_primary=QColor(primary_fallback),
         )
 
     sample = image.scaled(
@@ -474,8 +498,14 @@ def artwork_surface_palette(
         return MusicSurfacePalette(
             primary_fallback, secondary_fallback, primary_fallback,
             colors, weights,
+            source_primary=QColor(primary_fallback),
         )
     ranked = _merge_hue_groups(sorted(groups.items(), key=lambda pair: pair[1]["count"], reverse=True))
+    dominant_group = ranked[0][1]
+    source_primary = QColor(*(
+        round(dominant_group[channel] / dominant_group["count"])
+        for channel in ("red", "green", "blue")
+    ))
     ambient_colors, ambient_weights = _ambient_pigments(ambient_groups, opaque_count)
     if not ambient_colors and opaque_count < 3.0:
         ambient_colors, ambient_weights = _fallback_ambient(primary_fallback, secondary_fallback)
@@ -492,6 +522,7 @@ def artwork_surface_palette(
             primary, primary.darker(135), QColor(primary),
             ambient_colors or (QColor(primary),),
             ambient_weights or (1.0,),
+            source_primary=source_primary,
         )
 
     dominant_key, dominant_group = ranked[0]
@@ -558,4 +589,5 @@ def artwork_surface_palette(
     return MusicSurfacePalette(
         primary, secondary, characteristic, ambient_colors or (QColor(primary),),
         ambient_weights or (1.0,),
+        source_primary=source_primary,
     )

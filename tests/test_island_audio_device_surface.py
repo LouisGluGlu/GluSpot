@@ -180,12 +180,13 @@ class IslandAudioDeviceSurfaceTests(unittest.TestCase):
         base.assert_called_once()
         device.assert_not_called()
 
-    def test_actual_pure_white_and_black_backgrounds_choose_opposite_ink(self):
+    def test_actual_system_light_and_dark_backgrounds_choose_opposite_ink(self):
         self._notice(replace(PAYLOAD, battery_percent=None))
         region = QRectF(34.0, 26.0, 26.0, 20.0)
-        for style, light_ink in (("pure_white", False), ("pure_black", True)):
-            with self.subTest(style=style):
-                self.visual.music_ambience_style = style
+        for dark, light_ink in ((False, False), (True, True)):
+            with self.subTest(dark=dark), patch("local.island_stack_visual.system_dark_mode", return_value=dark):
+                self.visual.set_music_ambience_style("system", notify=False)
+                self.visual._refresh_music_system_theme(force=True)
                 self._image()
                 ink = self.visual._audio_device_ink(region)
                 self.assertEqual(ink.lightness() > 128, light_ink)
