@@ -145,7 +145,7 @@ class AudioPackageCheckTests(unittest.TestCase):
             helper = Path(temp) / "GluSpotAirPlay.exe"
             helper.touch()
             event = {"event": "error", "message":
-                     "Group requires a verified music process, source endpoint and HomePod"}
+                     "Group requires a verified music process, source endpoint and two outputs or AirPlay"}
             reply = SimpleNamespace(returncode=2, stdout=json.dumps(event) + "\n", stderr="")
             with patch.object(check, "engine_path", return_value=helper), \
                     patch.object(check.subprocess, "run", return_value=reply) as run:
@@ -160,6 +160,8 @@ class AudioPackageCheckTests(unittest.TestCase):
             helper = Path(temp) / "GluSpotAirPlay.exe"
             helper.touch()
             for output, code in ((json.dumps({"event": "error", "message": "Unknown argument --group"}), 1),
+                                 (json.dumps({"event": "error", "message":
+                                              "Group requires a verified music process, source endpoint and HomePod"}), 2),
                                  ('[]\n', 2), ('invalid\n', 2),
                                  (json.dumps({"event": "connecting"}), 0)):
                 with self.subTest(output=output), patch.object(check, "engine_path", return_value=helper), \
