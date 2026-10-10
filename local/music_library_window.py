@@ -16,6 +16,7 @@ from api.online_music import AccountSnapshot, OnlineSong
 from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_mode_controls import paint_presentation_glyph
+from local.music_source_icons import music_source_icon_image, paint_music_source_icon
 from local.playback_entry_window import ENTRY_SOURCES, MusicSourceButton, _entry_font
 
 
@@ -56,25 +57,8 @@ class _LibraryActionButton(QAbstractButton):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#c80d0d") if self.kind == "logout" else QColor("#767676"))
             painter.drawRoundedRect(rect, 6, 6)
-            painter.save()
-            painter.translate(rect.topLeft())
-            painter.scale(rect.width() / 36, rect.height() / 36)
-            painter.setPen(QPen(QColor("white"), 2.4, Qt.PenStyle.SolidLine,
-                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            if self.kind == "switch":
-                painter.drawLine(7, 12, 28, 12)
-                painter.drawLine(23, 7, 28, 12)
-                painter.drawLine(23, 17, 28, 12)
-                painter.drawLine(29, 25, 8, 25)
-                painter.drawLine(13, 20, 8, 25)
-                painter.drawLine(13, 30, 8, 25)
-            else:
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(QRectF(6, 7, 16, 23), 2, 2)
-                painter.drawLine(17, 19, 30, 19)
-                painter.drawLine(25, 14, 30, 19)
-                painter.drawLine(25, 24, 30, 19)
-            painter.restore()
+            paint_music_source_icon(painter, rect.adjusted(4, 4, -4, -4), self.kind,
+                                     tint=QColor("white") if self.kind == "switch" else None)
             if self.hasFocus():
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(QColor("white"), 1.5, Qt.PenStyle.DotLine))
@@ -290,13 +274,8 @@ class MusicLibraryWindow(QWidget):
         self.search.setAccessibleName("搜索当前平台的歌曲与歌单")
         self.search.setPlaceholderText("搜索歌曲与歌单")
         self.search.setFont(_entry_font(16))
-        search_icon = QPixmap(36, 36)
-        search_icon.fill(Qt.GlobalColor.transparent)
-        with QPainter(search_icon) as painter:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(QPen(QColor("white"), 3.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawEllipse(QRectF(5, 5, 22, 22))
-            painter.drawLine(25, 25, 32, 32)
+        search_icon = QPixmap.fromImage(music_source_icon_image("search", QSize(68, 68)))
+        search_icon.setDevicePixelRatio(2.0)
         self.search_button = QPushButton(self.search)
         self.search_button.setIcon(QIcon(search_icon))
         self.search_button.setIconSize(QSize(34, 34))
