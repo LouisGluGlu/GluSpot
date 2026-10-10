@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 
 from PySide6.QtCore import QObject, QRect
 from PySide6.QtGui import QImage
@@ -23,6 +24,7 @@ class MusicLibraryController(QObject):
         self.tasks.completed.connect(self._completed)
         self.art_tasks.completed.connect(self._art_completed)
         self.window.sourceSwitchRequested.connect(self.switch_source)
+        self.window.backRequested.connect(self.back)
         self.window.logoutRequested.connect(self.logout)
         self.window.collectionRequested.connect(self.play_collection)
         self.window.searchRequested.connect(self.search)
@@ -94,9 +96,29 @@ class MusicLibraryController(QObject):
             self.window.set_error("服务繁忙，请稍后重新进入")
 
     def switch_source(self):
+        if self._closed:
+            return
         self._invalidate()
+        self._source = ""
+        self.window.set_loading(False)
         self.window.hide()
         self.entry.show_login()
+
+    def back(self):
+        if self._closed:
+            return
+        if self.window.search.text().strip() and not self._logout_pending:
+            # Match the existing Escape behavior: leave search before leaving
+            # the account's library. Account records and playback stay intact.
+            if self._opening is not None:
+                self._opening = None
+                self._opening_ready = False
+                self.player.stop()
+                self.window.finish_open_transition()
+                self.window.set_loading(False)
+            self.window.search.clear()
+            return
+        self.switch_source()
 
     def _invalidate(self):
         self._epoch += 1
@@ -197,7 +219,17 @@ class MusicLibraryController(QObject):
         return previous + tuple(row for row in incoming if row.key not in keys and not keys.add(row.key))
 
     def _completed(self, token, result, error):
-        kind, epoch, request = token
+        kind, epoch, request, *extra = token
+        if kind == "recommendation_art":
+            if self._closed or epoch != self._epoch or error or not result:
+                return
+            cover = next((song.artwork_url for song in result if isinstance(song, OnlineSong) and song.artwork_url), "")
+            if cover:
+                key = extra[0]
+                self._collections = tuple(replace(row, artwork_url=cover) if row.key == key else row
+                                          for row in self._collections)
+                self.window.set_collections(self._collections)
+            return
         if self._closed or epoch != self._epoch or request != self._request:
             return
         self._pending = False
@@ -235,6 +267,15 @@ class MusicLibraryController(QObject):
             else:
                 self.window.set_collections(self._collections)
                 self.window.set_error("歌单暂未加载，请切换平台后重新进入；推荐入口仍可使用")
+            if self._source == "netease":
+                # The catalog has no recommendation artwork. Retrieve actual
+                # song covers independently, without delaying the first list.
+                for key, fetch in (("daily", self.service.daily_recommendations),
+                                   ("fm", self.service.personal_fm)):
+                    source = self._source
+                    self.tasks.submit(("recommendation_art", self._epoch, self._request, key),
+                        lambda fetch=fetch, source=source, epoch=self._epoch:
+                            fetch(source) if not self._closed and epoch == self._epoch else ())
         elif kind == "catalog":
             self._append_catalog(result)
         elif kind == "search":
@@ -344,13 +385,28 @@ class MusicLibraryController(QObject):
             self._opening = None
             self.window.finish_open_transition()
             self.window.set_loading(False)
-            self.window.set_error("平台未返回可播放歌曲，请重试或选择其他歌单")
+            messages = {
+                "busy": "播放服务繁忙，请稍后重试",
+                "catalog_unavailable": "未能加载可播放歌曲，请重试或选择其他歌单",
+                "stream_unavailable": "平台未提供此歌曲的播放地址，请检查账号权限或选择其他歌曲",
+                "playback_failed": "音频加载失败，请检查网络后重试",
+            }
+            failures = {
+                "auth_required": "登录已失效，请返回平台入口重新登录",
+                "credential": "账号读取失败，请返回平台入口重试",
+                "timeout": "播放请求超时，请检查网络后重试",
+                "network": "音频连接失败，请检查网络后重试",
+                "format": "播放器无法解码此音频，请尝试其他歌曲",
+                "access_denied": "平台拒绝了此音频的访问，请检查账号权限",
+                "invalid_stream": "平台返回的播放地址无效，请重试",
+            }
+            self.window.set_error(failures.get(getattr(self.player, "failure_reason", ""), messages[status]))
 
     def _player_changed(self):
         if self._opening is None or self.player.track is None:
             return
         # Old playback can emit position signals while a catalog request runs.
-        if self.player.status == "loading_catalog" or not self._opening_ready:
+        if not self._opening_ready or self.player.status not in {"playing", "trial"} or not self.player.track.is_playing:
             return
         mode, rect, snapshot = self._opening
         self._opening = None

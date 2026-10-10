@@ -169,6 +169,21 @@ class OnlineMusicServiceTests(unittest.TestCase):
         self.backend.catalog["stream_url"] = {"data": [{"url": "https://user:password@example.org/song"}]}
         self.assertFalse(self.service.stream_url("netease", "9").playable)
 
+    def test_personal_fm_legacy_duration_is_milliseconds_without_changing_other_sources(self):
+        self.login()
+        self.backend.catalog["personal_fm"] = {"data": [{
+            "id": 9, "name": "曲目", "duration": 178106,
+            "artists": [{"name": "歌手"}],
+            "album": {"name": "专辑", "picUrl": "https://example.org/art.png"},
+        }]}
+        song = self.service.personal_fm()[0]
+        self.assertEqual(song.duration_seconds, 178.106)
+        self.assertEqual(song.artist, "歌手")
+        self.assertEqual(song.artwork_url, "https://example.org/art.png")
+        for source in ("qq", "kugou"):
+            with self.subTest(source=source):
+                self.assertEqual(self.service._song(source, {"id": 9, "name": "曲目", "duration": 178}).duration_seconds, 178)
+
     def test_playlist_and_track_pagination(self):
         self.login()
         self.backend.catalog = {"playlists": {"playlist": [{"id": 12, "name": "列表", "trackCount": 2}]}, "playlist_tracks": {"songs": [{"id": 9, "name": "曲目", "dt": 1000}]}}

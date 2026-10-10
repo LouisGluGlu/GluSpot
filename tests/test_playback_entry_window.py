@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRect, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QByteArray, QBuffer, QCoreApplication, QEvent, QIODevice, QRect, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QImage
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 from api.online_music import AccountSnapshot
 from local.playback_entry_window import ENTRY_SOURCES, PlaybackEntryWindow
@@ -57,6 +59,16 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.assertEqual(self.window.selection, (False, True))
         self.window.system_button.click()
         self.assertEqual(self.window.selection, (False, True))
+
+    def test_disposing_entry_after_page_resize_preserves_shared_screen_wrapper(self):
+        shared = QGuiApplication.primaryScreen()
+        entry = PlaybackEntryWindow()
+        entry.show_sources()
+        entry._set_expanded(1.0)
+        entry.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertTrue(isValid(shared))
+        self.assertIs(QGuiApplication.primaryScreen(), shared)
 
     def test_continue_requires_explicit_click_and_only_emits_selection(self):
         spy = QSignalSpy(self.window.selectionAccepted)
@@ -227,7 +239,8 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self._login_page()
         account = AccountSnapshot("netease", True, "test", "测试昵称", state="verified")
         self.window.set_account(account)
-        self.assertEqual(self.window.height(), 368)
+        self.assertTrue(self.window.rect().contains(self.window.enter_button.geometry()))
+        self.assertGreaterEqual(self.window.enter_button.height(), 44)
         self.assertEqual(self.window.enter_button.text(), "进入")
         self.assertTrue(self.window.refresh_button.isHidden())
         self.assertTrue(self.window.message_label.isHidden())
@@ -266,6 +279,34 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.assertIsNone(self.window._account)
         self.assertEqual(self.window.login_state, "starting")
         self.assertEqual(self.window.enter_button.text(), "继续")
+
+    def test_source_and_account_navigation_use_clear_targets_within_window(self):
+        self._login_page()
+        for button in (self.window.back_button, self.window.close_button, self.window.refresh_button, *self.window.source_buttons.values()):
+            self.assertGreaterEqual(button.width(), 44)
+            self.assertGreaterEqual(button.height(), 44)
+            self.assertTrue(self.window.rect().contains(button.geometry()))
+        self.assertGreaterEqual(self.window.height() - 24 - self.window.refresh_button.geometry().bottom(), 16)
+        self.assertFalse(self.window.message_label.geometry().intersects(self.window.refresh_button.geometry()))
+        self.window.set_account(AccountSnapshot("netease", True, "fixture", "较长的布局测试账号昵称" * 3, state="verified"))
+        self.assertTrue(self.window.rect().contains(self.window.enter_button.geometry()))
+        self.assertFalse(self.window.enter_button.geometry().intersects(self.window.source_buttons["qq"].geometry()))
+
+    def test_login_page_adapts_to_short_display_without_cutting_navigation_or_actions(self):
+        self._login_page()
+        available = QRect(0, 0, 520, 520)
+        screen = SimpleNamespace(availableGeometry=lambda: available)
+        with patch.object(QGuiApplication, "screenAt", return_value=screen):
+            self.window._set_expanded(1.0)
+        self.assertLessEqual(self.window.width(), available.width())
+        self.assertLessEqual(self.window.height(), available.height())
+        for button in (self.window.back_button, self.window.close_button, self.window.refresh_button, *self.window.source_buttons.values()):
+            self.assertTrue(self.window.rect().contains(button.geometry()))
+            self.assertGreaterEqual(button.height(), 44)
+            self.assertGreaterEqual(button.width(), 44)
+        self.assertFalse(self.window.message_label.geometry().intersects(self.window.refresh_button.geometry()))
+        self.assertGreaterEqual(self.window.height() - 24 - self.window.refresh_button.geometry().bottom(), 16)
+        self.assertFalse(self.window.grab().isNull())
 
 
 if __name__ == "__main__":

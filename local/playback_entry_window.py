@@ -10,8 +10,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPoint, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton, QWidget
 
 from api.online_music import AccountSnapshot
@@ -42,6 +42,33 @@ def _entry_font(pixels: int, *, heavy: bool = False) -> QFont:
     font.setPixelSize(pixels)
     font.setWeight(QFont.Weight.Black if heavy else QFont.Weight.Bold)
     return font
+
+
+class EntryNavigationButton(QAbstractButton):
+    """Shared native navigation geometry with a 44 px interactive target."""
+    def __init__(self, kind: str, label: str, parent: QWidget):
+        super().__init__(parent)
+        self.kind = kind
+        self.setAccessibleName(label)
+        self.setToolTip(label)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event):
+        with QPainter(self) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+            painter.setPen(QPen(QColor("#494b51"), 1) if self.hasFocus() else Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#303238") if self.underMouse() else QColor("#23252a"))
+            painter.drawRoundedRect(rect, 12, 12)
+            painter.setPen(QPen(QColor("#e8e9ec"), 2, Qt.PenStyle.SolidLine,
+                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            center = rect.center()
+            if self.kind == "back":
+                painter.drawLine(center + QPointF(3, -7), center + QPointF(-4, 0))
+                painter.drawLine(center + QPointF(-4, 0), center + QPointF(3, 7))
+            else:
+                painter.drawLine(center + QPointF(-5, -5), center + QPointF(5, 5))
+                painter.drawLine(center + QPointF(-5, 5), center + QPointF(5, -5))
 
 
 class PlaybackModeButton(QAbstractButton):
@@ -117,6 +144,7 @@ class MusicSourceButton(QAbstractButton):
     def __init__(self, source: EntrySource, parent: QWidget):
         super().__init__(parent)
         self.source = source
+        self.show_caption = True
         self.setText(source.name)
         self.setAccessibleName(source.name)
         self.setToolTip(source.name)
@@ -128,12 +156,22 @@ class MusicSourceButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             if not self.isEnabled():
                 painter.setOpacity(.38)
-            rect = QRectF(self.rect()).adjusted(10, 9, -10, -9)
+            rect = QRectF(self.rect()).adjusted(8, 8, -8, -24 if self.show_caption else -8)
+            painter.setPen(QPen(QColor(self.source.color), 1.5) if self.isChecked() else QPen(QColor("#3c3e44"), 1))
+            painter.setBrush(QColor("#2b2d33") if self.isChecked() else QColor("#202227"))
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 16, 16)
             if self.isChecked() or self.hasFocus():
                 painter.setPen(QPen(QColor(self.source.color), 3))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(rect.adjusted(-4, -4, 4, 4), 14, 14)
-            paint_music_source_icon(painter, rect, self.source.source_id)
+                painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 15, 15)
+            side = min(40.0, rect.width(), rect.height())
+            icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2, side, side)
+            paint_music_source_icon(painter, icon, self.source.source_id)
+            painter.setFont(_entry_font(12))
+            painter.setPen(QColor("#e2e3e7"))
+            title = self.source.name.replace("音乐", "").strip()
+            if self.show_caption:
+                painter.drawText(QRectF(2, self.height() - 25, self.width() - 4, 20), Qt.AlignmentFlag.AlignCenter, title)
 
 
 class PlaybackEntryWindow(QWidget):
@@ -157,7 +195,7 @@ class PlaybackEntryWindow(QWidget):
         IslandStackVisual.load_embedded_lyric_fonts()
         self.setWindowTitle(f"{APP_NAME} · 播放来源")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(840, 650)
+        self._resize_page(840, 650)
         self.page = "modes"
         self.selected_source = ""
         self.login_state = "unavailable"
@@ -203,10 +241,10 @@ class PlaybackEntryWindow(QWidget):
         self.continue_button = QPushButton("继续", self)
         self.continue_button.setAccessibleName("继续选择播放来源")
         self.continue_button.clicked.connect(self._accept_modes)
-        self.close_button = QPushButton("×", self)
+        self.close_button = EntryNavigationButton("close", "关闭播放来源窗口", self)
         self.close_button.setAccessibleName("关闭播放来源窗口")
         self.close_button.clicked.connect(self.close)
-        self.back_button = QPushButton("‹", self)
+        self.back_button = EntryNavigationButton("back", "返回播放模式", self)
         self.back_button.setAccessibleName("返回播放模式")
         self.back_button.clicked.connect(self._go_back)
         self.refresh_button = QPushButton("刷新二维码", self)
@@ -217,7 +255,7 @@ class PlaybackEntryWindow(QWidget):
         self.message_label.setWordWrap(True)
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message_label.setFont(_entry_font(14))
-        self.message_label.setStyleSheet("color: #333333; background: transparent;")
+        self.message_label.setStyleSheet("color: #b3b6c0; background: transparent;")
         self.source_buttons = {source.source_id: MusicSourceButton(source, self) for source in ENTRY_SOURCES}
         for source_id, button in self.source_buttons.items():
             button.setEnabled(False)
@@ -226,15 +264,18 @@ class PlaybackEntryWindow(QWidget):
         for button in (self.continue_button, self.refresh_button, self.enter_button):
             button.setFont(_entry_font(15))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet("QPushButton { color: #111; background: #f4f4f4; border: 1px solid #ffffff; border-radius: 17px; padding: 6px 15px; } QPushButton:disabled { color: #858585; } QPushButton:focus { border: 2px solid #555; }")
-        for button in (self.close_button, self.back_button):
-            button.setFont(_entry_font(23))
-            button.setStyleSheet("QPushButton { color: #303030; border: none; background: transparent; } QPushButton:hover { background: #ffffff40; border-radius: 15px; }")
+            button.setStyleSheet("QPushButton { color: #f4f5f7; background: #343740; border: 1px solid #494c56; border-radius: 12px; padding: 6px 15px; } QPushButton:hover { background: #41454f; } QPushButton:disabled { color: #747782; } QPushButton:focus { border: 2px solid #afb6c8; }")
         self._layout_children()
 
     @property
     def selection(self) -> tuple[bool, bool]:
         return self.owned_button.isChecked(), self.system_button.isChecked()
+
+    def _resize_page(self, width: int, height: int):
+        # QWidget.screen() reparents shared wrappers to this transient widget.
+        screen = QGuiApplication.screenAt(self.frameGeometry().center()) or QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+        self.resize(min(width, available.width()), min(height, available.height()))
 
     def _ensure_mode(self, changed: PlaybackModeButton, checked: bool):
         if not checked and not any(self.selection):
@@ -257,6 +298,7 @@ class PlaybackEntryWindow(QWidget):
         """Prevent completed onboarding from being re-entered via login Back."""
         self._mode_back_enabled = bool(enabled)
         self.back_button.setAccessibleName("返回播放模式" if enabled else "返回音乐来源")
+        self.back_button.setToolTip(self.back_button.accessibleName())
         self._layout_children()
 
     def _go_back(self):
@@ -273,7 +315,7 @@ class PlaybackEntryWindow(QWidget):
         self.page = "modes"
         self._accept_snapshots = True
         self.selected_source = ""
-        self.resize(840, 650)
+        self._resize_page(840, 650)
         self._layout_children()
         if self.isVisible():
             self._frame_timer.start()
@@ -290,7 +332,7 @@ class PlaybackEntryWindow(QWidget):
         for button in self.source_buttons.values():
             button.setChecked(False)
         self._expanded = 0.0
-        self.resize(500, 150)
+        self._resize_page(560, 264)
         self.message_label.setText("选择音乐来源")
         self._layout_children()
         self.update()
@@ -327,7 +369,7 @@ class PlaybackEntryWindow(QWidget):
 
     def _set_expanded(self, value):
         self._expanded = float(value)
-        self.resize(500, round(150 + (218 if self._account is not None else 345) * self._expanded))
+        self._resize_page(560, round(264 + (224 if self._account is not None else 344) * self._expanded))
         self._layout_children()
         self.update()
 
@@ -373,9 +415,10 @@ class PlaybackEntryWindow(QWidget):
         self._qr_image = QImage()
         self.login_state = "confirmed"
         self.enter_button.setText("进入")
-        self.enter_button.setFont(_entry_font(24))
+        self.enter_button.setFont(_entry_font(16))
         source = next(item for item in ENTRY_SOURCES if item.source_id == account.source_id)
-        self.enter_button.setStyleSheet(f"QPushButton {{ color: #111; background: {source.color}; border: none; border-radius: 19px; padding: 4px 15px; }} QPushButton:focus {{ border: 2px solid #555; }}")
+        ink = "#131313" if account.source_id == "qq" else "#ffffff"
+        self.enter_button.setStyleSheet(f"QPushButton {{ color: {ink}; background: {source.color}; border: none; border-radius: 12px; padding: 6px 20px; }} QPushButton:focus {{ border: 2px solid #b7baca; }}")
         self._set_expanded(self._expanded)
         self.update()
 
@@ -409,32 +452,33 @@ class PlaybackEntryWindow(QWidget):
         if hasattr(self, "enter_button"):
             self.enter_button.setText("继续")
             self.enter_button.setFont(_entry_font(15))
-            self.enter_button.setStyleSheet("QPushButton { color: #111; background: #f4f4f4; border: 1px solid #ffffff; border-radius: 17px; padding: 6px 15px; } QPushButton:focus { border: 2px solid #555; }")
+            self.enter_button.setStyleSheet("QPushButton { color: #f4f5f7; background: #343740; border: 1px solid #494c56; border-radius: 12px; padding: 6px 15px; } QPushButton:focus { border: 2px solid #afb6c8; }")
 
     def _layout_children(self):
         modes = self.page == "modes"
         self.owned_button.setVisible(modes)
         self.system_button.setVisible(modes)
         self.continue_button.setVisible(modes)
-        self.close_button.setGeometry(self.width() - 50, 18, 30, 30)
-        self.back_button.setGeometry(20, 18, 30, 30)
+        self.close_button.setGeometry(self.width() - 68, 20, 44, 44)
+        self.back_button.setGeometry(24, 20, 44, 44)
         self.back_button.setVisible(not modes and (self._mode_back_enabled or bool(self.selected_source)))
         if modes:
             self.owned_button.setGeometry(round(self.width() * .10), round(self.height() * .51), round(self.width() * .35), 94)
             self.system_button.setGeometry(round(self.width() * .55), round(self.height() * .51), round(self.width() * .35), 94)
-            self.continue_button.setGeometry((self.width() - 82) // 2, self.height() - 92, 82, 36)
+            self.continue_button.setGeometry((self.width() - 120) // 2, self.height() - 92, 120, 44)
         for index, button in enumerate(self.source_buttons.values()):
             button.setVisible(not modes)
-            button.setGeometry(65 + index * 94, 35, 74, 74)
+            tile_width = (self.width() - 112) // 4
+            button.setGeometry(32 + index * (tile_width + 16), 112, tile_width, 96)
         expanded = not modes and self._expanded > .85
         account_card = expanded and self._account is not None
         self.message_label.setVisible(not modes and not account_card)
-        self.message_label.setGeometry(48, self.height() - 90 if expanded else 108, self.width() - 96, 36)
+        self.message_label.setGeometry(32, self.height() - 132 if expanded else 224, self.width() - 64, 40 if expanded else 24)
         self.refresh_button.setVisible(expanded and self.login_state != "confirmed")
         self.refresh_button.setEnabled(self.login_state not in {"starting", "loading", "unavailable", "unsupported", "cancelled"})
-        self.refresh_button.setGeometry((self.width() - 130) // 2, self.height() - 48, 130, 34)
+        self.refresh_button.setGeometry((self.width() - 152) // 2, self.height() - 84, 152, 44)
         self.enter_button.setVisible(expanded and self.login_state == "confirmed")
-        self.enter_button.setGeometry(250, 236, 125, 38) if account_card else self.enter_button.setGeometry((self.width() - 82) // 2, self.height() - 48, 82, 34)
+        self.enter_button.setGeometry(232, 384, 152, 44) if account_card else self.enter_button.setGeometry((self.width() - 120) // 2, self.height() - 84, 120, 44)
 
     def _advance(self):
         if not self.isVisible():
@@ -572,7 +616,7 @@ class PlaybackEntryWindow(QWidget):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             panel = QRectF(self.rect()).adjusted(2, 2, -2, -2)
             clip = QPainterPath()
-            radius = min(panel.height() / 2, 64 if self.page == "modes" else 48)
+            radius = min(panel.height() / 2, 32 if self.page == "modes" else 24)
             clip.addRoundedRect(panel, radius, radius)
             painter.setClipPath(clip)
             if self._contraction_target is not None and not self._contraction_frame.isNull():
@@ -592,18 +636,26 @@ class PlaybackEntryWindow(QWidget):
                 painter.drawText(QRectF(0, self.height() * .095, self.width(), 83), Qt.AlignmentFlag.AlignCenter, "GLU")
                 painter.drawText(QRectF(0, self.height() * .095 + 74, self.width(), 83), Qt.AlignmentFlag.AlignCenter, "spot")
             else:
-                painter.fillRect(panel, QColor("#f2f2f2"))
+                painter.fillRect(panel, QColor("#15171c"))
+                painter.setFont(_entry_font(23))
+                painter.setPen(QColor("#f1f2f5"))
+                painter.drawText(QRectF(84 if self.back_button.isVisible() else 32, 23, self.width() - 168, 36),
+                                 Qt.AlignmentFlag.AlignVCenter, "音乐来源")
+                painter.setFont(_entry_font(13))
+                painter.setPen(QColor("#9296a3"))
+                painter.drawText(QRectF(32, 76, self.width() - 64, 24), Qt.AlignmentFlag.AlignVCenter,
+                                 "选择平台，使用对应账号连接音乐库")
                 if self._expanded > .05:
-                    pane = QRectF(22, 126, self.width() - 44, max(1, self.height() - (150 if self._account else 238)))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(QColor("#d9d9d9"))
-                    painter.drawRoundedRect(pane, 35, 35)
+                    pane = QRectF(32, 232, self.width() - 64, max(1, self.height() - 256))
+                    painter.setPen(QPen(QColor("#30333b"), 1))
+                    painter.setBrush(QColor("#1e2027"))
+                    painter.drawRoundedRect(pane, 20, 20)
                     if self._expanded > .85:
                         if self._account is not None:
-                            avatar = QRectF(64, 150, 155, 155)
+                            avatar = QRectF(64, 280, 128, 128)
                             source = next(item for item in ENTRY_SOURCES if item.source_id == self._account.source_id)
                             painter.setPen(QPen(QColor(source.color), 6))
-                            painter.setBrush(QColor("#525252"))
+                            painter.setBrush(QColor("#343740"))
                             painter.drawEllipse(avatar)
                             if not self._account_image.isNull():
                                 painter.save()
@@ -616,13 +668,18 @@ class PlaybackEntryWindow(QWidget):
                                               (self._account_image.height() - side) / 2, side, side)
                                 painter.drawImage(avatar, self._account_image, crop)
                                 painter.restore()
-                            painter.setFont(_entry_font(24))
-                            painter.setPen(QColor("#111111"))
-                            name_rect = QRectF(250, 185, 180, 42)
+                            painter.setFont(_entry_font(22))
+                            painter.setPen(QColor("#f4f5f8"))
+                            name_rect = QRectF(232, 292, self.width() - 264, 40)
                             name = painter.fontMetrics().elidedText(self._account.nickname or "已登录账号", Qt.TextElideMode.ElideRight, round(name_rect.width()))
                             painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter, name)
+                            painter.setFont(_entry_font(13))
+                            painter.setPen(QColor("#a3a7b3"))
+                            painter.drawText(QRectF(232, 336, self.width() - 264, 24), Qt.AlignmentFlag.AlignVCenter, f"{source.name} · 已连接")
                             return
-                        qr = QRectF((self.width() - 174) / 2, 143, 174, 174)
+                        qr_top = 248 if self.height() < 584 else 264
+                        qr_side = min(192, max(80, self.height() - 148 - qr_top))
+                        qr = QRectF((self.width() - qr_side) / 2, qr_top, qr_side, qr_side)
                         source = next((item for item in ENTRY_SOURCES if item.source_id == self.selected_source), ENTRY_SOURCES[0])
                         painter.setPen(QPen(QColor(source.color), 6))
                         painter.setBrush(QColor("#ffffff"))

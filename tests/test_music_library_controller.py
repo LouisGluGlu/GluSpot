@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.lyrics import LocalLyricsStore
 from api.models import ColorToken, IslandVisualData, TrackData
-from api.online_music import AccountSnapshot, CatalogPage, MusicSource, OnlineMusicError, OnlinePlaylist, OnlineSong
+from api.online_music import AccountSnapshot, CatalogPage, MusicSource, OnlineMusicError, OnlinePlaylist, OnlineSong, StreamInfo
 from local.music_library_controller import MusicLibraryController
 from local.music_library_window import LibraryCollection, MusicLibraryWindow
 from local.owned_music_player import OwnedMusicPlayer
@@ -46,6 +46,14 @@ class Service:
         if isinstance(value, Exception):
             raise value
         return value
+
+    def daily_recommendations(self, source):
+        self.calls.append(("daily", source))
+        return (OnlineSong(source, "daily-song", "Daily song", artwork_url="https://example.test/daily.png"),)
+
+    def personal_fm(self, source):
+        self.calls.append(("fm", source))
+        return (OnlineSong(source, "fm-song", "FM song", artwork_url="https://example.test/fm.png"),)
 
     def logout(self, source):
         self.calls.append(("logout", source))
@@ -94,8 +102,9 @@ class Player(QObject):
             self.changed.emit()
         self.queue, self.index = tuple(songs), 0
         self._epoch += 1
-        self.track = track(self.queue[0])
+        self.track = replace(track(self.queue[0]), is_playing=True)
         self._set_status("loading_stream")
+        self._set_status("playing")
         self.changed.emit()
         return True
 
@@ -185,6 +194,62 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.entry.calls, [("login", "qq")])
         self.assertFalse(self.window.isVisible())
         self.assertFalse(any(call[0] == "playlists" for call in self.service.calls))
+
+    def test_recommendation_covers_arrive_without_blocking_catalog_or_resetting_search(self):
+        self.open()
+        jobs = [job for job in self.tasks.jobs if job[0][0] == "recommendation_art"]
+        self.assertEqual(len(jobs), 2)
+        self.assertFalse(self.window._loading)
+        self.search("query")
+        for job in jobs:
+            self.tasks.run(job)
+        rows = {row.key: row for row in self.controller._collections}
+        self.assertEqual(rows["daily"].artwork_url, "https://example.test/daily.png")
+        self.assertEqual(rows["fm"].artwork_url, "https://example.test/fm.png")
+        self.assertEqual(self.window.search.text(), "query")
+        self.assertEqual(self.window.collections, ())
+        self.window.search.clear()
+        self.assertEqual(self.window.collections[0].artwork_url, "https://example.test/daily.png")
+
+    def test_back_leaves_search_then_source_without_logging_out_or_stopping_playback(self):
+        self.open()
+        self.player.play_queue((self.song,))
+        self.search("query")
+        old = self.tasks.latest("search")
+        self.window.backRequested.emit()
+        self.assertEqual(self.window.search.text(), "")
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.window.collections, self.controller._collections)
+        self.window.backRequested.emit()
+        self.assertFalse(self.window.isVisible())
+        self.assertEqual(self.entry.calls, [("login", "")])
+        self.assertNotIn(("stop",), self.player.calls)
+        self.assertFalse(any(call[0] == "logout" for call in self.service.calls))
+        self.assertTrue(self.service.accounts["netease"].logged_in)
+        self.assertIsNone(old[1]())
+        self.controller.search("late")
+        self.assertEqual(self.controller._source, "")
+
+    def test_recommendation_art_from_previous_source_cannot_replace_new_library(self):
+        self.open()
+        jobs = [job for job in self.tasks.jobs if job[0][0] == "recommendation_art"]
+        self.open("qq")
+        for token, action in jobs:
+            self.assertEqual(action(), ())
+            self.tasks.completed.emit(token, self.service.daily_recommendations("netease"), None)
+        self.assertEqual(self.window._account.source_id, "qq")
+        self.assertEqual(self.controller._collections, ())
+        self.assertEqual(self.window.collections, ())
+
+    def test_back_during_song_request_keeps_late_completion_from_opening_surface(self):
+        self.open()
+        self.window._rows[0].cover.click()
+        self.window.backRequested.emit()
+        self.assertIsNone(self.controller._opening)
+        self.assertNotIn(("visual", "owned:netease:song-1"), self.island.calls)
+        self.player.play_queue((self.song,))
+        self.assertEqual(self.island.calls, [])
+        self.assertFalse(self.window._opening)
 
     def test_stale_open_action_and_completion_do_not_replace_new_source(self):
         self.controller.open_source("netease")
@@ -543,8 +608,50 @@ class OwnedControllerHandoffTests(unittest.TestCase):
         self.player.play_queue((OnlineSong("netease", "old", "old song"),))
         self.controller.play_collection(self.row, "window", QRect())
         visuals = [call for call in self.island.calls if call[0] == "visual"]
-        self.assertEqual(visuals, [("visual", "owned:netease:new")])
+        self.assertEqual(visuals, [])
         self.assertEqual(self.player.status, "loading_stream")
+        self.assertTrue(self.window.isVisible())
+        token, _ = self.play_tasks.latest("stream")
+        self.play_tasks.completed.emit(token, StreamInfo("netease", "new", "https://example.test/audio.mp3", True), None)
+        self.assertEqual([call for call in self.island.calls if call[0] == "visual"], [("visual", "owned:netease:new")])
+        self.assertFalse(self.window.isVisible())
+
+    def test_unavailable_stream_keeps_visible_library_and_releases_controls(self):
+        self.window._rows[0].cover.click()
+        token, _ = self.play_tasks.latest("stream")
+        self.play_tasks.completed.emit(token, StreamInfo("netease", "new"), None)
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.island.calls, [])
+        self.assertFalse(self.window._opening)
+        self.assertTrue(self.window._rows[0].isEnabled())
+        self.assertIn("播放地址", self.window._error)
+
+    def test_back_from_search_cancels_pending_stream_before_restoring_catalog(self):
+        self.window.search.setText("query")
+        self.window.set_search_results((self.row,))
+        self.window._rows[0].cover.click()
+        token, action = self.play_tasks.latest("stream")
+        self.assertIsNotNone(self.controller._opening)
+        self.window.backRequested.emit()
+        self.assertEqual(self.window.search.text(), "")
+        self.assertIsNone(self.controller._opening)
+        self.assertIsNone(self.player.track)
+        self.assertIsNone(action())
+        self.play_tasks.completed.emit(token, StreamInfo("netease", "new", "https://example.test/audio.mp3", True), None)
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.island.calls, [])
+        self.assertFalse(self.window._opening)
+        self.assertFalse(self.window._loading)
+        self.assertEqual(self.window.collections, self.controller._collections)
+
+    def test_delayed_decoder_failure_does_not_hide_error_in_music_surface(self):
+        self.window._rows[0].cover.click()
+        self.player.failure_reason = "network"
+        self.player._set_status("playback_failed")
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.island.calls, [])
+        self.assertIn("连接失败", self.window._error)
+        self.assertFalse(self.window._loading)
 
     def test_real_owned_rejected_stream_does_not_handoff_or_disable_rows(self):
         self.player.play_queue((OnlineSong("netease", "old", "old song"),))

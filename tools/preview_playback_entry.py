@@ -50,6 +50,9 @@ def main():
     window.set_login_snapshot(SimpleNamespace(source_id="netease", state="waiting", qr_image_bytes=bytes(payload), message="布局测试图片 · 不是账号登录二维码"))
     app.processEvents()
     window.grab().save(str(options.output / "login-fixture.png"))
+    window.resize(520, 520)
+    app.processEvents()
+    window.grab().save(str(options.output / "login-short-screen-fixture.png"))
     window.close()
     print(options.output.resolve())
 

@@ -246,6 +246,53 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         self.assertEqual(playlists["items"][0]["id"], 5)
         self.assertEqual((playlists["next_offset"], playlists["has_more"]), (4, False))
 
+    def test_netease_stream_uses_pinned_standard_module_without_xeapi_startup(self):
+        self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
+            "main.js": "throw new Error('upstream server entry must not load');",
+            "util/xeapiKey.js": "throw new Error('xeapi startup must not load');",
+            "module/song_url_v1.js": "throw new Error('unblock imports must not load');",
+            "module/song_url.js": r'''module.exports=async(query,request)=>{
+              if(query.br!==128000 || query.timeout!==12000 || query.randomCNIP!==false ||
+                 query.cookie.MUSIC_U!=='synthetic-cookie' || query.unblock!==undefined)
+                throw new Error('wrong standard module contract');
+              return request('/api/song/enhance/player/url',{
+                ids:JSON.stringify(String(query.id).split(',')),br:query.br
+              },{cookie:query.cookie,timeout:query.timeout});
+            };''',
+            "util/request.js": r'''module.exports=async(url,data,options)=>{
+              if(url!=='/api/song/enhance/player/url' || data.br!==128000 ||
+                 options.cookie.MUSIC_U!=='synthetic-cookie' || options.timeout!==12000)
+                throw new Error('wrong stream request contract');
+              return {body:{code:200,data:[{id:Number(JSON.parse(data.ids)[0]),
+                url:'https://example.org/fixture.mp3',code:200,fee:0,freeTrialInfo:null,br:data.br}]}};
+            };''',
+        })
+        credential = {"cookie": {"MUSIC_U": "synthetic-cookie"}}
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)}):
+            for song in ("1", "2"):
+                stream = self.backend.request("netease", "stream_url", {"song_id": song}, credential)["data"]
+                entry = stream["data"][0]
+                self.assertEqual(entry["id"], int(song))
+                self.assertEqual(entry["br"], 128000)
+                self.assertIsNone(entry["freeTrialInfo"])
+            self.assertFalse((self.root / "GluSpot/cache/online-music-bridge/xeapi_public_key").exists())
+
+    def test_netease_standard_stream_preserves_trial_and_unavailable_results(self):
+        self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
+            "util/request.js": "module.exports=()=>{};",
+            "module/song_url.js": r'''module.exports=async query=>({body:{code:200,data:[
+              query.id==='trial'?{id:1,url:'https://example.org/trial.mp3',code:200,fee:1,freeTrialInfo:{start:1000,end:31000}}:
+              {id:2,url:null,code:-110,fee:1,freeTrialInfo:null,message:'fixture unavailable'}
+            ]}});''',
+        })
+        credential = {"cookie": {"MUSIC_U": "synthetic-cookie"}}
+        trial = self.backend.request("netease", "stream_url", {"song_id": "trial"}, credential)["data"]["data"][0]
+        self.assertEqual(trial["freeTrialInfo"], {"start": 1000, "end": 31000})
+        self.assertEqual((trial["code"], trial["fee"]), (200, 1))
+        blocked = self.backend.request("netease", "stream_url", {"song_id": "blocked"}, credential)["data"]["data"][0]
+        self.assertIsNone(blocked["url"])
+        self.assertEqual((blocked["code"], blocked["fee"]), (-110, 1))
+
     def test_qq_search_uses_verified_public_contract_and_sparse_page_metadata(self):
         credential = self.qq_catalog_fixture()
         client = self.modules / "@yakult-green-tea" / "qq-music-api" / "dist" / "src" / "services" / "auth" / "httpClient.js"
