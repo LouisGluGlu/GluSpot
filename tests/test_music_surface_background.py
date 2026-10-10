@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageStat
 import numpy as np
@@ -8,7 +9,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QImage
 
 from local.music_surface_background import AlbumFlowBackgroundRenderer
-from local.music_surface_palette import relative_luminance
+from local.music_surface_palette import future_lyric_color, relative_luminance, single_hue_background_colors
 
 
 def _pixels(image: QImage) -> Image.Image:
@@ -33,6 +34,55 @@ def _advance(renderer: AlbumFlowBackgroundRenderer, colors: tuple[QColor, ...], 
 
 class AlbumFlowBackgroundTests(unittest.TestCase):
     COLORS = (QColor(222, 53, 44), QColor(35, 120, 216), QColor(199, 170, 52))
+
+    def test_bright_single_hue_has_soft_tonal_depth_instead_of_a_saturated_wash(self):
+        for source in (QColor(233, 31, 20), QColor(16, 135, 164),
+                       QColor(242, 204, 12), QColor(181, 35, 230)):
+            with self.subTest(source=source.name()):
+                renderer = AlbumFlowBackgroundRenderer()
+                roles = renderer._palette_slots((source,), (1.0,))
+                strengths = renderer._domain_strengths((source,), (1.0,))
+                observed_ranges, mean_saturation = [], []
+                for second in range(0, 61, 3):
+                    renderer._geometry_seconds = second * .74
+                    frame = renderer._paint_field(QSize(256, 144), roles, strengths)
+                    rgb = np.asarray(_pixels(frame)).astype(float)
+                    high, low = rgb.max(2), rgb.min(2)
+                    mean_saturation.append(np.mean((high - low) / np.maximum(high, 1)))
+                    observed_ranges.append(float(np.percentile(high, 90) - np.percentile(high, 10)))
+                    for role in roles:
+                        self.assertLessEqual(relative_luminance(role), renderer.MAX_LUMINANCE)
+                self.assertLess(max(mean_saturation), source.hsvSaturationF() * .65)
+                self.assertGreater(max(observed_ranges), 35)
+                self.assertGreater(max(observed_ranges) - min(observed_ranges), 15)
+                self.assertLess(strengths[2], strengths[0])
+
+    def test_other_cover_routes_keep_exact_native_pixels(self):
+        controls = (self.COLORS, (QColor(112, 112, 112),),
+                    (QColor(8, 25, 38), QColor(20, 130, 240)),
+                    (QColor(195, 30, 40), QColor(240, 240, 240)))
+        for colors in controls:
+            with self.subTest(colors=colors):
+                self.assertFalse(single_hue_background_colors(colors))
+                actual = AlbumFlowBackgroundRenderer().render(QSize(256, 144), colors, 0.0)
+                with patch("local.music_surface_background.single_hue_background_colors", return_value=()):
+                    previous = AlbumFlowBackgroundRenderer().render(QSize(256, 144), colors, 0.0)
+                self.assertEqual(_difference(actual, previous), (0.0, 0))
+
+    def test_single_hue_display_layers_keep_live_lyric_contrast_across_hues(self):
+        for hue in range(0, 360, 15):
+            source = QColor.fromHsv(hue, 235, 225)
+            renderer = AlbumFlowBackgroundRenderer()
+            frame = renderer.render(QSize(256, 144), (source,), 0.0, weights=(1.0,))
+            backdrop = renderer.contrast_backdrop(frame)
+            self.assertIsNotNone(backdrop)
+            self.assertLessEqual(relative_luminance(backdrop), renderer.MAX_LUMINANCE)
+            self.assertGreaterEqual(1.05 / (relative_luminance(backdrop) + .05), 3.3)
+            ink = future_lyric_color(source, backdrop, primary=source, use_light=True, require_light=True)
+            composed = QColor(*(round(front * ink.alphaF() + back * (1 - ink.alphaF()))
+                                for front, back in zip(ink.getRgb()[:3], backdrop.getRgb()[:3])))
+            ratio = (relative_luminance(composed) + .05) / (relative_luminance(backdrop) + .05)
+            self.assertGreaterEqual(ratio, 2.30)
 
     def test_4k_portrait_and_small_outputs_are_opaque_and_bounded(self):
         renderer = AlbumFlowBackgroundRenderer()
@@ -113,8 +163,10 @@ class AlbumFlowBackgroundTests(unittest.TestCase):
         self.assertEqual(_difference(halfway, interrupted), (0.0, 0))
         completed = _advance(renderer, green, 1.9, start=0.6)
         red_mean, green_mean, blue_mean = ImageStat.Stat(_pixels(completed)).mean
-        self.assertGreater(green_mean, red_mean + 40)
-        self.assertGreater(green_mean, blue_mean + 40)
+        # The finished single-hue page retains green dominance after its
+        # new display layers soften saturation; raw source green is intact.
+        self.assertGreater(green_mean, red_mean + 15)
+        self.assertGreater(green_mean, blue_mean + 15)
 
     def test_monochrome_and_missing_art_remain_neutral_with_tonal_motion(self):
         for colors in ((), (QColor(255, 255, 255),), (QColor(0, 0, 0),),

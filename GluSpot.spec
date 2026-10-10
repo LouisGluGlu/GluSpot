@@ -94,7 +94,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(ROOT / "assets" / "brand" / "gluspot.ico"),
+    icon=str(ROOT / "assets" / "brand" / "gluspot-glu.ico"),
     version=str(ROOT / "packaging" / "windows" / "version_info.txt"),
 )
 

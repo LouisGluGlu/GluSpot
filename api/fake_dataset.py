@@ -114,6 +114,6 @@ FAKE_PLUGINS = (
 
 FAKE_VISUAL_DATA = IslandVisualData(
     track=FAKE_TRACK,
-    messages=FAKE_MESSAGES,
-    plugins=FAKE_PLUGINS,
+    messages=(),
+    plugins=(),
 )

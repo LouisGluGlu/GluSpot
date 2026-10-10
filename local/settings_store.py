@@ -154,12 +154,13 @@ def normalize_mydockfinder_listener_process_names(listener_process_names=None) -
 DEFAULT_SETTINGS = {
     "v2_playback_onboarding_completed": False,
     "v2_owned_playback_enabled": True,
+    "v2_owned_playback_mode": "sequential",
     "v2_system_capture_enabled": False,
     "v2_startup_mode": "none",
     "v2_custom_icon_path": "",
     "v2_music_playing": True,
     "v2_music_auto_detect": False,
-    "v2_persistent_plugin": True,
+    "v2_persistent_plugin": False,
     "v2_super_topmost": True,
     "v2_location_mode": "top",
     "v2_top_notch_height_mode": "standard",
@@ -172,7 +173,7 @@ DEFAULT_SETTINGS = {
     "v2_taskbar_left_handle_color": "#8E8E93",
     "v2_expanded": False,
     "v2_show_seconds": True,
-    "v2_enabled_plugins": ["time"],
+    "v2_enabled_plugins": [],
     "v2_side_island_style": "standard",
     "v2_plugin_island_style": "standard",
     "v2_plugin_fullscreen_alert_style": "toast",
@@ -293,14 +294,57 @@ DEFAULT_SETTINGS = {
     "v2_schedule_reminder_minutes": "15,30,5",
     "v2_schedule_json_path": "",
     "v2_schedule_ics_path": "",
-    "v2_enable_message_detection": True,
-    "v2_enable_wechat_notification": True,
+    "v2_enable_message_detection": False,
+    "v2_enable_wechat_notification": False,
     "v2_enable_wechat_detail_notification": False,
     "v2_enable_qq_notification": False,
     "v2_enable_qq_detail_notification": False,
     "v2_enable_dingtalk_notification": False,
     "v2_enable_dingtalk_detail_notification": False,
 }
+
+
+# Removed controls keep compatibility keys, but old files and visual-state
+# exports cannot restore custom styles or restart retired runtime services.
+# Playback-page translation is a session action; its persisted default stays off.
+FIXED_DEFAULT_SETTING_KEYS = frozenset({
+    "v2_music_playing", "v2_music_auto_detect", "v2_persistent_plugin",
+    "v2_enabled_plugins", "v2_super_topmost", "v2_location_mode", "v2_top_notch_height_mode",
+    "v2_finder_mode", "v2_manual_mydockfinder", "v2_show_seconds",
+    "v2_taskbar_corner_style", "v2_taskbar_auto_hide_mode",
+    "v2_taskbar_left_handle_color", "v2_tasker_follow_taskbar_color",
+    "v2_side_island_style", "v2_plugin_island_style", "v2_music_island_style",
+    "v2_music_expanded_layout_style", "v2_plugin_fullscreen_alert_style",
+    "v2_plugin_fullscreen_alert_x_offset", "v2_plugin_fullscreen_alert_y_offset",
+    "v2_font_family", "v2_settings_font_family", "v2_imported_settings_fonts",
+    "v2_high_quality_font_rendering", "v2_empty_island_display_mode",
+    "v2_no_music_island_priority", "v2_empty_bar_palette", "v2_empty_bar_width",
+    "v2_empty_bar_height", "v2_empty_bar_y_offset", "v2_empty_bar_opacity",
+    "v2_empty_bar_custom_colors", "v2_stack_center_ratio", "v2_window_pos",
+    "v2_last_window_position", "v2_position_preset", "v2_stack_direction",
+    "v2_auto_expand_bounds", "v2_expand_direction", "v2_ambient_intensity",
+    "v2_music_flow_intensity", "v2_music_ambience_values",
+    "v2_music_reactive_background_enabled", "v2_music_reactive_background_intensity",
+    "v2_compact_duotone_balance", "v2_expanded_duotone_balance",
+    "v2_solid_album_background_fallback", "v2_lyric_font_size",
+    "v2_compact_lyric_show_cover", "v2_no_lyrics_display_mode", "v2_no_lyrics_text",
+    "v2_wave_font_weight", "v2_gelv_font_family", "v2_gelv_primary_font_size",
+    "v2_gelv_secondary_font_size", "v2_gelv_dual_line_font_size",
+    "v2_gelv_initial_word_spacing", "v2_gelv_word_spacing",
+    "v2_gelv_color_fill_enabled", "v2_gelv_word_fill_enabled",
+    "v2_enable_dual_line_lyrics", "v2_dual_line_font_size",
+    "v2_dual_line_secondary_weight", "v2_dual_line_secondary_spacing",
+    "v2_album_island_cover_count", "v2_album_island_cover_size",
+    "v2_album_island_compact_cover_size", "v2_album_island_expanded_cover_size",
+    "v2_album_island_spacing", "v2_album_island_secondary_style",
+    "v2_album_island_perspective_amount", "v2_barrage_y_offset",
+    "v2_barrage_font_size", "v2_barrage_speed", "v2_barrage_use_backdrop",
+    "v2_barrage_show_icon", "v2_barrage_display_mode",
+    "v2_enable_message_detection", "v2_enable_wechat_notification",
+    "v2_enable_wechat_detail_notification", "v2_enable_qq_notification",
+    "v2_enable_qq_detail_notification", "v2_enable_dingtalk_notification",
+    "v2_enable_dingtalk_detail_notification",
+})
 
 
 _REMOVED_MUSIC_AMBIENCE_STYLES = {"yaoguang", "bilateral_diffraction"}
@@ -317,6 +361,8 @@ _REMOVED_VISUAL_SETTING_KEYS = {
     "v2_lyric_elastic_mode",
     "v2_lyric_word_spacing",
     "v2_fullscreen_reading_effect",
+    "v2_plugin_count",
+    "v2_taskbar_fusion_mode",
 }
 
 
@@ -368,6 +414,9 @@ class SettingsManager(QObject):
             if not self._settings["v2_owned_playback_enabled"] and not self._settings["v2_system_capture_enabled"]:
                 self._settings["v2_owned_playback_enabled"] = True
                 migrated = True
+            if self._settings.get("v2_owned_playback_mode") not in ("sequential", "shuffle", "repeat_one"):
+                self._settings["v2_owned_playback_mode"] = "sequential"
+                migrated = True
             original_style = self._settings.get("v2_music_ambience_style")
             for key in ("v2_music_ambience_style", "v2_music_background_follow_previous_style"):
                 raw = self._settings.get(key, "")
@@ -398,6 +447,10 @@ class SettingsManager(QObject):
             reading_strategy = normalize_music_reading_strategy(raw_reading_strategy)
             self._settings["v2_music_surface_reading_strategy"] = reading_strategy
             migrated = migrated or raw_reading_strategy != reading_strategy
+            for key in FIXED_DEFAULT_SETTING_KEYS:
+                default = DEFAULT_SETTINGS[key]
+                migrated = migrated or self._settings.get(key) != default
+                self._settings[key] = copy.deepcopy(default)
             if migrated:
                 self.save()
         except (json.JSONDecodeError, OSError):
@@ -425,11 +478,15 @@ class SettingsManager(QObject):
             pass
 
     def get(self, key: str, default=None):
+        if key in FIXED_DEFAULT_SETTING_KEYS:
+            return copy.deepcopy(DEFAULT_SETTINGS[key])
         return self._settings.get(key, default)
 
     def set(self, key: str, value):
-        if key in _REMOVED_VISUAL_SETTING_KEYS:
+        if key in _REMOVED_VISUAL_SETTING_KEYS or key in FIXED_DEFAULT_SETTING_KEYS:
             return
+        if key == "v2_owned_playback_mode" and value not in ("sequential", "shuffle", "repeat_one"):
+            value = "sequential"
         if key in {"v2_music_ambience_style", "v2_music_background_follow_previous_style"}:
             value = normalize_music_ambience_style(value) if value or key == "v2_music_ambience_style" else ""
         if key == "v2_music_ambience_values":

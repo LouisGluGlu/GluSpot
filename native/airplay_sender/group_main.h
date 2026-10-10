@@ -76,6 +76,10 @@ struct GroupArguments {
     std::vector<std::string> localEndpoints;
     std::string sourceId = "02:47:4C:55:53:50";
     std::vector<GroupReceiverArgument> receivers;
+    std::string pcmPipe;
+    uint32_t pcmParentPid = 0;
+    uint64_t pcmParentCreatedAt = 0, pcmEpoch = 0;
+    bool directPcm() const { return !pcmPipe.empty(); }
 };
 inline uint64_t groupUnsigned(const std::string& value, uint64_t maximum, const char* field) {
     uint64_t result = 0;
@@ -157,19 +161,33 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
             else if (key == "--music-created-at") result.musicCreatedAt = groupUnsigned(value, UINT64_MAX, "music creation token");
             else if (key == "--source-endpoint") result.sourceEndpoint = value;
             else if (key == "--source-id") result.sourceId = value;
+            else if (key == "--pcm-pipe") result.pcmPipe = value;
+            else if (key == "--pcm-parent-pid") result.pcmParentPid = uint32_t(groupUnsigned(value, 0xffffffffULL, "PCM parent PID"));
+            else if (key == "--pcm-parent-created-at") result.pcmParentCreatedAt = groupUnsigned(value, UINT64_MAX, "PCM parent creation token");
+            else if (key == "--pcm-epoch") result.pcmEpoch = groupUnsigned(value, UINT64_MAX, "PCM epoch");
             else throw std::invalid_argument("Unknown group option: " + key);
         }
     }
     finishMember();
-    if (!global.count("--group") || !result.musicPid || !result.musicCreatedAt ||
-        (result.receivers.empty() && result.localEndpoints.size() < 2))
-        throw std::invalid_argument("Group requires a verified music process, source endpoint and two outputs or AirPlay");
-    groupText(result.sourceEndpoint, 2048, "source endpoint");
+    if (!global.count("--group")) throw std::invalid_argument("Missing group mode");
+    if (result.directPcm()) {
+        static const std::regex pipeName("^GluSpotPCM-[0-9a-f]{32}$");
+        if (!std::regex_match(result.pcmPipe, pipeName) || !result.pcmParentPid ||
+            !result.pcmParentCreatedAt || !result.pcmEpoch || global.count("--music-pid") ||
+            global.count("--music-created-at") || global.count("--source-endpoint") ||
+            (result.receivers.empty() && result.localEndpoints.empty()))
+            throw std::invalid_argument("Direct PCM requires an authenticated parent, epoch and output, without process capture options");
+    } else {
+        if (global.count("--pcm-pipe") || global.count("--pcm-parent-pid") || global.count("--pcm-parent-created-at") || global.count("--pcm-epoch") ||
+            !result.musicPid || !result.musicCreatedAt || (result.receivers.empty() && result.localEndpoints.size() < 2))
+            throw std::invalid_argument("Group requires a verified music process, source endpoint and two outputs or AirPlay");
+        groupText(result.sourceEndpoint, 2048, "source endpoint");
+    }
     if (result.receivers.size() + result.localEndpoints.size() > 8)
         throw std::invalid_argument("At most eight group outputs are supported");
     for (size_t index = 0; index < result.localEndpoints.size(); ++index) {
         const auto& endpoint = result.localEndpoints[index];
-        if (groupSameEndpoint(endpoint, result.sourceEndpoint) ||
+        if ((!result.directPcm() && groupSameEndpoint(endpoint, result.sourceEndpoint)) ||
             std::any_of(result.localEndpoints.begin(), result.localEndpoints.begin() + index,
                 [&endpoint](const auto& previous) { return groupSameEndpoint(endpoint, previous); }))
             throw std::invalid_argument("Local group outputs must be unique and differ from muted source");

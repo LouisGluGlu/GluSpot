@@ -16,7 +16,7 @@ from PySide6.QtCore import QPointF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 
 from local.music_lyric_motion import MotionSimulationClock
-from local.music_surface_palette import relative_luminance
+from local.music_surface_palette import relative_luminance, single_hue_background_colors
 
 
 class AlbumFlowBackgroundRenderer:
@@ -66,6 +66,10 @@ class AlbumFlowBackgroundRenderer:
         # A photographic shadow is permitted to be a visible colored mass,
         # but a bright blue must not be replaced by its dark lyric role.
         color = QColor.fromHsv(hue, saturation, min(220, round(80 + value * 0.55)))
+        return cls._bounded_luminance(color)
+
+    @classmethod
+    def _bounded_luminance(cls, color: QColor) -> QColor:
         if relative_luminance(color) > cls.MAX_LUMINANCE:
             low, high = 0.0, 1.0
             for _ in range(12):
@@ -85,8 +89,12 @@ class AlbumFlowBackgroundRenderer:
         return QSize(max(1, round(width * scale)), max(1, round(height * scale)))
 
     @classmethod
-    def _palette_slots(cls, colors: tuple[QColor, ...]) -> tuple[QColor, ...]:
+    def _palette_slots(cls, colors: tuple[QColor, ...], weights: tuple[float, ...] = ()) -> tuple[QColor, ...]:
         colors = tuple(color for color in colors[:cls.MAX_COLORS] if color.isValid())
+        tonal_layers = single_hue_background_colors(colors, weights=weights)
+        if tonal_layers:
+            layers = tuple(cls._bounded_luminance(color) for color in tonal_layers)
+            return (*layers, *(QColor(layers[0]) for _ in range(cls.MAX_COLORS + 1 - len(layers))))
         pigments = [cls._ambient_color(color) for color in colors]
         if not pigments:
             pigments = [QColor(44, 44, 44)]
@@ -116,6 +124,11 @@ class AlbumFlowBackgroundRenderer:
 
     @classmethod
     def _domain_strengths(cls, colors: tuple[QColor, ...], weights: tuple[float, ...]) -> tuple[float, ...]:
+        if single_hue_background_colors(colors, weights=weights):
+            # Synthetic tonal layers express depth rather than source area.
+            # The strongest hue has the smallest domain, over a broad pale
+            # mass and middle band; unused slots match the quiet base.
+            return (1.0, 0.88, 0.60, 1.0, 1.0, 1.0)
         if not weights or len(weights) != len(colors):
             return (1.0,) * cls.MAX_COLORS
         # Cover support controls occupied area, not a global transparency
@@ -250,7 +263,7 @@ class AlbumFlowBackgroundRenderer:
         previous_intensity = intensity if self._last_intensity is None else self._last_intensity
         self._geometry_seconds += delta * previous_intensity
         self._last_intensity = intensity
-        target = self._palette_slots(colors)
+        target = self._palette_slots(colors, weights)
         strengths = self._domain_strengths(colors, weights)
         retargeted = target != self._target_colors or strengths != self._target_strengths
         if retargeted:

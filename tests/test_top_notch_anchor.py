@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.providers import EmptyIslandDataProvider, empty_visual_data
+from local.island_audio_device_motion import IslandAudioDeviceMotion
 from local.island_stack_visual import IslandKind, IslandStackVisual, SpringRect, StackVisual
 
 
@@ -118,6 +119,10 @@ class TopNotchAnchorTests(unittest.TestCase):
 
     def test_main_kind_change_and_device_notice_keep_same_attached_edge(self):
         visual = self.visual
+        # This legacy notice helper remains an independent layout audit.
+        # Actual islands retain their retired-extras boundary by default.
+        visual._runtime_extras_retired = False
+        visual._audio_device_motion = IslandAudioDeviceMotion()
         visual.show()
         self.app.processEvents()
         device = AudioRouteDevice("buds", "AirPods Pro", "airpods-pro", "windows", True)

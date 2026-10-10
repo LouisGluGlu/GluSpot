@@ -130,7 +130,12 @@ def run(output: Path, timeout: float) -> dict:
 
     def check():
         nonlocal timed_out
-        if owned.status in {"ended", "playback_failed", "stream_unavailable"}:
+        if (any(sample["status"] == "EndOfMedia" for sample in statuses)
+                and sum(call["operation"] == "stream" for call in service_calls) >= 2
+                and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+                and player.position() >= 400):
+            loop.quit()
+        elif owned.status in {"playback_failed", "stream_unavailable"}:
             loop.quit()
         elif time.monotonic() - started > timeout:
             timed_out = True
@@ -153,10 +158,10 @@ def run(output: Path, timeout: float) -> dict:
             "http_fixture_requested": bool(requests),
             "qt_playing_state_observed": any(sample["state"] == "PlayingState" for sample in states),
             "qt_positions_advanced": progressed,
-            "qt_positions_monotonic": bool(observed_positions) and all(a <= b for a, b in zip(observed_positions, observed_positions[1:])),
+            "qt_clock_restarts_after_eof": any(a >= 1500 and b == 0 for a, b in zip(observed_positions, observed_positions[1:])),
             "qt_end_of_media_observed": any(sample["status"] == "EndOfMedia" for sample in statuses),
-            "owned_end_observed": owned.status == "ended",
-            "provider_clock_advanced": last_track is not None and last_track.position_seconds >= 1.5,
+            "owned_sequence_loops": sum(call["operation"] == "stream" for call in service_calls) >= 2 and owned.status == "playing",
+            "provider_clock_advanced": last_track is not None and last_track.position_seconds >= .4,
             "player_output_volume_zero": audio.volume() == 0.0,
             "no_qt_errors": not errors,
             "no_timeout": not timed_out,

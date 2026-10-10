@@ -1,4 +1,4 @@
-"""User-supplied source and account-tool SVGs with bounded Qt render caches."""
+"""User-supplied source/account/playback SVGs with bounded Qt render caches."""
 from __future__ import annotations
 
 from functools import lru_cache
@@ -12,17 +12,19 @@ from local.branding import ROOT_DIR
 
 
 MUSIC_SOURCE_ICON_KEYS = frozenset({"qq", "qishui", "kugou", "netease", "search", "logout", "switch"})
+MUSIC_CONTROL_ICON_KEYS = frozenset({"library", "shuffle", "sequence", "repeat_one"})
 
 
-@lru_cache(maxsize=7)
+@lru_cache(maxsize=11)
 def _svg_renderer(key: str) -> QSvgRenderer | None:
-    if key not in MUSIC_SOURCE_ICON_KEYS:
+    if key not in MUSIC_SOURCE_ICON_KEYS | MUSIC_CONTROL_ICON_KEYS:
         return None
-    renderer = QSvgRenderer(str(ROOT_DIR / "assets" / "music_sources" / f"{key}.svg"))
+    folder = "music_controls" if key in MUSIC_CONTROL_ICON_KEYS else "music_sources"
+    renderer = QSvgRenderer(str(ROOT_DIR / "assets" / folder / f"{key}.svg"))
     return renderer if renderer.isValid() else None
 
 
-@lru_cache(maxsize=56)
+@lru_cache(maxsize=88)
 def _rendered_icon(key: str, width: int, height: int, tint_rgba: int | None) -> QImage:
     image = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.GlobalColor.transparent)
@@ -48,7 +50,7 @@ def music_source_icon_image(key: str, size: QSize, *, tint: QColor | None = None
     The SVG bytes remain unchanged. UI callers render on the GUI thread,
     matching the existing audio-output SVG renderer/cache pattern.
     """
-    if key not in MUSIC_SOURCE_ICON_KEYS or size.isEmpty():
+    if key not in MUSIC_SOURCE_ICON_KEYS | MUSIC_CONTROL_ICON_KEYS or size.isEmpty():
         return QImage()
     width, height = (max(1, min(256, value)) for value in (size.width(), size.height()))
     return _rendered_icon(key, width, height, tint.rgba() if tint is not None else None).copy()

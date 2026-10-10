@@ -105,17 +105,451 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.tasks = Tasks()
         self.artwork_tasks = Tasks()
+        self.prefetch_tasks = Tasks()
         self.qt_player = Player()
         self.service = SimpleNamespace(stream_url=lambda *args: None, lyrics=lambda *args: None)
         self.lyrics = LocalLyricsStore(root=Path(self.temp.name))
         self.player = OwnedMusicPlayer(self.service, self.lyrics, player=self.qt_player,
-                                      audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks)
+                                      audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=self.prefetch_tasks)
         self.songs = (OnlineSong("netease", "1", "第一首", duration_seconds=120),
                       OnlineSong("netease", "2", "第二首", duration_seconds=150))
 
     def tearDown(self):
         self.player.close()
         self.temp.cleanup()
+
+    def covered_songs(self, count=10):
+        return tuple(OnlineSong("netease", str(i), f"song {i}", artist=f"artist {i}",
+            album=f"album {i}", duration_seconds=120 + i, artwork_url=f"https://example.test/{i}.png")
+            for i in range(count))
+
+    def finish_artwork(self, content=None):
+        delivered = set()
+        for _ in range(30):
+            pending = [(token, action) for token, action in self.artwork_tasks.jobs if token not in delivered
+                       and token[3] in self.player._art_running]
+            if not pending:
+                return
+            for token, _ in pending:
+                delivered.add(token)
+                data = content if content is not None else ("art:" + token[2][1]).encode()
+                self.artwork_tasks.completed.emit(token, (data, ColorToken(10, 20, 30), ColorToken(40, 50, 60)), None)
+        self.fail("artwork pump did not settle")
+
+    def authorize_current(self):
+        token = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "stream")
+        song = self.player.queue[self.player.index]
+        self.tasks.completed.emit(token, StreamInfo(song.source_id, song.song_id, "https://example.test/audio", True), None)
+
+    def test_sequential_list_loops_eof_and_manual_boundaries(self):
+        self.assertEqual(self.player.playback_mode, "sequential")
+        self.player.play_queue(self.songs, index=1)
+        self.authorize_current()
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.track.track_id, "owned:netease:1")
+        self.assertEqual(self.player.status, "loading_stream")
+        self.assertEqual(len([token for token, _ in self.tasks.jobs if token[0] == "catalog"]), 0)
+        self.assertTrue(self.player.send_playback_command("previous"))
+        self.assertEqual(self.player.index, 1)
+        self.assertTrue(self.player.send_playback_command("next"))
+        self.assertEqual(self.player.index, 0)
+
+    def test_repeat_one_reauthorizes_eof_but_manual_controls_change_tracks(self):
+        self.player.set_playback_mode("repeat_one")
+        self.player.play_queue(self.covered_songs(2))
+        self.finish_artwork()
+        self.authorize_current()
+        original_track, original_epoch = self.player.track.track_id, self.player._epoch
+        self.qt_player.positionChanged.emit(115000)
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.track.track_id, original_track)
+        self.assertEqual(self.player.track.position_seconds, 0)
+        self.assertEqual(self.player.track.album_art_bytes, b"art:0")
+        self.assertEqual(self.player._epoch, original_epoch + 1)
+        self.assertEqual(self.tasks.jobs[-1][0][0], "stream")
+        self.assertEqual(len([token for token, _ in self.tasks.jobs if token[0] == "catalog"]), 0)
+        self.assertTrue(self.player.send_playback_command("next"))
+        self.assertEqual(self.player.index, 1)
+        self.assertTrue(self.player.send_playback_command("previous"))
+        self.assertEqual(self.player.index, 0)
+
+    def test_pending_or_duplicate_eof_cannot_skip_unconfirmed_next_stream(self):
+        self.player.play_queue(self.songs)
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.index, 0)
+        self.authorize_current()
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.index, 1)
+        count = len(self.tasks.jobs)
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.index, 1)
+        self.assertEqual(len(self.tasks.jobs), count)
+
+    def test_shuffle_preplans_real_next_covers_cycle_and_previous_history(self):
+        self.player._random.shuffle = lambda values: values.reverse()
+        self.player.set_playback_mode("shuffle")
+        self.player.play_queue(self.covered_songs(6))
+        self.assertEqual([entry.track_id for entry in self.player.track.album_queue],
+                         ["owned:netease:5", "owned:netease:4", "owned:netease:3"])
+        self.assertEqual([token[2][1] for token, _ in self.artwork_tasks.jobs], ["0", "5"])
+        self.finish_artwork()
+        self.assertEqual({key[1] for key in self.player._art_cache}, {"0", "3", "4", "5"})
+        visited = [self.player.index]
+        for _ in range(5):
+            advertised = self.player.track.album_queue[0].track_id
+            self.assertTrue(self.player.send_playback_command("next"))
+            self.assertEqual(self.player.track.track_id, advertised)
+            visited.append(self.player.index)
+            self.finish_artwork()
+            self.assertLessEqual(len(self.player._art_cache), 7)
+        self.assertEqual(len(set(visited)), 6)
+        previous, current = visited[-2:]
+        self.assertTrue(self.player.send_playback_command("previous"))
+        self.assertEqual(self.player.index, previous)
+        self.assertTrue(self.player.send_playback_command("next"))
+        self.assertEqual(self.player.index, current)
+        self.assertTrue(self.player.send_playback_command("next"))
+        self.assertNotEqual(self.player.index, current)
+
+    def test_shuffle_repeated_cycles_do_not_repeat_immediately_and_history_is_bounded(self):
+        self.player._random.shuffle = lambda values: None
+        self.player.set_playback_mode("shuffle")
+        self.player.play_queue(self.songs)
+        for _ in range(80):
+            current = self.player.index
+            self.player.send_playback_command("next")
+            self.assertNotEqual(self.player.index, current)
+            self.assertLessEqual(len(self.player._shuffle_history), len(self.songs) + 3)
+            self.assertLessEqual(len(self.player._shuffle_pending), 3)
+
+    def test_shuffle_duplicate_catalog_identity_cannot_repeat_immediately(self):
+        self.player._random.shuffle = lambda values: None
+        self.player.set_playback_mode("shuffle")
+        self.player.play_queue((self.songs[0], self.songs[0], self.songs[1]), index=1)
+        for _ in range(12):
+            current = self.player.track.track_id
+            self.player.send_playback_command("next")
+            self.assertNotEqual(self.player.track.track_id, current)
+
+    def test_single_song_modes_restart_without_impossible_shuffle_choice(self):
+        for mode in ("sequential", "shuffle", "repeat_one"):
+            self.player.set_playback_mode(mode)
+            self.player.play_queue(self.songs[:1])
+            self.authorize_current()
+            self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+            self.assertEqual(self.player.index, 0)
+            self.assertEqual(self.player.status, "loading_stream")
+            self.assertTrue(self.player.send_playback_command("next"))
+
+    def test_setting_mode_preserves_current_stream_and_validates_idle_closed_values(self):
+        self.assertTrue(self.player.set_playback_mode("shuffle"))
+        for invalid in ("repeat", "", None, [], "SHUFFLE"):
+            self.assertFalse(self.player.set_playback_mode(invalid))
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        current, epoch, url = self.player.track.track_id, self.player._epoch, self.qt_player.url
+        with patch.object(self.qt_player, "stop", wraps=self.qt_player.stop) as stop:
+            self.assertTrue(self.player.set_playback_mode("repeat_one"))
+        stop.assert_not_called()
+        self.assertEqual((self.player.track.track_id, self.player._epoch, self.qt_player.url), (current, epoch, url))
+        self.player.stop()
+        self.assertEqual(self.player.playback_mode, "repeat_one")
+        self.assertEqual(self.player._shuffle_history, [])
+        self.assertEqual(list(self.player._shuffle_pending), [])
+        self.player.close()
+        self.assertFalse(self.player.set_playback_mode("sequential"))
+
+    def test_shuffle_queue_replacement_clears_old_plan_stream_and_cover_results(self):
+        self.player._random.shuffle = lambda values: values.reverse()
+        self.player.set_playback_mode("shuffle")
+        self.player.play_queue(self.covered_songs(6))
+        stream = self.tasks.jobs[-1][0]
+        art = self.artwork_tasks.jobs[0][0]
+        replacement = (OnlineSong("qq", "x", "new", artwork_url="https://example.test/new.png"),)
+        self.player.play_queue(replacement)
+        self.tasks.completed.emit(stream, StreamInfo("netease", "0", "https://example.test/old", True), None)
+        self.artwork_tasks.completed.emit(art, (b"old", ColorToken(1, 2, 3), ColorToken(4, 5, 6)), None)
+        self.assertEqual(self.player.track.track_id, "owned:qq:x")
+        self.assertEqual(self.player.track.album_art_bytes, b"")
+        self.assertEqual(self.player._shuffle_history, [0])
+        self.assertTrue(all(index == 0 for index in self.player._shuffle_pending))
+
+    def test_fm_shuffle_only_reorders_unplayed_batch_and_continues_new_songs(self):
+        songs = self.covered_songs(9)
+        self.player._random.shuffle = lambda values: values.reverse()
+        self.player.set_playback_mode("shuffle")
+        self.service.personal_fm = lambda source: songs[:3]
+        self.player.play_personal_fm()
+        token, action = self.tasks.jobs[-1]
+        self.tasks.completed.emit(token, action(), None)
+        self.assertEqual([song.song_id for song in self.player.queue], ["0", "2", "1"])
+        self.assertEqual([entry.track_id for entry in self.player.track.album_queue], ["owned:netease:2", "owned:netease:1"])
+        self.authorize_current()
+        self.prefetch_tasks.completed.emit(self.prefetch_tasks.jobs[-1][0], songs[3:6], None)
+        self.assertEqual([song.song_id for song in self.player.queue], ["0", "2", "1", "5", "4", "3"])
+        self.finish_artwork()
+        played = [self.player.queue[self.player.index].song_id]
+        for _ in range(5):
+            advertised = self.player.track.album_queue[0].track_id
+            self.player.send_playback_command("next")
+            self.assertEqual(self.player.track.track_id, advertised)
+            played.append(self.player.queue[self.player.index].song_id)
+            self.finish_artwork()
+        self.assertEqual(played, ["0", "2", "1", "5", "4", "3"])
+        self.assertEqual([song.song_id for song in self.player.queue[:self.player.index]], ["1", "5", "4"])
+        self.assertTrue(self.player.send_playback_command("previous"))
+        self.assertEqual(self.player.track.track_id, "owned:netease:4")
+        self.assertEqual(self.player.track.album_art_bytes, b"art:4")
+        self.assertTrue(self.player.send_playback_command("next"))
+        self.assertEqual(self.player.track.track_id, "owned:netease:3")
+        self.service.personal_fm = lambda source: songs[6:9]
+        self.assertTrue(self.player.send_playback_command("next"))
+        token, action = self.tasks.jobs[-1]
+        self.assertEqual(token[2], "fm_continue")
+        self.tasks.completed.emit(token, action(), None)
+        self.assertEqual(self.player.track.track_id, "owned:netease:8")
+        self.assertEqual([song.song_id for song in self.player.queue[self.player.index:]], ["8", "7", "6"])
+
+    def test_fm_switch_to_shuffle_keeps_current_and_history_then_repeat_eof_current(self):
+        songs = self.covered_songs(7)
+        self.service.personal_fm = lambda source: songs[:3]
+        self.player.play_personal_fm()
+        token, action = self.tasks.jobs[-1]
+        self.tasks.completed.emit(token, action(), None)
+        self.authorize_current()
+        self.prefetch_tasks.completed.emit(self.prefetch_tasks.jobs[-1][0], songs[3:6], None)
+        self.player.send_playback_command("next")
+        self.player._random.shuffle = lambda values: values.reverse()
+        self.player.set_playback_mode("shuffle")
+        self.assertEqual([song.song_id for song in self.player.queue], ["0", "1", "5", "4", "3", "2"])
+        self.assertEqual(self.player.track.track_id, "owned:netease:1")
+        self.player.set_playback_mode("repeat_one")
+        self.authorize_current()
+        catalog_count = len([token for token, _ in self.tasks.jobs if token[0] == "catalog"])
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.track.track_id, "owned:netease:1")
+        self.assertEqual(len([token for token, _ in self.tasks.jobs if token[0] == "catalog"]), catalog_count)
+        self.player.send_playback_command("next")
+        self.assertEqual(self.player.track.track_id, "owned:netease:5")
+
+    def test_manual_previous_cancels_waiting_fm_next_without_losing_new_batch(self):
+        songs = self.covered_songs(6)
+        self.service.personal_fm = lambda source: songs[:3]
+        self.player.play_personal_fm()
+        token, action = self.tasks.jobs[-1]
+        self.tasks.completed.emit(token, action(), None)
+        self.authorize_current()
+        prefetch = self.prefetch_tasks.jobs[-1][0]
+        self.player.send_playback_command("next")
+        self.player.send_playback_command("next")
+        self.player.send_playback_command("next")
+        self.assertTrue(self.player._fm_advance_pending)
+        self.player.set_playback_mode("shuffle")
+        self.player.send_playback_command("previous")
+        self.assertFalse(self.player._fm_advance_pending)
+        self.assertEqual(self.player.track.track_id, "owned:netease:1")
+        self.prefetch_tasks.completed.emit(prefetch, songs[3:6], None)
+        self.assertEqual(self.player.track.track_id, "owned:netease:1")
+        self.assertEqual({song.song_id for song in self.player.queue}, set("012345"))
+        self.assertEqual(len(self.prefetch_tasks.jobs), 1)
+
+    def test_adjacent_three_covers_are_bounded_and_next_uses_ready_cover_before_authorization(self):
+        songs = self.covered_songs()
+        self.player.play_queue(songs, index=3)
+        self.assertEqual(len(self.artwork_tasks.jobs), 2)
+        self.assertEqual([job[0][2][1] for job in self.artwork_tasks.jobs], ["3", "4"])
+        self.finish_artwork()
+        self.assertEqual({key[1] for key in self.player._art_cache}, set("0123456"))
+        self.assertEqual(len(self.player._art_cache), 7)
+        self.assertEqual(self.player.queue, songs)
+        self.assertEqual([entry.track_id for entry in self.player.track.album_queue],
+                         ["owned:netease:4", "owned:netease:5", "owned:netease:6"])
+        self.assertEqual(self.player.track.album_queue[0].artist, "artist 4")
+        self.assertEqual(self.player.track.album_queue[0].album_art_bytes, b"art:4")
+        self.assertEqual([job[0][0] for job in self.tasks.jobs], ["stream"])
+        self.assertEqual(self.player.status, "loading_stream")
+        self.assertEqual(self.player.track.lyrics, ("加载歌词中",))
+        self.player.send_playback_command("next")
+        self.assertEqual(self.player.track.album_art_bytes, b"art:4")
+        self.assertEqual(self.player.track.album_art_lookup_state, "original")
+        self.assertEqual(self.player.track.duration_seconds, 124)
+        self.assertTrue(self.qt_player.url.isEmpty())
+        self.assertEqual([job[0][0] for job in self.tasks.jobs], ["stream", "stream"])
+        self.assertNotIn("0", {key[1] for key in self.player._art_cache})
+        self.finish_artwork()
+        self.assertEqual({key[1] for key in self.player._art_cache}, set("1234567"))
+        self.player.send_playback_command("previous")
+        self.assertEqual(self.player.track.album_art_bytes, b"art:3")
+
+    def test_late_previous_cover_enriches_history_without_replacing_current_cover(self):
+        songs = self.covered_songs(4)
+        self.player.play_queue(songs)
+        old, _ = self.artwork_tasks.jobs[0]
+        current, _ = self.artwork_tasks.jobs[1]
+        self.player.send_playback_command("next")
+        colors = ColorToken(1, 2, 3), ColorToken(4, 5, 6)
+        self.artwork_tasks.completed.emit(old, (b"previous", *colors), None)
+        self.assertEqual(self.player.track.track_id, "owned:netease:1")
+        self.assertEqual(self.player.track.album_art_bytes, b"")
+        self.assertEqual(self.player._art_cache[self.player._art_key(songs[0])][0], b"previous")
+        self.assertEqual(self.player.track.album_queue[0].track_id, "owned:netease:2")
+        self.artwork_tasks.completed.emit(current, (b"current", *colors), None)
+        self.assertEqual(self.player.track.album_art_bytes, b"current")
+
+    def test_artwork_byte_cap_protects_current_and_does_not_retry_evicted_neighbors_forever(self):
+        self.player.ARTWORK_CACHE_MAX_BYTES = 12
+        self.player.play_queue(self.covered_songs(8), index=3)
+        self.finish_artwork(content=b"xxxx")
+        self.assertLessEqual(sum(len(item[0]) for item in self.player._art_cache.values()), 12)
+        self.assertEqual(self.player.track.album_art_bytes, b"xxxx")
+        self.assertIn(self.player._art_key(self.player.queue[3]), self.player._art_cache)
+        self.assertEqual(len(self.artwork_tasks.jobs), 7)
+        self.player._pump_artwork()
+        self.assertEqual(len(self.artwork_tasks.jobs), 7)
+
+    def test_neighbor_failure_is_terminal_for_window_and_does_not_change_current_lyrics_or_status(self):
+        self.player.play_queue(self.covered_songs(5))
+        current, neighbor = [job[0] for job in self.artwork_tasks.jobs]
+        self.artwork_tasks.completed.emit(current, (b"current", ColorToken(1, 2, 3), ColorToken(4, 5, 6)), None)
+        before = self.player.status, self.player.track.lyrics, self.player.track.album_art_bytes
+        self.artwork_tasks.completed.emit(neighbor, None, "timeout")
+        self.player._pump_artwork()
+        self.assertEqual((self.player.status, self.player.track.lyrics, self.player.track.album_art_bytes), before)
+        self.assertEqual(sum(job[0][2] == neighbor[2] for job in self.artwork_tasks.jobs), 1)
+
+    def test_source_replacement_waits_for_old_workers_then_rejects_their_cache_results(self):
+        self.player.play_queue(self.covered_songs(6))
+        old = list(self.artwork_tasks.jobs)
+        songs = (OnlineSong("qq", "0", "new source", artwork_url="https://example.test/new.png"),)
+        self.player.play_queue(songs)
+        self.assertEqual(len(self.artwork_tasks.jobs), 2)
+        for token, action in old:
+            with patch("local.owned_music_player.fetch_online_artwork") as fetch:
+                self.assertIsNone(action())
+                fetch.assert_not_called()
+            self.artwork_tasks.completed.emit(token, (b"old", ColorToken(1, 2, 3), ColorToken(4, 5, 6)), None)
+        self.assertEqual(len(self.artwork_tasks.jobs), 3)
+        self.assertEqual(self.player._art_cache, {})
+        self.assertEqual(self.player.track.album_art_bytes, b"")
+        self.assertEqual(self.player.track.track_id, "owned:qq:0")
+
+    def test_fm_prefetch_appends_real_batch_deduplicates_and_keeps_three_previous_covers(self):
+        songs = self.covered_songs(8)
+        self.service.personal_fm = lambda source: songs[:3]
+        self.player.play_personal_fm()
+        token, action = self.tasks.jobs[-1]
+        self.tasks.completed.emit(token, action(), None)
+        self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "0", "https://example.test/audio", True), None)
+        self.assertEqual(self.tasks.jobs[-1][0][0], "lyrics")
+        token, _ = self.prefetch_tasks.jobs[-1]
+        before = self.player.status, self.player.track.lyrics
+        self.prefetch_tasks.completed.emit(token, (songs[2], songs[3], songs[3], songs[4], songs[5]), None)
+        self.assertEqual(self.player.queue, songs[:6])
+        self.assertEqual((self.player.status, self.player.track.lyrics), before)
+        self.finish_artwork()
+        for _ in range(4):
+            self.player.send_playback_command("next")
+            self.finish_artwork()
+        self.assertEqual([song.song_id for song in self.player.queue], ["1", "2", "3", "4", "5"])
+        self.assertEqual(self.player.index, 3)
+        self.assertEqual([self.player._art_cache[self.player._art_key(song)][0] for song in self.player.queue[:3]],
+                         [b"art:1", b"art:2", b"art:3"])
+        self.assertEqual([entry.track_id for entry in self.player.track.album_queue], ["owned:netease:5"])
+        self.assertEqual(self.player.track.album_art_bytes, b"art:4")
+
+    def test_fm_waiting_next_reuses_prefetch_and_failed_batch_does_not_loop(self):
+        songs = self.covered_songs(5)
+        self.service.personal_fm = lambda source: songs[:3]
+        self.player.play_personal_fm()
+        token, action = self.tasks.jobs[-1]
+        self.tasks.completed.emit(token, action(), None)
+        self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "0", "https://example.test/audio", True), None)
+        token, _ = self.prefetch_tasks.jobs[-1]
+        self.player.index = 2
+        self.assertTrue(self.player.send_playback_command("next"))
+        self.assertTrue(self.player._fm_advance_pending)
+        self.assertEqual(len(self.prefetch_tasks.jobs), 1)
+        self.prefetch_tasks.completed.emit(token, (songs[3], songs[4]), None)
+        self.assertEqual(self.player.track.track_id, "owned:netease:3")
+        self.assertFalse(self.player._fm_advance_pending)
+        self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "3", "https://example.test/audio", True), None)
+        token, _ = self.prefetch_tasks.jobs[-1]
+        count = len(self.prefetch_tasks.jobs)
+        self.prefetch_tasks.completed.emit(token, None, "timeout")
+        self.player._prefetch_fm()
+        self.assertEqual(len(self.prefetch_tasks.jobs), count)
+
+    def test_stale_fm_prefetch_cannot_poll_or_append_to_new_queue(self):
+        self.service.personal_fm = lambda source: self.songs
+        self.player.play_personal_fm()
+        token, action = self.tasks.jobs[-1]
+        self.tasks.completed.emit(token, action(), None)
+        self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "1", "https://example.test/audio", True), None)
+        token, action = self.prefetch_tasks.jobs[-1]
+        self.player.play_queue((OnlineSong("qq", "new", "new"),))
+        self.assertEqual(action(), ())
+        self.prefetch_tasks.completed.emit(token, self.covered_songs(), None)
+        self.assertEqual(self.player.queue[0].source_id, "qq")
+        self.assertEqual(len(self.player.queue), 1)
+
+    def test_fm_foreground_fallback_keeps_history_after_failed_preload(self):
+        songs = self.covered_songs(8)
+        self.service.personal_fm = lambda source: songs[:3]
+        self.player.play_personal_fm()
+        token, action = self.tasks.jobs[-1]
+        self.tasks.completed.emit(token, action(), None)
+        self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "0", "https://example.test/audio", True), None)
+        self.prefetch_tasks.completed.emit(self.prefetch_tasks.jobs[-1][0], None, "timeout")
+        self.finish_artwork()
+        self.player.index = 2
+        self.service.personal_fm = lambda source: songs[3:6]
+        self.player.send_playback_command("next")
+        token, action = self.tasks.jobs[-1]
+        self.assertEqual(token[2], "fm_continue")
+        self.tasks.completed.emit(token, action(), None)
+        self.assertEqual(self.player.track.track_id, "owned:netease:3")
+        self.assertEqual(self.player._fm_source, "netease")
+        self.assertEqual(self.player.queue, songs[:6])
+        self.assertEqual([self.player._art_cache[self.player._art_key(song)][0] for song in self.player.queue[:3]],
+                         [b"art:0", b"art:1", b"art:2"])
+
+    def test_fm_prefetch_worker_cannot_hold_current_stream_or_lyric_submission(self):
+        from local.music_tasks import MusicTasks
+        workers = MusicTasks()
+        entered, release = threading.Event(), threading.Event()
+        def fetch(source):
+            entered.set()
+            release.wait(2)
+            return ()
+        self.service.personal_fm = fetch
+        player = OwnedMusicPlayer(self.service, self.lyrics, player=Player(), audio=object(),
+                                  tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=workers)
+        try:
+            player.play_queue(self.songs)
+            player._fm_source = "netease"
+            self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "1", "https://example.test/audio", True), None)
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(player.status, "playing")
+            self.assertEqual(self.tasks.jobs[-1][0][0], "lyrics")
+            started = time.monotonic()
+            self.assertTrue(player.send_playback_command("next"))
+            self.assertLess(time.monotonic() - started, .1)
+            self.assertEqual(player.track.track_id, "owned:netease:2")
+            self.assertEqual(self.tasks.jobs[-1][0][0], "stream")
+        finally:
+            release.set()
+            player.close()
+
+    def test_stop_clears_cover_bytes_and_closed_prefetch_is_inert(self):
+        self.player.play_queue(self.covered_songs())
+        self.finish_artwork()
+        self.assertTrue(self.player._art_cache)
+        self.player.stop()
+        self.assertEqual(self.player._art_cache, {})
+        self.assertEqual(self.player._art_window, {})
+        self.assertIsNone(self.player.track)
+        self.player.close()
+        self.assertTrue(self.prefetch_tasks.closed)
 
     def test_stale_stream_cannot_replace_new_song(self):
         self.player.play_queue(self.songs)
@@ -227,7 +661,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual(self.player.track.lyrics, ("加载歌词中",))
         self.assertEqual(self.artwork_tasks.jobs, [])
 
-    def test_artwork_updates_original_colors_and_only_matching_queue_entry(self):
+    def test_artwork_updates_current_original_colors_and_preserves_upcoming_identity(self):
         songs = (OnlineSong("netease", "1", "第一首", artwork_url="https://example.test/cover.png"), self.songs[1])
         self.player.play_queue(songs)
         self.assertEqual(self.player.track.album_art_lookup_state, "pending")
@@ -242,15 +676,15 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual(self.player.track.album_art_source, "original")
         self.assertEqual(self.player.track.album_art_lookup_state, "original")
         self.assertEqual(self.player.track.album_color, colors[0])
-        self.assertEqual(self.player.track.album_queue[0].album_art_bytes, b"source-art")
-        self.assertEqual(self.player.track.album_queue[1].album_art_bytes, b"")
+        self.assertEqual(self.player.track.album_queue[0].track_id, "owned:netease:2")
+        self.assertEqual(self.player.track.album_queue[0].album_art_bytes, b"")
         self.assertTrue(self.qt_player.url.isEmpty())
 
     def test_stale_artwork_skips_request_and_cannot_replace_new_song(self):
         songs = (OnlineSong("netease", "1", "第一首", artwork_url="https://example.test/old.png"), self.songs[1])
         self.player.play_queue(songs)
         token, action = self.artwork_tasks.jobs[-1]
-        self.player.send_playback_command("next")
+        self.player.play_queue((self.songs[1],))
         with patch("local.owned_music_player.fetch_online_artwork") as fetch:
             self.assertIsNone(action())
             fetch.assert_not_called()
@@ -358,8 +792,11 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.tasks.completed.emit(token, action(), None)
         self.assertEqual(self.player._fm_source, "netease")
         self.player.index = 1
+        self.player._load_song()
+        self.authorize_current()
+        self.prefetch_tasks.completed.emit(self.prefetch_tasks.jobs[-1][0], None, "timeout")
         self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
-        self.assertEqual(self.tasks.jobs[-1][0][2], "fm")
+        self.assertEqual(self.tasks.jobs[-1][0][2], "fm_continue")
 
     def test_playlist_follows_all_pages(self):
         offsets = []
@@ -520,6 +957,8 @@ class OwnedControlThreadTests(unittest.TestCase):
                     self.assertEqual(self.qt_player.position, 12500)
 
     def test_background_returns_actual_rejection_from_gui(self):
+        self.player.set_playback_mode("shuffle")
+        self.qt_player.calls.clear()
         control = self.start_control(lambda: self.player.send_playback_command("previous"))
         self.assertFalse(self.finish_control(control))
         self.assertEqual(self.qt_player.calls, [])
@@ -527,6 +966,54 @@ class OwnedControlThreadTests(unittest.TestCase):
         control = self.start_control(lambda: self.player.seek_playback_position(10))
         self.assertFalse(self.finish_control(control))
         self.assertEqual(self.qt_player.calls, [("seekable", self.main_thread)])
+
+    def test_worker_mode_applies_on_owner_thread_and_supports_idle(self):
+        self.player.stop()
+        self.qt_player.calls.clear()
+        applied = []
+        self.player.changed.connect(lambda: applied.append(threading.get_ident()))
+        control = self.start_control(lambda: self.player.set_playback_mode("shuffle"))
+        self.assertEqual(self.player.playback_mode, "sequential")
+        self.assertTrue(self.finish_control(control))
+        self.assertEqual(self.player.playback_mode, "shuffle")
+        self.assertEqual(self.qt_player.calls, [])
+        self.assertEqual(applied, [self.main_thread])
+
+    def test_worker_mode_cannot_apply_to_replaced_same_track_queue_or_new_catalog(self):
+        for replacement in ("same_track_queue", "catalog", "stop"):
+            self.player.play_queue(self.songs)
+            control = self.start_control(lambda: self.player.set_playback_mode("shuffle"))
+            if replacement == "same_track_queue":
+                self.player.play_queue(self.songs)
+            elif replacement == "catalog":
+                self.service.daily_recommendations = lambda source: self.songs
+                self.player.play_daily()
+            else:
+                self.player.stop()
+            self.qt_player.calls.clear()
+            self.assertFalse(self.finish_control(control))
+            self.assertEqual(self.player.playback_mode, "sequential")
+            self.assertEqual(self.qt_player.calls, [])
+
+    def test_mode_change_fences_queued_next_even_with_same_active_track(self):
+        control = self.start_control(lambda: self.player.send_playback_command("next"))
+        track_id = self.player.track.track_id
+        self.player.set_playback_mode("repeat_one")
+        self.qt_player.calls.clear()
+        self.assertFalse(self.finish_control(control))
+        self.assertEqual(self.player.track.track_id, track_id)
+        self.assertEqual(self.qt_player.calls, [])
+
+    def test_worker_mode_deadline_and_close_reject_without_reentry(self):
+        for reason in ("deadline", "closed"):
+            control = self.start_control(lambda: self.player.set_playback_mode("shuffle"))
+            if reason == "deadline":
+                with patch("local.owned_music_player.time.monotonic", return_value=control[3][3]):
+                    self.assertFalse(self.finish_control(control))
+            else:
+                self.player.close()
+                self.assertFalse(self.finish_control(control))
+            self.assertEqual(self.player.playback_mode, "sequential")
 
     def test_queued_command_and_seek_cannot_apply_after_track_changes(self):
         for kind in ("command", "seek"):

@@ -100,6 +100,26 @@ class PlaybackModePersistenceTests(unittest.TestCase):
                     finally:
                         manager.save_now()
 
+    def test_song_mode_persists_and_invalid_values_return_to_sequence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch("local.settings_store.SETTINGS_FILE", str(path)), \
+                    patch("local.settings_store.APP_DATA_DIR", directory), \
+                    patch("local.settings_store.legacy_app_data_dirs", return_value=()):
+                manager = SettingsManager()
+                self.assertEqual(manager.get("v2_owned_playback_mode"), "sequential")
+                for mode in ("shuffle", "repeat_one", "sequential"):
+                    manager.set("v2_owned_playback_mode", mode)
+                    manager.save_now()
+                    self.assertEqual(SettingsManager().get("v2_owned_playback_mode"), mode)
+                for invalid in (None, [], {}, True, "repeat_all"):
+                    manager.set("v2_owned_playback_mode", invalid)
+                    self.assertEqual(manager.get("v2_owned_playback_mode"), "sequential")
+                path.write_text(json.dumps({"v2_owned_playback_mode": "corrupted"}), encoding="utf-8")
+                repaired = SettingsManager()
+                self.assertEqual(repaired.get("v2_owned_playback_mode"), "sequential")
+                repaired.save_now()
+
 
 if __name__ == "__main__":
     unittest.main()

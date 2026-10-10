@@ -22,9 +22,10 @@ from local.playback_entry_controller import PlaybackEntryController
 from local.music_library_controller import MusicLibraryController
 from local.branding import APP_NAME, local_app_data_dir, resolve_icon_paths
 from local.island_stack_visual import IslandStackVisual
-from local.audio_device_notice import AudioDeviceNotice
 from local.settings_store import (
+    DEFAULT_SETTINGS,
     DEFAULT_MUSIC_AMBIENCE_VALUES,
+    FIXED_DEFAULT_SETTING_KEYS,
     DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
     MUSIC_READING_LIFT_DEFAULT_LEVEL,
     MUSIC_READING_STRATEGY_DEFAULT,
@@ -283,27 +284,21 @@ class LocalIslandApp:
         self.app.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         set_theme_settings_getter(self.settings.get)
         IslandStackVisual.load_embedded_lyric_fonts()
-        self.system_provider = WindowsMediaProvider(settings_getter=self.settings.get)
+        self.system_provider = WindowsMediaProvider(settings_getter=self._runtime_setting)
         self.online_music = make_online_music_service()
         self.owned_player = OwnedMusicPlayer(self.online_music, self.system_provider.lyrics_store, self.app)
-        self.data_provider = PlaybackSourceProvider(self.system_provider, self.owned_player, self.settings.get)
+        self.owned_player.set_playback_mode(self.settings.get("v2_owned_playback_mode", "sequential"))
+        self.data_provider = PlaybackSourceProvider(self.system_provider, self.owned_player, self._runtime_setting)
         self.data_provider.settings_setter = self.settings.set
         self.app.aboutToQuit.connect(self.data_provider.close_audio_outputs)
-        if self.settings.get("v2_system_capture_enabled", False):
+        if self.settings.get("v2_owned_playback_enabled", True) or self.settings.get("v2_system_capture_enabled", False):
             self.data_provider.start_audio_outputs()
-        app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)))
+        app_font_family = IslandStackVisual.best_available_font_family(DEFAULT_SETTINGS["v2_font_family"])
         self.app.setFont(QFont(app_font_family, 9))
         self.window = IslandStackVisual(data_provider=self.data_provider)
         self.window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
-        self.window.settings_getter = self.settings.get
+        self.window.settings_getter = self._runtime_setting
         self.window.settings_setter = self.settings.set
-        self.audio_device_notice = AudioDeviceNotice()
-        self._audio_device_event_serial = 0
-        self.audio_device_notice_timer = QTimer(self.app)
-        self.audio_device_notice_timer.setInterval(350)
-        self.audio_device_notice_timer.timeout.connect(self._poll_audio_device_notice)
-        self.audio_device_notice_timer.start()
-        self.app.aboutToQuit.connect(self.audio_device_notice.close)
         self._apply_startup_setting()
         self._apply_saved_settings()
         self.settings_window = SettingsWindow(self.window, self.settings)
@@ -311,6 +306,7 @@ class LocalIslandApp:
                                                        self.online_music, self.app)
         self.music_library = MusicLibraryController(self.settings, self.online_music, self.owned_player,
                                                    self.window, self.playback_entry, self.app)
+        self.window._music_library_back_callback = self.music_library.return_from_music_surface
         self.playback_entry.login_callback = self.music_library.open_source
         self.settings_window.online_music_login_callback = self.playback_entry.show_login
         self.settings.setting_changed.connect(self._playback_mode_changed)
@@ -324,7 +320,17 @@ class LocalIslandApp:
         self.tray = None
         self._setup_tray()
 
+    def _runtime_setting(self, key, default=None):
+        # The song-page button controls this session's lyric lookup as well as
+        # its painter. The persisted default remains fixed for the next launch.
+        if key == "v2_enable_dual_line_lyrics":
+            window = getattr(self, "window", None)
+            return bool(getattr(window, "enable_dual_line_lyrics", DEFAULT_SETTINGS[key]))
+        return self.settings.get(key, default)
+
     def _playback_mode_changed(self, key, value):
+        if key == "v2_owned_playback_mode":
+            self.owned_player.set_playback_mode(value)
         if key == "v2_owned_playback_enabled" and value is False:
             self.owned_player.stop()
         if key == "v2_system_capture_enabled" and value is False:
@@ -333,78 +339,13 @@ class LocalIslandApp:
         if key == "v2_system_capture_enabled" and value is True:
             self.system_provider.start_audio_outputs()
 
-    def _poll_audio_device_notice(self):
-        route = self.data_provider.get_audio_route_snapshot()
-        surface = getattr(self.window, "music_fullscreen_overlay", None)
-        surface_visible = surface is not None and surface.isVisible()
-        music_surface_owned = surface_visible or bool(getattr(self.window, "_music_surface_active", False))
-        if music_surface_owned:
-            # A notice that started on the island must not float over the
-            # music surface when it opens, even without a newer route event.
-            self.audio_device_notice.close()
-        if route.event_serial <= self._audio_device_event_serial:
-            return
-        self._audio_device_event_serial = route.event_serial
-        identity = str(getattr(route, "event_device_id", "") or "")
-        if identity:
-            device = next((d for d in route.devices if d.id == identity), None)
-        else:
-            # Older snapshots only have a label. Two endpoints may share it;
-            # retain a generic glyph rather than inventing a device identity.
-            matches = tuple(d for d in route.devices if d.name == route.event_name)
-            device = matches[0] if len(matches) == 1 else None
-        if music_surface_owned:
-            if surface_visible and not surface.isMinimized():
-                handler = getattr(surface, "on_audio_device_event", None)
-                if callable(handler):
-                    handler(route, device)
-            # Minimized/hidden music surfaces should not open a separate
-            # popup or replay a stale connection animation when restored.
-            return
-        self.audio_device_notice.close()
-        handler = getattr(self.window, "on_audio_device_event", None)
-        if callable(handler):
-            handler(route, device)
-
     def _music_ambience_values_for_style(self, style: str) -> dict[str, float | int]:
         if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
             style = "sea_level"
-        values_by_style = self.settings.get("v2_music_ambience_values", {}) or {}
-        defaults = DEFAULT_MUSIC_AMBIENCE_VALUES.get(style, DEFAULT_MUSIC_AMBIENCE_VALUES["sea_level"])
-        if not isinstance(values_by_style, dict):
-            values_by_style = {}
-        raw_values = values_by_style.get(style, {})
-        if not isinstance(raw_values, dict):
-            raw_values = {}
-        return {
-            "ambient_intensity": raw_values.get("ambient_intensity", self.settings.get("v2_ambient_intensity", defaults["ambient_intensity"])),
-            "music_flow_intensity": raw_values.get("music_flow_intensity", self.settings.get("v2_music_flow_intensity", defaults["music_flow_intensity"])),
-            "compact_duotone_balance": raw_values.get("compact_duotone_balance", self.settings.get("v2_compact_duotone_balance", defaults["compact_duotone_balance"])),
-            "expanded_duotone_balance": raw_values.get("expanded_duotone_balance", self.settings.get("v2_expanded_duotone_balance", defaults["expanded_duotone_balance"])),
-        }
+        return dict(DEFAULT_MUSIC_AMBIENCE_VALUES[style])
 
     def _location_mode_setting(self) -> str:
-        value = str(self.settings.get("v2_location_mode", "") or "").strip().lower()
-        if value in {"finder", "free", "top", "tasker", "stick"}:
-            return value
-        legacy_taskbar = str(self.settings.get("v2_taskbar_fusion_mode", "") or "").strip().lower()
-        if legacy_taskbar in {"compact", "expanded"}:
-            return "tasker"
-        if self.settings.get("v2_finder_mode", None) is True:
-            return "finder"
-        return "top"
-
-    def _enabled_plugins_setting(self) -> list[str]:
-        known = ["time", "weather", "agenda"]
-        raw = self.settings.get("v2_enabled_plugins", None)
-        if isinstance(raw, (list, tuple, set)):
-            enabled = {str(item or "").strip().casefold() for item in raw}
-            return [plugin_id for plugin_id in known if plugin_id in enabled]
-        try:
-            legacy_count = max(0, min(len(known), int(self.settings.get("v2_plugin_count", 1))))
-        except (TypeError, ValueError):
-            legacy_count = 1
-        return known[:legacy_count]
+        return DEFAULT_SETTINGS["v2_location_mode"]
 
     def _mydockfinder_listener_process_names_setting(self) -> tuple[str, ...]:
         return _mydockfinder_listener_process_names(
@@ -421,19 +362,24 @@ class LocalIslandApp:
         StartupManager().apply(mode, build_startup_command())
 
     def _apply_saved_settings(self):
+        def saved_setting(key, fallback=None):
+            if key in FIXED_DEFAULT_SETTING_KEYS:
+                return DEFAULT_SETTINGS[key]
+            return self.settings.get(key, fallback)
+
         self.window.set_saved_placement(
-            self.settings.get("v2_stack_center_ratio", 0.5),
-            self.settings.get("v2_window_pos", None),
+            saved_setting("v2_stack_center_ratio", 0.5),
+            saved_setting("v2_window_pos", None),
             notify=False,
-            stack_direction=self.settings.get("v2_stack_direction", 1),
-            last_window_position=self.settings.get("v2_last_window_position", None),
+            stack_direction=saved_setting("v2_stack_direction", 1),
+            last_window_position=saved_setting("v2_last_window_position", None),
         )
-        self.window.position_preset = str(self.settings.get("v2_position_preset", "last") or "last")
-        self.window.music_playing = bool(self.settings.get("v2_music_playing", True))
-        self.window.music_auto_detect = bool(self.settings.get("v2_music_auto_detect", False))
-        self.window.persistent_plugin = bool(self.settings.get("v2_persistent_plugin", True))
-        self.window.set_super_topmost(bool(self.settings.get("v2_super_topmost", True)), notify=False)
-        mydockfinder_path = str(self.settings.get("v2_mydockfinder_path", "") or "")
+        self.window.position_preset = str(saved_setting("v2_position_preset", "last") or "last")
+        self.window.music_playing = bool(saved_setting("v2_music_playing", True))
+        self.window.music_auto_detect = bool(saved_setting("v2_music_auto_detect", False))
+        self.window.persistent_plugin = False
+        self.window.set_super_topmost(bool(saved_setting("v2_super_topmost", True)), notify=False)
+        mydockfinder_path = str(saved_setting("v2_mydockfinder_path", "") or "")
         self.window.set_mydockfinder_path(mydockfinder_path, notify=False)
         mydockfinder_listener_process_names = self._mydockfinder_listener_process_names_setting()
         if hasattr(self.window, "set_mydockfinder_listener_process_names"):
@@ -445,48 +391,41 @@ class LocalIslandApp:
             listener_process_names=mydockfinder_listener_process_names,
         )
         self.window.set_mydockfinder_diagnostics(mydockfinder_diagnostics, notify=False)
-        self.window.set_manual_finder_available(bool(self.settings.get("v2_manual_mydockfinder", False)), notify=False)
-        self.window.set_top_notch_height_mode(str(self.settings.get("v2_top_notch_height_mode", "standard")), notify=False)
+        self.window.set_manual_finder_available(bool(saved_setting("v2_manual_mydockfinder", False)), notify=False)
+        self.window.set_top_notch_height_mode(str(saved_setting("v2_top_notch_height_mode", "standard")), notify=False)
         self.window.set_mydockfinder_running(bool(mydockfinder_diagnostics.get("running")), notify=False)
         self.window.set_location_mode(self._location_mode_setting(), notify=False)
-        self.window.set_taskbar_corner_style(str(self.settings.get("v2_taskbar_corner_style", "win11")), notify=False)
-        self.window.set_taskbar_auto_hide_mode(str(self.settings.get("v2_taskbar_auto_hide_mode", "auto")), notify=False)
+        self.window.set_taskbar_corner_style(str(saved_setting("v2_taskbar_corner_style", "win11")), notify=False)
+        self.window.set_taskbar_auto_hide_mode(str(saved_setting("v2_taskbar_auto_hide_mode", "auto")), notify=False)
         if hasattr(self.window, "set_tasker_follow_taskbar_color"):
-            self.window.set_tasker_follow_taskbar_color(bool(self.settings.get("v2_tasker_follow_taskbar_color", False)), notify=False)
+            self.window.set_tasker_follow_taskbar_color(bool(saved_setting("v2_tasker_follow_taskbar_color", False)), notify=False)
         else:
-            self.window.tasker_follow_taskbar_color = bool(self.settings.get("v2_tasker_follow_taskbar_color", False))
-        self.window.music_background_follow_previous_style = str(self.settings.get("v2_music_background_follow_previous_style", "") or "")
-        self.window.set_taskbar_left_handle_color(str(self.settings.get("v2_taskbar_left_handle_color", "#8E8E93")), notify=False)
-        self.window.expanded = bool(self.settings.get("v2_expanded", False))
-        self.window.show_seconds = bool(self.settings.get("v2_show_seconds", True))
-        enabled_plugins = self._enabled_plugins_setting()
-        self.window.enabled_plugin_ids = set(enabled_plugins)
-        self.window.enabled_plugin_count = len(enabled_plugins)
-        self.window.side_island_style = str(self.settings.get("v2_side_island_style", "standard") or "standard")
-        self.window.plugin_island_style = str(self.settings.get("v2_plugin_island_style", "standard") or "standard")
-        self.window.set_plugin_fullscreen_alert_style(str(self.settings.get("v2_plugin_fullscreen_alert_style", "toast") or "toast"), notify=False)
-        self.window.set_plugin_fullscreen_alert_position(
-            x_offset=int(self.settings.get("v2_plugin_fullscreen_alert_x_offset", 0)),
-            y_offset=int(self.settings.get("v2_plugin_fullscreen_alert_y_offset", 0)),
-            notify=False,
-        )
-        self.window.music_island_style = str(self.settings.get("v2_music_island_style", "standard") or "standard")
+            self.window.tasker_follow_taskbar_color = bool(saved_setting("v2_tasker_follow_taskbar_color", False))
+        self.window.music_background_follow_previous_style = str(saved_setting("v2_music_background_follow_previous_style", "") or "")
+        self.window.set_taskbar_left_handle_color(str(saved_setting("v2_taskbar_left_handle_color", "#8E8E93")), notify=False)
+        self.window.expanded = bool(saved_setting("v2_expanded", False))
+        self.window.show_seconds = bool(saved_setting("v2_show_seconds", True))
+        self.window.enabled_plugin_ids = set()
+        self.window.enabled_plugin_count = 0
+        self.window.side_island_style = str(saved_setting("v2_side_island_style", "standard") or "standard")
+        self.window.plugin_island_style = str(saved_setting("v2_plugin_island_style", "standard") or "standard")
+        self.window.music_island_style = str(saved_setting("v2_music_island_style", "standard") or "standard")
         self.window.set_music_expanded_layout_style(
-            str(self.settings.get("v2_music_expanded_layout_style", "standard") or "standard"),
+            str(saved_setting("v2_music_expanded_layout_style", "standard") or "standard"),
             notify=False,
         )
-        self.window.time_alarm_side_display = str(self.settings.get("v2_time_alarm_side_display", "note") or "note")
-        ambience_style = str(self.settings.get("v2_music_ambience_style", "sea_level") or "sea_level")
+        self.window.time_alarm_side_display = str(saved_setting("v2_time_alarm_side_display", "note") or "note")
+        ambience_style = str(saved_setting("v2_music_ambience_style", "sea_level") or "sea_level")
         if ambience_style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
             ambience_style = "sea_level"
         ambience_values = self._music_ambience_values_for_style(ambience_style)
         self.window.ambient_intensity = max(0.0, min(1.0, float(ambience_values["ambient_intensity"])))
         self.window.set_music_reactive_background_enabled(
-            bool(self.settings.get("v2_music_reactive_background_enabled", False)),
+            bool(saved_setting("v2_music_reactive_background_enabled", False)),
             notify=False,
         )
         self.window.set_music_reactive_background_intensity(
-            int(self.settings.get("v2_music_reactive_background_intensity", 55)),
+            int(saved_setting("v2_music_reactive_background_intensity", 55)),
             notify=False,
         )
         self.window.set_music_ambience_style(ambience_style, notify=False)
@@ -498,83 +437,74 @@ class LocalIslandApp:
         )
         if hasattr(self.window, "set_solid_album_background_fallback"):
             self.window.set_solid_album_background_fallback(
-                str(self.settings.get("v2_solid_album_background_fallback", "#16BCFF") or "#16BCFF"),
+                str(saved_setting("v2_solid_album_background_fallback", "#16BCFF") or "#16BCFF"),
                 notify=False,
             )
-        self.window.set_ui_font(str(self.settings.get("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)), notify=False)
-        self.window.set_high_quality_font_rendering(bool(self.settings.get("v2_high_quality_font_rendering", False)), notify=False)
-        self.window.set_animation_fps(int(self.settings.get("v2_animation_fps", 60)), notify=False)
-        self.window.set_lyric_animation_fps(int(self.settings.get("v2_lyric_animation_fps", 120)), notify=False)
-        self.window.set_animation_speed(float(self.settings.get("v2_animation_speed", 1.0)), notify=False)
-        self.window.set_empty_island_display_mode(str(self.settings.get("v2_empty_island_display_mode", "visible_bar")), notify=False)
+        self.window.set_ui_font(str(saved_setting("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)), notify=False)
+        self.window.set_high_quality_font_rendering(bool(saved_setting("v2_high_quality_font_rendering", False)), notify=False)
+        self.window.set_animation_fps(int(saved_setting("v2_animation_fps", 60)), notify=False)
+        self.window.set_lyric_animation_fps(int(saved_setting("v2_lyric_animation_fps", 120)), notify=False)
+        self.window.set_animation_speed(float(saved_setting("v2_animation_speed", 1.0)), notify=False)
+        self.window.set_empty_island_display_mode(str(saved_setting("v2_empty_island_display_mode", "visible_bar")), notify=False)
         if hasattr(self.window, "set_no_music_island_priority"):
-            self.window.set_no_music_island_priority(str(self.settings.get("v2_no_music_island_priority", "plugin")), notify=False)
+            self.window.set_no_music_island_priority(str(saved_setting("v2_no_music_island_priority", "plugin")), notify=False)
         else:
-            self.window.no_music_island_priority = str(self.settings.get("v2_no_music_island_priority", "plugin") or "plugin")
-        self.window.set_empty_bar_palette(str(self.settings.get("v2_empty_bar_palette", "aurora")), notify=False)
+            self.window.no_music_island_priority = str(saved_setting("v2_no_music_island_priority", "plugin") or "plugin")
+        self.window.set_empty_bar_palette(str(saved_setting("v2_empty_bar_palette", "aurora")), notify=False)
         self.window.set_empty_bar_geometry(
-            width=int(self.settings.get("v2_empty_bar_width", 92)),
-            height=int(self.settings.get("v2_empty_bar_height", 14)),
-            y_offset=int(self.settings.get("v2_empty_bar_y_offset", 0)),
-            opacity=int(self.settings.get("v2_empty_bar_opacity", 100)),
+            width=int(saved_setting("v2_empty_bar_width", 92)),
+            height=int(saved_setting("v2_empty_bar_height", 14)),
+            y_offset=int(saved_setting("v2_empty_bar_y_offset", 0)),
+            opacity=int(saved_setting("v2_empty_bar_opacity", 100)),
             notify=False,
         )
         self.window.set_empty_bar_custom_colors(
-            self.settings.get("v2_empty_bar_custom_colors", ["#46D6FF", "#73FFA6", "#FF5A86"]),
+            saved_setting("v2_empty_bar_custom_colors", ["#46D6FF", "#73FFA6", "#FF5A86"]),
             notify=False,
         )
-        self.window.set_barrage_settings(
-            y_offset=int(self.settings.get("v2_barrage_y_offset", 0)),
-            font_size=int(self.settings.get("v2_barrage_font_size", 10)),
-            speed=int(self.settings.get("v2_barrage_speed", 100)),
-            use_backdrop=bool(self.settings.get("v2_barrage_use_backdrop", True)),
-            show_icon=bool(self.settings.get("v2_barrage_show_icon", True)),
-            display_mode=str(self.settings.get("v2_barrage_display_mode", "fullscreen") or "fullscreen"),
-            notify=False,
-        )
-        self.window.set_auto_expand_bounds(bool(self.settings.get("v2_auto_expand_bounds", True)), notify=False)
-        self.window.set_expand_direction(str(self.settings.get("v2_expand_direction", "auto")), notify=False)
-        self.window.set_lyric_offset_seconds(float(self.settings.get("v2_lyric_offset_seconds", 0.0)), notify=False)
-        self.window.set_lyric_font_size(int(self.settings.get("v2_lyric_font_size", 18)), notify=False)
+        self.window.set_auto_expand_bounds(bool(saved_setting("v2_auto_expand_bounds", True)), notify=False)
+        self.window.set_expand_direction(str(saved_setting("v2_expand_direction", "auto")), notify=False)
+        self.window.set_lyric_offset_seconds(float(saved_setting("v2_lyric_offset_seconds", 0.0)), notify=False)
+        self.window.set_lyric_font_size(int(saved_setting("v2_lyric_font_size", 18)), notify=False)
         self.window.set_music_surface_reading_lift_level(
-            self.settings.get("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL), notify=False
+            saved_setting("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL), notify=False
         )
         self.window.set_music_surface_reading_gradient_steps(
-            self.settings.get("v2_music_surface_reading_gradient_steps", 30), notify=False
+            saved_setting("v2_music_surface_reading_gradient_steps", 30), notify=False
         )
         self.window.set_music_surface_reading_strategy(
-            self.settings.get("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT), notify=False
+            saved_setting("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT), notify=False
         )
         self.window.set_music_sparse_highlight_seconds_per_unit(
-            self.settings.get("v2_music_sparse_highlight_seconds_per_unit", 1.5), notify=False
+            saved_setting("v2_music_sparse_highlight_seconds_per_unit", 1.5), notify=False
         )
-        self.window.set_music_intro_cleanup_enabled(bool(self.settings.get("v2_music_intro_cleanup_enabled", True)), notify=False)
-        self.window.set_enable_dual_line_lyrics(bool(self.settings.get("v2_enable_dual_line_lyrics", False)), notify=False)
-        self.window.set_dual_line_font_size(int(self.settings.get("v2_dual_line_font_size", 12)), notify=False)
-        self.window.set_dual_line_secondary_weight(int(self.settings.get("v2_dual_line_secondary_weight", 72)), notify=False)
-        self.window.set_dual_line_secondary_spacing(int(self.settings.get("v2_dual_line_secondary_spacing", 100)), notify=False)
-        self.window.set_compact_lyric_show_cover(bool(self.settings.get("v2_compact_lyric_show_cover", True)), notify=False)
-        self.window.set_wave_font_weight(str(self.settings.get("v2_wave_font_weight", "bold")), notify=False)
-        self.window.set_lyric_flow_style(str(self.settings.get("v2_lyric_flow_style", "wave_stream")), notify=False)
+        self.window.set_music_intro_cleanup_enabled(bool(saved_setting("v2_music_intro_cleanup_enabled", True)), notify=False)
+        self.window.set_enable_dual_line_lyrics(bool(saved_setting("v2_enable_dual_line_lyrics", False)), notify=False)
+        self.window.set_dual_line_font_size(int(saved_setting("v2_dual_line_font_size", 12)), notify=False)
+        self.window.set_dual_line_secondary_weight(int(saved_setting("v2_dual_line_secondary_weight", 72)), notify=False)
+        self.window.set_dual_line_secondary_spacing(int(saved_setting("v2_dual_line_secondary_spacing", 100)), notify=False)
+        self.window.set_compact_lyric_show_cover(bool(saved_setting("v2_compact_lyric_show_cover", True)), notify=False)
+        self.window.set_wave_font_weight(str(saved_setting("v2_wave_font_weight", "bold")), notify=False)
+        self.window.set_lyric_flow_style(str(saved_setting("v2_lyric_flow_style", "wave_stream")), notify=False)
         self.window.set_gelv_font_family(IslandStackVisual.GELV_FONT_FAMILY, notify=False)
-        self.window.set_no_lyrics_display_mode(str(self.settings.get("v2_no_lyrics_display_mode", "text")), notify=False)
-        self.window.set_album_island_cover_count(int(self.settings.get("v2_album_island_cover_count", 5)), notify=False)
-        self.window.set_album_island_cover_size(int(self.settings.get("v2_album_island_cover_size", 30)), notify=False)
+        self.window.set_no_lyrics_display_mode(str(saved_setting("v2_no_lyrics_display_mode", "text")), notify=False)
+        self.window.set_album_island_cover_count(int(saved_setting("v2_album_island_cover_count", 5)), notify=False)
+        self.window.set_album_island_cover_size(int(saved_setting("v2_album_island_cover_size", 30)), notify=False)
         self.window.set_album_island_compact_cover_size(
-            int(self.settings.get("v2_album_island_compact_cover_size", self.settings.get("v2_album_island_cover_size", 30))),
+            int(saved_setting("v2_album_island_compact_cover_size", saved_setting("v2_album_island_cover_size", 30))),
             notify=False,
         )
-        self.window.set_album_island_expanded_cover_size(int(self.settings.get("v2_album_island_expanded_cover_size", 72)), notify=False)
-        self.window.set_album_island_spacing(int(self.settings.get("v2_album_island_spacing", 112)), notify=False)
-        self.window.set_album_island_secondary_style(str(self.settings.get("v2_album_island_secondary_style", "perspective_dim")), notify=False)
-        self.window.set_album_island_perspective_amount(int(self.settings.get("v2_album_island_perspective_amount", 100)), notify=False)
+        self.window.set_album_island_expanded_cover_size(int(saved_setting("v2_album_island_expanded_cover_size", 72)), notify=False)
+        self.window.set_album_island_spacing(int(saved_setting("v2_album_island_spacing", 112)), notify=False)
+        self.window.set_album_island_secondary_style(str(saved_setting("v2_album_island_secondary_style", "perspective_dim")), notify=False)
+        self.window.set_album_island_perspective_amount(int(saved_setting("v2_album_island_perspective_amount", 100)), notify=False)
         self.window.set_album_island_record(
-            float(self.settings.get("v2_album_island_listened_seconds_total", 0.0) or 0.0),
-            self.settings.get("v2_album_island_history", []),
+            float(saved_setting("v2_album_island_listened_seconds_total", 0.0) or 0.0),
+            saved_setting("v2_album_island_history", []),
             notify=False,
         )
-        self.window.set_no_lyrics_text(str(self.settings.get("v2_no_lyrics_text", "暂无歌词")), notify=False)
-        position_preset = str(self.settings.get("v2_position_preset", "last") or "last")
+        self.window.set_no_lyrics_text(str(saved_setting("v2_no_lyrics_text", "暂无歌词")), notify=False)
+        position_preset = str(saved_setting("v2_position_preset", "last") or "last")
         self.window.apply_position_preset(position_preset, notify=False)
         self.window._set_plugin_focus(min(self.window.plugin_focus_target, max(0, self.window.enabled_plugin_count - 1)), immediate=True)
 

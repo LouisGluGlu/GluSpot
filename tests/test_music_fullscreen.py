@@ -1041,7 +1041,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(phase(4.25, 9.0), 0.0)
         self.assertAlmostEqual(phase(9.1, 9.0), 0.2)
 
-    def test_genuine_song_shows_obo_next_to_idle_window_control(self):
+    def test_genuine_song_keeps_timing_without_top_badge_in_both_presentations(self):
         self.owner.track_title = "short song"
         self.owner.timed_lyrics = [(0.0, "真逐字"), (3.0, "第二句"), (6.0, "第三句")]
         self.owner.timed_lyric_units = [
@@ -1051,41 +1051,30 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         ]
         self.owner.timed_lyric_timing_kinds = ["unit"] * 3
         self.window.resize(960, 540)
-        image = QImage(self.window.size(), QImage.Format.Format_RGB32)
         self.owner.music_surface_reading_strategy = "gold"
-        with patch.object(self.window, "_paint_control_layer", wraps=self.window._paint_control_layer) as layer:
-            self.window.render(image)
-        window_calls = [call for call in layer.call_args_list if call.args[4][0] == "window"]
-        self.assertEqual(len(window_calls), 1)
-        self.assertTrue(window_calls[0].args[4][3])
-        self.assertTrue(window_calls[0].args[4][4])
-        button = self.window._window_control_base_rect(QRectF(self.window.rect()))
-        obo = self.window._obo_badge_rect(button, self.window._surface_scale())
-        self.assertEqual(obo.size(), button.size())
-        self.assertEqual(obo.top(), button.top())
-        dark = image.pixelColor(round(obo.left() + 6), round(obo.center().y()))
-        self.assertLess(dark.red(), 100)
-
-        self.window._fullscreen = True
-        with patch.object(self.window, "_paint_control_layer", wraps=self.window._paint_control_layer) as layer:
-            self.window.render(image)
-        fullscreen_calls = [call for call in layer.call_args_list if call.args[4][0] == "window"]
-        self.assertEqual(len(fullscreen_calls), 1)
-        self.assertTrue(fullscreen_calls[0].args[4][3])
-
-        self.window._control_last_motion_at = 0.0
-        self.window.render(image)
-        hidden = image.pixelColor(round(obo.left() + 6), round(obo.center().y()))
-        self.assertLess(abs(hidden.red() - dark.red()), 100)
-        self.window._reset_control_idle()
-
-        self.owner.timed_lyric_units = [self.owner.timed_lyric_units[0], (), self.owner.timed_lyric_units[2]]
-        self.owner.timed_lyric_timing_kinds = ["unit", "line", "unit"]
-        with patch.object(self.window, "_paint_control_layer", wraps=self.window._paint_control_layer) as layer:
-            self.window.render(image)
-        window_calls = [call for call in layer.call_args_list if call.args[4][0] == "window"]
-        self.assertTrue(window_calls[0].args[4][3])
-        self.assertTrue(window_calls[0].args[4][4])
+        for fullscreen in (False, True):
+            self.window._fullscreen = fullscreen
+            self.window._reset_control_idle(100.0)
+            image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with QPainter(image) as painter, patch("local.music_surface_window.time.monotonic", return_value=100.0):
+                self.window._paint_window_controls(painter, QRectF(self.window.rect()))
+            self.assertEqual(set(self.window._button_rects), {"mode" if fullscreen else "return", "translation"})
+            lines, timed = self.window._display_lyrics()
+            self.assertTrue(self.window._has_genuine_obo_timing(lines, timed))
+            genuine = bytes(image.constBits())
+            original_units = self.owner.timed_lyric_units
+            self.owner.timed_lyric_units = [()] * 3
+            self.owner.timed_lyric_timing_kinds = ["line"] * 3
+            image.fill(Qt.GlobalColor.transparent)
+            with QPainter(image) as painter, patch("local.music_surface_window.time.monotonic", return_value=100.0):
+                self.window._paint_window_controls(painter, QRectF(self.window.rect()))
+            self.assertEqual(genuine, bytes(image.constBits()))
+            self.owner.timed_lyric_units = original_units
+            self.owner.timed_lyric_timing_kinds = ["unit"] * 3
+            with patch("local.music_surface_window.time.monotonic", return_value=110.0):
+                self.window._sync_window_control_rects()
+            self.assertEqual(self.window._button_rects, {})
 
     def test_sentence_sized_source_markers_do_not_claim_obo_or_low_perception_reading(self):
         self.owner.track_title = "row markers"
@@ -1104,15 +1093,12 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._timing_quality_badge(lines, timed), "行计时")
         self.window.resize(960, 540)
         image = QImage(self.window.size(), QImage.Format.Format_RGB32)
-        with patch.object(self.window, "_paint_control_layer", wraps=self.window._paint_control_layer) as layer, patch.object(
-            self.window, "_paint_wrapped_lifted_lyric",
-        ) as reading:
+        with patch.object(self.window, "_paint_wrapped_lifted_lyric") as reading:
             self.window.render(image)
-        window_key = next(call for call in layer.call_args_list if call.args[4][0] == "window").args[4]
-        self.assertFalse(window_key[3])
+        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
         reading.assert_not_called()
 
-    def test_gold_badge_has_inactive_state_and_low_perception_hides_it(self):
+    def test_line_timed_gold_and_low_perception_share_badge_free_controls(self):
         self.owner.track_title = "line-timed song"
         self.owner.timed_lyrics = [
             (0.0, "first line"), (3.0, "second line"),
@@ -1121,22 +1107,22 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.owner.timed_lyric_units = [()] * 4
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
         self.window.resize(960, 540)
-        image = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        rendered = []
+        controls = []
+        for strategy in ("gold", "low_perception"):
+            self.owner.music_surface_reading_strategy = strategy
+            self.window._reset_control_idle(100.0)
+            image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with QPainter(image) as painter, patch("local.music_surface_window.time.monotonic", return_value=100.0):
+                self.window._paint_window_controls(painter, QRectF(self.window.rect()))
+            rendered.append(bytes(image.constBits()))
+            controls.append(dict(self.window._button_rects))
+        self.assertEqual(rendered[0], rendered[1])
+        self.assertEqual(controls[0], controls[1])
+        self.assertEqual(set(controls[0]), {"return", "translation"})
 
-        self.owner.music_surface_reading_strategy = "gold"
-        with patch.object(self.window, "_paint_control_layer", wraps=self.window._paint_control_layer) as layer:
-            self.window.render(image)
-        key = next(call for call in layer.call_args_list if call.args[4][0] == "window").args[4]
-        self.assertTrue(key[3])
-        self.assertFalse(key[4])
-
-        self.owner.music_surface_reading_strategy = "low_perception"
-        with patch.object(self.window, "_paint_control_layer", wraps=self.window._paint_control_layer) as layer:
-            self.window.render(image)
-        key = next(call for call in layer.call_args_list if call.args[4][0] == "window").args[4]
-        self.assertFalse(key[3])
-
-    def test_passionfruit_style_start_only_word_marker_stays_white_obo_without_sparse_glow(self):
+    def test_passionfruit_style_start_only_word_marker_has_no_badge_or_sparse_glow(self):
         self.owner.track_title = "Passionfruit"
         self.owner.music_surface_reading_strategy = "gold"
         self.owner.timed_lyrics = [
@@ -1155,13 +1141,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._timing_quality_badge(lines, timed), "行计时")
         self.assertFalse(self.window._has_genuine_obo_timing(lines, timed))
         image = QImage(self.window.size(), QImage.Format.Format_RGB32)
-        with patch.object(self.window, "_paint_control_layer", wraps=self.window._paint_control_layer) as layer, patch.object(
-            self.window, "_paint_sparse_glyph_run",
-        ) as glow:
+        with patch.object(self.window, "_paint_sparse_glyph_run") as glow:
             self.window.render(image)
-        key = next(call for call in layer.call_args_list if call.args[4][0] == "window").args[4]
-        self.assertTrue(key[3])  # Gold mode keeps the dark, white-text OBO mark.
-        self.assertFalse(key[4])
+        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
         glow.assert_not_called()
         self.assertEqual(self.window._last_lyric_emphasis_mode, "none")
         self.assertIsNone(self.window._pending_glow_prewarm)
@@ -4057,8 +4039,14 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             with patch("local.music_surface_window.time.monotonic", return_value=20.0 + frame / 30.0):
                 self.window.render(output)
         settled = self.window._background_cache.pixelColor(128, 72)
-        self.assertGreater(settled.red(), settled.blue() + 30)
-        self.assertGreater(settled.green(), settled.blue() + 25)
+        # Bright single-hue covers now use lower-chroma display layers. Verify
+        # that the newest yellow hue replaces the red/blue transitions without
+        # demanding the former aggressively saturated RGB-channel distances.
+        expected_hue = QColor(160, 145, 30).hsvHue()
+        distance = abs(settled.hsvHue() - expected_hue)
+        self.assertLessEqual(min(distance, 360 - distance), 8)
+        self.assertGreater(settled.hsvSaturation(), 0)
+        self.assertNotEqual(self.window._background_cache, displayed)
 
     def test_ambient_background_invalidates_on_track_colors_intensity_and_size(self):
         self.owner.media_track_id = "song-a"
@@ -6134,7 +6122,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             island._music_surface_active = False
             island.close()
 
-    def test_music_surface_tick_keeps_runtime_and_overlay_sync_without_island_frame_work(self):
+    def test_music_surface_tick_keeps_media_and_lyrics_without_retired_extras_or_island_frame_work(self):
         class VisibleSurface:
             def isVisible(self):
                 return True
@@ -6162,17 +6150,17 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
             refresh_media.assert_called_once_with(12.0)
             update_scene.assert_called_once_with(12.0)
-            prune_messages.assert_called_once_with(12.0)
-            sync_overlays.assert_called_once_with(12.0)
-            barrage_plan.assert_called_once()
+            prune_messages.assert_not_called()
+            sync_overlays.assert_not_called()
+            barrage_plan.assert_not_called()
             lyric_tick.assert_called_once_with(12.0, island._animation_speed_factor())
             follow_refresh.assert_not_called()
             topmost_tick.assert_not_called()
             frame_execution.assert_not_called()
             force_topmost.assert_not_called()
             island_update.assert_not_called()
-            self.assertTrue(island.barrage_hovered)
-            self.assertEqual(island.barrage_clock, 2.25)
+            self.assertFalse(island.barrage_hovered)
+            self.assertEqual(island.barrage_clock, 2.0)
         finally:
             island.music_fullscreen_overlay = None
             island.close()

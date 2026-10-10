@@ -9,8 +9,8 @@ APP_NAME = "GluSpot"
 APP_VERSION = "6.412"
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BRAND_ASSET_DIR = ROOT_DIR / "assets" / "brand"
-APP_ICON_PATH = BRAND_ASSET_DIR / "gluspot-card-center.ico"
-TRAY_ICON_PATH = BRAND_ASSET_DIR / "gluspot.ico"
+APP_ICON_PATH = BRAND_ASSET_DIR / "gluspot-glu.ico"
+TRAY_ICON_PATH = APP_ICON_PATH
 LEGACY_APP_NAMES = ("DynamicIsland", "gpt-island")
 CUSTOM_ICON_PNG_NAME = "custom-icon.png"
 CUSTOM_ICON_ICO_NAME = "custom-icon.ico"
@@ -57,7 +57,7 @@ def resolve_icon_paths(custom_icon_path: str | os.PathLike[str] | None = None) -
         if not preview_path.exists():
             preview_path = icon_path
         return IconPaths(app_icon=icon_path, tray_icon=icon_path, preview_icon=preview_path)
-    return IconPaths(app_icon=APP_ICON_PATH, tray_icon=TRAY_ICON_PATH, preview_icon=BRAND_ASSET_DIR / "gluspot-card-center-icon-256.png")
+    return IconPaths(app_icon=APP_ICON_PATH, tray_icon=TRAY_ICON_PATH, preview_icon=BRAND_ASSET_DIR / "gluspot-glu-icon-256.png")
 
 
 def install_custom_icon(source_path: str | os.PathLike[str], target_dir: str | os.PathLike[str] | None = None) -> dict[str, str]:

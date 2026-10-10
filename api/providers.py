@@ -33,6 +33,8 @@ from api.artwork_sources import (
     artwork_duration_matches, artwork_text_key, normalize_artwork_url, read_artwork_response,
 )
 from api.lyrics import LocalLyricsStore
+# Compatibility imports for older callers/tests; active providers never
+# construct these retired collectors.
 from api.message_detector import WindowsMessageDetector
 from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, TrackData
 from api.netease_position import NeteasePositionReader, QQPositionReader
@@ -120,7 +122,19 @@ class EmptyIslandDataProvider:
         self.visual_data = visual_data or EMPTY_VISUAL_DATA
 
     def get_visual_data(self) -> IslandVisualData:
-        return self.visual_data
+        data = self.visual_data
+        return replace(data, messages=(), plugins=()) if data.messages or data.plugins else data
+
+    def messages(self):
+        """Compatibility boundary for retired message collection."""
+        return ()
+
+    def plugins(self):
+        """Compatibility boundary for retired time/weather/agenda work."""
+        return ()
+
+    def diagnostics(self):
+        return {"enabled": False, "state": "removed", "message_detection_enabled": False, "cached_messages": 0}
 
     def get_audio_frame(self) -> AudioFrame | None:
         return None
@@ -160,20 +174,28 @@ class NoMediaSessionProvider(EmptyIslandDataProvider):
 class PlaybackSourceProvider:
     """V2 provider boundary selecting owned playback or enabled system capture.
 
-    Owned music never supplies a fictitious external process ID to the native
-    process-loopback group sender. That route requires a future direct PCM input.
+    Owned decoded PCM has its own authenticated input to the shared sender.
+    External process capture retains its independent strict identity guards.
     """
     def __init__(self, system_provider, owned_player, settings_getter):
         self.system = system_provider
         self.owned = owned_player
         self.settings_getter = settings_getter
         self._owned_capture_suspended = False
+        self._owned_outputs = None
+        from local.owned_audio_bridge import OwnedAudioBridge
+        self._owned_audio_bridge = OwnedAudioBridge(owned_player)
         self.owned.changed.connect(self._owned_state_changed)
 
     def _owned_state_changed(self):
         active = self._owned_active()
         if active and not self._owned_capture_suspended:
             self.system.suspend_live_audio()
+            stop_cast = getattr(self.system, "stop_audio_cast", None)
+            if callable(stop_cast):
+                stop_cast()
+        elif self._owned_outputs is not None and not self._owned_output_mode():
+            self._owned_outputs.stop_cast()
         self._owned_capture_suspended = active
 
     @property
@@ -190,14 +212,30 @@ class PlaybackSourceProvider:
     def _system_enabled(self):
         return bool(self.settings_getter("v2_system_capture_enabled", False))
 
+    def _owned_output_mode(self):
+        return self._owned_active() or (bool(self.settings_getter("v2_owned_playback_enabled", True)) and not self._system_enabled())
+
+    def start_audio_outputs(self):
+        if not self._owned_output_mode():
+            return self.system.start_audio_outputs()
+        if self._owned_outputs is None:
+            from api.owned_audio_outputs import OwnedAudioOutputController
+            source_id = str(self.settings_getter("v2_airplay_sender_id", ""))
+            if not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", source_id):
+                source_id = "02:" + ":".join(f"{part:02X}" for part in secrets.token_bytes(5))
+                setter = self.settings_setter
+                if callable(setter):
+                    setter("v2_airplay_sender_id", source_id)
+            self._owned_outputs = OwnedAudioOutputController(self._owned_audio_bridge, source_id=source_id)
+        return self._owned_outputs
+
     def get_visual_data(self):
         if self._owned_active():
             data = self.owned.visual_data()
-            return replace(data, messages=self.system.message_detector.messages(), plugins=self.system.plugin_provider.plugins())
+            return replace(data, messages=(), plugins=())
         if self._system_enabled():
-            return self.system.get_visual_data()
-        return replace(empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot"),
-                       messages=self.system.message_detector.messages(), plugins=self.system.plugin_provider.plugins())
+            return replace(self.system.get_visual_data(), messages=(), plugins=())
+        return empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot")
 
     def get_audio_frame(self):
         return self.system.get_audio_frame() if self._system_enabled() and not self._owned_active() else None
@@ -206,9 +244,9 @@ class PlaybackSourceProvider:
         return self._system_enabled() and not self._owned_active() and self.system.has_live_audio()
 
     def get_audio_route_snapshot(self):
-        if self._owned_active():
-            return AudioRouteSnapshot(state="unavailable", capture_scope="owned-player",
-                status_message="程序内播放使用系统默认输出；暂不支持同步播放到多个设备")
+        if self._owned_output_mode():
+            return (self._owned_outputs.snapshot() if self._owned_outputs is not None else
+                AudioRouteSnapshot(capture_scope="owned-player", status_message="打开设备面板以选择程序内音乐输出"))
         if not self._system_enabled():
             return AudioRouteSnapshot(state="unavailable", status_message="系统抓取已关闭")
         return self.system.get_audio_route_snapshot()
@@ -218,33 +256,71 @@ class PlaybackSourceProvider:
             return self.owned.send_playback_command(command)
         return self._system_enabled() and self.system.send_playback_command(command)
 
+    def get_owned_playback_mode(self):
+        if not self._owned_active():
+            return None
+        mode = getattr(self.owned, "playback_mode", None)
+        return mode if mode in ("sequential", "shuffle", "repeat_one") else None
+
+    def set_owned_playback_mode(self, mode):
+        if not self._owned_active() or mode not in ("sequential", "shuffle", "repeat_one"):
+            return False
+        setter = getattr(self.owned, "set_playback_mode", None)
+        if not callable(setter) or not setter(mode):
+            return False
+        persist = self.settings_setter
+        if callable(persist):
+            persist("v2_owned_playback_mode", mode)
+        return True
+
     def seek_playback_position(self, position_seconds, expected_track_id=None):
         if self._owned_active():
             return self.owned.seek_playback_position(position_seconds, expected_track_id)
         return self._system_enabled() and self.system.seek_playback_position(position_seconds, expected_track_id)
 
+    def _request_immediate_media_refresh(self):
+        if self._owned_active():
+            return self.owned.refresh_lyrics()
+        return self.system._request_immediate_media_refresh()
+
     def refresh_audio_outputs(self):
-        return self._system_enabled() and not self._owned_active() and self.system.refresh_audio_outputs()
+        return self.start_audio_outputs().refresh() if self._owned_output_mode() else self._system_enabled() and self.system.refresh_audio_outputs()
 
     def select_audio_output(self, device_id):
-        return self._system_enabled() and not self._owned_active() and self.system.select_audio_output(device_id)
+        if self._owned_output_mode():
+            return self._owned_outputs is not None and self._owned_outputs.select(device_id)
+        return self._system_enabled() and self.system.select_audio_output(device_id)
 
     def toggle_audio_output(self, device_id):
-        return self._system_enabled() and not self._owned_active() and self.system.toggle_audio_output(device_id)
+        if self._owned_output_mode():
+            return self._owned_outputs is not None and self._owned_outputs.toggle(device_id)
+        return self._system_enabled() and self.system.toggle_audio_output(device_id)
 
     def set_audio_output_volume(self, device_id, volume):
-        return self._system_enabled() and not self._owned_active() and self.system.set_audio_output_volume(device_id, volume)
+        if self._owned_output_mode():
+            return self._owned_outputs is not None and self._owned_outputs.set_volume(device_id, volume)
+        return self._system_enabled() and self.system.set_audio_output_volume(device_id, volume)
 
     def add_homepod(self, host, port=7000):
-        return self._system_enabled() and not self._owned_active() and self.system.add_homepod(host, port)
+        return self.start_audio_outputs().add_homepod(host, port) if self._owned_output_mode() else self._system_enabled() and self.system.add_homepod(host, port)
+
+    def stop_audio_cast(self):
+        if self._owned_output_mode():
+            return self._owned_outputs is not None and self._owned_outputs.stop_cast()
+        return self._system_enabled() and self.system.stop_audio_cast()
 
     def diagnostics(self):
         data = self.system.diagnostics()
         data["playback_source"] = "owned" if self._owned_active() else "system" if self._system_enabled() else "idle"
         data["owned_playback_status"] = self.owned.status
+        if self._owned_outputs is not None:
+            data["owned_audio_outputs"] = self._owned_outputs.diagnostics()
         return data
 
     def close_audio_outputs(self):
+        if self._owned_outputs is not None:
+            self._owned_outputs.close()
+        self._owned_audio_bridge.close()
         self.owned.close()
         self.system.suspend_live_audio()
         self.system.close_audio_outputs()
@@ -370,8 +446,11 @@ class WindowsMediaProvider:
         self._audio_analyzer_last_error = ""
         self.netease_position: NeteasePositionReader | None = None
         self.qq_position: QQPositionReader | None = None
-        self.plugin_provider = RealPluginProvider(settings_getter)
-        self.message_detector = WindowsMessageDetector(settings_getter)
+        # Preserve the old accessors for diagnostics/callers without creating
+        # collectors. Retired settings cannot start UIA/notification polling,
+        # weather HTTP threads, timers or agenda-file work.
+        self.plugin_provider = EmptyIslandDataProvider()
+        self.message_detector = self.plugin_provider
         self._audio_route_controller = None
         self._audio_route_init_lock = threading.Lock()
         self._audio_route_closed = False
@@ -455,18 +534,18 @@ class WindowsMediaProvider:
             # snapshot moving without waiting for disk I/O or starting work.
             data = getattr(self, "_last_data", None)
             if data is None:
-                return self.fallback.get_visual_data()
+                return replace(self.fallback.get_visual_data(), messages=(), plugins=())
             projected = self._project_visual_position(data, now, getattr(self, "_last_ready_at", 0.0))
-            return replace(projected, messages=self.message_detector.messages(), plugins=self.plugin_provider.plugins())
+            return replace(projected, messages=(), plugins=())
         try:
             if self._loop is None:
-                return self.fallback.get_visual_data()
+                return replace(self.fallback.get_visual_data(), messages=(), plugins=())
             self._consume_refresh_future(now)
             refresh_interval = self._current_refresh_interval(now)
             force_anchor_refresh = self._lyrics_found_progress_retry_cached_refresh_due(now)
             if self._last_data is not None and not force_anchor_refresh and now - self._last_refresh_at < refresh_interval:
                 projected = self._project_visual_position(self._last_data, now, self._last_ready_at)
-                return replace(projected, messages=self.message_detector.messages(), plugins=self.plugin_provider.plugins())
+                return replace(projected, messages=(), plugins=())
             self._last_refresh_at = now
             if self._refresh_future is None or self._refresh_future.done():
                 try:
@@ -950,8 +1029,7 @@ class WindowsMediaProvider:
         return replace(data, track=replace(track, position_seconds=position))
 
     def _cached_or_status_visual(self, now: float) -> IslandVisualData:
-        plugins = self.plugin_provider.plugins()
-        messages = self.message_detector.messages()
+        plugins, messages = (), ()
         if self._provider_status == "missing_winsdk":
             return replace(MISSING_WINSDK_VISUAL_DATA, messages=messages, plugins=plugins)
         if self._provider_status == "no_session":
@@ -2709,7 +2787,7 @@ class WindowsMediaProvider:
             if album_title or not same_track_as_previous:
                 self._accepted_album_title = str(album_title or "")
             self._accepted_album_track_id = track_key
-            data = replace(fallback_data, track=track, messages=self.message_detector.messages(), plugins=self.plugin_provider.plugins())
+            data = replace(fallback_data, track=track, messages=(), plugins=())
             return self._apply_recent_local_seek_to_visual_data(data, time.monotonic())
 
     def _observe_raw_playback_state(

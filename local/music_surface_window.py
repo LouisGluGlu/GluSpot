@@ -79,6 +79,7 @@ from local.audio_output_status import OutputMember, OutputMembershipTracker
 from local.audio_output_motion import OutputConnectionMotion, connection_capsule_rect, paint_connection_pose
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
+from local.music_source_icons import paint_music_source_icon
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -180,6 +181,7 @@ class MusicSurfaceWindow(QWidget):
         self._moving = False
         self._closing_for_shutdown = False
         self._button_rects: dict[str, QRectF] = {}
+        self._owned_playback_mode: str | None = None
         self._audio_output_panel: AudioOutputPanel | None = None
         self._audio_output_kinds: tuple[str, ...] = ()
         self._audio_output_membership = OutputMembershipTracker()
@@ -904,6 +906,20 @@ class MusicSurfaceWindow(QWidget):
             callback()
         else:
             self.hide()
+
+    def _library_back_available(self) -> bool:
+        callback = getattr(self.owner, "_music_library_back_callback", None)
+        active = getattr(getattr(self.owner, "data_provider", None), "_owned_active", None)
+        return callable(callback) and callable(active) and bool(active())
+
+    def return_to_library(self) -> bool:
+        """Request account navigation without issuing a playback command."""
+        if not self._library_back_available():
+            return False
+        self._dismiss_audio_output_panel(immediate=True)
+        self._restore_idle_cursor()
+        self.owner._music_library_back_callback()
+        return True
 
     def hideEvent(self, event):
         self._update_metadata_hover(None, time.monotonic())
@@ -7739,19 +7755,88 @@ class MusicSurfaceWindow(QWidget):
         width, height, top = 44.0 * scale, 44.0 * scale, 18.0 * scale
         return QRectF(rect.right() - 22.0 * scale - width, top, width, height)
 
+    def _library_button_rect(self, rect: QRectF) -> QRectF:
+        scale = self._surface_scale(rect)
+        return QRectF(18.0 * scale, max(4.0, 6.0 * scale),
+                      max(104.0, 118.0 * scale), max(44.0, 44.0 * scale))
+
+    def _paint_library_back(self, painter: QPainter, rect: QRectF):
+        if not self._library_back_available():
+            return
+        button = self._library_button_rect(rect)
+        face = button.adjusted(4, 4, -4, -4)
+        hovered = self._hovered_window_button == "library"
+        pressed = self._pressed_window_button == "library"
+        painter.save()
+        painter.setPen(QPen(QColor(75, 76, 77, 240), 1))
+        painter.setBrush(QColor(47 if pressed else 67 if hovered else 55,
+                               48 if pressed else 68 if hovered else 56,
+                               49 if pressed else 69 if hovered else 57, 236))
+        painter.drawRoundedRect(face, face.height() / 2, face.height() / 2)
+        ink = QColor(255, 255, 255, 242)
+        paint_music_source_icon(painter, QRectF(face.left() + 9, face.center().y() - 9, 18, 18),
+                                "library", tint=ink)
+        painter.setPen(ink)
+        painter.setFont(self._surface_font(max(12.0, 14.0 * self._surface_scale(rect)), QFont.Weight.DemiBold))
+        painter.drawText(face.adjusted(32, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "音乐库")
+        painter.restore()
+
     @staticmethod
-    def _obo_badge_rect(button: QRectF, scale: float) -> QRectF:
+    def _preceding_control_rect(button: QRectF, scale: float) -> QRectF:
         return QRectF(button.left() - button.width() - 12.0 * scale,
                       button.top(), button.width(), button.height())
 
     def _translation_button_rect(self, button: QRectF, scale: float) -> QRectF:
-        anchor = self._obo_badge_rect(button, scale) if self._reading_strategy() == "gold" else button
-        return self._obo_badge_rect(anchor, scale)
+        return self._preceding_control_rect(button, scale)
+
+    def _playback_mode_button_rect(self, button: QRectF, scale: float) -> QRectF:
+        return self._preceding_control_rect(self._translation_button_rect(button, scale), scale)
+
+    def _sync_owned_playback_mode(self):
+        provider = getattr(self.owner, "data_provider", None)
+        getter = getattr(provider, "get_owned_playback_mode", None)
+        setter = getattr(provider, "set_owned_playback_mode", None)
+        try:
+            mode = getter() if callable(getter) and callable(setter) else None
+        except Exception:
+            mode = None
+        mode = mode if mode in {"sequential", "shuffle", "repeat_one"} else None
+        if mode != self._owned_playback_mode:
+            self._owned_playback_mode = mode
+            if self._hovered_window_button == "playback_mode":
+                self.setToolTip(self._playback_mode_tooltip())
+            self._sync_window_control_rects()
+            self.update()
+
+    def _playback_mode_tooltip(self) -> str:
+        labels = {"sequential": ("顺序播放 · 歌单循环", "随机播放"),
+                  "shuffle": ("随机播放", "单曲循环"),
+                  "repeat_one": ("单曲循环", "顺序播放")}
+        mode = labels.get(self._owned_playback_mode)
+        return f"{mode[0]} · 点击切换为{mode[1]}" if mode else ""
+
+    def _cycle_owned_playback_mode(self) -> bool:
+        # Recheck the provider at release so a source switch cannot send this
+        # owned-player action to the system track displayed after the press.
+        self._sync_owned_playback_mode()
+        modes = {"sequential": "shuffle", "shuffle": "repeat_one", "repeat_one": "sequential"}
+        following = modes.get(self._owned_playback_mode)
+        setter = getattr(getattr(self.owner, "data_provider", None), "set_owned_playback_mode", None)
+        if following is None or not callable(setter):
+            return False
+        try:
+            changed = bool(setter(following))
+        except Exception:
+            changed = False
+        self._sync_owned_playback_mode()
+        self.setToolTip(self._playback_mode_tooltip())
+        return changed
 
     def _audio_output_available(self) -> bool:
         return callable(getattr(getattr(self.owner, "data_provider", None), "get_audio_route_snapshot", None))
 
     def _sync_audio_output_status(self, snapshot=None, *, settle: bool = False):
+        self._sync_owned_playback_mode()
         getter = getattr(getattr(self.owner, "data_provider", None), "get_audio_route_snapshot", None)
         try:
             snapshot = snapshot if snapshot is not None else (getter() if callable(getter) else None)
@@ -7824,7 +7909,9 @@ class MusicSurfaceWindow(QWidget):
                                                    -margin, margin, margin))
 
     def _audio_output_button_rect(self, button: QRectF, scale: float) -> QRectF:
-        return self._obo_badge_rect(self._translation_button_rect(button, scale), scale)
+        anchor = (self._playback_mode_button_rect(button, scale) if self._owned_playback_mode is not None
+                  else self._translation_button_rect(button, scale))
+        return self._preceding_control_rect(anchor, scale)
 
     def _dismiss_audio_output_panel(self, *, immediate: bool = False):
         panel = getattr(self, "_audio_output_panel", None)
@@ -8037,6 +8124,11 @@ class MusicSurfaceWindow(QWidget):
                  self._window_control_shift(button, reveal))}
             if reveal >= 0.75 else {}
         )
+        if self._library_back_available():
+            self._button_rects["library"] = self._library_button_rect(rect)
+        if reveal >= 0.75 and self._owned_playback_mode is not None:
+            self._button_rects["playback_mode"] = self._playback_mode_button_rect(
+                button, self._surface_scale(rect)).translated(self._window_control_shift(button, reveal))
         if reveal >= 0.75 and self._audio_output_available():
             audio = self._audio_output_button_rect(button, self._surface_scale(rect))
             pose = self._audio_output_motion.pose
@@ -8066,18 +8158,33 @@ class MusicSurfaceWindow(QWidget):
         self._sync_window_control_rects(rect)
         if not paint_ink:
             return
+        self._paint_library_back(painter, rect)
         scale = self._surface_scale(rect)
         key = "mode" if self._fullscreen else "return"
         button = self._window_control_base_rect(rect)
-        lines, timed = self._display_lyrics()
-        show_obo = self._reading_strategy() == "gold"
-        # Any surviving genuinely timed spoken row activates the badge. The
-        # rest of the song may still be line-timed; the white state marks that
-        # the selected gold strategy is estimating those rows.
-        obo_active = show_obo and self._has_genuine_obo_timing(lines, timed)
-        obo = self._obo_badge_rect(button, scale)
         translation = self._translation_button_rect(button, scale)
         bounds = button.united(translation)
+        playback_mode = self._owned_playback_mode
+        playback_button = self._playback_mode_button_rect(button, scale)
+        playback_hovered = self._hovered_window_button == "playback_mode"
+        playback_pressed = self._pressed_window_button == "playback_mode"
+        playback_active = playback_mode in {"shuffle", "repeat_one"}
+        playback_ink = QColor(255, 255, 255, 242)
+        if playback_active:
+            samples = self._background_sample_colors(playback_button)
+            backdrop = sorted(samples, key=self._relative_luminance)[len(samples) // 2]
+            # Reuse the album's dark role against the same pale enabled face
+            # as adjacent controls. Preserve its hue while guarding small
+            # SVG details even when a bright pigment fills the background.
+            playback_ink = self._background_role_color(backdrop)
+            playback_ink.setAlpha(242)
+            face_color = self._composited_color(QColor(248, 249, 250, 245), backdrop)
+            for _ in range(8):
+                if self._contrast_ratio(self._composited_color(playback_ink, face_color), face_color) >= 4.5:
+                    break
+                playback_ink = playback_ink.darker(112)
+        if playback_mode is not None:
+            bounds = bounds.united(playback_button)
         audio_available = self._audio_output_available()
         audio_button = self._audio_output_button_rect(button, scale)
         audio_hovered = self._hovered_window_button == "audio_output"
@@ -8119,6 +8226,10 @@ class MusicSurfaceWindow(QWidget):
                 audio_ink = QColor(80, 151, 220) if audio_active else (
                     QColor(44, 46, 48) if audio_kinds else ink)
                 paint_audio_output_status(layer, audio_button, audio_kinds, audio_ink, count=audio_count)
+            if playback_mode is not None:
+                face(playback_button, playback_hovered, playback_pressed, playback_active)
+                paint_music_source_icon(layer, icon_rect(playback_button, 0.55),
+                                        "sequence" if playback_mode == "sequential" else playback_mode, tint=playback_ink)
             translation_symbol = self._translation_symbol_path(icon_rect(translation, 0.58))
             if translated:
                 # The vector symbol is removed from the face, so its ink is
@@ -8139,24 +8250,6 @@ class MusicSurfaceWindow(QWidget):
                 layer.setPen(Qt.PenStyle.NoPen)
                 layer.setBrush(ink)
                 layer.drawPath(translation_symbol)
-            if show_obo:
-                beta = QPainterPath()
-                beta.addText(QPointF(), self._surface_font(28.0 * scale, QFont.Weight.Bold), "β")
-                beta = beta.translated(obo.center() - beta.boundingRect().center())
-                if obo_active:
-                    gold = QLinearGradient(obo.topLeft(), obo.bottomRight())
-                    gold.setColorAt(0.0, QColor(255, 239, 42))
-                    gold.setColorAt(0.48, QColor(244, 211, 18))
-                    gold.setColorAt(1.0, QColor(190, 135, 10))
-                    layer.setPen(QPen(gold, max(1.0, 1.5 * scale)))
-                    layer.setBrush(QColor(0, 0, 0, 110))
-                    layer.drawEllipse(obo)
-                    layer.setBrush(gold)
-                else:
-                    face(obo)
-                    layer.setBrush(ink)
-                layer.setPen(Qt.PenStyle.NoPen)
-                layer.drawPath(beta)
             face(button, hovered_state, pressed_state)
             if not self._capturing_transition_snapshot:
                 self._paint_window_mode_icon(layer, icon_rect(button, 0.60), self._fullscreen, ink)
@@ -8167,10 +8260,12 @@ class MusicSurfaceWindow(QWidget):
 
         self._paint_control_layer(
             painter, bounds, reveal, self._window_control_shift(button, reveal),
-            ("window", key, round(scale, 3), show_obo, obo_active, translated,
-             translation_hovered, translation_pressed, hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw,
-            prewarm_default=(("window", key, round(scale, 3), show_obo, obo_active, translated,
-                               translation_hovered, translation_pressed, False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw_default),
+            ("window", key, round(scale, 3), translated,
+             translation_hovered, translation_pressed, playback_mode, playback_ink.rgba(), playback_hovered, playback_pressed,
+             hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw,
+            prewarm_default=(("window", key, round(scale, 3), translated,
+                               translation_hovered, translation_pressed, playback_mode, playback_ink.rgba(), playback_hovered, playback_pressed,
+                               False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw_default),
         )
         if audio_available and not audio_active and audio_pose is not None:
             painter.save()
@@ -8469,15 +8564,19 @@ class MusicSurfaceWindow(QWidget):
             self._pressed_media_command = ""
             self._pressed_window_button = next((
                 key for key, rect in self._transition_control_rects().items()
-                if key in {"mode", "return"} and rect.contains(event.position())
-            ), "") if self._transition_controls_clickable() else ""
+                if (key == "library" or (self._transition_controls_clickable() and key in {"mode", "return"}))
+                and rect.contains(event.position())
+            ), "")
             self._pressed_lyric_index = None
             event.accept()
             return
         self._resize_edges = self._edge_set(event.position())
         self._drag_origin = event.globalPosition().toPoint()
         self._drag_geometry = QRect(self.geometry())
-        self._pressed_window_button = next((key for key, rect in self._button_rects.items() if rect.contains(event.position())), "") if controls_clickable else ""
+        self._pressed_window_button = next((key for key, rect in self._button_rects.items()
+                                            if (controls_clickable or key == "library") and rect.contains(event.position())), "")
+        if self._pressed_window_button == "library":
+            self._resize_edges = set()
         self._pressed_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_clickable else ""
         self._pressed_lyric_index = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(event.position())), None)
         over_button = bool(self._pressed_window_button or self._pressed_media_command or self._pressed_lyric_index is not None)
@@ -8511,12 +8610,14 @@ class MusicSurfaceWindow(QWidget):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
                 return
             controls_hoverable = self._control_reveal_at(time.monotonic()) >= 0.75
-            window_button = next((key for key, rect in self._button_rects.items() if rect.contains(event.position())), "") if controls_hoverable else ""
+            window_button = next((key for key, rect in self._button_rects.items()
+                                  if (controls_hoverable or key == "library") and rect.contains(event.position())), "")
             media_button = next((key for key, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_hoverable else ""
             if window_button != self._hovered_window_button or media_button != self._hovered_media_command:
                 self._hovered_window_button = window_button
                 self._hovered_media_command = media_button
-                self.setToolTip({"mode": "切换到窗口", "return": "返回岛模式"}.get(window_button, ""))
+                self.setToolTip({"mode": "切换到窗口", "return": "返回岛模式", "library": "返回音乐库",
+                                 "playback_mode": self._playback_mode_tooltip()}.get(window_button, ""))
                 self.update()
             if window_button or media_button:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -8565,8 +8666,9 @@ class MusicSurfaceWindow(QWidget):
         if (self._pending_fullscreen is not None or self._island_returning) and not self._geometry_transition_snapshot.isNull():
             released = next((
                 key for key, rect in self._transition_control_rects().items()
-                if key in {"mode", "return"} and rect.contains(event.position())
-            ), "") if self._transition_controls_clickable() else ""
+                if (key == "library" or (self._transition_controls_clickable() and key in {"mode", "return"}))
+                and rect.contains(event.position())
+            ), "")
             pressed = self._pressed_window_button
             self._moving = False
             self._resize_edges = set()
@@ -8578,22 +8680,29 @@ class MusicSurfaceWindow(QWidget):
                     self.toggle_presentation_mode()
                 elif released == "return":
                     self.return_to_island()
+                elif released == "library":
+                    self.return_to_library()
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and not self._moving and not self._resize_edges:
             point = event.position()
-            release_window_button = next((key for key, rect in self._button_rects.items() if rect.contains(point)), "") if controls_clickable else ""
+            release_window_button = next((key for key, rect in self._button_rects.items()
+                                          if (controls_clickable or key == "library") and rect.contains(point)), "")
             release_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(point)), "") if controls_clickable else ""
             release_lyric_index = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(point)), None)
             pressed_window_button = str(getattr(self, "_pressed_window_button", "") or "")
             pressed_media_command = str(getattr(self, "_pressed_media_command", "") or "")
             pressed_lyric_index = getattr(self, "_pressed_lyric_index", None)
-            if pressed_window_button == "return" and release_window_button == "return":
+            if pressed_window_button == "library" and release_window_button == "library":
+                self.return_to_library()
+            elif pressed_window_button == "return" and release_window_button == "return":
                 self.return_to_island()
             elif pressed_window_button == "mode" and release_window_button == "mode":
                 self.toggle_presentation_mode()
             elif pressed_window_button == "translation" and release_window_button == "translation":
                 self._toggle_translation()
+            elif pressed_window_button == "playback_mode" and release_window_button == "playback_mode":
+                self._cycle_owned_playback_mode()
             elif pressed_window_button == "audio_output" and release_window_button == "audio_output":
                 self._toggle_audio_output_panel()
             elif pressed_lyric_index is not None and release_lyric_index == pressed_lyric_index:
@@ -8743,7 +8852,8 @@ class MusicSurfaceWindow(QWidget):
             if self._audio_output_panel is not None and self._audio_output_panel.isVisible():
                 self._dismiss_audio_output_panel()
                 return
-            self.return_to_island()
+            if not self.return_to_library():
+                self.return_to_island()
             return
         command = {Qt.Key.Key_Space: "toggle_play_pause", Qt.Key.Key_Left: "previous", Qt.Key.Key_Right: "next"}.get(event.key())
         if command:

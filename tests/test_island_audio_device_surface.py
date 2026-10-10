@@ -1,4 +1,4 @@
-"""Native Qt regressions for the device notice inside the existing V2 island."""
+"""Historical device-notice painter audit; notices are retired at runtime."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.providers import EmptyIslandDataProvider, empty_visual_data
-from local.island_audio_device_motion import IslandDevicePayload
+from local.island_audio_device_motion import IslandAudioDeviceMotion, IslandDevicePayload
 from local.island_stack_visual import IslandKind, IslandStackVisual, Message, SpringRect, StackVisual
 
 
@@ -27,6 +27,10 @@ class IslandAudioDeviceSurfaceTests(unittest.TestCase):
     def setUp(self):
         self.visual = IslandStackVisual(data_provider=EmptyIslandDataProvider(empty_visual_data()))
         self.visual.timer.stop()
+        # Explicitly opt this independent historical painter fixture into the
+        # retained helper. Production islands never construct notice motion.
+        self.visual._runtime_extras_retired = False
+        self.visual._audio_device_motion = IslandAudioDeviceMotion()
         self.visual.location_mode = "free"
         self.visual.finder_mode = False
         self.visual.expanded = False

@@ -342,7 +342,6 @@ class AudioOutputPanel(QWidget):
         self.scope_label.hide()
         self.status_label = QLabel("正在读取设备…")
         self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -352,6 +351,7 @@ class AudioOutputPanel(QWidget):
         self.rows_layout.setSpacing(5)
         self.scroll.setWidget(self.rows_widget)
         layout.addWidget(self.scroll, 1)
+        layout.addWidget(self.status_label)
         self.empty_label = QLabel("暂无可用输出设备")
         self.empty_label.setMargin(12)
         self.rows_layout.addWidget(self.empty_label)
@@ -529,6 +529,7 @@ class AudioOutputPanel(QWidget):
         minor = QFont(font)
         minor.setPixelSize(11)
         self.status_label.setFont(minor)
+        self.status_label.setMaximumHeight(math.ceil(QFontMetricsF(minor).lineSpacing()) * 3)
         self.scope_label.setFont(minor)
         self.scope_label.setStyleSheet(f"color: {self._muted.name()};")
         ink, muted = self._ink.name(), self._muted.name()
@@ -695,7 +696,8 @@ class AudioOutputPanel(QWidget):
                    if self.rows_layout.itemAt(i).widget() is not None and not self.rows_layout.itemAt(i).widget().isHidden()]
         height = sum(item.sizeHint().height() for item in visible) + max(0, len(visible) - 1) * self.rows_layout.spacing()
         self.rows_widget.setMinimumHeight(height)
-        status = self.status_label.sizeHint().height() + 9 if not self.status_label.isHidden() else 0
+        status = (min(self.status_label.heightForWidth(max(1, self.width() - self._inset * 2)),
+                      self.status_label.maximumHeight()) + 9 if not self.status_label.isHidden() else 0)
         self.resize(self.width(), min(self._max_height, self._inset * 2 + status + height))
         parent = self.parentWidget()
         if parent is not None:
@@ -732,9 +734,10 @@ class AudioOutputPanel(QWidget):
         right, top = self._source_rect.right(), self._source_rect.top()
         x = max(12, min(right - width, parent.width() - width - 12)) if parent else right - width
         y = max(0, min(top, parent.height() - 80)) if parent else top
-        # Floor the top coordinate so a fractional source top never becomes
-        # negative in local widget coordinates after integer positioning.
-        self._anchor = QPoint(round(x), math.floor(y))
+        # QWidget bounds are integral; contain the exact fractional source
+        # circle on both axes instead of clipping its right edge after rounding.
+        self._anchor = QPoint(math.floor(x), math.floor(y))
+        width = max(width, math.ceil(right) - self._anchor.x())
         self._max_height = min(460, max(80, parent.height() - self._anchor.y() - 12)) if parent else 460
         self.resize(width, self._max_height)
         if not was_visible:
@@ -902,6 +905,8 @@ class AudioOutputPanel(QWidget):
         except Exception:
             self._ui_key = None
             self.status_label.setText("音频设备暂时不可用。")
+            self.status_label.setToolTip(self.status_label.text())
+            self.status_label.setAccessibleDescription(self.status_label.text())
             self.status_label.show()
             self.stop_button.setEnabled(False)
             for row in self._rows.values():
@@ -938,7 +943,10 @@ class AudioOutputPanel(QWidget):
         casting = any(d.transport == "airplay" and d.id in desired for d in snapshot.devices)
         self.title_label.setText(f"同步播放 · {len(desired)} 个设备" if grouped else
                                  "单设备投放" if casting else "音频输出")
-        if pending_ids:
+        owned = snapshot.capture_scope == "owned-player"
+        if owned:
+            scope = "程序内播放 · 系统默认输出"
+        elif pending_ids:
             scope = ("正在切换到同步播放 · 仅当前音乐软件" if grouped else
                      "正在切换到单设备投放 · 电脑全部声音" if casting else
                      "正在切换输出 · 电脑全部声音")
@@ -947,8 +955,11 @@ class AudioOutputPanel(QWidget):
                      "电脑全部声音 · 自动歌词补偿" if casting else
                      "电脑全部声音 · 多选时仅当前音乐软件")
         self.scope_label.setText(scope)
-        self.setAccessibleDescription(scope + "。F5 刷新设备，Ctrl+N 添加 AirPlay 设备，Esc 关闭。")
-        self.setToolTip(scope)
+        description = scope + "。F5 刷新设备，Ctrl+N 添加 AirPlay 设备，Esc 关闭。"
+        if owned:
+            description = snapshot.status_message or scope
+        self.setAccessibleDescription(description)
+        self.setToolTip(description if owned else scope)
         if order != self._device_order:
             for row in self._rows.values():
                 self.rows_layout.removeWidget(row)
@@ -986,12 +997,17 @@ class AudioOutputPanel(QWidget):
             if row.delay_text:
                 row.setToolTip(f"{device.name} · {scope} · 自动歌词补偿 {snapshot.cast_latency_seconds:.2f} 秒（根据投放缓冲估计）")
             row.update()
+        self.empty_label.setText("使用系统默认输出" if owned else "暂无可用输出设备")
         self.empty_label.setVisible(not order)
         message = self._action_error or snapshot.status_message
+        if owned and not self._action_error and snapshot.state == "unavailable" and message == "程序内播放使用系统默认输出；暂不支持同步播放到多个设备":
+            message = ""
         if not self._action_error and ((snapshot.state == "casting" and message.startswith(("正在投放到", "正在同步播放到")))
                                       or message.startswith(("已调整 ", "已选择 "))):
             message = ""
         self.status_label.setText(message)
+        self.status_label.setToolTip(message)
+        self.status_label.setAccessibleDescription(message)
         self.status_label.setVisible(bool(message))
         error = bool(self._action_error or snapshot.state in {"error", "failed"})
         error_color = "#a22d2d" if relative_luminance(self._background) > .45 else "#ffb9b3"

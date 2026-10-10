@@ -78,13 +78,16 @@ class FusedOutputSurfaceTests(unittest.TestCase):
                 panel._apply_reveal_pose()
                 self.assertLessEqual(panel.y(), source.top())
                 self.assertLess(source.top() - panel.y(), 1.0)
-                self.assertAlmostEqual(panel.x() + panel.width(), source.right(), delta=.51)
+                self.assertGreaterEqual(panel.x() + panel.width(), source.right())
+                self.assertLess(panel.x() + panel.width() - source.right(), 1.0)
                 self.assertTrue(QRectF(panel.rect()).contains(panel.render_pose.shell_rect))
                 native_circle = panel.render_pose.shell_rect.translated(panel.pos())
                 self.assertAlmostEqual(native_circle.top(), source.top())
                 self.assertAlmostEqual(native_circle.right(), source.right())
                 panel._reveal = 1.0
                 panel._apply_reveal_pose()
+                self.assertAlmostEqual(panel.x() + panel.render_pose.shell_rect.right(),
+                                       source.right(), delta=.51)
                 self.assertAlmostEqual(panel.y() + panel.render_pose.shell_rect.top(),
                                        source.top(), delta=.51)
                 self.assertLessEqual(panel.y() + panel.height(), self.window.height())

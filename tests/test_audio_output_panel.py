@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
@@ -366,6 +366,38 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["local"].state, "active")
         self.assertEqual(self.panel._rows["homepod"].state, "available")
 
+    def test_owned_default_output_uses_one_clear_message_and_retains_limit_description(self):
+        message = "程序内播放使用系统默认输出；暂不支持同步播放到多个设备"
+        self.provider.snapshot = AudioRouteSnapshot(state="unavailable", capture_scope="owned-player", status_message=message)
+        self._open()
+        self.assertEqual(self.panel.empty_label.text(), "使用系统默认输出")
+        self.assertTrue(self.panel.empty_label.isVisible())
+        self.assertFalse(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.toolTip(), message)
+        self.assertIn("暂不支持同步播放", self.panel.accessibleDescription())
+        self.assertNotIn("电脑全部声音", self.panel.scope_label.text())
+
+    def test_long_failure_follows_devices_and_preserves_full_text_without_growing_past_bound(self):
+        self._open()
+        message = "设备连接失败，请检查设备访问设置和网络后重试。" * 8
+        self.provider.snapshot = replace(self.provider.snapshot, state="failed", status_message=message)
+        self.panel.sync_snapshot()
+        self.app.processEvents()
+        self.assertEqual(self.panel.status_label.text(), message)
+        self.assertEqual(self.panel.status_label.toolTip(), message)
+        self.assertEqual(self.panel.status_label.accessibleDescription(), message)
+        self.assertGreater(self.panel.status_label.y(), self.panel.scroll.y())
+        self.assertLessEqual(self.panel.status_label.height(), self.panel.status_label.maximumHeight())
+        self.assertTrue(self.panel.scroll.rect().isValid())
+        self.assertLessEqual(self.panel.height(), self.panel._max_height)
+
+    def test_owned_failure_is_not_hidden_as_default_output_information(self):
+        message = "音频设备暂时不可用，请重试"
+        self.provider.snapshot = AudioRouteSnapshot(state="error", capture_scope="owned-player", status_message=message)
+        self._open()
+        self.assertTrue(self.panel.status_label.isVisible())
+        self.assertEqual(self.panel.status_label.text(), message)
+
     def test_snapshot_failure_reveals_message_when_default_status_was_hidden(self):
         self._open()
         self.assertFalse(self.panel.status_label.isVisible())
@@ -720,6 +752,91 @@ class AudioOutputSurfaceTests(unittest.TestCase):
             self.window.keyPressEvent(event)
         return_to_island.assert_not_called()
         self.assertFalse(self.window._audio_output_panel.isVisible())
+
+    def test_owned_library_button_stays_visible_when_transport_hides_and_click_never_sends_playback(self):
+        callback = Mock()
+        self.owner._music_library_back_callback = callback
+        self.owner.data_provider._owned_active = lambda: True
+        for fullscreen in (True, False):
+            self.window._fullscreen = fullscreen
+            self.window._reset_control_idle(now=100.0)
+            with patch("local.music_surface_window.time.monotonic", return_value=110.0):
+                self.window._sync_window_control_rects()
+                self.assertEqual(set(self.window._button_rects), {"library"})
+                button = self.window._button_rects["library"]
+                self.assertGreaterEqual(button.height(), 44)
+                self.assertGreaterEqual(button.width(), 44)
+                self.assertTrue(QRectF(self.window.rect()).contains(button))
+                point = button.center()
+                event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, position=lambda: point,
+                    globalPosition=lambda: QPointF(self.window.mapToGlobal(point.toPoint())), accept=lambda: None)
+                self.window.mousePressEvent(event)
+                self.assertFalse(self.window._moving)
+                self.assertFalse(self.window._resize_edges)
+                self.window.mouseReleaseEvent(event)
+        self.assertEqual(callback.call_count, 2)
+        self.assertEqual(self.owner.data_provider.calls, [])
+
+    def test_owned_escape_closes_device_panel_then_returns_to_library(self):
+        callback = Mock()
+        self.owner._music_library_back_callback = callback
+        self.owner.data_provider._owned_active = lambda: True
+        self.window._toggle_audio_output_panel()
+        event = SimpleNamespace(key=lambda: Qt.Key.Key_Escape)
+        with patch.object(self.window, "return_to_island") as island:
+            self.window.keyPressEvent(event)
+            callback.assert_not_called()
+            self.window.keyPressEvent(event)
+        callback.assert_called_once_with()
+        island.assert_not_called()
+
+    def test_system_source_with_wired_library_callback_keeps_original_escape_destination(self):
+        callback = Mock()
+        self.owner._music_library_back_callback = callback
+        self.owner.data_provider._owned_active = lambda: False
+        self.window._sync_window_control_rects()
+        self.assertNotIn("library", self.window._button_rects)
+        with patch.object(self.window, "return_to_island") as island:
+            self.window.keyPressEvent(SimpleNamespace(key=lambda: Qt.Key.Key_Escape))
+        island.assert_called_once_with()
+        callback.assert_not_called()
+
+    def test_missing_library_callback_cannot_replace_system_navigation(self):
+        self.owner.data_provider._owned_active = lambda: True
+        self.window._sync_window_control_rects()
+        self.assertNotIn("library", self.window._button_rects)
+        self.assertFalse(self.window.return_to_library())
+
+    def test_library_back_during_geometry_transition_hides_surface_without_media_command(self):
+        callback = Mock(side_effect=self.window.hide)
+        self.owner._music_library_back_callback = callback
+        self.owner.data_provider._owned_active = lambda: True
+        self.window._fullscreen = False
+        self.window._sync_window_control_rects()
+        self.window.toggle_presentation_mode()
+        self.assertIsNotNone(self.window._pending_fullscreen)
+        point = self.window._transition_control_rects()["library"].center()
+        event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, position=lambda: point,
+            globalPosition=lambda: QPointF(self.window.mapToGlobal(point.toPoint())), accept=lambda: None)
+        self.window.mousePressEvent(event)
+        self.window.mouseReleaseEvent(event)
+        callback.assert_called_once_with()
+        self.assertFalse(self.window.isVisible())
+        self.assertIsNone(self.window._pending_fullscreen)
+        self.assertEqual(self.owner.data_provider.calls, [])
+
+    def test_source_change_between_back_press_and_release_cannot_navigate_system_track(self):
+        callback = Mock()
+        self.owner._music_library_back_callback = callback
+        self.owner.data_provider._owned_active = lambda: True
+        self.window._sync_window_control_rects()
+        point = self.window._button_rects["library"].center()
+        event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, position=lambda: point,
+            globalPosition=lambda: QPointF(self.window.mapToGlobal(point.toPoint())), accept=lambda: None)
+        self.window.mousePressEvent(event)
+        self.owner.data_provider._owned_active = lambda: False
+        self.window.mouseReleaseEvent(event)
+        callback.assert_not_called()
 
     def test_resize_dismisses_selector_and_does_not_leave_polling_running(self):
         self.window._toggle_audio_output_panel()

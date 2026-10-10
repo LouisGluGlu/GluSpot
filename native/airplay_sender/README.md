@@ -289,6 +289,29 @@ physical receiver. The native group suite independently decrypts two fake
 receivers to verify identical final PCM and presentation mappings; it also
 checks history bounds and continuous correction under simulated clock drift.
 
+## Owned-player direct PCM
+
+The source app can use the same group coordinator without process loopback:
+`--group --pcm-pipe GluSpotPCM-<32 lowercase hex> --pcm-parent-pid <PID>
+--pcm-parent-created-at <creation token> --pcm-epoch <positive epoch>` plus
+one to eight Windows/AirPlay output arguments. Process capture arguments are
+forbidden in this mode. The original capture mode retains its separate guards.
+
+The helper creates a local, first-instance-only inbound pipe and verifies the
+connected client's exact PID against a retained process handle/creation token.
+The client also verifies the helper identity. Each message uses a 24-byte
+little-endian `<4sQQI>` header: `GPCM`, epoch, sequence starting at one, frames.
+Payload is 44.1 kHz stereo PCM16; frames must be 1..16384 and sequence contiguous.
+EOF, wrong identity/header or bounded-ring overflow terminates the session.
+The ring's power-of-two storage holds at most 65536 stereo frames (about 1.486 s).
+Overlapped connection/read cancellation is drained before releasing its storage.
+
+Direct input skips source-endpoint and endpoint-mute guards entirely; the Qt
+bridge controls only its own audio output mute. It keeps the shared conditioner,
+history, receiver authentication and local presentation clocks unchanged. Stats
+identify `capture_signal.mode="direct_pcm"`, scope `owned-player`, and
+`group.pcm_epoch`. See [source-app behavior and evidence](../../docs/owned-playback-refinements.md).
+
 ## Verification limits
 
 The buffer conversion accepts float32/64, PCM8/16/24/32 and up to eight labelled
