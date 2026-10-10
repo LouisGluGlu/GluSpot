@@ -39,7 +39,7 @@ The deliverable is the complete `release/GluSpot-6.412` directory. Its
 internal Windows test build, with the public-release limits already listed
 in README.
 
-The complete project copy is planned at
+The complete project copy is prepared at
 `E:/Glusopt_waitingforlaunch/gpt-island_26_10_10_01`. It includes `.git`,
 `.venv`, build tools and products, runtime folders, existing logs and the
 new release. No source-folder subtree is intentionally excluded. External
@@ -58,8 +58,33 @@ check now matches that exact contract and rejects the former parser message;
 it still requires one error event, exit code 2, and the separate multiple-
 output collision probe. The package is rebuilt with this corrected check.
 
-Completion results, executable identity and archive integrity are recorded
-after the build and final checks. Existing source-instance or historical
-package verification is not used as evidence for the newly built executable.
-No casting, test tones or output-volume changes are needed; the user's
-Realtek-zero constraint remains in force.
+Final verification passed:
+
+- All **3408 Python tests**, 97.056 seconds, with the final acceptance fix.
+- All **11 native CTest suites**, 45.67 seconds, during the final build.
+- The newly rebuilt executable exits its explicit frozen acceptance with
+  code 0 and `ok=true`; version is 6.412 and native probes use the bundled
+  `_internal/native/GluSpotAirPlay.exe`. It enumerates devices, browses mDNS,
+  captures 250 ms of loopback without saving, and checks invalid parser
+  arguments without connecting to a receiver or changing Windows state.
+- All 70 collected `local/api` modules match compiled current source, as
+  do the CArchive main entry and Qt DLL hook. All 61 application-data,
+  artwork/font/icon and license/source-archive files match by SHA256.
+- Windows FileVersion and ProductVersion are both `6.412.0.0`.
+- EXE SHA256:
+  `174bf4abb67982488f954d0d30f8a7d5cc2590bb80202c6b688fc6c85c6cbf5d`.
+- Rebuilt source and packaged native helper SHA256:
+  `1ed5c7fde780298aa009bc4b46b6558cc734f40664316ff63fe61bd2008debfb`.
+
+Logs are retained under the ignored `logs/release-6.412-*` paths. The complete
+folder's file/directory inventory and paired SHA256 verification are written
+outside both source and destination at
+`E:/Glusopt_waitingforlaunch/_verification_26_10_10_01/complete-copy-sha256.json`.
+An additional frozen acceptance is run from the archived executable, with
+its report in that same verification directory.
+
+Historical 6.411 package reports are not used to certify this package.
+No casts, test tones, recordings saved to disk or output-volume writes ran.
+Realtek remains at 0. Full GUI desktop, real receiver playback and long-session
+audio synchronization are outside this packaging check and retain the
+existing limitations documented in README.
