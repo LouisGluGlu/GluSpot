@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from concurrent.futures import TimeoutError as FutureTimeoutError
+import os
+import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import api.providers as providers_module
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+from PySide6.QtGui import QImage
 from api.audio_analyzer import LiveAudioAnalyzer
+from api.lyrics import LocalLyricsStore, LyricsMatch
 from api.models import TimedLyricLine
 from api.providers import EmptyIslandDataProvider, NO_SESSION_VISUAL_DATA, WindowsMediaProvider, empty_visual_data
 from api.netease_position import NeteasePositionSample, QueueTrack
@@ -176,6 +185,21 @@ class FakeLaggedProgressReader(FakePositionReader):
     def read(self, title, artist, timed_lyrics, duration_seconds, interactive=False, allow_lyric_anchor=False, click_pos=None, force_progress_image=False):
         self.read_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive, allow_lyric_anchor, click_pos, force_progress_image))
         return NeteasePositionSample(96.0, 240.0, "netease-uia-progress", 0.92, sampled_at=time.monotonic())
+
+
+class FakePausedLyricReader(FakePositionReader):
+    def read(self, title, artist, timed_lyrics, duration_seconds, interactive=False, **_kwargs):
+        self.read_calls.append((title, artist, tuple(timed_lyrics), duration_seconds, interactive))
+        return NeteasePositionSample(
+            160.0,
+            240.0,
+            "netease-uia-lyrics",
+            0.86,
+            1,
+            "line",
+            time.monotonic(),
+            False,
+        )
 
 
 class FakeQueuePositionReader(FakePositionReader):
@@ -545,6 +569,68 @@ class ProviderStateTests(unittest.TestCase):
         self.assertFalse(analyzer._running)
         self.assertEqual(analyzer._status, "stopped")
 
+    def test_live_audio_analyzer_selects_output_loopback_by_endpoint_id(self):
+        analyzer = LiveAudioAnalyzer.__new__(LiveAudioAnalyzer)
+        analyzer._running = True
+        analyzer._status = "starting"
+        analyzer._last_error = ""
+        analyzer._analyze_block = lambda *_args: None
+        speaker = SimpleNamespace(id="render-endpoint-id", name="Shared Bluetooth name")
+        selected_ids = []
+        recorder_settings = []
+
+        class FakeRecorder:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def record(self, *, numframes):
+                analyzer._running = False
+                return None
+
+        class FakeLoopback:
+            isloopback = True
+
+            def recorder(self, *, samplerate, channels, blocksize, exclusive_mode):
+                recorder_settings.append((samplerate, channels, blocksize, exclusive_mode))
+                return FakeRecorder()
+
+        loopback = FakeLoopback()
+
+        def get_microphone(*, id, include_loopback):
+            selected_ids.append(id)
+            self.assertTrue(include_loopback)
+            return loopback if id == speaker.id else SimpleNamespace(isloopback=False)
+
+        with patch("soundcard.default_speaker", return_value=speaker), patch(
+            "soundcard.get_microphone", side_effect=get_microphone
+        ):
+            analyzer._capture_loop()
+
+        self.assertEqual(selected_ids, [speaker.id])
+        self.assertEqual(recorder_settings, [(44100, 2, 4096, False)])
+        self.assertEqual(analyzer._status, "capturing")
+        self.assertEqual(analyzer._last_error, "")
+
+    def test_live_audio_analyzer_never_opens_a_real_microphone(self):
+        analyzer = LiveAudioAnalyzer.__new__(LiveAudioAnalyzer)
+        analyzer._running = True
+        analyzer._status = "starting"
+        analyzer._last_error = ""
+        microphone = SimpleNamespace(isloopback=False)
+        microphone.recorder = lambda **_kwargs: self.fail("real microphone must not open")
+
+        with patch("soundcard.default_speaker", return_value=SimpleNamespace(id="render-endpoint-id")), patch(
+            "soundcard.get_microphone", return_value=microphone
+        ):
+            analyzer._capture_loop()
+
+        self.assertFalse(analyzer._running)
+        self.assertEqual(analyzer._status, "unavailable")
+        self.assertIn("loopback endpoint", analyzer._last_error)
+
     def test_windows_provider_starts_with_optional_music_attachments_cold(self):
         calls = {"audio": 0, "netease": 0, "qq": 0}
 
@@ -758,6 +844,40 @@ class ProviderStateTests(unittest.TestCase):
 
         self.assertAlmostEqual(projected.track.position_seconds, 15.0)
 
+    def test_delayed_media_refresh_uses_original_timeline_sample_time_once(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        data = empty_visual_data("Song", "Artist")
+        data = replace(data, track=replace(
+            data.track,
+            is_playing=True,
+            position_seconds=12.0,
+            duration_seconds=60.0,
+            position_source="windows-media",
+            position_sampled_at=100.0,
+        ))
+
+        class DoneFuture:
+            def done(self):
+                return True
+
+            def result(self):
+                return data
+
+        provider._refresh_future = DoneFuture()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._consume_refresh_future(101.4)
+
+        self.assertAlmostEqual(provider._last_data.track.position_seconds, 13.4)
+        self.assertEqual(provider._last_data.track.position_sampled_at, 100.0)
+        later = provider._project_visual_position(provider._last_data, 101.9, provider._last_ready_at)
+        self.assertAlmostEqual(later.track.position_seconds, 13.9)
+        uia = replace(data, track=replace(data.track, position_source="netease-uia-progress"))
+        self.assertIs(WindowsMediaProvider._advance_delayed_media_sample(uia, 101.4), uia)
+
     def test_interactive_hold_position_projection_advances_cached_data(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
@@ -783,12 +903,36 @@ class ProviderStateTests(unittest.TestCase):
             position_seconds=160.0,
             duration_seconds=240.0,
             position_source="netease-uia-lyrics",
+            position_sampled_at=99.7,
         )
         data = replace(data, track=track)
 
         projected = provider._project_visual_position(data, now=105.0, anchor_at=100.0)
 
         self.assertAlmostEqual(projected.track.position_seconds, 165.0)
+        self.assertEqual(projected.track.position_sampled_at, 99.7)
+
+    def test_cached_coarse_lyric_sample_stops_before_unobserved_next_line(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data("Song", "Artist")
+        lines = (TimedLyricLine(20.0, "current"), TimedLyricLine(24.0, "next"))
+        coarse = replace(
+            base,
+            track=replace(
+                base.track,
+                is_playing=True,
+                duration_seconds=40.0,
+                position_seconds=23.92,
+                position_source="netease-uia-lyrics",
+                timed_lyrics=lines,
+            ),
+        )
+
+        projected = provider._project_visual_position(coarse, now=101.0, anchor_at=100.0)
+
+        self.assertLess(projected.track.position_seconds, 24.0)
+        exact = replace(coarse, track=replace(coarse.track, position_source="netease-uia-progress"))
+        self.assertGreater(provider._project_visual_position(exact, now=101.0, anchor_at=100.0).track.position_seconds, 24.0)
 
     def test_player_anchor_fast_refresh_window_uses_short_interval(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -858,7 +1002,7 @@ class ProviderStateTests(unittest.TestCase):
 
         self.assertAlmostEqual(stabilized.track.position_seconds, 34.4, delta=0.02)
 
-    def test_large_player_progress_backwards_jump_is_preserved(self):
+    def test_large_player_progress_backwards_seek_commits_after_repeated_advancing_reads(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
         provider._last_ready_at = 100.0
@@ -886,8 +1030,57 @@ class ProviderStateTests(unittest.TestCase):
         )
 
         stabilized = provider._stabilize_incoming_position(incoming, now=100.4)
+        self.assertAlmostEqual(stabilized.track.position_seconds, 120.4)
+        provider._last_data = stabilized
+        provider._last_ready_at = 100.4
+        second = replace(incoming, track=replace(incoming.track, position_seconds=35.5))
+        stabilized = provider._stabilize_incoming_position(second, now=100.9)
+        self.assertAlmostEqual(stabilized.track.position_seconds, 120.9)
+        provider._last_data = stabilized
+        provider._last_ready_at = 100.9
+        third = replace(incoming, track=replace(incoming.track, position_seconds=36.0))
+        stabilized = provider._stabilize_incoming_position(third, now=101.4)
+        self.assertAlmostEqual(stabilized.track.position_seconds, 36.0)
 
-        self.assertEqual(stabilized.track.position_seconds, 35.0)
+    def test_cached_uia_sample_cannot_confirm_player_position_discontinuity(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
+        provider._last_ready_at = 100.0
+        provider._last_data = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=120.0,
+                duration_seconds=180.0,
+                position_source="netease-uia-progress",
+                position_sampled_at=99.8,
+            ),
+        )
+        incoming = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=35.0,
+                duration_seconds=180.0,
+                position_source="netease-uia-progress",
+                position_sampled_at=100.3,
+            ),
+        )
+        for now, position in ((100.4, 35.0), (100.9, 35.5), (101.4, 36.0)):
+            repeated = replace(incoming, track=replace(incoming.track, position_seconds=position))
+            stabilized = provider._stabilize_incoming_position(repeated, now=now)
+            self.assertAlmostEqual(stabilized.track.position_seconds, 120.0 + now - 100.0)
+            provider._last_data = stabilized
+            provider._last_ready_at = now
+        fresh = replace(incoming, track=replace(
+            incoming.track, position_seconds=36.5, position_sampled_at=101.8,
+        ))
+        stabilized = provider._stabilize_incoming_position(fresh, now=101.9)
+        self.assertAlmostEqual(stabilized.track.position_seconds, 36.5)
 
     def test_medium_background_player_progress_backstep_is_smoothed(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -923,6 +1116,130 @@ class ProviderStateTests(unittest.TestCase):
         stabilized = provider._stabilize_incoming_position(incoming, now=104.0)
 
         self.assertAlmostEqual(stabilized.track.position_seconds, 54.0, delta=0.02)
+
+    def test_repeated_medium_background_player_backstep_eventually_commits(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
+        provider._last_ready_at = 100.0
+        provider._last_data = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=50.0,
+                duration_seconds=180.0,
+                position_source="netease-uia-progress",
+            ),
+        )
+        for now, raw in ((100.2, 45.2), (100.65, 45.65), (101.1, 46.1)):
+            incoming = replace(
+                data,
+                track=replace(
+                    data.track,
+                    track_id="same-track",
+                    is_playing=True,
+                    position_seconds=raw,
+                    duration_seconds=180.0,
+                    position_source="netease-uia-progress",
+                ),
+            )
+            accepted = provider._stabilize_incoming_position(incoming, now)
+            provider._last_data = accepted
+            provider._last_ready_at = now
+        self.assertAlmostEqual(accepted.track.position_seconds, 46.1)
+
+    def test_single_false_forward_progress_spike_does_not_latch(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
+        provider._last_ready_at = 100.0
+        provider._last_data = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=50.0,
+                duration_seconds=180.0,
+                position_source="netease-uia-progress",
+            ),
+        )
+        spike = replace(data, track=replace(
+            data.track, track_id="same-track", is_playing=True,
+            position_seconds=55.2, duration_seconds=180.0,
+            position_source="netease-uia-progress",
+        ))
+        stable = provider._stabilize_incoming_position(spike, 100.2)
+        self.assertAlmostEqual(stable.track.position_seconds, 50.2)
+        provider._last_data = stable
+        provider._last_ready_at = 100.2
+        correction = replace(data, track=replace(
+            data.track, track_id="same-track", is_playing=True,
+            position_seconds=50.5, duration_seconds=180.0,
+            position_source="netease-uia-progress",
+        ))
+        stable = provider._stabilize_incoming_position(correction, 100.5)
+        self.assertAlmostEqual(stable.track.position_seconds, 50.5)
+        self.assertIsNone(provider._pending_player_position_discontinuity)
+
+    def test_single_foreground_uia_backstep_waits_for_confirming_progress(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._music_player_adapter = "netease"
+        data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
+        provider._last_ready_at = 100.0
+        provider._last_data = replace(
+            data,
+            track=replace(
+                data.track, track_id="same-track", is_playing=True,
+                position_seconds=50.0, duration_seconds=180.0,
+                position_source="netease-uia-progress", source_app_foreground=True,
+                position_interactive=True,
+            ),
+        )
+        incoming = replace(
+            data,
+            track=replace(
+                data.track, track_id="same-track", is_playing=True,
+                position_seconds=8.0, duration_seconds=180.0,
+                position_source="netease-uia-progress", source_app_foreground=True,
+                position_interactive=True,
+            ),
+        )
+
+        stable = provider._stabilize_incoming_position(incoming, 100.2)
+
+        self.assertAlmostEqual(stable.track.position_seconds, 50.2)
+        self.assertIsNotNone(provider._pending_player_position_discontinuity)
+        self.assertGreater(provider._player_anchor_fast_refresh_until, 100.2)
+
+    def test_slow_but_consistent_uia_readback_can_repair_position(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
+        provider._last_ready_at = 100.0
+        provider._last_data = replace(
+            data,
+            track=replace(
+                data.track, track_id="same-track", is_playing=True,
+                position_seconds=90.0, duration_seconds=180.0,
+                position_source="netease-uia-progress",
+            ),
+        )
+        first = replace(
+            data,
+            track=replace(
+                data.track, track_id="same-track", is_playing=True,
+                position_seconds=32.0, duration_seconds=180.0,
+                position_source="netease-uia-progress",
+            ),
+        )
+        held = provider._stabilize_incoming_position(first, 100.2)
+        provider._last_data = held
+        provider._last_ready_at = 100.2
+        second = replace(first, track=replace(first.track, position_seconds=34.0))
+
+        repaired = provider._stabilize_incoming_position(second, 102.2)
+
+        self.assertAlmostEqual(repaired.track.position_seconds, 34.0)
 
     def test_foreground_focus_lagged_raw_position_does_not_reanchor_backwards(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -979,6 +1296,7 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIsNotNone(data)
         self.assertGreaterEqual(data.track.position_seconds, 120.0)
         self.assertNotEqual(data.track.position_source, "interactive")
+        self.assertGreater(data.track.position_sampled_at, 0.0)
 
     def test_foreground_focus_lagged_uia_progress_reanchors_to_player_sample(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -1035,6 +1353,7 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIsNotNone(data)
         self.assertAlmostEqual(data.track.position_seconds, 96.0, delta=0.25)
         self.assertEqual(data.track.position_source, "netease-uia-progress")
+        self.assertGreater(data.track.position_sampled_at, 0.0)
 
     def test_select_media_session_prefers_playing_session_with_title(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -1359,6 +1678,293 @@ class ProviderStateTests(unittest.TestCase):
         self.assertTrue(provider._should_use_player_sample("netease", sample.source, 0.2, True))
         self.assertEqual(sample.duration_seconds, 210.0)
 
+    def test_fresh_paused_lyric_anchor_is_accepted(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        self.assertTrue(provider._should_use_player_sample("netease", "netease-uia-lyrics", 0.2, False))
+
+    def test_paused_player_lyric_anchor_overrides_zero_windows_timeline(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakePausedLyricReader()
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeTimedLyricsStore()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider._queue_art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": True,
+            "v2_music_player_mode": "netease",
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", False, 0.0, 240.0)
+
+        provider._get_session = fake_get_session
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
+        self.assertAlmostEqual(data.track.position_seconds, 160.0, delta=0.05)
+        self.assertFalse(data.track.is_playing)
+        self.assertEqual(data.track.position_source, "netease-uia-lyrics")
+
+    def test_playing_lyric_anchor_age_cannot_project_into_next_line(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        reader = FakePositionReader()
+        reader.read = lambda *_args, **_kwargs: NeteasePositionSample(
+            23.92, 40.0, "netease-uia-lyrics", 0.86, 0, "current",
+            time.monotonic() - 0.5, True,
+        )
+
+        class TwoLineStore(FakeLyricsStore):
+            def resolve_cached_or_local(self, *_args):
+                lines = (TimedLyricLine(20.0, "current"), TimedLyricLine(24.0, "next"))
+                return SimpleNamespace(timed_lyrics=lines, lyrics=("current", "next"), source="test")
+
+        provider.fallback = EmptyIslandDataProvider(empty_visual_data())
+        provider.lyrics_store = TwoLineStore()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider._queue_art_cache = {}
+        provider.netease_position = reader
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": True,
+            "v2_player_progress_auto_detect": True,
+            "v2_music_player_mode": "netease",
+        }.get(key, default)
+        provider._is_source_app_foreground = lambda *_args: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+        provider._get_session = lambda: asyncio.sleep(
+            0, result=FakeSession("cloudmusic.exe", "Song", "Artist", True, 0.0, 40.0)
+        )
+
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertEqual(data.track.position_source, "netease-uia-lyrics")
+        self.assertGreater(data.track.position_seconds, 23.8)
+        self.assertLess(data.track.position_seconds, 24.0)
+
+    def test_playing_coarse_lyric_backstep_does_not_replay_line(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        data = empty_visual_data("Song", "Artist", "cloudmusic.exe")
+        provider._pending_player_position_discontinuity = None
+        provider._local_seek_position_seconds = None
+        provider._last_ready_at = 100.0
+        provider._last_data = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=50.0,
+                duration_seconds=180.0,
+                position_source="netease-uia-lyrics",
+            ),
+        )
+        incoming = replace(
+            data,
+            track=replace(
+                data.track,
+                track_id="same-track",
+                is_playing=True,
+                position_seconds=47.8,
+                duration_seconds=180.0,
+                position_source="netease-uia-lyrics",
+                source_app_foreground=True,
+                position_interactive=True,
+            ),
+        )
+
+        stable = provider._stabilize_incoming_position(incoming, now=100.5)
+
+        self.assertAlmostEqual(stable.track.position_seconds, 50.5, delta=0.02)
+
+    def test_netease_art_search_requires_exact_track_identity(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        payload = {
+            "result": {
+                "songs": [
+                    {
+                        "name": "No Space Remix",
+                        "artists": [{"name": "alextbh"}],
+                        "album": {"picUrl": "https://example.test/wrong.jpg"},
+                    },
+                    {
+                        "name": "no space",
+                        "artists": [{"name": "alextbh"}],
+                        "album": {"picUrl": "https://example.test/correct.jpg"},
+                    },
+                ]
+            }
+        }
+
+        class Response:
+            _read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read1(self, _limit):
+                if self._read:
+                    return b""
+                self._read = True
+                return __import__("json").dumps(payload).encode("utf-8")
+
+        with patch("api.providers.urlopen", return_value=Response()):
+            url = provider._resolve_netease_art_url("no space", "alextbh")
+
+        self.assertEqual(url, "https://example.test/correct.jpg")
+
+    def test_netease_art_search_resolves_legacy_album_id_to_pic_url(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        search_payload = {
+            "result": {
+                "songs": [
+                    {
+                        "name": "no space",
+                        "artists": [{"name": "alextbh"}],
+                        "album": {"id": 80358190, "picId": 109951164208449488},
+                    }
+                ]
+            }
+        }
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+                self._read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read1(self, _limit):
+                if self._read:
+                    return b""
+                self._read = True
+                return __import__("json").dumps(self.payload).encode("utf-8")
+
+        with patch(
+            "api.providers.urlopen",
+            return_value=Response(search_payload),
+        ):
+            url = provider._resolve_netease_art_url("no space", "alextbh")
+
+        self.assertEqual(
+            url,
+            "https://p1.music.126.net/c5wY2dM--lFY52kjRPHg6Q==/109951164208449488.jpg?param=2560y2560",
+        )
+
+    def test_live_deep_in_shallow_end_catalog_duplicates_do_not_block_unknown_metadata(self):
+        # NetEase's real response while Windows supplied only title/artist:
+        # the EP has two regional IDs, followed by a tour compilation. The
+        # reference returns the first exact song, rather than rejecting all.
+        songs = [
+            {"name": "Deep In The Shallow End", "artists": [{"name": "Jenevieve"}], "duration": 214025,
+             "album": {"name": "Rendezvous - EP", "id": 151284437, "picId": 109951167858662243}},
+            {"name": "Deep In The Shallow End", "artists": [{"name": "Jenevieve"}], "duration": 214025,
+             "album": {"name": "Rendezvous - EP", "id": 151285319, "picId": 109951167858656895}},
+            {"name": "Deep In The Shallow End", "artists": [{"name": "Jenevieve"}], "duration": 214025,
+             "album": {"name": "贰零贰肆巡演 · 2024中国首演特别版", "id": 254427823, "picId": 109951170171699617}},
+        ]
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._fetch_current_art_json = lambda *_args: {"code": 200, "result": {"songs": songs}}
+        self.assertEqual(
+            provider._resolve_netease_art_url("Deep In The Shallow End", "Jenevieve"),
+            "https://p1.music.126.net/VEK_5p05jzF6M0vqdWQpSw==/109951167858662243.jpg?param=2560y2560",
+        )
+
+    def test_netease_reference_metadata_matching_does_not_add_empty_artist_gate(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._fetch_current_art_json = lambda *_args: {"result": {"songs": [
+            {"name": "No  Space", "artists": [], "album": {"picUrl": "https://example.test/matched.jpg"}},
+        ]}}
+        self.assertEqual(provider._resolve_netease_art_url("no space", "alextbh"), "https://example.test/matched.jpg")
+
+    def test_netease_api_denial_enters_source_cooldown_before_caa_fallback(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._online_current_art_lookup_enabled = True
+        provider._music_player_adapter = "netease"
+        provider._musicbrainz_artwork_resolver = SimpleNamespace(
+            resolve=lambda *_args, **_kwargs: "https://archive.org/download/valid/front.jpg"
+        )
+        requested = []
+        provider._schedule_queue_album_art_prefetch = lambda url: requested.append(url)
+        provider._fetch_current_art_json = lambda *_args: {"code": 405, "result": {"songs": []}}
+        jobs = []
+
+        class ManualThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                jobs.append(self.target)
+
+        class ManualTimer:
+            def __init__(self, _seconds, callback):
+                self.callback = callback
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        with patch("api.providers.threading.Thread", ManualThread), patch("api.providers.threading.Timer", ManualTimer):
+            self.assertTrue(provider._schedule_current_netease_art_lookup("track", "Song", "Artist", album_title="Album", duration_seconds=240))
+            jobs.pop(0)()
+            self.assertEqual(provider._current_art_lookup_sources["track"], "cover-art-archive")
+            self.assertEqual(requested, ["https://archive.org/download/valid/front.jpg"])
+            self.assertGreater(provider._netease_art_source_failed_until, time.monotonic() + 40.0)
+
+            provider._current_art_url_by_track_id.pop("track")
+            self.assertTrue(provider._schedule_current_netease_art_lookup("track", "Song", "Artist", album_title="Album", duration_seconds=240))
+            jobs.pop(0)()
+            self.assertEqual(requested, ["https://archive.org/download/valid/front.jpg"] * 2)
+
+    def test_current_online_art_is_bound_to_exact_track_id(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._current_art_url_by_track_id = {"old-track": "https://example.test/old.jpg"}
+        provider._queue_album_art_bytes = lambda track: str(track.album_art_url).encode("utf-8")
+
+        self.assertEqual(provider._current_online_album_art_bytes("new-track"), b"")
+        self.assertEqual(
+            provider._current_online_album_art_bytes("old-track"),
+            b"https://example.test/old.jpg",
+        )
+
     def test_recent_lyric_click_uses_lightweight_reader_without_hit_test_or_immediate_sync(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeLightweightFollowReader()
@@ -1435,6 +2041,8 @@ class ProviderStateTests(unittest.TestCase):
     def test_background_netease_window_title_corrects_stale_windows_metadata(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeWindowTrackPositionReader()
+        resets = []
+        reader.reset = lambda: resets.append(True)
         base = empty_visual_data()
         provider.fallback = EmptyIslandDataProvider(base)
         provider.lyrics_store = FakeLyricsStore()
@@ -1490,10 +2098,130 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(data.track.artist, "New Artist")
         self.assertEqual(data.track.duration_seconds, 201.0)
         self.assertNotEqual(data.track.track_id, "old-track")
+        self.assertEqual(resets, [True])
+
+    def test_same_title_new_duration_never_inherits_old_session_position_or_thumbnail(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = replace(
+            base,
+            track=replace(
+                base.track, title="Song", artist="Artist", track_id="old-version",
+                source_app="cloudmusic.exe", duration_seconds=180.0,
+                position_seconds=95.0, album_art_bytes=b"old-cover",
+            ),
+        )
+        provider._last_ready_at = time.monotonic()
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = "old-version"
+        provider._last_raw_timeline_position = 95.0
+        provider._last_raw_timeline_at = provider._last_ready_at
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = SimpleNamespace(
+            source_prefix="netease",
+            current_track=lambda: SimpleNamespace(
+                title="Song", artist="Artist", album_title="New Album", duration_seconds=220.0,
+            ),
+            duration_for_track=lambda *_args: 220.0,
+        )
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_music_player_mode": "netease",
+        }.get(key, default)
+        provider._is_source_app_foreground = lambda *_args: False
+        provider._schedule_current_netease_art_lookup = lambda *_args, **_kwargs: False
+        thumbnails = []
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(
+            0, result=thumbnails.append(True) or b"old-thumbnail"
+        )
+
+        async def fake_get_session():
+            return FakeSession("cloudmusic.exe", "Song", "Artist", True, 95.0, 180.0)
+
+        provider._get_session = fake_get_session
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertEqual(data.track.duration_seconds, 220.0)
+        self.assertEqual(data.track.position_seconds, 0.0)
+        self.assertEqual(data.track.album_art_bytes, b"")
+        self.assertEqual(thumbnails, [])
+        self.assertNotEqual(data.track.track_id, "old-version")
+
+    def test_same_metadata_different_duration_gets_new_track_identity(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider.fallback = EmptyIslandDataProvider(base)
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = None
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda _key, default=None: default
+        provider._is_source_app_foreground = lambda *_args: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+        session = FakeSession("cloudmusic.exe", "Same Song", "Artist", True, 100.0, 120.0)
+        provider._get_session = lambda: asyncio.sleep(0, result=session)
+
+        first = asyncio.run(provider._read_visual_data())
+        provider._last_data = first
+        session.timeline = FakeTimeline(0.0, 0.0)
+        unknown_duration = asyncio.run(provider._read_visual_data())
+        # With no version/album metadata a duration dropout is deliberately
+        # treated as the current track; do not guess a same-name replacement.
+        self.assertEqual(unknown_duration.track.track_id, first.track.track_id)
+
+        provider._last_data = unknown_duration
+        session.timeline = FakeTimeline(0.0, 210.0)
+        new_version = asyncio.run(provider._read_visual_data())
+        self.assertNotEqual(new_version.track.track_id, first.track.track_id)
+        self.assertEqual(new_version.track.position_seconds, 0.0)
+
+        provider._last_data = new_version
+        session.properties.album_title = "Album One"
+        same_album_added = asyncio.run(provider._read_visual_data())
+        self.assertEqual(same_album_added.track.track_id, new_version.track.track_id)
+        provider._last_data = same_album_added
+        session.properties.album_title = ""
+        temporarily_unknown_album = asyncio.run(provider._read_visual_data())
+        self.assertEqual(temporarily_unknown_album.track.track_id, same_album_added.track.track_id)
+        provider._last_data = temporarily_unknown_album
+        session.properties.album_title = "Album Two"
+        new_album = asyncio.run(provider._read_visual_data())
+        self.assertNotEqual(new_album.track.track_id, same_album_added.track.track_id)
 
     def test_current_read_prefetches_next_queue_track_lyrics_after_current_lyrics_exist(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeQueuePositionReader()
+        queue_ready = False
+        queue_reads = []
+        read_adjacent = reader.adjacent_track
+
+        def adjacent_when_ready(title, artist, direction):
+            queue_reads.append((title, artist, direction))
+            if not queue_ready:
+                return None
+            return read_adjacent(title, artist, direction)
+
+        reader.adjacent_track = adjacent_when_ready
 
         class CachedCurrentLyricsStore(TrackingLyricsStore):
             def resolve_cached_or_local(self, title, artist, album_title="", duration_seconds=0.0):
@@ -1526,6 +2254,7 @@ class ProviderStateTests(unittest.TestCase):
             "v2_player_progress_auto_detect": False,
             "v2_music_player_mode": "netease",
             "v2_enable_dual_line_lyrics": False,
+            "v2_music_surface_preload_count": "corrupt",
         }.get(key, default)
         provider._record_source_app_pointer_state = lambda _foreground, _now: None
         provider._is_source_app_foreground = lambda _source_app, _raw_source_app: True
@@ -1539,8 +2268,18 @@ class ProviderStateTests(unittest.TestCase):
         data = asyncio.run(provider._read_visual_data())
 
         self.assertIsNotNone(data)
+        self.assertEqual(queue_reads, [("Song", "Artist", "next")])
+        self.assertEqual(provider._music_surface_preload_count(), 6)
+
+        queue_ready = True
+        data = asyncio.run(provider._read_visual_data())
+
+        self.assertIsNotNone(data)
         self.assertEqual(reader.adjacent_calls, [("Song", "Artist", "next"), ("Next Song", "Next Artist", "next")])
         self.assertIn(("Next Song", "Next Artist", "Next Album", 201.0), lyrics_store.background_calls)
+        queue_reads_after_prefetch = len(queue_reads)
+        asyncio.run(provider._read_visual_data())
+        self.assertEqual(len(queue_reads), queue_reads_after_prefetch)
 
     def test_same_track_refresh_keeps_loaded_lyrics_when_lookup_temporarily_empty(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -1655,7 +2394,7 @@ class ProviderStateTests(unittest.TestCase):
         data = asyncio.run(provider._read_visual_data())
 
         self.assertIsNotNone(data)
-        self.assertEqual(reader.upcoming_calls, [("Song", "Artist", 2)])
+        self.assertEqual(reader.upcoming_calls, [("Song", "Artist", 6)])
         self.assertEqual(data.track.album_queue[0].title, "Next Song")
         self.assertEqual(data.track.album_queue[0].album_art_bytes, cover_bytes)
         self.assertIsNone(data.track.album_queue[0].album_color)
@@ -1684,6 +2423,131 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(entries[0].title, "Next Without Art")
         self.assertEqual(entries[0].album_art_bytes, b"")
 
+    def test_queue_art_cache_miss_schedules_nonblocking_prefetch(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"GLUSPOT_ALBUM_ART_CACHE_DIR": root}):
+            provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+            provider._queue_art_cache = {}
+            scheduled = []
+            provider._schedule_queue_album_art_prefetch = lambda url: scheduled.append(url) or True
+            track = SimpleNamespace(album_art_bytes=b"", image_bytes=b"", album_art_url="https://example.test/next.png")
+
+            self.assertEqual(provider._queue_album_art_bytes(track), b"")
+            self.assertEqual(scheduled, ["https://example.test/next.png"])
+
+    def test_current_original_art_cache_is_preferred_over_system_thumbnail(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        provider._queue_art_cache = {"https://example.test/current.png": png}
+        provider._queue_art_inflight = set()
+        provider._queue_art_failed_until = {}
+        provider._queue_art_lock = threading.Lock()
+        track = SimpleNamespace(album_art_bytes=b"", image_bytes=b"", album_art_url="https://example.test/current.png")
+
+        self.assertEqual(provider._queue_album_art_bytes(track), png)
+
+    def test_original_art_disk_cache_is_available_on_first_read(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._queue_art_cache = {}
+        provider._queue_art_inflight = set()
+        provider._queue_art_failed_until = {}
+        provider._queue_art_lock = threading.Lock()
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        url = "https://example.test/persisted.png"
+        track = SimpleNamespace(album_art_bytes=b"", image_bytes=b"", album_art_url=url)
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"GLUSPOT_ALBUM_ART_CACHE_DIR": root}):
+            provider._persist_queue_art(url, png)
+            provider._queue_art_cache = {}
+
+            loaded = provider._queue_album_art_bytes(track)
+
+        self.assertEqual(loaded, png)
+
+    def test_queue_art_prefetch_caches_valid_image_and_requests_refresh(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._queue_art_cache = {}
+        provider._queue_art_inflight = set()
+        provider._queue_art_failed_until = {}
+        provider._queue_art_lock = threading.Lock()
+        provider._queue_art_slots = threading.BoundedSemaphore(3)
+        refreshed = threading.Event()
+        provider._last_refresh_at = 12.0
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return png
+
+        with patch("api.providers.urlopen", return_value=Response()):
+            self.assertTrue(provider._schedule_queue_album_art_prefetch("https://example.test/next.png"))
+            for _ in range(100):
+                if provider._last_refresh_at == 0.0:
+                    break
+                refreshed.wait(0.01)
+
+        self.assertEqual(provider._queue_art_cache["https://example.test/next.png"], png)
+        self.assertEqual(provider._queue_art_inflight, set())
+        self.assertEqual(provider._last_refresh_at, 0.0)
+
+    def test_queue_art_download_accepts_complete_five_megabyte_image_but_caps_oversize(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._queue_art_cache = {}
+        provider._queue_art_inflight = set()
+        provider._queue_art_failed_until = {}
+        provider._queue_art_lock = threading.Lock()
+        provider._queue_art_slots = threading.BoundedSemaphore(1)
+        provider._persist_queue_art = lambda *_args: None
+        provider._last_refresh_at = 1.0
+        minimal_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        complete_image = minimal_png + b"x" * (5 * 1024 * 1024)
+        oversize_image = minimal_png + b"x" * (provider.QUEUE_ART_MAX_BYTES + 1)
+        jobs, read_limits = [], []
+
+        class ManualThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                jobs.append(self.target)
+
+        class Response:
+            def __init__(self, content):
+                self.content = content
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, limit):
+                read_limits.append(limit)
+                return self.content[:limit]
+
+        with patch("api.providers.threading.Thread", ManualThread), patch(
+            "api.providers.urlopen", side_effect=[Response(complete_image), Response(oversize_image)]
+        ):
+            self.assertTrue(provider._schedule_queue_album_art_prefetch("https://example.test/large.png"))
+            jobs.pop(0)()
+            self.assertEqual(provider._queue_art_cache["https://example.test/large.png"], complete_image)
+            self.assertTrue(provider._schedule_queue_album_art_prefetch("https://example.test/too-large.png"))
+            jobs.pop(0)()
+
+        self.assertEqual(read_limits, [provider.QUEUE_ART_MAX_BYTES + 1] * 2)
+        self.assertNotIn("https://example.test/too-large.png", provider._queue_art_cache)
+        self.assertGreater(provider._queue_art_failed_until["https://example.test/too-large.png"], time.monotonic())
+
     def test_netease_current_read_prefetches_next_two_queue_track_lyrics(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeTwoStepQueuePositionReader()
@@ -1704,6 +2568,34 @@ class ProviderStateTests(unittest.TestCase):
                 ("Third Song", "Third Artist", "Third Album", 199.0),
             ],
         )
+
+    def test_netease_upcoming_lyrics_use_one_bounded_queue_read(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        lyrics_store = TrackingLyricsStore()
+        provider.lyrics_store = lyrics_store
+        provider.settings_getter = lambda key, default=None: {"v2_enable_dual_line_lyrics": False}.get(key, default)
+        calls = []
+
+        class BatchQueueReader:
+            def upcoming_tracks(self, title, artist, count):
+                calls.append((title, artist, count))
+                return (
+                    SimpleNamespace(title="Next", artist="B", album_title="Two", duration_seconds=201.0),
+                    SimpleNamespace(title="Third", artist="C", album_title="Three", duration_seconds=199.0),
+                )
+
+            def adjacent_track(self, *_args):
+                raise AssertionError("batch prefetch should not re-read each adjacent track")
+
+        reader = BatchQueueReader()
+        self.assertTrue(provider._prefetch_netease_upcoming_lyrics("Current", "A", reader, count=2))
+        self.assertEqual(calls, [("Current", "A", 2)])
+        self.assertEqual(
+            lyrics_store.background_calls,
+            [("Next", "B", "Two", 201.0), ("Third", "C", "Three", 199.0)],
+        )
+        self.assertFalse(provider._prefetch_netease_upcoming_lyrics("Current", "A", reader, count=2))
+        self.assertEqual(calls, [("Current", "A", 2)])
 
     def test_current_lookup_blocks_automatic_netease_upcoming_lyric_prefetch(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -1798,6 +2690,143 @@ class ProviderStateTests(unittest.TestCase):
         self.assertIsNotNone(data)
         self.assertLess(events.index(("lyrics-background", "Song", "Artist")), events.index(("thumbnail", "", "")))
 
+        # Losing the player's original-art URL on an unfocused refresh must
+        # not replace an already sharp current cover with a system thumbnail.
+        original_cover = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        provider._last_data = replace(data, track=replace(data.track, album_art_bytes=original_cover))
+        provider._queue_album_art_bytes = lambda _track: b""
+        before = events.count(("thumbnail", "", ""))
+        unfocused = asyncio.run(provider._read_visual_data())
+        self.assertEqual(unfocused.track.album_art_bytes, original_cover)
+        self.assertEqual(events.count(("thumbnail", "", "")), before)
+
+    def test_slow_thumbnail_does_not_hold_track_and_refreshes_when_ready(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._last_refresh_at = 4.0
+
+        async def scenario():
+            release = asyncio.Event()
+
+            async def slow_thumbnail(_properties, _track_key):
+                await release.wait()
+                return b"thumbnail"
+
+            provider._read_thumbnail = slow_thumbnail
+            first = await provider._thumbnail_for_track(None, "song")
+            self.assertEqual(first, b"")
+            self.assertEqual(len(provider._pending_thumbnail_tasks), 1)
+            release.set()
+            await asyncio.wait_for(next(iter(provider._pending_thumbnail_tasks.values())), 0.2)
+            await asyncio.sleep(0)
+            self.assertEqual(provider._last_refresh_at, 0.0)
+            self.assertEqual(await provider._thumbnail_for_track(None, "song"), b"thumbnail")
+
+        asyncio.run(scenario())
+
+    def test_current_track_stops_lyric_lookup_after_first_confirmed_empty_result(self):
+        with tempfile.TemporaryDirectory() as root:
+            provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+            provider.lyrics_store = LocalLyricsStore(Path(root))
+            provider.settings_getter = lambda _key, default=None: default
+            started = threading.Event()
+            finish = threading.Event()
+            searches = []
+
+            def lookup(title, *_args):
+                searches.append(title)
+                started.set()
+                finish.wait(2.0)
+                return LyricsMatch((), (), "")
+
+            provider.lyrics_store._resolve_online = lookup
+            first_match, first_pending, first_started = provider._ensure_lyrics_lookup_started("Song", "Artist")
+            self.assertEqual(first_match, LyricsMatch((), (), ""))
+            self.assertTrue(first_pending)
+            self.assertTrue(first_started)
+            self.assertTrue(started.wait(2.0))
+
+            finish.set()
+            deadline = time.monotonic() + 2.0
+            while provider.lyrics_store.is_lookup_pending("Song", "Artist") and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(provider.lyrics_store.is_lookup_pending("Song", "Artist"))
+
+            with patch("api.lyrics.time.monotonic", return_value=time.monotonic() + 3600.0):
+                match, pending, started_again = provider._ensure_lyrics_lookup_started("Song", "Artist")
+            self.assertEqual(match, LyricsMatch((), (), ""))
+            self.assertFalse(pending)
+            self.assertFalse(started_again)
+            self.assertEqual(searches, ["Song"])
+
+            with patch("api.lyrics.threading.Thread"):
+                _other_match, other_pending, other_started = provider._ensure_lyrics_lookup_started("Next Song", "Artist")
+            self.assertTrue(other_pending)
+            self.assertTrue(other_started)
+
+    def test_provider_requests_throttled_unit_enrichment_for_cached_line_lyrics(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.settings_getter = lambda _key, default=None: default
+
+        class RecordingStore(FakeLyricsStore):
+            def __init__(self):
+                self.enrich_calls = []
+
+            def resolve_cached_or_local(self, *_args):
+                return LyricsMatch((TimedLyricLine(1.0, "你好"),), ("你好",), "local:artist - song.lrc")
+
+            def enrich_in_background(self, *args):
+                self.enrich_calls.append(args)
+                return False
+
+        provider.lyrics_store = RecordingStore()
+        match, pending, started = provider._ensure_lyrics_lookup_started("Song", "Artist")
+
+        self.assertEqual(match.timed_lyrics[0].text, "你好")
+        self.assertFalse(pending or started)
+        self.assertEqual(provider.lyrics_store.enrich_calls, [("Song", "Artist", "", 0.0, True)])
+
+    def test_provider_pending_then_empty_result_feeds_fullscreen_no_lyrics_target(self):
+        from local.music_surface_window import MusicSurfaceWindow
+
+        with tempfile.TemporaryDirectory() as root:
+            provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+            provider.lyrics_store = LocalLyricsStore(Path(root))
+            provider.settings_getter = lambda _key, default=None: default
+            started_lookup = threading.Event()
+            complete_lookup = threading.Event()
+
+            def empty_lookup(*_args):
+                started_lookup.set()
+                complete_lookup.wait(2.0)
+                return LyricsMatch((), (), "")
+
+            provider.lyrics_store._resolve_online = empty_lookup
+            _match, pending, started = provider._ensure_lyrics_lookup_started("Song", "Artist")
+            self.assertTrue(pending and started)
+            self.assertTrue(started_lookup.wait(2.0))
+            owner = SimpleNamespace(track_title="Song", lyrics=["查找歌词中"], timed_lyrics=[],
+                                    no_lyrics_text="暂无歌词", enable_dual_line_lyrics=False,
+                                    music_intro_cleanup_enabled=True)
+            surface = MusicSurfaceWindow.__new__(MusicSurfaceWindow)
+            surface.owner = owner
+            surface._fullscreen = True
+            surface._display_lyrics_cache_key = None
+            surface._display_lyrics_cache = None
+            self.assertFalse(surface._no_lyrics_cover_target())
+
+            complete_lookup.set()
+            deadline = time.monotonic() + 2.0
+            while provider.lyrics_store.is_lookup_pending("Song", "Artist") and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertFalse(provider.lyrics_store.is_lookup_pending("Song", "Artist"))
+            match, pending, started = provider._ensure_lyrics_lookup_started("Song", "Artist")
+            lyrics = match.lyrics or (("查找歌词中",) if pending else ("暂无歌词",))
+            owner.lyrics = list(lyrics)
+
+            self.assertEqual(lyrics, ("暂无歌词",))
+            self.assertFalse(pending or started)
+            self.assertTrue(surface._no_lyrics_cover_target())
+
     def test_command_prefetch_uses_reader_current_track_when_cached_track_is_stale(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         reader = FakeQueuePositionReader()
@@ -1865,6 +2894,28 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(scheduled, ["cancel", ("read", provider._loop)])
         self.assertEqual(provider._refresh_future, "new-future")
 
+    def test_run_cancels_timed_out_future_to_prevent_late_seek(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._loop = object()
+
+        class TimedOutFuture:
+            cancelled = False
+
+            def result(self, *, timeout):
+                self.timeout = timeout
+                raise FutureTimeoutError()
+
+            def cancel(self):
+                self.cancelled = True
+                return True
+
+        future = TimedOutFuture()
+        with patch("api.providers.asyncio.run_coroutine_threadsafe", return_value=future):
+            self.assertIsNone(provider._run("seek coroutine"))
+
+        self.assertEqual(future.timeout, 1.4)
+        self.assertTrue(future.cancelled)
+
     def test_successful_seek_without_cached_track_keeps_pending_anchor_and_refreshes(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         provider._loop = object()
@@ -1887,6 +2938,295 @@ class ProviderStateTests(unittest.TestCase):
         self.assertGreater(provider._local_seek_at, 0.0)
         self.assertEqual(provider._local_seek_track_id, "")
         self.assertEqual(refresh_calls, ["refresh"])
+
+    def test_configured_player_seek_uses_verified_progress_control_before_gsmtc(self):
+        for adapter in ("netease", "netease_betterncm", "qq"):
+            with self.subTest(adapter=adapter):
+                provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+                base = empty_visual_data()
+                provider._loop = object()
+                provider._last_data = replace(
+                    base,
+                    track=replace(base.track, title="Song", artist="Artist", track_id="track", duration_seconds=200.0),
+                )
+                provider._last_ready_at = 0.0
+                provider._local_seek_position_seconds = None
+                provider._local_seek_at = 0.0
+                provider._local_seek_track_id = ""
+                provider._music_player_adapter = adapter
+                calls = []
+                reader = SimpleNamespace(
+                    seek_playback_position=lambda position, duration, title="", artist="": calls.append(
+                        ("player", position, duration, title, artist)
+                    ) or True,
+                )
+                provider._player_position_reader_for = lambda selected: reader
+                provider._run = lambda _coro: calls.append(("gsmtc",)) or True
+                provider._seek_position = lambda _position: None
+                provider._request_immediate_media_refresh = lambda: calls.append(("refresh",))
+
+                self.assertTrue(provider.seek_playback_position(80.0))
+                self.assertEqual(calls[0], ("player", 80.0, 200.0, "Song", "Artist"))
+                self.assertNotIn(("gsmtc",), calls)
+                self.assertAlmostEqual(provider._local_seek_position_seconds, 80.0)
+
+    def test_configured_player_seek_falls_back_to_gsmtc(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider._loop = object()
+        provider._last_data = replace(
+            base,
+            track=replace(base.track, title="Song", artist="Artist", track_id="track", duration_seconds=240.0),
+        )
+        provider._last_ready_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._music_player_adapter = "netease"
+        calls = []
+        reader = SimpleNamespace(
+            seek_playback_position=lambda position, duration, title="", artist="": calls.append(
+                ("player", position, duration, title, artist)
+            ) or False,
+            verify_playback_position=lambda *_args, **_kwargs: False,
+        )
+
+        async def verified_gsmtc_seek(position, **kwargs):
+            calls.append(("gsmtc-verified", position, kwargs))
+            return True
+
+        provider._player_position_reader_for = lambda adapter: reader
+        provider._seek_position_verified = verified_gsmtc_seek
+        provider._run = lambda coro: asyncio.run(coro)
+        provider._request_immediate_media_refresh = lambda: calls.append(("refresh",))
+
+        self.assertTrue(provider.seek_playback_position(72.0))
+        self.assertEqual(calls[0], ("player", 72.0, 240.0, "Song", "Artist"))
+        self.assertEqual(calls[1][0:2], ("gsmtc-verified", 72.0))
+        self.assertEqual(calls[-1], ("refresh",))
+        self.assertEqual(provider._local_seek_track_id, "track")
+
+    def test_configured_player_gsmtc_ack_without_timeline_change_is_not_success(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider._last_data = replace(
+            base,
+            track=replace(base.track, title="Song", artist="Artist", track_id="track", duration_seconds=240.0),
+        )
+        provider._loop = object()
+        provider._music_player_adapter = "netease"
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._player_position_reader_for = lambda _adapter: SimpleNamespace(
+            seek_playback_position=lambda *_args, **_kwargs: False,
+            verify_playback_position=lambda *_args, **_kwargs: False,
+        )
+        session = FakeSession("cloudmusic.exe", "Song", "Artist", position=16.0, duration=240.0)
+
+        async def get_session():
+            return session
+
+        provider._get_session = get_session
+        provider._run = lambda coro: asyncio.run(coro)
+        refreshes = []
+        provider._request_immediate_media_refresh = lambda: refreshes.append(True)
+
+        async def immediate_sleep(_seconds):
+            return None
+
+        with patch("api.providers.asyncio.sleep", immediate_sleep):
+            self.assertFalse(provider.seek_playback_position(72.0, expected_track_id="track"))
+
+        self.assertEqual(session.seek_requests, [720_000_000])
+        self.assertIsNone(provider._local_seek_position_seconds)
+        self.assertEqual(refreshes, [])
+
+    def test_configured_player_gsmtc_timeline_readback_commits_seek(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider._last_data = replace(
+            base,
+            track=replace(base.track, title="Song", artist="Artist", track_id="track", duration_seconds=240.0),
+        )
+        provider._loop = object()
+        provider._music_player_adapter = "netease"
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._player_position_reader_for = lambda _adapter: SimpleNamespace(
+            seek_playback_position=lambda *_args, **_kwargs: False,
+            verify_playback_position=lambda *_args, **_kwargs: False,
+        )
+
+        class MovingSession(FakeSession):
+            async def try_change_playback_position_async(self, requested):
+                self.seek_requests.append(int(requested))
+                self.timeline.position = FakeTimeSpan(requested / 10_000_000)
+                return True
+
+        session = MovingSession("cloudmusic.exe", "Song", "Artist", position=16.0, duration=240.0)
+
+        async def get_session():
+            return session
+
+        provider._get_session = get_session
+        provider._run = lambda coro: asyncio.run(coro)
+        provider._request_immediate_media_refresh = lambda: None
+
+        async def immediate_sleep(_seconds):
+            return None
+
+        with patch("api.providers.asyncio.sleep", immediate_sleep):
+            self.assertTrue(provider.seek_playback_position(72.0, expected_track_id="track"))
+
+        self.assertAlmostEqual(provider._local_seek_position_seconds, 72.0)
+
+    def test_verified_timeline_after_physical_click_skips_second_gsmtc_seek(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider._last_data = replace(
+            base,
+            track=replace(base.track, title="Song", artist="Artist", track_id="track", duration_seconds=240.0),
+        )
+        provider._loop = object()
+        provider._music_player_adapter = "netease"
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        reader = SimpleNamespace(
+            seek_playback_position=lambda *_args, **_kwargs: False,
+            last_physical_seek_attempted=True,
+            verify_playback_position=lambda *_args, **_kwargs: False,
+        )
+        provider._player_position_reader_for = lambda _adapter: reader
+        session = FakeSession("cloudmusic.exe", "Song", "Artist", position=72.0, duration=240.0)
+
+        async def get_session():
+            return session
+
+        provider._get_session = get_session
+        provider._run = lambda coro: asyncio.run(coro)
+        provider._request_immediate_media_refresh = lambda: None
+
+        self.assertTrue(provider.seek_playback_position(72.0, expected_track_id="track"))
+        self.assertEqual(session.seek_requests, [])
+        self.assertAlmostEqual(provider._local_seek_position_seconds, 72.0)
+
+    def test_seek_rejects_changed_track_before_and_after_uia_call(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        original = replace(base, track=replace(base.track, title="Song", artist="Artist", track_id="track", duration_seconds=200.0))
+        provider._last_data = original
+        provider._loop = None
+        provider._music_player_adapter = "qq"
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        calls = []
+
+        def seek(*_args, **_kwargs):
+            calls.append("uia")
+            provider._last_data = replace(
+                original,
+                track=replace(original.track, track_id="new-track", title="Next Song"),
+            )
+            return True
+
+        provider._player_position_reader_for = lambda _adapter: SimpleNamespace(seek_playback_position=seek)
+        provider._request_immediate_media_refresh = lambda: calls.append("refresh")
+
+        self.assertFalse(provider.seek_playback_position(72.0, expected_track_id="not-this-track"))
+        self.assertEqual(calls, [])
+        self.assertFalse(provider.seek_playback_position(72.0, expected_track_id="track"))
+        self.assertEqual(calls, ["uia"])
+        self.assertIsNone(provider._local_seek_position_seconds)
+
+    def test_system_seek_uses_gsmtc_before_any_player_fallback(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._loop = object()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._music_player_adapter = "system"
+        calls = []
+
+        async def gsmtc_seek(position):
+            calls.append(("gsmtc", position))
+            return True
+
+        provider._seek_position = gsmtc_seek
+        provider._run = lambda coro: asyncio.run(coro)
+        provider._player_position_reader_for = lambda adapter: calls.append(("player", adapter))
+        provider._request_immediate_media_refresh = lambda: calls.append(("refresh",))
+
+        self.assertTrue(provider.seek_playback_position(12.0))
+        self.assertEqual(calls[0], ("gsmtc", 12.0))
+        self.assertNotIn(("player", "system"), calls)
+
+    def test_verified_local_seek_invalidates_old_lyric_row_reader_sample(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._last_data = None
+        provider._music_player_adapter = "netease"
+        resets = []
+        provider._player_position_reader_for = lambda _adapter: SimpleNamespace(reset=lambda: resets.append(True))
+
+        provider._remember_local_seek_for_track("track", 24.0, 120.0)
+
+        self.assertEqual(resets, [True])
+        self.assertEqual(provider._local_seek_track_id, "track")
+        self.assertEqual(provider._local_seek_position_seconds, 24.0)
+
+    def test_verified_seeks_keep_distinct_event_times_through_cached_projection(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data("Song", "Artist")
+        provider._last_data = replace(
+            base,
+            track=replace(base.track, track_id="track", duration_seconds=120.0, is_playing=True),
+        )
+        provider._music_player_adapter = "system"
+
+        with patch("api.providers.time.monotonic", side_effect=(10.0, 11.0)):
+            provider._remember_local_seek_for_track("track", 24.0, 120.0)
+            first = provider._last_data.track.position_sampled_at
+            first_cached = provider._project_visual_position(provider._last_data, now=10.5, anchor_at=10.0)
+            self.assertEqual(first_cached.track.position_sampled_at, first)
+            provider._remember_local_seek_for_track("track", 48.0, 120.0)
+            second = provider._last_data.track.position_sampled_at
+
+        self.assertEqual(first, 10.0)
+        self.assertEqual(second, 11.0)
+        self.assertNotEqual(first, second)
+
+    def test_failed_seek_does_not_publish_local_position_or_refresh(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        base = empty_visual_data()
+        provider._loop = object()
+        provider._last_data = replace(base, track=replace(base.track, duration_seconds=200.0))
+        provider._last_ready_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._music_player_adapter = "qq"
+        calls = []
+        reader = SimpleNamespace(
+            seek_playback_position=lambda *_args, **_kwargs: False,
+            verify_playback_position=lambda *_args, **_kwargs: False,
+        )
+
+        async def failed_seek(_position, **_kwargs):
+            return False
+
+        provider._player_position_reader_for = lambda adapter: reader
+        provider._seek_position_verified = failed_seek
+        provider._run = lambda coro: asyncio.run(coro)
+        provider._request_immediate_media_refresh = lambda: calls.append("refresh")
+
+        self.assertFalse(provider.seek_playback_position(64.0))
+        self.assertIsNone(provider._local_seek_position_seconds)
+        self.assertEqual(calls, [])
 
     def test_first_read_applies_pending_cold_start_seek_to_current_track(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -2007,7 +3347,10 @@ class ProviderStateTests(unittest.TestCase):
             "process_path": r"C:\\Program Files\\NetEase\\CloudMusic\\cloudmusic.exe",
             "process": "cloudmusic.exe",
         }
-        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
+        thumbnail_calls = []
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(
+            0, result=thumbnail_calls.append(_track_key) or b"stale-thumbnail",
+        )
 
         async def fake_get_session():
             return FakeSession("cloudmusic.exe", "butterflies", "Denise Julia", True, 161.0, 212.79)
@@ -2020,6 +3363,88 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(data.track.title, "Tunnel Vision")
         self.assertEqual(data.track.artist, "Chace")
         self.assertEqual(data.track.track_id != "", True)
+        self.assertEqual(data.track.position_seconds, 0.0)
+        self.assertEqual(data.track.album_art_bytes, b"")
+        self.assertEqual(thumbnail_calls, [])
+
+    def test_same_track_art_selection_keeps_the_sharper_cover_when_focus_changes(self):
+        def png(side, color):
+            image = QImage(side, side, QImage.Format.Format_RGB32)
+            image.fill(color)
+            data = QByteArray()
+            buffer = QBuffer(data)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            image.save(buffer, "PNG")
+            return bytes(data)
+
+        sharp = png(320, 0xFF203060)
+        small = png(48, 0xFF806020)
+        self.assertEqual(WindowsMediaProvider._preferred_album_art_bytes(small, sharp), sharp)
+        self.assertEqual(WindowsMediaProvider._preferred_album_art_bytes(sharp, small), sharp)
+        # More bytes at identical dimensions do not prove the replacement is
+        # visually better; preserve the current same-track image on a tie.
+        self.assertEqual(WindowsMediaProvider._preferred_album_art_bytes(sharp, sharp + b"padding"), sharp)
+
+    def test_netease_small_thumbnail_starts_full_size_lookup_and_upgrades_same_track(self):
+        def png(side):
+            image = QImage(side, side, QImage.Format.Format_RGB32)
+            image.fill(0xFF203060)
+            data = QByteArray()
+            buffer = QBuffer(data)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            image.save(buffer, "PNG")
+            return bytes(data)
+
+        thumbnail = png(1199)
+        original = png(2560)
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider.fallback = EmptyIslandDataProvider(empty_visual_data())
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = None
+        provider._last_ready_at = 0.0
+        provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = ""
+        provider._last_raw_timeline_position = None
+        provider._last_raw_timeline_at = 0.0
+        provider._local_seek_position_seconds = None
+        provider._local_seek_at = 0.0
+        provider._local_seek_track_id = ""
+        provider._art_cache = {}
+        provider.netease_position = None
+        provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_music_player_mode": "netease",
+            "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False,
+            "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda _foreground, _now: None
+        provider._is_source_app_foreground = lambda _source_app, _raw_source_app: False
+        provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=thumbnail)
+        provider._colors_from_art = lambda _art, fallback, secondary: (fallback, secondary)
+        provider._get_session = lambda: asyncio.sleep(
+            0, result=FakeSession("cloudmusic.exe", "Song", "Artist", True, 12.0, 240.0)
+        )
+        requested = []
+        provider._schedule_current_netease_art_lookup = lambda *args, **kwargs: requested.append((args, kwargs)) or True
+
+        first = asyncio.run(provider._read_visual_data())
+        self.assertEqual(first.track.album_art_bytes, thumbnail)
+        self.assertEqual(first.track.album_art_source, "thumbnail")
+        self.assertEqual(len(requested), 1)
+        self.assertEqual(requested[0][0][1:], ("Song", "Artist"))
+        self.assertEqual(requested[0][1], {"album_title": "", "duration_seconds": 240.0})
+
+        provider._last_data = first
+        provider._current_art_url_by_track_id = {first.track.track_id: "https://example.test/original.jpg"}
+        provider._queue_album_art_bytes = lambda _track: original
+        second = asyncio.run(provider._read_visual_data())
+        self.assertEqual(second.track.track_id, first.track.track_id)
+        self.assertEqual(second.track.album_art_bytes, original)
+        self.assertEqual(second.track.album_art_source, "original")
+        self.assertEqual(len(requested), 1)
 
     def test_foreground_title_change_corrects_cached_track_immediately(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -2304,6 +3729,161 @@ class ProviderStateTests(unittest.TestCase):
 
         self.assertEqual(reader.immediate_calls, [])
         self.assertNotEqual(third.track.position_source, "qq-uia-progress")
+
+class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
+    raw_url = "https://p1.music.126.net/cover/123.jpg?param=500y500"
+    upgraded_url = "https://p1.music.126.net/cover/123.jpg?param=2560y2560"
+
+    @staticmethod
+    def png(side):
+        image = QImage(side, side, QImage.Format.Format_RGB32)
+        image.fill(0xFF203060)
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, "PNG")
+        return bytes(data)
+
+    def provider(self):
+        provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+        provider._queue_art_cache = {}
+        provider._queue_art_disk_path = lambda _url: None
+        provider._persist_queue_art = lambda *_args: None
+        return provider
+
+    def test_player_tiny_target_cache_and_disk_retry_without_losing_preview(self):
+        provider = self.provider()
+        tiny, original = self.png(100), self.png(1417)
+        jobs = []
+
+        class ManualThread:
+            def __init__(self, *, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                jobs.append(self.target)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return original
+
+        track = SimpleNamespace(album_art_url=self.upgraded_url, album_art_bytes=tiny)
+        provider._queue_art_cache[self.upgraded_url] = tiny
+        with tempfile.TemporaryDirectory() as root, patch("api.providers.threading.Thread", ManualThread):
+            disk_path = Path(root) / "cover.img"
+            disk_path.write_bytes(tiny)
+            provider._queue_art_disk_path = lambda _url: disk_path
+            with patch("api.providers.time.monotonic", return_value=100.0):
+                self.assertEqual(provider._queue_album_art_bytes(track), tiny)
+                self.assertNotIn(self.upgraded_url, provider._queue_art_cache)
+                self.assertFalse(disk_path.exists())
+                self.assertEqual(provider._queue_album_art_bytes(track), tiny)
+                self.assertEqual(jobs, [])
+            with patch("api.providers.time.monotonic", return_value=130.1):
+                self.assertEqual(provider._queue_album_art_bytes(track), tiny)
+                self.assertEqual(provider._queue_album_art_bytes(track), tiny)
+                self.assertEqual(len(jobs), 1)
+                with patch("api.providers.urlopen", return_value=Response()):
+                    jobs.pop(0)()
+                self.assertEqual(provider._queue_album_art_bytes(track), original)
+                self.assertFalse(provider._album_art_url_is_preview(self.upgraded_url, original))
+            self.assertEqual(jobs, [])
+
+    def test_known_500_preview_stays_pending_until_upgraded_source_arrives(self):
+        provider = self.provider()
+        preview, original = self.png(500), self.png(1417)
+        provider._queue_art_cache[self.raw_url] = preview
+        scheduled = []
+        provider._schedule_queue_album_art_prefetch = lambda url: scheduled.append(url) or True
+        track = SimpleNamespace(album_art_url=self.raw_url, album_art_bytes=preview)
+        self.assertEqual(provider._queue_album_art_bytes(track), preview)
+        self.assertEqual(scheduled, [self.upgraded_url])
+        self.assertTrue(provider._album_art_url_is_preview(self.raw_url, preview))
+        provider._current_art_lookup_lock = threading.Lock()
+        provider._current_art_url_by_track_id = {"track": self.raw_url}
+        self.assertEqual(
+            provider._current_artwork_lookup_state("track", preview, eligible=True, online_art=preview, source="thumbnail"),
+            "pending",
+        )
+        provider._queue_art_cache[self.upgraded_url] = original
+        self.assertEqual(provider._queue_album_art_bytes(track), original)
+        self.assertFalse(provider._album_art_url_is_preview(self.raw_url, original))
+        self.assertEqual(
+            provider._current_artwork_lookup_state("track", original, eligible=True, online_art=original, source="netease-original"),
+            "ready",
+        )
+
+    def test_completed_smaller_original_keeps_best_variant_without_permanent_pending(self):
+        provider = self.provider()
+        preview, original = self.png(800), self.png(640)
+        provider._queue_art_cache = {self.raw_url: preview, self.upgraded_url: original}
+        scheduled = []
+        provider._schedule_queue_album_art_prefetch = lambda url: scheduled.append(url) or True
+        track = SimpleNamespace(album_art_url=self.raw_url, album_art_bytes=preview)
+        selected = provider._queue_album_art_bytes(track)
+        self.assertEqual(selected, preview)
+        self.assertEqual(scheduled, [])
+        self.assertFalse(provider._album_art_url_is_preview(self.raw_url, selected))
+        provider._current_art_lookup_lock = threading.Lock()
+        provider._current_art_url_by_track_id = {"track": self.raw_url}
+        self.assertEqual(provider._current_artwork_lookup_state(
+            "track", selected, eligible=True, online_art=selected, source="thumbnail"), "ready")
+
+    def test_visual_handoff_preserves_known_500_preview_provenance(self):
+        provider = self.provider()
+        preview, original = self.png(500), self.png(1417)
+        provider.fallback = EmptyIslandDataProvider(empty_visual_data())
+        provider.lyrics_store = FakeLyricsStore()
+        provider._last_data = None
+        provider._last_ready_at = provider._source_app_foreground_at = 0.0
+        provider._last_raw_timeline_track_id = provider._local_seek_track_id = ""
+        provider._last_raw_timeline_position = provider._local_seek_position_seconds = None
+        provider._last_raw_timeline_at = provider._local_seek_at = 0.0
+        provider._art_cache = {}
+        provider.netease_position = provider.qq_position = None
+        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
+        provider.message_detector = SimpleNamespace(messages=lambda: ())
+        provider.settings_getter = lambda key, default=None: {
+            "v2_music_player_mode": "netease", "v2_enable_player_progress_plugin": False,
+            "v2_player_progress_auto_detect": False, "v2_enable_dual_line_lyrics": False,
+        }.get(key, default)
+        provider._record_source_app_pointer_state = lambda *_args: None
+        provider._is_source_app_foreground = lambda *_args: False
+        provider._read_thumbnail = lambda *_args: asyncio.sleep(0, result=b"")
+        provider._colors_from_art = lambda _art, fallback, secondary: (fallback, secondary)
+        provider._get_session = lambda: asyncio.sleep(0, result=FakeSession("cloudmusic.exe", "Song", "Artist", True, 12, 240))
+        provider._schedule_current_netease_art_lookup = lambda *_args, **_kwargs: False
+        provider._schedule_queue_album_art_prefetch = lambda _url: False
+        provider._player_window_track_metadata = lambda *_args: SimpleNamespace(
+            title="Song", artist="Artist", album_title="Album", album_art_bytes=preview, album_art_url=self.raw_url,
+        )
+        provider._queue_art_cache[self.raw_url] = preview
+        first = asyncio.run(provider._read_visual_data())
+        self.assertEqual(first.track.album_art_bytes, preview)
+        self.assertEqual(first.track.album_art_source, "thumbnail")
+        self.assertNotEqual(first.track.album_art_lookup_state, "ready")
+        provider._last_data = first
+        provider._queue_art_cache[self.upgraded_url] = original
+        second = asyncio.run(provider._read_visual_data())
+        self.assertEqual(second.track.track_id, first.track.track_id)
+        self.assertEqual(second.track.album_art_bytes, original)
+        self.assertEqual(second.track.album_art_source, "original")
+        self.assertEqual(second.track.album_art_lookup_state, "ready")
+
+    def test_unknown_600_source_original_retains_reference_completion(self):
+        provider = self.provider()
+        original = self.png(600)
+        self.assertFalse(provider._album_art_url_is_preview("https://example.test/cover.jpg?param=500y500", original))
+        self.assertEqual(
+            provider._current_artwork_lookup_state("track", original, eligible=True, source="original"),
+            "ready",
+        )
 
 
 if __name__ == "__main__":

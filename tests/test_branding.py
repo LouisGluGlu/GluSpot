@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ class BrandingTests(unittest.TestCase):
         from local.branding import APP_ICON_PATH, APP_NAME, APP_VERSION, TRAY_ICON_PATH
 
         self.assertEqual(APP_NAME, "GluSpot")
-        self.assertEqual(APP_VERSION, "6.402")
+        self.assertEqual(APP_VERSION, "6.412")
         self.assertEqual(APP_ICON_PATH.name, "gluspot-card-center.ico")
         self.assertEqual(TRAY_ICON_PATH.name, "gluspot.ico")
         self.assertTrue(APP_ICON_PATH.exists())
@@ -44,6 +45,25 @@ class BrandingTests(unittest.TestCase):
         with Image.open(ico_path) as ico:
             self.assertGreaterEqual(ico.size[0], 16)
             self.assertGreaterEqual(ico.size[1], 16)
+
+    def test_windows_build_and_documented_version_match_runtime_branding(self):
+        from local.branding import APP_VERSION
+
+        root = Path(__file__).resolve().parents[1]
+        spec = (root / "GluSpot.spec").read_text(encoding="utf-8")
+        version = (root / "packaging" / "windows" / "version_info.txt").read_text(encoding="utf-8")
+        build = (root / "build-exe.bat").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertEqual(re.search(r'APP_VERSION = "([^"]+)"', spec).group(1), APP_VERSION)
+        expected_tuple = tuple(int(part) for part in APP_VERSION.split(".")) + (0, 0)
+        self.assertEqual(tuple(int(part.strip()) for part in re.search(r"filevers=\(([^)]+)\)", version).group(1).split(",")), expected_tuple)
+        self.assertEqual(tuple(int(part.strip()) for part in re.search(r"prodvers=\(([^)]+)\)", version).group(1).split(",")), expected_tuple)
+        self.assertIn(f"StringStruct('FileVersion', '{APP_VERSION}.0.0')", version)
+        self.assertIn(f"StringStruct('ProductVersion', '{APP_VERSION}.0.0')", version)
+        self.assertIn(f"echo GluSpot {APP_VERSION} build is ready:", build)
+        self.assertIn(f"release\\GluSpot-{APP_VERSION}\\GluSpot.exe", build)
+        self.assertIn(f"Current test-build version: `{APP_VERSION}`.", readme)
+        self.assertIn(f"release\\GluSpot-{APP_VERSION}\\GluSpot.exe", readme)
 
     def test_custom_icon_installer_creates_resolvable_png_and_ico(self):
         from PIL import Image
@@ -133,6 +153,26 @@ class BrandingTests(unittest.TestCase):
 
         self.assertIn(("app_id", "GluSpot"), calls)
         self.assertIn(("console", "GluSpot"), calls)
+
+    def test_windows_package_registers_qt_and_shiboken_dll_directories(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = (root / "GluSpot.spec").read_text(encoding="utf-8")
+        hook = root / "packaging" / "windows" / "runtime_qt_dlls.py"
+
+        self.assertIn('runtime_qt_dlls.py', spec)
+        self.assertTrue(hook.exists())
+        source = hook.read_text(encoding="utf-8")
+        self.assertIn('os.add_dll_directory', source)
+        self.assertIn('pyside_dir / "Qt6Core.dll"', source)
+        self.assertIn('shiboken_dir / "shiboken6.abi3.dll"', source)
+
+    def test_windows_package_excludes_incompatible_host_icu(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = (root / "GluSpot.spec").read_text(encoding="utf-8")
+
+        self.assertIn("a.binaries = [", spec)
+        self.assertIn('"icuuc.dll", "icudt78.dll"', spec)
+        self.assertIn("Path(entry[0]).name.lower()", spec)
 
 
 if __name__ == "__main__":

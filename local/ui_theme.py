@@ -92,14 +92,8 @@ def _scheduled_dark_mode(settings_getter: Callable[[str, object], object] | None
     return _clock_in_window(_clock_from_now(now), start, end)
 
 
-def app_dark_mode(settings_getter: Callable[[str, object], object] | None = None, now: datetime | clock_time | None = None) -> bool:
-    mode = str(_theme_setting("v2_theme_mode", "system", settings_getter) or "system").strip().lower()
-    if mode in {"dark", "night"}:
-        return True
-    if mode in {"light", "day"}:
-        return False
-    if mode in {"schedule", "scheduled", "custom"}:
-        return _scheduled_dark_mode(settings_getter, now)
+def system_dark_mode() -> bool:
+    """Read the operating system's app theme, without GluSpot overrides."""
     apps_use_light_theme = _windows_apps_use_light_theme()
     if apps_use_light_theme is not None:
         return int(apps_use_light_theme) == 0
@@ -111,7 +105,18 @@ def app_dark_mode(settings_getter: Callable[[str, object], object] | None = None
         return False
 
 
-LIGHT_MUSIC_AMBIENCE_STYLES = {"pure_white", "yaoguang"}
+def app_dark_mode(settings_getter: Callable[[str, object], object] | None = None, now: datetime | clock_time | None = None) -> bool:
+    mode = str(_theme_setting("v2_theme_mode", "system", settings_getter) or "system").strip().lower()
+    if mode in {"dark", "night"}:
+        return True
+    if mode in {"light", "day"}:
+        return False
+    if mode in {"schedule", "scheduled", "custom"}:
+        return _scheduled_dark_mode(settings_getter, now)
+    return system_dark_mode()
+
+
+LIGHT_MUSIC_AMBIENCE_STYLES = {"pure_white"}
 
 
 @dataclass(frozen=True)
@@ -135,6 +140,11 @@ def music_ambience_style_for_theme(
     style = str(current_style or "sea_level")
     if not follow_enabled:
         return style
+    if style == "system":
+        # A saved previous surface marks the optional automatic follow path.
+        # An explicit system choice has no marker and remains system.
+        previous = str(previous_dark_style or "").strip().lower()
+        return previous if bool(dark) and previous and previous != "system" else "system"
     if bool(dark):
         if music_ambience_theme_category(style) == "light":
             previous = str(previous_dark_style or "").strip().lower()
