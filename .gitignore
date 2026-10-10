@@ -11,3 +11,14 @@ tmp/
 lyrics/.source_hits.json
 lyrics/.generated/
 lyrics/*.lrc
+
+# Private local configuration and credentials must never enter source control.
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+*.pfx
+*.p12
+id_rsa
+id_ed25519
