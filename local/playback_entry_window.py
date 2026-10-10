@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPoint, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton, QWidget
 
@@ -19,6 +19,7 @@ from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_surface_background import AlbumFlowBackgroundRenderer
+from local.music_source_icons import paint_music_source_icon
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,7 @@ class PlaybackModeButton(QAbstractButton):
 
 
 class MusicSourceButton(QAbstractButton):
-    """Original vector source markers, not copied upstream brand assets."""
+    """User-supplied source artwork with the existing themed selection rim."""
 
     def __init__(self, source: EntrySource, parent: QWidget):
         super().__init__(parent)
@@ -132,28 +133,7 @@ class MusicSourceButton(QAbstractButton):
                 painter.setPen(QPen(QColor(self.source.color), 3))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(rect.adjusted(-4, -4, 4, 4), 14, 14)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(self.source.color))
-            painter.drawRoundedRect(rect, 10, 10)
-            # Four readable, independently drawn markers preserve the reference
-            # order/color without embedding another project's SVG or trademark art.
-            ink = QColor("#17482b") if self.source.source_id == "qq" else QColor("#ffffff")
-            painter.setPen(QPen(ink, 2.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            center = rect.center()
-            if self.source.source_id == "kugou":
-                painter.drawEllipse(rect.adjusted(8, 8, -8, -8))
-                painter.setFont(_entry_font(25))
-                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "K")
-            elif self.source.source_id == "netease":
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawArc(rect.adjusted(8, 8, -8, -8), 40 * 16, 290 * 16)
-                painter.drawEllipse(center - QPointF(6, 4), 6, 6)
-                painter.drawLine(center + QPointF(0, -4), center + QPointF(4, -16))
-            else:
-                painter.setBrush(ink)
-                painter.drawEllipse(center + QPointF(-4, 9), 8, 5)
-                painter.drawLine(center + QPointF(3, 9), center + QPointF(3, -14))
-                painter.drawLine(center + QPointF(3, -14), center + QPointF(13, -10))
+            paint_music_source_icon(painter, rect, self.source.source_id)
 
 
 class PlaybackEntryWindow(QWidget):
