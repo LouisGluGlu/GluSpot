@@ -183,7 +183,7 @@ class OwnedTranslationRefreshTests(unittest.TestCase):
                     self.player.close()
                 else:
                     from PySide6.QtMultimedia import QMediaPlayer
-                    self.player._error(QMediaPlayer.Error.NetworkError)
+                    self.player._error(QMediaPlayer.Error.FormatError)
                 current = self.player.track
                 self.assertIsNone(self.player._lyric_payload)
                 self.assertIsNone(self.player._lyrics_parse_pending)

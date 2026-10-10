@@ -5,11 +5,12 @@ import time
 import unittest
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from api.audio_route_controller import AudioRouteController
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
-from api.providers import EmptyIslandDataProvider, WindowsMediaProvider
+from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider
 
 
 class _Controller:
@@ -46,6 +47,10 @@ class _Controller:
 
     def set_volume(self, identity, volume):
         self.calls.append(("set_volume", identity, volume))
+        return not self.closed
+
+    def toggle_mute(self, identity):
+        self.calls.append(("toggle_mute", identity))
         return not self.closed
 
     def stop_cast(self):
@@ -227,9 +232,10 @@ class AudioRouteProviderTests(unittest.TestCase):
         self.assertTrue(provider.add_homepod("192.0.2.4", 7001))
         self.assertTrue(provider.stop_audio_cast())
         self.assertTrue(provider.set_audio_output_volume("headphones", 0.72))
+        self.assertTrue(provider.toggle_audio_output_mute(123))
         self.assertEqual(controller.calls, [("refresh",), ("select", "123"),
                                             ("add_homepod", "192.0.2.4", 7001), ("stop_cast",),
-                                            ("set_volume", "headphones", 0.72)])
+                                            ("set_volume", "headphones", 0.72), ("toggle_mute", "123")])
 
     def test_legacy_manual_delay_is_rejected_without_starting_or_saving_a_worker(self):
         provider, saved = self._provider()
@@ -279,6 +285,7 @@ class AudioRouteProviderTests(unittest.TestCase):
         self.assertFalse(provider.select_audio_output("speakers"))
         self.assertFalse(provider.stop_audio_cast())
         self.assertFalse(provider.set_audio_output_volume("speakers", 0.3))
+        self.assertFalse(provider.toggle_audio_output_mute("speakers"))
 
     def test_shutdown_before_first_start_prevents_late_controller_creation(self):
         provider, saved = self._provider()
@@ -322,6 +329,63 @@ class AudioRouteProviderTests(unittest.TestCase):
         self.assertFalse(provider.select_audio_output("speakers"))
         self.assertFalse(provider.stop_audio_cast())
         self.assertFalse(provider.set_audio_output_volume("speakers", 0.3))
+        self.assertFalse(provider.toggle_audio_output_mute("speakers"))
+
+    def test_mute_uses_existing_lazy_windows_output_controller(self):
+        provider, _saved = self._provider({"v2_airplay_sender_id": "02:11:22:33:44:55"})
+        with patch("api.audio_route_controller.AudioRouteController", side_effect=_Controller) as factory:
+            self.assertTrue(provider.toggle_audio_output_mute("headphones"))
+            self.assertTrue(provider.toggle_audio_output_mute("headphones"))
+        factory.assert_called_once()
+        self.assertEqual(provider._audio_route_controller.calls,
+            [("toggle_mute", "headphones"), ("toggle_mute", "headphones")])
+
+
+class PlaybackSourceMuteProviderTests(unittest.TestCase):
+    def provider(self, *, owned_enabled=True, system_enabled=False, track=True, outputs=True):
+        calls = []
+        settings = {"v2_owned_playback_enabled": owned_enabled, "v2_system_capture_enabled": system_enabled}
+        provider = PlaybackSourceProvider.__new__(PlaybackSourceProvider)
+        provider.settings_getter = lambda key, default=None: settings.get(key, default)
+        provider.owned = SimpleNamespace(track=object() if track else None)
+        provider.system = SimpleNamespace(toggle_audio_output_mute=lambda identity:
+            calls.append(("system_mute", identity)) or True)
+        provider._owned_outputs = SimpleNamespace(toggle_mute=lambda identity:
+            calls.append(("owned_mute", identity)) or True) if outputs else None
+        return provider, calls
+
+    def test_owned_active_and_owned_idle_route_only_to_existing_owned_controller(self):
+        for track, system_enabled in ((True, False), (True, True), (False, False)):
+            with self.subTest(track=track, system_enabled=system_enabled):
+                provider, calls = self.provider(track=track, system_enabled=system_enabled)
+                with patch.object(provider, "start_audio_outputs", side_effect=AssertionError("unexpected I/O start")):
+                    self.assertTrue(provider.toggle_audio_output_mute("airplay:fixture"))
+                self.assertEqual(calls, [("owned_mute", "airplay:fixture")])
+
+    def test_absent_owned_output_controller_does_not_start_or_fall_through_to_system(self):
+        provider, calls = self.provider(outputs=False, system_enabled=True)
+        with patch.object(provider, "start_audio_outputs", side_effect=AssertionError("unexpected I/O start")):
+            self.assertFalse(provider.toggle_audio_output_mute("headphones"))
+        self.assertEqual(calls, [])
+
+    def test_system_mute_routes_only_when_system_enabled_and_owned_not_active(self):
+        for owned_enabled, track in ((False, True), (False, False), (True, False)):
+            with self.subTest(owned_enabled=owned_enabled, track=track):
+                provider, calls = self.provider(owned_enabled=owned_enabled, system_enabled=True, track=track)
+                self.assertTrue(provider.toggle_audio_output_mute("headphones"))
+                self.assertEqual(calls, [("system_mute", "headphones")])
+
+    def test_disabled_sources_reject_mute_without_starting_any_output_io(self):
+        provider, calls = self.provider(owned_enabled=False, system_enabled=False)
+        with patch.object(provider, "start_audio_outputs", side_effect=AssertionError("unexpected I/O start")):
+            self.assertFalse(provider.toggle_audio_output_mute("headphones"))
+        self.assertEqual(calls, [])
+
+    def test_owned_controller_rejection_does_not_fall_back_to_system(self):
+        provider, calls = self.provider(system_enabled=True)
+        provider._owned_outputs.toggle_mute = lambda identity: False
+        self.assertFalse(provider.toggle_audio_output_mute("headphones"))
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections import deque
 import ctypes
 import ipaddress
+import json
+import math
 import os
 import queue
 import re
@@ -129,20 +131,26 @@ class OwnedPcmProcess(AirPlayGroupProcess):
         self._pcm_thread = None
         self._pcm_pipe = None
         self._pcm_pipe_epoch = 0
+        self._pcm_membership_supported = False
+        self._pcm_presentation_supported = False
+        self._membership_revision = 0
+        self._membership_pending_revision = 0
+        self._pcm_devices = ()
+        self._membership_requested = ()
+        self._membership_evidence = {}
 
-    def start_pcm(self, devices, epoch):
-        if isinstance(epoch, bool) or not isinstance(epoch, int) or not 0 < epoch < 2**64:
-            raise ValueError("invalid_pcm_epoch")
-        if not isinstance(devices, (tuple, list)) or not 1 <= len(devices) <= self.MAX_SINKS:
+    @classmethod
+    def _validate_pcm_devices(cls, devices):
+        if not isinstance(devices, (tuple, list)) or not 1 <= len(devices) <= cls.MAX_SINKS:
             raise ValueError("invalid_pcm_members")
         receivers, endpoints, identities, targets = [], [], set(), set()
         for device in devices:
-            if (not isinstance(device, AudioRouteDevice) or not self._text(device.id, 2048)
+            if (not isinstance(device, AudioRouteDevice) or not cls._text(device.id, 2048)
                     or device.id in identities or device.available is not True):
                 raise ValueError("invalid_pcm_member")
             identities.add(device.id)
             if device.transport == "windows":
-                folded = self._endpoint_key(device.id)
+                folded = cls._endpoint_key(device.id)
                 if folded in targets:
                     raise ValueError("duplicate_pcm_endpoint")
                 targets.add(folded)
@@ -154,8 +162,8 @@ class OwnedPcmProcess(AirPlayGroupProcess):
                     raise ValueError("invalid_pcm_receiver") from None
                 if (address.version != 4 or address.is_unspecified or address.is_multicast
                         or isinstance(device.port, bool) or not isinstance(device.port, int)
-                        or not 1 <= device.port <= 65535 or not self._text(device.name, 1024)
-                        or not self._text(device.device_id or device.host, 1024)):
+                        or not 1 <= device.port <= 65535 or not cls._text(device.name, 1024)
+                        or not cls._text(device.device_id or device.host, 1024)):
                     raise ValueError("invalid_pcm_receiver")
                 target = (str(address), device.port)
                 if target in targets:
@@ -164,6 +172,12 @@ class OwnedPcmProcess(AirPlayGroupProcess):
                 receivers.append(device)
             else:
                 raise ValueError("invalid_pcm_transport")
+        return tuple(receivers), tuple(endpoints)
+
+    def start_pcm(self, devices, epoch):
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or not 0 < epoch < 2**64:
+            raise ValueError("invalid_pcm_epoch")
+        receivers, endpoints = self._validate_pcm_devices(devices)
         identity = self._parent_identity_reader()
         if not _valid_identity(identity, os.getpid()):
             raise RuntimeError("pcm_parent_identity")
@@ -192,6 +206,12 @@ class OwnedPcmProcess(AirPlayGroupProcess):
             self._member_evidence, self._local_evidence = {}, {}
             self._group_source = None
             self._group_source_endpoint = ""
+            self._pcm_membership_supported = False
+            self._pcm_presentation_supported = False
+            self._membership_revision = self._membership_pending_revision = 0
+            self._pcm_devices = tuple(devices)
+            self._membership_requested = ()
+            self._membership_evidence = {}
         self.needs_local_output_restore = False
         self._pcm_epoch = epoch
         self._pcm_stop = threading.Event()
@@ -215,6 +235,110 @@ class OwnedPcmProcess(AirPlayGroupProcess):
         self._pcm_thread = threading.Thread(target=self._write_pcm, args=(name, self._process, epoch,
             self._pcm_queue, self._pcm_stop), daemon=True, name="GluSpotOwnedPCM")
         self._pcm_thread.start()
+
+    def supports_pcm_reconfigure(self, epoch):
+        with self._diagnostic_lock:
+            return bool(type(epoch) is int and self._pcm_membership_supported and epoch == self._pcm_epoch
+                and self._process is not None and not self._pcm_stop.is_set() and not self._last_terminal)
+
+    def supports_owned_presentation(self, epoch):
+        with self._diagnostic_lock:
+            return bool(type(epoch) is int and self._pcm_presentation_supported and epoch == self._pcm_epoch
+                and self._process is not None and not self._pcm_stop.is_set() and not self._last_terminal)
+
+    @staticmethod
+    def _device_target(device):
+        return (device.transport, device.id) if device.transport == "windows" else (
+            device.transport, device.host, device.port, device.device_id or device.host)
+
+    def reconfigure_pcm(self, devices, epoch):
+        """Queue an authenticated helper's bounded same-timeline change.
+
+        False explicitly means unsupported, busy, stale or invalid; it never
+        stops/restarts the current pipe or claims a receiver has connected.
+        Completion is the revision-fenced membership event from the helper.
+        """
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or not 0 < epoch < 2**64:
+            return False
+        try:
+            receivers, endpoints = self._validate_pcm_devices(devices)
+        except (TypeError, ValueError):
+            return False
+        with self._command_lock:
+            with self._diagnostic_lock:
+                if (not self._pcm_membership_supported or epoch != self._pcm_epoch
+                        or self._process is None or self._pcm_stop.is_set() or self._last_terminal
+                        or self._membership_pending_revision or self._membership_revision >= 2**64 - 1):
+                    return False
+                previous = {d.id: d for d in self._pcm_devices}
+                desired = {d.id: d for d in devices}
+                if len(previous.keys() | desired.keys()) > self.MAX_SINKS or any(
+                        self._device_target(previous[key]) != self._device_target(desired[key])
+                        for key in previous.keys() & desired.keys()):
+                    return False
+                # The native stage also bounds live transports. Duplicate
+                # physical targets cannot hide behind a new public identity.
+                union = dict(previous); union.update(desired)
+                try:
+                    self._validate_pcm_devices(tuple(union.values()))
+                except ValueError:
+                    return False
+                arguments = []
+                for endpoint in endpoints:
+                    arguments += ["--local-endpoint", endpoint]
+                for device in receivers:
+                    arguments += ["--receiver-id", device.id, "--host", device.host, "--port", str(device.port),
+                        "--device-id", device.device_id or device.host, "--name", device.name]
+                revision = self._membership_revision + 1
+                command = json.dumps({"command": "reconfigure_pcm", "epoch": epoch, "revision": revision,
+                    "outputs_hex": b"\0".join(part.encode("utf-8") for part in arguments).hex()},
+                    separators=(",", ":")) + "\n"
+                if len(command) > 131072:
+                    return False
+                process = self._process
+                self._membership_revision = self._membership_pending_revision = revision
+                self._membership_requested = tuple(devices)
+                # This matches the helper's retained-then-added transport order,
+                # including the receiver index used by explicit volume commands.
+                self._receiver_ids += tuple(d.id for d in receivers if d.id not in previous)
+                self._local_endpoints += tuple(e for e in endpoints if e not in previous)
+            try:
+                if process.poll() is not None:
+                    raise OSError("pcm_helper_ended")
+                process.stdin.write(command); process.stdin.flush()
+                return True
+            except (OSError, ValueError):
+                with self._diagnostic_lock:
+                    self._membership_pending_revision = 0
+                    self._membership_requested = ()
+                    self._receiver_ids = tuple(d.id for d in self._pcm_devices if d.transport == "airplay")
+                    self._local_endpoints = tuple(d.id for d in self._pcm_devices if d.transport == "windows")
+                return False
+
+    def membership_state(self):
+        with self._diagnostic_lock:
+            return dict(self._membership_evidence)
+
+    def set_device_volume(self, receiver_id, volume):
+        if not self.supports_pcm_reconfigure(self._pcm_epoch):
+            return super().set_device_volume(receiver_id, volume)
+        if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not math.isfinite(volume) or not 0 <= volume <= 1:
+            return False
+        with self._command_lock:
+            with self._diagnostic_lock:
+                if (receiver_id not in {d.id for d in self._pcm_devices if d.transport == "airplay"}
+                        or self._process is None or self._last_terminal or self._pcm_stop.is_set()):
+                    return False
+                process = self._process
+                command = json.dumps({"command": "set_owned_volume", "epoch": self._pcm_epoch,
+                    "receiver_hex": receiver_id.encode("utf-8").hex(), "volume": volume}, separators=(",", ":")) + "\n"
+            try:
+                if process.poll() is not None:
+                    return False
+                process.stdin.write(command); process.stdin.flush()
+                return True
+            except (OSError, ValueError):
+                return False
 
     def submit_pcm(self, content, epoch):
         if (isinstance(epoch, bool) or not isinstance(epoch, int) or epoch != self._pcm_epoch
@@ -276,6 +400,42 @@ class OwnedPcmProcess(AirPlayGroupProcess):
             return self._pcm_error
 
     def _remember_native_event(self, state, event):
+        if event.get("event") in {"capabilities", "membership"}:
+            with self._diagnostic_lock:
+                if (state is not self._mute_state or type(event.get("pcm_epoch")) is not int
+                        or event["pcm_epoch"] != self._pcm_epoch or self._pcm_stop.is_set()):
+                    return False
+                if event["event"] == "capabilities":
+                    self._pcm_membership_supported = type(event.get("reconfigure_pcm")) is int and event["reconfigure_pcm"] == 1
+                    self._pcm_presentation_supported = type(event.get("owned_presentation")) is int and event["owned_presentation"] == 1
+                else:
+                    if (not self._membership_pending_revision or type(event.get("revision")) is not int
+                            or event["revision"] != self._membership_pending_revision):
+                        return False
+                    phase = event.get("state")
+                    confirmed, pending = event.get("confirmed_ids"), event.get("pending_ids")
+                    union = {d.id: d for d in (*self._pcm_devices, *self._membership_requested)}
+                    if (phase not in {"pending", "applied", "rejected"} or
+                            not all(isinstance(ids, list) and len(ids) <= self.MAX_SINKS and
+                                all(isinstance(key, str) and key in union for key in ids) and len(set(ids)) == len(ids)
+                                for ids in (confirmed, pending)) or set(confirmed) & set(pending)):
+                        return False
+                    expected = {d.id for d in (self._membership_requested if phase == "applied" else self._pcm_devices)}
+                    if set(confirmed) != expected or phase != "pending" and pending:
+                        return False
+                    if phase == "pending" and set(pending) != {d.id for d in self._membership_requested} - expected:
+                        return False
+                    self._membership_evidence = {"pcm_epoch": self._pcm_epoch, "revision": event["revision"],
+                        "state": phase, "confirmed_ids": tuple(confirmed), "pending_ids": tuple(pending)}
+                    if phase != "pending":
+                        self._pcm_devices = tuple(union[key] for key in confirmed)
+                        self._receiver_ids = tuple(key for key in confirmed if union[key].transport == "airplay")
+                        self._local_endpoints = tuple(key for key in confirmed if union[key].transport == "windows")
+                        self._member_evidence = {key: value for key, value in self._member_evidence.items() if key in confirmed}
+                        self._local_evidence = {key: value for key, value in self._local_evidence.items() if key in confirmed}
+                        self._membership_pending_revision = 0
+                        self._membership_requested = ()
+            return True
         if event.get("event") == "stats":
             group = event.get("group")
             signal = event.get("capture_signal")
@@ -298,6 +458,11 @@ class OwnedPcmProcess(AirPlayGroupProcess):
             if thread is not None and thread is not threading.current_thread():
                 thread.join(.5)
             self._pcm_epoch = 0
+            with self._diagnostic_lock:
+                self._pcm_membership_supported = False
+                self._pcm_presentation_supported = False
+                self._membership_pending_revision = 0
+                self._membership_requested = ()
 
     def diagnostics(self):
         result = super().diagnostics()

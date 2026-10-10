@@ -7670,6 +7670,8 @@ class MusicSurfaceWindow(QWidget):
         window_control_exposed = paint_region is None or paint_region.intersects(
             QRectF(rect.right() - 205.0 * surface_scale, 0.0, 205.0 * surface_scale, 100.0 * surface_scale).toAlignedRect()
         )
+        if paint_region is None or paint_region.intersects(self._library_button_rect(rect).toAlignedRect()):
+            self._paint_library_back(painter, rect)
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed)
         controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
         controls_top = min(
@@ -7760,11 +7762,15 @@ class MusicSurfaceWindow(QWidget):
         return QRectF(18.0 * scale, max(4.0, 6.0 * scale),
                       max(104.0, 118.0 * scale), max(44.0, 44.0 * scale))
 
+    def _library_button_face(self, rect: QRectF) -> QRectF:
+        inset = max(3.0, 4.0 * self._surface_scale(rect))
+        return self._library_button_rect(rect).adjusted(inset, inset, -inset, -inset)
+
     def _paint_library_back(self, painter: QPainter, rect: QRectF):
         if not self._library_back_available():
             return
-        button = self._library_button_rect(rect)
-        face = button.adjusted(4, 4, -4, -4)
+        face = self._library_button_face(rect)
+        scale = max(0.9, self._surface_scale(rect))
         hovered = self._hovered_window_button == "library"
         pressed = self._pressed_window_button == "library"
         painter.save()
@@ -7774,11 +7780,13 @@ class MusicSurfaceWindow(QWidget):
                                49 if pressed else 69 if hovered else 57, 236))
         painter.drawRoundedRect(face, face.height() / 2, face.height() / 2)
         ink = QColor(255, 255, 255, 242)
-        paint_music_source_icon(painter, QRectF(face.left() + 9, face.center().y() - 9, 18, 18),
-                                "library", tint=ink)
+        icon_side = 20.0 * scale
+        icon_left = face.left() + 10.0 * scale
+        paint_music_source_icon(painter, QRectF(icon_left, face.center().y() - icon_side / 2, icon_side, icon_side),
+                                "library_back", tint=ink)
         painter.setPen(ink)
         painter.setFont(self._surface_font(max(12.0, 14.0 * self._surface_scale(rect)), QFont.Weight.DemiBold))
-        painter.drawText(face.adjusted(32, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "音乐库")
+        painter.drawText(face.adjusted(38.0 * scale, 0, -10.0 * scale, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "音乐库")
         painter.restore()
 
     @staticmethod
@@ -8158,7 +8166,6 @@ class MusicSurfaceWindow(QWidget):
         self._sync_window_control_rects(rect)
         if not paint_ink:
             return
-        self._paint_library_back(painter, rect)
         scale = self._surface_scale(rect)
         key = "mode" if self._fullscreen else "return"
         button = self._window_control_base_rect(rect)
@@ -8414,6 +8421,9 @@ class MusicSurfaceWindow(QWidget):
         cover = self._scaled_cover_rect(self._current_cover_rect(now), self._cover_scale_at(now))
         occluder = QPainterPath()
         occluder.addRoundedRect(cover, cover.width() * 0.055, cover.height() * 0.055)
+        if self._library_back_available():
+            face = self._library_button_face(rect)
+            occluder.addRoundedRect(face, face.height() / 2, face.height() / 2)
         # Transparent/absent artwork still owns its foreground slot. Rings
         # illuminate only the space behind it, never the thumbnail or plate.
         painter.setClipPath(space.subtracted(occluder), Qt.ClipOperation.IntersectClip)

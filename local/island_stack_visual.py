@@ -2058,7 +2058,7 @@ class IslandStackVisual(QWidget):
             getter = getattr(getattr(self, "data_provider", None), "get_audio_route_snapshot", None)
             if callable(getter):
                 route = getter()
-                if route.state == "casting":
+                if route.state in {"casting", "reconfiguring"}:
                     output_delay = max(0.0, min(5.0, float(route.cast_latency_seconds)))
                     generation = (route.group_id, route.active_id, route.cast_source_id)
             clock = getattr(self, "_lyric_output_latency_clock", None)

@@ -19,8 +19,9 @@ class _FixtureProvider:
     def __init__(self):
         self.owned = True
         self.mode = "sequential"
-        self.snapshot = AudioRouteSnapshot(state="unavailable", capture_scope="owned-player",
-            status_message="程序内播放使用系统默认输出；暂不支持同步播放到多个设备")
+        self.snapshot = AudioRouteSnapshot(state="ready", capture_scope="owned-player",
+            active_id="fixture-local", devices=(AudioRouteDevice("fixture-local", "本地扬声器 · UI FIXTURE",
+                kind="speaker", volume=.5),), status_message="选择程序内音乐的播放设备")
 
     def _owned_active(self):
         return self.owned

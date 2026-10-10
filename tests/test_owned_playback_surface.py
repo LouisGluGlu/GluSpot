@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QImage, QPainter, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
 from api.audio_routes import AudioRouteSnapshot
@@ -118,7 +118,7 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
             self.window.render(image)
         self.assertTrue(any(key[0] == "window" and "sequential" in key for key in seen))
 
-    def test_paint_reads_cached_mode_and_uses_supplied_library_svg(self):
+    def test_paint_reads_cached_mode_and_uses_clear_library_return_arrow(self):
         self.window._reset_control_idle()
         image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
         with patch.object(self.provider, "get_owned_playback_mode", side_effect=AssertionError("paint provider read")):
@@ -127,8 +127,37 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
                 self.window.render(image)
         keys = [call.args[2] for call in paint.call_args_list]
         self.assertIn("sequence", keys)
-        self.assertIn("library", keys)
+        self.assertIn("library_back", keys)
         self.assertEqual(self.provider.calls, [])
+
+    def test_left_library_damage_repaints_its_foreground_without_right_controls(self):
+        self.owner.music_flow_intensity = 0.0
+        self.window._reset_control_idle(now=100.0)
+        partial = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        with patch("local.music_surface_window.time.monotonic", return_value=100.0):
+            self.window.render(partial)
+            dirty = self.window._library_button_rect(QRectF(self.window.rect())).toAlignedRect()
+            with QPainter(partial) as painter:
+                painter.fillRect(dirty, QColor("magenta"))
+            with patch.object(self.window, "_paint_library_back", wraps=self.window._paint_library_back) as paint:
+                self.window.render(partial, dirty.topLeft(), QRegion(dirty))
+                self.assertEqual(paint.call_count, 1)
+            full = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            self.window.render(full)
+        self.assertEqual(bytes(partial.copy(dirty).constBits()), bytes(full.copy(dirty).constBits()))
+
+    def test_spatial_ripple_cannot_change_library_face_pixels(self):
+        image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor("#223344"))
+        original = image.copy()
+        self.window._transport_feedback = {"next": (100.0, QPointF(180, 260), 1.0, 4.0)}
+        rect = QRectF(self.window.rect())
+        with patch.object(self.window, "_transport_feedback_frame", return_value=(1.0, .43, .9)):
+            with QPainter(image) as painter:
+                self.window._paint_transport_spatial_light(painter, rect, 101.0)
+        self.assertNotEqual(bytes(image.constBits()), bytes(original.constBits()))
+        protected = self.window._library_button_face(rect).adjusted(8, 8, -8, -8).toAlignedRect()
+        self.assertEqual(bytes(image.copy(protected).constBits()), bytes(original.copy(protected).constBits()))
 
     def test_system_or_unsupported_mode_has_no_button_and_no_setter_action(self):
         for mode in (None, "unsupported"):

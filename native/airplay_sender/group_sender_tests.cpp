@@ -11,6 +11,11 @@ namespace {
 uint64_t wire64(const std::string& packet, size_t offset) {
     return (uint64_t(be32(packet, offset)) << 32) | be32(packet, offset + 4);
 }
+uint64_t wireLittle64(const std::string& packet, size_t offset) {
+    uint64_t value = 0;
+    for (size_t index = 0; index < 8; ++index) value |= uint64_t(uint8_t(packet[offset + index])) << (index * 8);
+    return value;
+}
 uint64_t sampleNtp(uint64_t frame) {
     return ((frame / 44100) << 32) + ((frame % 44100) << 32) / 44100;
 }
@@ -754,6 +759,86 @@ void testDitherTransportNeverCertifiesMusic() {
     CHECK(rig.sender->diagnostics().meaningfulSamplesSent == 0, "new receiver session cannot inherit music evidence");
     rig.sender->stop();
 }
+
+void testLateJoinUsesTheSameSourcePresentationWithoutRearmingOldReceiver() {
+    g_test = "GluSpot authenticated late join and subset solo preserve the original timeline";
+    Clock::time_point now{std::chrono::seconds(1000)};
+    Rig a, b, bad;
+    for (auto* rig : {&a, &b, &bad}) {
+        rig->sender->setClock([&now] { return now; });
+        rig->sender->setCoordinatedPlayback(true);
+        rig->sender->setStrictReceiverAuth(true);
+        rig->sender->setPreserveReceiverVolume(true);
+    }
+    runAp2Handshake(a, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    REQUIRE(a.launchedOk && *a.launchedOk, "original receiver independently authenticates");
+    const auto start = now + std::chrono::milliseconds(150);
+    const uint64_t anchor = 0xDE00112233445566ULL;
+    REQUIRE(a.sender->armCoordinatedTimeline(start, anchor), "original receiver arms once");
+    const auto syncA = packetsOf(a, RaopUdp::Control);
+    REQUIRE(syncA.size() == 1, "original receiver owns the original presentation anchor");
+    uint64_t frame = 0, sourceBase = 0, bAnchor = 0;
+    uint16_t firstSequence = 0;
+    uint64_t firstNonce = 0;
+    size_t commonPackets = 0;
+    auto send = [&](bool join) {
+        now = start + gluspot::groupFrameTime(frame);
+        const auto pcm = rampExpect(704, int16_t(500 + frame % 12000));
+        REQUIRE(a.sender->sendCoordinatedAudio(frame, pcm), "original sender retains contiguous source frames");
+        const auto pa = packetsOf(a, RaopUdp::Audio);
+        REQUIRE(pa.size() == 1, "old receiver receives exactly one original source packet");
+        const auto decodedA = a.rx.decodeAudio(pa.front().data);
+        CHECK(decodedA && *decodedA == pcm, "old independently decrypted PCM remains exact");
+        if (!frame) { firstSequence = be16(pa.front().data, 2); firstNonce = wireLittle64(pa.front().data, pa.front().data.size() - 8); }
+        CHECK(be16(pa.front().data, 2) == uint16_t(firstSequence + frame / 352) &&
+            wireLittle64(pa.front().data, pa.front().data.size() - 8) == firstNonce + frame / 352 &&
+            be32(pa.front().data, 4) == 66150 + frame,
+            "late handshake/arm/removal never resets old packet sequence, nonce or RTP");
+        if (join && frame >= sourceBase) {
+            REQUIRE(b.sender->sendCoordinatedAudio(frame - sourceBase, pcm), "new receiver sends relative frame on shifted source anchor");
+            const auto pb = packetsOf(b, RaopUdp::Audio);
+            REQUIRE(pb.size() == 1, "new receiver receives exactly the same source packet");
+            const auto decodedB = b.rx.decodeAudio(pb.front().data);
+            CHECK(decodedA && decodedB && *decodedA == *decodedB, "independent authenticated keys decrypt identical global PCM");
+            const uint64_t presentedA = wire64(syncA.front().data, 8) + sampleNtp(be32(pa.front().data, 4));
+            const uint64_t presentedB = bAnchor + sampleNtp(be32(pb.front().data, 4));
+            CHECK(presentedA >= presentedB && presentedA - presentedB <= 1,
+                "different relative RTP anchors map the same source sample to the same NTP presentation within one tick");
+            ++commonPackets;
+        }
+        frame += 352;
+    };
+    for (unsigned index = 0; index < 80; ++index) send(false);
+    runAp2Handshake(b, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    REQUIRE(b.launchedOk && *b.launchedOk && a.rx.audioKey != b.rx.audioKey,
+        "late receiver authenticates independently while old session remains active");
+    sourceBase = gluspot::groupJoinFrame(frame);
+    REQUIRE(b.sender->armCoordinatedTimeline(start + gluspot::groupFrameTime(sourceBase), anchor + sampleNtp(sourceBase)),
+        "late receiver arms only its future shifted source/NTP epoch");
+    const auto syncB = packetsOf(b, RaopUdp::Control);
+    REQUIRE(syncB.size() == 1, "late receiver publishes its shifted NTP anchor");
+    bAnchor = wire64(syncB.front().data, 8);
+    while (frame < sourceBase + 352 * 12) send(true);
+    CHECK(commonPackets == 12 && a.sender->diagnostics().audioFramesSent == frame &&
+        b.sender->diagnostics().audioFramesSent + sourceBase == frame,
+        "late receiver's local counters retain the same global source progress");
+    timingRequest(a); timingRequest(b);
+    const auto ta = packetsOf(a, RaopUdp::Timing), tb = packetsOf(b, RaopUdp::Timing);
+    REQUIRE(ta.size() == 1 && tb.size() == 1, "both receivers answer timing from their common monotonic domain");
+    const auto timeA = wire64(ta.front().data, 24), timeB = wire64(tb.front().data, 24);
+    CHECK((timeA >= timeB ? timeA - timeB : timeB - timeA) <= 5,
+        "shifted relative sessions agree on current NTP time within nanosecond anchor conversion");
+    b.sender->stop(); b.exchange(); // Targeted subset removal; a is never stopped/rearmed.
+    for (unsigned index = 0; index < 4; ++index) send(false);
+    bad.rx.badSrpProof = true;
+    runAp2Handshake(bad, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+    CHECK(bad.launchedOk && !*bad.launchedOk, "failed incoming receiver cannot claim authenticated presentation");
+    bad.sender->stop();
+    for (unsigned index = 0; index < 4; ++index) send(false);
+    CHECK(a.sender->diagnostics().audioFramesSent == frame && a.launchedCount == 1,
+        "failed fresh receiver does not rebuild the surviving same-PCM session");
+    a.sender->stop();
+}
 } // namespace
 
 int main() {
@@ -769,6 +854,7 @@ int main() {
     testTwoReceiversPauseSilenceResumeOnOneTimeline();
     testTwoReceiverBoundedHostCatchupPreservesSourcePackets();
     testDitherTransportNeverCertifiesMusic();
+    testLateJoinUsesTheSameSourcePresentationWithoutRearmingOldReceiver();
     std::printf("GluSpot group sender: %d/%d checks passed\n", g_checks - g_failures, g_checks);
     return g_failures ? 1 : 0;
 }

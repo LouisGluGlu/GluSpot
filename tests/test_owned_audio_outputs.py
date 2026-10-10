@@ -123,10 +123,10 @@ class OwnedOutputControllerTests(unittest.TestCase):
         self.assertTrue(self.controller.submit_pcm(b"\x10\0" * 2, 1))
         self.assertFalse(self.controller.submit_pcm(b"\x10\0" * 2, 2))
 
-    def test_first_airplay_checkbox_preserves_existing_single_receiver_membership(self):
+    def test_first_airplay_plus_preserves_existing_qt_windows_output(self):
         self.assertTrue(self.controller.toggle("airplay:one"))
         self.controller._step()
-        self.assertEqual(self.sender.calls[0][:2], ("start", ("airplay:one",)))
+        self.assertEqual(self.sender.calls[0][:2], ("start", ("one", "airplay:one")))
 
     def test_checkbox_extends_existing_qt_windows_output_and_shrinks_back(self):
         self.assertTrue(self.controller.toggle("two"))

@@ -151,6 +151,9 @@ class EmptyIslandDataProvider:
     def set_audio_output_volume(self, device_id: str, volume: float) -> bool:
         return False
 
+    def toggle_audio_output_mute(self, device_id: str) -> bool:
+        return False
+
     def stop_audio_cast(self) -> bool:
         return False
 
@@ -300,6 +303,11 @@ class PlaybackSourceProvider:
         if self._owned_output_mode():
             return self._owned_outputs is not None and self._owned_outputs.set_volume(device_id, volume)
         return self._system_enabled() and self.system.set_audio_output_volume(device_id, volume)
+
+    def toggle_audio_output_mute(self, device_id):
+        if self._owned_output_mode():
+            return self._owned_outputs is not None and self._owned_outputs.toggle_mute(device_id)
+        return self._system_enabled() and self.system.toggle_audio_output_mute(device_id)
 
     def add_homepod(self, host, port=7000):
         return self.start_audio_outputs().add_homepod(host, port) if self._owned_output_mode() else self._system_enabled() and self.system.add_homepod(host, port)
@@ -498,6 +506,9 @@ class WindowsMediaProvider:
     def set_audio_output_volume(self, device_id: str, volume: float) -> bool:
         """Queue a real device volume change; published snapshots confirm it."""
         return self.start_audio_outputs().set_volume(str(device_id), volume)
+
+    def toggle_audio_output_mute(self, device_id: str) -> bool:
+        return self.start_audio_outputs().toggle_mute(str(device_id))
 
     def stop_audio_cast(self) -> bool:
         controller = getattr(self, "_audio_route_controller", None)

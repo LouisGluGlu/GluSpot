@@ -28,7 +28,7 @@ class AirPlayGroupProcess(AirPlayProcess):
     MAX_EVENT_CHARS = 65536
     TIMING_METHODS = frozenset({"protocol_plus_input_queue", "windows_shared_pcm_clock"})
     _EVENTS = frozenset({"connecting", "waiting_audio", "streaming", "error", "stopped",
-                         "stats", "mute_state", "receiver_volume"})
+                         "stats", "mute_state", "receiver_volume", "capabilities", "membership"})
     _ENDPOINT_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
     _LOCAL_BOOL_FIELDS = frozenset({"ready", "armed", "playing", "endpoint_clock_valid",
                                     "acoustic_delay_known", "clock_qpc_age_known"})
@@ -391,8 +391,8 @@ class AirPlayGroupProcess(AirPlayProcess):
                     if not isinstance(event, dict) or event.get("event") not in AirPlayGroupProcess._EVENTS:
                         continue
                     event["_received_at"] = time.monotonic()
-                    if on_event is not None:
-                        on_event(event)
+                    if on_event is not None and on_event(event) is False:
+                        continue
                     event_name = event["event"]
                     if terminal:
                         # Healthy samples after a terminal cannot push that

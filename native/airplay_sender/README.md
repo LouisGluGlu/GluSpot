@@ -312,6 +312,29 @@ history, receiver authentication and local presentation clocks unchanged. Stats
 identify `capture_signal.mode="direct_pcm"`, scope `owned-player`, and
 `group.pcm_epoch`. See [source-app behavior and evidence](../../docs/owned-playback-refinements.md).
 
+The October 11 helper publishes an epoch-bound `capabilities` event with
+`reconfigure_pcm=1` and `owned_presentation=1` for this direct-input mode only.
+The latter delays `streaming` until meaningful PCM and the declared initial
+presentation boundary; it remains protocol evidence rather than acoustic proof.
+The parent can feed PCM before privately muting Qt at that boundary.
+
+For an established owned group, the canonical `reconfigure_pcm` stdin command
+contains `epoch`, increasing `revision` and `outputs_hex`: lowercase hex of
+NUL-separated existing output option/value tokens. UTF-8 LF and Windows CRLF
+lines are accepted; source/process/pipe options cannot be replaced. The input
+and live active/retiring transport set are bounded. The existing authenticated
+pipe and source epoch continue while newcomers prepare and join a future
+aligned global source frame. `membership` events report pending, applied or
+rejected with the same epoch/revision and exact confirmed/pending identities.
+Only applied membership changes confirmed output selection. Failed newcomers
+leave the original group running. Removed receiver/renderer cleanup happens
+off the packet thread. A one-output native subset retains the same timeline.
+
+Owned receiver volume uses `set_owned_volume` with `epoch`, exact UTF-8
+`receiver_hex` and normalized `volume`; mutable receiver indices are rejected
+in this mode. System-capture groups retain their established commands and
+source migration lifecycle. See [contracts, verification and limits](../../docs/playback-output-reliability.md).
+
 ## Verification limits
 
 The buffer conversion accepts float32/64, PCM8/16/24/32 and up to eight labelled
