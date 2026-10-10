@@ -197,6 +197,77 @@ inline GroupArguments parseGroupArguments(const std::vector<std::string>& argume
     return result;
 }
 
+// An owned helper accepts only the parent's canonical, versioned grammar.
+// Output arguments are UTF-8 bytes encoded as hex and separated by NUL;
+// the established CLI validator remains the authority for every member.
+struct GroupMembershipCommand {
+    uint64_t epoch = 0, revision = 0;
+    GroupArguments outputs;
+};
+inline std::optional<GroupMembershipCommand> groupMembershipCommand(
+        const std::string& line, const GroupArguments& session) {
+    if (!session.directPcm() || line.size() > 131072) return std::nullopt;
+    const std::string prefix = "{\"command\":\"reconfigure_pcm\",\"epoch\":";
+    const std::string middle = ",\"revision\":";
+    const std::string tail = ",\"outputs_hex\":\"";
+    if (!line.starts_with(prefix) || !line.ends_with("\"}")) return std::nullopt;
+    const auto revisionAt = line.find(middle, prefix.size());
+    const auto outputsAt = revisionAt == std::string::npos ? revisionAt : line.find(tail, revisionAt + middle.size());
+    if (outputsAt == std::string::npos) return std::nullopt;
+    try {
+        GroupMembershipCommand result;
+        const auto epochText = line.substr(prefix.size(), revisionAt - prefix.size());
+        const auto revisionText = line.substr(revisionAt + middle.size(), outputsAt - revisionAt - middle.size());
+        if (epochText.empty() || revisionText.empty() || epochText.front() == '0' || revisionText.front() == '0') return std::nullopt;
+        result.epoch = groupUnsigned(epochText, UINT64_MAX, "membership epoch");
+        result.revision = groupUnsigned(revisionText, UINT64_MAX, "membership revision");
+        if (result.epoch != session.pcmEpoch) return std::nullopt;
+        const auto encoded = line.substr(outputsAt + tail.size(), line.size() - outputsAt - tail.size() - 2);
+        if (encoded.empty() || encoded.size() % 2 || std::any_of(encoded.begin(), encoded.end(), [](char c) {
+                return !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f'); })) return std::nullopt;
+        std::string bytes; bytes.reserve(encoded.size() / 2);
+        auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+        for (size_t index = 0; index < encoded.size(); index += 2)
+            bytes += char(digit(encoded[index]) * 16 + digit(encoded[index + 1]));
+        std::vector<std::string> arguments{"--group", "--pcm-pipe", session.pcmPipe,
+            "--pcm-parent-pid", std::to_string(session.pcmParentPid),
+            "--pcm-parent-created-at", std::to_string(session.pcmParentCreatedAt),
+            "--pcm-epoch", std::to_string(session.pcmEpoch), "--source-id", session.sourceId};
+        size_t cursor = 0, count = 0;
+        while (cursor < bytes.size()) {
+            const auto end = bytes.find('\0', cursor);
+            const auto part = bytes.substr(cursor, end == std::string::npos ? end : end - cursor);
+            if (part.empty() || ++count > 80) return std::nullopt;
+            arguments.push_back(part);
+            if (end == std::string::npos) break;
+            cursor = end + 1;
+            if (cursor == bytes.size()) return std::nullopt;
+        }
+        for (size_t index = 11; index < arguments.size(); index += 2)
+            if (arguments[index] != "--local-endpoint" && arguments[index] != "--receiver-id" &&
+                arguments[index] != "--host" && arguments[index] != "--port" &&
+                arguments[index] != "--device-id" && arguments[index] != "--name") return std::nullopt;
+        result.outputs = parseGroupArguments(arguments);
+        std::set<std::string> identities;
+        for (const auto& endpoint : result.outputs.localEndpoints) identities.insert(endpoint);
+        for (const auto& receiver : result.outputs.receivers)
+            if (!identities.insert(receiver.id).second) return std::nullopt;
+        return result;
+    } catch (const std::exception&) { return std::nullopt; }
+}
+
+inline uint64_t groupJoinFrame(uint64_t nextFrame, uint64_t leadFrames = 6615) {
+    if (nextFrame > UINT64_MAX - leadFrames - 351) throw std::overflow_error("Group join frame overflow");
+    return ((nextFrame + leadFrames + 351) / 352) * 352;
+}
+inline std::chrono::nanoseconds groupFrameTime(uint64_t frame) {
+    if (frame / 44100 > uint64_t(INT64_MAX / 1000000000)) throw std::overflow_error("Group frame time overflow");
+    return std::chrono::nanoseconds((frame / 44100) * 1000000000ULL + (frame % 44100) * 1000000000ULL / 44100);
+}
+inline uint64_t groupFrameNtp(uint64_t frame) {
+    return ((frame / 44100) << 32) + ((frame % 44100) << 32) / 44100;
+}
+
 // The coordinator owns independent endpoint renderers as one lifecycle. All
 // workers receive the same pull callback and presentation epoch, while their
 // device clocks remain private. Stop signals fan out before any destructor
@@ -212,6 +283,7 @@ public:
     struct Output {
         std::string endpoint;
         std::unique_ptr<Renderer> renderer;
+        std::shared_ptr<uint64_t> sourceBase;
     };
     template<class Factory>
     GroupLocalRendererSet(const std::vector<std::string>& endpoints, Factory factory) {
@@ -220,7 +292,7 @@ public:
             for (const auto& endpoint : endpoints) {
                 auto renderer = factory(endpoint);
                 if (!renderer) throw std::runtime_error("Local group renderer factory returned no output");
-                outputs_.push_back({endpoint, std::move(renderer)});
+                outputs_.push_back({endpoint, std::move(renderer), std::make_shared<uint64_t>(0)});
             }
         } catch (...) { stop(); throw; }
     }
@@ -254,28 +326,53 @@ public:
             if (const auto detail = output.renderer->error(); !detail.empty()) return output.endpoint + ": " + detail;
         return {};
     }
-    bool hasMeaningfulPcm() const {
+    bool hasMeaningfulPcm(const std::set<std::string>& excluded = {}) const {
         if (stopped_) return false;
-        return std::all_of(outputs_.begin(), outputs_.end(), [](const auto& output) {
+        return std::all_of(outputs_.begin(), outputs_.end(), [&excluded](const auto& output) {
+            if (excluded.count(output.endpoint)) return true;
             const auto stats = output.renderer->diagnostics();
             return stats.ready && stats.armed && stats.playing && stats.meaningfulSamples > 0;
         });
     }
-    Progress progress() const {
+    Progress progress(const std::set<std::string>& excluded = {}) const {
         Progress result;
         if (stopped_ || outputs_.empty()) return result;
         result.ready = true;
         result.writtenFrames = result.nonzeroSamples = result.meaningfulSamples = UINT64_MAX;
+        bool included = false;
         for (const auto& output : outputs_) {
+            if (excluded.count(output.endpoint)) continue;
+            included = true;
             const auto stats = output.renderer->diagnostics();
             result.ready = result.ready && stats.ready && stats.armed && stats.playing;
-            result.writtenFrames = std::min(result.writtenFrames, stats.writtenFrames);
+            result.writtenFrames = std::min(result.writtenFrames, *output.sourceBase + stats.writtenFrames);
             result.nonzeroSamples = std::min(result.nonzeroSamples, stats.nonzeroSamples);
             result.meaningfulSamples = std::min(result.meaningfulSamples, stats.meaningfulSamples);
         }
+        if (!included) return {};
         return result;
     }
     const std::vector<Output>& outputs() const { return outputs_; }
+    bool add(const std::string& endpoint, std::unique_ptr<Renderer> renderer,
+             std::shared_ptr<uint64_t> sourceBase = std::make_shared<uint64_t>(0)) {
+        if (stopped_ || !renderer || outputs_.size() >= 8 || std::any_of(outputs_.begin(), outputs_.end(),
+                [&endpoint](const auto& output) { return groupSameEndpoint(output.endpoint, endpoint); })) {
+            if (renderer) renderer->requestStop();
+            return false;
+        }
+        if (!sourceBase) { renderer->requestStop(); return false; }
+        outputs_.push_back({endpoint, std::move(renderer), std::move(sourceBase)});
+        return true;
+    }
+    std::unique_ptr<Renderer> remove(const std::string& endpoint) {
+        const auto item = std::find_if(outputs_.begin(), outputs_.end(),
+            [&endpoint](const auto& output) { return output.endpoint == endpoint; });
+        if (item == outputs_.end()) return {};
+        item->renderer->requestStop();
+        auto renderer = std::move(item->renderer);
+        outputs_.erase(item);
+        return renderer;
+    }
     void stop() noexcept {
         stopped_ = true;
         for (const auto& output : outputs_) output.renderer->requestStop();
@@ -300,6 +397,36 @@ inline std::optional<GroupVolumeCommand> groupVolumeCommand(const std::string& l
         parsedVolume.ec != std::errc{} || parsedVolume.ptr != volume.data() + volume.size() ||
         !std::isfinite(result.volume) || result.volume < 0 || result.volume > 1) return std::nullopt;
     return result;
+}
+
+struct OwnedGroupVolumeCommand { std::string receiver; double volume = 0; };
+inline std::optional<OwnedGroupVolumeCommand> ownedGroupVolumeCommand(const std::string& line, uint64_t epoch) {
+    if (line.size() > 8192) return std::nullopt;
+    const std::string prefix = "{\"command\":\"set_owned_volume\",\"epoch\":";
+    const std::string receiverKey = ",\"receiver_hex\":\"", volumeKey = "\",\"volume\":";
+    if (!line.starts_with(prefix) || !line.ends_with('}')) return std::nullopt;
+    const auto receiverAt = line.find(receiverKey, prefix.size());
+    const auto volumeAt = receiverAt == std::string::npos ? receiverAt : line.find(volumeKey, receiverAt + receiverKey.size());
+    if (volumeAt == std::string::npos) return std::nullopt;
+    try {
+        if (groupUnsigned(line.substr(prefix.size(), receiverAt - prefix.size()), UINT64_MAX, "volume epoch") != epoch) return std::nullopt;
+        const auto hex = line.substr(receiverAt + receiverKey.size(), volumeAt - receiverAt - receiverKey.size());
+        if (hex.empty() || hex.size() > 4096 || hex.size() % 2) return std::nullopt;
+        OwnedGroupVolumeCommand result;
+        auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+        for (size_t index = 0; index < hex.size(); index += 2) {
+            for (size_t offset = 0; offset < 2; ++offset)
+                if (!(hex[index + offset] >= '0' && hex[index + offset] <= '9') &&
+                    !(hex[index + offset] >= 'a' && hex[index + offset] <= 'f')) return std::nullopt;
+            result.receiver += char(digit(hex[index]) * 16 + digit(hex[index + 1]));
+        }
+        groupText(result.receiver, 2048, "volume receiver identity");
+        const auto volume = line.substr(volumeAt + volumeKey.size(), line.size() - volumeAt - volumeKey.size() - 1);
+        const auto parsed = groupVolumeCommand("{\"command\":\"set_volume\",\"receiver\":0,\"volume\":" + volume + "}", 1);
+        if (!parsed) return std::nullopt;
+        result.volume = parsed->volume;
+        return result;
+    } catch (...) { return std::nullopt; }
 }
 
 // One immutable final-PCM timeline shared by network fan-out and the WASAPI

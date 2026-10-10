@@ -22,3 +22,8 @@ tint, darkened in the same hue when needed to retain readable contrast.
 
 The older Chinese-named playback transport assets already existed in this
 folder. This record describes only the four additions above.
+
+On 2026-10-11, the song-page library return action uses `library_back.svg`,
+an original 24 px rounded-stroke return arrow paired with the existing
+“音乐库” label. It remains readable at the same scale as adjacent controls.
+The original supplied `library.svg` stays byte-identical for provenance.

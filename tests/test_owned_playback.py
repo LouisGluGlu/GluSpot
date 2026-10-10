@@ -641,9 +641,16 @@ class OwnedPlaybackTests(unittest.TestCase):
                 self.player.play_queue(self.songs)
                 self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "1", "https://example.test/a", True), None)
                 self.qt_player.errorOccurred.emit(code, "synthetic signed-url-secret")
+                if code in {QMediaPlayer.Error.NetworkError, QMediaPlayer.Error.ResourceError}:
+                    self.assertEqual(self.player.status, "playing")
+                    self.assertTrue(self.player.track.is_playing)
+                    self.player._stream_fault_timer.stop()
+                    with patch("local.owned_music_player.time.monotonic", return_value=self.player._stream_fault[3] + 1.1):
+                        self.player._check_stream_fault()
                 self.assertEqual(self.player.status, "playback_failed")
                 self.assertEqual(self.player.failure_reason, reason)
                 self.assertFalse(self.player.track.is_playing)
+                self.assertEqual(self.qt_player.state, QMediaPlayer.PlaybackState.PausedState)
 
     def test_safe_task_error_categories_remain_distinct_from_authorization(self):
         for error, reason in (("auth_required", "auth_required"), ("timeout", "timeout"), ("network", "network"),

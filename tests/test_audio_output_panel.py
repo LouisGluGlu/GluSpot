@@ -36,6 +36,14 @@ class _RouteProvider:
         self.calls.append(("select", device_id))
         return self.accept
 
+    def toggle_audio_output(self, device_id):
+        self.calls.append(("toggle", device_id))
+        return self.accept
+
+    def toggle_audio_output_mute(self, device_id):
+        self.calls.append(("mute", device_id))
+        return self.accept
+
     def stop_audio_cast(self):
         self.calls.append(("stop",))
 
@@ -123,7 +131,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertIn(("volume", "homepod-2", .53), self.provider.calls)
         self.assertFalse(any(call[0] in {"toggle", "select"} for call in self.provider.calls))
         self.panel._rows["homepod-2"].click()
-        self.assertIn(("toggle", "homepod-2"), self.provider.calls)
+        self.assertIn(("mute", "homepod-2"), self.provider.calls)
         self.assertEqual(self.panel._rows["homepod-2"].state, "active")
         self.assertTrue(self.panel._rows["homepod-2"].isChecked())
 
@@ -140,6 +148,32 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
         self.assertTrue(self.panel.stop_button.isEnabled())
         self.assertTrue(self.panel.stop_button.isVisible())
+
+    def test_reconfiguring_retains_old_members_with_pending_join_and_all_actions(self):
+        devices = tuple(replace(d, volume=.4) if d.id == "homepod" else d for d in self.provider.devices)
+        self.provider.snapshot = AudioRouteSnapshot(devices, active_id="local", state="reconfiguring",
+            member_ids=("local", "bluetooth"), pending_ids=("homepod",),
+            capture_scope="music_process_tree", group_id="live-group")
+        self._open()
+        self.assertEqual(self._row_order(), ("local", "bluetooth", "homepod"))
+        self.assertEqual(self.panel.title_label.text(), "同步播放 · 3 个设备")
+        self.assertTrue(self.panel.stop_button.isVisible())
+        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
+        for identity in ("local", "bluetooth"):
+            row = self.panel._rows[identity]
+            self.assertEqual(row.state, "active")
+            self.assertTrue(row.isChecked())
+            self.assertTrue(row.volume_slider.isEnabled())
+            row.click()
+            row.solo_button.click()
+            self.assertIn(("mute", identity), self.provider.calls)
+            self.assertIn(("select", identity), self.provider.calls)
+        self.assertEqual(self.panel._rows["homepod"].state, "pending")
+        self.assertFalse(self.panel._rows["homepod"].isChecked())
+        self.assertFalse(self.panel._rows["homepod"].volume_slider.isEnabled())
+        self.assertEqual(self.panel._source_kinds, ("speaker", "airpods-pro"))
 
     def test_windows_only_group_has_music_scope_membership_volumes_and_stop_action(self):
         devices = tuple(replace(device, route_state="active") if device.id in {"local", "bluetooth"}
@@ -214,9 +248,11 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self._row_order(), ("bluetooth", "local", "homepod"))
         self.assertEqual(self.panel._device_order, self._row_order())
         self.assertTrue(self.panel.close_button.isHidden())
-        self.assertEqual(rows["bluetooth"].nextInFocusChain(), rows["bluetooth"].volume_slider)
+        self.assertEqual(rows["bluetooth"].nextInFocusChain(), rows["bluetooth"].solo_button)
+        self.assertEqual(rows["bluetooth"].solo_button.nextInFocusChain(), rows["bluetooth"].volume_slider)
         self.assertEqual(rows["bluetooth"].volume_slider.nextInFocusChain(), rows["local"])
-        self.assertEqual(rows["local"].nextInFocusChain(), rows["homepod"])
+        self.assertEqual(rows["local"].nextInFocusChain(), rows["local"].join_button)
+        self.assertEqual(rows["local"].join_button.nextInFocusChain(), rows["homepod"])
         with patch.object(self.panel.rows_layout, "insertWidget") as insert, \
                 patch.object(self.panel.rows_layout, "removeWidget") as remove:
             self.provider.snapshot = replace(self.provider.snapshot, revision=1,
@@ -377,6 +413,13 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertIn("暂不支持同步播放", self.panel.accessibleDescription())
         self.assertNotIn("电脑全部声音", self.panel.scope_label.text())
 
+    def test_owned_named_single_output_does_not_claim_system_default(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth", capture_scope="owned-player")
+        self._open()
+        self.assertEqual(self.panel.scope_label.text(), "程序内播放 · 当前输出设备")
+        self.assertNotIn("系统默认输出", self.panel.accessibleDescription())
+        self.assertNotIn("系统默认输出", self.panel._rows["bluetooth"].accessibleDescription())
+
     def test_long_failure_follows_devices_and_preserves_full_text_without_growing_past_bound(self):
         self._open()
         message = "设备连接失败，请检查设备访问设置和网络后重试。" * 8
@@ -473,31 +516,83 @@ class AudioOutputPanelTests(unittest.TestCase):
     def test_keyboard_volume_and_row_selection_are_separate_and_tab_order_is_logical(self):
         self._open()
         row = self.panel._rows["local"]
-        self.assertEqual(row.nextInFocusChain(), row.volume_slider)
+        self.assertEqual(row.nextInFocusChain(), row.solo_button)
+        self.assertEqual(row.solo_button.nextInFocusChain(), row.volume_slider)
+        QTest.keyClick(row.solo_button, Qt.Key.Key_Space)
+        self.assertEqual(self.provider.calls[-1], ("select", "local"))
+        self.provider.calls.clear()
         QTest.keyClick(row.volume_slider, Qt.Key.Key_Right)
         self.assertIn(("volume", "local", .38), self.provider.calls)
         self.assertFalse(any(c[0] == "select" for c in self.provider.calls))
         QTest.keyClick(row, Qt.Key.Key_Space)
-        self.assertIn(("select", "local"), self.provider.calls)
+        self.assertIn(("mute", "local"), self.provider.calls)
 
-    def test_volume_pointer_scrub_only_queues_volume_and_poll_does_not_reset_drag(self):
+    def test_selected_icon_solos_and_name_or_slider_area_mutes(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
         self._open()
         self.panel._reveal = 1.0
         self.panel._apply_reveal_pose()
         self.app.processEvents()
         row = self.panel._rows["bluetooth"]
-        slider = row.volume_slider
-        point = QPoint(round(slider.width() * .8), slider.height() // 2)
-        QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=point)
-        requested = slider.value()
-        self.assertGreater(requested, 75)
+        self.provider.calls.clear()
+        QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(24, row.height() // 2))
+        QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(95, row.height() // 2))
+        QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(95, row.height() - 12))
+        QTest.mouseClick(row.solo_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(self.provider.calls, [("select", "bluetooth"), ("mute", "bluetooth"), ("mute", "bluetooth"), ("select", "bluetooth")])
+        self.assertIn("仅播放到", row.solo_button.accessibleName())
+        self.assertTrue(row.volume_slider.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+        self.assertEqual(row.state, "active")
+        self.assertEqual(row.device.volume, .62)
+
+    def test_unselected_plus_joins_while_every_other_region_solos(self):
+        self._open()
+        self.panel._reveal = 1.0
+        self.panel._apply_reveal_pose()
+        self.app.processEvents()
+        row = self.panel._rows["bluetooth"]
+        self.provider.calls.clear()
+        QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(24, row.height() // 2))
+        QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(95, row.height() // 2))
+        QTest.mouseClick(row.join_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(self.provider.calls, [("select", "bluetooth"), ("select", "bluetooth"), ("toggle", "bluetooth")])
+        self.assertEqual(row.state, "available")
+        self.assertFalse(row.isChecked())
+        self.assertIn("加入", row.join_button.accessibleName())
+        self.assertEqual(row.nextInFocusChain(), row.join_button)
+        self.provider.calls.clear()
+        QTest.keyClick(row.join_button, Qt.Key.Key_Space)
+        QTest.keyClick(row, Qt.Key.Key_Space)
+        self.assertEqual(self.provider.calls, [("toggle", "bluetooth"), ("select", "bluetooth")])
+
+    def test_mute_failure_preserves_confirmed_route_and_volume(self):
+        self._open()
+        self.provider.accept = False
+        row = self.panel._rows["local"]
+        row.click()
+        self.assertEqual(self.provider.calls[-1], ("mute", "local"))
+        self.assertEqual(row.displayed_volume, 36)
+        self.assertEqual(row.state, "active")
+        self.assertEqual(self.panel.status_label.text(), "暂时无法切换此设备静音。")
+
+    def test_hovered_volume_uses_actual_readback_and_muted_is_audible_zero(self):
+        self._open()
+        row = self.panel._rows["local"]
+        row.volume_slider.setValue(71)
+        self.assertEqual(row.displayed_volume, 36)
+        self.provider.snapshot = replace(self.provider.snapshot, devices=(replace(self.provider.devices[0], volume_muted=True),))
         self.panel.sync_snapshot()
-        self.assertEqual(slider.value(), requested)
-        QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=point)
-        self.assertFalse(slider.isSliderDown())
-        self.assertFalse(any(c[0] == "select" for c in self.provider.calls))
-        self.assertTrue(any(c[0] == "volume" and c[1] == "bluetooth" for c in self.provider.calls))
+        self.assertEqual(row.displayed_volume, 0)
+        self.assertEqual(row.volume_fill_rect().width(), 0)
+
+    def test_unknown_active_volume_has_no_fabricated_percentage_but_can_request_restore(self):
+        self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod")
+        self._open()
+        row = self.panel._rows["homepod"]
+        self.assertIsNone(row.displayed_volume)
+        row.click()
+        self.assertEqual(self.provider.calls[-1], ("mute", "homepod"))
+        self.assertIsNone(row.device.volume)
 
     def test_volume_request_awaits_readback_then_external_updates_follow(self):
         self._open()

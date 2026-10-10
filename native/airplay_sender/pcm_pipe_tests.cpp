@@ -54,6 +54,71 @@ std::vector<std::string> pcmArguments() {
         "--pcm-parent-pid", "123", "--pcm-parent-created-at", "456", "--pcm-epoch", "789",
         "--local-endpoint", "output-a"};
 }
+std::string encodedArguments(const std::vector<std::string>& arguments) {
+    const char* digits = "0123456789abcdef";
+    std::string bytes, hex;
+    for (const auto& argument : arguments) {
+        if (!bytes.empty()) bytes += '\0';
+        bytes += argument;
+    }
+    for (const auto value : bytes) {
+        const auto byte = static_cast<unsigned char>(value);
+        hex += digits[byte >> 4]; hex += digits[byte & 15];
+    }
+    return hex;
+}
+void strictOwnedMembershipAndIdentityVolume() {
+    const auto session = gluspot::parseGroupArguments(pcmArguments());
+    auto command = [](const std::vector<std::string>& outputs, std::string revision = "1") {
+        return "{\"command\":\"reconfigure_pcm\",\"epoch\":789,\"revision\":" + revision +
+            ",\"outputs_hex\":\"" + encodedArguments(outputs) + "\"}";
+    };
+    const std::string endpoint = "endpoint-\xe6\xb5\x8b\xe8\xaf\x95-\"quoted\"";
+    const std::vector<std::string> outputs{"--local-endpoint", endpoint, "--receiver-id", "receiver-a",
+        "--host", "127.0.0.1", "--port", "7000", "--device-id", "fixture", "--name", "Late receiver"};
+    const auto parsed = gluspot::groupMembershipCommand(command(outputs), session);
+    require(parsed && parsed->epoch == 789 && parsed->revision == 1 &&
+        parsed->outputs.localEndpoints.front() == endpoint && parsed->outputs.receivers.front().id == "receiver-a" &&
+        parsed->outputs.pcmParentPid == session.pcmParentPid &&
+        parsed->outputs.pcmParentCreatedAt == session.pcmParentCreatedAt &&
+        parsed->outputs.pcmPipe == session.pcmPipe, "Membership did not preserve source identity/UTF8 outputs");
+    for (const auto& revision : {"0", "01", "-1", "true", "18446744073709551616"})
+        require(!gluspot::groupMembershipCommand(command(outputs, revision), session), "Invalid revision accepted");
+    for (const auto& invalid : std::vector<std::vector<std::string>>{
+            std::vector<std::string>{}, {"--local-endpoint"}, {"--local-endpoint", ""},
+            {"--local-endpoint", "a", "--local-endpoint", "A"},
+            {"--music-pid", "123", "--local-endpoint", "a"},
+            {"--pcm-parent-pid", "123", "--local-endpoint", "a"},
+            {"--source-id", session.sourceId, "--local-endpoint", "a"},
+            {"--source-endpoint", "a", "--local-endpoint", "b"},
+            {"--unknown", "a"},
+            {"--local-endpoint", "receiver-a", "--receiver-id", "receiver-a", "--host", "127.0.0.1",
+                "--port", "7000", "--device-id", "fixture", "--name", "Test"}})
+        require(!gluspot::groupMembershipCommand(command(invalid), session), "Invalid outputs accepted");
+    std::vector<std::string> nine;
+    for (unsigned index = 0; index < 9; ++index) nine.insert(nine.end(), {"--local-endpoint", "out" + std::to_string(index)});
+    require(!gluspot::groupMembershipCommand(command(nine), session), "Nine-output membership accepted");
+    auto wrong = command(outputs); wrong.replace(wrong.find("789"), 3, "788");
+    require(!gluspot::groupMembershipCommand(wrong, session), "Wrong epoch accepted");
+    require(!gluspot::groupMembershipCommand(command(outputs) + "x", session) &&
+        !gluspot::groupMembershipCommand(std::string(131073, 'x'), session), "Unbounded/malformed membership accepted");
+    const auto prefix = "{\"command\":\"reconfigure_pcm\",\"epoch\":789,\"revision\":1,\"outputs_hex\":\"";
+    for (const auto& hex : std::vector<std::string>{"0", "GG", "ff", encodedArguments(outputs) + "00"})
+        require(!gluspot::groupMembershipCommand(prefix + hex + "\"}", session), "Malformed hex outputs accepted");
+    auto processSession = session; processSession.pcmPipe.clear();
+    require(!gluspot::groupMembershipCommand(command(outputs), processSession), "System session changed by owned command");
+    const auto join = gluspot::groupJoinFrame(352 * 500);
+    require(join % 352 == 0 && join >= 352 * 500 + 6615 && join < 352 * 500 + 6615 + 352,
+        "Join lead is not a bounded future packet boundary");
+    const auto volumePrefix = "{\"command\":\"set_owned_volume\",\"epoch\":789,\"receiver_hex\":\"" +
+        encodedArguments({"receiver-a"}) + "\",\"volume\":";
+    const auto volume = gluspot::ownedGroupVolumeCommand(volumePrefix + "0.25}", 789);
+    require(volume && volume->receiver == "receiver-a" && volume->volume == .25,
+        "Owned volume did not name the exact receiver");
+    for (const std::string value : {"-0.1", "1.1", "true", "NaN", "1e400", "0.2,\"receiver\":0"})
+        require(!gluspot::ownedGroupVolumeCommand(volumePrefix + value + "}", 789), "Invalid owned volume accepted");
+    require(!gluspot::ownedGroupVolumeCommand(volumePrefix + "0.25}", 788), "Wrong volume epoch accepted");
+}
 void strictCaptureModeArguments() {
     const auto valid = pcmArguments();
     auto parsed = gluspot::parseGroupArguments(valid);
@@ -327,7 +392,7 @@ int main(int argc, char** argv) {
     try {
         if (argc > 1 && std::string(argv[1]) == "--capture-child") return captureChild(argc, argv);
         if (argc > 1 && std::string(argv[1]) == "--foreign-client") return foreignChild(argc, argv);
-        fixedHeaderBoundsAndIdentity(); strictCaptureModeArguments(); realPipeLifecycle();
+        fixedHeaderBoundsAndIdentity(); strictCaptureModeArguments(); strictOwnedMembershipAndIdentityVolume(); realPipeLifecycle();
         std::cout << "Direct PCM strict framing/CLI, fragmented stream, bounded queue, identity and cancellation passed\n";
         return 0;
     } catch (const std::exception& error) {

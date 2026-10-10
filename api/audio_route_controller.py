@@ -17,6 +17,7 @@ from api.airplay_discovery import AirPlayDiscovery
 from api.airplay_process import AirPlayProcess
 from api.airplay_group_process import AirPlayGroupProcess
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
+from api.audio_output_volume import AudioOutputVolumeHistory
 from api.windows_audio_sessions import MusicAudioSource, resolve_music_audio_source
 from api.windows_app_audio_routes import AppAudioRouteMigrationTimeout, WindowsAppAudioRoutes
 
@@ -85,6 +86,7 @@ class AudioRouteController:
         self._capture_signal_nonzero = None
         self._capture_signal_age_ms = None
         self._generation = 0
+        self._volume_history = AudioOutputVolumeHistory()
         self._worker_started_at = time.monotonic()
         self._endpoint_error = False
         if start_worker:
@@ -122,6 +124,9 @@ class AudioRouteController:
             candidate = replace(self._snapshot, **changes)
             if candidate != self._snapshot:
                 self._snapshot = replace(candidate, revision=self._snapshot.revision + 1)
+        if "devices" in changes:
+            for device in changes["devices"]:
+                self._volume_history.observe(device, self._generation)
 
     def _announce(self, name, message, identity=""):
         previous = self.snapshot()
@@ -204,7 +209,43 @@ class AudioRouteController:
                 return False
         elif device.transport != "windows" or not device.available:
             return False
-        return self._enqueue("volume", (device_id, value, self._generation))
+        generation = self._generation
+        self._volume_history.request(device_id, value, generation)
+        accepted = self._enqueue("volume", (device_id, value, generation))
+        if not accepted:
+            self._volume_history.discard(device_id, generation, value=value)
+        return accepted
+
+    def _is_selected_output(self, identity, current=None):
+        """Use confirmed membership, excluding the group's capture endpoint."""
+        current = self.snapshot() if current is None else current
+        source_ids = (self._cast_source_id, current.cast_source_id)
+        if any(source and source.translate(self._ENDPOINT_ASCII_FOLD) ==
+               identity.translate(self._ENDPOINT_ASCII_FOLD) for source in source_ids):
+            return False
+        pending = current.pending_ids or ((current.pending_id,) if current.pending_id else ())
+        if pending and current.state != "reconfiguring":
+            return False
+        return identity in current.member_ids if current.member_ids else identity == current.active_id
+
+    def toggle_mute(self, device_id):
+        """Mute a selected output, or restore its last confirmed positive scalar."""
+        current = self.snapshot()
+        device = next((d for d in current.devices if d.id == device_id), None)
+        if device is None or not self._is_selected_output(device_id, current):
+            return False
+        if device.transport == "airplay":
+            selected = device_id in self._group_member_ids if self._group_mode else device_id == self._cast_id
+            if not selected or current.state not in {"waiting_audio", "casting"}:
+                return False
+        elif device.transport != "windows" or not device.available or device.volume is None:
+            return False
+        generation = self._generation
+        value = self._volume_history.toggle(device, generation)
+        accepted = self._enqueue("volume", (device_id, value, generation, True))
+        if not accepted:
+            self._volume_history.discard(device_id, generation, value=value)
+        return accepted
 
     def add_homepod(self, address, port=7000):
         try:
@@ -379,21 +420,30 @@ class AudioRouteController:
         self._publish(devices=local + tuple(sorted(updated.values(), key=lambda d: (d.name.casefold(), d.id))),
                       discovery_state=self._discovery.state)
 
-    def _set_volume(self, identity, value, generation):
-        """Adjust the named device without routing changes or mute recovery."""
+    def _set_volume(self, identity, value, generation, selected_only=False):
+        """Adjust a named output; positive selected volume may undo user mute."""
         current = self.snapshot()
         device = next((d for d in current.devices if d.id == identity), None)
         try:
-            if device is None or device.volume is None:
+            if generation != self._generation or selected_only and not self._is_selected_output(identity, current):
+                raise RuntimeError("设备连接已改变，请重试")
+            if device is None or device.volume is None and not (selected_only and device.transport == "airplay"):
                 raise RuntimeError("设备音量暂时不可用")
             if device.transport == "windows":
                 if not any(d.id == identity and d.available for d in self._local_devices):
                     raise RuntimeError("音频设备已断开")
-                self._backend.set_endpoint_volume(identity, value)
+                if self._backend.set_endpoint_volume(identity, value) is False:
+                    raise RuntimeError("设备音量指令未被接受")
                 actual = self._volume_scalar(self._backend.get_endpoint_volume(identity))
                 if actual is None or not math.isclose(actual, value, abs_tol=0.005):
                     raise RuntimeError("无法确认设备音量")
                 muted = bool(self._backend.get_endpoint_mute(identity))
+                if value > 0 and muted and self._is_selected_output(identity, current):
+                    if self._backend.set_endpoint_mute(identity, False) is False:
+                        raise RuntimeError("无法解除设备静音")
+                    muted = bool(self._backend.get_endpoint_mute(identity))
+                    if muted:
+                        raise RuntimeError("无法确认设备解除静音")
                 self._local_devices = tuple(replace(d, volume=actual, volume_muted=muted)
                                             if d.id == identity else d for d in self._local_devices)
             elif (device.transport == "airplay" and (identity in self._group_member_ids if self._group_mode else identity == self._cast_id)
@@ -409,11 +459,13 @@ class AudioRouteController:
             self._publish(status_message=f"正在调整 {device.name} 音量" if device.transport == "airplay"
                           else f"已调整 {device.name} 音量")
         except Exception as exc:
+            self._volume_history.discard(identity, generation, value=value)
             # Volume errors leave a healthy cast and its owned mute intact.
             self._publish(status_message=f"调整音量失败：{str(exc)[:180]}")
 
     def _end_cast(self):
         self._generation += 1
+        self._volume_history.reset_intents()
         self._latency_updated_at = None
         self._receiver_volume_status_signature = None
         self._capture_authenticated_at = None

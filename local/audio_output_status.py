@@ -71,7 +71,7 @@ def _confirmed_ids(snapshot: AudioRouteSnapshot | None) -> tuple[str, ...]:
     if not isinstance(snapshot, AudioRouteSnapshot) or snapshot.state == "error":
         return ()
     pending = snapshot.pending_ids or ((snapshot.pending_id,) if snapshot.pending_id else ())
-    if snapshot.member_ids and snapshot.state in {"casting", "waiting_audio"}:
+    if snapshot.member_ids and snapshot.state in {"casting", "waiting_audio", "reconfiguring"}:
         identities = snapshot.member_ids
     elif snapshot.active_id and not pending:
         identities = (snapshot.active_id,)
@@ -84,7 +84,7 @@ def _confirmed_ids(snapshot: AudioRouteSnapshot | None) -> tuple[str, ...]:
             continue
         device = devices.get(identity)
         if (device is not None and device.transport == "airplay"
-                and snapshot.state not in {"casting", "waiting_audio"}):
+                and snapshot.state not in {"casting", "waiting_audio", "reconfiguring"}):
             continue
         result.append(identity)
     return tuple(result)
@@ -116,7 +116,7 @@ class OutputMembershipTracker:
         self._initialized = True
         pending = (isinstance(snapshot, AudioRouteSnapshot) and snapshot.state != "error"
                    and bool(snapshot.pending_ids or snapshot.pending_id))
-        if pending:
+        if pending and snapshot.state != "reconfiguring":
             return OutputMembershipUpdate(previous, previous, baseline=baseline, held_pending=True)
         identities = _confirmed_ids(snapshot)
         old_members = {member.id: member for member in previous.members}
@@ -151,7 +151,7 @@ def connected_output_kinds(snapshot: AudioRouteSnapshot | None) -> tuple[str, ..
     if not isinstance(snapshot, AudioRouteSnapshot) or snapshot.state == "error":
         return ()
     pending = snapshot.pending_ids or ((snapshot.pending_id,) if snapshot.pending_id else ())
-    if snapshot.member_ids and snapshot.state in {"casting", "waiting_audio"}:
+    if snapshot.member_ids and snapshot.state in {"casting", "waiting_audio", "reconfiguring"}:
         identities = snapshot.member_ids
     elif snapshot.active_id and not pending:
         identities = (snapshot.active_id,)
@@ -168,7 +168,7 @@ def connected_output_kinds(snapshot: AudioRouteSnapshot | None) -> tuple[str, ..
         if device is None:
             kinds.append("device")
             continue
-        if device.transport == "airplay" and snapshot.state not in {"casting", "waiting_audio"}:
+        if device.transport == "airplay" and snapshot.state not in {"casting", "waiting_audio", "reconfiguring"}:
             continue
         kinds.append(device.kind or ("airplay" if device.transport == "airplay" else "device"))
     return tuple(kinds)

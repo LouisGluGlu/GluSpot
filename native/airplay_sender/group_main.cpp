@@ -13,6 +13,8 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <future>
+#include <map>
 #include <memory>
 #include <thread>
 
@@ -120,6 +122,9 @@ struct Member {
     std::string state = "connecting";
     uint64_t volumeRevision = UINT64_MAX;
     GroupFeedbackWatchdog feedback;
+    bool committed = true, armed = false, retiring = false;
+    uint64_t sourceBase = 0;
+    std::string failure;
 };
 void receiverVolume(std::ostream& out, const fxchain::RaopDiagnostics& d) {
     out << "{\"volume\":";
@@ -159,13 +164,14 @@ void memberStates(std::ostream& out, const std::vector<std::unique_ptr<Member>>&
     }
     out << ']';
 }
-bool stdinCommands(std::string& pending, std::vector<std::unique_ptr<Member>>& members) {
+bool stdinCommands(std::string& pending, std::vector<std::unique_ptr<Member>>& members,
+                   const GroupArguments& args, std::optional<GroupMembershipCommand>& membership) {
     const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     if (!input || input == INVALID_HANDLE_VALUE || GetFileType(input) != FILE_TYPE_PIPE) return false;
     DWORD available = 0;
     if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) return true;
     std::array<std::optional<double>, 8> latest;
-    DWORD budget = 4096;
+    DWORD budget = 32768;
     while (available && budget) {
         char bytes[256]; DWORD count = 0;
         if (!ReadFile(input, bytes, std::min<DWORD>({available, DWORD(sizeof(bytes)), budget}), &count, nullptr) || !count)
@@ -173,11 +179,18 @@ bool stdinCommands(std::string& pending, std::vector<std::unique_ptr<Member>>& m
         pending.append(bytes, count); budget -= count;
         size_t newline = 0;
         while ((newline = pending.find('\n')) != std::string::npos) {
-            const auto line = pending.substr(0, newline); pending.erase(0, newline + 1);
+            auto line = pending.substr(0, newline); pending.erase(0, newline + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back(); // Windows text-pipe CRLF is transport framing.
             if (line == "stop" || line == "stop\r") return true;
-            if (const auto command = groupVolumeCommand(line, members.size())) latest[command->receiver] = command->volume;
+            if (!args.directPcm()) if (const auto command = groupVolumeCommand(line, members.size()))
+                latest[command->receiver] = command->volume;
+            if (const auto command = groupMembershipCommand(line, args)) membership = *command;
+            if (args.directPcm()) if (const auto command = ownedGroupVolumeCommand(line, args.pcmEpoch))
+                for (size_t index = 0; index < members.size(); ++index)
+                    if (members[index]->args.id == command->receiver && members[index]->committed)
+                        latest[index] = command->volume;
         }
-        if (pending.size() > 1024) return true;
+        if (pending.size() > 131072) return true;
         if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) return true;
     }
     for (size_t index = 0; index < members.size(); ++index)
@@ -213,12 +226,16 @@ void groupStats(GroupInput& capture, const std::vector<std::unique_ptr<Member>>&
                 double captureRatio
 #if GLUSPOT_HAS_LOCAL_RENDERER
                 , const GroupLocalRendererSet<LocalAudioRenderer>& locals
+                , const std::set<std::string>& stagedLocals
 #endif
                 ) {
     fxchain::RaopDiagnostics aggregate;
     aggregate.eventConnected = aggregate.eventKeyed = aggregate.coordinatedPlayback = aggregate.coordinatedTimelineArmed = true;
     aggregate.audioFramesSent = aggregate.nonzeroSamplesSent = aggregate.meaningfulSamplesSent = UINT64_MAX;
+    size_t committedReceivers = 0;
     for (const auto& member : members) {
+        if (!member->committed) continue;
+        ++committedReceivers;
         const auto d = member->sender->diagnostics();
         aggregate.feedbackSent += d.feedbackSent; aggregate.feedbackReplies += d.feedbackReplies;
         aggregate.feedbackRejected += d.feedbackRejected; aggregate.feedbackSkipped += d.feedbackSkipped;
@@ -226,7 +243,7 @@ void groupStats(GroupInput& capture, const std::vector<std::unique_ptr<Member>>&
         aggregate.eventDecryptFailures += d.eventDecryptFailures;
         aggregate.eventConnected &= d.eventConnected; aggregate.eventKeyed &= d.eventKeyed;
         aggregate.coordinatedTimelineArmed &= d.coordinatedTimelineArmed;
-        aggregate.audioFramesSent = std::min(aggregate.audioFramesSent, d.audioFramesSent);
+        aggregate.audioFramesSent = std::min(aggregate.audioFramesSent, member->sourceBase + d.audioFramesSent);
         aggregate.nonzeroSamplesSent = std::min(aggregate.nonzeroSamplesSent, d.nonzeroSamplesSent);
         aggregate.meaningfulSamplesSent = std::min(aggregate.meaningfulSamplesSent, d.meaningfulSamplesSent);
         aggregate.protocolLatencyFrames = d.protocolLatencyFrames;
@@ -235,7 +252,7 @@ void groupStats(GroupInput& capture, const std::vector<std::unique_ptr<Member>>&
     }
     uint64_t timingFrames = aggregate.audioFramesSent;
     uint32_t presentationFrames = aggregate.protocolLatencyFrames + aggregate.requestedMinLatencyFrames;
-    if (members.empty()) {
+    if (!committedReceivers) {
         // Empty network membership is not UINT64_MAX transport success. The
         // local renderers own playback evidence, separately from network stats.
         aggregate.audioFramesSent = aggregate.nonzeroSamplesSent = aggregate.meaningfulSamplesSent = 0;
@@ -244,7 +261,7 @@ void groupStats(GroupInput& capture, const std::vector<std::unique_ptr<Member>>&
         aggregate.coordinatedTimelineArmed = false;
         presentationFrames = windowsGroupPresentationFrames;
 #if GLUSPOT_HAS_LOCAL_RENDERER
-        const auto progress = locals.progress();
+        const auto progress = locals.progress(stagedLocals);
         timingFrames = progress.writtenFrames;
         aggregate.coordinatedTimelineArmed = progress.ready;
 #else
@@ -253,7 +270,7 @@ void groupStats(GroupInput& capture, const std::vector<std::unique_ptr<Member>>&
     }
     const auto queued = capture.ring().availableRead() / 2 + conditionedFrames;
 #if GLUSPOT_HAS_LOCAL_RENDERER
-    flowing = flowing && locals.hasMeaningfulPcm();
+    flowing = flowing && locals.hasMeaningfulPcm(stagedLocals);
 #endif
     const auto estimate = timing.sample({capture.frames.load(), timingFrames, paddedFrames,
         capture.droppedSamples.load(), capture.discontinuities.load(), queued, 44100,
@@ -262,9 +279,9 @@ void groupStats(GroupInput& capture, const std::vector<std::unique_ptr<Member>>&
     std::cout << "{\"event\":\"stats\",\"captured_frames\":" << capture.frames.load()
               << ",\"dropped_samples\":" << capture.droppedSamples.load() << ",\"discontinuities\":" << capture.discontinuities.load()
               << ",\"protocol\":"; protocol(std::cout, aggregate, paddedFrames, queued);
-    std::cout << ",\"timing\":{\"method\":" << quoted(members.empty() ? "windows_shared_pcm_clock" : "protocol_plus_input_queue")
+    std::cout << ",\"timing\":{\"method\":" << quoted(!committedReceivers ? "windows_shared_pcm_clock" : "protocol_plus_input_queue")
               << ",\"estimated_delay_ms\":" << estimate.delayMs()
-              << (members.empty() ? ",\"presentation_buffer_ms\":" : ",\"protocol_buffer_ms\":") << estimate.protocolBufferMs
+              << (!committedReceivers ? ",\"presentation_buffer_ms\":" : ",\"protocol_buffer_ms\":") << estimate.protocolBufferMs
               << ",\"input_queue_ms\":" << estimate.inputQueueMs
               << ",\"rtp_buffer_ms\":" << 1000.0 * aggregate.protocolLatencyFrames / 44100
               << ",\"requested_min_latency_ms\":" << 1000.0 * aggregate.requestedMinLatencyFrames / 44100
@@ -337,11 +354,11 @@ int runGroupHelper(int argc, wchar_t** argv) {
         }
         GroupInput capture(args);
         if (!capture.waitReady()) throw std::runtime_error(capture.error().empty() ? "Music capture initialization timed out" : capture.error());
-        auto history = std::make_unique<GroupPcmHistory>();
+        auto history = std::make_shared<GroupPcmHistory>();
 #if GLUSPOT_HAS_LOCAL_RENDERER
-        GroupLocalRendererSet<LocalAudioRenderer> locals(args.localEndpoints, [&history](const auto& endpoint) {
+        GroupLocalRendererSet<LocalAudioRenderer> locals(args.localEndpoints, [history](const auto& endpoint) {
             return std::make_unique<LocalAudioRenderer>(wide(endpoint),
-                [&history](uint64_t frame, std::span<int16_t> output) { return history->pull(frame, output); });
+                [history](uint64_t frame, std::span<int16_t> output) { return history->pull(frame, output); });
         });
         if (const auto error = locals.prepare(); !error.empty()) throw std::runtime_error(error);
 #else
@@ -357,20 +374,24 @@ int runGroupHelper(int argc, wchar_t** argv) {
             status("error", message);
         };
         std::vector<std::unique_ptr<Member>> members;
-        for (const auto& receiver : args.receivers) {
+        auto makeMember = [&](const GroupReceiverArgument& receiver, bool committed) {
             auto member = std::make_unique<Member>(); member->args = receiver;
+            member->committed = committed;
             Member* sink = member.get();
             fxchain::RaopEvents events;
-            events.launched = [sink, &fail](bool ok, const std::string& error) {
-                if (!ok) { sink->state = "error"; fail(sink->args.name + ": " + error); }
+            events.launched = [sink](bool ok, const std::string& error) {
+                if (sink->retiring) return;
+                if (!ok) { sink->state = "error"; sink->failure = error; }
                 else {
                     sink->ready = true; sink->state = "waiting_audio";
                     sink->feedback.start(Clock::now());
                 }
             };
-            events.closed = [sink, &fail] { sink->state = "error"; fail(sink->args.name + ": receiver ended the synchronized group session"); };
-            events.pinRequired = [sink, &fail](const std::string&) {
-                sink->state = "error"; fail(sink->args.name + ": this build requires open HomePod transient pairing");
+            events.closed = [sink] {
+                if (!sink->retiring) { sink->state = "error"; sink->failure = "Receiver ended the synchronized session"; }
+            };
+            events.pinRequired = [sink](const std::string&) {
+                if (!sink->retiring) { sink->state = "error"; sink->failure = "Receiver requires interactive pairing"; }
             };
             member->sender = std::make_unique<fxchain::RaopSender>(member->loop, std::move(events),
                 [id = receiver.id](fxchain::RaopLogLevel, const std::string& line) { std::cerr << '[' << id << "] " << line << '\n'; });
@@ -378,23 +399,160 @@ int runGroupHelper(int argc, wchar_t** argv) {
             member->sender->setCoordinatedPlayback(true);
             member->sender->setIdentity({"GluSpot", args.sourceId, "iPhone14,3"});
             member->sender->setAuth(fxchain::RaopDeviceInfo::Auth::HapTransient, true, receiver.deviceId, "", "");
-            members.push_back(std::move(member));
-        }
+            return member;
+        };
+        for (const auto& receiver : args.receivers) members.push_back(makeMember(receiver, true));
         std::string pending;
-        if (groupInterrupted || stdinCommands(pending, members)) { status("stopped"); return 0; }
+        std::optional<GroupMembershipCommand> membershipCommand;
+        if (groupInterrupted || stdinCommands(pending, members, args, membershipCommand)) { status("stopped"); return 0; }
+        if (args.directPcm()) std::cout << "{\"event\":\"capabilities\",\"pcm_epoch\":" << args.pcmEpoch
+            << ",\"reconfigure_pcm\":1,\"owned_presentation\":1}\n" << std::flush;
         status("connecting");
         for (auto& member : members) member->sender->start(member->args.host, member->args.port, member->args.name);
         const auto connectDeadline = Clock::now() + 20s;
         auto statsDeadline = Clock::now() + 500ms, guardDeadline = Clock::now(), volumeDeadline = Clock::now();
         Clock::time_point sendStart{};
+        uint64_t anchorNtp = 0;
         uint64_t nextFrame = 0;
+        uint32_t presentationFrames = windowsGroupPresentationFrames;
+        uint32_t rtpFrames = 66150;
+        uint64_t membershipRevision = 0;
+        std::optional<GroupMembershipCommand> staged;
+        Clock::time_point stagedDeadline{};
+        std::set<std::string> stagedLocals;
+        struct JoiningLocal { std::shared_ptr<uint64_t> base; bool armed = false; };
+        std::map<std::string, JoiningLocal> joiningLocals;
+        struct RetiredTransport { std::string id, target; std::future<void> cleanup; };
+        std::vector<RetiredTransport> retired;
+        auto retireMember = [&](std::unique_ptr<Member> member) {
+            member->retiring = true;
+            const auto id = member->args.id, target = member->args.host + ':' + std::to_string(member->args.port);
+            retired.push_back({id, target, std::async(std::launch::async,
+                [member = std::move(member)] { member->sender->stop(); })});
+        };
+#if GLUSPOT_HAS_LOCAL_RENDERER
+        auto retireLocal = [&](const std::string& endpoint) {
+            auto renderer = locals.remove(endpoint); // Only signal here; never join on the PCM packet thread.
+            if (renderer) retired.push_back({endpoint, "", std::async(std::launch::async,
+                [renderer = std::move(renderer)]() mutable { renderer.reset(); })});
+        };
+#endif
+        auto syncArguments = [&] {
+            args.receivers.clear();
+            for (const auto& member : members) args.receivers.push_back(member->args);
+#if GLUSPOT_HAS_LOCAL_RENDERER
+            args.localEndpoints.clear();
+            for (const auto& output : locals.outputs()) args.localEndpoints.push_back(output.endpoint);
+#endif
+        };
+        auto membershipEvent = [&](const char* state, uint64_t revision) {
+            std::cout << "{\"event\":\"membership\",\"pcm_epoch\":" << args.pcmEpoch
+                << ",\"revision\":" << revision << ",\"state\":" << quoted(state) << ",\"confirmed_ids\":[";
+            bool comma = false;
+            for (const auto& member : members) if (member->committed) {
+                if (comma) std::cout << ','; comma = true; std::cout << quoted(member->args.id);
+            }
+#if GLUSPOT_HAS_LOCAL_RENDERER
+            for (const auto& output : locals.outputs()) if (!stagedLocals.count(output.endpoint)) {
+                if (comma) std::cout << ','; comma = true; std::cout << quoted(output.endpoint);
+            }
+#endif
+            std::cout << "],\"pending_ids\":["; comma = false;
+            for (const auto& member : members) if (!member->committed) {
+                if (comma) std::cout << ','; comma = true; std::cout << quoted(member->args.id);
+            }
+            for (const auto& endpoint : stagedLocals) {
+                if (comma) std::cout << ','; comma = true; std::cout << quoted(endpoint);
+            }
+            std::cout << "]}\n" << std::flush;
+        };
+        auto rollbackMembership = [&] {
+            if (!staged) return;
+            const auto revision = staged->revision;
+            for (auto item = members.begin(); item != members.end();) {
+                if (!(*item)->committed) { retireMember(std::move(*item)); item = members.erase(item); }
+                else ++item;
+            }
+#if GLUSPOT_HAS_LOCAL_RENDERER
+            for (const auto& endpoint : stagedLocals) retireLocal(endpoint);
+#endif
+            stagedLocals.clear(); joiningLocals.clear(); staged.reset(); syncArguments();
+            membershipEvent("rejected", revision);
+        };
         GroupPcmConditioner conditioner;
         BufferTimingTracker timing;
-        while (!failed && !groupInterrupted && !stdinCommands(pending, members)) {
+        while (!failed && !groupInterrupted && !stdinCommands(pending, members, args, membershipCommand)) {
+            retired.erase(std::remove_if(retired.begin(), retired.end(), [](auto& transport) {
+                return transport.cleanup.wait_for(0ms) == std::future_status::ready;
+            }), retired.end());
+            if (membershipCommand) {
+                const auto command = *membershipCommand; membershipCommand.reset();
+                if (command.revision > membershipRevision) {
+                    rollbackMembership(); membershipRevision = command.revision;
+                    bool valid = groupArmed;
+                    std::set<std::string> unionIds;
+                    std::set<std::string> physicalReceivers;
+                    for (const auto& member : members) unionIds.insert(member->args.id);
+                    for (const auto& member : members) physicalReceivers.insert(member->args.host + ':' + std::to_string(member->args.port));
+                    for (const auto& endpoint : args.localEndpoints) unionIds.insert(endpoint);
+                    for (const auto& receiver : command.outputs.receivers) {
+                        const bool retained = unionIds.count(receiver.id);
+                        unionIds.insert(receiver.id);
+                        if (!retained) valid &= physicalReceivers.insert(receiver.host + ':' + std::to_string(receiver.port)).second;
+                        for (const auto& member : members) if (member->args.id == receiver.id)
+                            valid &= member->args.host == receiver.host && member->args.port == receiver.port &&
+                                member->args.deviceId == receiver.deviceId;
+                        for (const auto& endpoint : args.localEndpoints) valid &= endpoint != receiver.id;
+                    }
+                    for (const auto& endpoint : command.outputs.localEndpoints) {
+                        unionIds.insert(endpoint);
+                        for (const auto& member : members) valid &= member->args.id != endpoint;
+                    }
+                    valid &= unionIds.size() + retired.size() <= 8;
+                    for (const auto& transport : retired) {
+                        for (const auto& receiver : command.outputs.receivers)
+                            valid &= transport.id != receiver.id && transport.target != receiver.host + ':' + std::to_string(receiver.port);
+                        for (const auto& endpoint : command.outputs.localEndpoints)
+                            valid &= !groupSameEndpoint(transport.id, endpoint);
+                    }
+                    if (!valid) membershipEvent("rejected", command.revision);
+                    else {
+                        staged = command; stagedDeadline = Clock::now() + 20s;
+                        try {
+                            for (const auto& receiver : command.outputs.receivers) {
+                                if (std::any_of(members.begin(), members.end(), [&receiver](const auto& member) {
+                                        return member->args.id == receiver.id; })) continue;
+                                auto member = makeMember(receiver, false);
+                                member->sender->start(receiver.host, receiver.port, receiver.name);
+                                members.push_back(std::move(member));
+                            }
+#if GLUSPOT_HAS_LOCAL_RENDERER
+                            for (const auto& endpoint : command.outputs.localEndpoints) {
+                                if (std::find(args.localEndpoints.begin(), args.localEndpoints.end(), endpoint) != args.localEndpoints.end()) continue;
+                                auto base = std::make_shared<uint64_t>(0);
+                                auto renderer = std::make_unique<LocalAudioRenderer>(wide(endpoint),
+                                    [history, base](uint64_t frame, std::span<int16_t> output) {
+                                        return frame <= UINT64_MAX - *base && history->pull(*base + frame, output);
+                                    });
+                                if (!locals.add(endpoint, std::move(renderer), base)) throw std::runtime_error("Cannot add output");
+                                stagedLocals.insert(endpoint); joiningLocals.emplace(endpoint, JoiningLocal{base});
+                            }
+#endif
+                            syncArguments(); membershipEvent("pending", command.revision);
+                        } catch (...) { rollbackMembership(); }
+                    }
+                }
+            }
             for (auto& member : members) {
                 member->loop.pump(*member->sender, 0ms);
                 if (failed) break;
             }
+            bool joinFailed = false;
+            for (const auto& member : members) if (!member->failure.empty()) {
+                if (member->committed) fail(member->args.name + ": " + member->failure);
+                else joinFailed = true;
+            }
+            if (joinFailed) rollbackMembership();
             if (failed) break;
             const auto now = Clock::now();
             for (auto& member : members) {
@@ -402,16 +560,22 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 const auto diagnostics = member->sender->diagnostics();
                 if (!member->feedback.healthy(now, diagnostics.feedbackReplies, diagnostics.feedbackRejected)) {
                     member->state = "error";
-                    fail(member->args.name + ": no successful receiver feedback for 10 seconds; synchronized group stopped");
-                    break;
+                    if (member->committed) fail(member->args.name + ": no successful receiver feedback for 10 seconds; synchronized group stopped");
+                    else joinFailed = true;
                 }
             }
+            if (joinFailed) rollbackMembership();
             if (failed) break;
             if (!capture.error().empty()) { fail(capture.error()); break; }
             if (!capture.sourceAlive()) { fail("Music process ended; synchronized group stopped"); break; }
             if (capture.droppedSamples.load()) { fail("Music capture overran; synchronized group stopped before source frames diverged"); break; }
 #if GLUSPOT_HAS_LOCAL_RENDERER
-            if (const auto error = locals.error(); !error.empty()) { fail(error); break; }
+            for (const auto& output : locals.outputs()) if (const auto error = output.renderer->error(); !error.empty()) {
+                if (stagedLocals.count(output.endpoint)) joinFailed = true;
+                else fail(output.endpoint + ": " + error);
+            }
+            if (joinFailed) rollbackMembership();
+            if (failed) break;
 #endif
             if (now >= guardDeadline) {
                 try { if (source) source->check(); }
@@ -429,17 +593,18 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 // follows the RTP buffer; local playback must include both.
                 // Queue evidence also includes the capture startup lead.
                 const auto anchorClock = Clock::now();
-                const auto anchorNtp = ntpWallNow();
+                anchorNtp = ntpWallNow();
                 sendStart = anchorClock + 150ms;
                 const auto firstFrameNtp = anchorNtp + 150ULL * 0x100000000ULL / 1000;
                 for (auto& member : members)
                     if (!member->sender->armCoordinatedTimeline(sendStart, firstFrameNtp)) {
                         fail("Cannot arm every receiver on the shared group timeline"); break;
-                    }
+                    } else member->armed = true;
                 if (failed) break;
-                auto presentationFrames = windowsGroupPresentationFrames;
+                anchorNtp = firstFrameNtp;
                 if (!members.empty()) {
                     const auto policy = members.front()->sender->diagnostics();
+                    rtpFrames = policy.protocolLatencyFrames;
                     presentationFrames = groupPresentationFrames(policy.protocolLatencyFrames, policy.requestedMinLatencyFrames);
                     if (!std::all_of(members.begin(), members.end(), [&policy](const auto& member) {
                         const auto d = member->sender->diagnostics();
@@ -453,6 +618,31 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 capture.start(); groupArmed = true;
                 status("waiting_audio", args.directPcm() ? "Synchronized group connected; waiting for program-player PCM" :
                     "Synchronized group connected; waiting for music-process audio");
+            }
+            if (staged) {
+                for (auto& member : members) if (!member->committed && member->ready && !member->armed) {
+                    const auto policy = member->sender->diagnostics();
+                    if (policy.protocolLatencyFrames != rtpFrames ||
+                        groupPresentationFrames(policy.protocolLatencyFrames, policy.requestedMinLatencyFrames) != presentationFrames) {
+                        joinFailed = true; break;
+                    }
+                    member->sourceBase = groupJoinFrame(nextFrame);
+                    member->armed = member->sender->armCoordinatedTimeline(
+                        sendStart + groupFrameTime(member->sourceBase),
+                        anchorNtp + groupFrameNtp(member->sourceBase), rtpFrames);
+                    if (!member->armed) { joinFailed = true; break; }
+                }
+#if GLUSPOT_HAS_LOCAL_RENDERER
+                for (const auto& output : locals.outputs()) {
+                    const auto item = joiningLocals.find(output.endpoint);
+                    if (item == joiningLocals.end() || item->second.armed || !output.renderer->diagnostics().ready) continue;
+                    *item->second.base = groupJoinFrame(nextFrame);
+                    item->second.armed = output.renderer->arm(
+                        sendStart + groupFrameTime(*item->second.base), presentationFrames);
+                    if (!item->second.armed) { joinFailed = true; break; }
+                }
+#endif
+                if (now >= stagedDeadline || joinFailed) rollbackMembership();
             }
             if (groupArmed && now >= sendStart) {
                 const auto ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - sendStart).count());
@@ -470,11 +660,46 @@ int runGroupHelper(int argc, wchar_t** argv) {
                     conditioner.packet(pcm);
                     if (!history->append(nextFrame, pcm)) { fail("Shared PCM timeline rejected a source frame"); break; }
                     for (auto& member : members)
-                        if (!member->sender->sendCoordinatedAudio(nextFrame, pcm)) {
-                            fail(member->args.name + ": source packet missed shared presentation deadline"); break;
+                        if (member->armed && nextFrame >= member->sourceBase &&
+                            !member->sender->sendCoordinatedAudio(nextFrame - member->sourceBase, pcm)) {
+                            if (member->committed) fail(member->args.name + ": source packet missed shared presentation deadline");
+                            else joinFailed = true;
+                            if (failed) break;
                         }
                     if (failed) break;
                     nextFrame += 352;
+                }
+            }
+            if (joinFailed) rollbackMembership();
+            if (staged) {
+                bool joined = true;
+                for (const auto& member : members) if (!member->committed)
+                    joined &= member->armed && member->sender->diagnostics().meaningfulSamplesSent > 0 &&
+                        now >= sendStart + groupFrameTime(member->sourceBase + presentationFrames);
+#if GLUSPOT_HAS_LOCAL_RENDERER
+                for (const auto& output : locals.outputs()) if (stagedLocals.count(output.endpoint)) {
+                    const auto& item = joiningLocals.at(output.endpoint);
+                    joined &= item.armed && output.renderer->diagnostics().meaningfulSamples > 0 &&
+                        now >= sendStart + groupFrameTime(*item.base + presentationFrames);
+                }
+#endif
+                if (joined) {
+                    const auto revision = staged->revision;
+                    for (auto item = members.begin(); item != members.end();) {
+                        if (std::none_of(staged->outputs.receivers.begin(), staged->outputs.receivers.end(),
+                                [&item](const auto& receiver) { return receiver.id == (*item)->args.id; })) {
+                            retireMember(std::move(*item)); item = members.erase(item);
+                        } else { (*item)->committed = true; (*item)->state = "streaming"; ++item; }
+                    }
+#if GLUSPOT_HAS_LOCAL_RENDERER
+                    std::vector<std::string> removed;
+                    for (const auto& output : locals.outputs())
+                        if (std::find(staged->outputs.localEndpoints.begin(), staged->outputs.localEndpoints.end(), output.endpoint)
+                                == staged->outputs.localEndpoints.end()) removed.push_back(output.endpoint);
+                    for (const auto& endpoint : removed) retireLocal(endpoint);
+#endif
+                    staged.reset(); stagedLocals.clear(); joiningLocals.clear(); syncArguments();
+                    membershipEvent("applied", revision);
                 }
             }
             if (failed) break;
@@ -500,7 +725,8 @@ int runGroupHelper(int argc, wchar_t** argv) {
 #if GLUSPOT_HAS_LOCAL_RENDERER
             if (members.empty()) sourceSignalReady = hasStreamingSignal(signal, locals.progress().meaningfulSamples);
 #endif
-            if (groupArmed && sourceSignalReady && localSignalReady && !streaming && std::all_of(members.begin(), members.end(), [&signal](const auto& member) {
+            const bool presentationDue = !args.directPcm() || now >= sendStart + groupFrameTime(presentationFrames);
+            if (groupArmed && presentationDue && sourceSignalReady && localSignalReady && !streaming && std::all_of(members.begin(), members.end(), [&signal](const auto& member) {
                     return hasStreamingSignal(signal, member->sender->diagnostics().meaningfulSamplesSent);
                 })) {
                 streaming = true;
@@ -511,7 +737,7 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 groupStats(capture, members, timing, groupArmed, conditioner.paddedFrames(), args, nextFrame,
                            conditioner.queuedFrames(), conditioner.ratio()
 #if GLUSPOT_HAS_LOCAL_RENDERER
-                           , locals
+                           , locals, stagedLocals
 #endif
                            );
                 statsDeadline = now + 500ms;
@@ -521,7 +747,7 @@ int runGroupHelper(int argc, wchar_t** argv) {
         groupStats(capture, members, timing, false, conditioner.paddedFrames(), args, nextFrame,
                    conditioner.queuedFrames(), conditioner.ratio()
 #if GLUSPOT_HAS_LOCAL_RENDERER
-                   , locals
+                   , locals, stagedLocals
 #endif
                    );
 #if GLUSPOT_HAS_LOCAL_RENDERER

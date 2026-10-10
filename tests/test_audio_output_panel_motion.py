@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QImage, QMouseEvent, QPainter, QWheelEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from api.audio_routes import AudioRouteDevice
@@ -75,56 +76,132 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.panel.sync_snapshot()
         self.app.processEvents()
 
-    def test_selected_white_fill_requires_one_second_then_adjusts_only_its_volume(self):
+    def _native_image(self, widget):
+        dpr = widget.devicePixelRatioF()
+        image = QImage(round(widget.width() * dpr), round(widget.height() * dpr),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        return image
+
+    def test_selected_whole_row_requires_half_second_then_adjusts_only_its_volume(self):
         row = self.panel._rows["local"]
         point = QPoint(75, 25)
         self.assertTrue(row.volume_hit(QPointF(point)))
         self._move(row, point, 101.0)
-        self._wheel(row, point, 101.99)
+        self._wheel(row, point, 101.49)
         self.assertEqual(self.provider.calls, [])
-        self._wheel(row, point, 102.01)
+        self._wheel(row, point, 101.51)
         self.assertEqual(self.provider.calls, [("volume", "local", .52)])
 
-    def test_grey_half_name_and_other_devices_cannot_own_volume_wheel(self):
+    def test_grey_half_can_adjust_volume_but_other_devices_keep_scrolling(self):
         row = self.panel._rows["local"]
         point = QPoint(row.width() - 20, 25)
-        self.assertFalse(row.volume_hit(QPointF(point)))
+        self.assertTrue(row.volume_hit(QPointF(point)))
         self._move(row, point, 101.0)
         self._wheel(row, point, 110.0)
-        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.provider.calls, [("volume", "local", .52)])
+        self.provider.calls.clear()
         other = self.panel._rows["bluetooth"]
         self.assertTrue(other.volume_slider.isHidden())
         self._move(other, QPoint(75, 25), 111.0)
         self._wheel(other, QPoint(75, 25), 115.0)
         self.assertEqual(self.provider.calls, [])
 
-    def test_leaving_or_crossing_fill_boundary_resets_dwell(self):
+    def test_crossing_fill_boundary_keeps_dwell_but_leaving_resets_it(self):
         row = self.panel._rows["local"]
         white, grey = QPoint(75, 25), QPoint(row.width() - 20, 25)
         self._move(row, white, 101.0)
-        self._move(row, grey, 102.1)
-        self._move(row, white, 102.2)
-        self._wheel(row, white, 102.9)
-        self.assertEqual(self.provider.calls, [])
+        self._move(row, grey, 101.3)
+        self._move(row, white, 101.4)
+        self._wheel(row, white, 101.51)
+        self.assertEqual(self.provider.calls, [("volume", "local", .52)])
+        self.provider.calls.clear()
         self.app.sendEvent(row, QEvent(QEvent.Type.Leave))
         self._move(row, white, 103.0)
-        self._wheel(row, white, 103.9)
+        self._wheel(row, white, 103.49)
         self.assertEqual(self.provider.calls, [])
-        self._wheel(row, white, 104.01)
-        self.assertEqual(self.provider.calls, [("volume", "local", .52)])
+        self._wheel(row, white, 103.51)
+        self.assertEqual(self.provider.calls, [("volume", "local", .54)])
 
-    def test_zero_unknown_and_unselected_have_no_white_hit_surface(self):
+    def test_zero_active_volume_can_wheel_restore_but_unknown_and_unselected_cannot(self):
         self.provider.snapshot = replace(self.provider.snapshot, devices=tuple(
             replace(device, volume=0) if device.id == "local" else device
             for device in self.provider.snapshot.devices))
         self.panel.sync_snapshot()
-        self.assertFalse(self.panel._rows["local"].volume_hit(QPointF(2, 28)))
+        row = self.panel._rows["local"]
+        self.assertEqual(row.volume_fill_rect().width(), 0)
+        self.assertTrue(row.volume_hit(QPointF(2, 28)))
+        point = QPoint(row.width() - 20, 25)
+        self._move(row, point, 101.0)
+        self._wheel(row, point, 101.51)
+        self.assertEqual(self.provider.calls, [("volume", "local", .02)])
+        self.provider.calls.clear()
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod")
         self.panel.sync_snapshot()
         row = self.panel._rows["homepod"]
         self.assertEqual(row.state, "active")
         self.assertTrue(row.volume_slider.isHidden())
         self.assertFalse(row.volume_hit(QPointF(75, 25)))
+        self._move(row, QPoint(75, 25), 102.0)
+        self._wheel(row, QPoint(75, 25), 102.51)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_half_second_hover_anywhere_reveals_and_exit_clears_details(self):
+        row = self.panel._rows["local"]
+        self._move(row, QPoint(24, 25), 101.0)
+        self.assertFalse(row.details_visible)
+        self._move(row, QPoint(row.width() - 18, 25), 101.49)
+        self.assertFalse(row.details_visible)
+        self._move(row, QPoint(90, 25), 101.51)
+        self.assertTrue(row.details_visible)
+        self.app.sendEvent(row, QEvent(QEvent.Type.Leave))
+        self.assertFalse(row.details_visible)
+        self.assertFalse(self.panel._hover_detail_timer.isActive())
+        other = self.panel._rows["bluetooth"]
+        self._move(other.join_button, other.join_button.rect().center(), 102.0)
+        self._move(other.join_button, other.join_button.rect().center(), 102.51)
+        self.assertTrue(other.details_visible)
+        self.assertFalse(row.details_visible)
+
+    def test_stationary_hover_timer_reveals_without_extra_mouse_move(self):
+        row = self.panel._rows["local"]
+        self._move(row, QPoint(90, 25), 101.0)
+        self.assertTrue(self.panel._hover_detail_timer.isActive())
+        self.assertFalse(row.details_visible)
+        QTest.qWait(520)
+        self.assertTrue(row.details_visible)
+        self.panel.dismiss(immediate=True)
+        self.assertFalse(row.details_visible)
+        self.assertFalse(self.panel._hover_detail_timer.isActive())
+
+    def test_native_handoff_arms_hover_under_stationary_pointer(self):
+        row = self.panel._rows["local"]
+        point = row.mapToGlobal(QPoint(row.width() - 18, row.height() // 2))
+        self.panel._reveal = .8
+        self.panel._apply_reveal_pose()
+        self.assertTrue(self.panel._scroll_opacity.isEnabled())
+        with patch("local.audio_output_panel.QCursor.pos", return_value=point), \
+                patch("local.audio_output_panel.time.monotonic", return_value=101.0):
+            self.panel._reveal = 1
+            self.panel._reveal_velocity = 0
+            self.panel._apply_reveal_pose()
+        self.assertEqual(self.panel._hover_row_id, "local")
+        self.assertTrue(self.panel._hover_detail_timer.isActive())
+        self.assertFalse(row.details_visible)
+        QTest.qWait(520)
+        self.assertTrue(row.details_visible)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_list_scroll_before_hover_threshold_resets_details_and_keeps_volume(self):
+        self._add_list(9)
+        row = self.panel._rows["local"]
+        self._move(row, QPoint(75, 25), 101.0)
+        self._wheel(row, QPoint(75, 25), 101.49, angle=-120)
+        self.assertGreater(self.panel.scroll.verticalScrollBar().value(), 0)
+        self.assertEqual(self.provider.calls, [])
+        self.assertFalse(row.details_visible)
+        self.assertEqual(self.panel._hover_row_id, "")
 
     def test_pixel_volume_accumulates_small_deltas_and_preserves_native_direction(self):
         row, point = self.panel._rows["local"], QPoint(75, 25)
@@ -274,11 +351,9 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
 
     def test_transition_uses_shared_row_painter_without_device_reads(self):
         row = self.panel._rows["local"]
-        natural = QImage(row.size(), QImage.Format.Format_ARGB32_Premultiplied)
-        natural.fill(Qt.GlobalColor.transparent)
+        natural = self._native_image(row)
         row.render(natural)
-        direct = QImage(row.size(), QImage.Format.Format_ARGB32_Premultiplied)
-        direct.fill(Qt.GlobalColor.transparent)
+        direct = self._native_image(row)
         with QPainter(direct) as painter:
             row.paint_contents(painter)
         self.assertEqual(bytes(natural.constBits()), bytes(direct.constBits()))
@@ -286,8 +361,7 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
             self.panel._reveal = amount
             self.panel._apply_reveal_pose()
             before = (self.panel._reveal, self.panel._reveal_velocity, row.elapsed)
-            frame = QImage(self.panel.size(), QImage.Format.Format_ARGB32_Premultiplied)
-            frame.fill(Qt.GlobalColor.transparent)
+            frame = self._native_image(self.panel)
             with patch.object(self.provider, "get_audio_route_snapshot", side_effect=AssertionError("paint read")):
                 self.panel.render(frame)
             self.assertEqual(before, (self.panel._reveal, self.panel._reveal_velocity, row.elapsed))
@@ -337,15 +411,16 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.panel._reveal = 1
         self.panel._reveal_velocity = .1
         self.panel._apply_reveal_pose()
-        transitional = QImage(self.panel.size(), QImage.Format.Format_ARGB32_Premultiplied)
-        transitional.fill(Qt.GlobalColor.transparent)
+        transitional = self._native_image(self.panel)
         self.panel.render(transitional)
         self.panel._reveal_velocity = 0
         self.panel._apply_reveal_pose()
-        normal = QImage(self.panel.size(), QImage.Format.Format_ARGB32_Premultiplied)
-        normal.fill(Qt.GlobalColor.transparent)
+        normal = self._native_image(self.panel)
         self.panel.render(normal)
-        bounds = self.panel.render_pose.first_rect.adjusted(2, 2, -2, -2).toAlignedRect()
+        logical = self.panel.render_pose.first_rect.adjusted(2, 2, -2, -2)
+        dpr = normal.devicePixelRatio()
+        bounds = QRectF(logical.x() * dpr, logical.y() * dpr,
+                        logical.width() * dpr, logical.height() * dpr).toAlignedRect()
         self.assertEqual(bytes(transitional.copy(bounds).constBits()), bytes(normal.copy(bounds).constBits()))
 
     def test_native_handoff_does_not_offset_or_leak_effect_cached_rows(self):

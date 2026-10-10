@@ -12,10 +12,10 @@ from local.branding import ROOT_DIR
 
 
 MUSIC_SOURCE_ICON_KEYS = frozenset({"qq", "qishui", "kugou", "netease", "search", "logout", "switch"})
-MUSIC_CONTROL_ICON_KEYS = frozenset({"library", "shuffle", "sequence", "repeat_one"})
+MUSIC_CONTROL_ICON_KEYS = frozenset({"library", "library_back", "shuffle", "sequence", "repeat_one"})
 
 
-@lru_cache(maxsize=11)
+@lru_cache(maxsize=12)
 def _svg_renderer(key: str) -> QSvgRenderer | None:
     if key not in MUSIC_SOURCE_ICON_KEYS | MUSIC_CONTROL_ICON_KEYS:
         return None

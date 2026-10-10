@@ -261,7 +261,7 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 self.assertTrue(panel._rows["homepod-2"].volume_slider.isHidden())
                 self.provider.calls.clear()
                 QTest.mouseClick(panel._rows["homepod-2"], Qt.MouseButton.LeftButton)
-                self.assertEqual(self.provider.calls, [("toggle", "homepod-2")])
+                self.assertEqual(self.provider.calls, [("select", "homepod-2")])
                 self.assertEqual(panel._rows["homepod-2"].state, "pending")
                 # Pointer activation can legitimately repaint the whole page.
                 # Poll/crop must retain that newly displayed complete frame.

@@ -20,7 +20,11 @@ class OwnedAudioBridge(QObject):
         self._closed = False
         self._epoch = 0
         self._direct = False
+        self._direct_token = None
         self._original_muted = None
+        self._owns_mute = False
+        self._changing_mute = False
+        self._mute_committed = False
         self._last_buffer_end = None
         self._last_position = None
         self._restarting = False
@@ -38,6 +42,8 @@ class OwnedAudioBridge(QObject):
             self.output.audioBufferReceived.connect(self._buffer)
             owned.player.setAudioBufferOutput(self.output)
         owned.changed.connect(self._owner_changed)
+        if hasattr(owned.audio, "mutedChanged"):
+            owned.audio.mutedChanged.connect(self._muted_changed)
         if hasattr(owned.player, "positionChanged"):
             owned.player.positionChanged.connect(self._position_changed)
 
@@ -76,8 +82,47 @@ class OwnedAudioBridge(QObject):
     def select_device(self, endpoint, token=None):
         return self._invoke("select", str(endpoint), token=token)
 
-    def set_direct(self, enabled, epoch, token=None):
-        return self._invoke("direct", (bool(enabled), epoch), token=token)
+    def set_direct(self, enabled, epoch, token=None, *, muted=True):
+        return self._invoke("direct", (bool(enabled), epoch, bool(muted)), token=token)
+
+    def commit_direct_mute(self, epoch, token=None):
+        """Mute the Qt output after this exact feeding session can present PCM."""
+        return self._invoke("commit_mute", epoch, token=token)
+
+    def _commit_mute(self, audio):
+        if self._mute_committed:
+            return True
+        # A user or another owner may have muted Qt during unmuted prefill.
+        # Only a false-to-true change performed here belongs to this bridge.
+        if not audio.isMuted():
+            self._original_muted = False
+            self._owns_mute = True
+            self._changing_mute = True
+            try:
+                audio.setMuted(True)
+            finally:
+                self._changing_mute = False
+            if not audio.isMuted():
+                self._owns_mute, self._original_muted = False, None
+                return False
+        self._mute_committed = True
+        return True
+
+    def _release_mute(self, audio):
+        if self._owns_mute and self._original_muted is not None and audio.isMuted():
+            self._changing_mute = True
+            try:
+                audio.setMuted(self._original_muted)
+            finally:
+                self._changing_mute = False
+        self._owns_mute, self._original_muted, self._mute_committed = False, None, False
+
+    @Slot(bool)
+    def _muted_changed(self, muted):
+        if not self._changing_mute and not muted:
+            # An explicit external unmute ends our mute ownership. A later
+            # external mute must not be undone when this session stops.
+            self._owns_mute, self._original_muted = False, None
 
     @Slot(object)
     def _apply(self, request):
@@ -101,26 +146,35 @@ class OwnedAudioBridge(QObject):
                 audio.setDevice(device)
                 request[5] = self.endpoint_id(audio.device()).casefold() == value.casefold()
             elif operation == "direct":
-                enabled, epoch = value
+                enabled, epoch, muted = value
                 if enabled:
                     if not self.supported or not self.owned.track or not hasattr(audio, "setMuted"):
                         return
-                    if not self._direct:
-                        self._original_muted = audio.isMuted()
-                    audio.setMuted(True)
+                    new_session = not self._direct or (epoch, token) != (self._epoch, self._direct_token)
+                    if new_session:
+                        if not muted:
+                            self._release_mute(audio)
+                        self._mute_committed = False
+                    if muted and not self._commit_mute(audio):
+                        return
                     self._epoch, self._direct = epoch, True
+                    self._direct_token = token
                     self._last_buffer_end = None
                     self._restarting = False
                 else:
                     # A stop for an older session cannot unmute its replacement.
                     if self._direct and epoch not in {0, self._epoch}:
                         return
-                    if self._direct and self._original_muted is not None and audio.isMuted():
-                        audio.setMuted(self._original_muted)
-                    self._direct, self._epoch, self._original_muted = False, 0, None
+                    self._release_mute(audio)
+                    self._direct, self._epoch, self._direct_token = False, 0, None
                     self._last_buffer_end = None
                     self._restarting = False
                 request[5] = True
+            elif operation == "commit_mute":
+                if (not self._direct or self._restarting or value != self._epoch
+                        or token != self._direct_token or not hasattr(audio, "setMuted")):
+                    return
+                request[5] = self._commit_mute(audio)
         finally:
             done.set()
 
@@ -155,6 +209,9 @@ class OwnedAudioBridge(QObject):
     @Slot(object)
     def _buffer(self, buffer):
         if self._closed or not self._direct or self._restarting or self._controller is None or not buffer.isValid() or not buffer.frameCount():
+            return
+        if self.media_token() != self._direct_token:
+            self._owner_changed()
             return
         if not self._controller.accepts_pcm(self._epoch):
             return

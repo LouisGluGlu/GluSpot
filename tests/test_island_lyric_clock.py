@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 from api.audio_routes import AudioRouteSnapshot
@@ -86,6 +87,17 @@ class IslandLyricClockTests(unittest.TestCase):
         self.assertAlmostEqual(visual._stable_lyric_source_position(100.1), 10.1)
         self.assertEqual(visual._effective_lyric_offset_seconds(include_output_latency=False), 0)
         self.assertIsNone(visual._island_lyric_source_clock.pending_clock_position)
+
+    def test_warm_device_join_retains_group_lyric_compensation(self):
+        visual = self._visual()
+        route = [AudioRouteSnapshot(state="casting", cast_latency_seconds=1.75,
+            group_id="owned:1", active_id="one", member_ids=("one", "two"))]
+        visual.data_provider = SimpleNamespace(get_audio_route_snapshot=lambda: route[0])
+        self.assertEqual(visual._effective_lyric_offset_seconds(), -1.75)
+        anchor = visual._lyric_output_compensation_anchor
+        route[0] = replace(route[0], state="reconfiguring", pending_ids=("three",))
+        self.assertEqual(visual._effective_lyric_offset_seconds(), -1.75)
+        self.assertEqual(visual._lyric_output_compensation_anchor, anchor)
 
     def test_fresh_paused_seek_and_new_song_reanchor(self):
         visual = self._visual()
