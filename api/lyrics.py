@@ -1198,6 +1198,21 @@ class LocalLyricsStore:
         lines = group_cantonese_plain_lines(lines, language_hint)
         return tuple(TimedLyricLine(index * step_seconds, line, timing_kind="synthetic") for index, line in enumerate(lines))
 
+    def parse_online_lyrics(self, *, raw_lrc: str = "", raw_yrc: str = "", translation: str = "",
+                            romanization: str = "", source: str = "") -> LyricsMatch | None:
+        """Parse source-owned lyrics through the same timing/secondary pipeline.
+
+        Malformed word timing falls back to LRC; genuine YRC units retain their
+        exact timestamps. No independent online lookup or disk write is started.
+        """
+        payload = {"lrc": {"lyric": raw_lrc}, "yrc": {"lyric": raw_yrc},
+                   "tlyric": {"lyric": translation}, "romalrc": {"lyric": romanization}}
+        text = self._extract_netease_lyric_text(payload,
+            secondary_source=self._dual_line_secondary_source(),
+            prefer_secondary=self._dual_line_lyrics_enabled(),
+            prefer_original=not self._dual_line_lyrics_enabled())
+        return self._lyrics_match_from_text(text, source)
+
     def _lyrics_match_from_text(self, text: str | tuple[str, ...], source: str) -> LyricsMatch | None:
         if isinstance(text, tuple):
             texts = tuple(item for item in text if str(item or "").strip())

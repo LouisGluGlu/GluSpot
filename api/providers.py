@@ -157,6 +157,103 @@ class NoMediaSessionProvider(EmptyIslandDataProvider):
         super().__init__(NO_SESSION_VISUAL_DATA)
 
 
+class PlaybackSourceProvider:
+    """V2 provider boundary selecting owned playback or enabled system capture.
+
+    Owned music never supplies a fictitious external process ID to the native
+    process-loopback group sender. That route requires a future direct PCM input.
+    """
+    def __init__(self, system_provider, owned_player, settings_getter):
+        self.system = system_provider
+        self.owned = owned_player
+        self.settings_getter = settings_getter
+        self._owned_capture_suspended = False
+        self.owned.changed.connect(self._owned_state_changed)
+
+    def _owned_state_changed(self):
+        active = self._owned_active()
+        if active and not self._owned_capture_suspended:
+            self.system.suspend_live_audio()
+        self._owned_capture_suspended = active
+
+    @property
+    def settings_setter(self):
+        return getattr(self.system, "settings_setter", None)
+
+    @settings_setter.setter
+    def settings_setter(self, value):
+        self.system.settings_setter = value
+
+    def _owned_active(self):
+        return bool(self.settings_getter("v2_owned_playback_enabled", True)) and self.owned.track is not None
+
+    def _system_enabled(self):
+        return bool(self.settings_getter("v2_system_capture_enabled", False))
+
+    def get_visual_data(self):
+        if self._owned_active():
+            data = self.owned.visual_data()
+            return replace(data, messages=self.system.message_detector.messages(), plugins=self.system.plugin_provider.plugins())
+        if self._system_enabled():
+            return self.system.get_visual_data()
+        return replace(empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot"),
+                       messages=self.system.message_detector.messages(), plugins=self.system.plugin_provider.plugins())
+
+    def get_audio_frame(self):
+        return self.system.get_audio_frame() if self._system_enabled() and not self._owned_active() else None
+
+    def has_live_audio(self):
+        return self._system_enabled() and not self._owned_active() and self.system.has_live_audio()
+
+    def get_audio_route_snapshot(self):
+        if self._owned_active():
+            return AudioRouteSnapshot(state="unavailable", capture_scope="owned-player",
+                status_message="程序内播放使用系统默认输出；暂不支持同步播放到多个设备")
+        if not self._system_enabled():
+            return AudioRouteSnapshot(state="unavailable", status_message="系统抓取已关闭")
+        return self.system.get_audio_route_snapshot()
+
+    def send_playback_command(self, command):
+        if self._owned_active():
+            return self.owned.send_playback_command(command)
+        return self._system_enabled() and self.system.send_playback_command(command)
+
+    def seek_playback_position(self, position_seconds, expected_track_id=None):
+        if self._owned_active():
+            return self.owned.seek_playback_position(position_seconds, expected_track_id)
+        return self._system_enabled() and self.system.seek_playback_position(position_seconds, expected_track_id)
+
+    def refresh_audio_outputs(self):
+        return self._system_enabled() and not self._owned_active() and self.system.refresh_audio_outputs()
+
+    def select_audio_output(self, device_id):
+        return self._system_enabled() and not self._owned_active() and self.system.select_audio_output(device_id)
+
+    def toggle_audio_output(self, device_id):
+        return self._system_enabled() and not self._owned_active() and self.system.toggle_audio_output(device_id)
+
+    def set_audio_output_volume(self, device_id, volume):
+        return self._system_enabled() and not self._owned_active() and self.system.set_audio_output_volume(device_id, volume)
+
+    def add_homepod(self, host, port=7000):
+        return self._system_enabled() and not self._owned_active() and self.system.add_homepod(host, port)
+
+    def diagnostics(self):
+        data = self.system.diagnostics()
+        data["playback_source"] = "owned" if self._owned_active() else "system" if self._system_enabled() else "idle"
+        data["owned_playback_status"] = self.owned.status
+        return data
+
+    def close_audio_outputs(self):
+        self.owned.close()
+        self.system.suspend_live_audio()
+        self.system.close_audio_outputs()
+
+    def __getattr__(self, name):
+        # Preserve established diagnostics/cache/plugin control call sites.
+        return getattr(self.system, name)
+
+
 def _ensure_winsdk_loaded() -> bool:
     global MediaManager, PlaybackStatus, Buffer, DataReader, InputStreamOptions, WINSdk_IMPORT_ATTEMPTED, WINSdk_IMPORT_ERROR
     if WINSdk_IMPORT_ATTEMPTED:
@@ -964,6 +1061,17 @@ class WindowsMediaProvider:
         except Exception as exc:
             return {"status": "error", "running": False, "has_recent_frame": False, "last_error": self._brief_error(exc)}
         return diagnostics if isinstance(diagnostics, dict) else {}
+
+    def suspend_live_audio(self):
+        """Detach an optional meter immediately, release its stream off Qt."""
+        analyzer, self.audio_analyzer = getattr(self, "audio_analyzer", None), None
+        if analyzer is not None:
+            def stop():
+                try:
+                    analyzer.stop()
+                except Exception:
+                    pass
+            threading.Thread(target=stop, name="GluSpotMeterStop", daemon=True).start()
 
     def _release_audio_analyzer(self, reason: str = "", cooldown: bool = False, now: float | None = None):
         analyzer = getattr(self, "audio_analyzer", None)
