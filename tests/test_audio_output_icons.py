@@ -263,14 +263,14 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
             self.window._paint_window_controls(painter, QRectF(self.window.rect()))
         return image
 
-    def test_four_controls_share_circle_diameter_spacing_and_keep_idle_click_gate(self):
+    def test_three_controls_share_circle_diameter_spacing_and_keep_idle_click_gate(self):
         self.window._reset_control_idle(100.0)
         image = self._controls()
         mode = self.window._button_rects["return"]
         translation = self.window._button_rects["translation"]
         output = self.window._button_rects["audio_output"]
-        beta = self.window._obo_badge_rect(mode, self.window._surface_scale())
-        circles = [output, translation, beta, mode]
+        self.assertEqual(set(self.window._button_rects), {"audio_output", "translation", "return"})
+        circles = [output, translation, mode]
         for circle in circles:
             self.assertEqual(circle.size(), mode.size())
             self.assertEqual(circle.width(), circle.height())
@@ -315,22 +315,18 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         self.assertTrue(all(image.pixelColor(x, y).alpha() < 70 for x, y in points))
         self.assertGreater(image.pixelColor(round(circle.center().x()), round(circle.top()) + 3).red(), 200)
 
-    def test_genuine_timing_switches_white_beta_to_gold_symbol_and_ring(self):
+    def test_genuine_timing_and_reading_strategy_do_not_add_top_badges_or_slots(self):
         self.window._reset_control_idle(100.0)
         inactive = self._controls()
-        circle = self.window._obo_badge_rect(self.window._window_control_base_rect(QRectF(self.window.rect())),
-                                             self.window._surface_scale()).toAlignedRect()
+        controls = dict(self.window._button_rects)
         self.owner.timed_lyrics = [(0.0, "Hello world"), (3.0, "Next")]
         self.owner.timed_lyric_units = [(SimpleNamespace(start_seconds=0.0, end_seconds=0.5, text="Hello "),
                                         SimpleNamespace(start_seconds=0.5, end_seconds=1.0, text="world")), ()]
         self.owner.timed_lyric_timing_kinds = ["unit", "line"]
         active = self._controls()
-        gold_points = [(x, y) for y in range(circle.top(), circle.bottom())
-                       for x in range(circle.left(), circle.right())
-                       if active.pixelColor(x, y).red() > 130
-                       and active.pixelColor(x, y).green() > 100
-                       and active.pixelColor(x, y).blue() < 80]
-        self.assertGreater(len(gold_points), 150)
-        self.assertTrue(any(y <= circle.top() + 2 for _, y in gold_points))
-        self.assertFalse(any(inactive.pixelColor(x, y).red() > 130
-                             and inactive.pixelColor(x, y).blue() < 80 for x, y in gold_points))
+        self.assertEqual(bytes(inactive.constBits()), bytes(active.constBits()))
+        self.assertEqual(controls, self.window._button_rects)
+        self.owner.music_surface_reading_strategy = "low_perception"
+        low_perception = self._controls()
+        self.assertEqual(bytes(active.constBits()), bytes(low_perception.constBits()))
+        self.assertEqual(controls, self.window._button_rects)

@@ -139,6 +139,7 @@ class Island:
         self.calls.append(("restore",))
         self._music_surface_active = False
     def show(self): self.calls.append(("show",))
+    def hide(self): self.calls.append(("hide",))
     def _show_music_fullscreen(self, **kwargs):
         self.calls.append(("surface", kwargs))
         self._music_surface_active = True
@@ -229,6 +230,44 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.assertIsNone(old[1]())
         self.controller.search("late")
         self.assertEqual(self.controller._source, "")
+
+    def test_song_surface_back_reuses_catalog_and_keeps_playback_and_search(self):
+        self.open()
+        self.player.play_queue((self.song,))
+        self.search("query")
+        self.window.hide()
+        self.island._music_surface_active = True
+        track_before = self.player.track
+        calls_before = tuple(self.service.calls)
+        self.assertTrue(self.controller.return_from_music_surface())
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(self.window.search.text(), "query")
+        self.assertIs(self.player.track, track_before)
+        self.assertEqual(tuple(self.service.calls), calls_before)
+        self.assertIn(("restore",), self.island.calls)
+        self.assertIn(("hide",), self.island.calls)
+        self.assertNotIn(("stop",), self.player.calls)
+        self.assertEqual(self.entry.calls, [])
+
+    def test_song_surface_back_reopens_playing_source_after_source_switch(self):
+        self.open()
+        self.player.play_queue((self.song,))
+        self.controller.switch_source()
+        self.assertTrue(self.controller.return_from_music_surface())
+        self.assertEqual(self.controller._source, "netease")
+        self.assertIsNotNone(self.player.track)
+        self.assertNotIn(("stop",), self.player.calls)
+        self.tasks.run(self.tasks.latest("open"))
+        self.assertEqual(self.window.collections, self.controller._collections)
+
+    def test_song_surface_back_rejects_system_and_disabled_owned_playback(self):
+        self.assertFalse(self.controller.return_from_music_surface())
+        self.player.play_queue((self.song,))
+        self.player.track = replace(self.player.track, track_id="external-song")
+        self.assertFalse(self.controller.return_from_music_surface())
+        self.player.track = replace(self.player.track, track_id="owned:netease:song-1")
+        self.settings.set("v2_owned_playback_enabled", False)
+        self.assertFalse(self.controller.return_from_music_surface())
 
     def test_recommendation_art_from_previous_source_cannot_replace_new_library(self):
         self.open()

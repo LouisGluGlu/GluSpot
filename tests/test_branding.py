@@ -15,36 +15,44 @@ class BrandingTests(unittest.TestCase):
 
         self.assertEqual(APP_NAME, "GluSpot")
         self.assertEqual(APP_VERSION, "6.412")
-        self.assertEqual(APP_ICON_PATH.name, "gluspot-card-center.ico")
-        self.assertEqual(TRAY_ICON_PATH.name, "gluspot.ico")
+        self.assertEqual(APP_ICON_PATH.name, "gluspot-glu.ico")
+        self.assertEqual(TRAY_ICON_PATH, APP_ICON_PATH)
         self.assertTrue(APP_ICON_PATH.exists())
         self.assertTrue(TRAY_ICON_PATH.exists())
 
-    def test_branding_icon_assets_use_black_white_card_mark(self):
+    def test_branding_icon_assets_use_transparent_glu_at_all_native_sizes(self):
         from PIL import Image
+        from local.branding import resolve_icon_paths
 
         root = Path(__file__).resolve().parents[1]
-        png_path = root / "assets" / "brand" / "gluspot-card-center-icon-256.png"
-        ico_path = root / "assets" / "brand" / "gluspot.ico"
+        paths = resolve_icon_paths()
+        png_path, ico_path = paths.preview_icon, paths.app_icon
 
-        image = Image.open(png_path).convert("RGBA")
+        with Image.open(png_path) as source:
+            self.assertEqual(source.info, {})
+            image = source.convert("RGBA")
         self.assertEqual(image.size, (256, 256))
 
-        def brightness(x: int, y: int) -> float:
-            red, green, blue, _alpha = image.getpixel((x, y))
-            return (red + green + blue) / 3.0
-
-        self.assertGreater(image.getpixel((0, 0))[3], 245)
-        self.assertGreater(brightness(16, 16), 236)
-        self.assertGreater(brightness(128, 54), 236)
-        self.assertLess(brightness(55, 130), 24)
-        self.assertLess(brightness(114, 130), 24)
-        self.assertLess(brightness(165, 130), 24)
-        self.assertLess(brightness(206, 130), 24)
-
+        self.assertEqual(image.getpixel((0, 0))[3], 0)
+        self.assertEqual(image.getpixel((128, 20))[3], 0)
+        pixels = [image.getpixel((x, y)) for y in range(image.height) for x in range(image.width)]
+        self.assertTrue(any(alpha == 255 and red < 30 for red, _, _, alpha in pixels))
+        self.assertTrue(any(alpha == 255 and red > 240 for red, _, _, alpha in pixels))
         with Image.open(ico_path) as ico:
-            self.assertGreaterEqual(ico.size[0], 16)
-            self.assertGreaterEqual(ico.size[1], 16)
+            sizes = {(size, size) for size in (16, 24, 32, 48, 64, 128, 256)}
+            self.assertEqual(ico.ico.sizes(), sizes)
+            for size in sorted(sizes):
+                frame = ico.ico.getimage(size).convert("RGBA")
+                self.assertEqual(frame.size, size)
+                self.assertEqual(frame.getpixel((0, 0))[3], 0)
+                self.assertIsNotNone(frame.getbbox())
+        svg = (root / "assets" / "brand" / "gluspot-glu.svg").read_text(encoding="utf-8")
+        self.assertIn("Impact outlines from the installation animation", svg)
+        self.assertEqual(re.findall(r'data-letter="([GLU])"', svg), ["G", "L", "U"])
+        self.assertNotIn("<text", svg)
+        self.assertNotIn("href=", svg)
+        self.assertNotIn("C:/Users/", svg)
+        self.assertIn('"gluspot-glu.ico"', (root / "GluSpot.spec").read_text(encoding="utf-8"))
 
     def test_windows_build_and_documented_version_match_runtime_branding(self):
         from local.branding import APP_VERSION
@@ -124,7 +132,7 @@ class BrandingTests(unittest.TestCase):
         self.assertNotIn("DynamicIsland", combined)
         self.assertNotIn("Island Stack V2", combined)
 
-    def test_app_uses_main_icon_and_distinct_tray_icon(self):
+    def test_app_uses_resolved_main_and_tray_icons(self):
         source = Path(__file__).resolve().parents[1].joinpath("local", "app.py").read_text(encoding="utf-8")
 
         self.assertIn("resolve_icon_paths", source)

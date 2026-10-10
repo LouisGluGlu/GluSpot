@@ -120,6 +120,32 @@ class MusicLibraryController(QObject):
             return
         self.switch_source()
 
+    def return_from_music_surface(self):
+        """Reopen the last account catalog without restarting its playback."""
+        if self._closed or not self.settings.get("v2_owned_playback_enabled", True):
+            return False
+        track = self.player.track
+        if track is None or not track.track_id.startswith("owned:"):
+            return False
+        source_id = track.track_id.split(":", 2)[1]
+        self._opening = None
+        self._opening_ready = False
+        self.window.finish_open_transition()
+        if getattr(self.island, "_music_surface_active", False):
+            self.island._restore_island_from_music_surface()
+        self.island.hide()
+        if hasattr(self.entry, "window"):
+            self.entry.window.hide()
+        account = self.window._account
+        if self._source == source_id and account is not None and account.logged_in:
+            self.window.set_loading(False)
+            self.window.show()
+            self.window.raise_()
+            self.window.activateWindow()
+        else:
+            self.open_source(source_id)
+        return True
+
     def _invalidate(self):
         self._epoch += 1
         self._request += 1

@@ -129,7 +129,7 @@ class MacPreferencesShellTests(unittest.TestCase):
             self.assertGreaterEqual(window.nav.iconSize().width(), 22)
             self.assertGreaterEqual(window.nav.iconSize().height(), 22)
             icon_paths = [page.get("icon_path", "") for page in window._settings_pages]
-            self.assertEqual(len(icon_paths), 6)
+            self.assertEqual(len(icon_paths), 4)
             self.assertTrue(all("assets" in str(path) and "seeting" in str(path) for path in icon_paths))
             self.assertTrue(all(Path(str(path)).exists() for path in icon_paths))
         finally:
@@ -152,35 +152,6 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn('setObjectName("MacTitle")', source)
         self.assertIn('setObjectName("MacContentScroll")', source)
         self.assertIn('setObjectName("MacCard")', source)
-
-    def test_plugin_settings_are_merged_into_settings_window(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("def _plugins_page", source)
-        self.assertIn('("插件设置", self._plugins_page())', source)
-        self.assertIn("NoWheelComboBox", source)
-        self.assertIn("NoWheelSpinBox", source)
-        self.assertIn("v2_plugin_timezone", source)
-        self.assertIn("v2_weather_use_location", source)
-        self.assertIn("v2_schedule_json_path", source)
-
-    def test_animation_speed_control_is_exposed(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("self.animation_speed = self._combo", source)
-        self.assertNotIn("self.animation_speed.parentWidget().hide()", source)
-
-    def test_animation_fps_controls_are_visible_and_refresh_rate_limited(self):
-        source = self._source("local/settings_window.py")
-        from local.settings_store import DEFAULT_SETTINGS
-
-        self.assertEqual(DEFAULT_SETTINGS["v2_animation_fps"], 60)
-        self.assertEqual(DEFAULT_SETTINGS["v2_lyric_animation_fps"], 120)
-        self.assertIn("_display_refresh_rate_fps_cap", source)
-        self.assertIn("self.fps_slider = self._slider_row", source)
-        self.assertIn("self.lyric_fps_slider = self._slider_row", source)
-        self.assertNotIn("self.fps_slider.parentWidget().hide()", source)
-        self.assertIn("高性能消耗", source)
 
     def test_about_diagnostics_can_export_support_payload(self):
         from local.settings_window import SettingsWindow
@@ -221,84 +192,6 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("v2_schedule_reminder_minutes", source)
         self.assertIn("v2_alarm_rows", source)
         self.assertIn("课表读取录入", source)
-
-    def test_time_settings_use_adapted_alarm_rows_instead_of_raw_iso_alarm_input(self):
-        settings_source = self._source("local/settings_window.py")
-        manager_source = self._source("local/plugin_manager_window.py")
-
-        self.assertIn("plugin_alarm_summary", settings_source)
-        self.assertIn("v2_alarm_rows", settings_source)
-        self.assertNotIn("plugin_alarm_at = QLineEdit", settings_source)
-        self.assertIn("alarm_rows_summary", manager_source)
-        self.assertIn("v2_alarm_rows", manager_source)
-        self.assertNotIn("alarm_input = QLineEdit", manager_source)
-
-    def test_future_island_style_placeholders_are_exposed(self):
-        settings_source = self._source("local/settings_window.py")
-        store_source = self._source("local/settings_store.py")
-        app_source = self._source("local/app.py")
-        visual_source = self._source("local/island_stack_visual.py")
-
-        for key in (
-            "v2_side_island_style",
-            "v2_plugin_island_style",
-            "v2_time_alarm_side_display",
-        ):
-            self.assertIn(key, store_source)
-            self.assertIn(key, settings_source)
-            self.assertIn(key, visual_source)
-
-        self.assertIn("time_alarm_side_display", settings_source)
-        self.assertIn("side_island_style", settings_source)
-        self.assertIn("plugin_island_style", settings_source)
-        self.assertIn("v2_music_island_style", store_source)
-        self.assertIn("v2_music_island_style", visual_source)
-        self.assertNotIn("self.music_island_style", settings_source)
-        self.assertIn("v2_time_alarm_side_display", app_source)
-
-    def test_expanded_music_layout_style_exposes_regular_and_dual_panel_choices(self):
-        from local.settings_store import DEFAULT_SETTINGS
-        from local.settings_window import SettingsWindow
-
-        settings_source = self._source("local/settings_window.py")
-        app_source = self._source("local/app.py")
-        visual_source = self._source("local/island_stack_visual.py")
-
-        self.assertEqual(DEFAULT_SETTINGS["v2_music_expanded_layout_style"], "standard")
-        self.assertIn("MUSIC_EXPANDED_LAYOUT_STYLES", settings_source)
-        self.assertIn('("常规", "standard")', settings_source)
-        self.assertIn('("双板", "dual_panel")', settings_source)
-        self.assertIn("v2_music_expanded_layout_style", app_source)
-        self.assertIn("v2_music_expanded_layout_style", visual_source)
-
-        island = FakeIslandWidget()
-        settings = FakeSettingsManager()
-        window = SettingsWindow(island, settings)
-        try:
-            self.assertTrue(hasattr(window, "music_expanded_layout_style"))
-            window._set_combo_data(window.music_expanded_layout_style, "dual_panel")
-            window._set_music_expanded_layout_style()
-            self.assertEqual(island.music_expanded_layout_style, "dual_panel")
-            self.assertEqual(settings.values["v2_music_expanded_layout_style"], "dual_panel")
-        finally:
-            window.close()
-
-    def test_music_background_style_owns_only_current_contextual_controls(self):
-        from local.settings_window import SettingsWindow
-
-        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
-        try:
-            for style in ("sea_level", "solid_album", "system"):
-                window._set_combo_data(window.music_ambience_style, style)
-                window._set_music_ambience_style()
-                self.assertEqual(window.wave_slider.parentWidget().isHidden(), style != "sea_level")
-                self.assertEqual(window.music_flow_slider.parentWidget().isHidden(), style != "sea_level")
-                self.assertEqual(window.solid_album_background_fallback.parentWidget().isHidden(), style != "solid_album")
-                self.assertEqual(window._music_ambience_controls.isHidden(), style == "system")
-            self.assertFalse(hasattr(window, "duotone_balance_slider"))
-            self.assertFalse(hasattr(window, "compact_duotone_balance_slider"))
-        finally:
-            window.close()
 
     def test_music_background_preview_uses_three_current_styles_and_system_theme(self):
         from local.settings_window import MusicAmbiencePreview, SettingsWindow
@@ -354,7 +247,7 @@ class MacPreferencesShellTests(unittest.TestCase):
                 finally:
                     window.close()
 
-    def test_removed_visual_settings_migrate_without_changing_wave_font(self):
+    def test_removed_visual_settings_migrate_to_fixed_defaults(self):
         from local import settings_store
 
         for retired in ("yaoguang", "bilateral_diffraction"):
@@ -380,12 +273,12 @@ class MacPreferencesShellTests(unittest.TestCase):
                     settings = settings_store.SettingsManager()
                     self.assertEqual(settings.get("v2_music_ambience_style"), "sea_level")
                     self.assertEqual(settings.get("v2_music_background_follow_previous_style"), "sea_level")
-                    self.assertEqual(settings.get("v2_wave_font_weight"), "heavy")
-                    self.assertEqual(settings.get("v2_lyric_font_size"), 21)
-                    self.assertTrue(settings.get("v2_enable_dual_line_lyrics"))
+                    self.assertEqual(settings.get("v2_wave_font_weight"), "bold")
+                    self.assertEqual(settings.get("v2_lyric_font_size"), 18)
+                    self.assertFalse(settings.get("v2_enable_dual_line_lyrics"))
                     self.assertTrue(settings._dirty)
                     self.assertNotIn(retired, settings.get("v2_music_ambience_values"))
-                    self.assertEqual(settings.get("v2_music_ambience_values")["sea_level"]["ambient_intensity"], 0.33)
+                    self.assertEqual(settings.get("v2_music_ambience_values")["sea_level"]["ambient_intensity"], 0.0)
                     settings.save_now()
                     migrated = json.loads(settings_file.read_text(encoding="utf-8"))
                     self.assertEqual(migrated["v2_music_ambience_style"], "sea_level")
@@ -400,11 +293,11 @@ class MacPreferencesShellTests(unittest.TestCase):
                     self.assertNotIn(retired, settings.get("v2_music_ambience_values"))
                     settings.save_now()
                     saved = json.loads(settings_file.read_text(encoding="utf-8"))
-                    self.assertEqual(saved["v2_wave_font_weight"], "heavy")
+                    self.assertEqual(saved["v2_wave_font_weight"], "bold")
                     self.assertNotIn(retired, saved["v2_music_ambience_values"])
                     self.assertTrue(settings_store._REMOVED_VISUAL_SETTING_KEYS.isdisjoint(saved))
 
-    def test_startup_ignores_removed_visual_options_and_preserves_wave_font_choice(self):
+    def test_startup_ignores_removed_visual_options_and_uses_fixed_wave_font(self):
         from local.app import LocalIslandApp
 
         controller = LocalIslandApp.__new__(LocalIslandApp)
@@ -428,8 +321,8 @@ class MacPreferencesShellTests(unittest.TestCase):
         with mock.patch("local.app._mydockfinder_process_diagnostics", return_value={"running": False}):
             controller._apply_saved_settings()
         controller.window.set_music_ambience_style.assert_called_once_with("sea_level", notify=False)
-        controller.window.set_wave_font_weight.assert_called_once_with("heavy", notify=False)
-        controller.window.set_lyric_font_size.assert_called_once_with(21, notify=False)
+        controller.window.set_wave_font_weight.assert_called_once_with("bold", notify=False)
+        controller.window.set_lyric_font_size.assert_called_once_with(18, notify=False)
         for method in (
             "set_wave_word_fill_enabled", "set_wave_color_fill_enabled", "set_lyric_elastic_strength",
             "set_lyric_elastic_mode", "set_lyric_word_spacing", "set_yaoguang_outer_color",
@@ -641,7 +534,7 @@ class MacPreferencesShellTests(unittest.TestCase):
                 }), encoding="utf-8")
                 settings = settings_store.SettingsManager()
                 self.assertEqual(settings.get("v2_music_surface_reading_lift_level"), 2)
-                self.assertEqual(settings.get("v2_lyric_font_size"), 21)
+                self.assertEqual(settings.get("v2_lyric_font_size"), 18)
                 settings.save_now()
                 saved = json.loads(settings_file.read_text(encoding="utf-8"))
                 self.assertEqual(saved["v2_music_surface_reading_lift_level"], 2)
@@ -760,7 +653,7 @@ class MacPreferencesShellTests(unittest.TestCase):
                 settings = settings_store.SettingsManager()
             self.assertEqual(settings.get("v2_music_sparse_highlight_seconds_per_unit"), 1.5)
 
-    def test_music_intro_cleanup_and_embedded_translation_share_existing_setting(self):
+    def test_music_intro_cleanup_remains_without_settings_translation_switch(self):
         from local.settings_window import SettingsWindow
 
         island = FakeIslandWidget()
@@ -768,18 +661,14 @@ class MacPreferencesShellTests(unittest.TestCase):
         window = SettingsWindow(island, settings)
         try:
             self.assertTrue(window.music_intro_cleanup_checkbox.isChecked())
-            window.music_intro_cleanup_checkbox.setChecked(False)
             window.music_intro_cleanup_checkbox.toggled.emit(False)
             self.assertFalse(settings.get("v2_music_intro_cleanup_enabled"))
             self.assertFalse(island.music_intro_cleanup_enabled)
-
-            self.assertFalse(window.music_surface_translation_checkbox.isChecked())
-            window.music_surface_translation_checkbox.setChecked(True)
-            window.music_surface_translation_checkbox.toggled.emit(True)
-            self.assertTrue(settings.get("v2_enable_dual_line_lyrics"))
+            for name in ("music_surface_translation_checkbox", "dual_line_lyrics_checkbox", "gelv_dual_line_checkbox"):
+                self.assertFalse(hasattr(window, name), name)
+            window._set_dual_line_lyrics(True)
             self.assertTrue(island.enable_dual_line_lyrics)
-            self.assertTrue(window.dual_line_lyrics_checkbox.isChecked())
-            self.assertFalse(hasattr(window, "gelv_dual_line_checkbox"))
+            window.sync_from_widget()
         finally:
             window.close()
 
@@ -794,7 +683,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertEqual(DEFAULT_SETTINGS["v2_music_background_follow_previous_style"], "")
         self.assertEqual(DEFAULT_SETTINGS["v2_dual_line_font_size"], 12)
         self.assertEqual(set(DEFAULT_SETTINGS["v2_music_ambience_values"]), {"sea_level", "solid_album", "system"})
-        self.assertEqual(DEFAULT_SETTINGS["v2_enabled_plugins"], ["time"])
+        self.assertEqual(DEFAULT_SETTINGS["v2_enabled_plugins"], [])
         self.assertIn("v2_mydockfinder_path", DEFAULT_SETTINGS)
         self.assertEqual(DEFAULT_SETTINGS["v2_mydockfinder_listener_process_names"], ["dock.exe"])
         self.assertIn("v2_last_window_position", DEFAULT_SETTINGS)
@@ -806,39 +695,12 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertNotIn("v2_taskbar_hint_text", DEFAULT_SETTINGS)
         self.assertNotIn("v2_taskbar_fusion_mode", DEFAULT_SETTINGS)
 
-    def test_reading_styles_share_controls_and_hide_retired_effect_panels(self):
-        from local.settings_window import SettingsWindow
-
-        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
-        try:
-            self.assertEqual(
-                [(window.lyric_flow_style.itemText(i), window.lyric_flow_style.itemData(i))
-                 for i in range(window.lyric_flow_style.count())],
-                [("波光逐流", "wave_stream"), ("格律宋散", "gelv_songscatter"), ("专辑岛", "album_island")],
-            )
-            common_panel = window._wave_stream_controls
-            for style in ("wave_stream", "gelv_songscatter"):
-                window._set_combo_data(window.lyric_flow_style, style)
-                window._set_lyric_flow_style()
-                self.assertIs(window._wave_stream_controls, common_panel)
-                self.assertFalse(common_panel.isHidden())
-                self.assertTrue(window.lyric_font_size.isEnabled())
-                self.assertTrue(window.wave_compact_cover_checkbox.isEnabled())
-            for name in ("_gelv_controls", "_ember_controls", "gelv_primary_font_size",
-                         "gelv_secondary_font_size", "gelv_initial_word_spacing", "gelv_word_spacing"):
-                self.assertFalse(hasattr(window, name), name)
-            source = self._source("local/settings_window.py")
-            self.assertNotIn('self._row(c, "全局字体", font_combo)', source)
-            self.assertNotIn('self.lyric_offset = self._slider_row(c, "歌词偏移"', source)
-        finally:
-            window.close()
-
     def test_media_page_uses_per_app_lyric_offsets_only(self):
         from local.settings_window import SettingsWindow
 
         source = self._source("local/settings_window.py")
         media_start = source.index("def _media_page")
-        media_end = source.index("def _appearance_page", media_start)
+        media_end = source.index("def _music_surface_lyrics_page", media_start)
         media_source = source[media_start:media_end]
         self.assertNotIn('self.lyric_offset = self._slider_row(c, "歌词偏移"', media_source)
         self.assertIn("_build_music_app_profile_panel", source)
@@ -893,27 +755,10 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("v2_album_island_compact_cover_size", app_source)
         self.assertIn("v2_album_island_expanded_cover_size", app_source)
 
-    def test_settings_window_exposes_location_mode_instead_of_old_taskbar_fusion_controls(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("LOCATION_MODES", source)
-        self.assertIn("location_mode", source)
-        self.assertIn("v2_location_mode", source)
-        self.assertIn("taskbar_corner_style", source)
-        self.assertIn("taskbar_auto_hide_mode", source)
-        self.assertIn("v2_taskbar_auto_hide_mode", source)
-        self.assertIn("dual_line_font_size", source)
-        self.assertNotIn("taskbar_recognition_threshold", source)
-        self.assertNotIn("taskbar_plugin_compact_style", source)
-        self.assertNotIn("taskbar_message_compact_style", source)
-        self.assertNotIn("TASKBAR_FUSION_MODES", source)
-        self.assertNotIn("taskbar_fusion_mode", source)
-        self.assertNotIn("taskbar_hint_text", source)
-
     def test_music_ambience_setting_is_renamed_to_background_style(self):
         source = self._source("local/settings_window.py")
 
-        self.assertIn("音乐岛背景样式", source)
+        self.assertIn('self._row(c, "背景样式", self.music_ambience_style)', source)
         self.assertNotIn("音乐岛光效", source)
 
     def test_settings_window_is_more_compact_with_rounded_shell(self):
@@ -945,11 +790,11 @@ class MacPreferencesShellTests(unittest.TestCase):
         appearance_source = source[appearance_start:appearance_end]
         self.assertIn("self._begin_compact_appearance_page(page)", appearance_source)
         self.assertIn("self._end_compact_appearance_page()", appearance_source)
-        self.assertIn("self.empty_island_display_mode = self._combo", appearance_source)
-        self.assertIn("无岛显示", appearance_source)
+        self.assertNotIn("self.empty_island_display_mode = self._combo", appearance_source)
+        self.assertNotIn("无岛显示", appearance_source)
         self.assertNotIn("self._preview_frame(22)", appearance_source)
         media_start = source.index("def _media_page")
-        media_end = source.index("def _appearance_page", media_start)
+        media_end = source.index("def _music_surface_lyrics_page", media_start)
         media_source = source[media_start:media_end]
         self.assertIn("MusicAmbiencePreview", media_source)
 
@@ -967,6 +812,8 @@ class MacPreferencesShellTests(unittest.TestCase):
             self.assertIn("runtime_bottleneck", window._diagnostic_labels)
             self.assertIn("runtime_trace", window._diagnostic_labels)
             self.assertIn("lyric_timeline_lag", window._diagnostic_labels)
+            self.assertFalse(any(key.startswith(("message_", "wechat_", "qq_notification_", "dingtalk_notification_"))
+                                 for key in window._diagnostic_labels))
             self.assertTrue(all(label.objectName() == "DiagnosticValue" for label in labels))
             self.assertTrue(all(label.wordWrap() for label in labels))
             self.assertTrue(
@@ -1011,9 +858,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("grid = QGridLayout(row_widget)", source)
         self.assertIn("grid.addWidget(indicator, 0, 0", source)
         self.assertIn("grid.setColumnMinimumWidth(0, 12)", source)
-        self.assertIn('self._indicator_row(p, "MyDockFinder 监听"', source)
-        self.assertIn('self._indicator_row(p, "Tasker 圆角"', source)
-        self.assertIn('self._indicator_row(p, "Tasker 左侧竖线"', source)
+        self.assertIn('self._indicator_row(c, "检测状态"', source)
 
     def test_retired_effects_have_no_settings_search_entry(self):
         from local.settings_window import SettingsWindow
@@ -1023,76 +868,8 @@ class MacPreferencesShellTests(unittest.TestCase):
             indexed = " ".join(" ".join(entry["terms"]) for entry in window._settings_search_entries)
             for label in ("明灭余烬", "歌词炫彩", "双色占比", "初始字词间距", "平排"):
                 self.assertNotIn(label, indexed, label)
-            for label in ("格律宋散", "波光逐流", "系统", "透视"):
+            for label in ("格律宋散", "波光逐流", "系统"):
                 self.assertIn(label, indexed, label)
-        finally:
-            window.close()
-
-    def test_shared_reader_has_no_legacy_fill_switches_in_either_typeface(self):
-        from local.settings_window import SettingsWindow
-
-        for style in ("wave_stream", "gelv_songscatter"):
-            island = FakeIslandWidget()
-            island.lyric_flow_style = style
-            window = SettingsWindow(island, FakeSettingsManager())
-            try:
-                for name in ("gelv_word_fill_checkbox", "ember_word_fill_checkbox", "wave_word_fill_checkbox",
-                             "wave_color_fill_checkbox", "gelv_color_fill_checkbox", "ember_color_fill_checkbox"):
-                    self.assertFalse(hasattr(window, name), name)
-                labels = [label.text() for label in window._wave_stream_controls.findChildren(QLabel)]
-                self.assertIn("歌词字号", labels)
-                self.assertIn("第二行内容", labels)
-                self.assertIn("双语显示/双行显示", labels)
-                self.assertNotIn("歌词炫彩", labels)
-                self.assertNotIn("歌词读字", labels)
-            finally:
-                window.close()
-
-    def test_gelv_shared_reader_remains_available_on_all_backgrounds(self):
-        from local.settings_window import SettingsWindow
-
-        for background in ("sea_level", "solid_album", "system"):
-            island = FakeIslandWidget()
-            island.lyric_flow_style = "gelv_songscatter"
-            island.music_ambience_style = background
-            island.gelv_color_fill_enabled = True
-            window = SettingsWindow(island, FakeSettingsManager())
-            try:
-                self.assertFalse(window._wave_stream_controls.isHidden())
-                self.assertTrue(window.lyric_font_size.isEnabled())
-                self.assertFalse(hasattr(window, "gelv_color_fill_indicator"))
-                self.assertFalse(hasattr(window, "gelv_color_fill_checkbox"))
-            finally:
-                window.close()
-
-    def test_wave_has_no_legacy_animation_details_and_keeps_font_and_bilingual_choices(self):
-        from local.settings_window import SettingsWindow
-
-        island = FakeIslandWidget()
-        island.lyric_flow_style = "wave_stream"
-        island.wave_font_weight = "heavy"
-        island.enable_dual_line_lyrics = True
-        settings = FakeSettingsManager()
-        settings.values["v2_wave_font_weight"] = "heavy"
-        window = SettingsWindow(island, settings)
-        try:
-            for name in (
-                "_wave_stream_detail_toggle", "wave_word_fill_checkbox", "wave_color_fill_checkbox",
-                "wave_word_fill_indicator", "wave_color_fill_indicator", "lyric_elastic_strength",
-                "lyric_elastic_mode", "lyric_word_spacing",
-            ):
-                self.assertFalse(hasattr(window, name), name)
-            self.assertEqual(window.wave_font_weight.currentData(), "heavy")
-            self.assertTrue(window.dual_line_lyrics_checkbox.isChecked())
-            self.assertTrue(window.dual_line_secondary_source.isEnabled())
-            self.assertTrue(window.dual_line_font_size.isEnabled())
-            self.assertTrue(hasattr(window, "wave_compact_cover_checkbox"))
-            window._set_combo_data(window.wave_font_weight, "bold")
-            window._set_wave_font_weight()
-            self.assertEqual(island.wave_font_weight, "bold")
-            self.assertEqual(settings.values["v2_wave_font_weight"], "bold")
-            window.sync_from_widget()
-            self.assertEqual(window.wave_font_weight.currentData(), "bold")
         finally:
             window.close()
 
@@ -1106,54 +883,9 @@ class MacPreferencesShellTests(unittest.TestCase):
         window = SettingsWindow(island, settings)
         try:
             self.assertEqual(window.lyric_flow_style.currentData(), "wave_stream")
-            self.assertFalse(window._wave_stream_controls.isHidden())
-            self.assertTrue(window.lyric_font_size.isEnabled())
+            window.sync_from_widget()
             self.assertEqual(window.lyric_flow_style.findData("ember_fade"), -1)
             self.assertFalse(hasattr(window, "_ember_controls"))
-        finally:
-            window.close()
-
-    def test_gelv_uses_shared_font_sizes_without_retired_effect_sliders(self):
-        from local.settings_window import SettingsWindow
-
-        island = FakeIslandWidget()
-        island.lyric_flow_style = "gelv_songscatter"
-        settings = FakeSettingsManager()
-        window = SettingsWindow(island, settings)
-        try:
-            self.assertEqual((window.lyric_font_size.minimum(), window.lyric_font_size.maximum()), (14, 24))
-            self.assertEqual((window.dual_line_font_size.minimum(), window.dual_line_font_size.maximum()), (8, 20))
-            window.lyric_font_size.setValue(22)
-            self.assertEqual(island.lyric_font_size, 22)
-            self.assertEqual(settings.get("v2_lyric_font_size"), 22)
-            for name in ("ember_font_size", "ember_back_opacity", "ember_blur_panel_strength", "ember_lyric_offset"):
-                self.assertFalse(hasattr(window, name), name)
-        finally:
-            window.close()
-
-    def test_gelv_shared_bilingual_and_cover_choices_survive_style_switches(self):
-        from local.settings_window import SettingsWindow
-
-        island = FakeIslandWidget()
-        island.lyric_flow_style = "gelv_songscatter"
-        settings = FakeSettingsManager()
-        window = SettingsWindow(island, settings)
-        try:
-            window._set_dual_line_lyrics(True)
-            window._set_compact_lyric_show_cover(False)
-            self.assertTrue(island.enable_dual_line_lyrics)
-            self.assertTrue(settings.get("v2_enable_dual_line_lyrics"))
-            self.assertFalse(island.compact_lyric_show_cover)
-            self.assertFalse(settings.get("v2_compact_lyric_show_cover"))
-            for style in ("wave_stream", "gelv_songscatter"):
-                window._set_combo_data(window.lyric_flow_style, style)
-                window._set_lyric_flow_style()
-                window.sync_from_widget()
-                self.assertTrue(window.dual_line_lyrics_checkbox.isChecked())
-                self.assertFalse(window.wave_compact_cover_checkbox.isChecked())
-                self.assertTrue(window.dual_line_secondary_source.isEnabled())
-            self.assertFalse(hasattr(window, "ember_line_mode"))
-            self.assertFalse(hasattr(window, "ember_italic_checkbox"))
         finally:
             window.close()
 
@@ -1183,14 +915,6 @@ class MacPreferencesShellTests(unittest.TestCase):
         try:
             island.media_refresh_calls.clear()
             window._set_dual_line_lyrics(True)
-            self.assertEqual(island.media_refresh_calls, ["provider"])
-
-            island.media_refresh_calls.clear()
-            window.dual_line_secondary_source.blockSignals(True)
-            window.dual_line_secondary_source.setCurrentIndex(1)
-            window.dual_line_secondary_source.blockSignals(False)
-            window._set_dual_line_secondary_source()
-            self.assertEqual(settings.values["v2_dual_line_secondary_source"], "transliteration")
             self.assertEqual(island.media_refresh_calls, ["provider"])
 
             island.media_refresh_calls.clear()
@@ -1244,104 +968,29 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("from local.no_wheel_widgets import NoWheelComboBox, NoWheelSlider, NoWheelSpinBox", source)
         self.assertIn("slider = NoWheelSlider(Qt.Orientation.Horizontal)", source)
 
-    def test_settings_exposes_empty_display_modes_instead_of_stream_palette(self):
-        source = self._source("local/settings_window.py")
-        defaults = self._source("local/settings_store.py")
-
-        self.assertIn("v2_empty_island_display_mode", defaults)
-        self.assertIn("v2_empty_island_display_mode", source)
-        self.assertIn("v2_no_music_island_priority", defaults)
-        self.assertIn("v2_no_music_island_priority", source)
-        self.assertIn("no_music_island_priority", source)
-        self.assertIn("无音乐岛时优先", source)
-        self.assertIn("无岛显示", source)
-        self.assertIn("visible_bar", source)
-        self.assertIn("text", source)
-        self.assertIn("time", source)
-        self.assertNotIn("hidden_bar", source)
-        self.assertNotIn('"v2_empty_island_display_mode": "hidden_bar"', defaults)
-        self.assertIn("empty_time_seconds_checkbox", source)
-        self.assertIn("empty_time_seconds_row", source)
-        self.assertIn("_update_empty_island_time_seconds_visibility", source)
-        self.assertIn('self._row(ep, "时间显秒"', source)
-        self.assertIn('mode == "time"', source)
-        self.assertNotIn("空态流光设置", source)
-        self.assertNotIn("EMPTY_BAR_PALETTES", source)
-        self.assertNotIn("_empty_bar_preview_colors", source)
-        self.assertNotIn("self.empty_palette", source)
-
-    def test_time_plugin_exposes_seconds_toggle_shared_with_empty_time(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("time_seconds_checkbox", source)
-        self.assertIn('self._row(t, "时间显秒"', source)
-        self.assertIn("empty_time_seconds_checkbox", source)
-        self.assertIn('("seconds_checkbox", "time_seconds_checkbox", "empty_time_seconds_checkbox")', source)
-
-    def test_settings_search_displays_ranked_content_results_and_predicts_terms(self):
+    def test_settings_search_displays_ranked_retained_results_and_predicts_terms(self):
         from local.settings_window import SettingsWindow
 
         window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
         try:
-            normal_nav = [window.nav.item(index).text() for index in range(window.nav.count())]
-
-            window.search_input.setText("时间显秒")
+            normal_nav = [window.nav.item(i).text() for i in range(window.nav.count())]
+            window.search_input.setText("背景样式")
             self.assertIs(window.stack.currentWidget(), window.settings_search_page)
-            self.assertEqual([window.nav.item(index).text() for index in range(window.nav.count())], normal_nav)
-            result_titles = [
-                label.text()
-                for label in window.settings_search_page.findChildren(QLabel)
-                if label.objectName() == "SearchResultTitle"
-            ]
-            self.assertGreater(len(result_titles), 0)
-            self.assertEqual(result_titles[0], "时间显秒")
-
-            completer = window.search_input.completer()
-            suggestions = [
-                completer.model().index(row, 0).data()
-                for row in range(completer.model().rowCount())
-            ]
-            self.assertIn("时间显秒", suggestions)
-
-            window.search_input.setText("时秒")
-            fuzzy_titles = [
-                label.text()
-                for label in window.settings_search_page.findChildren(QLabel)
-                if label.objectName() == "SearchResultTitle"
-            ]
-            self.assertIn("时间显秒", fuzzy_titles)
-
-            window.search_input.setText("无音频隐藏")
-            hide_titles = [
-                label.text()
-                for label in window.settings_search_page.findChildren(QLabel)
-                if label.objectName() == "SearchResultTitle"
-            ]
-            self.assertGreater(len(hide_titles), 0)
-            self.assertEqual(hide_titles[0], "音乐岛自动识别：无音频时隐藏")
-
+            self.assertEqual([window.nav.item(i).text() for i in range(window.nav.count())], normal_nav)
+            titles = [label.text() for label in window.settings_search_page.findChildren(QLabel)
+                      if label.objectName() == "SearchResultTitle"]
+            self.assertEqual(titles[0], "背景样式")
+            model = window.search_input.completer().model()
+            self.assertIn("背景样式", [model.index(row, 0).data() for row in range(model.rowCount())])
+            window.search_input.setText("背样式")
+            titles = [label.text() for label in window.settings_search_page.findChildren(QLabel)
+                      if label.objectName() == "SearchResultTitle"]
+            self.assertIn("背景样式", titles)
             window.search_input.clear()
             self.assertIsNot(window.stack.currentWidget(), window.settings_search_page)
-            self.assertEqual([window.nav.item(index).text() for index in range(window.nav.count())][:4], ["基础设置", "媒体控制", "全屏歌词", "插件设置"])
+            self.assertEqual(normal_nav, ["基础设置", "媒体控制", "全屏歌词", "关于我"])
         finally:
             window.close()
-
-    def test_tasker_marks_shared_bilingual_control_unavailable_for_both_fonts(self):
-        from local.settings_window import SettingsWindow
-
-        for style in ("wave_stream", "gelv_songscatter"):
-            island = FakeIslandWidget()
-            island.location_mode = "tasker"
-            island.lyric_flow_style = style
-            island.enable_dual_line_lyrics = True
-            window = SettingsWindow(island, FakeSettingsManager())
-            try:
-                self.assertFalse(window.wave_dual_line_indicator._active)
-                self.assertFalse(window.dual_line_lyrics_checkbox.isEnabled())
-                self.assertIn("Tasker", window.wave_dual_line_indicator.toolTip())
-                self.assertFalse(hasattr(window, "gelv_dual_line_checkbox"))
-            finally:
-                window.close()
 
     def test_theme_following_restores_sea_level_and_explicit_system_stays_system(self):
         from local.settings_window import SettingsWindow
@@ -1372,29 +1021,20 @@ class MacPreferencesShellTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_music_background_follow_theme_defaults_tasker_follow_and_warns_when_disabled(self):
+    def test_music_background_follow_theme_does_not_change_retired_tasker_setting(self):
         from local.settings_window import SettingsWindow
 
         island = FakeIslandWidget()
         settings = FakeSettingsManager()
-        settings.values["v2_music_background_follow_theme"] = False
-        settings.values["v2_tasker_follow_taskbar_color"] = False
         window = SettingsWindow(island, settings)
         try:
             window._set_music_background_follow_theme(True)
-            self.assertTrue(settings.values["v2_music_background_follow_theme"])
-            self.assertTrue(settings.values["v2_tasker_follow_taskbar_color"])
-            self.assertTrue(island.tasker_follow_taskbar_color)
-
-            window._set_tasker_follow_taskbar_color(False)
-            self.assertFalse(settings.values["v2_tasker_follow_taskbar_color"])
-            hints = getattr(window, "tasker_follow_taskbar_color_hint_labels", [])
-            self.assertGreater(len(hints), 0)
-            self.assertTrue(any(not hint.isHidden() for hint in hints))
-
+            self.assertTrue(settings.get("v2_music_background_follow_theme"))
+            self.assertFalse(settings.get("v2_tasker_follow_taskbar_color"))
+            self.assertFalse(island.tasker_follow_taskbar_color)
+            self.assertFalse(hasattr(window, "tasker_follow_taskbar_color_checkbox"))
             window._set_music_background_follow_theme(False)
-            self.assertFalse(settings.values["v2_music_background_follow_theme"])
-            self.assertTrue(all(hint.isHidden() for hint in hints))
+            self.assertFalse(settings.get("v2_music_background_follow_theme"))
         finally:
             window.close()
 
@@ -1427,67 +1067,14 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("set(DEFAULT_MUSIC_AMBIENCE_VALUES)", source)
         self.assertNotIn('{"pure_black", "bilateral_diffraction", "pure_white"} if active_fill', source)
 
-    def test_location_mode_options_reflect_manual_finder_state(self):
-        source = self._source("local/settings_window.py")
+    def test_app_position_uses_fixed_top_default_after_old_manual_choices(self):
+        from local.app import LocalIslandApp
 
-        self.assertIn("mydockfinder_running", source)
-        self.assertIn('("Free", "free"), ("Finder", "finder")', source)
-        self.assertIn('("Top", "top"), ("Free", "free"), ("Tasker", "tasker")', source)
-        self.assertIn("_refresh_location_mode_options", source)
-
-    def test_taskbar_auto_hide_mode_setting_is_persisted_and_applied(self):
-        source = self._source("local/settings_window.py")
-        app_source = self._source("local/app.py")
-        store_source = self._source("local/settings_store.py")
-
-        self.assertIn("TASKBAR_AUTO_HIDE_MODES", source)
-        self.assertIn("_set_taskbar_auto_hide_mode", source)
-        self.assertIn("v2_taskbar_auto_hide_mode", source)
-        self.assertIn("set_taskbar_auto_hide_mode", app_source)
-        self.assertIn('"v2_taskbar_auto_hide_mode": "auto"', store_source)
-
-    def test_stick_location_mode_is_preserved_as_internal_drag_state(self):
-        settings_source = self._source("local/settings_window.py")
-        app_source = self._source("local/app.py")
-
-        self.assertIn('{"finder", "free", "top", "tasker", "stick"}', app_source)
-        self.assertIn('current == "stick"', settings_source)
-        self.assertIn('("Stick", "stick")', settings_source)
-        self.assertIn('("Top", "top")', settings_source)
-
-    def test_top_notch_height_mode_setting_is_persisted_and_applied(self):
-        from local.settings_window import SettingsWindow
-
-        source = self._source("local/settings_window.py")
-        self.assertIn("Top/Stick 高度", source)
-        island = FakeIslandWidget()
-        settings = FakeSettingsManager()
-        window = SettingsWindow(island, settings)
-        try:
-            self.assertTrue(hasattr(window, "top_notch_height_mode"))
-            window._set_combo_data(window.top_notch_height_mode, "spacious")
-            window._set_top_notch_height_mode()
-
-            self.assertEqual(island.top_notch_height_mode, "spacious")
-            self.assertEqual(settings.values["v2_top_notch_height_mode"], "spacious")
-        finally:
-            window.close()
-
-    def test_weather_and_agenda_plugins_are_enabled_interfaces(self):
-        source = self._source("local/settings_window.py")
-        app_source = self._source("local/app.py")
-        provider_source = self._source("api/plugin_provider.py")
-
-        self.assertIn('known = ["time", "weather", "agenda"]', source)
-        self.assertIn('known = ["time", "weather", "agenda"]', app_source)
-        self.assertIn('enabled.append("weather")', source)
-        self.assertIn('enabled.append("agenda")', source)
-        self.assertIn('if "weather" in enabled:', provider_source)
-        self.assertIn('if "agenda" in enabled:', provider_source)
-        self.assertNotIn("天气插件（待开发）", source)
-        self.assertNotIn("日程插件（待开发）", source)
-        self.assertNotIn("weather_card.setEnabled(False)", source)
-        self.assertNotIn("agenda_card.setEnabled(False)", source)
+        controller = LocalIslandApp.__new__(LocalIslandApp)
+        controller.settings = FakeSettingsManager()
+        for old_mode in ("finder", "free", "top", "tasker", "stick"):
+            controller.settings.values["v2_location_mode"] = old_mode
+            self.assertEqual(controller._location_mode_setting(), "top")
 
     def test_settings_exposes_mydockfinder_listener_path(self):
         source = self._source("local/settings_window.py")
@@ -1509,24 +1096,6 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("mydockfinder_status_label", source)
         self.assertIn("_mydockfinder_status_text", source)
         self.assertIn("_mydockfinder_process_diagnostics", app_source)
-
-    def test_tasker_controls_are_gated_by_mydockfinder_indicator(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("taskbar_corner_status", source)
-        self.assertIn("taskbar_left_handle_status", source)
-        self.assertIn("mydockfinder_running", source)
-        self.assertIn("not mydockfinder_running", source)
-
-    def test_position_page_exposes_explicit_position_presets_without_auto_snap(self):
-        source = self._source("local/settings_window.py")
-        visual_source = self._source("local/island_stack_visual.py")
-
-        self.assertIn("POSITION_PRESETS", source)
-        self.assertIn("position_preset", source)
-        self.assertIn("_set_position_preset", source)
-        self.assertIn("apply_position_preset", visual_source)
-        self.assertNotIn("_snap_top_center_window_pos", visual_source)
 
     def test_app_flushes_visual_position_snapshot_before_quit(self):
         from local.app import LocalIslandApp
@@ -1567,72 +1136,6 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("getOpenFileName", source)
         self.assertIn("getExistingDirectory", source)
 
-    def test_barrage_page_uses_screen_height_range_and_fullscreen_notification_style(self):
-        source = self._source("local/settings_window.py")
-        store_source = self._source("local/settings_store.py")
-        app_source = self._source("local/app.py")
-        visual_source = self._source("local/island_stack_visual.py")
-
-        self.assertIn("_barrage_position_max", source)
-        self.assertIn("self._barrage_position_max()", source)
-        self.assertNotIn('"弹幕位置", 0, 240', source)
-        self.assertIn("PLUGIN_FULLSCREEN_ALERT_STYLES", source)
-        self.assertIn("plugin_fullscreen_alert_style", source)
-        self.assertIn("v2_plugin_fullscreen_alert_style", store_source)
-        self.assertIn("v2_plugin_fullscreen_alert_style", app_source)
-        self.assertIn("set_plugin_fullscreen_alert_style", visual_source)
-        self.assertIn("v2_plugin_fullscreen_alert_x_offset", store_source)
-        self.assertIn("v2_plugin_fullscreen_alert_y_offset", store_source)
-        self.assertIn("set_plugin_fullscreen_alert_position", visual_source)
-        self.assertIn("plugin_fullscreen_alert_x_offset", source)
-        self.assertIn("plugin_fullscreen_alert_y_offset", source)
-        self.assertIn("v2_barrage_display_mode", store_source)
-        self.assertIn("v2_barrage_display_mode", app_source)
-        self.assertIn("BARRAGE_DISPLAY_MODES", source)
-        self.assertIn("_set_barrage_display_mode", source)
-
-    def test_barrage_adjustments_trigger_preview_without_hiding_island(self):
-        source = self._source("local/settings_window.py")
-        preview_start = source.index("def _begin_barrage_adjust_preview")
-        preview_end = source.index("def _touch", preview_start)
-        preview_source = source[preview_start:preview_end]
-        self.assertIn("show_barrage_preview", preview_source)
-        self.assertNotIn("set_settings_window_active(True)", preview_source)
-
-        for name in ("_set_barrage_y_offset", "_set_barrage_font_size", "_set_barrage_speed", "_set_barrage_backdrop", "_set_barrage_icon"):
-            start = source.index(f"def {name}")
-            end = source.index("\n    def ", start + 1)
-            method_source = source[start:end]
-            self.assertIn("_begin_barrage_adjust_preview()", method_source, name)
-
-    def test_plugin_alert_adjustments_trigger_preview(self):
-        source = self._source("local/settings_window.py")
-        preview_start = source.index("def _begin_plugin_alert_adjust_preview")
-        preview_end = source.index("\n    def ", preview_start + 1)
-        preview_source = source[preview_start:preview_end]
-        self.assertIn("show_plugin_fullscreen_alert_preview", preview_source)
-
-        for name in ("_set_plugin_fullscreen_alert_style", "_set_plugin_fullscreen_alert_x_offset", "_set_plugin_fullscreen_alert_y_offset"):
-            start = source.index(f"def {name}")
-            end = source.index("\n    def ", start + 1)
-            method_source = source[start:end]
-            self.assertIn("_begin_plugin_alert_adjust_preview()", method_source, name)
-
-    def test_plugin_fullscreen_alert_choices_use_fullscreen_when_wording(self):
-        from local.settings_window import SettingsWindow
-
-        self.assertEqual(
-            tuple(SettingsWindow.PLUGIN_FULLSCREEN_ALERT_STYLES),
-            (
-                ("弹幕提醒", "barrage"),
-                ("弹窗提醒", "toast"),
-                ("全屏提醒", "fullscreen"),
-            ),
-        )
-        source = self._source("local/settings_window.py")
-        self.assertIn('self._row(g, "全屏时提醒"', source)
-        self.assertNotIn('self._row(g, "全屏提醒"', source)
-
     def test_disabled_settings_options_are_visually_gray(self):
         style = self._source("local/mac_style.py")
 
@@ -1640,114 +1143,29 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("color: {t[\"disabled_text\"]}", style)
         self.assertIn("QComboBox QAbstractItemView::item:disabled", style)
 
-    def test_weather_and_agenda_plugin_options_are_available_indicator_rows(self):
-        from local.settings_window import SettingsWindow
-
-        island = FakeIslandWidget()
-        island.enabled_plugin_ids = {"time", "weather", "agenda"}
-        island.enabled_plugin_count = 3
-        window = SettingsWindow(island, FakeSettingsManager())
-        try:
-            self.assertTrue(window.plugin_weather_indicator._active)
-            self.assertTrue(window.plugin_agenda_indicator._active)
-            self.assertTrue(window.plugin_weather_enabled.isEnabled())
-            self.assertTrue(window.plugin_agenda_enabled.isEnabled())
-            self.assertTrue(window.plugin_weather_enabled.isChecked())
-            self.assertTrue(window.plugin_agenda_enabled.isChecked())
-            self.assertEqual(window.plugin_weather_indicator.toolTip(), "可用")
-            self.assertEqual(window.plugin_agenda_indicator.toolTip(), "可用")
-            self.assertEqual(window.plugin_weather_enabled.unavailable_reason(), "")
-            self.assertEqual(window.plugin_agenda_enabled.unavailable_reason(), "")
-        finally:
-            window.close()
-
-
-    def test_appearance_page_exposes_settings_font_selection_and_import(self):
-        from local.settings_window import SettingsWindow
-
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("QFontDatabase", source)
-        self.assertIn("QFileDialog", source)
-        self.assertIn("settings_font_combo", source)
-        self.assertIn("import_settings_font_button", source)
-        self.assertIn("_import_settings_font", source)
-        self.assertIn("_apply_settings_font", source)
-        self.assertIn("addApplicationFont", source)
-        self.assertIn("v2_settings_font_family", source)
-        self.assertIn("v2_imported_settings_fonts", source)
-        self.assertIn("load_embedded_lyric_fonts", source)
-        self.assertEqual(
-            SettingsWindow.FONT_CHOICES,
-            (
-                "Alibaba PuHuiTi",
-                "Alibaba PuHuiTi Heavy",
-                "Noto Serif SC ExtraBold",
-                "JiangChengXieSong 700W",
-                "JiangChengXieSong 900W",
-            ),
-        )
-        self.assertNotIn("PingFang SC", SettingsWindow.FONT_CHOICES)
-        self.assertNotIn("Source Han Serif SC", SettingsWindow.FONT_CHOICES)
-
-    def test_settings_font_reports_actual_applied_family(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("settings_font_status", source)
-        self.assertIn("_resolve_settings_font_family", source)
-        self.assertIn("_update_settings_font_status", source)
-        self.assertIn("QApplication.instance()", source)
 
     def test_media_page_prioritizes_per_app_sync_profiles(self):
         source = self._source("local/settings_window.py")
+        start = source.index("def _media_page")
+        media = source[start:source.index("def _music_surface_lyrics_page", start)]
+        self.assertIn("music_sync_status", media)
+        self.assertLess(media.index("音乐软件监听"), media.index("音乐岛样式"))
+        self.assertLess(media.index("音乐岛样式"), media.index("歌词与预载"))
 
-        self.assertIn("music_sync_status", source)
-        self.assertIn("_music_app_profile_status_text", source)
-        self.assertIn("_update_music_app_profile_statuses", source)
-        self.assertNotIn("ncm_path_input", source)
-        self.assertLess(source.index("app_profile_title"), source.index("lyric_title"))
-        self.assertLess(source.index("app_profile_title"), source.index("background_title"))
-        self.assertLess(source.index("background_title"), source.index("lyric_title"))
+    def test_settings_window_is_arranged_by_four_function_pages(self):
+        from local.settings_window import SettingsWindow
 
-    def test_taskbar_left_handle_color_setting_is_exposed(self):
-        source = self._source("local/settings_window.py")
-        app_source = self._source("local/app.py")
-        visual_source = self._source("local/island_stack_visual.py")
-
-        self.assertIn("taskbar_left_handle_color", source)
-        self.assertIn("v2_taskbar_left_handle_color", source)
-        self.assertIn("ColorButton", source)
-        self.assertIn("v2_taskbar_left_handle_color", app_source)
-        self.assertIn("set_taskbar_left_handle_color", visual_source)
-
-    def test_plugin_count_slider_is_replaced_by_three_plugin_checkboxes(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("plugin_time_enabled", source)
-        self.assertIn("plugin_weather_enabled", source)
-        self.assertIn("plugin_agenda_enabled", source)
-        self.assertIn("v2_enabled_plugins", source)
-        self.assertNotIn("plugin_count = self._slider_row", source)
-        self.assertNotIn("插件数量", source)
-
-    def test_settings_window_is_arranged_by_function_pages(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("def _basic_settings_page", source)
-        self.assertIn("def _media_page", source)
-        self.assertIn("def _music_surface_lyrics_page", source)
-        self.assertIn("def _plugins_page", source)
-        self.assertIn("def _notification_page", source)
-        self.assertIn("def _about_page", source)
-        for name in ("基础设置", "媒体控制", "全屏歌词", "插件设置", "通知设置", "关于我"):
-            self.assertIn(name, source)
-        self.assertIn("self._basic_settings_page()", source)
-        self.assertLess(source.index("self._basic_settings_page()"), source.index("self._media_page()"))
-        self.assertLess(source.index("self._media_page()"), source.index("self._plugins_page()"))
-        self.assertLess(source.index("self._media_page()"), source.index("self._music_surface_lyrics_page()"))
-        self.assertLess(source.index("self._music_surface_lyrics_page()"), source.index("self._plugins_page()"))
-        self.assertLess(source.index("self._plugins_page()"), source.index("self._notification_page()"))
-        self.assertLess(source.index("self._notification_page()"), source.index("self._about_page()"))
+        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
+        try:
+            titles = [page["title"] for page in window._settings_pages]
+            self.assertEqual(titles, ["基础设置", "媒体控制", "全屏歌词", "关于我"])
+            self.assertEqual([window.nav.item(i).text() for i in range(window.nav.count())], titles)
+            window.sync_from_widget()
+            window.nav.setCurrentRow(3)
+            self.assertEqual(window._diagnostics_page_index, 3)
+            self.assertIs(window.stack.currentWidget(), window._settings_pages[3]["page"])
+        finally:
+            window.close()
 
     def test_about_page_exposes_custom_global_icon_picker(self):
         source = self._source("local/settings_window.py")
@@ -1796,24 +1214,35 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("v2_startup_mode", source)
         self.assertIn("v2_startup_mode", store_source)
 
-    def test_basic_settings_groups_mydockfinder_and_taskbar_controls(self):
+    def test_mydockfinder_listener_moves_to_media_page_and_preserves_setters(self):
         from local.settings_window import SettingsWindow
 
-        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
+        island = FakeIslandWidget()
+        settings = FakeSettingsManager()
+        window = SettingsWindow(island, settings)
         try:
+            basic, media = (window._settings_pages[i]["page"] for i in (0, 1))
+            self.assertFalse(basic.isAncestorOf(window.mydockfinder_path_input))
+            self.assertTrue(media.isAncestorOf(window.mydockfinder_path_input))
             self.assertEqual(window.mydockfinder_path_row.objectName(), "PathPickerRowStacked")
-            self.assertTrue(hasattr(window, "mydockfinder_listener_detail_toggle"))
-            self.assertTrue(hasattr(window, "mydockfinder_listener_detail_body"))
             self.assertFalse(window.mydockfinder_listener_detail_toggle.isChecked())
-            self.assertFalse(window.mydockfinder_listener_detail_body.isVisible())
-
-            section_titles = [
-                label.text()
-                for label in window.findChildren(QLabel)
-                if label.text() in {"位置与监听", "任务栏设置"}
-            ]
-            self.assertIn("位置与监听", section_titles)
-            self.assertIn("任务栏设置", section_titles)
+            self.assertTrue(window.mydockfinder_listener_detail_body.isHidden())
+            window.mydockfinder_path_input.setText('"C:/Fixture/MyDockFinder.exe"')
+            window._set_mydockfinder_path()
+            self.assertEqual(settings.get("v2_mydockfinder_path"), "C:/Fixture/MyDockFinder.exe")
+            self.assertEqual(island.mydockfinder_path, "C:/Fixture/MyDockFinder.exe")
+            process = next(name for name in window.mydockfinder_process_checkboxes if name != "dock.exe")
+            window._set_mydockfinder_listener_process(process, True)
+            self.assertIn(process, settings.get("v2_mydockfinder_listener_process_names"))
+            self.assertTrue(window.mydockfinder_process_checkboxes[process].isChecked())
+            window._set_mydockfinder_listener_process(process, False)
+            self.assertNotIn(process, settings.get("v2_mydockfinder_listener_process_names"))
+            island.mydockfinder_running = True
+            island.mydockfinder_diagnostics = {"matched_name": "dock.exe"}
+            window.sync_from_widget()
+            self.assertTrue(window.mydockfinder_status_indicator._active)
+            self.assertIn("dock.exe", window.mydockfinder_status_label.text())
+            self.assertNotIn("位置模式", window.mydockfinder_status_label.text())
         finally:
             window.close()
 
@@ -1836,6 +1265,159 @@ class MacPreferencesShellTests(unittest.TestCase):
 
         switch.setEnabled(True)
         self.assertEqual(switch.minimumHeight(), switch.CONTROL_HEIGHT)
+
+    def test_retired_settings_have_no_widgets_or_search_results(self):
+        from local.settings_window import SettingsWindow
+
+        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
+        try:
+            for name in (
+                "music_checkbox", "plugin_checkbox", "music_auto_checkbox", "empty_island_display_mode",
+                "no_music_island_priority", "location_mode", "top_notch_height_mode", "position_preset",
+                "taskbar_corner_style", "taskbar_auto_hide_mode", "taskbar_left_handle_color",
+                "settings_font_combo", "import_settings_font_button", "font_combo",
+                "super_topmost_checkbox", "expanded_checkbox",
+                "auto_bounds_checkbox", "expand_direction", "message_detection_checkbox",
+                "plugin_time_enabled", "plugin_weather_enabled", "plugin_agenda_enabled",
+                "barrage_display_mode", "barrage_y_offset", "barrage_font_size", "plugin_fullscreen_alert_style",
+                "music_reactive_background_checkbox", "music_reactive_background_intensity",
+                "music_expanded_layout_style", "wave_slider", "music_flow_slider", "solid_album_background_fallback",
+                "lyric_font_size", "wave_font_weight", "dual_line_lyrics_checkbox", "music_surface_translation_checkbox",
+                "dual_line_font_size", "dual_line_secondary_weight", "dual_line_secondary_spacing",
+                "wave_compact_cover_checkbox", "album_island_cover_count", "album_island_cover_size",
+                "album_island_spacing", "album_island_perspective_amount", "no_lyrics_input", "no_lyrics_display_mode",
+            ):
+                self.assertFalse(hasattr(window, name), name)
+            indexed = " ".join(" ".join(entry["terms"]) for entry in window._settings_search_entries)
+            for label in ("插件设置", "通知设置", "字体设置", "字体导入", "岛屿启用", "无岛显示", "位置与监听",
+                          "Tasker 圆角", "律动强度", "双语字号", "专辑间距", "透视程度", "时间显秒", "展开态界面"):
+                self.assertNotIn(label, indexed, label)
+                window.search_input.setText(label)
+                titles = [entry["title"] for entry in window._settings_search_entries
+                          if entry["title"] == label]
+                self.assertEqual(titles, [], label)
+            window.search_input.clear()
+            window.sync_from_widget()
+        finally:
+            window.close()
+
+    def test_background_choices_use_fixed_style_defaults_after_legacy_custom_values(self):
+        from local.settings_store import DEFAULT_MUSIC_AMBIENCE_VALUES
+        from local.settings_window import SettingsWindow
+
+        island = FakeIslandWidget()
+        settings = FakeSettingsManager()
+        settings.values["v2_music_ambience_values"] = {"sea_level": {"ambient_intensity": .99, "music_flow_intensity": .01}}
+        window = SettingsWindow(island, settings)
+        try:
+            self.assertEqual([window.music_ambience_style.itemData(i) for i in range(window.music_ambience_style.count())],
+                             ["sea_level", "solid_album", "system"])
+            for style, values in DEFAULT_MUSIC_AMBIENCE_VALUES.items():
+                window._set_combo_data(window.music_ambience_style, style)
+                window._set_music_ambience_style()
+                self.assertEqual(island.music_ambience_style, style)
+                self.assertEqual(settings.get("v2_music_ambience_style"), style)
+                self.assertEqual(island.ambient_intensity, values["ambient_intensity"])
+                self.assertEqual(island.music_flow_intensity, values["music_flow_intensity"])
+                self.assertEqual(window.music_preview._style, style)
+                window.sync_from_widget()
+        finally:
+            window.close()
+
+    def test_simple_lyric_styles_and_preload_remain_usable_without_fine_controls(self):
+        from local.settings_window import SettingsWindow
+
+        island = FakeIslandWidget()
+        settings = FakeSettingsManager()
+        window = SettingsWindow(island, settings)
+        try:
+            self.assertEqual([window.lyric_flow_style.itemData(i) for i in range(window.lyric_flow_style.count())],
+                             ["wave_stream", "gelv_songscatter", "album_island"])
+            for style in ("wave_stream", "gelv_songscatter", "album_island"):
+                window._set_combo_data(window.lyric_flow_style, style)
+                window._set_lyric_flow_style()
+                self.assertEqual(island.lyric_flow_style, style)
+                self.assertEqual(settings.get("v2_lyric_flow_style"), style)
+                self.assertEqual(window.reset_album_record_button.isHidden(), style != "album_island")
+                window.sync_from_widget()
+            window.music_surface_preload_count.setValue(3)
+            self.assertEqual(settings.get("v2_music_surface_preload_count"), 3)
+            settings.set("v2_music_surface_preload_count", 5)
+            window.sync_from_widget()
+            self.assertEqual(window.music_surface_preload_count.value(), 5)
+        finally:
+            window.close()
+
+    def test_settings_uses_default_embedded_font_despite_legacy_selection(self):
+        from local.settings_store import DEFAULT_SETTINGS
+        from local.settings_window import SettingsWindow
+
+        settings = FakeSettingsManager()
+        settings.values["v2_settings_font_family"] = "JiangChengXieSong 900W"
+        window = SettingsWindow(FakeIslandWidget(), settings)
+        try:
+            requested = DEFAULT_SETTINGS["v2_settings_font_family"]
+            from PySide6.QtGui import QFont
+            self.assertEqual(window.font().weight(), window.SETTINGS_FONT_WEIGHTS.get(requested, QFont.Weight.Normal))
+            self.assertEqual(window.font().families(), list(window.SETTINGS_FONT_FALLBACKS[requested]))
+            self.assertFalse(hasattr(window, "settings_font_combo"))
+            self.assertTrue(hasattr(window, "app_icon_preview"))
+        finally:
+            window.close()
+
+    def test_secondary_content_choice_remains_on_fullscreen_page_without_lookup(self):
+        from local.settings_window import SettingsWindow
+
+        island = FakeIslandWidget()
+        settings = FakeSettingsManager()
+        window = SettingsWindow(island, settings)
+        try:
+            fullscreen = window._settings_pages[2]["page"]
+            self.assertTrue(fullscreen.isAncestorOf(window.dual_line_secondary_source))
+            self.assertEqual(window.dual_line_secondary_source.currentData(), "translation")
+            island.data_provider._request_immediate_media_refresh = mock.Mock()
+            window.dual_line_secondary_source.setCurrentIndex(window.dual_line_secondary_source.findData("transliteration"))
+            self.assertEqual(settings.get("v2_dual_line_secondary_source"), "transliteration")
+            self.assertFalse(settings.get("v2_enable_dual_line_lyrics"))
+            self.assertFalse(hasattr(island, "enable_dual_line_lyrics"))
+            # Changing the display choice requests a follow-up media refresh;
+            # the UI never performs a synchronous lyric/network lookup.
+            island.data_provider._request_immediate_media_refresh.assert_called_once_with()
+            settings.set("v2_dual_line_secondary_source", "translation")
+            window.sync_from_widget()
+            self.assertEqual(window.dual_line_secondary_source.currentData(), "translation")
+        finally:
+            window.close()
+
+    def test_general_animation_controls_remain_visible_and_persist(self):
+        from local.settings_window import SettingsWindow
+
+        island = FakeIslandWidget()
+        settings = FakeSettingsManager()
+        with mock.patch.object(SettingsWindow, "_display_refresh_rate_fps_cap", return_value=144):
+            window = SettingsWindow(island, settings)
+            try:
+                basic = window._settings_pages[0]["page"]
+                for control in (window.animation_speed, window.fps_slider, window.lyric_fps_slider):
+                    self.assertTrue(basic.isAncestorOf(control))
+                    self.assertFalse(control.isHidden())
+                self.assertEqual(window.fps_slider.maximum(), 144)
+                self.assertEqual(window.lyric_fps_slider.maximum(), 144)
+                island.set_animation_speed = mock.Mock(side_effect=lambda value, **_kwargs: setattr(island, "animation_speed", value))
+                window.animation_speed.setCurrentIndex(window.animation_speed.findData(2.0))
+                self.assertEqual(settings.get("v2_animation_speed"), 2.0)
+                window.fps_slider.setValue(90)
+                window.lyric_fps_slider.setValue(120)
+                self.assertEqual(settings.get("v2_animation_fps"), 90)
+                self.assertEqual(settings.get("v2_lyric_animation_fps"), 120)
+                island.animation_speed, island.animation_fps, island.lyric_animation_fps = 1.0, 60, 90
+                window.sync_from_widget()
+                self.assertEqual(window.animation_speed.currentData(), 1.0)
+                self.assertEqual(window.fps_slider.value(), 60)
+                self.assertEqual(window.lyric_fps_slider.value(), 90)
+                self.assertIn("高性能消耗", window.lyric_fps_slider._value_label.text())
+            finally:
+                window.close()
 
 
 if __name__ == "__main__":

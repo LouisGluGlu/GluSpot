@@ -98,8 +98,7 @@ class LyricRecoveryTests(unittest.TestCase):
                 translation = surface._button_rects["translation"]
                 self.assertEqual(translation.size(), mode.size())
                 self.assertEqual(translation.top(), mode.top())
-                anchor = surface._obo_badge_rect(mode, 1.0) if strategy == "gold" else mode
-                self.assertAlmostEqual(anchor.left() - translation.right(), 12.0)
+                self.assertAlmostEqual(mode.left() - translation.right(), 12.0)
         self.assertTrue(owner.enable_dual_line_lyrics)
         surface._toggle_translation()
         self.assertFalse(owner.enable_dual_line_lyrics)

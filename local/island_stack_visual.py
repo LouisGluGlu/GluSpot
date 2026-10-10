@@ -4,12 +4,8 @@ Local visual renderer for GluSpot.
 
 Controls:
   M       Toggle music island
-  P       Toggle persistent plugin island
-  N       Push/update a fake notification
-  C       Clear notifications
   F       Toggle Finder simulation / standalone mode
   Space   Expand / collapse island stack
-  1/2/3   Focus plugin: time / weather / schedule
   Esc     Quit
 """
 
@@ -29,7 +25,7 @@ from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 from ctypes import wintypes
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 MUSIC_CONTROL_ICON_DIR = ROOT_DIR / "assets" / "music_controls"
@@ -1181,8 +1177,13 @@ class IslandStackVisual(QWidget):
 
     def __init__(self, data_provider=None):
         super().__init__()
+        # Every live island retires extras independently of saved settings or
+        # provider output. Standalone legacy helper fixtures remain auditable.
+        self._runtime_extras_retired = True
         self.data_provider = data_provider or EmptyIslandDataProvider()
         visual_data = self.data_provider.get_visual_data()
+        if visual_data.messages or visual_data.plugins:
+            visual_data = replace(visual_data, messages=(), plugins=())
         self.finder_material: FinderGlassMaterial = read_finder_material(include_center=True)
         self.finder_mode = bool(self.finder_material.available)
         self.attach_to_real_finder = self.finder_mode
@@ -1286,7 +1287,7 @@ class IslandStackVisual(QWidget):
         self.music_cover_rect = QRectF()
         self.music_fullscreen_overlay: MusicSurfaceWindow | None = None
         self._music_cover_hover_motion = ArtworkHoverMotion()
-        self._audio_device_motion = IslandAudioDeviceMotion()
+        self._audio_device_motion = None
         self._audio_device_event_serial = 0
         self._music_surface_active = False
         self._island_visible_before_music_surface = True
@@ -1295,9 +1296,9 @@ class IslandStackVisual(QWidget):
         self.music_surface_reading_gradient_steps = MUSIC_READING_GRADIENT_DEFAULT_STEPS
         self.music_surface_reading_strategy = MUSIC_READING_STRATEGY_DEFAULT
         self.music_sparse_highlight_seconds_per_unit = SPARSE_MIN_SECONDS_PER_UNIT
-        self.persistent_plugin = True
-        self.enabled_plugin_count = 1
-        self.enabled_plugin_ids = {"time"}
+        self.persistent_plugin = False
+        self.enabled_plugin_count = 0
+        self.enabled_plugin_ids = set()
         self.show_seconds = True
         self.expanded = False
         self.plugin_panel_open = False
@@ -1592,6 +1593,10 @@ class IslandStackVisual(QWidget):
             QTimer.singleShot(1300, self.add_message)
 
     def _apply_visual_data(self, visual_data: IslandVisualData, initial: bool = False) -> bool:
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            if visual_data.messages or visual_data.plugins:
+                visual_data = replace(visual_data, messages=(), plugins=())
+            self.messages = []
         now = time.monotonic()
         track = visual_data.track
         previous_track_id = getattr(self, "media_track_id", "")
@@ -1864,6 +1869,8 @@ class IslandStackVisual(QWidget):
         return image.scaled(limit, limit, Qt.AspectRatioMode.KeepAspectRatio, mode)
 
     def _ingest_provider_messages(self, visual_data: IslandVisualData):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         latest_by_app: dict[str, tuple[str, object]] = {}
         app_order: list[str] = []
         for message in visual_data.messages:
@@ -2795,14 +2802,17 @@ class IslandStackVisual(QWidget):
             self._refresh_taskbar_above_follow_position()
 
     def _handle_fullscreen_overlay_sync(self, now: float):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         self._ensure_fullscreen_plugin_barrage_messages(now)
         self._sync_fullscreen_plugin_alert_overlay(now)
 
     def _handle_tick_overlay_clock_and_topmost(self, now: float, anim_dt: float):
-        self._handle_fullscreen_overlay_sync(now)
-        barrage_hover_plan = self._barrage_hover_clock_plan(anim_dt)
-        self.barrage_hovered = barrage_hover_plan.hovered
-        self.barrage_clock += barrage_hover_plan.clock_delta
+        if not bool(getattr(self, "_runtime_extras_retired", False)):
+            self._handle_fullscreen_overlay_sync(now)
+            barrage_hover_plan = self._barrage_hover_clock_plan(anim_dt)
+            self.barrage_hovered = barrage_hover_plan.hovered
+            self.barrage_clock += barrage_hover_plan.clock_delta
         if self._topmost_reinforcement_due(now):
             self._force_super_topmost()
 
@@ -2810,7 +2820,8 @@ class IslandStackVisual(QWidget):
         visual_data_changed = bool(self._sync_music_background_to_theme())
         visual_data_changed = bool(self._refresh_media_data(now)) or visual_data_changed
         self._update_scene_state(now)
-        self._prune_expired_messages(now)
+        if not bool(getattr(self, "_runtime_extras_retired", False)):
+            self._prune_expired_messages(now)
         return visual_data_changed
 
     def _lyric_fallback_advance_plan(self, now: float, speed: float):
@@ -4472,6 +4483,8 @@ class IslandStackVisual(QWidget):
         super().hideEvent(event)
 
     def on_audio_device_event(self, route, device) -> None:
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         serial = int(getattr(route, "event_serial", 0) or 0)
         if serial <= int(getattr(self, "_audio_device_event_serial", 0)):
             return
@@ -4516,11 +4529,12 @@ class IslandStackVisual(QWidget):
         if music_surface is not None and music_surface.isVisible():
             self._refresh_media_data(now)
             self._update_scene_state(now)
-            self._prune_expired_messages(now)
-            self._handle_fullscreen_overlay_sync(now)
-            barrage_hover_plan = self._barrage_hover_clock_plan(anim_dt)
-            self.barrage_hovered = barrage_hover_plan.hovered
-            self.barrage_clock += barrage_hover_plan.clock_delta
+            if not bool(getattr(self, "_runtime_extras_retired", False)):
+                self._prune_expired_messages(now)
+                self._handle_fullscreen_overlay_sync(now)
+                barrage_hover_plan = self._barrage_hover_clock_plan(anim_dt)
+                self.barrage_hovered = barrage_hover_plan.hovered
+                self.barrage_clock += barrage_hover_plan.clock_delta
             self._handle_music_lyric_tick(now, speed)
             return
         visual_data_changed = self._handle_tick_runtime_refresh(now)
@@ -4941,6 +4955,8 @@ class IslandStackVisual(QWidget):
         return max(float(self.width()), float(viewport.width())) + float(content_width) + self._u(140.0)
 
     def _active_barrage_messages(self) -> list[Message]:
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return []
         previews = list(getattr(self, "barrage_preview_messages", []))
         fullscreen = list(getattr(self, "fullscreen_plugin_barrage_messages", []))
         return presentation_active_barrage_messages(
@@ -4999,6 +5015,8 @@ class IslandStackVisual(QWidget):
         )
 
     def _fullscreen_plugin_alerts(self, limit: int = 1) -> list[tuple]:
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return []
         if self._plugin_fullscreen_alert_preview_active():
             return [self._plugin_fullscreen_alert_preview()][: max(0, int(limit))]
         try:
@@ -5130,6 +5148,8 @@ class IslandStackVisual(QWidget):
         return self._barrage_viewport_rect()
 
     def _sync_plugin_alert_overlay(self, now: float):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         overlay = getattr(self, "plugin_alert_overlay", None)
         state = self._plugin_alert_overlay_state()
         if state is None:
@@ -5143,6 +5163,8 @@ class IslandStackVisual(QWidget):
         overlay.configure(state, self._fullscreen_plugin_alert_screen_rect(), now)
 
     def _sync_barrage_overlay(self, now: float):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         if self._fullscreen_plugin_alert_style() == "barrage":
             self._ensure_fullscreen_plugin_barrage_messages(now)
         overlay = getattr(self, "barrage_overlay", None)
@@ -5189,6 +5211,8 @@ class IslandStackVisual(QWidget):
         return messages
 
     def _ensure_fullscreen_plugin_barrage_messages(self, now: float):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         context_active = self._fullscreen_overlay_context_active()
         alert_style = self._fullscreen_plugin_alert_style()
         if not context_active or alert_style != "barrage":
@@ -5215,6 +5239,8 @@ class IslandStackVisual(QWidget):
         self.fullscreen_plugin_barrage_messages = self._fullscreen_plugin_alert_barrage_messages(repeat_count=10, now=now)
 
     def add_message(self):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         if not self.message_samples:
             return
         app, sender, text, name_color, avatar_color = self.message_samples[self.sample_index % len(self.message_samples)]
@@ -5227,6 +5253,8 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def show_barrage_preview(self):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         now = time.monotonic()
         if now - getattr(self, "last_barrage_preview_at", 0.0) < 0.18:
             return
@@ -5252,6 +5280,8 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def show_plugin_fullscreen_alert_preview(self):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         now = time.monotonic()
         self.plugin_fullscreen_alert_preview_until = now + 6.2
         self.fullscreen_plugin_barrage_alert_key = ""
@@ -5288,8 +5318,12 @@ class IslandStackVisual(QWidget):
 
     def keyPressEvent(self, event):
         key = event.key()
+        extras_retired = bool(getattr(self, "_runtime_extras_retired", False))
+        if extras_retired and key in (Qt.Key.Key_P, Qt.Key.Key_N, Qt.Key.Key_C,
+                Qt.Key.Key_0, Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_T):
+            return
         settings_changed = False
-        if self._handle_alarm_editor_key_event(event):
+        if not extras_retired and self._handle_alarm_editor_key_event(event):
             self.update()
             return
         if key == Qt.Key.Key_Escape:
@@ -5338,6 +5372,9 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def inputMethodEvent(self, event):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            super().inputMethodEvent(event)
+            return
         try:
             commit = event.commitString()
         except Exception:
@@ -8067,6 +8104,8 @@ class IslandStackVisual(QWidget):
         return str(animation.get("from") or ""), from_offset, to_offset
 
     def _activate_plugin_action(self, command: str):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         command = str(command or "").strip().lower()
         if command.startswith("alarm-editor-") and command not in {"alarm-editor-save", "alarm-editor-cancel"}:
             result = presentation_handle_alarm_editor_action(
@@ -8188,6 +8227,8 @@ class IslandStackVisual(QWidget):
             self._open_plugin_manager()
 
     def refresh_plugin_data(self):
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return
         self.last_media_refresh_at = -999.0
         self._refresh_media_data(time.monotonic())
         self.update()
@@ -8238,6 +8279,8 @@ class IslandStackVisual(QWidget):
         return now.strftime("%H:%M:%S" if bool(getattr(self, "show_seconds", True)) else "%H:%M")
 
     def _enabled_plugin_ids(self) -> list[str]:
+        if bool(getattr(self, "_runtime_extras_retired", False)):
+            return []
         return presentation_enabled_plugin_ids(
             getattr(self, "enabled_plugin_ids", None),
             int(getattr(self, "enabled_plugin_count", 3) or 0),

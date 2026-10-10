@@ -16,7 +16,7 @@ class IslandStyleMigrationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_retired_choices_migrate_and_persist_without_losing_other_settings(self):
+    def test_retired_choices_migrate_and_reset_fine_controls_without_losing_other_settings(self):
         for background, expected in (("duotone_full", "sea_level"), ("pure_black", "system"), ("pure_white", "system")):
             with self.subTest(background=background), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "settings.json"
@@ -36,8 +36,8 @@ class IslandStyleMigrationTests(unittest.TestCase):
                     self.assertEqual(manager.get("v2_music_background_follow_previous_style"), "sea_level")
                     self.assertEqual(manager.get("v2_lyric_flow_style"), "wave_stream")
                     self.assertEqual(manager.get("v2_album_island_secondary_style"), "perspective_dim")
-                    self.assertEqual(manager.get("v2_music_ambience_values")[expected]["ambient_intensity"], 0.31)
-                    self.assertEqual(manager.get("v2_lyric_font_size"), 21)
+                    self.assertEqual(manager.get("v2_music_ambience_values"), settings_store.DEFAULT_MUSIC_AMBIENCE_VALUES)
+                    self.assertEqual(manager.get("v2_lyric_font_size"), settings_store.DEFAULT_SETTINGS["v2_lyric_font_size"])
                     self.assertEqual(manager.get("v2_music_app_profiles"), {"netease": {"sync_enabled": True}})
                     manager.save_now()
                     saved = json.loads(path.read_text(encoding="utf-8"))

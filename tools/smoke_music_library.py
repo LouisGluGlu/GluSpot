@@ -70,12 +70,16 @@ class FixtureSystem(EmptyIslandDataProvider):
         self.suspensions = 0
         self.closed = False
         self.started = False
+        self.refresh_requests = 0
 
     def suspend_live_audio(self):
         self.suspensions += 1
 
     def has_live_audio(self):
         return False
+
+    def _request_immediate_media_refresh(self):
+        self.refresh_requests += 1
 
     def start_audio_outputs(self):
         self.started = True
@@ -125,13 +129,24 @@ class FixtureService:
         # Follow a real cursor even when the first page has no playable rows.
         return CatalogPage((), 100, True, 1) if offset == 0 else CatalogPage((self.playlist_song,), 200, False, 1)
 
+    def daily_recommendations(self, source):
+        self._record("daily", source=source)
+        return (self.song,)
+
+    def personal_fm(self, source):
+        self._record("fm", source=source)
+        return (self.playlist_song,)
+
     def stream_url(self, source, song_id):
         self._record("stream")
         return StreamInfo(source, song_id, self.url, True, quality="fixture-pcm")
 
     def lyrics(self, source, song_id):
         self._record("lyrics")
-        return LyricPayload(source, song_id, raw_lrc="[00:00.00]本机音频联调\n[00:01.00]歌词跟随真实时钟\n[00:02.00]封面入口已交接\n[00:03.00]页面交接完成\n[00:04.00]窗口读取同一来源\n[00:05.00]播放到达结尾", source="local-http-fixture")
+        return LyricPayload(source, song_id,
+            raw_lrc="[00:00.00]本机音频联调\n[00:01.00]歌词跟随真实时钟\n[00:02.00]封面入口已交接\n[00:03.00]页面交接完成\n[00:04.00]窗口读取同一来源\n[00:05.00]播放到达结尾",
+            translation="[00:00.00]Local audio\n[00:01.00]Real playback clock\n[00:02.00]Cover handoff\n[00:03.00]Surface ready\n[00:04.00]Shared source\n[00:05.00]Playlist loop",
+            source="local-http-fixture")
 
     def close(self):
         self.closed = True
@@ -220,16 +235,24 @@ def run_library(output):
         set_theme_settings_getter(settings.get)
         IslandStackVisual.load_embedded_lyric_fonts()
         system = FixtureSystem(output)
+        island = None
+        def runtime_setting(key, default=None):
+            if key == "v2_enable_dual_line_lyrics":
+                return bool(getattr(island, "enable_dual_line_lyrics", False))
+            return settings.get(key, default)
+        system.lyrics_store.settings_getter = runtime_setting
         audio = QAudioOutput()
         audio.setVolume(0)
         owned = OwnedMusicPlayer(service, system.lyrics_store, audio=audio)
-        provider = PlaybackSourceProvider(system, owned, settings.get)
+        provider = PlaybackSourceProvider(system, owned, runtime_setting)
+        provider.settings_setter = settings.set
         island = IslandStackVisual(data_provider=provider)
-        island.settings_getter, island.settings_setter = settings.get, settings.set
+        island.settings_getter, island.settings_setter = runtime_setting, settings.set
         island.set_super_topmost(False, notify=False)
         island._music_windowed_preference = False
         entry = SimpleNamespace(_show_island=island.show, show_login=lambda *_args: None)
         controller = MusicLibraryController(settings, service, owned, island, entry)
+        island._music_library_back_callback = controller.return_from_music_surface
         owned.changed.connect(lambda: island._apply_visual_data(provider.get_visual_data()))
         owned.player.errorOccurred.connect(lambda code, _message: errors.append(code.name))
         window = controller.window
@@ -295,7 +318,36 @@ def run_library(output):
             controller.load_more()
             check("search_cursor_page2", _wait(lambda: not controller._pending and any(item.key == "song:netease:fixture-search-2" for item in window.collections)))
             screenshot(window, "library-search.png")
-            activate("song:netease:fixture-song", "default")
+            surface = activate("song:netease:fixture-song", "default")
+            retained_epoch = owned._epoch
+            for mode in ("shuffle", "repeat_one", "sequential"):
+                check(f"song_mode_{mode}", surface._cycle_owned_playback_mode()
+                      and provider.get_owned_playback_mode() == mode)
+            check("song_mode_saved_without_restart", settings.get("v2_owned_playback_mode") == "sequential"
+                  and owned._epoch == retained_epoch)
+            requests_before = sum(call["operation"] == "stream" for call in service.calls)
+            lyric_requests_before = sum(call["operation"] == "lyrics" for call in service.calls)
+            position_before = owned.player.position()
+            surface._toggle_translation()
+            check("current_song_translation_on", _wait(lambda: "Local audio" in "\n".join(owned.track.lyrics)))
+            check("current_song_translation_clock_retained", owned._epoch == retained_epoch
+                  and owned.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+                  and owned.player.position() >= position_before)
+            surface._toggle_translation()
+            check("current_song_translation_off", _wait(lambda: "Local audio" not in "\n".join(owned.track.lyrics)))
+            check("translation_no_stream_reload", sum(call["operation"] == "stream" for call in service.calls) == requests_before)
+            check("translation_uses_retained_payload", sum(call["operation"] == "lyrics" for call in service.calls) == lyric_requests_before)
+            check("translation_off_keeps_playing", owned._epoch == retained_epoch
+                  and owned.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+                  and owned.player.position() >= position_before)
+            check("translation_default_stays_fixed", not settings.get("v2_enable_dual_line_lyrics"))
+            retained_collections = window.collections
+            retained_track = owned.track.track_id
+            check("song_back_available", surface._library_back_available())
+            check("song_back_library_visible", surface.return_to_library() and _wait(window.isVisible))
+            check("song_back_preserves_search", window.search.text() == "fixture" and window.collections is retained_collections)
+            check("song_back_preserves_playback", owned.track.track_id == retained_track
+                  and owned.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
             check("provider_pause", provider.send_playback_command("toggle_play_pause") and _wait(lambda: owned.player.playbackState() == QMediaPlayer.PlaybackState.PausedState))
             check("provider_seek", provider.seek_playback_position(1, owned.track.track_id) and _wait(lambda: owned.player.position() >= 950))
             controller.open_source("netease")
@@ -303,7 +355,9 @@ def run_library(output):
             activate("playlist:netease:fixture-list", "window")
             check("playlist_cursor_followed", [call["offset"] for call in service.calls if call["operation"] == "playlist_tracks"] == [0, 100])
             check("playlist_new_track", owned.track.track_id == "owned:netease:fixture-playlist-song")
-            check("qt_eof", _wait(lambda: owned.status == "ended", timeout=9))
+            playlist_epoch = owned._epoch
+            check("qt_eof_loops_playlist", _wait(lambda: owned._epoch > playlist_epoch
+                  and owned.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState, timeout=9))
             check("qt_clock_advanced", max(positions, default=0) >= 5500)
             check("provider_capture_suspended", system.suspensions > 0 and not system.started and not provider.has_live_audio())
             check("owned_output_route", provider.get_audio_route_snapshot().capture_scope == "owned-player")
@@ -352,10 +406,14 @@ def run_constructor(output):
         audio = QAudioOutput()
         audio.setVolume(0)
         return OwnedMusicPlayer(*args, audio=audio, **kwargs)
+
+    def system_factory(**kwargs):
+        system.lyrics_store.settings_getter = kwargs["settings_getter"]
+        return system
     with ExitStack() as stack:
         _settings_scope(stack, output)
         stack.enter_context(patch("local.app.SettingsManager", side_effect=settings_factory))
-        stack.enter_context(patch("local.app.WindowsMediaProvider", return_value=system))
+        stack.enter_context(patch("local.app.WindowsMediaProvider", side_effect=system_factory))
         stack.enter_context(patch("local.app.make_online_music_service", return_value=service))
         stack.enter_context(patch("local.app.OwnedMusicPlayer", side_effect=silent_player))
         stack.enter_context(patch("local.app.MainThreadWatchdog", return_value=None))
@@ -365,6 +423,14 @@ def run_constructor(output):
         instance = LocalIslandApp()
         checks["actual_constructor"] = type(instance) is LocalIslandApp
         checks["actual_controllers"] = type(instance.music_library) is MusicLibraryController
+        checks["retired_notice_not_constructed"] = not hasattr(instance, "audio_device_notice") and not hasattr(instance, "audio_device_notice_timer")
+        checks["plugins_inactive"] = instance.window.enabled_plugin_count == 0 and not instance.window.persistent_plugin
+        checks["fixed_default_typography"] = instance.window.lyric_font_size == 18 and instance.window.wave_font_weight == "bold"
+        instance.window.set_enable_dual_line_lyrics(True)
+        checks["session_translation_reaches_parser"] = system.lyrics_store._dual_line_lyrics_enabled() and instance.window.settings_getter("v2_enable_dual_line_lyrics")
+        checks["session_translation_does_not_change_default"] = not instance.settings.get("v2_enable_dual_line_lyrics")
+        instance.window.set_enable_dual_line_lyrics(False)
+        checks["idle_translation_refreshes_system"] = system.refresh_requests == 2
         checks["own_volume_zero"] = instance.owned_player.audio.volume() == 0
         timer = QTimer(instance.app)
         timer.setInterval(50)

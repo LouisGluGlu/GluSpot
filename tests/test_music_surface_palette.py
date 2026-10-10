@@ -11,6 +11,8 @@ from local.music_surface_palette import (
     background_role_color,
     future_lyric_color,
     relative_luminance,
+    single_hue_background_colors,
+    solid_album_background_color,
 )
 
 
@@ -41,6 +43,47 @@ def _ink_contrast(ink: QColor, backdrop: QColor) -> float:
 
 
 class MusicSurfacePaletteTests(unittest.TestCase):
+    def test_bright_single_hue_display_layers_keep_hue_and_solid_source(self):
+        for source in (QColor(233, 31, 20), QColor(16, 135, 164),
+                       QColor(242, 204, 12), QColor(181, 35, 230)):
+            with self.subTest(source=source.name()):
+                palette = artwork_surface_palette(
+                    _artwork(((100, source),)), QColor("black"), QColor("black"),
+                )
+                roles = single_hue_background_colors(
+                    palette.ambient_colors, weights=palette.ambient_weights,
+                )
+                self.assertEqual(len(roles), 4)
+                self.assertTrue(all(_hue_distance(role, source) <= 1 for role in roles))
+                self.assertLess(roles[0].hsvSaturation(), source.hsvSaturation() * .4)
+                self.assertGreater(roles[2].value() - roles[0].value(), 75)
+                self.assertLess(roles[2].hsvSaturation(), roles[3].hsvSaturation())
+                self.assertEqual(palette.ambient_colors, (source,))
+                self.assertEqual(palette.ambient_weights, (1.0,))
+                self.assertEqual(solid_album_background_color(palette), source)
+
+    def test_near_single_hue_variations_use_one_tonal_family(self):
+        colors = (QColor(16, 135, 164), QColor(30, 177, 201), QColor(90, 186, 209))
+        roles = single_hue_background_colors(colors, weights=(.999, .305, .055))
+        self.assertEqual(len(roles), 4)
+        self.assertTrue(all(_hue_distance(role, colors[0]) <= 1 for role in roles))
+        self.assertEqual(colors[0], QColor(16, 135, 164))
+
+    def test_multicolor_gray_low_chroma_and_dark_covers_keep_source_route(self):
+        controls = (
+            ((QColor(195, 30, 40), QColor(30, 40, 195)), (.98, .02)),
+            ((QColor(195, 30, 40), QColor(240, 240, 240)), (.99, .01)),
+            ((QColor(112, 112, 112),), (1.0,)),
+            ((QColor(112, 133, 140),), (1.0,)),
+            ((QColor(7, 22, 38), QColor(20, 130, 240), QColor(180, 207, 235)), (1.0, .25, .05)),
+            ((QColor(30, 3, 8),), (1.0,)),
+            ((QColor(180, 35, 230),), (.79,)),
+            ((), ()),
+        )
+        for colors, weights in controls:
+            with self.subTest(colors=colors):
+                self.assertEqual(single_hue_background_colors(colors, weights=weights), ())
+
     def test_ambient_core_keeps_real_strong_pigment_separate_from_same_hue_shadows(self):
         shadow, core, pale = QColor(7, 22, 38), QColor(20, 130, 240), QColor(180, 207, 235)
         palette = artwork_surface_palette(

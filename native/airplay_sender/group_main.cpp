@@ -2,7 +2,7 @@
 // PCM timeline, independently authenticated AirPlay receivers and optional
 // Windows render outputs. No receiver owns an independent capture/pacer.
 #include "group_main.h"
-#include "group_capture.h"
+#include "pcm_pipe_capture.h"
 #include "endpoint_mute_guard.h"
 #include "timing_estimate.h"
 #include "raop_loop.h"
@@ -207,7 +207,7 @@ void localRenderStats(std::ostream& out, const LocalRenderDiagnostics& d, const 
         << ",\"phase_error_ms\":" << d.phaseErrorMs << ",\"resample_ratio\":" << d.resampleRatio << '}';
 }
 #endif
-void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>>& members,
+void groupStats(GroupInput& capture, const std::vector<std::unique_ptr<Member>>& members,
                 BufferTimingTracker& timing, bool flowing, uint64_t paddedFrames,
                 const GroupArguments& args, uint64_t timelineFrame, size_t conditionedFrames,
                 double captureRatio
@@ -269,7 +269,9 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
               << ",\"rtp_buffer_ms\":" << 1000.0 * aggregate.protocolLatencyFrames / 44100
               << ",\"requested_min_latency_ms\":" << 1000.0 * aggregate.requestedMinLatencyFrames / 44100
               << ",\"valid\":" << (estimate.valid ? "true" : "false") << '}'
-              << ",\"capture_signal\":{\"mode\":\"process_loopback\",\"scope\":\"music_process_tree\",\"nonzero_samples\":" << signal.nonzeroSamples
+              << ",\"capture_signal\":{\"mode\":" << quoted(args.directPcm() ? "direct_pcm" : "process_loopback")
+              << ",\"scope\":" << quoted(args.directPcm() ? "owned-player" : "music_process_tree")
+              << ",\"nonzero_samples\":" << signal.nonzeroSamples
               << ",\"meaningful_samples\":" << signal.meaningfulSamples
               << ",\"last_nonzero_age_ms\":";
     if (signal.lastNonzeroAgeMs) std::cout << *signal.lastNonzeroAgeMs; else std::cout << "null";
@@ -280,7 +282,9 @@ void groupStats(GroupCapture& capture, const std::vector<std::unique_ptr<Member>
               << ",\"members\":" << members.size() + args.localEndpoints.size()
               << ",\"airplay_members\":" << members.size()
               << ",\"timeline_frame\":" << timelineFrame << ",\"music_pid\":" << args.musicPid
-              << ",\"music_created_at\":" << args.musicCreatedAt << ",\"local_endpoints\":[";
+              << ",\"music_created_at\":" << args.musicCreatedAt;
+    if (args.directPcm()) std::cout << ",\"pcm_epoch\":" << args.pcmEpoch;
+    std::cout << ",\"local_endpoints\":[";
     for (size_t index = 0; index < args.localEndpoints.size(); ++index) {
         if (index) std::cout << ',';
         std::cout << quoted(args.localEndpoints[index]);
@@ -324,10 +328,14 @@ int runGroupHelper(int argc, wchar_t** argv) {
     struct ConsoleOwner { ~ConsoleOwner() { SetConsoleCtrlHandler(groupConsoleHandler, FALSE); } } consoleOwner;
     try {
         Apartment apartment;
-        SourceEndpointGuard source(args.sourceEndpoint);
-        EndpointMuteGuard mute(wide(args.sourceEndpoint));
-        muteStatus("prepared", args, mute, false);
-        GroupCapture capture(args.musicPid, args.musicCreatedAt);
+        std::unique_ptr<SourceEndpointGuard> source;
+        std::unique_ptr<EndpointMuteGuard> mute;
+        if (!args.directPcm()) {
+            source = std::make_unique<SourceEndpointGuard>(args.sourceEndpoint);
+            mute = std::make_unique<EndpointMuteGuard>(wide(args.sourceEndpoint));
+            muteStatus("prepared", args, *mute, false);
+        }
+        GroupInput capture(args);
         if (!capture.waitReady()) throw std::runtime_error(capture.error().empty() ? "Music capture initialization timed out" : capture.error());
         auto history = std::make_unique<GroupPcmHistory>();
 #if GLUSPOT_HAS_LOCAL_RENDERER
@@ -406,15 +414,15 @@ int runGroupHelper(int argc, wchar_t** argv) {
             if (const auto error = locals.error(); !error.empty()) { fail(error); break; }
 #endif
             if (now >= guardDeadline) {
-                try { source.check(); }
+                try { if (source) source->check(); }
                 catch (const std::exception& error) { fail(error.what()); break; }
-                if (groupArmed && !mute.isStillMuted()) { fail("Source output was unmuted externally; synchronized group stopped"); break; }
+                if (groupArmed && mute && !mute->isStillMuted()) { fail("Source output was unmuted externally; synchronized group stopped"); break; }
                 guardDeadline = now + 250ms;
             }
             const bool allReady = std::all_of(members.begin(), members.end(), [](const auto& member) { return member->ready; });
             if (!groupArmed && !allReady && now >= connectDeadline) { fail("A group receiver timed out; check access and inbound UDP firewall rules"); break; }
             if (!groupArmed && allReady) {
-                mute.mute(); muteStatus("muted", args, mute, true);
+                if (mute) { mute->mute(); muteStatus("muted", args, *mute, true); }
                 // One startup lead: source frame zero enters capture now and
                 // is transmitted 150 ms later, then plays at the protocol's
                 // common presentation time. The AP2 requested render lead
@@ -443,7 +451,8 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 if (const auto error = locals.arm(sendStart, presentationFrames); !error.empty()) { fail(error); break; }
 #endif
                 capture.start(); groupArmed = true;
-                status("waiting_audio", "Synchronized group connected; waiting for music-process audio");
+                status("waiting_audio", args.directPcm() ? "Synchronized group connected; waiting for program-player PCM" :
+                    "Synchronized group connected; waiting for music-process audio");
             }
             if (groupArmed && now >= sendStart) {
                 const auto ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - sendStart).count());
@@ -522,7 +531,7 @@ int runGroupHelper(int argc, wchar_t** argv) {
 #if GLUSPOT_HAS_LOCAL_RENDERER
         locals.clear(); // Stop every delayed output before source mute is restored.
 #endif
-        try { mute.restore(); muteStatus("restored", args, mute, false); }
+        try { if (mute) { mute->restore(); muteStatus("restored", args, *mute, false); } }
         catch (const std::exception& error) { fail(error.what()); }
         status("stopped"); return failed ? 1 : 0;
     } catch (const std::exception& error) { status("error", error.what()); status("stopped"); return 1; }

@@ -87,6 +87,39 @@ def relative_luminance(color: QColor) -> float:
     return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
 
 
+def single_hue_background_colors(
+    colors: tuple[QColor, ...],
+    *,
+    weights: tuple[float, ...] = (),
+) -> tuple[QColor, ...]:
+    """Separate a bright, nearly single-hue page into soft tonal layers.
+
+    These are display colors, never replacements for the sampled pigments
+    or the Solid island's source color. A real second hue, neutral band,
+    low-chroma cover or dark photograph keeps the ordinary pigment route.
+    """
+    if not colors:
+        return ()
+    source = QColor(colors[0])
+    if (not source.isValid() or _is_neutral(source)
+            or source.value() < 80 or source.hsvSaturation() < 125):
+        return ()
+    if len(weights) == len(colors) and weights[0] < 0.80:
+        return ()
+    hue, saturation, _value, _alpha = source.getHsv()
+    if any(not color.isValid() or _is_neutral(color)
+           or _hue_distance(hue, color.hsvHue()) > 24 for color in colors[1:]):
+        return ()
+    # Dark tinted foundation, a middle band, a pale light mass and a smaller
+    # stronger core. Every layer keeps the actual cover hue; saturation no
+    # longer covers the whole page simply because the art has one pigment.
+    return tuple(QColor.fromHsv(hue, min(limit, round(saturation * fraction)), value)
+                 for fraction, limit, value in (
+                     (0.32, 78, 74), (0.50, 125, 128),
+                     (0.26, 78, 165), (0.75, 185, 160),
+                 ))
+
+
 def _contrast_ratio(first: QColor, second: QColor) -> float:
     first_luminance = relative_luminance(first)
     second_luminance = relative_luminance(second)
