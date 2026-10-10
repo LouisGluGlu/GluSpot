@@ -2307,6 +2307,19 @@ class SettingsWindow(QDialog):
         card = self._card(layout)
         c = card.layout()
 
+        playback_title = QLabel("播放来源")
+        self._register_section_label(playback_title, 2, 8)
+        c.addWidget(playback_title)
+        self.owned_playback_switch = self._check("程序内播放", bool(self._setting_value("v2_owned_playback_enabled", True)),
+            lambda enabled: self._set_playback_source("v2_owned_playback_enabled", enabled))
+        self.system_capture_switch = self._check("系统抓取", bool(self._setting_value("v2_system_capture_enabled", False)),
+            lambda enabled: self._set_playback_source("v2_system_capture_enabled", enabled))
+        c.addWidget(self.owned_playback_switch)
+        c.addWidget(self.system_capture_switch)
+        self.online_login_button = QPushButton("登录音乐来源")
+        self.online_login_button.clicked.connect(self._open_online_music_login)
+        c.addWidget(self.online_login_button)
+
         self.music_auto_checkbox = self._check("音乐岛自动识别：无音频时隐藏", bool(getattr(self.island_widget, "music_auto_detect", False)), self._set_music_auto_detect)
         c.addWidget(self.music_auto_checkbox)
 
@@ -3192,6 +3205,12 @@ class SettingsWindow(QDialog):
         return page
 
     def sync_from_widget(self):
+        for control, key, default in (
+            (getattr(self, "owned_playback_switch", None), "v2_owned_playback_enabled", True),
+            (getattr(self, "system_capture_switch", None), "v2_system_capture_enabled", False),
+        ):
+            if control is not None:
+                self._set_switch_checked(control, bool(self._setting_value(key, default)))
         enabled_plugins = self._enabled_plugins_setting()
         pairs = (
             (self.music_checkbox, bool(getattr(self.island_widget, "music_playing", True))),
@@ -4145,6 +4164,20 @@ class SettingsWindow(QDialog):
         self.island_widget.music_auto_detect = bool(enabled)
         self._save("v2_music_auto_detect", bool(enabled))
         self._touch()
+
+    def _set_playback_source(self, key: str, enabled: bool):
+        other = "v2_system_capture_enabled" if key == "v2_owned_playback_enabled" else "v2_owned_playback_enabled"
+        control = self.owned_playback_switch if key == "v2_owned_playback_enabled" else self.system_capture_switch
+        if not enabled and not bool(self._setting_value(other, other == "v2_owned_playback_enabled")):
+            self._set_switch_checked(control, True)
+            return
+        self._save(key, bool(enabled))
+        self._touch()
+
+    def _open_online_music_login(self):
+        callback = getattr(self, "online_music_login_callback", None)
+        if callable(callback):
+            callback()
 
     def _set_persistent_plugin(self, enabled: bool):
         self.island_widget.persistent_plugin = enabled

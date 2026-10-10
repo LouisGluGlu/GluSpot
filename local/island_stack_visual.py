@@ -7740,7 +7740,7 @@ class IslandStackVisual(QWidget):
         # player settles, must not rewind a pause or count paused time on resume.
         return expected, self._estimated_media_position(now)
 
-    def _show_music_fullscreen(self):
+    def _show_music_fullscreen(self, *, fullscreen=None, origin_geometry=None, origin_snapshot=None):
         overlay = getattr(self, "music_fullscreen_overlay", None)
         if bool(getattr(self, "_music_surface_active", False)):
             self._focus_active_music_surface()
@@ -7749,9 +7749,10 @@ class IslandStackVisual(QWidget):
             overlay = MusicSurfaceWindow(self)
             self.music_fullscreen_overlay = overlay
         self._island_visible_before_music_surface = bool(self.isVisible())
-        origin_geometry = self._current_main_global_rect().toAlignedRect()
-        origin_snapshot = QImage()
-        if origin_geometry.isValid() and self.isVisible():
+        external_origin = origin_geometry is not None
+        origin_geometry = QRect(origin_geometry) if external_origin else self._current_main_global_rect().toAlignedRect()
+        origin_snapshot = QImage(origin_snapshot) if origin_snapshot is not None else QImage()
+        if not external_origin and origin_geometry.isValid() and self.isVisible():
             local_origin = self.mapFromGlobal(origin_geometry.topLeft())
             local_rect = QRect(local_origin, origin_geometry.size()).intersected(self.rect())
             if local_rect.isValid():
@@ -7764,7 +7765,7 @@ class IslandStackVisual(QWidget):
             self._release_super_topmost()
             self.hide()
             overlay.show_from_island(
-                fullscreen=None,
+                fullscreen=fullscreen,
                 origin_geometry=origin_geometry,
                 origin_snapshot=origin_snapshot,
             )

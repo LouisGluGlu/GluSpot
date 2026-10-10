@@ -1382,7 +1382,7 @@ class MusicSurfaceWindow(QWidget):
 
     def _artwork_is_loading(self) -> bool:
         lookup_state = str(getattr(self.owner, "album_art_lookup_state", "") or "").casefold()
-        if lookup_state == "failed":
+        if lookup_state in {"failed", "miss"}:
             # A completed failed lookup keeps its best available cover. It is
             # no longer an in-flight download, and must not hold lyric feedback
             # behind a permanently repeating artwork ring.

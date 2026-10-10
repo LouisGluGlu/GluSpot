@@ -152,6 +152,9 @@ def normalize_mydockfinder_listener_process_names(listener_process_names=None) -
 
 
 DEFAULT_SETTINGS = {
+    "v2_playback_onboarding_completed": False,
+    "v2_owned_playback_enabled": True,
+    "v2_system_capture_enabled": False,
     "v2_startup_mode": "none",
     "v2_custom_icon_path": "",
     "v2_music_playing": True,
@@ -357,6 +360,14 @@ class SettingsManager(QObject):
                 return
             migrated = any(key in data for key in _REMOVED_VISUAL_SETTING_KEYS)
             self._settings.update({key: value for key, value in data.items() if key not in _REMOVED_VISUAL_SETTING_KEYS})
+            for key, default in (("v2_owned_playback_enabled", True), ("v2_system_capture_enabled", False),
+                                 ("v2_playback_onboarding_completed", False)):
+                if not isinstance(self._settings.get(key), bool):
+                    self._settings[key] = default
+                    migrated = True
+            if not self._settings["v2_owned_playback_enabled"] and not self._settings["v2_system_capture_enabled"]:
+                self._settings["v2_owned_playback_enabled"] = True
+                migrated = True
             original_style = self._settings.get("v2_music_ambience_style")
             for key in ("v2_music_ambience_style", "v2_music_background_follow_previous_style"):
                 raw = self._settings.get(key, "")

@@ -21,6 +21,24 @@ datas = [
     (str(AIRPLAY_LICENSES), "native/licenses"),
     (str(DISCOVERY_LICENSES), "licenses/audio-discovery"),
 ]
+# The bridge source and notices are always inspectable. Its optional prepared
+# runtime is included only when installation has completed; otherwise source
+# availability reports the missing dependency rather than creating fake login.
+ONLINE_MUSIC_SOURCE = ROOT / "native" / "online_music"
+ONLINE_MUSIC_RUNTIME = ROOT / "build" / "online-music"
+if ONLINE_MUSIC_SOURCE.is_dir():
+    datas += [(str(ONLINE_MUSIC_SOURCE / "bridge.cjs"), "online_music"),
+              (str(ONLINE_MUSIC_SOURCE / "package.json"), "online_music"),
+              (str(ONLINE_MUSIC_SOURCE / "package-lock.json"), "online_music"),
+              (str(ONLINE_MUSIC_SOURCE / "licenses"), "online_music/licenses")]
+if (ONLINE_MUSIC_RUNTIME / "node.exe").is_file() and (ONLINE_MUSIC_RUNTIME / "node_modules").is_dir():
+    if not (ONLINE_MUSIC_RUNTIME / "SOURCE.json").is_file() or not (ONLINE_MUSIC_RUNTIME / "licenses" / "Node-LICENSE.txt").is_file():
+        raise RuntimeError("Run native/online_music/prepare-runtime.ps1 before packaging the optional online runtime")
+    datas += [(str(ONLINE_MUSIC_RUNTIME / "node.exe"), "online_music"),
+              (str(ONLINE_MUSIC_RUNTIME / "node_modules"), "online_music/node_modules"),
+              (str(ONLINE_MUSIC_RUNTIME / "SOURCE.json"), "online_music"),
+              (str(ONLINE_MUSIC_RUNTIME / "licenses"), "online_music/licenses")]
+
 datas += collect_data_files("ToJyutping") + copy_metadata("ToJyutping")
 datas += collect_data_files("zeroconf") + copy_metadata("zeroconf") + copy_metadata("ifaddr")
 

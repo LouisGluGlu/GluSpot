@@ -15,7 +15,11 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
-from api.providers import WindowsMediaProvider
+from api.providers import PlaybackSourceProvider, WindowsMediaProvider
+from api.online_music import make_online_music_service
+from local.owned_music_player import OwnedMusicPlayer
+from local.playback_entry_controller import PlaybackEntryController
+from local.music_library_controller import MusicLibraryController
 from local.branding import APP_NAME, local_app_data_dir, resolve_icon_paths
 from local.island_stack_visual import IslandStackVisual
 from local.audio_device_notice import AudioDeviceNotice
@@ -279,10 +283,14 @@ class LocalIslandApp:
         self.app.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         set_theme_settings_getter(self.settings.get)
         IslandStackVisual.load_embedded_lyric_fonts()
-        self.data_provider = WindowsMediaProvider(settings_getter=self.settings.get)
+        self.system_provider = WindowsMediaProvider(settings_getter=self.settings.get)
+        self.online_music = make_online_music_service()
+        self.owned_player = OwnedMusicPlayer(self.online_music, self.system_provider.lyrics_store, self.app)
+        self.data_provider = PlaybackSourceProvider(self.system_provider, self.owned_player, self.settings.get)
         self.data_provider.settings_setter = self.settings.set
         self.app.aboutToQuit.connect(self.data_provider.close_audio_outputs)
-        self.data_provider.start_audio_outputs()
+        if self.settings.get("v2_system_capture_enabled", False):
+            self.data_provider.start_audio_outputs()
         app_font_family = IslandStackVisual.best_available_font_family(str(self.settings.get("v2_font_family", IslandStackVisual.DEFAULT_FONT_FAMILY)))
         self.app.setFont(QFont(app_font_family, 9))
         self.window = IslandStackVisual(data_provider=self.data_provider)
@@ -299,12 +307,31 @@ class LocalIslandApp:
         self._apply_startup_setting()
         self._apply_saved_settings()
         self.settings_window = SettingsWindow(self.window, self.settings)
+        self.playback_entry = PlaybackEntryController(self.settings, self.system_provider, self.window,
+                                                       self.online_music, self.app)
+        self.music_library = MusicLibraryController(self.settings, self.online_music, self.owned_player,
+                                                   self.window, self.playback_entry, self.app)
+        self.playback_entry.login_callback = self.music_library.open_source
+        self.settings_window.online_music_login_callback = self.playback_entry.show_login
+        self.settings.setting_changed.connect(self._playback_mode_changed)
+        self.app.aboutToQuit.connect(self.playback_entry.close)
+        self.app.aboutToQuit.connect(self.music_library.close)
+        self.app.aboutToQuit.connect(self.online_music.close)
         self.settings_window.icon_changed_callback = self._apply_global_icon
         self.settings_window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         self.window.settings_changed_callback = self._save_visual_state
         self._setup_mydockfinder_listener()
         self.tray = None
         self._setup_tray()
+
+    def _playback_mode_changed(self, key, value):
+        if key == "v2_owned_playback_enabled" and value is False:
+            self.owned_player.stop()
+        if key == "v2_system_capture_enabled" and value is False:
+            self.system_provider.suspend_live_audio()
+            self.system_provider.stop_audio_cast()
+        if key == "v2_system_capture_enabled" and value is True:
+            self.system_provider.start_audio_outputs()
 
     def _poll_audio_device_notice(self):
         route = self.data_provider.get_audio_route_snapshot()
@@ -673,7 +700,7 @@ class LocalIslandApp:
         self.app.quit()
 
     def run(self):
-        self.window.show()
+        self.playback_entry.start()
         return self.app.exec()
 
 

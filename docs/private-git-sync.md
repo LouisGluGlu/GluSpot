@@ -16,7 +16,7 @@ Commit hashes necessarily change. Historical hashes in earlier release and verif
 
 ## Remote scope and confidentiality
 
-The designated remote is `https://github.com/LouisGluGlu/GluSpot.git`, with repository visibility `private`. The new branch is `codex/owned-playback-sources`; `main` continues to contain the 6.412 product baseline, while the new branch contains the playback research and Git hygiene documentation.
+The designated remote is `https://github.com/LouisGluGlu/GluSpot.git`, with repository visibility `private`. The new branch is `codex/owned-playback-sources`; `main` continues to contain the 6.412 product baseline, while the new branch now contains the playback entry implementation, research and Git hygiene documentation.
 
 Before uploading, verify the authenticated owner and the repository's `private` flag and visibility through GitHub. Check repository access, pending invitations, hooks, deploy keys and Pages, and disable Actions on this backup/research repository to prevent workflows from executing uploaded code automatically. After upload, verify remote branch/tag object IDs against the local refs and check private visibility again.
 
@@ -24,4 +24,4 @@ Push only explicit `refs/heads/*` and `refs/tags/*`. Do not mirror the entire lo
 
 The ignore rules cover runtime directories and common local credential files. The pre-upload audit checks reachable source history for obvious credential/private-key material, generated files and GitHub's 100 MiB file limit. Pattern checks have limits and do not replace careful review. New account adapters must keep cookies and tokens outside the repository, avoid secrets in URLs/logs, and use an appropriate protected local credential store.
 
-This task establishes a reviewed Git baseline and source plan. It does not publish a website, create a public release, copy upstream player code, implement the online-playlist UI, or rebuild the executable.
+The initial synchronization established a reviewed Git baseline and source plan. Subsequent first-run, account, native library/search and owned-player implementation is recorded in [the playback entry document](owned-playback-entry.md). This branch does not publish a website, create a public release, copy upstream player code, or rebuild the executable.
