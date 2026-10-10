@@ -51,10 +51,16 @@ class Player(QObject):
         self.position = 0
 
     def setAudioOutput(self, audio): pass
-    def stop(self): self.state = QMediaPlayer.PlaybackState.StoppedState
+    def stop(self):
+        self.state = QMediaPlayer.PlaybackState.StoppedState
+        self.playbackStateChanged.emit(self.state)
     def setSource(self, url): self.url = url
-    def play(self): self.state = QMediaPlayer.PlaybackState.PlayingState
-    def pause(self): self.state = QMediaPlayer.PlaybackState.PausedState
+    def play(self):
+        self.state = QMediaPlayer.PlaybackState.PlayingState
+        self.playbackStateChanged.emit(self.state)
+    def pause(self):
+        self.state = QMediaPlayer.PlaybackState.PausedState
+        self.playbackStateChanged.emit(self.state)
     def playbackState(self): return self.state
     def isSeekable(self): return True
     def setPosition(self, value): self.position = value
@@ -129,6 +135,91 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual(self.qt_player.state, QMediaPlayer.PlaybackState.PlayingState)
         self.assertEqual(self.player.status, "trial")
         self.assertEqual(self.tasks.jobs[-1][0][0], "lyrics")
+
+    def test_stream_is_not_reported_playing_until_qt_confirms_state(self):
+        self.player.play_queue(self.songs)
+        token = self.tasks.jobs[-1][0]
+        observed = []
+        self.player.statusChanged.connect(lambda status: observed.append((status, bool(self.player.track and self.player.track.is_playing))))
+        with patch.object(self.qt_player, "play", side_effect=lambda: None):
+            self.tasks.completed.emit(token, StreamInfo("netease", "1", "https://example.test/a", True, True), None)
+        self.assertEqual(self.player.status, "loading_stream")
+        self.assertFalse(self.player.track.is_playing)
+        self.assertEqual(observed, [])
+        self.qt_player.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+        self.assertEqual(self.player.status, "trial")
+        self.assertEqual(observed, [("trial", True)])
+
+    def test_synchronous_source_or_play_error_cannot_be_overwritten_by_playing(self):
+        for during in ("source", "play"):
+            with self.subTest(during=during):
+                self.player.play_queue(self.songs)
+                token = self.tasks.jobs[-1][0]
+                emit_error = lambda *args: self.qt_player.errorOccurred.emit(QMediaPlayer.Error.NetworkError, "synthetic signed-url-secret")
+                with patch.object(self.qt_player, "setSource" if during == "source" else "play", side_effect=emit_error), \
+                        patch.object(self.qt_player, "play" if during == "source" else "setSource", wraps=self.qt_player.play if during == "source" else self.qt_player.setSource) as other:
+                    self.tasks.completed.emit(token, StreamInfo("netease", "1", "https://example.test/a", True), None)
+                self.assertEqual(self.player.status, "playback_failed")
+                self.assertEqual(self.player.failure_reason, "network")
+                self.assertNotIn("secret", self.player.failure_reason)
+                self.assertFalse(self.player.track.is_playing)
+                self.assertEqual(self.player.track.lyrics, ("暂无歌词",))
+                self.assertFalse(any(job[0][0] == "lyrics" and job[0][1] == self.player._epoch for job in self.tasks.jobs))
+                if during == "source":
+                    other.assert_not_called()
+                self.qt_player.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+                self.assertEqual(self.player.status, "playback_failed")
+                self.assertFalse(self.player.track.is_playing)
+
+    def test_new_catalog_cannot_be_confirmed_by_old_stream_or_playing_signal(self):
+        self.service.daily_recommendations = lambda source: self.songs
+        self.player.play_queue(self.songs)
+        old_stream = self.tasks.jobs[-1][0]
+        self.player.play_daily()
+        self.qt_player.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+        self.assertEqual(self.player.status, "loading_catalog")
+        with patch.object(self.qt_player, "setSource", wraps=self.qt_player.setSource) as source:
+            self.tasks.completed.emit(old_stream, StreamInfo("netease", "1", "https://example.test/old", True), None)
+        source.assert_not_called()
+        self.assertEqual(self.player.status, "loading_catalog")
+        catalog = next(job for job in reversed(self.tasks.jobs) if job[0][0] == "catalog")
+        self.tasks.completed.emit(catalog[0], catalog[1](), None)
+        self.assertEqual(self.player.status, "loading_stream")
+        self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "1", "https://example.test/new", True), None)
+        self.assertEqual(self.player.status, "playing")
+
+    def test_reset_and_closed_qt_errors_do_not_create_false_playback_failure(self):
+        with patch.object(self.qt_player, "setSource", side_effect=lambda *args:
+                self.qt_player.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "synthetic old reset")):
+            self.player.play_queue(self.songs)
+        self.assertEqual(self.player.status, "loading_stream")
+        self.assertEqual(self.player.failure_reason, "")
+        self.player.close()
+        self.qt_player.errorOccurred.emit(QMediaPlayer.Error.NetworkError, "synthetic closed signal")
+        self.assertEqual(self.player.status, "idle")
+        self.assertEqual(self.player.failure_reason, "")
+
+    def test_async_qt_error_categories_are_sanitized_and_stop_playing_visual(self):
+        for code, reason in ((QMediaPlayer.Error.NetworkError, "network"),
+                (QMediaPlayer.Error.FormatError, "format"), (QMediaPlayer.Error.AccessDeniedError, "access_denied"),
+                (QMediaPlayer.Error.ResourceError, "resource")):
+            with self.subTest(code=code):
+                self.player.play_queue(self.songs)
+                self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "1", "https://example.test/a", True), None)
+                self.qt_player.errorOccurred.emit(code, "synthetic signed-url-secret")
+                self.assertEqual(self.player.status, "playback_failed")
+                self.assertEqual(self.player.failure_reason, reason)
+                self.assertFalse(self.player.track.is_playing)
+
+    def test_safe_task_error_categories_remain_distinct_from_authorization(self):
+        for error, reason in (("auth_required", "auth_required"), ("timeout", "timeout"), ("network", "network"),
+                ("invalid_response", "invalid_response"), ("request_failed", "unavailable")):
+            with self.subTest(error=error):
+                self.player.play_queue(self.songs)
+                self.tasks.completed.emit(self.tasks.jobs[-1][0], None, error)
+                self.assertEqual(self.player.status, "stream_unavailable")
+                self.assertEqual(self.player.failure_reason, reason)
+                self.assertEqual(self.player.track.lyrics, ("暂无歌词",))
 
     def test_missing_artwork_has_terminal_miss_and_lyrics_begin_loading(self):
         self.player.play_queue(self.songs)
@@ -248,6 +339,17 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.player.close()
         self.tasks.completed.emit(token, StreamInfo("netease", "1", "https://example.test/a", True), None)
         self.assertTrue(self.qt_player.url.isEmpty())
+
+    def test_invalid_stream_authority_or_control_chars_fail_before_qt(self):
+        for url in ("https:///missing-host", "https://user:password@example.test/audio", "https://[broken/audio",
+                    "https://example.test/audio\r\nInjected:value"):
+            with self.subTest(url=url):
+                self.player.play_queue(self.songs)
+                token = self.tasks.jobs[-1][0]
+                self.tasks.completed.emit(token, StreamInfo("netease", "1", url, True), None)
+                self.assertTrue(self.qt_player.url.isEmpty())
+                self.assertEqual(self.player.status, "stream_unavailable")
+                self.assertEqual(self.player.failure_reason, "invalid_stream")
 
     def test_end_of_queue_fetches_next_personal_fm_batch(self):
         self.service.personal_fm = lambda source: self.songs

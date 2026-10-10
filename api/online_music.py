@@ -462,7 +462,9 @@ class OnlineMusicService:
         duration = item.get("dt", item.get("duration", item.get("interval", item.get("timelen", item.get("Duration", 0)))))
         try:
             duration = float(duration)
-            if "dt" in item or "timelen" in item:
+            # NetEase's older personal-FM song shape names its milliseconds
+            # `duration`; QQ/Kugou duration/interval fields remain seconds.
+            if "dt" in item or "timelen" in item or source_id == "netease" and "duration" in item:
                 duration /= 1000
             duration = max(0.0, duration) if math.isfinite(duration) else 0.0
         except (ValueError, TypeError):

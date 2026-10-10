@@ -3,10 +3,11 @@ from __future__ import annotations
 import unittest
 from dataclasses import FrozenInstanceError
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
+from shiboken6 import isValid
 
 from api.online_music import AccountSnapshot, OnlineSong
 from local.music_library_window import LibraryCollection, MusicLibraryWindow
@@ -46,12 +47,20 @@ class MusicLibraryWindowTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             item.title = "changed"
 
+    def test_disposing_library_preserves_shared_application_screen_wrapper(self):
+        shared = QGuiApplication.primaryScreen()
+        library = MusicLibraryWindow()
+        library.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertTrue(isValid(shared))
+        self.assertIs(QGuiApplication.primaryScreen(), shared)
+
     def test_initial_expanded_layout_has_inline_small_modes(self):
         row = self.window._rows[0]
         self.assertEqual(self.window._expanded, 1.0)
         self.assertTrue(self.window.switch_button.isVisible())
         self.assertTrue(self.window.logout_button.isVisible())
-        self.assertEqual(row.mode_buttons["fullscreen"].height(), 35)
+        self.assertGreaterEqual(row.mode_buttons["fullscreen"].height(), 44)
         self.assertGreater(row.mode_buttons["fullscreen"].x(), row._title_rect.right())
 
     def test_compact_moves_larger_modes_below_title_and_enlarges_cover(self):
@@ -61,7 +70,7 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self._finish_toolbar()
         self.assertEqual(self.window._expanded, 0.0)
         self.assertFalse(self.window.switch_button.isVisible())
-        self.assertEqual(row.mode_buttons["window"].height(), 54)
+        self.assertGreaterEqual(row.mode_buttons["window"].height(), 44)
         self.assertGreater(row.mode_buttons["window"].y(), row._title_rect.bottom())
         self.assertGreater(row.cover.width(), old_cover)
 
@@ -107,6 +116,54 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self.assertEqual(switch.count(), 1)
         self.assertEqual(logout.count(), 1)
         self.assertEqual(self.window._account, self.account)
+
+    def test_back_button_and_escape_emit_navigation_without_close_or_account_mutation(self):
+        back = QSignalSpy(self.window.backRequested)
+        closed = QSignalSpy(self.window.closed)
+        self.window.back_button.click()
+        QTest.keyClick(self.window, Qt.Key.Key_Escape)
+        self.window.search.setText("待返回的搜索")
+        self.assertEqual(self.window.back_button.toolTip(), "返回音乐库")
+        QTest.keyClick(self.window.search, Qt.Key.Key_Escape)
+        self.assertEqual(back.count(), 3)
+        self.assertEqual(closed.count(), 0)
+        self.assertEqual(self.window._account, self.account)
+        self.assertEqual(self.window.search.text(), "待返回的搜索")
+        self.window.search.clear()
+        self.assertEqual(self.window.back_button.toolTip(), "返回音乐来源")
+
+    def test_header_search_and_navigation_remain_usable_in_both_sizes(self):
+        for width, height in ((760, 720), (520, 360)):
+            self.window.resize(width, height)
+            for expanded in (False, True):
+                self.window.set_toolbar_expanded(expanded)
+                self._finish_toolbar()
+                controls = [self.window.back_button, self.window.close_button, self.window.search, self.window.search_button]
+                if expanded:
+                    controls.extend((self.window.source_button, self.window.switch_button, self.window.logout_button))
+                for control in controls:
+                    self.assertTrue(control.isVisible())
+                    self.assertGreaterEqual(control.height(), 44)
+                    self.assertGreaterEqual(control.width(), 44)
+                    self.assertTrue(control.parentWidget().rect().contains(control.geometry()))
+                self.assertFalse(self.window.back_button.geometry().intersects(self.window.close_button.geometry()))
+
+    def test_long_text_and_mode_group_never_overlap_during_toolbar_motion(self):
+        self.window.set_collections((LibraryCollection("long", "playlist", "很长的歌单名称" * 12, "", "2"),))
+        for width in (520, 760):
+            self.window.resize(width, 500)
+            for step in range(11):
+                self.window._set_expanded(step / 10)
+                row = self.window._rows[0]
+                self.assertFalse(row._group_rect.intersects(row._title_rect))
+                self.assertFalse(row._group_rect.intersects(row._subtitle_rect))
+                self.assertTrue(row.rect().contains(row.cover.geometry()))
+
+    def test_error_status_has_its_own_space_below_scrolling_content(self):
+        self.window.set_error("布局测试 · 播放失败")
+        self.assertLess(self.window.scroll.geometry().bottom(), self.window.height() - 36)
+        self.assertEqual(self.window._error, "布局测试 · 播放失败")
+        self.assertFalse(self.window.grab().isNull())
 
     def test_cover_default_and_three_modes_emit_global_artwork_rectangle(self):
         spy = QSignalSpy(self.window.collectionRequested)
@@ -257,6 +314,35 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self.window.show()
         self.app.processEvents()
         self.assertEqual(spy.count(), 1)
+
+    def test_removed_search_artwork_completion_allows_request_when_song_returns(self):
+        song = OnlineSong("netease", "search-first", "第一首搜索歌曲", "测试歌手")
+        first = LibraryCollection("search-first", "song", song.title,
+                                  "https://example.invalid/search-first.jpg", song=song)
+        spy = QSignalSpy(self.window.artworkNeeded)
+        self.window.search.setText("第一首")
+        self.window._search_timer.stop()
+        self.window.set_search_results((first,))
+        self.assertEqual(spy.count(), 1)
+        self.assertIn(first.key, self.window._artwork_pending)
+
+        self.window.search.setText("第二首")
+        self.window._search_timer.stop()
+        self.window.set_search_results(())
+        image = QImage(64, 64, QImage.Format.Format_RGB32)
+        image.fill(QColor("#125578"))
+        self.window.set_artwork(first.key, image)
+        self.assertNotIn(first.key, self.window._artwork)
+        self.assertNotIn(first.key, self.window._artwork_pending)
+
+        self.window.search.setText("第一首")
+        self.window._search_timer.stop()
+        self.window.set_search_results((first,))
+        self.assertEqual(spy.count(), 2)
+        self.assertEqual(spy.at(1), [first.key, first.artwork_url])
+        self.window.set_artwork(first.key, image)
+        self.assertFalse(self.window._rows[0].cover.image.isNull())
+        self.assertNotIn(first.key, self.window._artwork_pending)
 
     def test_reopen_can_retry_ignored_artwork_and_pending_search(self):
         spy = QSignalSpy(self.window.artworkNeeded)

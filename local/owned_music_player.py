@@ -46,9 +46,12 @@ class OwnedMusicPlayer(QObject):
         self.index = -1
         self.track: TrackData | None = None
         self.status = "idle"
+        self.failure_reason = ""
         self._epoch = 0
         self._catalog_epoch = 0
         self._fm_source = ""
+        self._stream_epoch = 0
+        self._stream_trial = False
         self._closed = False
 
     def _set_status(self, value):
@@ -96,6 +99,9 @@ class OwnedMusicPlayer(QObject):
             return False
         self._catalog_epoch += 1
         epoch = self._catalog_epoch
+        # A previous stream or Qt state must not confirm a new catalog opening.
+        self._stream_epoch = 0
+        self.failure_reason = ""
         self._set_status("loading_catalog")
         accepted = self.tasks.submit(("catalog", epoch, kind, source_id),
             lambda: action() if not self._closed and epoch == self._catalog_epoch else ())
@@ -108,6 +114,9 @@ class OwnedMusicPlayer(QObject):
             return False
         self._epoch += 1
         epoch = self._epoch
+        self._stream_epoch = 0
+        self._stream_trial = False
+        self.failure_reason = ""
         song = self.queue[self.index]
         self.player.stop()
         self.player.setSource(QUrl())
@@ -122,8 +131,9 @@ class OwnedMusicPlayer(QObject):
                 track_id=f"owned:{s.source_id}:{s.song_id}") for s in self.queue),
         )
         self._set_status("loading_stream")
-        accepted = self.tasks.submit(("stream", epoch), lambda: self.service.stream_url(song.source_id, song.song_id)
-            if not self._closed and epoch == self._epoch else None)
+        catalog_epoch = self._catalog_epoch
+        accepted = self.tasks.submit(("stream", epoch, catalog_epoch), lambda: self.service.stream_url(song.source_id, song.song_id)
+            if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch else None)
         if not accepted:
             self._set_status("busy")
             self._lyrics_unavailable()
@@ -146,6 +156,7 @@ class OwnedMusicPlayer(QObject):
             if epoch != self._catalog_epoch:
                 return
             if error or not result:
+                self.failure_reason = self._request_failure(error)
                 self._set_status("catalog_unavailable")
                 return
             catalog_kind, source = extra
@@ -155,17 +166,35 @@ class OwnedMusicPlayer(QObject):
         if epoch != self._epoch or self.track is None:
             return
         if kind == "stream":
+            if extra and extra[0] != self._catalog_epoch:
+                return
             if error or result is None or not result.playable:
+                self.failure_reason = self._request_failure(error)
                 self._set_status("stream_unavailable")
                 self._lyrics_unavailable()
                 return
-            if urlsplit(result.url).scheme not in {"https", "http"}:
+            try:
+                parsed = urlsplit(result.url)
+                valid_url = (parsed.scheme in {"https", "http"} and bool(parsed.hostname)
+                    and not parsed.username and not parsed.password and len(result.url) <= 16384
+                    and not any(ord(character) < 32 for character in result.url))
+            except (TypeError, ValueError):
+                valid_url = False
+            if not valid_url:
+                self.failure_reason = "invalid_stream"
                 self._set_status("stream_unavailable")
                 self._lyrics_unavailable()
                 return
+            self._stream_epoch = epoch
+            self._stream_trial = bool(result.trial)
             self.player.setSource(QUrl(result.url))
+            if self._stream_epoch != epoch or self.status == "playback_failed":
+                return
             self.player.play()
-            self._set_status("trial" if result.trial else "playing")
+            # QMediaPlayer confirms PlayingState asynchronously. A synchronous
+            # decoder/network error must not be overwritten by a queued play.
+            if self._stream_epoch != epoch or self.status == "playback_failed":
+                return
             song = self.queue[self.index]
             if not self.tasks.submit(("lyrics", epoch), lambda: self._fetch_lyrics(song)
                     if not self._closed and epoch == self._epoch else None):
@@ -223,7 +252,11 @@ class OwnedMusicPlayer(QObject):
 
     def _state_changed(self, state):
         if self.track is not None:
-            self.track = replace(self.track, is_playing=state == QMediaPlayer.PlaybackState.PlayingState)
+            self.track = replace(self.track, is_playing=(state == QMediaPlayer.PlaybackState.PlayingState
+                and self.status != "playback_failed"))
+            if (state == QMediaPlayer.PlaybackState.PlayingState
+                    and self._stream_epoch == self._epoch and not self._closed):
+                self._set_status("trial" if self._stream_trial else "playing")
             self.changed.emit()
 
     def _media_status(self, status):
@@ -238,8 +271,23 @@ class OwnedMusicPlayer(QObject):
             else:
                 self._set_status("ended")
 
-    def _error(self, *args):
+    @staticmethod
+    def _request_failure(error):
+        return error if error in {"auth_required", "credential", "timeout", "network", "unsupported", "invalid_response", "response"} else "unavailable"
+
+    def _error(self, code, *_args):
+        if self._closed or self.track is None or self._stream_epoch != self._epoch:
+            return
+        self._stream_epoch = 0
+        self.failure_reason = {
+            QMediaPlayer.Error.NetworkError: "network",
+            QMediaPlayer.Error.FormatError: "format",
+            QMediaPlayer.Error.AccessDeniedError: "access_denied",
+            QMediaPlayer.Error.ResourceError: "resource",
+        }.get(code, "backend")
+        self.track = replace(self.track, is_playing=False)
         self._set_status("playback_failed")
+        self._lyrics_unavailable()
 
     def send_playback_command(self, command):
         if self.track is None or self._closed:
@@ -313,6 +361,9 @@ class OwnedMusicPlayer(QObject):
         """Invalidate queued I/O before disabling or changing playback modes."""
         self._epoch += 1
         self._catalog_epoch += 1
+        self._stream_epoch = 0
+        self._stream_trial = False
+        self.failure_reason = ""
         self._fm_source = ""
         self.track = None
         self.queue = ()

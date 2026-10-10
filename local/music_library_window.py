@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QAbstractButton, QLineEdit, QPushButton, QScrollArea, QWidget
 
 from api.online_music import AccountSnapshot, OnlineSong
@@ -17,7 +17,7 @@ from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_mode_controls import paint_presentation_glyph
 from local.music_source_icons import music_source_icon_image, paint_music_source_icon
-from local.playback_entry_window import ENTRY_SOURCES, MusicSourceButton, _entry_font
+from local.playback_entry_window import ENTRY_SOURCES, EntryNavigationButton, MusicSourceButton, _entry_font
 
 
 @dataclass(frozen=True)
@@ -55,9 +55,9 @@ class _LibraryActionButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#c80d0d") if self.kind == "logout" else QColor("#767676"))
-            painter.drawRoundedRect(rect, 6, 6)
-            paint_music_source_icon(painter, rect.adjusted(4, 4, -4, -4), self.kind,
+            painter.setBrush(QColor("#3d2d32") if self.kind == "logout" and self.underMouse() else QColor("#272a31"))
+            painter.drawRoundedRect(rect, 12, 12)
+            paint_music_source_icon(painter, rect.adjusted(10, 10, -10, -10), self.kind,
                                      tint=QColor("white") if self.kind == "switch" else None)
             if self.hasFocus():
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -76,20 +76,22 @@ class _ModeButton(QAbstractButton):
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            rect = QRectF(self.rect()).adjusted(3, 3, -3, -3)
+            rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
             painter.setPen(QPen(QColor("#a8a8a8"), 1.3) if self.hasFocus() else Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#4d4d4d") if self.underMouse() else QColor("#373737"))
-            painter.drawEllipse(rect)
-            side = rect.width() * .70
+            painter.setBrush(QColor("#3c404b") if self.underMouse() else QColor("#292c34"))
+            painter.drawRoundedRect(rect, 12, 12)
+            side = min(28.0, rect.width() * .65)
             glyph = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2, side, side)
             paint_presentation_glyph(painter, glyph, "windowed" if self.mode == "window" else self.mode,
                                      QColor("#ffffff"))
 
 
 class _CollectionCover(QAbstractButton):
-    def __init__(self, parent: QWidget):
+    def __init__(self, source_id: str, kind: str, parent: QWidget):
         super().__init__(parent)
         self.image = QImage()
+        self.source_id = source_id
+        self.kind = kind
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hover = 0.0
         self._animation = QVariantAnimation(self)
@@ -129,6 +131,20 @@ class _CollectionCover(QAbstractButton):
             painter.fillRect(rect, QColor("#252525"))
             if not self.image.isNull():
                 _paint_crop(painter, rect, self.image)
+            else:
+                # Clearly branded placeholder, never a fabricated album cover.
+                source = next((item for item in ENTRY_SOURCES if item.source_id == self.source_id), ENTRY_SOURCES[0])
+                accent = QColor(source.color)
+                accent.setAlpha(28)
+                painter.fillRect(rect, QColor("#23262e"))
+                painter.fillRect(rect, accent)
+                side = min(44.0, rect.width() * .36)
+                icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2 - 8, side, side)
+                paint_music_source_icon(painter, icon, source.source_id)
+                label = {"daily": "每日推荐", "fm": "私人漫游", "playlist": "歌单", "song": "歌曲"}.get(self.kind, "音乐")
+                painter.setFont(_entry_font(12))
+                painter.setPen(QColor("#c4c7d0"))
+                painter.drawText(rect.adjusted(8, rect.height() - 30, -8, -6), Qt.AlignmentFlag.AlignCenter, label)
             painter.setClipping(False)
             painter.setPen(QPen(QColor("#717171") if self.hasFocus() else QColor("#343434"), 1.4))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -143,11 +159,11 @@ class _CollectionCover(QAbstractButton):
 class _CollectionRow(QWidget):
     activated = Signal(object, str, object)
 
-    def __init__(self, collection: LibraryCollection, parent: QWidget):
+    def __init__(self, collection: LibraryCollection, source_id: str, parent: QWidget):
         super().__init__(parent)
         self.collection = collection
         self.fraction = 1.0
-        self.cover = _CollectionCover(self)
+        self.cover = _CollectionCover(source_id, collection.kind, self)
         self.cover.setAccessibleName(f"播放{collection.title}")
         self.cover.setToolTip(collection.title)
         self.cover.clicked.connect(lambda: self._activate("default"))
@@ -167,27 +183,26 @@ class _CollectionRow(QWidget):
 
     def _layout(self):
         f = self.fraction
-        side = round(_mix(144, 128, f))
-        left = round(_mix(15, 11, f))
-        self.cover.setGeometry(left, 4, side, side)
-        text_x = left + side + 24
-        font = _entry_font(24)
-        title_width = min(200, QFontMetricsF(font).horizontalAdvance(self.collection.title) + 8)
-        self._title_rect = QRectF(text_x, _mix(17, 34, f), max(50, self.width() - text_x - 14), 40)
-        small_x = min(text_x + title_width + 12, self.width() - 132)
-        group_x = round(_mix(text_x - 10, small_x, f))
-        group_y = round(_mix(72, 36, f))
-        group_width = round(_mix(185, 122, f))
-        group_height = round(_mix(62, 42, f))
+        side = round(_mix(152, 112, f))
+        left = 16
+        self.cover.setGeometry(left, 12, side, side)
+        text_x = left + side + 16
+        group_width = round(_mix(180, 156, f))
+        group_height = round(_mix(64, 56, f))
+        group_x = round(_mix(text_x - 4, self.width() - group_width - 24, f))
+        group_y = round(_mix(88, 36, f))
         self._group_rect = QRectF(group_x, group_y, group_width, group_height)
-        button_side = round(_mix(54, 35, f))
+        button_side = round(_mix(52, 44, f))
         gap = (group_width - button_side * 3) / 4
         for index, button in enumerate(self.mode_buttons.values()):
             button.setGeometry(round(group_x + gap + index * (button_side + gap)),
                                round(group_y + (group_height - button_side) / 2), button_side, button_side)
-        # Leave space for compact controls without allowing a long title to
-        # paint through the inline mode group in the expanded reference.
-        self._title_rect.setWidth(_mix(self.width() - text_x - 16, max(42, small_x - text_x - 8), f))
+        text_width = self.width() - text_x - 24
+        self._title_rect = QRectF(text_x, _mix(20, 26, f), text_width, 32)
+        self._subtitle_rect = QRectF(text_x, _mix(56, 64, f), text_width, 24)
+        for text_rect in (self._title_rect, self._subtitle_rect):
+            if self._group_rect.top() < text_rect.bottom() and self._group_rect.bottom() > text_rect.top():
+                text_rect.setWidth(max(1, group_x - text_x - 24))
 
     def resizeEvent(self, event):
         self._layout()
@@ -196,25 +211,29 @@ class _CollectionRow(QWidget):
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            panel = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+            painter.setPen(QPen(QColor("#2b2e36"), 1))
+            painter.setBrush(QColor("#1d2027"))
+            painter.drawRoundedRect(panel, 18, 18)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#575757"))
-            painter.drawRoundedRect(self._group_rect, self._group_rect.height() / 2, self._group_rect.height() / 2)
-            painter.setFont(_entry_font(24))
+            painter.setBrush(QColor("#242730"))
+            painter.drawRoundedRect(self._group_rect, 16, 16)
+            painter.setFont(_entry_font(21))
             painter.setPen(QColor("#f8f8f8"))
             title = painter.fontMetrics().elidedText(self.collection.title, Qt.TextElideMode.ElideRight,
                                                      round(self._title_rect.width()))
             painter.drawText(self._title_rect, Qt.AlignmentFlag.AlignVCenter, title)
-            if self.collection.song is not None and self.fraction < .45:
-                painter.setFont(_entry_font(13))
-                painter.setPen(QColor("#aaaaaa"))
-                painter.drawText(QRectF(self._title_rect.x(), 51, self._title_rect.width(), 21),
-                                 Qt.AlignmentFlag.AlignVCenter,
-                                 painter.fontMetrics().elidedText(self.collection.song.artist,
-                                                                 Qt.TextElideMode.ElideRight,
-                                                                 round(self._title_rect.width())))
+            painter.setFont(_entry_font(13))
+            painter.setPen(QColor("#989eac"))
+            subtitle = self.collection.song.artist if self.collection.song is not None else {
+                "daily": "为你推荐的音乐", "fm": "私人漫游", "playlist": "歌单", "song": "歌曲"}.get(self.collection.kind, "音乐合集")
+            painter.drawText(self._subtitle_rect, Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(subtitle, Qt.TextElideMode.ElideRight,
+                                                             round(self._subtitle_rect.width())))
 
 
 class MusicLibraryWindow(QWidget):
+    backRequested = Signal()
     sourceSwitchRequested = Signal()
     logoutRequested = Signal()
     searchRequested = Signal(str)
@@ -231,8 +250,11 @@ class MusicLibraryWindow(QWidget):
         IslandStackVisual.load_embedded_lyric_fonts()
         self.setWindowTitle(f"{APP_NAME} · 音乐库")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setMinimumSize(520, 360)
-        self.resize(660, 600)
+        # Application queries preserve the shared QScreen wrapper's lifetime.
+        screen = QGuiApplication.screenAt(self.frameGeometry().center()) or QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+        self.setMinimumSize(min(520, available.width()), min(360, available.height()))
+        self.resize(min(760, available.width()), min(720, available.height()))
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._account: AccountSnapshot | None = None
@@ -260,15 +282,16 @@ class MusicLibraryWindow(QWidget):
         self._search_timer.timeout.connect(self._submit_search)
         source = ENTRY_SOURCES[0]
         self.source_button = MusicSourceButton(source, self)
+        self.source_button.show_caption = False
         self.source_button.setCheckable(False)
         self.source_button.clicked.connect(self.sourceSwitchRequested)
         self.switch_button = _LibraryActionButton("switch", "切换音乐平台", self)
         self.switch_button.clicked.connect(self.sourceSwitchRequested)
         self.logout_button = _LibraryActionButton("logout", "退出当前平台账号", self)
         self.logout_button.clicked.connect(self.logoutRequested)
-        self.close_button = QPushButton("×", self)
-        self.close_button.setAccessibleName("关闭音乐库")
-        self.close_button.setStyleSheet("QPushButton { color: #aaa; border: none; background: transparent; font-size: 24px; } QPushButton:hover { color: white; }")
+        self.back_button = EntryNavigationButton("back", "返回音乐来源", self)
+        self.back_button.clicked.connect(self.backRequested)
+        self.close_button = EntryNavigationButton("close", "关闭音乐库", self)
         self.close_button.clicked.connect(self.close)
         self.search = QLineEdit(self)
         self.search.setAccessibleName("搜索当前平台的歌曲与歌单")
@@ -278,7 +301,7 @@ class MusicLibraryWindow(QWidget):
         search_icon.setDevicePixelRatio(2.0)
         self.search_button = QPushButton(self.search)
         self.search_button.setIcon(QIcon(search_icon))
-        self.search_button.setIconSize(QSize(34, 34))
+        self.search_button.setIconSize(QSize(22, 22))
         self.search_button.setAccessibleName("搜索歌曲与歌单")
         self.search_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.search_button.setStyleSheet("QPushButton { border: none; background: transparent; } QPushButton:focus { border: 1px dotted white; border-radius: 15px; }")
@@ -290,8 +313,8 @@ class MusicLibraryWindow(QWidget):
         self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self.scroll.setWidgetResizable(False)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }")
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; } QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; } QScrollBar::handle:vertical { background: #444a56; border-radius: 3px; min-height: 28px; } QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; } QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }")
         self.content = QWidget()
         self.content.setStyleSheet("background: transparent;")
         self.scroll.setWidget(self.content)
@@ -350,7 +373,8 @@ class MusicLibraryWindow(QWidget):
             row.deleteLater()
         self._rows = []
         for collection in self.collections:
-            row = _CollectionRow(collection, self.content)
+            source_id = self._account.source_id if self._account is not None else "netease"
+            row = _CollectionRow(collection, source_id, self.content)
             row.activated.connect(self._collection_activated)
             row.cover.image = self._artwork.get(collection.key, QImage())
             row.setEnabled(not self._opening)
@@ -397,18 +421,21 @@ class MusicLibraryWindow(QWidget):
         self._message = str(message)
         if loading:
             self._error = ""
+        self._layout()
         self.update()
 
     def set_error(self, message: str):
         self._loading = False
         self._error = str(message)
+        self._layout()
         self.update()
 
     def set_artwork(self, key: str, image: QImage):
+        # Completion releases the request even if a newer search removed its row.
+        self._artwork_pending.discard(key)
         known = {item.key for item in self._catalog + self._results}
         if not isinstance(image, QImage) or (key != "account" and key not in known):
             return
-        self._artwork_pending.discard(key)
         artwork = image.scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio,
                                Qt.TransformationMode.SmoothTransformation) if not image.isNull() else QImage()
         self._artwork[key] = artwork
@@ -476,29 +503,37 @@ class MusicLibraryWindow(QWidget):
 
     def _layout(self):
         f = self._expanded
-        header_height = round(_mix(100, 156, f))
-        self.close_button.setGeometry(self.width() - 34, 5, 28, 30)
+        header_height = round(_mix(216, 256, f))
+        self.back_button.setGeometry(24, 16, 44, 44)
+        back_label = "返回音乐库" if self.search.text().strip() else "返回音乐来源"
+        self.back_button.setToolTip(back_label)
+        self.back_button.setAccessibleName(back_label)
+        self.close_button.setGeometry(self.width() - 68, 16, 44, 44)
         for button in (self.source_button, self.switch_button, self.logout_button):
             button.setVisible(f > .48)
-        self.source_button.setGeometry(164, 3, 52, 52)
-        self.switch_button.setGeometry(229, 9, 41, 41)
-        self.logout_button.setGeometry(273, 9, 41, 41)
-        search_x = round(_mix(105, 154, f))
-        search_y = round(_mix(65, 68, f))
-        search_height = round(_mix(14, 51, f))
-        self.search.setGeometry(search_x, search_y, min(405, self.width() - search_x - 42), search_height)
-        self.search.setStyleSheet(f"QLineEdit {{ color: white; background: #575757; border: none; border-radius: {search_height // 2}px; padding-left: 17px; padding-right: {48 if f > .7 else 12}px; }} QLineEdit:focus {{ border: 1px solid #aaa; }}")
-        self.search.setPlaceholderText("搜索歌曲与歌单" if f > .7 else "")
-        self.search_button.setVisible(f > .7)
-        self.search_button.setGeometry(self.search.width() - 46, 4, 40, max(1, search_height - 8))
-        self.scroll.setGeometry(0, header_height, self.width(), max(1, self.height() - header_height - 8))
-        row_height = round(_mix(156, 142, f))
-        self.content.resize(self.scroll.width(), max(1, len(self._rows) * row_height + 10))
+        for index, button in enumerate((self.source_button, self.switch_button, self.logout_button)):
+            button.setGeometry(self.width() - 180 + index * 52, 88, 44, 44)
+        search_y = round(_mix(124, 160, f))
+        self.search.setGeometry(24, search_y, self.width() - 48, 48)
+        self.search.setStyleSheet("QLineEdit { color: #f3f4f7; background: #252830; border: 1px solid #353944; border-radius: 14px; padding-left: 16px; padding-right: 52px; } QLineEdit:focus { border: 1px solid #727989; }")
+        self.search.setPlaceholderText("搜索当前平台的歌曲与歌单")
+        self.search_button.setVisible(True)
+        self.search_button.setGeometry(self.search.width() - 48, 2, 44, 44)
+        # Keep status outside the scrolling children so a failed open remains visible.
+        footer = 44 if self._rows and (self._error or (self._loading and self._message)) else 16
+        self.scroll.setGeometry(16, header_height, self.width() - 32, max(1, self.height() - header_height - footer))
+        row_height = round(_mix(176, 136, f))
+        content_height = max(1, len(self._rows) * row_height + 10)
+        scrollbar_width = self.scroll.verticalScrollBar().sizeHint().width() if content_height > self.scroll.height() else 0
+        self.content.resize(max(1, self.scroll.width() - scrollbar_width), content_height)
         for index, row in enumerate(self._rows):
             row.setGeometry(0, index * row_height + 4, self.content.width(), row_height)
             row.set_fraction(f)
 
     def eventFilter(self, watched, event):
+        if watched is self.search and event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            self.backRequested.emit()
+            return True
         if watched is self.search and event.type() in {QEvent.Type.FocusIn, QEvent.Type.MouseButtonPress, QEvent.Type.Enter}:
             self.set_toolbar_expanded(True)
         if watched is self.scroll.viewport():
@@ -532,10 +567,7 @@ class MusicLibraryWindow(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            if self.search.text():
-                self.search.clear()
-            else:
-                self.close()
+            self.backRequested.emit()
             event.accept()
             return
         super().keyPressEvent(event)
@@ -571,17 +603,17 @@ class MusicLibraryWindow(QWidget):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             panel = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#000000"))
+            painter.setPen(QPen(QColor("#30333b"), 1))
+            painter.setBrush(QColor("#15171c"))
             painter.drawRoundedRect(panel, 24, 24)
             f = self._expanded
-            if f > .48:
-                painter.setBrush(QColor("#f4f4f4"))
-                painter.drawRoundedRect(QRectF(172, 7, 151, 52), 8, 8)
-            side = _mix(74, 120, f)
-            avatar = QRectF(_mix(20, 14, f), _mix(11, 7, f), side, side)
-            painter.setBrush(QColor("#242424"))
-            painter.setPen(QPen(QColor("#424242"), 2))
+            painter.setFont(_entry_font(23))
+            painter.setPen(QColor("#f1f2f5"))
+            painter.drawText(QRectF(84, 20, self.width() - 168, 36), Qt.AlignmentFlag.AlignVCenter, "音乐库")
+            side = _mix(40, 64, f)
+            avatar = QRectF(24, _mix(72, 80, f), side, side)
+            painter.setBrush(QColor("#292d36"))
+            painter.setPen(QPen(QColor("#414651"), 1))
             painter.drawEllipse(avatar)
             image = self._artwork.get("account", QImage())
             if not image.isNull():
@@ -591,16 +623,23 @@ class MusicLibraryWindow(QWidget):
                 painter.setClipPath(clip)
                 _paint_crop(painter, avatar, image)
                 painter.restore()
-            if f < .9:
-                painter.setOpacity(1.0 - f)
-                painter.setFont(_entry_font(18))
-                painter.setPen(QColor("#eeeeee"))
-                name = self._account.nickname if self._account else ""
-                name_rect = QRectF(112, 24, max(1, self.width() - 162), 32)
-                painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter,
-                                 painter.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight,
-                                                                 round(name_rect.width())))
-                painter.setOpacity(1.0)
+            text_x = _mix(80, 104, f)
+            text_right = self.width() - (204 if f > .48 else 24)
+            painter.setFont(_entry_font(20))
+            painter.setPen(QColor("#f1f2f5"))
+            name = self._account.nickname if self._account else ""
+            name_rect = QRectF(text_x, _mix(70, 80, f), max(1, text_right - text_x), 32)
+            painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(name or "音乐账号", Qt.TextElideMode.ElideRight, round(name_rect.width())))
+            painter.setFont(_entry_font(13))
+            painter.setPen(QColor("#969cab"))
+            source = self.source_button.source.name if self._account is not None else ""
+            painter.drawText(QRectF(text_x, _mix(100, 116, f), max(1, text_right - text_x), 24),
+                             Qt.AlignmentFlag.AlignVCenter, source)
+            section = "搜索结果" if self.search.text().strip() else "我的音乐"
+            painter.setFont(_entry_font(17))
+            painter.setPen(QColor("#d9dce4"))
+            painter.drawText(QRectF(24, self.scroll.y() - 36, self.width() - 48, 28), Qt.AlignmentFlag.AlignVCenter, section)
             if not self._rows:
                 painter.setFont(_entry_font(17))
                 painter.setPen(QColor("#b8b8b8"))
@@ -608,8 +647,8 @@ class MusicLibraryWindow(QWidget):
                                          ("未找到歌曲或歌单" if self.search.text().strip() else "暂无可显示的歌单"))
                 painter.drawText(QRectF(24, self.scroll.y() + 55, self.width() - 48, 80),
                                  Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, message)
-            elif self._error:
+            elif self._error or (self._loading and self._message):
                 painter.setFont(_entry_font(13))
-                painter.setPen(QColor("#e4b5ad"))
-                painter.drawText(QRectF(24, self.height() - 31, self.width() - 48, 25),
-                                 Qt.AlignmentFlag.AlignCenter, self._error)
+                painter.setPen(QColor("#e4b5ad") if self._error else QColor("#969cab"))
+                painter.drawText(QRectF(24, self.height() - 36, self.width() - 48, 25), Qt.AlignmentFlag.AlignCenter,
+                                 painter.fontMetrics().elidedText(self._error or self._message, Qt.TextElideMode.ElideRight, self.width() - 48))

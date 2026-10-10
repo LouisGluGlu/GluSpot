@@ -62,11 +62,8 @@ async function ncmCall(state, method, params = {}) {
       if (error && error.body && [800,801,802,803].includes(Number(error.body.code))) result=error;
       else throw error;
     }
-  } else if (method === "song_url_v1") {
-    // No unblock/matching operation is reachable through this bridge.
-    result = await state.request("/api/song/enhance/player/url/v1",{ids:JSON.stringify([Number(query.id)]),level:query.level || "standard",encodeType:"mp3"},{crypto:"xeapi",cookie:query.cookie,timeout:12000,randomCNIP:false});
   } else {
-    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personal_fm","lyric_new","lyric","cloudsearch"]);
+    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personal_fm","lyric_new","lyric","cloudsearch","song_url"]);
     if (!allowed.has(method)) fail("unsupported");
     const fn = require(path.join(state.root,"module",method + ".js"));
     result = await fn(query,state.request);
@@ -198,7 +195,9 @@ async function dispatch(source,op,p,credential,context) {
     if(op==="playlist_tracks") return await ncmCall(state,"playlist_track_all",{id:requireId(p.playlist_id),limit:p.limit,offset:p.offset});
     if(op==="daily_recommendations") return await ncmCall(state,"recommend_songs");
     if(op==="personal_fm") return await ncmCall(state,"personal_fm");
-    if(op==="stream_url") return await ncmCall(state,"song_url_v1",{id:requireId(p.song_id),level:"standard"});
+    // The pinned standard endpoint uses the existing account authorization,
+    // without XEAPI startup-key registration or unblock/matching imports.
+    if(op==="stream_url") return await ncmCall(state,"song_url",{id:requireId(p.song_id),br:128000});
     if(op==="lyrics") {
       let newer={};
       try {newer=await ncmCall(state,"lyric_new",{id:requireId(p.song_id)});} catch(_) {}

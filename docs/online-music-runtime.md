@@ -34,14 +34,14 @@
 
 | 来源 | 已接入操作 | 固定接口与处理 |
 | --- | --- | --- |
-| 网易云 | 扫码、验证、歌单与分页、歌曲/歌单搜索、每日推荐、私人 FM、授权流、LRC/YRC/翻译/罗马音 | 包内 QR key/create、login_status、user_playlist、playlist_track_all、cloudsearch、recommend_songs、personal_fm、lyric_new/lyric；QR check 使用已核对的 request API 直接调用 `/api/login/qrcode/client/login`，绕过固定版本 QR module 的错误 catch；流使用 `/api/song/enhance/player/url/v1`。 |
+| 网易云 | 扫码、验证、歌单与分页、歌曲/歌单搜索、每日推荐、私人 FM、授权流、LRC/YRC/翻译/罗马音 | 包内 QR key/create、login_status、user_playlist、playlist_track_all、cloudsearch、recommend_songs、personal_fm、lyric_new/lyric；QR check 使用已核对的 request API 直接调用 `/api/login/qrcode/client/login`，绕过固定版本 QR module 的错误 catch；流使用固定包 `song_url` 模块，`br=128000`，对应 `/api/song/enhance/player/url`。 |
 | QQ | 扫码、验证、歌单与分页、歌曲/歌单搜索、授权流 | 固定 `dist/src/services/auth/qrLogin.node.js` 的 `createNodeQrLoginService`；`getUserPlaylists` 返回 `v_playlist`，`getOwnedPlaylistSongs` 返回单个窗口，`getMusicPlay` 按 songmid 返回地址映射。搜索单独使用已核对的固定包 HTTP client 和实测 musicu Desktop 契约，详见下文。 |
 | 酷狗 | 扫码、验证、歌单与分页、歌曲/歌单搜索、授权流 | 包内 `register_dev`、login_qr_key/create/check、user_detail、user_playlist、playlist_track_all、search、song_url；使用 `util/request.js` 的 `createRequest`，保留完整设备 cookie 与新账号 cookie。 |
 | 汽水 | 明确不可用 | 没有已验证、可随 Qt 项目分发的扫码适配器。未复制参考项目的混淆安全运行时。 |
 
 QQ owned 歌单接口每页最多 100 首，服务据此限制单页并保留后续分页标记。其回退接口只能读取前 1000 首，超出后明确返回不支持，不将截断声称为完整歌单。QQ 收藏歌单接受固定包核对过的 `dissid/dirId/dirid`；酷狗曲目端点需要 `global_collection_id`，优先保留此 ID，避免误用其他列表编号。
 
-网易流仅调用当前账号可获得的标准音质地址；桥接 allowlist 没有解锁、跨源匹配或替代音源操作。返回 URL 为空时为不可播放；平台提供试听信息时保留其性质。QQ/酷狗逐字歌词尚未接入。登录后的内容界面与用户确认范围参见[入口实施记录](owned-playback-entry.md)。
+网易流仅调用当前账号可获得的标准音质地址；桥接 allowlist 没有解锁、跨源匹配或替代音源操作。返回 URL 为空时为不可播放；平台提供试听信息时保留其性质。原先绕过上游启动入口却直接请求 XEAPI v1，缺少该路径所需的密钥状态，导致真实授权流失败；现使用固定包已有的标准授权模块，不再依赖 XEAPI 初始化。网易旧版 FM 的 `duration` 与新版 `dt` 均按毫秒转换，QQ/酷狗秒字段保留。QQ/酷狗逐字歌词尚未接入。登录后的内容界面与用户确认范围参见[入口实施记录](owned-playback-entry.md)。
 
 ## 当前平台歌曲与歌单搜索
 
@@ -91,4 +91,6 @@ node --check native/online_music/bridge.cjs
 
 搜索另用临时环境、上游原始 module 与固定 QQ HTTP client 作匿名核对，未导入已有账号。网易歌曲/歌单在 offset=2、limit=2 均返回两项；QQ 独立歌曲探测第 1、2 页各返回 20 项，歌单第 1、2 页返回 20、19 项并分别声明下一页 2、3；酷狗匿名 special 第 2 页返回两项及 total=480，返回的 gid 读取曲目成功。酷狗匿名歌曲实际返回 error_code=152，文档要求账号；部分 QQ 合并探测实际返回 code=2001/is_filter=-12，已保留失败证据，没有宣称稳定成功。脱敏记录在 ignored `logs/online-music-anonymous-search-result.json`，仅保留字段名、数量、分页与错误码，不含账号、曲目流地址或会话。服务端登录后的完整搜索流程仍由 fixtures 覆盖，真实用户账户验证待进行。
 
-真实用户授权后的每日推荐、FM、歌单、完整会话重启和音频仍需用户登录验证。酷狗文档没有 user_detail 成功 profile 的完整 schema，当前按成功状态、非空 data 和账号 ID 验证，只有合成响应覆盖。三源匿名成功不代表会员、版权、地区或未来 API 可用性保证，也不构成性能或长时歌词同步的实测结论。项目全量回归结果由 README 与本次提交的交付记录统一报告。
+随后修复的服务、桥接和凭据专测 55 项全部通过，新增标准流模块契约、原有账号 cookie 传递和 FM 毫秒时长回归。已有网易云账户的只读验证返回每日推荐 30 首、FM 3 首，并验证非空歌单的分页。两类首曲均取得非试听授权流，Qt 实际进入 PlayingState，时钟分别推进至 1202/1228 ms，歌词分别解析 48/50 行，无 Qt 错误；仅测试播放器音量为零，加密账户文件字节与修改时间前后不变。证据在 ignored `.runtime/online-playback-readonly-probe.json` 和 `.runtime/online-playback-qt-readonly-probe.json`，不保留账号身份、cookie 或签名 URL。完整会话重启、所有目录歌曲、长时播放与实际扬声器听感未由这次短测覆盖，详见[修复验收](library-playback-repair.md)。
+
+酷狗文档没有 user_detail 成功 profile 的完整 schema，当前按成功状态、非空 data 和账号 ID 验证，只有合成响应覆盖。三源匿名成功不代表会员、版权、地区或未来 API 可用性保证，也不构成性能或长时歌词同步的实测结论。项目全量回归结果由 README 与本次提交的交付记录统一报告。
