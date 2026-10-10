@@ -204,7 +204,7 @@ def _check_group_dispatch() -> dict:
         result["ok"] = (completed.returncode == 2 and len(events) == 1
                         and isinstance(events[0], dict) and events[0].get("event") == "error"
                         and events[0].get("message") ==
-                        "Group requires a verified music process, source endpoint and HomePod")
+                        "Group requires a verified music process, source endpoint and two outputs or AirPlay")
         if not result["ok"]:
             result["error"] = "Packaged helper does not implement the expected group dispatch"
     except Exception as exc:

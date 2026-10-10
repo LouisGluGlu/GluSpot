@@ -50,6 +50,14 @@ until the user confirms cleanup.
 
 ## Verification
 
+The first newly built package exposed a stale acceptance expectation: the
+group probe still matched the former HomePod-required parser message. The
+current native contract permits two Windows outputs without AirPlay and
+rejects incomplete arguments with its corresponding message. The Python
+check now matches that exact contract and rejects the former parser message;
+it still requires one error event, exit code 2, and the separate multiple-
+output collision probe. The package is rebuilt with this corrected check.
+
 Completion results, executable identity and archive integrity are recorded
 after the build and final checks. Existing source-instance or historical
 package verification is not used as evidence for the newly built executable.
