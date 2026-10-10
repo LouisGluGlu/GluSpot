@@ -1,0 +1,1296 @@
+[
+  {
+    "accent": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "backdrop": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "primary": [
+      217,
+      76,
+      77,
+      255
+    ],
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      236,
+      236,
+      236,
+      242
+    ]
+  },
+  {
+    "accent": [
+      171,
+      147,
+      240,
+      255
+    ],
+    "backdrop": [
+      55,
+      240,
+      8,
+      255
+    ],
+    "primary": null,
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      120,
+      101,
+      178,
+      242
+    ]
+  },
+  {
+    "accent": [
+      90,
+      138,
+      246,
+      255
+    ],
+    "backdrop": [
+      152,
+      169,
+      194,
+      255
+    ],
+    "primary": [
+      130,
+      56,
+      146,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      59,
+      92,
+      162,
+      242
+    ]
+  },
+  {
+    "accent": [
+      102,
+      230,
+      29,
+      255
+    ],
+    "backdrop": [
+      201,
+      111,
+      85,
+      255
+    ],
+    "primary": [
+      129,
+      247,
+      81,
+      255
+    ],
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      165,
+      234,
+      135,
+      242
+    ]
+  },
+  {
+    "accent": [
+      248,
+      210,
+      81,
+      255
+    ],
+    "backdrop": [
+      69,
+      32,
+      191,
+      255
+    ],
+    "primary": [
+      161,
+      56,
+      155,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      164,
+      138,
+      53,
+      242
+    ]
+  },
+  {
+    "accent": [
+      135,
+      94,
+      85,
+      255
+    ],
+    "backdrop": [
+      131,
+      215,
+      7,
+      255
+    ],
+    "primary": [
+      135,
+      94,
+      85,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      90,
+      73,
+      69,
+      242
+    ]
+  },
+  {
+    "accent": [
+      85,
+      20,
+      208,
+      255
+    ],
+    "backdrop": [
+      160,
+      102,
+      123,
+      255
+    ],
+    "primary": null,
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      202,
+      184,
+      240,
+      242
+    ]
+  },
+  {
+    "accent": [
+      23,
+      50,
+      140,
+      255
+    ],
+    "backdrop": [
+      11,
+      194,
+      45,
+      255
+    ],
+    "primary": [
+      243,
+      124,
+      73,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      18,
+      40,
+      112,
+      242
+    ]
+  },
+  {
+    "accent": [
+      116,
+      23,
+      22,
+      255
+    ],
+    "backdrop": [
+      149,
+      205,
+      35,
+      255
+    ],
+    "primary": [
+      73,
+      230,
+      132,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      90,
+      17,
+      17,
+      242
+    ]
+  },
+  {
+    "accent": [
+      130,
+      237,
+      98,
+      255
+    ],
+    "backdrop": [
+      71,
+      133,
+      51,
+      255
+    ],
+    "primary": [
+      213,
+      93,
+      0,
+      255
+    ],
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      118,
+      215,
+      89,
+      242
+    ]
+  },
+  {
+    "accent": [
+      153,
+      98,
+      212,
+      255
+    ],
+    "backdrop": [
+      132,
+      175,
+      106,
+      255
+    ],
+    "primary": [
+      153,
+      98,
+      212,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      108,
+      87,
+      132,
+      242
+    ]
+  },
+  {
+    "accent": [
+      120,
+      110,
+      153,
+      255
+    ],
+    "backdrop": [
+      190,
+      168,
+      3,
+      255
+    ],
+    "primary": null,
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      75,
+      64,
+      113,
+      242
+    ]
+  },
+  {
+    "accent": [
+      66,
+      165,
+      127,
+      255
+    ],
+    "backdrop": [
+      231,
+      164,
+      116,
+      255
+    ],
+    "primary": [
+      23,
+      234,
+      37,
+      255
+    ],
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      229,
+      240,
+      229,
+      242
+    ]
+  },
+  {
+    "accent": [
+      95,
+      62,
+      172,
+      255
+    ],
+    "backdrop": [
+      95,
+      20,
+      112,
+      255
+    ],
+    "primary": [
+      202,
+      113,
+      189,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      132,
+      86,
+      239,
+      242
+    ]
+  },
+  {
+    "accent": [
+      249,
+      205,
+      48,
+      255
+    ],
+    "backdrop": [
+      11,
+      191,
+      179,
+      255
+    ],
+    "primary": [
+      23,
+      89,
+      158,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      124,
+      101,
+      24,
+      242
+    ]
+  },
+  {
+    "accent": [
+      78,
+      121,
+      223,
+      255
+    ],
+    "backdrop": [
+      148,
+      213,
+      28,
+      255
+    ],
+    "primary": [
+      78,
+      121,
+      223,
+      255
+    ],
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      229,
+      232,
+      240,
+      242
+    ]
+  },
+  {
+    "accent": [
+      74,
+      208,
+      191,
+      255
+    ],
+    "backdrop": [
+      63,
+      187,
+      242,
+      255
+    ],
+    "primary": null,
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      40,
+      113,
+      103,
+      242
+    ]
+  },
+  {
+    "accent": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "backdrop": [
+      239,
+      86,
+      117,
+      255
+    ],
+    "primary": [
+      3,
+      130,
+      149,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      220,
+      220,
+      220,
+      242
+    ]
+  },
+  {
+    "accent": [
+      213,
+      39,
+      81,
+      255
+    ],
+    "backdrop": [
+      2,
+      207,
+      12,
+      255
+    ],
+    "primary": [
+      117,
+      240,
+      140,
+      255
+    ],
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      240,
+      229,
+      232,
+      242
+    ]
+  },
+  {
+    "accent": [
+      22,
+      65,
+      234,
+      255
+    ],
+    "backdrop": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "primary": [
+      226,
+      152,
+      215,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      16,
+      50,
+      173,
+      242
+    ]
+  },
+  {
+    "accent": [
+      231,
+      134,
+      10,
+      255
+    ],
+    "backdrop": [
+      87,
+      105,
+      23,
+      255
+    ],
+    "primary": [
+      231,
+      134,
+      10,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      48,
+      35,
+      20,
+      242
+    ]
+  },
+  {
+    "accent": [
+      216,
+      54,
+      233,
+      255
+    ],
+    "backdrop": [
+      38,
+      91,
+      78,
+      255
+    ],
+    "primary": null,
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      224,
+      84,
+      240,
+      242
+    ]
+  },
+  {
+    "accent": [
+      64,
+      135,
+      187,
+      255
+    ],
+    "backdrop": [
+      119,
+      111,
+      117,
+      255
+    ],
+    "primary": [
+      114,
+      132,
+      99,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      26,
+      54,
+      75,
+      242
+    ]
+  },
+  {
+    "accent": [
+      214,
+      169,
+      242,
+      255
+    ],
+    "backdrop": [
+      200,
+      100,
+      0,
+      255
+    ],
+    "primary": [
+      229,
+      195,
+      207,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      79,
+      55,
+      96,
+      242
+    ]
+  },
+  {
+    "accent": [
+      49,
+      222,
+      211,
+      255
+    ],
+    "backdrop": [
+      221,
+      115,
+      24,
+      255
+    ],
+    "primary": [
+      125,
+      66,
+      119,
+      255
+    ],
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      147,
+      240,
+      234,
+      242
+    ]
+  },
+  {
+    "accent": [
+      21,
+      87,
+      98,
+      255
+    ],
+    "backdrop": [
+      239,
+      151,
+      17,
+      255
+    ],
+    "primary": [
+      21,
+      87,
+      98,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      46,
+      84,
+      90,
+      242
+    ]
+  },
+  {
+    "accent": [
+      214,
+      63,
+      247,
+      255
+    ],
+    "backdrop": [
+      166,
+      76,
+      198,
+      255
+    ],
+    "primary": null,
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      92,
+      27,
+      107,
+      242
+    ]
+  },
+  {
+    "accent": [
+      159,
+      201,
+      147,
+      255
+    ],
+    "backdrop": [
+      59,
+      97,
+      133,
+      255
+    ],
+    "primary": [
+      171,
+      150,
+      138,
+      255
+    ],
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      116,
+      173,
+      98,
+      242
+    ]
+  },
+  {
+    "accent": [
+      88,
+      70,
+      31,
+      255
+    ],
+    "backdrop": [
+      17,
+      146,
+      68,
+      255
+    ],
+    "primary": [
+      247,
+      32,
+      245,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      82,
+      65,
+      29,
+      242
+    ]
+  },
+  {
+    "accent": [
+      102,
+      122,
+      203,
+      255
+    ],
+    "backdrop": [
+      75,
+      130,
+      130,
+      255
+    ],
+    "primary": [
+      250,
+      129,
+      81,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      47,
+      57,
+      94,
+      242
+    ]
+  },
+  {
+    "accent": [
+      238,
+      144,
+      203,
+      255
+    ],
+    "backdrop": [
+      199,
+      23,
+      7,
+      255
+    ],
+    "primary": [
+      238,
+      144,
+      203,
+      255
+    ],
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      226,
+      169,
+      205,
+      242
+    ]
+  },
+  {
+    "accent": [
+      11,
+      235,
+      103,
+      255
+    ],
+    "backdrop": [
+      104,
+      168,
+      36,
+      255
+    ],
+    "primary": null,
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      8,
+      99,
+      44,
+      242
+    ]
+  },
+  {
+    "accent": [
+      246,
+      143,
+      186,
+      255
+    ],
+    "backdrop": [
+      218,
+      210,
+      162,
+      255
+    ],
+    "primary": [
+      124,
+      89,
+      245,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      162,
+      92,
+      122,
+      242
+    ]
+  },
+  {
+    "accent": [
+      53,
+      205,
+      220,
+      255
+    ],
+    "backdrop": [
+      43,
+      159,
+      143,
+      255
+    ],
+    "primary": [
+      219,
+      61,
+      139,
+      255
+    ],
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      170,
+      234,
+      240,
+      242
+    ]
+  },
+  {
+    "accent": [
+      0,
+      0,
+      0,
+      255
+    ],
+    "backdrop": [
+      102,
+      28,
+      210,
+      255
+    ],
+    "primary": [
+      55,
+      159,
+      36,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      172,
+      172,
+      172,
+      242
+    ]
+  },
+  {
+    "accent": [
+      135,
+      25,
+      218,
+      255
+    ],
+    "backdrop": [
+      141,
+      140,
+      18,
+      255
+    ],
+    "primary": [
+      135,
+      25,
+      218,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      97,
+      57,
+      128,
+      242
+    ]
+  },
+  {
+    "accent": [
+      66,
+      82,
+      71,
+      255
+    ],
+    "backdrop": [
+      222,
+      248,
+      71,
+      255
+    ],
+    "primary": null,
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      229,
+      240,
+      232,
+      242
+    ]
+  },
+  {
+    "accent": [
+      190,
+      240,
+      3,
+      255
+    ],
+    "backdrop": [
+      89,
+      85,
+      214,
+      255
+    ],
+    "primary": [
+      11,
+      108,
+      211,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      152,
+      186,
+      15,
+      242
+    ]
+  },
+  {
+    "accent": [
+      243,
+      41,
+      114,
+      255
+    ],
+    "backdrop": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "primary": [
+      177,
+      244,
+      228,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      160,
+      27,
+      76,
+      242
+    ]
+  },
+  {
+    "accent": [
+      1,
+      213,
+      49,
+      255
+    ],
+    "backdrop": [
+      44,
+      203,
+      132,
+      255
+    ],
+    "primary": [
+      176,
+      225,
+      44,
+      255
+    ],
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      229,
+      240,
+      231,
+      242
+    ]
+  },
+  {
+    "accent": [
+      238,
+      189,
+      146,
+      255
+    ],
+    "backdrop": [
+      219,
+      97,
+      75,
+      255
+    ],
+    "primary": [
+      238,
+      189,
+      146,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      77,
+      67,
+      58,
+      242
+    ]
+  },
+  {
+    "accent": [
+      227,
+      251,
+      171,
+      255
+    ],
+    "backdrop": [
+      89,
+      251,
+      232,
+      255
+    ],
+    "primary": null,
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      131,
+      150,
+      85,
+      242
+    ]
+  },
+  {
+    "accent": [
+      217,
+      51,
+      215,
+      255
+    ],
+    "backdrop": [
+      10,
+      194,
+      167,
+      255
+    ],
+    "primary": [
+      29,
+      132,
+      85,
+      255
+    ],
+    "use_light": false,
+    "require_light": true,
+    "expected": [
+      240,
+      229,
+      240,
+      242
+    ]
+  },
+  {
+    "accent": [
+      86,
+      21,
+      184,
+      255
+    ],
+    "backdrop": [
+      137,
+      89,
+      102,
+      255
+    ],
+    "primary": [
+      71,
+      122,
+      221,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      55,
+      14,
+      121,
+      242
+    ]
+  },
+  {
+    "accent": [
+      148,
+      214,
+      154,
+      255
+    ],
+    "backdrop": [
+      7,
+      38,
+      69,
+      255
+    ],
+    "primary": [
+      10,
+      2,
+      103,
+      255
+    ],
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      80,
+      141,
+      85,
+      242
+    ]
+  },
+  {
+    "accent": [
+      88,
+      147,
+      172,
+      255
+    ],
+    "backdrop": [
+      104,
+      79,
+      110,
+      255
+    ],
+    "primary": [
+      88,
+      147,
+      172,
+      255
+    ],
+    "use_light": true,
+    "require_light": true,
+    "expected": [
+      123,
+      162,
+      178,
+      242
+    ]
+  },
+  {
+    "accent": [
+      8,
+      217,
+      86,
+      255
+    ],
+    "backdrop": [
+      111,
+      80,
+      138,
+      255
+    ],
+    "primary": null,
+    "use_light": false,
+    "require_light": false,
+    "expected": [
+      15,
+      185,
+      77,
+      242
+    ]
+  },
+  {
+    "accent": [
+      197,
+      199,
+      146,
+      255
+    ],
+    "backdrop": [
+      69,
+      69,
+      93,
+      255
+    ],
+    "primary": [
+      2,
+      145,
+      44,
+      255
+    ],
+    "use_light": true,
+    "require_light": false,
+    "expected": [
+      145,
+      147,
+      84,
+      242
+    ]
+  }
+]

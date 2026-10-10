@@ -25,6 +25,7 @@ import time
 import ctypes
 import hashlib
 import unicodedata
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 from ctypes import wintypes
 from pathlib import Path
@@ -36,13 +37,14 @@ TIME_REMINDER_ICON_DIR = ROOT_DIR / "assets" / "logos"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRectF, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import (
     QBrush,
     QColor,
     QCursor,
     QFont,
     QFontDatabase,
+    QFontInfo,
     QFontMetrics,
     QGuiApplication,
     QImage,
@@ -54,6 +56,7 @@ from PySide6.QtGui import (
     QPalette,
     QRadialGradient,
     QRegion,
+    QTextLayout,
 )
 try:
     from PySide6.QtSvg import QSvgRenderer
@@ -62,6 +65,7 @@ except Exception:
 from PySide6.QtWidgets import QApplication, QWidget
 
 from api.lyric_timeline import (
+    active_index_for_position,
     active_index_near_position,
     lyric_timeline_diagnostics,
 )
@@ -76,6 +80,28 @@ from local.audio_reactive_engine import (
     live_audio_availability_request_plan,
 )
 from local.album_art_pipeline import album_art_bytes_signature, album_art_update_plan
+from local.album_island_projection import album_cover_projection
+from local.music_lyric_motion import GLYPH_FLOAT_LIFT, LogicalLineSpringChain, MusicLyricMotion
+from local.music_lyric_reading import (
+    LyricReadingRenderer,
+    apply_cjk_letter_spacing,
+    reading_unit_offsets,
+    utf16_slice,
+)
+from local.music_lyric_presentation import (
+    INTRO_COUNTDOWN_TEXT,
+    analyze_duet_lyric_rows,
+    present_lyric_text,
+    present_timed_lyric_rows,
+)
+from local.lyric_unit_timing import (
+    estimated_row_read_end,
+    estimated_row_reading_progress,
+    genuinely_timed_unit_row,
+    real_unit_row_finished_before_next_start,
+    song_has_genuine_unit_timing,
+    timed_unit_reading_front,
+)
 from local.branding import APP_NAME, APP_VERSION
 from local.diagnostics_export import (
     build_diagnostics_export_payload,
@@ -173,6 +199,19 @@ from local.media_position_pipeline import (
     media_position_update_plan,
 )
 from local.music_background_renderer import NativeMusicBackgroundRenderer, SolidMusicBackgroundRenderer
+from local.audio_output_icons import paint_audio_output_icon
+from local.island_audio_device_motion import IslandAudioDeviceMotion, IslandDevicePayload, reliable_device_battery
+from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
+from local.music_surface_palette import (
+    MusicSurfacePalette,
+    artwork_surface_palette,
+    cached_artwork_surface_palette,
+    relative_luminance,
+    solid_album_background_color,
+    solid_album_ink_color,
+)
+from local.music_surface_window import MusicSurfaceWindow
+from local.music_mode_controls import ArtworkHoverMotion, paint_presentation_glyph
 from local.mydockfinder import FinderGlassMaterial, read_finder_material
 from local.plugin_presentation import (
     active_plugin_alerts as presentation_active_plugin_alerts,
@@ -245,7 +284,16 @@ from local.plugin_presentation import (
     weather_plugin_panel_sections as presentation_weather_plugin_panel_sections,
     yearly_alarm_max_day as presentation_yearly_alarm_max_day,
 )
-from local.settings_store import DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES
+from local.settings_store import (
+    DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
+    MUSIC_READING_GRADIENT_DEFAULT_STEPS,
+    MUSIC_READING_LIFT_DEFAULT_LEVEL,
+    MUSIC_READING_STRATEGY_DEFAULT,
+    normalize_music_ambience_style,
+    normalize_music_reading_gradient_steps,
+    normalize_music_reading_lift_level,
+    normalize_music_reading_strategy,
+)
 from local.taskbar_positioning import (
     StandaloneAboveTaskbarTarget,
     StandalonePlacementTarget,
@@ -402,6 +450,7 @@ from local.taskbar_positioning import (
 )
 from local.ui_theme import (
     app_dark_mode,
+    system_dark_mode,
     is_theme_change_event,
     music_background_light_sync_plan,
     music_ambience_theme_category,
@@ -470,6 +519,10 @@ class SpringRect:
         velocity += acceleration * dt
         value += velocity * dt
         return value, velocity
+
+
+class _IslandArtworkPaletteBridge(QObject):
+    ready = Signal(int, object, object)
 
 
 class TaskbarDropOverlay(QWidget):
@@ -1101,17 +1154,23 @@ class IslandStackVisual(QWidget):
         "Noto Serif SC ExtraBold",
         "JiangChengXieSong 700W",
     )
-    MUSIC_AMBIENCE_STYLES = ("sea_level", "duotone_full", "pure_black", "bilateral_diffraction", "yaoguang", "solid_album", "pure_white")
+    MUSIC_AMBIENCE_STYLES = ("sea_level", "solid_album", "system")
     MUSIC_EXPANDED_LAYOUT_STYLES = ("standard", "dual_panel")
     COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "bilateral_diffraction", "pure_white")
-    COLOR_FILL_BLOCKED_AMBIENCE_STYLES = {"sea_level", "duotone_full", "yaoguang", "solid_album"}
+    COLOR_FILL_BLOCKED_AMBIENCE_STYLES = {"sea_level", "solid_album"}
     EMBER_COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "pure_white")
     EMBER_COLOR_BACK_GRAY_AMBIENCE_STYLES = ("sea_level", "duotone_full", "solid_album")
-    LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "ember_fade", "album_island")
-    ALBUM_ISLAND_SECONDARY_STYLES = ("shrink_dim", "perspective_dim")
-    CURRENT_ALBUM_ART_MAX_SIDE = 384
+    LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "album_island")
+    ALBUM_ISLAND_SECONDARY_STYLES = ("perspective_dim",)
+    # The island reuses a scaled cache, while the music window needs enough
+    # source pixels for a 4K desktop. Keep the decoded source bounded, but do
+    # not destroy the original cover by reducing it to an island thumbnail.
+    CURRENT_ALBUM_ART_MAX_SIDE = 2560
     STORED_ALBUM_ART_MAX_SIDE = 192
-    SCALED_ALBUM_ART_CACHE_LIMIT = 3
+    # Seven members in compact and expanded poses must coexist; a few recent
+    # sizes survive the mode transition without resizing the full row again.
+    SCALED_ALBUM_ART_CACHE_LIMIT = 24
+    SCALED_ALBUM_ART_CACHE_PIXEL_BUDGET = 2 * 1024 * 1024
     LYRIC_LAYOUT_CACHE_LIMIT = 40
     REPRESENTATIVE_WIDTH_CACHE_LIMIT = 8
     STABLE_RENDER_FPS = 30
@@ -1190,6 +1249,7 @@ class IslandStackVisual(QWidget):
         self.media_position_seconds = 0.0
         self.media_track_id = ""
         self.media_source_app = ""
+        self.media_lyric_offset_adapter = "system"
         self.media_position_source = "windows-media"
         self.media_position_plan_reason = "raw"
         self.media_position_confidence = 1.0
@@ -1208,14 +1268,33 @@ class IslandStackVisual(QWidget):
         self.music_surface_transition_to = (QColor(), QColor())
         self.lyrics_source = ""
         self.timed_lyrics: list[tuple[float, str]] = []
+        # These lists share indices with the legacy (start, text) timeline.
+        # Word timestamps belong to the original line, never its translation.
+        self.timed_lyric_units: list[tuple[object, ...]] = []
+        self.timed_lyric_timing_kinds: list[str] = []
         self.album_art = QImage()
+        self._initialize_solid_album_palette_worker()
         self.album_art_signature = ""
+        self.album_art_source = ""
+        self.album_art_lookup_state = ""
         self.last_media_refresh_at = 0.0
         self.media_refresh_interval = 0.65
         self.music_button_rects: dict[str, QRectF] = {}
         self.music_control_press_started_at: dict[str, float] = {}
+        self._island_button_ripples: list[dict[str, object]] = []
         self.tasker_music_hover_auto_expand_suppressed = False
         self.music_cover_rect = QRectF()
+        self.music_fullscreen_overlay: MusicSurfaceWindow | None = None
+        self._music_cover_hover_motion = ArtworkHoverMotion()
+        self._audio_device_motion = IslandAudioDeviceMotion()
+        self._audio_device_event_serial = 0
+        self._music_surface_active = False
+        self._island_visible_before_music_surface = True
+        self._music_windowed_preference = False
+        self.music_surface_reading_lift_level = MUSIC_READING_LIFT_DEFAULT_LEVEL
+        self.music_surface_reading_gradient_steps = MUSIC_READING_GRADIENT_DEFAULT_STEPS
+        self.music_surface_reading_strategy = MUSIC_READING_STRATEGY_DEFAULT
+        self.music_sparse_highlight_seconds_per_unit = SPARSE_MIN_SECONDS_PER_UNIT
         self.persistent_plugin = True
         self.enabled_plugin_count = 1
         self.enabled_plugin_ids = {"time"}
@@ -1336,7 +1415,7 @@ class IslandStackVisual(QWidget):
         self.ui_font_family = self.DEFAULT_FONT_FAMILY
         self.high_quality_font_rendering = False
         self.animation_fps = 60
-        self.lyric_animation_fps = 60
+        self.lyric_animation_fps = 120
         self.animation_speed = 1.0
         self.empty_island_display_mode = "visible_bar"
         self.no_music_island_priority = "plugin"
@@ -1366,6 +1445,7 @@ class IslandStackVisual(QWidget):
         self.wave_word_fill_enabled = False
         self.wave_color_fill_enabled = False
         self.enable_dual_line_lyrics = False
+        self.music_intro_cleanup_enabled = True
         self.dual_line_font_size = 12
         self.dual_line_secondary_weight = 72
         self.dual_line_secondary_spacing = 100
@@ -1406,8 +1486,11 @@ class IslandStackVisual(QWidget):
         self.lyric_last_phase_index = -1
         self.lyric_last_phase_progress = 0.0
         self.lyric_last_phase_at = 0.0
+        self.lyric_last_phase_timing_kind = ""
         self._lyric_layout_cache: dict[tuple[object, ...], LyricLayout] = {}
         self._representative_lyric_width_cache: dict[tuple[object, ...], float] = {}
+        self._wave_reading_renderer = LyricReadingRenderer()
+        self._wave_line_spring = LogicalLineSpringChain()
         self._scaled_album_art_cache: dict[tuple[str, int, int], QImage] = {}
         self._album_image_signature_cache: dict[int, str] = {}
         self._svg_renderer_cache: dict[str, QSvgRenderer] = {}
@@ -1499,6 +1582,7 @@ class IslandStackVisual(QWidget):
         self.last_runtime_diagnostics_trace_at = 0.0
 
         self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._tick)
         self.timer.start(self._timer_interval_ms())
 
@@ -1511,6 +1595,7 @@ class IslandStackVisual(QWidget):
         now = time.monotonic()
         track = visual_data.track
         previous_track_id = getattr(self, "media_track_id", "")
+        previous_is_playing = bool(getattr(self, "media_is_playing", False))
         previous_title = str(getattr(self, "track_title", "") or "")
         previous_artist = str(getattr(self, "artist", "") or "")
         previous_lyrics = tuple(getattr(self, "lyrics", ()))
@@ -1528,12 +1613,21 @@ class IslandStackVisual(QWidget):
         incoming_track_id = track.track_id or f"{track.source_app}:{track.title}:{track.artist}"
         same_visible_track = previous_title == str(track.title or "") and previous_artist == str(track.artist or "")
         message_refresh = bool(getattr(visual_data, "messages", ()))
+        previous_duration = max(0.0, float(getattr(self, "media_duration_seconds", 0.0) or 0.0))
+        incoming_duration = max(0.0, float(getattr(track, "duration_seconds", 0.0) or 0.0))
+        same_media_generation = (
+            previous_duration <= 0.0
+            or incoming_duration <= 0.0
+            or abs(incoming_duration - previous_duration)
+            <= max(5.0, max(previous_duration, incoming_duration) * 0.04)
+        )
         track_changed = presentation_media_visual_track_changed(
             initial=initial,
             incoming_track_id=incoming_track_id,
             previous_track_id=previous_track_id,
             same_visible_track=same_visible_track,
             message_refresh=message_refresh,
+            same_media_generation=same_media_generation,
         )
         flow_direction = 1
         if track_changed and not initial:
@@ -1548,6 +1642,11 @@ class IslandStackVisual(QWidget):
         incoming_is_playing = bool(track.is_playing)
         incoming_position = max(0.0, float(track.position_seconds))
         incoming_position_source = str(getattr(track, "position_source", "windows-media") or "windows-media")
+        incoming_is_playing, incoming_position = self._reconcile_music_playback_toggle(
+            incoming_track_id, incoming_is_playing, incoming_position,
+            float(getattr(track, "position_sampled_at", 0.0) or 0.0), now,
+            track_changed=track_changed,
+        )
         previous_position = self._estimated_media_position(now) if hasattr(self, "media_position_sync_at") else 0.0
         previous_sync_at = float(getattr(self, "media_position_sync_at", now))
         position_plan = media_position_update_plan(
@@ -1575,15 +1674,40 @@ class IslandStackVisual(QWidget):
         self.media_track_id = incoming_track_id
         self.media_source_app = track.source_app
         self.media_position_source = position_plan.position_source
+        self.media_position_sampled_at = float(getattr(track, "position_sampled_at", 0.0) or 0.0)
+        self.media_position_observed_seconds = getattr(track, "position_observed_seconds", None)
         self.media_position_plan_reason = position_plan.reason
         self.media_position_confidence = position_plan.position_confidence
         self.media_position_interactive = position_plan.position_interactive
         self.media_source_foreground = position_plan.source_foreground
         self.media_app_lyric_offset_seconds = max(-12.0, min(12.0, float(getattr(track, "lyric_offset_seconds", 0.0) or 0.0)))
+        self.media_lyric_offset_adapter = str(getattr(track, "lyric_offset_adapter", "system") or "system").casefold()
         self.media_refresh_interval = position_plan.refresh_interval_seconds
+        if track_changed:
+            self._media_strong_tracking_until = now + 10.0
         self.lyrics_source = track.lyrics_source
         had_timed_lyrics = bool(getattr(self, "timed_lyrics", ()))
-        self.timed_lyrics = self._coalesced_timed_lyrics([(line.time_seconds, line.text) for line in track.timed_lyrics])
+        previous_timing_rows = getattr(self, "timed_lyrics", [])
+        previous_timing_units = getattr(self, "timed_lyric_units", [])
+        previous_timing_kinds = getattr(self, "timed_lyric_timing_kinds", [])
+        previous_timing = (
+            tuple(previous_timing_rows), tuple(previous_timing_units), tuple(previous_timing_kinds),
+        )
+        (
+            self.timed_lyrics,
+            self.timed_lyric_units,
+            self.timed_lyric_timing_kinds,
+        ) = self._coalesced_timed_lyric_data(track.timed_lyrics)
+        timing_changed = previous_timing != (
+            tuple(self.timed_lyrics), tuple(self.timed_lyric_units), tuple(self.timed_lyric_timing_kinds),
+        )
+        if not timing_changed:
+            # Surface caches key immutable metadata by its container identity.
+            # Equal provider refreshes should not remap every lyric unit at
+            # the next visible paint; a genuine timing upgrade still replaces it.
+            self.timed_lyrics = previous_timing_rows
+            self.timed_lyric_units = previous_timing_units
+            self.timed_lyric_timing_kinds = previous_timing_kinds
         timed_lyrics_appeared = bool(self.timed_lyrics) and not had_timed_lyrics and not track_changed
         self.plugin_samples = [
             (
@@ -1645,17 +1769,33 @@ class IslandStackVisual(QWidget):
         if plan.should_set_loaded_cover and not cover_reused:
             self.album_art = self._bounded_album_image(image, self.CURRENT_ALBUM_ART_MAX_SIDE, smooth=True)
             self.album_art_signature = plan.next_signature or art_signature
+            self.album_art_source = str(getattr(track, "album_art_source", "") or "")
             self._scaled_album_art_cache.clear()
+        elif plan.action == "reuse" and cover_loaded:
+            self.album_art_source = str(getattr(track, "album_art_source", "") or "")
         elif plan.should_clear_current_cover:
             self.album_art = QImage()
             self.album_art_signature = ""
+            self.album_art_source = ""
             self._scaled_album_art_cache.clear()
+        self.album_art_lookup_state = str(getattr(track, "album_art_lookup_state", "") or "")
         if track_changed:
             self.lyric_index = 0 if self.timed_lyrics else min(1, len(self.lyrics) - 1)
             self.prev_lyric_index = self.lyric_index
             self.lyric_changed_at = now
             self.audio_started_at = now
-        self._sync_timed_lyrics(now, allow_backward=timed_lyrics_appeared)
+        if track_changed or timing_changed:
+            self.lyric_last_phase_index = -1
+            self.lyric_last_phase_progress = 0.0
+            self.lyric_last_phase_at = now
+            self.lyric_last_phase_timing_kind = ""
+            self.ember_last_phase_index = -1
+            self.ember_last_phase_progress = 0.0
+            self.ember_last_phase_at = now
+            surface = getattr(self, "music_fullscreen_overlay", None)
+            if surface is not None:
+                surface.update()
+        self._sync_timed_lyrics(now, allow_backward=timed_lyrics_appeared or timing_changed)
         current_messages = tuple(
             (
                 str(getattr(message, "app", "") or ""),
@@ -1666,10 +1806,12 @@ class IslandStackVisual(QWidget):
         )
         return bool(
             track_changed
+            or self.media_is_playing != previous_is_playing
             or self.track_title != previous_title
             or self.artist != previous_artist
             or tuple(getattr(self, "lyrics", ())) != previous_lyrics
             or timed_lyrics_appeared
+            or timing_changed
             or previous_plugin_samples != tuple(getattr(self, "plugin_samples", ()))
             or previous_messages != current_messages
             or getattr(self, "album_art", QImage()).cacheKey() != previous_album_art_key
@@ -1779,11 +1921,19 @@ class IslandStackVisual(QWidget):
         ]
 
     def _coalesced_timed_lyrics(self, timed_lyrics: list[tuple[float, str]]) -> list[tuple[float, str]]:
+        rows, _units, _kinds = self._coalesced_timed_lyric_data(timed_lyrics)
+        return rows
+
+    def _coalesced_timed_lyric_data(self, timed_lyrics) -> tuple[list[tuple[float, str]], list[tuple[object, ...]], list[str]]:
         if not timed_lyrics:
-            return []
+            return [], [], []
         merged: list[tuple[float, str]] = []
+        merged_units: list[tuple[object, ...]] = []
+        merged_kinds: list[str] = []
         current_time: float | None = None
         current_parts: list[str] = []
+        current_units: tuple[object, ...] = ()
+        current_kind = "line"
 
         def flush():
             if current_time is None or not current_parts:
@@ -1791,32 +1941,76 @@ class IslandStackVisual(QWidget):
             if len(current_parts) == 1:
                 text = current_parts[0]
             else:
-                text = f"{current_parts[0]}\n{' / '.join(current_parts[1:])}"
+                text = "\n".join(current_parts)
             merged.append((current_time, text))
+            merged_units.append(current_units)
+            merged_kinds.append(current_kind)
 
-        for raw_time, raw_text in timed_lyrics:
+        for item in timed_lyrics:
+            if hasattr(item, "time_seconds"):
+                raw_time = item.time_seconds
+                raw_text = item.text
+                raw_units = tuple(getattr(item, "units", ()) or ())
+                kind = str(getattr(item, "timing_kind", "line") or "line")
+            else:
+                raw_time, raw_text = item
+                raw_units = ()
+                kind = "line"
             parts = [" ".join(part.split()) for part in str(raw_text or "").splitlines()]
             parts = [part for part in parts if part]
             if not parts:
                 continue
-            text = "\n".join(parts[:2])
+            text = "\n".join(parts)
+            # Display normalization can remove or merge whitespace.  Refuse
+            # timings whose concatenated text no longer fits the primary row.
+            units_text = " ".join("".join(str(getattr(unit, "text", "") or "") for unit in raw_units).split())
+            units = raw_units if units_text == parts[0] else ()
+            if kind == "unit" and not units:
+                kind = "line"
             line_time = max(0.0, float(raw_time))
             if current_time is None:
                 current_time = line_time
                 current_parts = [text]
+                current_units = units
+                current_kind = kind
                 continue
-            if abs(line_time - current_time) <= 0.08:
-                if text not in current_parts:
+            same_timestamp = abs(line_time - current_time) <= 0.0005
+            separate_voice = same_timestamp and bool(analyze_duet_lyric_rows(
+                ((current_time, current_parts[0]), (line_time, text)),
+                singer_names=str(getattr(self, "artist", "") or ""),
+            ).groups)
+            # Quick sentences can be only tens of milliseconds apart. Only
+            # identical timestamps are bilingual subrows. Verified duet
+            # voices keep their own units even at equal source timestamps.
+            if same_timestamp and not separate_voice:
+                if units and not current_units and text != current_parts[0]:
+                    # A local dual-line file may put its translation first.
+                    # The timed original must lead the display group so its
+                    # units still correspond to the primary lyric text.
+                    if text in current_parts:
+                        current_parts.remove(text)
+                    current_parts.insert(0, text)
+                    current_units = units
+                    current_kind = kind
+                elif text not in current_parts:
                     current_parts.append(text)
+                elif text == current_parts[0] and units and not current_units:
+                    current_units = units
+                    current_kind = kind
                 continue
             flush()
             current_time = line_time
             current_parts = [text]
+            current_units = units
+            current_kind = kind
         flush()
-        return merged
+        return merged, merged_units, merged_kinds
 
     def _refresh_media_data(self, now: float) -> bool:
-        if now - getattr(self, "last_media_refresh_at", 0.0) < getattr(self, "media_refresh_interval", 0.65):
+        interval = float(getattr(self, "media_refresh_interval", 0.65))
+        if now < float(getattr(self, "_media_strong_tracking_until", 0.0)):
+            interval = min(interval, 0.12)
+        if now - getattr(self, "last_media_refresh_at", 0.0) < interval:
             return False
         self.last_media_refresh_at = now
         try:
@@ -1831,14 +2025,112 @@ class IslandStackVisual(QWidget):
         duration = max(0.0, float(getattr(self, "media_duration_seconds", 0.0)))
         if bool(getattr(self, "media_is_playing", False)):
             base += max(0.0, now - sync_at)
+        source = str(getattr(self, "media_position_source", "") or "")
+        if source.endswith("-uia-lyrics"):
+            # A visible lyric row provides a coarse position *inside* that row.
+            # Wall-clock projection must not claim the next row before the
+            # player supplies a fresh lyric or precise progress observation.
+            timed = getattr(self, "timed_lyrics", ()) or ()
+            if timed:
+                anchor = max(0.0, float(getattr(self, "media_position_seconds", 0.0) or 0.0))
+                index = active_index_for_position(timed, anchor, lead_seconds=0.0)
+                if index + 1 < len(timed):
+                    next_start = float(timed[index + 1][0])
+                    base = min(base, max(anchor, next_start - 0.08))
         if duration > 0.0:
             return min(duration, base)
         return base
 
-    def _effective_lyric_offset_seconds(self) -> float:
+    def _effective_lyric_offset_seconds(self, include_output_latency: bool = True) -> float:
         global_offset = float(getattr(self, "lyric_offset_seconds", 0.0) or 0.0)
         app_offset = float(getattr(self, "media_app_lyric_offset_seconds", 0.0) or 0.0)
-        return max(-24.0, min(24.0, global_offset + app_offset))
+        output_delay = 0.0
+        if include_output_latency:
+            from local.music_output_clock import OutputLatencyClock
+            generation = None
+            getter = getattr(getattr(self, "data_provider", None), "get_audio_route_snapshot", None)
+            if callable(getter):
+                route = getter()
+                if route.state == "casting":
+                    output_delay = max(0.0, min(5.0, float(route.cast_latency_seconds)))
+                    generation = (route.group_id, route.active_id, route.cast_source_id)
+            clock = getattr(self, "_lyric_output_latency_clock", None)
+            if clock is None:
+                clock = self._lyric_output_latency_clock = OutputLatencyClock()
+            output_delay = clock.sample(output_delay, time.monotonic(), generation,
+                                        playing=bool(getattr(self, "media_is_playing", False)))
+            # Manual edits and route transitions re-anchor ink. Ordinary
+            # estimate slewing preserves each view's in-flight focus pose.
+            self._lyric_output_compensation_anchor = (global_offset, app_offset, generation)
+        return max(-24.0, min(24.0, global_offset + app_offset - output_delay))
+
+    def _stable_lyric_source_position(self, now: float) -> float:
+        """Validate source observations before adding display-only latency.
+
+        All island word effects consume this clock. Source seeking and player
+        progress continue to use _estimated_media_position without output delay.
+        """
+        position = self._estimated_media_position(now)
+        sync_at = getattr(self, "media_position_sync_at", None)
+        if sync_at is None:
+            return position
+        source = str(getattr(self, "media_position_source", "") or "")
+        observed_at = float(getattr(self, "media_position_sampled_at", 0.0) or 0.0)
+        legacy_raw = float(getattr(self, "media_raw_position_seconds", getattr(self, "media_position_seconds", position)) or 0.0)
+        raw = legacy_raw
+        if hasattr(self, "media_position_observed_seconds"):
+            observed_position = self.media_position_observed_seconds
+            # No original evidence must not become an advancing observation
+            # through delivery projection. NaN is only a confirmation marker;
+            # the source position passed to the clock remains unchanged.
+            raw = float(observed_position) if observed_position is not None else float("nan")
+        app = str(getattr(self, "media_source_app", "") or "")
+        sample = (observed_at if observed_at > 0.0 else sync_at,
+                  0.0 if observed_at > 0.0 else legacy_raw, source, app)
+        prior = getattr(self, "_island_lyric_source_sample", None)
+        playing = bool(getattr(self, "media_is_playing", False))
+        explicit_seek = (
+            source == "local-seek" and (prior is None or prior[2] != source or sample != prior)
+        ) or (
+            not playing and getattr(self, "_island_lyric_source_playing", None) is False
+            and source in {"windows-media", "interactive"}
+            and observed_at > 0.0 and prior is not None
+            and math.isfinite(raw)
+            and prior[2:] == sample[2:] and sample != prior
+        )
+        self._island_lyric_source_sample = sample
+        self._island_lyric_source_playing = playing
+        clock = getattr(self, "_island_lyric_source_clock", None)
+        if clock is None:
+            clock = self._island_lyric_source_clock = MusicLyricMotion()
+        ceiling = None
+        timed = getattr(self, "timed_lyrics", ()) or ()
+        if source.endswith("-uia-lyrics") and timed:
+            anchor = float(getattr(self, "media_position_seconds", position) or 0.0)
+            index = active_index_for_position(timed, anchor, lead_seconds=0.0)
+            if index + 1 < len(timed):
+                ceiling = max(anchor, float(timed[index + 1][0]) - 0.08)
+        clock.frame([], position, now, str(getattr(self, "media_track_id", "") or ""),
+                    sample_id=sample, sample_position=raw, playing=playing,
+                    explicit_seek=explicit_seek, position_ceiling=ceiling,
+                    source_generation=(app, source))
+        return float(clock.last_source_position)
+
+    def _prepare_island_lyric_offset(self, now: float, offset: float) -> bool:
+        previous = getattr(self, "_island_last_lyric_offset", offset)
+        self._island_last_lyric_offset = offset
+        changed = not math.isclose(previous, offset, abs_tol=1e-7)
+        anchor = getattr(self, "_lyric_output_compensation_anchor", None)
+        previous_anchor = getattr(self, "_island_lyric_offset_anchor", anchor)
+        self._island_lyric_offset_anchor = anchor
+        if changed and (anchor is None or anchor != previous_anchor):
+            # Compensation is presentation state, not a player seek. Drop
+            # cached ink only when it would otherwise prevent re-calibration.
+            self.lyric_last_phase_index = self.ember_last_phase_index = -1
+            self.lyric_last_phase_progress = self.ember_last_phase_progress = 0.0
+            self.lyric_last_phase_at = self.ember_last_phase_at = now
+            self.lyric_last_phase_timing_kind = ""
+        return changed
 
     def _looks_like_seek_to_start(self, raw_position: float, previous_position: float, previous_raw_position: float | None) -> bool:
         return media_position_looks_like_seek_to_start(raw_position, previous_position, previous_raw_position)
@@ -1846,10 +2138,24 @@ class IslandStackVisual(QWidget):
     def _sync_timed_lyrics(self, now: float, allow_backward: bool = False) -> bool:
         if not self.timed_lyrics:
             return False
-        position = max(0.0, self._estimated_media_position(now) + self._effective_lyric_offset_seconds())
+        offset = self._effective_lyric_offset_seconds()
+        previous_offset = getattr(self, "_island_last_sync_offset", offset)
+        self._island_last_sync_offset = offset
+        offset_changed = not math.isclose(previous_offset, offset, abs_tol=1e-7)
+        self._prepare_island_lyric_offset(now, offset)
+        position = max(0.0, self._stable_lyric_source_position(now) + offset)
         previous_index = int(getattr(self, "lyric_index", 0))
-        index = active_index_near_position(self.timed_lyrics, position, previous_index)
-        if index < previous_index and bool(getattr(self, "media_is_playing", False)) and not allow_backward:
+        # The normal island uses a 120 ms visual lead. A coarse UIA lyric-row
+        # anchor is already bounded to that observed row, so adding the lead
+        # here would advance 40 ms before the next row is actually observed.
+        source = str(getattr(self, "media_position_source", "") or "")
+        lead = 0.0 if source.endswith("-uia-lyrics") else 0.12
+        index = active_index_near_position(
+            self.timed_lyrics, position, previous_index, lead_seconds=lead,
+        )
+        if (index < previous_index and bool(getattr(self, "media_is_playing", False))
+                and not allow_backward and not offset_changed
+                and getattr(self, "_island_lyric_source_clock", None) is None):
             current_start = float(self.timed_lyrics[min(previous_index, len(self.timed_lyrics) - 1)][0])
             last_position = float(getattr(self, "lyric_last_sync_position", 0.0))
             small_backstep = position >= max(0.0, current_start - 1.05) or 0.0 < last_position - position < 2.4
@@ -1866,6 +2172,7 @@ class IslandStackVisual(QWidget):
             self.lyric_last_phase_index = -1
             self.lyric_last_phase_progress = 0.0
             self.lyric_last_phase_at = now
+            self.lyric_last_phase_timing_kind = ""
             return True
         return False
 
@@ -1904,6 +2211,10 @@ class IslandStackVisual(QWidget):
         return "bold" if value in {"bold", "heavy", "900w", "900"} else "normal"
 
     def _wave_stream_font_families(self) -> list[str]:
+        # Both reading styles share one layout and renderer. Gelv changes
+        # only the embedded lyric typeface, including measurement caches.
+        if self._gelv_enabled():
+            return self._gelv_font_families()
         primary = self.WAVE_FONT_FAMILY_HEAVY if self._wave_font_weight_key() == "heavy" else self.WAVE_FONT_FAMILY_BOLD
         families = [primary]
         for family in (self.WAVE_FONT_FAMILY_BOLD, *self.WAVE_FONT_FALLBACK_FAMILIES):
@@ -1915,7 +2226,9 @@ class IslandStackVisual(QWidget):
         font = QFont()
         font.setFamilies(self._wave_stream_font_families())
         font.setPointSize(self._font_size(size, shrink=shrink))
-        if self._wave_font_weight_key() == "heavy":
+        if self._gelv_enabled():
+            font.setWeight(max(weight, QFont.Weight.ExtraBold))
+        elif self._wave_font_weight_key() == "heavy":
             font.setWeight(max(weight, QFont.Weight.Black))
         else:
             font.setWeight(max(weight, QFont.Weight.Bold))
@@ -2092,6 +2405,11 @@ class IslandStackVisual(QWidget):
         has_lyrics = bool(getattr(self, "timed_lyrics", None) or getattr(self, "lyrics", None))
         if not has_lyrics:
             return False
+        try:
+            if self._should_paint_album_island():
+                return False
+        except (AttributeError, RuntimeError):
+            pass
         current = time.monotonic() if now is None else float(now)
         if int(getattr(self, "prev_lyric_index", 0)) != int(getattr(self, "lyric_index", 0)):
             if self._animation_started_active(getattr(self, "lyric_changed_at", 0.0), 0.52, current):
@@ -2102,6 +2420,8 @@ class IslandStackVisual(QWidget):
         return True
 
     def _effective_animation_fps(self, active_animation: bool, now: float | None = None) -> int:
+        # Preserve the native island's original refresh-rate-normalized clock.
+        # The separate music surface owns its own high-refresh timer.
         fps = self._normalize_animation_fps(getattr(self, "animation_fps", 60))
         if active_animation and self._has_active_lyric_animation(now=now):
             fps = max(fps, self._normalize_animation_fps(getattr(self, "lyric_animation_fps", fps)))
@@ -2152,6 +2472,15 @@ class IslandStackVisual(QWidget):
         return any(self._animation_dict_active(animation, now, 0.22) for animation in animations.values())
 
     def _active_visual_animation_plan(self, now: float):
+        cover_motion = getattr(self, "_music_cover_hover_motion", None)
+        if cover_motion is not None and cover_motion.active:
+            from local.island_presentation import ActiveVisualAnimationPlan
+            return ActiveVisualAnimationPlan(True, "album_cover_hover")
+        motion = getattr(self, "_audio_device_motion", None)
+        if motion is not None and motion.active:
+            # Reuse the island's precise frame timer, including paused lyrics.
+            from local.island_presentation import ActiveVisualAnimationPlan
+            return ActiveVisualAnimationPlan(True, "audio_device")
         plan = presentation_active_visual_animation_plan(
             media_is_playing=getattr(self, "media_is_playing", False),
             finder_mode=getattr(self, "finder_mode", False),
@@ -2280,8 +2609,13 @@ class IslandStackVisual(QWidget):
                 if self._animation_started_active(started_at, 0.42, now):
                     music_control_press_active = True
                     break
+        ripple_active = any(
+            float(ripple.get("started_at", 0.0)) <= now
+            < float(ripple.get("started_at", 0.0)) + float(ripple.get("duration", 0.0))
+            for ripple in getattr(self, "_island_button_ripples", ())
+        )
         return presentation_active_visual_animation_plan(
-            music_control_press_active=music_control_press_active,
+            music_control_press_active=music_control_press_active or ripple_active,
         )
 
     def _has_active_visual_animation(self, now: float) -> bool:
@@ -2451,6 +2785,7 @@ class IslandStackVisual(QWidget):
         )
 
     def _handle_tick_follow_refresh(self, now: float):
+        self._refresh_top_notch_position()
         if self._tick_follow_refresh_plan(now, active=self._taskbar_compact_active()).should_refresh:
             self._refresh_taskbar_follow_position()
         if self._tick_follow_refresh_plan(
@@ -2512,14 +2847,32 @@ class IslandStackVisual(QWidget):
 
     def _handle_music_lyric_tick(self, now: float, speed: float) -> bool:
         music_lyric_plan = self._music_lyric_tick_plan(now, speed)
+        changed = False
         if music_lyric_plan.sync_timed_lyrics:
-            return bool(self._sync_timed_lyrics(now))
+            changed = bool(self._sync_timed_lyrics(now))
         elif music_lyric_plan.fallback_advance.should_advance:
             self.prev_lyric_index = music_lyric_plan.fallback_advance.previous_index
             self.lyric_index = music_lyric_plan.fallback_advance.next_index
             self.lyric_changed_at = music_lyric_plan.fallback_advance.changed_at
-            return True
-        return False
+            changed = True
+        spring = getattr(self, "_wave_line_spring", None)
+        if (
+            isinstance(spring, LogicalLineSpringChain)
+            and bool(getattr(self, "expanded", False))
+            and str(getattr(self, "lyric_flow_style", "wave_stream")) in {"wave_stream", "gelv_songscatter"}
+            and not bool(getattr(self, "scene_suppressed", False))
+        ):
+            first, last = spring.visible_range or (0, 0)
+            moving = any(
+                abs(spring.positions[index] - spring.targets[index]) > 0.10
+                or abs(spring.velocities[index]) > 0.10
+                for index in range(first, last)
+            )
+            # The same island timer runs the physical rows even when Qt
+            # combines several requested paints, including paused seeks.
+            spring.advance(now)
+            changed = changed or moving
+        return changed
 
     def _hover_auto_activation_due(self, now: float) -> bool:
         hovered_key = getattr(self, "hovered_key", "")
@@ -2642,12 +2995,10 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
 
     def set_music_ambience_style(self, style: str, notify: bool = True):
-        style = str(style or "sea_level").lower()
-        if style in ("album_mist", "xiaomi_duotone"):
-            style = "sea_level"
-        if style not in self.MUSIC_AMBIENCE_STYLES:
-            style = "sea_level"
+        style = normalize_music_ambience_style(style)
         self.music_ambience_style = style
+        if style == "system":
+            self._refresh_music_system_theme(force=True)
         if not self._lyric_color_fill_background_available():
             self.wave_color_fill_enabled = False
             self.gelv_color_fill_enabled = False
@@ -2726,6 +3077,13 @@ class IslandStackVisual(QWidget):
                 pass
 
     def _sync_music_background_to_light_state(self, light: bool, enabled: bool, force: bool = False) -> bool:
+        if (
+            normalize_music_ambience_style(getattr(self, "music_ambience_style", "sea_level")) == "system"
+            and not self._music_background_follow_previous_style()
+        ):
+            # An explicit system surface follows Windows, rather than an
+            # application schedule or a sampled taskbar material.
+            return False
         plan = music_background_light_sync_plan(
             light=light,
             enabled=enabled,
@@ -2743,19 +3101,24 @@ class IslandStackVisual(QWidget):
         return True
 
     def _sync_music_background_to_theme(self, force: bool = False):
+        system_changed = False
+        if normalize_music_ambience_style(getattr(self, "music_ambience_style", "sea_level")) == "system":
+            system_changed = self._refresh_music_system_theme(force=force)
+            if not self._music_background_follow_previous_style():
+                return system_changed
         getter = getattr(self, "settings_getter", None)
         enabled = self._music_background_follow_theme_enabled()
         if not enabled:
-            return False
+            return system_changed
         now = time.monotonic()
         if not force and now - float(getattr(self, "_last_theme_follow_checked_at", 0.0) or 0.0) < 2.0:
-            return False
+            return system_changed
         self._last_theme_follow_checked_at = now
         dark = app_dark_mode(getter if callable(getter) else None)
         if not force and dark == getattr(self, "_last_theme_follow_dark", None):
-            return False
+            return system_changed
         self._last_theme_follow_dark = dark
-        return self._sync_music_background_to_light_state(light=not dark, enabled=enabled, force=force)
+        return self._sync_music_background_to_light_state(light=not dark, enabled=enabled, force=force) or system_changed
 
     def _sync_music_background_to_taskbar_color(self, force: bool = False) -> bool:
         if not self._tasker_follow_taskbar_color_enabled():
@@ -2769,9 +3132,25 @@ class IslandStackVisual(QWidget):
     def _coerce_music_ambience_for_color_fill(self):
         return
 
+    def _refresh_music_system_theme(self, force: bool = False) -> bool:
+        """Poll once per two seconds, or immediately on a native theme event."""
+        now = time.monotonic()
+        previous = getattr(self, "_music_system_dark", None)
+        checked_at = getattr(self, "_music_system_theme_checked_at", None)
+        if not force and previous is not None and checked_at is not None and now - float(checked_at) < 2.0:
+            return False
+        dark = system_dark_mode()
+        self._music_system_theme_checked_at = now
+        self._music_system_dark = dark
+        return previous is None or bool(previous) != dark
+
     def _effective_music_ambience_style(self) -> str:
-        style = str(getattr(self, "music_ambience_style", "sea_level") or "sea_level")
-        return style if style in self.MUSIC_AMBIENCE_STYLES else "sea_level"
+        style = normalize_music_ambience_style(getattr(self, "music_ambience_style", "sea_level"))
+        if style == "system":
+            if getattr(self, "_music_system_dark", None) is None:
+                self._refresh_music_system_theme(force=True)
+            return "pure_black" if bool(self._music_system_dark) else "pure_white"
+        return style
 
     def _active_lyric_color_fill_paints_background(self, ambience_style: str | None = None) -> bool:
         if not self._active_lyric_color_fill_enabled():
@@ -2786,21 +3165,21 @@ class IslandStackVisual(QWidget):
     def _music_lyric_text_color(self, alpha: int = 246) -> QColor:
         alpha = max(0, min(255, int(alpha)))
         if self._effective_music_ambience_style() == "solid_album":
-            return QColor(255, 255, 255, alpha)
-        if self._effective_music_ambience_style() in {"pure_white", "yaoguang"}:
+            return solid_album_ink_color(self._solid_album_background_color(), alpha)
+        if self._effective_music_ambience_style() == "pure_white":
             return QColor(0, 0, 0, alpha)
         return QColor(255, 255, 255, alpha)
 
     def _music_lyric_base_text_color(self, alpha: int = 132) -> QColor:
         alpha = max(0, min(255, int(alpha)))
         if self._effective_music_ambience_style() == "solid_album":
-            return QColor(0, 0, 0, alpha)
-        if self._effective_music_ambience_style() in {"pure_white", "yaoguang"}:
+            return self._solid_album_unread_color(alpha)
+        if self._effective_music_ambience_style() == "pure_white":
             return QColor(0, 0, 0, alpha)
         return QColor(255, 255, 255, alpha)
 
     def _pure_white_music_active(self) -> bool:
-        return self._effective_music_ambience_style() in {"pure_white", "yaoguang"}
+        return self._effective_music_ambience_style() == "pure_white"
 
     def _solid_album_music_active(self) -> bool:
         return self._effective_music_ambience_style() == "solid_album"
@@ -2813,13 +3192,13 @@ class IslandStackVisual(QWidget):
 
     def _music_control_fill_color(self, alpha: int = 24) -> QColor:
         alpha = max(0, min(255, int(alpha)))
-        if self._pure_white_music_active():
+        if self._music_lyric_text_color(255).lightness() < 128:
             return QColor(246, 247, 248, alpha)
         return QColor(18, 20, 24, alpha)
 
     def _music_control_icon_spec(self, command: str) -> dict[str, object]:
         command_key = str(command or "")
-        light_icon = not self._pure_white_music_active()
+        light_icon = self._music_lyric_text_color(255).lightness() >= 128
         suffix = " (1)" if light_icon else ""
         mirrored = False
         if command_key == "music:toggle_play_pause":
@@ -2923,6 +3302,204 @@ class IslandStackVisual(QWidget):
         painter.setFont(QFont("Segoe UI Symbol", self._font_size(12), QFont.Weight.Medium))
         painter.setPen(self._music_control_icon_color(232))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._music_control_fallback_label(command))
+
+    def _island_button_ripple_target(self, key: str) -> QRectF:
+        """Resolve visible controls only; the surrounding card is a drag surface."""
+        key = str(key or "")
+        if key.startswith("music:"):
+            if key == "music:open_surface":
+                return QRectF()
+            return QRectF(getattr(self, "music_button_rects", {}).get(key, QRectF()))
+        if key.startswith("plugin-action:"):
+            command = key.split(":", 1)[1]
+            # Editable fields and the alarm list backdrop are not buttons.
+            if command.startswith("alarm-editor-focus-") or command in {"alarm-editor-note", "alarm-list"}:
+                return QRectF()
+            return QRectF(getattr(self, "plugin_action_rects", {}).get(command, QRectF()))
+        return QRectF()
+
+    def _start_island_button_ripple(self, key: str, press_pos: QPointF, now: float | None = None) -> bool:
+        target = self._island_button_ripple_target(key)
+        if target.isEmpty():
+            return False
+        current = time.monotonic() if now is None else float(now)
+        center = target.center() if target.width() <= self._u(100.0) else QPointF(press_pos)
+        if not target.contains(center):
+            center = target.center()
+        album_origin = key in {"music:previous", "music:next"}
+        source_radius = min(target.width(), target.height()) * 0.42
+        if album_origin:
+            cover = QRectF(getattr(self, "music_cover_rect", QRectF()))
+            if not cover.isEmpty():
+                center = cover.center()
+                source_radius = 0.0
+            else:
+                album_origin = False
+        clip = QRectF(target)
+        owner_key = "music" if key.startswith("music:") else key
+        enclosing = [
+            (motion_key, QRectF(motion.rect))
+            for motion_key, motion in getattr(self, "motions", {}).items()
+            if float(getattr(motion, "opacity", 0.0)) > 0.12
+            and QRectF(motion.rect).contains(center)
+            and QRectF(motion.rect).width() >= target.width() * 0.85
+        ]
+        if enclosing:
+            if key.startswith("music:"):
+                chosen = next((item for item in enclosing if item[0] == "music"), None)
+            elif key.startswith("plugin-action:"):
+                chosen = next((item for item in enclosing if item[0] == "plugin-panel"), None)
+            else:
+                chosen = next((item for item in enclosing if item[0] == key), None)
+            if chosen is None:
+                chosen = min(enclosing, key=lambda item: item[1].width() * item[1].height())
+            if key.startswith("plugin-action:"):
+                owner_key = chosen[0]
+            clip = QRectF(chosen[1])
+        else:
+            # A missing stack motion should confine the wash to the known control
+            # rather than leak onto the transparent host window.
+            clip = QRectF(target)
+            if key.startswith("plugin-action:"):
+                owner_key = "plugin-panel"
+        is_light_surface = False
+        if key.startswith("music"):
+            try:
+                is_light_surface = self._music_control_icon_color(255).lightness() < 128
+            except Exception:
+                pass
+        elif key.startswith("plugin"):
+            try:
+                is_light_surface = self._plugin_theme_colors()["shell_expanded"].lightness() > 160
+            except Exception:
+                pass
+        ripples = list(getattr(self, "_island_button_ripples", ()))
+        ripples = [
+            ripple for ripple in ripples
+            if current - float(ripple.get("started_at", 0.0)) < float(ripple.get("duration", 0.0))
+        ]
+        ripples.append({
+            "started_at": current,
+            "duration": self._animation_duration(1.72 if album_origin else 0.38),
+            "travel_duration": self._animation_duration(1.5) if album_origin else 0.0,
+            "center": QPointF(center),
+            "target": QRectF(target),
+            "clip": QRectF(clip),
+            "owner_key": owner_key,
+            "source_radius_fraction": source_radius / max(1.0, min(clip.width(), clip.height())),
+            "album_origin": album_origin,
+            "origin_fraction": QPointF(
+                (center.x() - clip.left()) / max(1.0, clip.width()),
+                (center.y() - clip.top()) / max(1.0, clip.height()),
+            ),
+            "light_surface": is_light_surface,
+        })
+        self._island_button_ripples = ripples[-4:]
+        self.update()
+        return True
+
+    def _paint_island_button_ripples(
+        self,
+        painter: QPainter,
+        now: float,
+        owner_key: str | None = None,
+        shell_rect: QRectF | None = None,
+        shell_path: QPainterPath | None = None,
+    ):
+        """Paint a soft expanding circular light ring behind card content."""
+        ripples = getattr(self, "_island_button_ripples", ())
+        if not ripples:
+            return
+        active: list[dict[str, object]] = []
+        filtered = owner_key is not None
+        for ripple in ripples:
+            started = float(ripple["started_at"])
+            duration = max(0.001, float(ripple["duration"]))
+            progress = (now - started) / duration
+            if progress < 0.0 or progress >= 1.0:
+                continue
+            active.append(ripple)
+            if not filtered or ripple.get("owner_key") != owner_key:
+                continue
+            center = QPointF(ripple["center"])
+            clip = QRectF(shell_rect) if shell_rect is not None else QRectF(ripple["clip"])
+            if clip.isEmpty():
+                continue
+            if shell_rect is not None:
+                origin = QPointF(ripple.get("origin_fraction", QPointF(0.5, 0.5)))
+                center = QPointF(clip.left() + clip.width() * origin.x(), clip.top() + clip.height() * origin.y())
+            album_origin = bool(ripple.get("album_origin", False))
+            if album_origin:
+                travel_duration = max(0.001, float(ripple.get("travel_duration", duration)))
+                elapsed = now - started
+                travel = min(1.0, elapsed / travel_duration)
+                # A linearly rising speed gives the ring a gentle launch and a
+                # fast finish; travel ends well before the two-second limit.
+                expansion = 0.4 * travel + 0.6 * travel * travel
+                tail = max(0.0, 1.0 - max(0.0, elapsed - travel_duration) / max(0.001, duration - travel_duration))
+                luminance = min(1.0, expansion / 0.09) * (1.0 - 0.22 * expansion) * tail
+            else:
+                luminance = min(1.0, progress / 0.10) * (1.0 - progress) ** 1.05
+            if luminance <= 0.001:
+                continue
+            light_surface = bool(ripple["light_surface"])
+            pearl = QColor(225, 219, 242) if light_surface else QColor(255, 252, 248)
+            chroma = QColor(145, 130, 190) if light_surface else QColor(187, 171, 238)
+            short_side = min(clip.width(), clip.height())
+            if album_origin:
+                # Navigation light grows behind the album from radius zero and
+                # reaches the music space's right edge within two seconds.
+                max_radius = max(0.0, clip.right() - center.x())
+                start_radius = 0.0
+            else:
+                edge_room = min(
+                    max(0.0, center.y() - clip.top()),
+                    max(0.0, clip.bottom() - center.y()),
+                )
+                max_radius = min(short_side * 0.60, max(short_side * 0.46, edge_room * 1.18))
+                start_radius = min(max_radius * 0.83, max(self._u(4.0),
+                    short_side * float(ripple.get("source_radius_fraction", 0.08))))
+                expansion = 1.0 - (1.0 - progress) ** 1.7
+            radius = start_radius + (max_radius - start_radius) * expansion
+            band = max(self._u(11.0), short_side * (0.30 if album_origin else 0.15))
+            gradient_radius = radius + band * 1.8
+            inner = max(0.0, radius - band * 1.6) / gradient_radius
+            gradient = QRadialGradient(center, gradient_radius)
+            gradient.setColorAt(0.0, QColor(pearl.red(), pearl.green(), pearl.blue(), 0))
+            gradient.setColorAt(inner, QColor(pearl.red(), pearl.green(), pearl.blue(), 0))
+            gradient.setColorAt(max(inner + 0.001, (radius - band * 0.95) / gradient_radius),
+                                QColor(chroma.red(), chroma.green(), chroma.blue(), int((24 if light_surface else 39) * luminance)))
+            gradient.setColorAt(max(inner + 0.002, (radius - band * 0.24) / gradient_radius),
+                                QColor(pearl.red(), pearl.green(), pearl.blue(), int((58 if light_surface else 103) * luminance)))
+            gradient.setColorAt(radius / gradient_radius,
+                                QColor(pearl.red(), pearl.green(), pearl.blue(), int((78 if light_surface else 145) * luminance)))
+            gradient.setColorAt((radius + band * 0.38) / gradient_radius,
+                                QColor(pearl.red(), pearl.green(), pearl.blue(), int((45 if light_surface else 83) * luminance)))
+            gradient.setColorAt((radius + band * 1.15) / gradient_radius,
+                                QColor(chroma.red(), chroma.green(), chroma.blue(), int((10 if light_surface else 17) * luminance)))
+            gradient.setColorAt(1.0, QColor(pearl.red(), pearl.green(), pearl.blue(), 0))
+            painter.save()
+            painter.setClipPath(shell_path if shell_path is not None else self._rounded_path(
+                clip, min(clip.height() * 0.46, clip.width() * 0.20)
+            ), Qt.ClipOperation.IntersectClip)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(gradient)
+            painter.drawEllipse(center, gradient_radius, gradient_radius)
+            painter.restore()
+        self._island_button_ripples = active
+
+    def _paint_current_island_space_glow(
+        self, painter: QPainter, rect: QRectF, radius: float, shell_path: QPainterPath | None = None,
+    ):
+        key = str(getattr(self, "_island_glow_current_visual_key", "") or "")
+        if key and getattr(self, "_island_button_ripples", ()):
+            self._paint_island_button_ripples(
+                painter,
+                float(getattr(self, "_island_glow_paint_now", 0.0) or time.monotonic()),
+                owner_key=key,
+                shell_rect=rect,
+                shell_path=shell_path if shell_path is not None else self._rounded_path(rect, radius),
+            )
 
     def set_music_flow_intensity(self, value: float, notify: bool = True):
         try:
@@ -3066,12 +3643,42 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
 
     def set_lyric_offset_seconds(self, seconds: float, notify: bool = True):
-        self.lyric_offset_seconds = max(-12.0, min(12.0, float(seconds)))
-        now = time.monotonic()
-        self.lyric_changed_at = now
-        self._sync_timed_lyrics(now)
+        value = max(-12.0, min(12.0, float(seconds)))
+        if value == self.lyric_offset_seconds:
+            return
+        self.lyric_offset_seconds = value
+        self._reanchor_lyric_offset()
         if notify:
             self._notify_settings_changed()
+
+    def set_active_music_app_lyric_offset(self, service: str, seconds: float) -> bool:
+        """Apply the edited profile immediately, but only to its active adapter."""
+        active = str(getattr(self, "media_lyric_offset_adapter", "system") or "system").casefold()
+        edited = str(service or "").casefold()
+        if active == "netease_betterncm":
+            active = "netease"
+        if active != edited or active == "system":
+            return False
+        value = max(-12.0, min(12.0, float(seconds)))
+        if value != float(getattr(self, "media_app_lyric_offset_seconds", 0.0) or 0.0):
+            self.media_app_lyric_offset_seconds = value
+            self._reanchor_lyric_offset()
+        return True
+
+    def _reanchor_lyric_offset(self):
+        """A deliberate slider change is not a noisy player-clock backstep."""
+        now = time.monotonic()
+        self.lyric_last_phase_index = -1
+        self.lyric_last_phase_progress = 0.0
+        self.lyric_last_phase_at = now
+        self.lyric_last_phase_timing_kind = ""
+        self._sync_timed_lyrics(now, allow_backward=True)
+        self.lyric_changed_at = now
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            reanchor = getattr(surface, "on_lyric_offset_changed", None)
+            if callable(reanchor):
+                reanchor()
         self.update()
 
     def set_lyric_font_size(self, size: int, notify: bool = True):
@@ -3081,6 +3688,43 @@ class IslandStackVisual(QWidget):
         if notify:
             self._notify_settings_changed()
         self.update()
+
+    def set_music_surface_reading_lift_level(self, level: int, notify: bool = True):
+        self.music_surface_reading_lift_level = normalize_music_reading_lift_level(level)
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            surface.update()
+        if notify:
+            self._notify_settings_changed()
+
+    def set_music_surface_reading_gradient_steps(self, steps: int, notify: bool = True):
+        self.music_surface_reading_gradient_steps = normalize_music_reading_gradient_steps(steps)
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            surface.update()
+        if notify:
+            self._notify_settings_changed()
+
+    def set_music_surface_reading_strategy(self, strategy: str, notify: bool = True):
+        self.music_surface_reading_strategy = normalize_music_reading_strategy(strategy)
+        self.lyric_last_phase_index = -1
+        self.lyric_last_phase_progress = 0.0
+        self.ember_last_phase_index = -1
+        self.ember_last_phase_progress = 0.0
+        self.update()
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            surface.update()
+        if notify:
+            self._notify_settings_changed()
+
+    def set_music_sparse_highlight_seconds_per_unit(self, seconds: float, notify: bool = True):
+        self.music_sparse_highlight_seconds_per_unit = normalize_sparse_seconds_per_unit(seconds)
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            surface.update()
+        if notify:
+            self._notify_settings_changed()
 
     def set_lyric_elastic_strength(self, strength: int, notify: bool = True):
         self.lyric_elastic_strength = max(0, min(160, int(strength)))
@@ -3106,8 +3750,28 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def set_enable_dual_line_lyrics(self, enabled: bool, notify: bool = True):
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            changed = getattr(surface, "on_translation_visibility_changed", None)
+            if callable(changed):
+                changed(bool(enabled))
         self.enable_dual_line_lyrics = bool(enabled)
         self._pulse_stack()
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            surface.update()
+        if notify:
+            self._notify_settings_changed()
+            refresh = getattr(getattr(self, "data_provider", None), "_request_immediate_media_refresh", None)
+            if callable(refresh):
+                refresh()
+        self.update()
+
+    def set_music_intro_cleanup_enabled(self, enabled: bool, notify: bool = True):
+        self.music_intro_cleanup_enabled = bool(enabled)
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None:
+            surface.update()
         if notify:
             self._notify_settings_changed()
         self.update()
@@ -3142,12 +3806,11 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def _compact_lyric_cover_enabled(self) -> bool:
-        if self._ember_enabled():
-            return bool(getattr(self, "ember_show_cover", True))
         return bool(getattr(self, "compact_lyric_show_cover", True))
 
     def set_lyric_flow_style(self, style: str, notify: bool = True):
         style = str(style or "wave_stream").strip()
+        # Removed Ember Fade selections reopen with the canonical reader.
         if style not in self.LYRIC_FLOW_STYLES:
             style = "wave_stream"
         self.lyric_flow_style = style
@@ -3543,6 +4206,43 @@ class IslandStackVisual(QWidget):
         finally:
             self._restoring_position = False
 
+    def _top_notch_anchor_locked(self) -> bool:
+        return (
+            str(getattr(self, "location_mode", "free") or "free") == "top"
+            and not bool(getattr(self, "finder_mode", False))
+            and not bool(getattr(self, "attach_to_real_finder", False))
+            and not bool(getattr(self, "dragging", False))
+            and not bool(getattr(self, "drag_candidate", False))
+            and not bool(getattr(self, "_music_surface_active", False))
+        )
+
+    def _refresh_top_notch_position(self) -> bool:
+        if not self._top_notch_anchor_locked() or bool(getattr(self, "_restoring_position", False)):
+            return False
+        kind = self._main_kind()
+        # Downward layout has a fixed local top; it does not need the current
+        # text width/height, which can be expensive to measure on every tick.
+        main_top = self._main_top_for_direction(kind, 0.0, 1)
+        current = QPoint(self.pos())
+        probe = self.mapToGlobal(QPoint(self.width() // 2, int(round(main_top + self._u(16.0)))))
+        screen = QGuiApplication.screenAt(probe) or self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return False
+        target = QPoint(current.x(), int(round(screen.geometry().top() - main_top)))
+        direction_changed = int(getattr(self, "stack_direction", 1) or 1) != 1
+        self.stack_direction = 1
+        moved = target != current
+        if moved:
+            # Platform moves and re-show geometry must not become a new free
+            # placement. The native move can synchronously emit moveEvent.
+            self._restoring_position = True
+            try:
+                self.move(target)
+            finally:
+                self._restoring_position = False
+        self.save_last_position(target)
+        return moved or direction_changed
+
     def _standalone_canvas_width(self) -> float:
         return self._u(1180.0)
 
@@ -3688,11 +4388,12 @@ class IslandStackVisual(QWidget):
             return False
         if str(getattr(self, "location_mode", "free") or "free") == "finder" or bool(getattr(self, "finder_mode", False)):
             return False
+        previous = getattr(self, "last_window_position", None)
+        self._refresh_top_notch_position()
         try:
             pos = self.pos()
         except Exception:
             return False
-        previous = getattr(self, "last_window_position", None)
         self.save_last_position(pos)
         return previous != getattr(self, "last_window_position", None)
 
@@ -3712,6 +4413,11 @@ class IslandStackVisual(QWidget):
         self.update()
 
     def _force_super_topmost(self):
+        if bool(getattr(self, "_music_surface_active", False)):
+            return
+        music_surface = getattr(self, "music_fullscreen_overlay", None)
+        if music_surface is not None and music_surface.isVisible():
+            return
         if sys.platform != "win32" or not getattr(self, "super_topmost_enabled", True):
             return
         try:
@@ -3748,20 +4454,81 @@ class IslandStackVisual(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._resume_solid_album_palette_worker()
+        if bool(getattr(self, "_music_surface_active", False)):
+            self.hide()
+            return
         self._center_on_screen()
+        self._refresh_top_notch_position()
         self._force_super_topmost()
+
+    def hideEvent(self, event):
+        cover_motion = getattr(self, "_music_cover_hover_motion", None)
+        if cover_motion is not None:
+            cover_motion.clear(time.monotonic())
+        motion = getattr(self, "_audio_device_motion", None)
+        if motion is not None:
+            motion.clear(time.monotonic())
+        super().hideEvent(event)
+
+    def on_audio_device_event(self, route, device) -> None:
+        serial = int(getattr(route, "event_serial", 0) or 0)
+        if serial <= int(getattr(self, "_audio_device_event_serial", 0)):
+            return
+        self._audio_device_event_serial = serial
+        motion = getattr(self, "_audio_device_motion", None)
+        if motion is None:
+            return
+        now = time.monotonic()
+        if (not self.isVisible() or self.isMinimized()
+                or bool(getattr(self, "scene_suppressed", False))
+                or bool(getattr(self, "_music_surface_active", False))):
+            motion.clear(now)
+            return
+        name = str(getattr(device, "name", "") or getattr(route, "event_name", "") or "").strip()
+        if not name:
+            return
+        # Synthetic group notices have no accessory identity or battery.
+        identity = str(getattr(device, "id", "") or f"event:{serial}")
+        motion.announce(IslandDevicePayload(identity, name,
+            str(getattr(device, "kind", "device") or "device"),
+            reliable_device_battery(device)), now)
+        self.update()
+
+    def _audio_device_pose(self):
+        motion = getattr(self, "_audio_device_motion", None)
+        return motion.pose if motion is not None and not bool(getattr(self, "expanded", False)) else None
 
     def _tick(self):
         now = time.monotonic()
         anim_dt = self._animation_tick_delta_seconds(now)
         self.last_tick_at = now
         speed = self._animation_speed_factor()
+        cover_hover_changed = self._advance_music_cover_hover(now)
+        notice_motion = getattr(self, "_audio_device_motion", None)
+        notice_changed = False
+        if notice_motion is not None:
+            if bool(getattr(self, "scene_suppressed", False)) or bool(getattr(self, "_music_surface_active", False)):
+                notice_motion.clear(now)
+            else:
+                notice_changed = notice_motion.advance(now)
+        music_surface = getattr(self, "music_fullscreen_overlay", None)
+        if music_surface is not None and music_surface.isVisible():
+            self._refresh_media_data(now)
+            self._update_scene_state(now)
+            self._prune_expired_messages(now)
+            self._handle_fullscreen_overlay_sync(now)
+            barrage_hover_plan = self._barrage_hover_clock_plan(anim_dt)
+            self.barrage_hovered = barrage_hover_plan.hovered
+            self.barrage_clock += barrage_hover_plan.clock_delta
+            self._handle_music_lyric_tick(now, speed)
+            return
         visual_data_changed = self._handle_tick_runtime_refresh(now)
         self._handle_tick_follow_refresh(now)
         self._handle_tick_overlay_clock_and_topmost(now, anim_dt)
 
         lyric_visual_changed = self._handle_music_lyric_tick(now, speed)
-        visual_data_changed = bool(visual_data_changed or lyric_visual_changed)
+        visual_data_changed = bool(visual_data_changed or lyric_visual_changed or notice_changed or cover_hover_changed)
 
         if self.scene_suppressed:
             self._handle_scene_suppressed_tick(now)
@@ -4617,17 +5384,11 @@ class IslandStackVisual(QWidget):
             "v2_music_reactive_background_intensity": int(getattr(self, "music_reactive_background_intensity", 55)),
             "v2_compact_duotone_balance": int(getattr(self, "compact_duotone_balance", 50)),
             "v2_expanded_duotone_balance": int(getattr(self, "expanded_duotone_balance", 50)),
-            "v2_diffraction_frequency": round(float(getattr(self, "diffraction_frequency", 0.30)), 3),
             "v2_solid_album_background_fallback": str(getattr(self, "solid_album_background_fallback", "#16BCFF")),
-            "v2_yaoguang_outer_color": str(getattr(self, "yaoguang_outer_color", "#6C35F2")),
-            "v2_yaoguang_blur_strength": int(getattr(self, "yaoguang_blur_strength", 58)),
-            "v2_yaoguang_color_source": self._yaoguang_color_source_key(),
-            "v2_yaoguang_album_inverse_enabled": bool(getattr(self, "yaoguang_album_inverse_enabled", False)) and self._yaoguang_color_source_key() == "album",
-            "v2_yaoguang_height_mode": self._yaoguang_height_mode_key(),
             "v2_font_family": self.ui_font_family,
             "v2_high_quality_font_rendering": bool(getattr(self, "high_quality_font_rendering", False)),
             "v2_animation_fps": self.animation_fps,
-            "v2_lyric_animation_fps": int(getattr(self, "lyric_animation_fps", 60)),
+            "v2_lyric_animation_fps": int(getattr(self, "lyric_animation_fps", 120)),
             "v2_animation_speed": self.animation_speed,
             "v2_empty_island_display_mode": self._empty_island_display_mode(),
             "v2_no_music_island_priority": self._no_music_island_priority(),
@@ -4656,17 +5417,25 @@ class IslandStackVisual(QWidget):
             "v2_expand_direction": self.expand_direction,
             "v2_lyric_offset_seconds": round(float(getattr(self, "lyric_offset_seconds", 0.0)), 3),
             "v2_lyric_font_size": int(getattr(self, "lyric_font_size", 18)),
-            "v2_lyric_elastic_strength": int(getattr(self, "lyric_elastic_strength", 100)),
-            "v2_lyric_elastic_mode": str(getattr(self, "lyric_elastic_mode", "both")),
-            "v2_lyric_word_spacing": int(getattr(self, "lyric_word_spacing", 100)),
+            "v2_music_surface_reading_lift_level": normalize_music_reading_lift_level(
+                getattr(self, "music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL)
+            ),
+            "v2_music_surface_reading_gradient_steps": normalize_music_reading_gradient_steps(
+                getattr(self, "music_surface_reading_gradient_steps", MUSIC_READING_GRADIENT_DEFAULT_STEPS)
+            ),
+            "v2_music_surface_reading_strategy": normalize_music_reading_strategy(
+                getattr(self, "music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT)
+            ),
+            "v2_music_sparse_highlight_seconds_per_unit": normalize_sparse_seconds_per_unit(
+                getattr(self, "music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT)
+            ),
             "v2_enable_dual_line_lyrics": bool(getattr(self, "enable_dual_line_lyrics", False)),
+            "v2_music_intro_cleanup_enabled": bool(getattr(self, "music_intro_cleanup_enabled", True)),
             "v2_dual_line_font_size": int(getattr(self, "dual_line_font_size", 12)),
             "v2_dual_line_secondary_weight": int(getattr(self, "dual_line_secondary_weight", 72)),
             "v2_dual_line_secondary_spacing": int(getattr(self, "dual_line_secondary_spacing", 100)),
             "v2_compact_lyric_show_cover": bool(getattr(self, "compact_lyric_show_cover", True)),
             "v2_wave_font_weight": self._wave_font_weight_key(),
-            "v2_wave_word_fill_enabled": bool(getattr(self, "wave_word_fill_enabled", False)),
-            "v2_wave_color_fill_enabled": bool(getattr(self, "wave_color_fill_enabled", False)),
             "v2_lyric_flow_style": str(getattr(self, "lyric_flow_style", "wave_stream")),
             "v2_gelv_font_family": self.GELV_FONT_FAMILY,
             "v2_gelv_primary_font_size": int(getattr(self, "gelv_primary_font_size", 22)),
@@ -6210,6 +6979,8 @@ class IslandStackVisual(QWidget):
             return
         if bool(getattr(self, "taskbar_hidden_by_follow", False)):
             self.taskbar_hidden_by_follow = False
+            if bool(getattr(self, "_music_surface_active", False)):
+                return
             try:
                 self.show()
             except Exception:
@@ -6567,6 +7338,28 @@ class IslandStackVisual(QWidget):
         if self.settings_changed_callback:
             self.settings_changed_callback(self.settings_snapshot())
 
+    @Slot(str, object)
+    def on_music_cache_cleared(self, kind: str, result=None):
+        """Invalidate GUI caches after the provider's background cleanup."""
+        if result is not None and (not isinstance(result, dict) or not result.get("refresh_requested")):
+            return
+        if kind == "artwork":
+            # Preserve a softened preview, but force freshly returned bytes
+            # through decoding even if they equal the old cached download.
+            self.album_art_signature = ""
+            self.album_art_source = "thumbnail" if not self.album_art.isNull() else ""
+            self.album_art_lookup_state = "pending"
+            self._scaled_album_art_cache.clear()
+            surface = getattr(self, "music_fullscreen_overlay", None)
+            if surface is not None:
+                surface.invalidate_artwork_cache()
+        elif kind == "lyrics":
+            self._clear_lyric_metrics_cache()
+        else:
+            return
+        self.last_media_refresh_at = -999.0
+        self.update()
+
     def provider_diagnostics(self) -> dict[str, object]:
         provider_diagnostics = {}
         try:
@@ -6575,6 +7368,18 @@ class IslandStackVisual(QWidget):
                 provider_diagnostics.update(provider_diag())
         except Exception as exc:
             provider_diagnostics["provider_error"] = str(exc)
+        image = getattr(self, "album_art", QImage())
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        provider_diagnostics["artwork_handoff"] = {
+            "source": str(getattr(self, "album_art_source", "") or ""),
+            "lookup_state": str(getattr(self, "album_art_lookup_state", "") or ""),
+            "decoded_width": image.width(),
+            "decoded_height": image.height(),
+            "bytes_signature": str(getattr(self, "album_art_signature", "") or ""),
+            "display_cache_key": image.cacheKey(),
+            "surface_waiting": bool(getattr(surface, "_art_loading_waiting", False)),
+            "surface_preview_key": getattr(surface, "_art_loading_preview_key", None),
+        }
         now = time.monotonic()
         diagnostics = self._build_island_runtime_diagnostics(
             now,
@@ -6656,7 +7461,7 @@ class IslandStackVisual(QWidget):
             reactive_background_enabled=bool(getattr(self, "music_reactive_background_enabled", False)),
             reactive_background_intensity=int(getattr(self, "music_reactive_background_intensity", 55) or 0),
             animation_fps=int(getattr(self, "animation_fps", 60) or 0),
-            lyric_animation_fps=int(getattr(self, "lyric_animation_fps", 60) or 0),
+            lyric_animation_fps=int(getattr(self, "lyric_animation_fps", 120) or 0),
             animation_speed=float(getattr(self, "animation_speed", 1.0) or 0.0),
             compact_duotone_balance=int(getattr(self, "compact_duotone_balance", 50) or 0),
             expanded_duotone_balance=int(getattr(self, "expanded_duotone_balance", 50) or 0),
@@ -6684,7 +7489,17 @@ class IslandStackVisual(QWidget):
                 media_is_playing=bool(getattr(self, "media_is_playing", False)),
                 transition_kind=getattr(self, "lyric_transition_kind", ""),
             )
-            return diagnostics.as_dict()
+            result = diagnostics.as_dict()
+            clock = getattr(self, "_island_lyric_source_clock", None)
+            pending_at = getattr(clock, "pending_clock_at", None)
+            result["source_clock"] = {
+                "observed_seconds": getattr(self, "media_position_observed_seconds", None),
+                "observed_at": getattr(self, "media_position_sampled_at", 0.0),
+                "validated_seconds": getattr(clock, "last_source_position", None),
+                "pending_seconds": getattr(clock, "pending_clock_position", None),
+                "pending_age_seconds": max(0.0, now - pending_at) if pending_at is not None else None,
+            }
+            return result
         except Exception as exc:
             return {
                 "estimated_position_seconds": estimated_position,
@@ -6751,7 +7566,7 @@ class IslandStackVisual(QWidget):
         if key != self.hovered_key:
             self.hovered_key = key
             self.hover_started_at = now
-            self.hover_armed_key = key if key and not self.expanded and not (self._main_kind() == IslandKind.MESSAGE and self._is_message_hit(key)) else ""
+            self.hover_armed_key = key if key and key != "music:open_surface" and not self.expanded and not (self._main_kind() == IslandKind.MESSAGE and self._is_message_hit(key)) else ""
             if key:
                 self.hover_bounce_until = now + 1.0
             self.update()
@@ -6857,12 +7672,161 @@ class IslandStackVisual(QWidget):
             self._run_background("FocusApp", lambda: self._focus_app_window(app_name))
 
     def _send_playback_command_async(self, command: str):
-        self._run_background("MediaCommand", lambda: self.data_provider.send_playback_command(command))
+        now = time.monotonic()
+        pending = None
+        if command == "toggle_play_pause":
+            pending = self._begin_music_playback_toggle(now)
+        else:
+            self._pending_music_playback_toggle = None
+            if command in {"previous", "next"}:
+                self._media_strong_tracking_until = now + 10.0
+
+        def send():
+            try:
+                succeeded = bool(self.data_provider.send_playback_command(command))
+            except Exception:
+                succeeded = False
+            if pending is not None:
+                # Only a plain result is published by the worker. Qt state
+                # and the current command generation are reconciled on the UI.
+                pending["command_succeeded"] = succeeded
+
+        self._run_background("MediaCommand", send)
+
+    def _begin_music_playback_toggle(self, now: float) -> dict[str, object]:
+        playing = bool(getattr(self, "media_is_playing", False))
+        position = self._estimated_media_position(now)
+        self.media_position_seconds = position
+        self.media_position_sync_at = float(now)
+        self.media_is_playing = not playing
+        pending = {
+            "track_id": str(getattr(self, "media_track_id", "") or ""),
+            "started_at": float(now),
+            "playing": not playing,
+            "previous_playing": playing,
+            "command_succeeded": None,
+        }
+        self._pending_music_playback_toggle = pending
+        self._media_strong_tracking_until = max(
+            float(getattr(self, "_media_strong_tracking_until", 0.0)), float(now) + 2.5,
+        )
+        self.last_media_refresh_at = 0.0
+        return pending
+
+    def _reconcile_music_playback_toggle(
+        self, track_id: str, playing: bool, position: float,
+        sampled_at: float, now: float, *, track_changed: bool = False,
+    ) -> tuple[bool, float]:
+        pending = getattr(self, "_pending_music_playback_toggle", None)
+        if not isinstance(pending, dict):
+            return playing, position
+        if track_changed or str(pending["track_id"]) != str(track_id):
+            self._pending_music_playback_toggle = None
+            return playing, position
+        if pending.get("command_succeeded") is False:
+            # A failed command restores the actual source state on the next
+            # fast refresh instead of leaving the optimistic icon or clock.
+            self._pending_music_playback_toggle = None
+            return playing, position
+        started_at = float(pending["started_at"])
+        expected = bool(pending["playing"])
+        if now - started_at >= 1.8:
+            self._pending_music_playback_toggle = None
+            return playing, position
+        if sampled_at > started_at and playing == expected:
+            self._pending_music_playback_toggle = None
+            return playing, position
+        # An in-flight pre-click read, or a cached provider frame while the
+        # player settles, must not rewind a pause or count paused time on resume.
+        return expected, self._estimated_media_position(now)
+
+    def _show_music_fullscreen(self):
+        overlay = getattr(self, "music_fullscreen_overlay", None)
+        if bool(getattr(self, "_music_surface_active", False)):
+            self._focus_active_music_surface()
+            return
+        if overlay is None:
+            overlay = MusicSurfaceWindow(self)
+            self.music_fullscreen_overlay = overlay
+        self._island_visible_before_music_surface = bool(self.isVisible())
+        origin_geometry = self._current_main_global_rect().toAlignedRect()
+        origin_snapshot = QImage()
+        if origin_geometry.isValid() and self.isVisible():
+            local_origin = self.mapFromGlobal(origin_geometry.topLeft())
+            local_rect = QRect(local_origin, origin_geometry.size()).intersected(self.rect())
+            if local_rect.isValid():
+                origin_geometry = QRect(self.mapToGlobal(local_rect.topLeft()), local_rect.size())
+                origin_snapshot = self.grab(local_rect).toImage()
+            else:
+                origin_geometry = QRect()
+        self._music_surface_active = True
+        try:
+            self._release_super_topmost()
+            self.hide()
+            overlay.show_from_island(
+                fullscreen=None,
+                origin_geometry=origin_geometry,
+                origin_snapshot=origin_snapshot,
+            )
+        except Exception:
+            try:
+                overlay.hide()
+            except Exception:
+                pass
+            self._music_surface_active = False
+            if bool(getattr(self, "_island_visible_before_music_surface", True)):
+                self.show()
+                self.raise_()
+                self.activateWindow()
+
+    def _focus_active_music_surface(self) -> bool:
+        if not bool(getattr(self, "_music_surface_active", False)):
+            return False
+        overlay = getattr(self, "music_fullscreen_overlay", None)
+        if overlay is not None and overlay.isVisible():
+            try:
+                minimized = bool(overlay.isMinimized())
+            except Exception:
+                minimized = False
+            if minimized:
+                try:
+                    if bool(getattr(overlay, "_fullscreen", False)):
+                        overlay.showFullScreen()
+                    else:
+                        overlay.showNormal()
+                except Exception:
+                    pass
+            overlay.raise_()
+            overlay.activateWindow()
+        return True
+
+    def _restore_island_from_music_surface(self):
+        overlay = getattr(self, "music_fullscreen_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.hide()
+            except Exception:
+                pass
+        self._music_surface_active = False
+        if bool(getattr(self, "_island_visible_before_music_surface", True)):
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+    def _close_music_fullscreen(self):
+        overlay = getattr(self, "music_fullscreen_overlay", None)
+        return_to_island = getattr(overlay, "return_to_island", None)
+        if bool(getattr(self, "_music_surface_active", False)) and callable(return_to_island):
+            return_to_island()
+        else:
+            self._restore_island_from_music_surface()
 
     def _activate_key(self, key: str):
         if key.startswith("music:"):
             command = key.split(":", 1)[1]
-            if command == "open_source":
+            if command == "open_surface":
+                self._show_music_fullscreen()
+            elif command == "open_source":
                 self._open_music_source()
             else:
                 self.tasker_music_hover_auto_expand_suppressed = True
@@ -6874,7 +7838,6 @@ class IslandStackVisual(QWidget):
                         presses = {}
                         self.music_control_press_started_at = presses
                     presses[key] = time.monotonic()
-                    self.media_is_playing = not self.media_is_playing
                 self.last_media_refresh_at = 0.0
         elif key.startswith("plugin-alert:"):
             plugin_id = key.split(":", 1)[1]
@@ -8381,6 +9344,8 @@ class IslandStackVisual(QWidget):
         if plan.activate_pressed_key:
             key = getattr(self, "drag_press_key", "") or self._hit_test(event.position())
             if key:
+                if self._island_button_ripple_target(key).contains(event.position()):
+                    self._start_island_button_ripple(key, getattr(self, "drag_press_pos", event.position()))
                 self._activate_key(key)
             if plan.update_after_activation:
                 self.update()
@@ -8449,6 +9414,14 @@ class IslandStackVisual(QWidget):
         super().leaveEvent(event)
 
     def closeEvent(self, event):
+        self._close_solid_album_palette_worker()
+        music_surface = getattr(self, "music_fullscreen_overlay", None)
+        if music_surface is not None:
+            try:
+                music_surface.shutdown()
+            except Exception:
+                pass
+        self.music_fullscreen_overlay = None
         overlays = [
             getattr(self, "plugin_alert_overlay", None),
             getattr(self, "barrage_overlay", None),
@@ -8531,11 +9504,20 @@ class IslandStackVisual(QWidget):
                 main_drag_key=main_drag_key,
                 unit=self._u(1.0),
             )
+            if (
+                taskbar_key in (None, "music")
+                and getattr(self, "music_cover_rect", QRectF()).contains(point)
+                and self._main_kind() == IslandKind.MUSIC
+            ):
+                return "music:open_surface"
             if taskbar_key is not None:
                 return taskbar_key
+        if (self._main_kind() == IslandKind.MUSIC
+                and getattr(self, "music_cover_rect", QRectF()).contains(point)):
+            return "music:open_surface"
         if self.expanded and self._main_kind() == IslandKind.MUSIC:
             if getattr(self, "music_cover_rect", QRectF()).contains(point):
-                return "music:open_source"
+                return "music:open_surface"
             for key, rect in self.music_button_rects.items():
                 if rect.contains(point):
                     return key
@@ -8657,6 +9639,23 @@ class IslandStackVisual(QWidget):
         )
 
     def _music_target_width(self, expanded: bool | None = None) -> float:
+        base = self._base_music_target_width(expanded)
+        if bool(self.expanded if expanded is None else expanded):
+            return base
+        return self._audio_device_target_width(base)
+
+    def _audio_device_target_width(self, base: float) -> float:
+        pose = self._audio_device_pose()
+        if pose is None:
+            return base
+        metric = QFontMetrics(self._font(self._compact_primary_lyric_font_size(), QFont.Weight.Bold, shrink=False))
+        payloads = (pose.payload,) if pose.previous is None else (pose.previous, pose.payload)
+        desired = max(min(self._u(680), metric.horizontalAdvance(p.name)) + self._u(104) for p in payloads)
+        if any(p.battery_percent is not None for p in payloads):
+            desired = max(desired, base + self._u(80))
+        return base + (max(base, desired) - base) * pose.reveal
+
+    def _base_music_target_width(self, expanded: bool | None = None) -> float:
         expanded = self.expanded if expanded is None else expanded
         instrumental = self._is_instrumental_track()
         lyric_lines = self._music_lyric_measurement_lines(self.lyrics, expanded=expanded)
@@ -8692,7 +9691,7 @@ class IslandStackVisual(QWidget):
             return max(self._u(300.0), min(self._u(760.0), required))
 
         compact_text = self._compact_music_measurement_text()
-        compact_metric = QFontMetrics(self._font(compact_lyric_size, QFont.Weight.Bold, shrink=False))
+        compact_metric = QFontMetrics(self._wave_stream_font(compact_lyric_size, QFont.Weight.Bold, shrink=False))
         title_metric = QFontMetrics(self._font(11, QFont.Weight.Bold, shrink=False))
         content_w = min(
             float(compact_metric.horizontalAdvance(compact_text)),
@@ -8705,28 +9704,6 @@ class IslandStackVisual(QWidget):
             self._music_lyric_measurement_width_cap(expanded=False),
         )
         current_dual_w = self._current_compact_dual_line_width(compact_lyric_size)
-        if self._gelv_enabled():
-            active_size, next_size = self._gelv_line_sizes(taskbar=False)
-            dual_size = self._gelv_dual_line_size(taskbar=False)
-            second_size = dual_size if (self._gelv_current_dual_line() or self._gelv_current_mixed_language_line()) else next_size
-            gelv_lines = self._gelv_display_lines()
-            gelv_w = max(
-                (
-                    self._gelv_layout_width(line, active_size if index == 0 else second_size)
-                    for index, line in enumerate(gelv_lines)
-                    if line
-                ),
-                default=0.0,
-            )
-            current_dual_w = max(current_dual_w, min(gelv_w, self._music_lyric_measurement_width_cap(expanded=False)))
-        if self._ember_enabled():
-            ember_lines = self._ember_current_display_lines(expanded=False)
-            ember_size = self._ember_base_font_size(expanded=False, line_count=max(1, len(ember_lines)))
-            ember_w = max(
-                (self._ember_layout(line, ember_size).total_width for line in ember_lines if line),
-                default=0.0,
-            )
-            current_dual_w = max(current_dual_w, min(ember_w, self._music_lyric_measurement_width_cap(expanded=False)))
         return self._compact_music_target_width_from_content(content_w, title_w, artist_w, lyric_w, current_dual_w, instrumental)
 
     def _music_lyric_measurement_width_cap(self, expanded: bool) -> float:
@@ -8889,7 +9866,7 @@ class IslandStackVisual(QWidget):
             if title and artist:
                 return f"{title} · {artist}"
             return title or artist or "纯音乐"
-        current = self._clean_lyric_for_width(self.lyrics[self.lyric_index]) if self.lyrics else ""
+        current = self._clean_lyric_for_width(self.lyrics[self._island_display_row_index()]) if self.lyrics else ""
         return current or self.track_title or self.artist or "正在播放"
 
     def _lyric_display_lines(self, lyric: str) -> list[str]:
@@ -8948,7 +9925,7 @@ class IslandStackVisual(QWidget):
         )
 
     def _lyric_color_fill_background_available(self) -> bool:
-        style = str(getattr(self, "music_ambience_style", "sea_level") or "sea_level")
+        style = self._effective_music_ambience_style()
         return style not in self.COLOR_FILL_BLOCKED_AMBIENCE_STYLES or self._yaoguang_colorful_unlocked()
 
     def _gelv_color_fill_available(self) -> bool:
@@ -8966,13 +9943,13 @@ class IslandStackVisual(QWidget):
         return bool(getattr(self, "gelv_color_fill_enabled", False)) and self._gelv_color_fill_available() and self._gelv_fill_color().isValid()
 
     def _gelv_word_fill_enabled(self) -> bool:
-        return bool(getattr(self, "gelv_word_fill_enabled", False))
+        return bool(getattr(self, "gelv_word_fill_enabled", False)) and not self._island_whole_row_reading()
 
     def _ember_color_theme_enabled(self) -> bool:
         return bool(getattr(self, "ember_color_fill_enabled", False)) and self._ember_color_fill_available() and self._ember_fill_color().isValid()
 
     def _ember_word_fill_enabled(self) -> bool:
-        return bool(getattr(self, "ember_word_fill_enabled", True))
+        return bool(getattr(self, "ember_word_fill_enabled", True)) and not self._island_whole_row_reading()
 
     def _wave_color_theme_enabled(self) -> bool:
         return bool(getattr(self, "wave_color_fill_enabled", False)) and self._lyric_color_fill_background_available() and self._wave_fill_color().isValid()
@@ -8981,20 +9958,11 @@ class IslandStackVisual(QWidget):
         return bool(getattr(self, "wave_word_fill_enabled", False))
 
     def _active_lyric_color_fill_enabled(self) -> bool:
-        style = str(getattr(self, "lyric_flow_style", "wave_stream"))
-        if style == "gelv_songscatter":
-            return self._gelv_color_theme_enabled()
-        if style == "wave_stream":
-            return self._wave_color_theme_enabled()
-        if style == "ember_fade":
-            return self._ember_color_theme_enabled()
+        # The shared continuous reading front ignores historical effect
+        # switches. Keeping their saved values does not change live paint.
         return False
 
     def _active_lyric_fill_color(self) -> QColor:
-        if self._ember_enabled():
-            return self._ember_fill_color()
-        if self._gelv_enabled():
-            return self._gelv_fill_color()
         return self._wave_fill_color()
 
     def _dual_line_lyrics_allowed(self) -> bool:
@@ -9163,6 +10131,8 @@ class IslandStackVisual(QWidget):
 
     def _gelv_spacing_percent(self, progress: float = 1.0) -> int:
         initial = max(100, min(320, int(getattr(self, "gelv_initial_word_spacing", 220))))
+        if self._island_whole_row_reading():
+            return initial
         target = max(initial, min(420, int(getattr(self, "gelv_word_spacing", 320))))
         progress = max(0.0, min(1.0, float(progress)))
         return int(round(initial + (target - initial) * progress))
@@ -9324,7 +10294,7 @@ class IslandStackVisual(QWidget):
         timed = getattr(self, "timed_lyrics", []) or []
         index = int(getattr(self, "lyric_index", 0))
         if timed and 0 <= index < len(timed):
-            position = max(0.0, self._estimated_media_position(now) + self._effective_lyric_offset_seconds())
+            position = max(0.0, self._stable_lyric_source_position(now) + self._effective_lyric_offset_seconds())
             start = float(timed[index][0])
             if index + 1 < len(timed):
                 end = float(timed[index + 1][0])
@@ -9337,13 +10307,14 @@ class IslandStackVisual(QWidget):
 
     def _ember_lyric_phase(self, now: float) -> dict[str, float]:
         extra_offset = max(0.0, min(4.0, float(getattr(self, "ember_lyric_offset_seconds", 0.0) or 0.0)))
-        custom_phase = getattr(self, "__dict__", {}).get("_lyric_phase")
-        if callable(custom_phase) and abs(extra_offset) <= 0.0001:
-            return custom_phase(now)
+        if abs(extra_offset) <= 0.0001:
+            return self._lyric_phase(now)
+        estimated_position = self._stable_lyric_source_position(now)
+        self._prepare_island_lyric_offset(now, self._effective_lyric_offset_seconds())
         paint_state = build_lyric_paint_state(
             timed_lyrics=getattr(self, "timed_lyrics", ()) or (),
             lyric_index=getattr(self, "lyric_index", 0),
-            estimated_position_seconds=self._estimated_media_position(now),
+            estimated_position_seconds=estimated_position,
             lyric_offset_seconds=self._effective_lyric_offset_seconds() + extra_offset,
             lyric_changed_at=getattr(self, "lyric_changed_at", now),
             previous_phase_index=getattr(self, "ember_last_phase_index", -1),
@@ -9355,10 +10326,26 @@ class IslandStackVisual(QWidget):
             position_selects_active_index=extra_offset > 0.0001,
             lead_seconds=0.0,
         )
+        phase = dict(paint_state.phase)
+        timed = getattr(self, "timed_lyrics", ()) or ()
+        kinds = getattr(self, "timed_lyric_timing_kinds", ()) or ()
+        units = getattr(self, "timed_lyric_units", ()) or ()
+        index = paint_state.cache.active_index
+        if self._island_song_has_genuine_unit_timing() and 0 <= index < len(timed):
+            kind = kinds[index] if index < len(kinds) else "line"
+            row_units = units[index] if index < len(units) else ()
+            if kind == "line" or (kind == "unit" and not genuinely_timed_unit_row(row_units)):
+                next_start = float(timed[index + 1][0]) if index + 1 < len(timed) else None
+                estimated = estimated_row_reading_progress(
+                    float(timed[index][0]), next_start,
+                    estimated_position + self._effective_lyric_offset_seconds() + extra_offset,
+                )
+                if estimated is not None:
+                    phase["progress"] = estimated
         self.ember_last_phase_index = paint_state.cache.active_index
-        self.ember_last_phase_progress = paint_state.cache.progress
+        self.ember_last_phase_progress = float(phase.get("progress", paint_state.cache.progress))
         self.ember_last_phase_at = paint_state.cache.updated_at
-        return paint_state.phase
+        return phase
 
     def _lyric_fill_color(self) -> QColor:
         album = QColor(getattr(self, "album_color", QColor()))
@@ -9389,15 +10376,221 @@ class IslandStackVisual(QWidget):
 
     def _solid_album_fallback_color(self, color: QColor | str | None = None) -> QColor:
         candidate = QColor(color) if color is not None else QColor(str(getattr(self, "solid_album_background_fallback", "#16BCFF")))
-        if not self._solid_album_color_usable(candidate):
+        if not candidate.isValid():
             candidate = QColor("#16BCFF")
-        return self._saturated_solid_album_color(candidate)
+        candidate.setAlpha(255)
+        return candidate
+
+    def _solid_album_palette_request(self):
+        image = QImage(getattr(self, "album_art", QImage()))
+        primary = QColor(getattr(self, "album_color", QColor()))
+        secondary = QColor(getattr(self, "secondary_color", QColor()))
+        fallback_setting = str(getattr(self, "solid_album_background_fallback", "#16BCFF") or "#16BCFF")
+        # The legacy cyan default is not a claim about a missing cover's hue.
+        # Keep an explicitly selected fallback, but make the untouched default
+        # neutral when there is no artwork or usable provider color.
+        fallback = QColor(56, 56, 56) if fallback_setting.upper() == "#16BCFF" else QColor(fallback_setting)
+        if not fallback.isValid():
+            fallback = QColor(56, 56, 56)
+        if not primary.isValid():
+            primary = QColor(fallback)
+        if not secondary.isValid():
+            secondary = QColor(primary)
+        key = (image.cacheKey(), primary.rgba(), secondary.rgba(), fallback.rgba())
+        return key, image, primary, secondary
+
+    def _solid_album_surface_palette(self) -> MusicSurfacePalette:
+        """Read prepared cover roles without cold extraction on the GUI thread."""
+        key, image, primary, secondary = self._solid_album_palette_request()
+        cached_key = getattr(self, "_solid_album_palette_cache_key", None)
+        cached = getattr(self, "_solid_album_palette_cache", None)
+        # Value-only legacy renderer fixtures do not construct a QWidget or
+        # its queued signal bridge. They can retain exact steady-state role
+        # checks; every normally constructed application island is async.
+        if not bool(getattr(self, "_solid_album_palette_async_enabled", False)):
+            if key != cached_key or cached is None:
+                cached = (MusicSurfacePalette(primary, QColor(primary), QColor(primary))
+                          if image.isNull() else artwork_surface_palette(image, primary, secondary))
+                self._solid_album_palette_cache_key = key
+                self._solid_album_palette_cache = cached
+            return cached
+        if key != cached_key or cached is None:
+            if key != self._solid_album_palette_requested_key:
+                self._solid_album_palette_generation += 1
+                self._solid_album_palette_requested_key = key
+                self._solid_album_palette_pending = None
+                self._solid_album_palette_failed_key = None
+            waiting_for_cover = image.isNull() and str(getattr(self, "album_art_lookup_state", "") or "") == "pending"
+            if waiting_for_cover and self._solid_album_palette_cache is not None:
+                return self._displayed_solid_album_palette()
+            prepared = cached_artwork_surface_palette(image, primary, secondary)
+            if prepared is not None:
+                self._solid_album_palette_pending = None
+                self._accept_solid_album_palette(key, prepared)
+            elif image.isNull():
+                self._accept_solid_album_palette(
+                    key, MusicSurfacePalette(primary, QColor(primary), QColor(primary)),
+                )
+            elif not self._solid_album_palette_closed and key != self._solid_album_palette_failed_key:
+                surface = getattr(self, "music_fullscreen_overlay", None)
+                # The visible large surface uses the same shared cache and
+                # already queues this cover. Avoid a second extraction while
+                # it owns presentation; return-to-island will hit its result.
+                large_surface_visible = surface is not None and surface.isVisible()
+                if not large_surface_visible:
+                    if (self._solid_album_palette_worker_key != key
+                            or self._solid_album_palette_active_token != self._solid_album_palette_generation):
+                        self._solid_album_palette_pending = (key, image, primary, secondary)
+                    self._start_solid_album_palette_worker()
+            if self._solid_album_palette_cache is None:
+                self._solid_album_palette_cache = MusicSurfacePalette(
+                    primary, QColor(primary), QColor(primary),
+                )
+        return self._displayed_solid_album_palette()
+
+    def _initialize_solid_album_palette_worker(self) -> None:
+        self._solid_album_palette_async_enabled = True
+        self._solid_album_palette_generation = 0
+        self._solid_album_palette_active_token = None
+        self._solid_album_palette_worker_key = None
+        self._solid_album_palette_pending = None
+        self._solid_album_palette_requested_key = None
+        self._solid_album_palette_failed_key = None
+        self._solid_album_palette_closed = False
+        self._solid_album_palette_cache_key = None
+        self._solid_album_palette_cache = None
+        self._solid_album_palette_blend_from = None
+        self._solid_album_palette_blend_started_at = 0.0
+        self._solid_album_palette_bridge = _IslandArtworkPaletteBridge(self)
+        self._solid_album_palette_bridge.ready.connect(self._on_solid_album_palette_ready, Qt.ConnectionType.QueuedConnection)
+        self._solid_album_palette_blend_timer = QTimer(self)
+        self._solid_album_palette_blend_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._solid_album_palette_blend_timer.setInterval(16)
+        self._solid_album_palette_blend_timer.timeout.connect(self._advance_solid_album_palette_blend)
+
+    def _close_solid_album_palette_worker(self) -> None:
+        if not bool(getattr(self, "_solid_album_palette_async_enabled", False)):
+            return
+        self._solid_album_palette_closed = True
+        self._solid_album_palette_generation += 1
+        self._solid_album_palette_pending = None
+        self._solid_album_palette_blend_timer.stop()
+        # Keep the one outstanding job owned until its queued completion.
+        # A close/show on the same QWidget must not launch a second worker.
+        # QObject automatically releases this bridge connection on deletion.
+
+    def _resume_solid_album_palette_worker(self) -> None:
+        if bool(getattr(self, "_solid_album_palette_async_enabled", False)) and self._solid_album_palette_closed:
+            self._solid_album_palette_closed = False
+            self._solid_album_palette_requested_key = None
+            self._solid_album_palette_failed_key = None
+
+    def _start_solid_album_palette_worker(self) -> None:
+        if (self._solid_album_palette_closed or self._solid_album_palette_active_token is not None
+                or self._solid_album_palette_pending is None):
+            return
+        key, image, primary, secondary = self._solid_album_palette_pending
+        self._solid_album_palette_pending = None
+        prepared = cached_artwork_surface_palette(image, primary, secondary)
+        if prepared is not None:
+            self._accept_solid_album_palette(key, prepared)
+            return
+        token = self._solid_album_palette_generation
+        self._solid_album_palette_active_token = token
+        self._solid_album_palette_worker_key = key
+        bridge = self._solid_album_palette_bridge
+
+        def prepare():
+            # Only immutable value payloads and a signal bridge survive in
+            # this closure. No QWidget, owner, geometry or painter is touched.
+            try:
+                result = artwork_surface_palette(image, primary, secondary)
+            except Exception:
+                result = None
+            try:
+                bridge.ready.emit(token, key, result)
+            except RuntimeError:
+                pass
+
+        try:
+            self._run_background("SolidArtworkPalette", prepare)
+        except Exception:
+            self._solid_album_palette_active_token = None
+            self._solid_album_palette_worker_key = None
+            self._solid_album_palette_failed_key = key
+
+    @Slot(int, object, object)
+    def _on_solid_album_palette_ready(self, token: int, key, result) -> None:
+        if token != self._solid_album_palette_active_token:
+            return
+        self._solid_album_palette_active_token = None
+        self._solid_album_palette_worker_key = None
+        if self._solid_album_palette_closed:
+            return
+        if token == self._solid_album_palette_generation and key == self._solid_album_palette_requested_key:
+            # Observe actual current values too: a provider can replace art
+            # between the last paint and queued GUI delivery.
+            current, _image, _primary, _secondary = self._solid_album_palette_request()
+            if current == key:
+                if result is not None:
+                    self._accept_solid_album_palette(key, result)
+                    self._solid_album_palette_failed_key = None
+                else:
+                    self._solid_album_palette_failed_key = key
+        if self._solid_album_palette_pending is not None:
+            if self._solid_album_palette_pending[0] == self._solid_album_palette_requested_key:
+                self._start_solid_album_palette_worker()
+            else:
+                self._solid_album_palette_pending = None
+
+    def _accept_solid_album_palette(self, key, palette: MusicSurfacePalette) -> None:
+        previous = self._displayed_solid_album_palette()
+        self._solid_album_palette_cache_key = key
+        self._solid_album_palette_cache = palette
+        if previous is not None and solid_album_background_color(previous) != solid_album_background_color(palette):
+            self._solid_album_palette_blend_from = previous
+            self._solid_album_palette_blend_started_at = time.monotonic()
+            self._solid_album_palette_blend_timer.start()
+        else:
+            self._solid_album_palette_blend_from = None
+            self._solid_album_palette_blend_timer.stop()
+        self.update()
+
+    def _displayed_solid_album_palette(self) -> MusicSurfacePalette | None:
+        target = getattr(self, "_solid_album_palette_cache", None)
+        previous = getattr(self, "_solid_album_palette_blend_from", None)
+        if target is None or previous is None:
+            return target
+        elapsed = max(0.0, time.monotonic() - self._solid_album_palette_blend_started_at)
+        fraction = min(1.0, elapsed / 0.42)
+        if fraction >= 1.0:
+            self._solid_album_palette_blend_from = None
+            return target
+        fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+        return MusicSurfacePalette(
+            self._mix_color(previous.primary, target.primary, fraction),
+            self._mix_color(previous.secondary, target.secondary, fraction),
+            self._mix_color(previous.characteristic, target.characteristic, fraction),
+            target.ambient_colors, target.ambient_weights,
+            self._mix_color(solid_album_background_color(previous), solid_album_background_color(target), fraction),
+        )
+
+    def _advance_solid_album_palette_blend(self) -> None:
+        if self._solid_album_palette_closed or self._solid_album_palette_blend_from is None:
+            self._solid_album_palette_blend_timer.stop()
+            return
+        self._displayed_solid_album_palette()
+        self.update()
+
+    def _solid_album_palette_colors(self) -> tuple[QColor, QColor, QColor]:
+        palette = self._solid_album_surface_palette()
+        return (QColor(palette.primary), QColor(palette.secondary), QColor(palette.characteristic))
 
     def _solid_album_background_color(self) -> QColor:
-        album = QColor(getattr(self, "album_color", QColor()))
-        if self._solid_album_color_usable(album):
-            return self._saturated_solid_album_color(album)
-        return self._solid_album_fallback_color()
+        return solid_album_background_color(self._solid_album_surface_palette())
+
+    def _solid_album_unread_color(self, alpha: int) -> QColor:
+        return solid_album_ink_color(self._solid_album_background_color(), alpha)
 
     def _yaoguang_color_usable(self, color: QColor) -> bool:
         if not color.isValid():
@@ -9523,28 +10716,20 @@ class IslandStackVisual(QWidget):
         step = self._album_island_step_px(cover, stage, center)
         center_x = stage.center().x()
         center_y = stage.center().y()
-        secondary_style = str(getattr(self, "album_island_secondary_style", "perspective_dim") or "perspective_dim")
-        if secondary_style not in self.ALBUM_ISLAND_SECONDARY_STYLES:
-            secondary_style = "perspective_dim"
         perspective_amount = max(0, min(200, int(getattr(self, "album_island_perspective_amount", 100)))) / 100.0
         sides = list(range(-left_count, 0)) + [0] + list(range(1, right_count + 1))
         slots: list[dict[str, object]] = []
         for side in sides:
             distance = abs(side)
             perspective = None
-            if secondary_style == "perspective_dim":
-                scale = max(0.78, 1.0 - 0.08 * distance)
-                alpha = max(92, 255 - 48 * distance)
-                squeeze = min(0.42, (0.10 + 0.055 * distance) * perspective_amount)
-                if side < 0:
-                    perspective = {"left_height": 1.0, "right_height": 1.0 - squeeze}
-                elif side > 0:
-                    perspective = {"left_height": 1.0 - squeeze, "right_height": 1.0}
-                tilt = 0.0
-            else:
-                scale = max(0.48, 1.0 - 0.16 * distance)
-                alpha = max(76, 255 - 56 * distance)
-                tilt = 0.0
+            scale = max(0.78, 1.0 - 0.08 * distance)
+            alpha = max(92, 255 - 48 * distance)
+            squeeze = min(0.42, (0.10 + 0.055 * distance) * perspective_amount)
+            if side < 0:
+                perspective = {"left_height": 1.0, "right_height": 1.0 - squeeze}
+            elif side > 0:
+                perspective = {"left_height": 1.0 - squeeze, "right_height": 1.0}
+            tilt = 0.0
             size = cover * scale
             animated_side = float(side)
             if eased_transition < 1.0:
@@ -10004,11 +11189,18 @@ class IslandStackVisual(QWidget):
             )
         self.album_history = history[:6]
 
+    def _island_display_row_index(self) -> int:
+        lyrics = getattr(self, "lyrics", ()) or ()
+        index = int(getattr(self, "lyric_index", 0))
+        if getattr(self, "_island_lyric_frame_at", None) is not None:
+            phase = self._island_display_phase()
+            index = int(phase.get("visual_focus_index", phase.get("active_index", index)))
+        return index % len(lyrics) if lyrics else 0
+
     def _current_lyric_display_lines(self) -> list[str]:
         if not self.lyrics:
             return []
-        index = int(getattr(self, "lyric_index", 0)) % len(self.lyrics)
-        return self._lyric_display_lines(self.lyrics[index])
+        return self._lyric_display_lines(self.lyrics[self._island_display_row_index()])
 
     def _has_current_two_line_lyric(self) -> bool:
         return len(self._current_lyric_display_lines()) > 1
@@ -10021,7 +11213,7 @@ class IslandStackVisual(QWidget):
         return "\n".join(" ".join(part.strip(" -—·:：[]【】()（）").split()) for part in str(lyric).splitlines()).strip()
 
     def _stack_target_width(self, main_kind: IslandKind) -> float:
-        return positioning_stack_target_width(
+        base = positioning_stack_target_width(
             main_kind,
             music_width=self._music_target_width(self.expanded) if main_kind == IslandKind.MUSIC else 0.0,
             empty_text_width=self._empty_text_island_size()[0] if main_kind == IslandKind.EMPTY_TEXT else 0.0,
@@ -10029,6 +11221,9 @@ class IslandStackVisual(QWidget):
             default_stack_width=float(self.STACK_WIDTH),
             unit=self._u(1.0),
         )
+        if main_kind in {IslandKind.EMPTY_TEXT, IslandKind.TIME, IslandKind.THIN_BAR, IslandKind.PLUGIN}:
+            return self._audio_device_target_width(base)
+        return base
 
     def _taskbar_compact_active(self) -> bool:
         return str(getattr(self, "location_mode", "free") or "free") == "tasker"
@@ -10300,12 +11495,24 @@ class IslandStackVisual(QWidget):
     def _compact_music_content_height_raw(self) -> float:
         if self._should_paint_album_island():
             return self._album_island_compact_music_height()
-        if self._gelv_enabled():
-            height = self._gelv_compact_music_height()
-        elif self._ember_enabled():
-            height = self._ember_compact_music_height()
-        else:
-            height = 80.0 if bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric() else 46.0
+        two_line = bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric()
+        height = 80.0 if two_line else 46.0
+        lines = self._current_lyric_display_lines() if getattr(self, "lyrics", None) else ()
+        if lines:
+            size = self._compact_primary_lyric_font_size()
+            if two_line:
+                secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
+                primary_size, secondary_size = self._compact_dual_line_font_sizes(size, secondary_bold)
+                content_height = (
+                    self._island_lyric_row_content_height(lines[0], primary_size, True)
+                    + self._u(1.0)
+                    + self._island_lyric_row_content_height(lines[1], secondary_size, secondary_bold)
+                    + self._u(4.0)
+                )
+            else:
+                content_height = self._island_lyric_row_content_height(lines[0], size, True)
+            top, bottom = self._compact_lyric_vertical_padding(two_line)
+            height = max(height, (content_height + top + bottom) / self._u(1.0))
         if (
             self._effective_music_ambience_style() == "yaoguang"
             and self._yaoguang_height_mode_key() == "spacious"
@@ -10317,11 +11524,9 @@ class IslandStackVisual(QWidget):
     def _notch_music_needs_content_height(self) -> bool:
         if self._should_paint_album_island():
             return True
-        if self._gelv_enabled():
-            return len(self._gelv_display_lines()) > 1
-        if self._ember_enabled():
-            return len(self._ember_current_display_lines(expanded=False)) > 1
-        return bool(getattr(self, "lyrics", None)) and self._has_current_two_line_lyric()
+        return bool(getattr(self, "lyrics", None)) and (
+            self._has_current_two_line_lyric() or self._compact_music_content_height_raw() > 46.0
+        )
 
     def _edge_notch_music_height_raw(self) -> float:
         height = self._compact_music_content_height_raw()
@@ -10341,6 +11546,19 @@ class IslandStackVisual(QWidget):
         return self._u(self._edge_notch_music_height_raw())
 
     def _main_size_for_kind(self, main_kind: IslandKind, stack_w: float) -> tuple[float, float]:
+        width, height = self._base_main_size_for_kind(main_kind, stack_w)
+        pose = self._audio_device_pose()
+        if pose is not None and main_kind in {IslandKind.EMPTY_TEXT, IslandKind.TIME, IslandKind.THIN_BAR, IslandKind.PLUGIN}:
+            # Keep the existing main identity and SpringRect; reminders retain
+            # their priority. Tasker never grows beyond its selected zone.
+            if self._taskbar_compact_active():
+                width, _unused = self._taskbar_compact_music_size(stack_w, self._taskbar_height())
+            else:
+                width = min(stack_w, self._audio_device_target_width(width))
+                height += (max(height, self._u(34)) - height) * pose.reveal
+        return width, height
+
+    def _base_main_size_for_kind(self, main_kind: IslandKind, stack_w: float) -> tuple[float, float]:
         taskbar_compact = self._taskbar_compact_active()
         expanded = bool(getattr(self, "expanded", False)) and not self._drag_hides_auxiliary_visuals()
         unit = self._u(1.0)
@@ -10464,6 +11682,8 @@ class IslandStackVisual(QWidget):
         return str(getattr(self, "drag_press_key", "") or "") != "taskbar:left-handle"
 
     def _vertical_stack_direction(self, main_kind: IslandKind, main_h: float, screen_geo) -> int:
+        if self._top_notch_anchor_locked():
+            return 1
         taskbar_compact = self._taskbar_compact_active()
         taskbar = QRectF(getattr(self, "last_taskbar_rect", QRectF())) if taskbar_compact else QRectF()
         mode = str(getattr(self, "expand_direction", "auto") or "auto")
@@ -11079,14 +12299,37 @@ class IslandStackVisual(QWidget):
             return False
         return self._apply_motion_snap_to_target(visual.key, plan.target_rect, plan.target_opacity)
 
+    def _pin_top_notch_main_motion(self, visual: StackVisual) -> None:
+        if visual.z_index != 10 or not self._top_notch_anchor_locked():
+            return
+        motion = self.motions.get(visual.key)
+        if motion is not None:
+            # Only the attached edge is fixed. Width, height and opacity keep
+            # their existing springs when lyrics, devices or main kinds change.
+            motion.y = visual.rect.top()
+            motion.vy = 0.0
+
     def paintEvent(self, event):
+        # Layout and ink must consume one verified source snapshot. A queued
+        # timer can still hold the old row when this first visible frame is
+        # painted; measuring that old row and then painting a new bilingual
+        # row would leave its translation outside the old one-line shell.
+        self._island_lyric_frame_at = time.monotonic()
+        self._island_lyric_frame_phase = None
+        try:
+            self._paint_island_frame(event)
+        finally:
+            self._island_lyric_frame_at = None
+            self._island_lyric_frame_phase = None
+
+    def _paint_island_frame(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         if getattr(self, "high_quality_font_rendering", False):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        now = time.monotonic()
+        now = self._island_lyric_frame_at
         dt = (now - self.last_frame_at) * self._animation_speed_factor()
         self.last_frame_at = now
 
@@ -11147,6 +12390,7 @@ class IslandStackVisual(QWidget):
                 response=motion_plan.response,
                 damping=motion_plan.damping,
             )
+            self._pin_top_notch_main_motion(visual)
 
         for key in list(self.motions):
             if key not in targets:
@@ -11182,9 +12426,11 @@ class IslandStackVisual(QWidget):
 
         self._paint_dot_group_backing(painter, items)
         self.plugin_action_rects = {}
+        self._island_glow_paint_now = now
         for paint_item in paint_plan.paint_items:
             visual = paint_item.visual
             motion = paint_item.motion
+            self._island_glow_current_visual_key = visual.key
             if paint_item.isolate_painter_state:
                 painter.save()
             try:
@@ -11201,6 +12447,8 @@ class IslandStackVisual(QWidget):
                 )
                 painter.setOpacity(context_plan.opacity)
                 rect = QRectF(context_plan.rect)
+                if visual.z_index == 10 and self._top_notch_anchor_locked():
+                    rect.moveTop(visual.rect.top())
                 if context_plan.paint_taskbar_left_handle:
                     self._paint_taskbar_left_handle(painter, rect)
                 if context_plan.paint_edge_notch_backing:
@@ -11209,6 +12457,9 @@ class IslandStackVisual(QWidget):
                     painter.setClipPath(self._edge_notch_path(rect, self._edge_notch_edge()))
                 if visual.kind == IslandKind.MUSIC:
                     self._paint_music(painter, rect, self.expanded)
+                elif (self._audio_device_pose() is not None and not visual.folded
+                      and visual.kind in {IslandKind.PLUGIN, IslandKind.EMPTY_TEXT, IslandKind.TIME, IslandKind.THIN_BAR}):
+                    self._paint_audio_device_idle_island(painter, rect, visual.kind)
                 elif visual.kind == IslandKind.PLUGIN:
                     self._paint_plugin(painter, rect, visual.folded)
                 elif visual.kind == IslandKind.PLUGIN_PANEL:
@@ -11226,6 +12477,7 @@ class IslandStackVisual(QWidget):
             finally:
                 if paint_item.isolate_painter_state:
                     painter.restore()
+                self._island_glow_current_visual_key = ""
 
         self.barrage_rects = {}
         self._update_interaction_mask(list(paint_plan.mask_rects))
@@ -12042,10 +13294,29 @@ class IslandStackVisual(QWidget):
             expanded_layout_style=self._normalize_music_expanded_layout_style(getattr(self, "music_expanded_layout_style", "standard")),
             lyric_color_fill_paints_background=self._active_lyric_color_fill_paints_background(ambience_style),
         )
+        if not expanded and self._audio_device_pose() is not None:
+            # Render the same background once, without content. Sampling this
+            # raster includes album/white-bridge transitions and never reads
+            # the desktop, a previous icon, or an audio provider from paint.
+            self._paint_audio_device_background(painter, rect, radius, plan)
+            self._paint_music_compact(painter, rect)
+            for step in plan.steps:
+                if step in {"border", "yaoguang_compact_frame_overlay"}:
+                    self._execute_music_surface_paint_step(step, painter, rect, radius, False, plan.ambience_style)
+            self._record_visual_paint_section("music.total", total_started_at)
+            return
         try:
             for step in plan.steps:
                 step_started_at = time.perf_counter()
                 try:
+                    if step in {"expanded_content", "compact_content"} and getattr(self, "_island_button_ripples", ()):
+                        self._paint_island_button_ripples(
+                            painter,
+                            float(getattr(self, "_island_glow_paint_now", 0.0) or time.monotonic()),
+                            owner_key="music",
+                            shell_rect=rect,
+                            shell_path=self._music_reactive_overlay_clip_path(rect, radius, expanded, plan.ambience_style),
+                        )
                     self._execute_music_surface_paint_step(step, painter, rect, radius, expanded, plan.ambience_style)
                 finally:
                     self._record_visual_paint_section(f"music.{step}", step_started_at)
@@ -12144,6 +13415,12 @@ class IslandStackVisual(QWidget):
         return path
 
     def _paint_dual_panel_music_background(self, painter: QPainter, rect: QRectF, radius: float, ambience_style: str):
+        if ambience_style == "solid_album":
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.fillPath(self._music_shell_path(rect, radius, True), self._solid_album_background_color())
+            painter.restore()
+            return
         lyric_panel, info_panel = self._dual_panel_music_rects(rect)
         lower_light = ambience_style == "pure_white"
         lower_fill = QColor(255, 255, 255, 255) if lower_light else QColor(0, 0, 0, 255)
@@ -12334,6 +13611,8 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_music_surface_transition_wash(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
+        if self._solid_album_music_active():
+            return
         mode = str(getattr(self, "music_surface_transition_mode", "") or "")
         started_at = float(getattr(self, "music_surface_transition_started_at", 0.0) or 0.0)
         if not mode or started_at <= 0.0:
@@ -12433,9 +13712,6 @@ class IslandStackVisual(QWidget):
         return QRectF(left, top, max(1.0, right - left), max(1.0, bottom - top))
 
     def _compact_cover_rect(self, rect: QRectF) -> QRectF:
-        if self._gelv_enabled():
-            cover_size = min(rect.height() - self._u(12.0), self._u(38.0))
-            return QRectF(rect.left() + self._u(9), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
         two_line = self._has_current_two_line_lyric()
         if self._taskbar_edge_compact_active():
             top_padding, bottom_padding = self._compact_lyric_vertical_padding(two_line, rect)
@@ -12967,7 +14243,7 @@ class IslandStackVisual(QWidget):
         self._native_music_background_renderer().paint_bilateral_diffraction_ambience(painter, rect, radius, expanded)
 
     def _paint_bottom_ambience(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
-        style = getattr(self, "music_ambience_style", "sea_level")
+        style = self._effective_music_ambience_style()
         if style in {"pure_black", "bilateral_diffraction"}:
             return
         if style == "duotone_full":
@@ -13089,7 +14365,7 @@ class IslandStackVisual(QWidget):
         return self._native_music_background_renderer().sea_level_wave_path(rect, center_y, amplitude, thickness, phase, layer)
 
     def _paint_music_light_wave(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
-        style = getattr(self, "music_ambience_style", "sea_level")
+        style = self._effective_music_ambience_style()
         if style in {"pure_black", "bilateral_diffraction"}:
             return
         if style == "duotone_full":
@@ -13172,10 +14448,47 @@ class IslandStackVisual(QWidget):
     def _paint_xiaomi_duotone_wave(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
         self._native_music_background_renderer().paint_sea_level_wave(painter, rect, radius, expanded)
 
+    def _advance_music_cover_hover(self, now: float) -> bool:
+        motion = getattr(self, "_music_cover_hover_motion", None)
+        if motion is None:
+            return False
+        if (bool(getattr(self, "scene_suppressed", False))
+                or bool(getattr(self, "_music_surface_active", False))):
+            changed = motion.value != 0.0
+            motion.clear(now)
+            return changed
+        cover = getattr(self, "music_cover_rect", QRectF())
+        hovered = (not cover.isEmpty() and cover.contains(getattr(self, "pointer_pos", QPointF(-1, -1)))
+                   and self._main_kind() == IslandKind.MUSIC)
+        return motion.advance(hovered, now)
+
+    def _paint_interactive_music_cover(self, painter: QPainter, rect: QRectF, radius: float,
+                                       image: QImage | None = None, cache_key: str | None = None):
+        motion = getattr(self, "_music_cover_hover_motion", None)
+        reveal = max(0.0, min(1.0, motion.value)) if motion is not None else 0.0
+        painter.save()
+        if motion is not None and abs(motion.scale-1.0) > 0.0001:
+            painter.translate(rect.center())
+            painter.scale(motion.scale, motion.scale)
+            painter.translate(-rect.center())
+        self._paint_cover(painter, rect, radius, image, cache_key)
+        if reveal > 0.001:
+            path = self._rounded_path(rect, radius)
+            painter.fillPath(path, QColor(0, 0, 0, round(112*reveal)))
+            side = min(rect.width(), rect.height())*0.57
+            glyph = QRectF(rect.center().x()-side/2.0, rect.center().y()-side/2.0, side, side)
+            painter.save()
+            painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+            painter.setOpacity(painter.opacity()*reveal)
+            mode = "windowed" if bool(getattr(self, "_music_windowed_preference", False)) else "fullscreen"
+            paint_presentation_glyph(painter, glyph, mode, QColor(255, 255, 255, 242))
+            painter.restore()
+        painter.restore()
+
     def _paint_cover(self, painter: QPainter, rect: QRectF, radius: float, image: QImage | None = None, cache_key: str | None = None):
         path = self._rounded_path(rect, radius)
         painter.save()
-        painter.setClipPath(path)
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
         album_art = image if isinstance(image, QImage) else getattr(self, "album_art", QImage())
         if not album_art.isNull():
             scaled_width = int(max(1, rect.width()))
@@ -13194,9 +14507,20 @@ class IslandStackVisual(QWidget):
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                scaled_cache[scaled_key] = scaled
-                while len(scaled_cache) > int(getattr(self, "SCALED_ALBUM_ART_CACHE_LIMIT", 4)):
-                    scaled_cache.pop(next(iter(scaled_cache)))
+                # Aspect-fill can produce a tall or wide raster from unusual
+                # artwork. Bound retained pixels as well as item count; hits
+                # skip this accounting, and an oversized item stays transient.
+                pixel_budget = int(getattr(self, "SCALED_ALBUM_ART_CACHE_PIXEL_BUDGET", 2 * 1024 * 1024))
+                scaled_pixels = scaled.width() * scaled.height() * scaled.depth() // 8
+                if scaled_pixels <= pixel_budget:
+                    scaled_cache[scaled_key] = scaled
+                    retained_pixels = sum(
+                        cached.width() * cached.height() * cached.depth() // 8
+                        for cached in scaled_cache.values()
+                    )
+                    while len(scaled_cache) > int(getattr(self, "SCALED_ALBUM_ART_CACHE_LIMIT", 24)) or retained_pixels > pixel_budget:
+                        discarded = scaled_cache.pop(next(iter(scaled_cache)))
+                        retained_pixels -= discarded.width() * discarded.height() * discarded.depth() // 8
             source = QRectF(
                 (scaled.width() - rect.width()) / 2.0,
                 (scaled.height() - rect.height()) / 2.0,
@@ -13273,6 +14597,158 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_music_compact(self, painter: QPainter, rect: QRectF):
+        pose = self._audio_device_pose()
+        if pose is None:
+            self._paint_music_compact_base(painter, rect)
+            return
+        painter.save()
+        painter.setClipPath(self._music_shell_path(rect, self._music_shell_radius(rect, False), False), Qt.ClipOperation.IntersectClip)
+        opacity = painter.opacity()
+        if pose.reveal < 1.0:
+            self._paint_audio_device_faded_layer(painter, rect, 1.0-pose.reveal,
+                lambda layer: self._paint_music_compact_base(layer, rect))
+        self.music_button_rects = {}
+        self.music_cover_rect = QRectF()
+        painter.setOpacity(opacity * pose.reveal)
+        content_rect = self._yaoguang_compact_background_rect(rect) if self._effective_music_ambience_style() == "yaoguang" else rect
+        self._paint_audio_device_content(painter, content_rect, pose, keep_lyrics=True)
+        painter.restore()
+
+    def _paint_audio_device_faded_layer(self, painter, rect, opacity, paint):
+        combined = painter.opacity()*opacity
+        if combined <= 0:
+            return
+        if combined >= .999:
+            paint(painter)
+            return
+        # Existing lyric styles own per-line opacity. Composite their live
+        # render as one layer so those values cannot override a notice fade.
+        dpr = max(1.0, float(painter.device().devicePixelRatioF()))
+        image = QImage(max(1, math.ceil(rect.width()*dpr)), max(1, math.ceil(rect.height()*dpr)), QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as layer:
+            layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+            layer.translate(-rect.left(), -rect.top())
+            paint(layer)
+        painter.save()
+        painter.setOpacity(combined)
+        painter.drawImage(rect.topLeft(), image)
+        painter.restore()
+
+    def _paint_audio_device_background(self, painter, rect, radius, plan):
+        dpr = max(1.0, float(painter.device().devicePixelRatioF()))
+        size = (max(1, math.ceil(rect.width() * dpr)), max(1, math.ceil(rect.height() * dpr)))
+        image = getattr(self, "_audio_device_background_image", None)
+        if image is None or (image.width(), image.height()) != size or image.devicePixelRatioF() != dpr:
+            image = QImage(*size, QImage.Format.Format_ARGB32_Premultiplied)
+            image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as background:
+            background.setRenderHint(QPainter.RenderHint.Antialiasing)
+            background.translate(-rect.left(), -rect.top())
+            for step in plan.steps:
+                if step not in {"compact_content", "expanded_content", "border", "yaoguang_compact_frame_overlay"}:
+                    self._execute_music_surface_paint_step(step, background, rect, radius, False, plan.ambience_style)
+        self._audio_device_background_image = image
+        self._audio_device_background_rect = QRectF(rect)
+        painter.drawImage(rect.topLeft(), image)
+
+    def _audio_device_ink(self, rect: QRectF) -> QColor:
+        image = getattr(self, "_audio_device_background_image", None)
+        bounds = getattr(self, "_audio_device_background_rect", QRectF())
+        if image is None or image.isNull() or bounds.isEmpty():
+            return self._music_control_icon_color(246)
+        dpr = image.devicePixelRatioF()
+        luminances = []
+        for fx in (.30, .50, .70):
+            for fy in (.35, .50, .65):
+                x = min(image.width()-1, max(0, round((rect.left() + rect.width()*fx - bounds.left())*dpr)))
+                y = min(image.height()-1, max(0, round((rect.top() + rect.height()*fy - bounds.top())*dpr)))
+                color = image.pixelColor(x, y)
+                if color.alpha() >= 180:
+                    luminances.append(relative_luminance(color))
+        if not luminances:
+            return self._music_control_icon_color(246)
+        # Black/white contrast crossover, using the actual background only.
+        return QColor(24, 26, 29) if sum(luminances)/len(luminances) > .179 else QColor(244, 246, 248)
+
+    def _paint_audio_device_content(self, painter, rect, pose, *, keep_lyrics):
+        pad = min(self._u(12), rect.width()*.06)
+        glyph_size = max(1.0, min(self._u(39), rect.height()*.86, rect.width()*.22))
+        ring_size = max(1.0, min(self._u(29), rect.height()*.72, rect.width()*.19))
+        glyph = QRectF(rect.left()+pad, rect.center().y()-glyph_size/2, glyph_size, glyph_size)
+        ring = QRectF(rect.right()-pad-ring_size, rect.center().y()-ring_size/2, ring_size, ring_size)
+        center = QRectF(glyph.right()+pad, rect.top()+self._u(2), max(0, ring.left()-glyph.right()-pad*2), max(1, rect.height()-self._u(4)))
+        name_inset = pad * 2 + glyph_size
+        name_rect = rect.adjusted(name_inset, self._u(2), -name_inset, -self._u(2))
+        payloads = [(pose.payload, 1.0)] if pose.previous is None else [(pose.previous, 1-pose.content_blend), (pose.payload, pose.content_blend)]
+        base_opacity = painter.opacity()
+        battery_weight = 0.0
+        font = self._font(min(self._compact_primary_lyric_font_size(), max(9, int(rect.height()*.46))), QFont.Weight.Bold, shrink=False)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for payload, weight in payloads:
+            if weight <= 0:
+                continue
+            painter.setOpacity(base_opacity*weight)
+            moved = glyph.translated(-self._u(6)*(1-pose.reveal), 0)
+            paint_audio_output_icon(painter, moved, payload.kind, self._audio_device_ink(glyph))
+            percent = payload.battery_percent
+            if percent is not None:
+                battery_weight += weight
+                ink = self._audio_device_ink(ring)
+                track = QColor(ink)
+                track.setAlpha(54)
+                stroke = min(self._u(4.5), ring_size*.17)
+                arc = ring.adjusted(stroke/2, stroke/2, -stroke/2, -stroke/2)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(track, stroke))
+                painter.drawEllipse(arc)
+                green = QColor(23, 135, 60) if ink.red() < 128 else QColor(80, 222, 119)
+                painter.setPen(QPen(green, stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                if percent > 0:
+                    painter.drawArc(arc, 90*16, -round(360*16*percent/100))
+            if percent is None or not keep_lyrics:
+                painter.setFont(font)
+                painter.setPen(self._audio_device_ink(name_rect))
+                text_bounds = name_rect if percent is None else center
+                label = QFontMetrics(font).elidedText(payload.name, Qt.TextElideMode.ElideRight, max(0, int(text_bounds.width())))
+                painter.drawText(text_bounds, Qt.AlignmentFlag.AlignCenter, label)
+        if keep_lyrics and battery_weight > 0 and center.width() > 2:
+            painter.setOpacity(base_opacity)
+            self._paint_audio_device_faded_layer(painter, center, battery_weight,
+                lambda layer: self._paint_compact_lyric_viewport(layer, center))
+        painter.restore()
+
+    def _paint_audio_device_idle_island(self, painter, rect, kind):
+        pose = self._audio_device_pose()
+        if pose is None:
+            return
+        opacity = painter.opacity()
+        painter.save()
+        if pose.reveal < 1:
+            def original(layer):
+                if kind == IslandKind.PLUGIN:
+                    self._paint_plugin(layer, rect, False)
+                elif kind == IslandKind.EMPTY_TEXT:
+                    self._paint_empty_text_island(layer, rect)
+                elif kind == IslandKind.TIME:
+                    self._paint_empty_time_island(layer, rect)
+                else:
+                    self._paint_thin_bar(layer, rect)
+            self._paint_audio_device_faded_layer(painter, rect, 1-pose.reveal, original)
+        painter.setOpacity(opacity*pose.reveal)
+        style = self._effective_music_ambience_style()
+        plan = presentation_music_surface_paint_plan(expanded=False, ambience_style=style,
+            expanded_layout_style="standard", lyric_color_fill_paints_background=self._active_lyric_color_fill_paints_background(style))
+        radius = self._music_shell_radius(rect, False)
+        self._paint_audio_device_background(painter, rect, radius, plan)
+        painter.setClipPath(self._music_shell_path(rect, radius, False), Qt.ClipOperation.IntersectClip)
+        self._paint_audio_device_content(painter, rect, pose, keep_lyrics=False)
+        painter.restore()
+
+    def _paint_music_compact_base(self, painter: QPainter, rect: QRectF):
         self.music_button_rects = {}
         if self._taskbar_cover_only_music_active(rect):
             self._paint_taskbar_cover_only_music(painter, rect)
@@ -13288,13 +14764,13 @@ class IslandStackVisual(QWidget):
             self._paint_album_island_compact(painter, rect)
             self._paint_taskbar_music_hover_overlay(painter, rect)
             return
-        two_line = self._has_current_two_line_lyric() and not self._gelv_enabled()
+        two_line = self._has_current_two_line_lyric()
         top_padding, bottom_padding = self._compact_lyric_vertical_padding(two_line, rect)
         yaoguang_compact = self._effective_music_ambience_style() == "yaoguang"
         if self._compact_lyric_cover_enabled():
             cover = self._yaoguang_compact_cover_rect(rect) if yaoguang_compact else self._compact_cover_rect(rect)
             self.music_cover_rect = QRectF(cover)
-            self._paint_cover(painter, cover, self._compact_cover_radius(rect, two_line))
+            self._paint_interactive_music_cover(painter, cover, self._compact_cover_radius(rect, two_line))
             text_left = cover.right() + self._u(15 if two_line else 12)
         else:
             self.music_cover_rect = QRectF()
@@ -13327,7 +14803,7 @@ class IslandStackVisual(QWidget):
             cover = QRectF(cover.left(), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
         self.music_button_rects = {"music:toggle_play_pause": QRectF(button)}
-        self._paint_cover(painter, cover, self._compact_cover_radius(rect, False))
+        self._paint_interactive_music_cover(painter, cover, self._compact_cover_radius(rect, False))
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         radius = min(button.height() / 2.0, self._u(9.0))
@@ -13359,34 +14835,59 @@ class IslandStackVisual(QWidget):
             self._paint_music_control_button(painter, br, command, 206 if index != 1 else 226, radius=radius)
         painter.restore()
 
+    def _island_lyric_row_content_height(self, text: str, size: float, bold: bool) -> float:
+        """Reserve the shaped line and its full reading travel before clipping.
+
+        Island fonts use point sizes. Raw settings units therefore cannot
+        stand in for actual Qt line height, especially for the serif face or
+        fallback glyphs. The same bounded shaped-line cache serves the block
+        renderer, so measuring does not rasterize every word on every frame.
+        """
+        font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        renderer = getattr(self, "_wave_reading_renderer", None)
+        if not isinstance(renderer, LyricReadingRenderer):
+            renderer = self._wave_reading_renderer = LyricReadingRenderer()
+        layout = renderer.whole_line(text or "Mg国", font)
+        line_height = layout.lineAt(0).height() if layout.lineCount() else float(QFontMetrics(font).height())
+        pixel_size = max(1.0, float(QFontInfo(font).pixelSize()))
+        lift = GLYPH_FLOAT_LIFT * pixel_size / 38.0
+        return line_height + 2.0 * lift + self._u(2.0)
+
+    def _fit_island_lyric_row_size(self, text: str, size: int, bold: bool, height: float) -> int:
+        # A taskbar or a spring that is still opening owns its shell height.
+        # Fit ink inside that live geometry instead of clipping it while the
+        # next full-height target is being reached.
+        size = int(size)
+        while size > 8 and self._island_lyric_row_content_height(text, size, bold) > height:
+            size -= 1
+        return size
+
     def _compact_dual_line_lyric_rows(
         self,
         rect: QRectF,
         compact_size: int,
         secondary_bold: bool,
+        texts: tuple[str, str] = ("Mg国", "Mg国"),
     ) -> tuple[QRectF, QRectF, int, int]:
         primary_size, secondary_size = self._compact_dual_line_font_sizes(compact_size, secondary_bold)
         try:
             yaoguang_compact = self._effective_music_ambience_style() == "yaoguang"
         except Exception:
             yaoguang_compact = False
-        min_primary_size = 11 if yaoguang_compact else 12
+        min_primary_size = 8
         min_secondary_size = 8
         top_inset = self._u(4.0 if yaoguang_compact else 2.0)
         bottom_inset = self._u(4.0 if yaoguang_compact else 2.0)
         gap = self._u(1.0)
 
         def measured_rows() -> tuple[float, float, float]:
-            primary_font = self._wave_stream_font(primary_size, QFont.Weight.Bold)
-            secondary_weight = QFont.Weight.Bold if secondary_bold else QFont.Weight.Normal
-            secondary_font = self._wave_stream_font(secondary_size, secondary_weight)
-            primary_h = max(float(QFontMetrics(primary_font).height()) + self._u(2.0), self._u(float(primary_size) + 5.0))
-            secondary_h = max(float(QFontMetrics(secondary_font).height()) + self._u(1.0), self._u(float(secondary_size) + 4.0))
+            primary_h = self._island_lyric_row_content_height(texts[0], primary_size, True)
+            secondary_h = self._island_lyric_row_content_height(texts[1], secondary_size, secondary_bold)
             return primary_h, secondary_h, primary_h + gap + secondary_h
 
         primary_h, secondary_h, total_h = measured_rows()
         available_h = max(1.0, rect.height() - top_inset - bottom_inset)
-        for _ in range(6):
+        for _ in range(max(primary_size, secondary_size)):
             if total_h <= available_h or (primary_size <= min_primary_size and secondary_size <= min_secondary_size):
                 break
             if primary_size > min_primary_size:
@@ -13421,20 +14922,20 @@ class IslandStackVisual(QWidget):
             self._paint_album_island(painter, rect)
             painter.restore()
             return
-        if self._ember_enabled():
-            self._paint_ember_lyrics(painter, rect, expanded=False)
-            painter.restore()
-            return
-        if self._gelv_enabled():
-            self._paint_gelv_compact_lyrics(painter, rect)
-            painter.restore()
-            return
         lines = self._compact_lyric_lines()
         if not lines:
             painter.restore()
             return
-        index = int(getattr(self, "lyric_index", 0)) % len(lines)
-        phase = self._lyric_phase(time.monotonic())
+        phase = self._island_display_phase()
+        source_index = int(phase.get("active_index", getattr(self, "lyric_index", 0)))
+        index = int(phase.get("visual_focus_index", source_index)) % len(lines)
+        if index != source_index:
+            phase = dict(phase)
+            phase["progress"] = 0.0
+            phase["whole_row"] = False
+            for key in ("timed_primary_text", "timed_units", "timed_position",
+                        "timed_line_end", "timed_character_front", "whole_block_progress"):
+                phase.pop(key, None)
         compact_size = self._compact_primary_lyric_font_size()
         display_lines = self._lyric_display_lines(lines[index])
         base_text = self._music_lyric_base_text_color(132)
@@ -13442,11 +14943,22 @@ class IslandStackVisual(QWidget):
         if len(display_lines) > 1 and rect.height() >= self._u(48.0):
             secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
             secondary_spacing = int(getattr(self, "dual_line_secondary_spacing", 100))
-            first, second, primary_size, secondary_size = self._compact_dual_line_lyric_rows(rect, compact_size, secondary_bold)
-            self._paint_live_lyric_text(painter, first, display_lines[0], primary_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
-            self._paint_live_lyric_text(painter, second, display_lines[1], secondary_size, self._music_lyric_base_text_color(96), self._music_lyric_text_color(204), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
+            first, second, primary_size, secondary_size = self._compact_dual_line_lyric_rows(
+                rect, compact_size, secondary_bold, (display_lines[0], display_lines[1]),
+            )
+            if "whole_block_progress" in phase:
+                self._paint_wave_stream_whole_block(painter, (
+                    (first, display_lines[0], primary_size, True, base_text, live_text, None),
+                    (second, display_lines[1], secondary_size, secondary_bold,
+                     self._music_lyric_base_text_color(96), self._music_lyric_text_color(204), secondary_spacing),
+                ), phase)
+            else:
+                self._paint_live_lyric_text(painter, first, display_lines[0], primary_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
+                self._paint_live_lyric_text(painter, second, display_lines[1], secondary_size, self._music_lyric_base_text_color(96), self._music_lyric_text_color(204), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
         else:
-            self._paint_live_lyric_text(painter, rect, display_lines[0] if display_lines else lines[index], compact_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
+            text = display_lines[0] if display_lines else lines[index]
+            compact_size = self._fit_island_lyric_row_size(text, compact_size, True, rect.height())
+            self._paint_live_lyric_text(painter, rect, text, compact_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
         painter.restore()
 
     def _paint_gelv_compact_lyrics(self, painter: QPainter, rect: QRectF):
@@ -13563,7 +15075,11 @@ class IslandStackVisual(QWidget):
         front_layout = self._ember_layout(text, size, back_layer=False)
         back_x = self._ember_layout_x(rect, back_layout, progress=progress) if scroll else None
         front_x = self._ember_layout_x(rect, front_layout, progress=progress) if scroll else None
-        front_base = self._ember_front_neutral_color(255)
+        front_base = (
+            self._music_lyric_base_text_color(132)
+            if self._solid_album_music_active()
+            else self._ember_front_neutral_color(255)
+        )
         front_live = self._ember_front_read_color(255)
         back_color = self._ember_back_layer_color(front_live)
         word_fill = self._ember_word_fill_enabled()
@@ -13751,7 +15267,10 @@ class IslandStackVisual(QWidget):
         layout = self._gelv_layout(text, size, spacing_percent=spacing)
         x = self._gelv_line_x(rect, text, size, progress, spacing_percent=spacing)
         gelv_color_theme_active = color_fill and self._gelv_color_theme_enabled()
-        gelv_word_fill_active = bool(allow_word_fill) and bool(progress_fill or self._gelv_word_fill_enabled())
+        gelv_word_fill_active = (
+            bool(allow_word_fill) and bool(progress_fill or self._gelv_word_fill_enabled())
+            and not self._island_whole_row_reading()
+        )
         if self._pure_white_music_active() or self._solid_album_music_active():
             neutral_base = self._music_lyric_base_text_color(128 if active else 82)
             neutral_live = self._music_lyric_text_color(245 if active else 156)
@@ -13840,6 +15359,8 @@ class IslandStackVisual(QWidget):
     def _paint_album_island_slots(self, painter: QPainter, raw_slots: list[dict[str, object]]):
         slots = sorted(raw_slots, key=lambda slot: int(slot.get("z", 0)))
         for slot in slots:
+            if bool(slot["center"]):
+                self.music_cover_rect = QRectF(slot["rect"])
             painter.setOpacity(float(slot["alpha"]) / 255.0)
             radius = self._u(8.0 if bool(slot["center"]) else 6.0)
             self._paint_album_island_slot(painter, slot, radius)
@@ -13864,18 +15385,9 @@ class IslandStackVisual(QWidget):
         perspective = slot.get("perspective")
         painter.save()
         if isinstance(perspective, dict) and not bool(slot.get("center")):
-            left_h = max(0.45, min(1.0, float(perspective.get("left_height", 1.0) or 1.0)))
-            right_h = max(0.45, min(1.0, float(perspective.get("right_height", 1.0) or 1.0)))
-            left_top = rect.center().y() - rect.height() * left_h / 2.0
-            left_bottom = rect.center().y() + rect.height() * left_h / 2.0
-            right_top = rect.center().y() - rect.height() * right_h / 2.0
-            right_bottom = rect.center().y() + rect.height() * right_h / 2.0
-            path = QPainterPath(QPointF(rect.left(), left_top))
-            path.lineTo(QPointF(rect.right(), right_top))
-            path.lineTo(QPointF(rect.right(), right_bottom))
-            path.lineTo(QPointF(rect.left(), left_bottom))
-            path.closeSubpath()
-            painter.setClipPath(path)
+            painter.setWorldTransform(album_cover_projection(rect, perspective), combine=True)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.setOpacity(float(slot["alpha"]) / 255.0)
             cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
             self._paint_cover(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
@@ -13887,7 +15399,8 @@ class IslandStackVisual(QWidget):
             painter.shear(math.tan(math.radians(tilt)) * 0.34, 0.0)
             painter.translate(-center)
         cache_key = f"album-island:{slot.get('side', 0)}:{image.cacheKey() if isinstance(image, QImage) else 'empty'}"
-        self._paint_cover(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
+        cover_painter = self._paint_interactive_music_cover if bool(slot.get("center")) else self._paint_cover
+        cover_painter(painter, rect, radius, image if isinstance(image, QImage) else None, cache_key)
         painter.restore()
 
     def _paint_album_island_listened_text(self, painter: QPainter, rect: QRectF, slots: list[dict[str, object]]):
@@ -13939,7 +15452,7 @@ class IslandStackVisual(QWidget):
         cover_size = self._u(58)
         cover = QRectF(rect.left() + margin, rect.top() + self._u(14), cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
-        self._paint_cover(painter, cover, self._u(17))
+        self._paint_interactive_music_cover(painter, cover, self._u(17))
 
         controls_w = self._u(132)
         info = QRectF(cover.right() + self._u(15), cover.top() + self._u(2), rect.right() - cover.right() - controls_w - self._u(48), self._u(68))
@@ -13964,14 +15477,14 @@ class IslandStackVisual(QWidget):
         lyric_viewport = lyric_panel.adjusted(self._u(30.0), self._u(16.0), -self._u(30.0), -self._u(14.0))
         self._paint_lyric_viewport(painter, lyric_viewport)
 
-        lower_light = self._effective_music_ambience_style() == "pure_white"
+        lower_light = self._music_lyric_text_color(255).lightness() < 128
         title_color = QColor(0, 0, 0, 242) if lower_light else QColor(255, 255, 255, 242)
         artist_color = QColor(0, 0, 0, 184) if lower_light else QColor(255, 255, 255, 172)
         margin = self._u(22.0)
         cover_size = max(self._u(48.0), min(self._u(66.0), info_panel.height() - self._u(26.0)))
         cover = QRectF(info_panel.left() + margin, info_panel.center().y() - cover_size / 2.0, cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
-        self._paint_cover(painter, cover, self._u(9.0))
+        self._paint_interactive_music_cover(painter, cover, self._u(9.0))
 
         button_size = self._u(42.0)
         gap = self._u(14.0 if rect.width() >= self._u(600.0) else 12.0)
@@ -14029,12 +15542,96 @@ class IslandStackVisual(QWidget):
             self.lyric_transition_distance = 0
         return elapsed, eased
 
+    def _island_song_has_genuine_unit_timing(self) -> bool:
+        """Classify the displayed song, not metadata rows kept in the source timeline.
+
+        The island keeps its original rows and indexes for playback. Match
+        unit evidence to the existing large-page presentation only for the
+        song-wide reading decision; the match is cached across paint frames.
+        """
+        timed = getattr(self, "timed_lyrics", ()) or ()
+        kinds = getattr(self, "timed_lyric_timing_kinds", ()) or ()
+        units = getattr(self, "timed_lyric_units", ()) or ()
+        show_translation = bool(getattr(self, "enable_dual_line_lyrics", False))
+        clean_intro = bool(getattr(self, "music_intro_cleanup_enabled", True))
+        artist = str(getattr(self, "artist", "") or "")
+        key = (
+            str(getattr(self, "media_track_id", "") or ""),
+            str(getattr(self, "track_title", "") or ""), artist,
+            id(timed), len(timed), id(kinds), len(kinds), id(units), len(units),
+            show_translation, clean_intro,
+        )
+        if key == getattr(self, "_island_genuine_timing_cache_key", None):
+            return bool(getattr(self, "_island_genuine_timing_cache_value", False))
+        has_timing = False
+        if timed and song_has_genuine_unit_timing(kinds, units):
+            displayed = present_timed_lyric_rows(
+                timed, show_translation=show_translation, clean_intro=clean_intro,
+                intro_countdown=False, singer_names=artist,
+            )
+            surviving = tuple(
+                (float(start), str(text).replace("\u2028", "\n").splitlines()[0])
+                for start, text in displayed if text != INTRO_COUNTDOWN_TEXT
+            )
+            for index, (start, raw_text) in enumerate(timed):
+                if index >= len(kinds) or kinds[index] != "unit" or index >= len(units):
+                    continue
+                row_units = units[index]
+                if not genuinely_timed_unit_row(row_units):
+                    continue
+                prepared = present_lyric_text(
+                    raw_text, show_translation=show_translation, clean_intro=clean_intro,
+                    clean_credits=False,
+                )
+                primary = prepared.splitlines()[0] if prepared else ""
+                if not primary or not any(
+                    abs(float(start) - shown_start) <= 0.02 and primary == shown_primary
+                    for shown_start, shown_primary in surviving
+                ):
+                    continue
+                if timed_unit_reading_front(
+                    primary, row_units, float(start), range(len(primary) + 1),
+                ) is not None:
+                    has_timing = True
+                    break
+        self._island_genuine_timing_cache_key = key
+        self._island_genuine_timing_cache_value = has_timing
+        return has_timing
+
+    def _island_whole_row_reading(self, index: int | None = None) -> bool:
+        """Keep low-perception in one mode for an entire timed song."""
+        index = int(getattr(self, "lyric_index", 0)) if index is None else int(index)
+        timed = getattr(self, "timed_lyrics", ()) or ()
+        kinds = getattr(self, "timed_lyric_timing_kinds", ()) or ()
+        kind = kinds[index] if 0 <= index < len(kinds) else "line"
+        if kind == "synthetic":
+            return True
+        strategy = normalize_music_reading_strategy(getattr(
+            self, "music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT,
+        ))
+        if strategy != "low_perception":
+            return False
+        return not self._island_song_has_genuine_unit_timing()
+
+    def _island_display_phase(self, now: float | None = None) -> dict[str, float]:
+        frame_at = getattr(self, "_island_lyric_frame_at", None)
+        if frame_at is not None:
+            phase = getattr(self, "_island_lyric_frame_phase", None)
+            if phase is None:
+                phase = self._lyric_phase(frame_at)
+                self._island_lyric_frame_phase = phase
+            return phase
+        return self._lyric_phase(time.monotonic() if now is None else now)
+
     def _lyric_phase(self, now: float) -> dict[str, float]:
+        estimated_position = self._stable_lyric_source_position(now)
+        lyric_offset = self._effective_lyric_offset_seconds()
+        self._prepare_island_lyric_offset(now, lyric_offset)
         paint_state = build_lyric_paint_state(
             timed_lyrics=getattr(self, "timed_lyrics", ()) or (),
             lyric_index=getattr(self, "lyric_index", 0),
-            estimated_position_seconds=self._estimated_media_position(now),
-            lyric_offset_seconds=self._effective_lyric_offset_seconds(),
+            estimated_position_seconds=estimated_position,
+            lyric_offset_seconds=lyric_offset,
             lyric_changed_at=getattr(self, "lyric_changed_at", now),
             previous_phase_index=getattr(self, "lyric_last_phase_index", -1),
             previous_phase_progress=getattr(self, "lyric_last_phase_progress", 0.0),
@@ -14042,11 +15639,145 @@ class IslandStackVisual(QWidget):
             now=now,
             media_is_playing=getattr(self, "media_is_playing", False),
             transition_kind=getattr(self, "lyric_transition_kind", ""),
+            position_selects_active_index=True,
+            lead_seconds=0.0 if str(getattr(self, "media_position_source", "") or "").endswith("-uia-lyrics") else 0.12,
         )
-        self.lyric_last_phase_index = paint_state.cache.active_index
-        self.lyric_last_phase_progress = paint_state.cache.progress
+        phase = dict(paint_state.phase)
+        index = paint_state.cache.active_index
+        phase["active_index"] = index
+        timed = getattr(self, "timed_lyrics", ()) or ()
+        if timed and index == len(timed) - 1:
+            # Tail rows have no following timestamp. Their existing fallback
+            # span remains, but an old owner's changed_at is not a new song
+            # clock when a first visible paint already belongs to the tail.
+            elapsed = max(0.0, estimated_position + lyric_offset - float(timed[index][0]))
+            span = max(0.35, float(phase.get("span", 2.45)))
+            phase.update(progress=min(1.0, elapsed / span), elapsed=elapsed,
+                         remaining=max(0.0, span - elapsed))
+        kinds = getattr(self, "timed_lyric_timing_kinds", ()) or ()
+        unit_rows = getattr(self, "timed_lyric_units", ()) or ()
+        song_has_real_units = self._island_song_has_genuine_unit_timing()
+        timing_kind = "line"
+        if 0 <= index < len(timed) and index < len(kinds):
+            kind = kinds[index]
+            timing_kind = kind
+            if kind == "synthetic":
+                # A plain-text source has no actual intra-line time evidence.
+                phase["progress"] = 1.0
+            elif kind == "unit":
+                timing_kind = "line"
+                units = unit_rows[index] if index < len(unit_rows) else ()
+                primary_text = str(timed[index][1]).splitlines()[0]
+                if primary_text and genuinely_timed_unit_row(units):
+                    line_end = float(timed[index + 1][0]) if index + 1 < len(timed) else None
+                    front = timed_unit_reading_front(
+                        primary_text,
+                        units,
+                        max(0.0, estimated_position + lyric_offset),
+                        tuple(range(len(primary_text) + 1)),
+                        line_end=line_end,
+                    )
+                    if front is not None:
+                        timing_kind = "unit"
+                        unit_progress = max(0.0, min(1.0, front / len(primary_text)))
+                        reanchoring = (
+                            not bool(getattr(self, "media_is_playing", False))
+                            or str(getattr(self, "lyric_transition_kind", "") or "") == "seek"
+                            or str(getattr(self, "media_position_source", "") or "") == "local-seek"
+                        )
+                        if (
+                            not reanchoring
+                            and index == int(getattr(self, "lyric_last_phase_index", -1))
+                            and str(getattr(self, "lyric_last_phase_timing_kind", "") or "") == "unit"
+                        ):
+                            unit_progress = max(
+                                unit_progress,
+                                float(getattr(self, "lyric_last_phase_progress", 0.0) or 0.0),
+                            )
+                        phase["progress"] = unit_progress
+                        phase["timed_primary_text"] = primary_text
+                        phase["timed_units"] = units
+                        phase["timed_position"] = max(0.0, estimated_position + lyric_offset)
+                        phase["timed_line_end"] = line_end
+                        phase["timed_character_front"] = unit_progress * len(primary_text)
+        if song_has_real_units and timing_kind == "line" and 0 <= index < len(timed):
+            next_start = float(timed[index + 1][0]) if index + 1 < len(timed) else None
+            estimated = estimated_row_reading_progress(
+                float(timed[index][0]), next_start, estimated_position + lyric_offset,
+            )
+            if estimated is not None:
+                phase["progress"] = estimated
+        phase["whole_row"] = self._island_whole_row_reading(index)
+        if phase["whole_row"] and str(getattr(self, "lyric_flow_style", "wave_stream")) in {"wave_stream", "gelv_songscatter"} and normalize_music_reading_strategy(getattr(
+            self, "music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT,
+        )) == "low_perception":
+            if 0 <= index < len(timed):
+                elapsed = max(0.0, estimated_position + lyric_offset - float(timed[index][0]))
+            else:
+                elapsed = max(0.0, now - float(getattr(self, "lyric_changed_at", now)))
+            phase["whole_block_progress"] = max(0.0, min(1.0, elapsed / 0.5))
+        # The source row remains ``lyric_index``. Only the Wave Stream view
+        # may focus an unread next sentence after the current one has been
+        # fully read; reusing the source index here would seek/retime audio.
+        visual_index = index
+        focus_key = (
+            str(getattr(self, "media_track_id", "") or ""),
+            id(timed), len(timed), round(float(lyric_offset), 3), song_has_real_units,
+        )
+        explicit_seek = (
+            str(getattr(self, "lyric_transition_kind", "") or "") == "seek"
+            or str(getattr(self, "media_position_source", "") or "") == "local-seek"
+        )
+        if focus_key != getattr(self, "_island_visual_focus_key", None) or explicit_seek:
+            self._island_visual_focus_key = focus_key
+            self._island_advanced_focus_index = None
+        latched = getattr(self, "_island_advanced_focus_index", None)
+        if latched is not None and latched != index + 1:
+            self._island_advanced_focus_index = None
+            latched = None
+        if song_has_real_units and not explicit_seek and 0 <= index < len(timed) - 1:
+            start = float(timed[index][0])
+            next_start = float(timed[index + 1][0])
+            effective_position = max(0.0, estimated_position + lyric_offset)
+            if start <= effective_position < next_start:
+                if timing_kind == "unit":
+                    primary = str(timed[index][1]).splitlines()[0]
+                    finished = real_unit_row_finished_before_next_start(
+                        primary, unit_rows[index] if index < len(unit_rows) else (),
+                        effective_position, next_start,
+                    )
+                elif timing_kind == "line":
+                    end = estimated_row_read_end(start, next_start)
+                    finished = bool(end is not None and end < next_start and effective_position >= end)
+                else:
+                    finished = False
+                if finished:
+                    self._island_advanced_focus_index = index + 1
+                    latched = index + 1
+        if latched == index + 1 and 0 <= latched < len(timed):
+            visual_index = latched
+        phase["visual_focus_index"] = visual_index
+        self.lyric_last_phase_index = index
+        self.lyric_last_phase_progress = float(phase.get("progress", paint_state.cache.progress))
         self.lyric_last_phase_at = paint_state.cache.updated_at
-        return paint_state.phase
+        self.lyric_last_phase_timing_kind = timing_kind
+        return phase
+
+    def _paint_wave_stream_whole_block(self, painter: QPainter, rows: tuple, phase: dict) -> None:
+        """Share the half-second reading ramp across original and translation."""
+        renderer = getattr(self, "_wave_reading_renderer", None)
+        if not isinstance(renderer, LyricReadingRenderer):
+            renderer = LyricReadingRenderer()
+            self._wave_reading_renderer = renderer
+        prepared = []
+        for rect, text, size, bold, unread, read, spacing in rows:
+            font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+            layout = self._lyric_layout(text, size, bold, spacing)
+            x = self._scrolling_text_x(rect, layout.total_width, True, True, focus_px=None)
+            prepared.append((rect, x, text, font, unread, read))
+        renderer.paint_whole_block(
+            painter, tuple(prepared), float(phase.get("whole_block_progress", 1.0)),
+        )
 
     def _paint_expanded_lyric_row(
         self,
@@ -14065,17 +15796,33 @@ class IslandStackVisual(QWidget):
         if active and len(lines) > 1:
             secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
             secondary_spacing = int(getattr(self, "dual_line_secondary_spacing", 100))
-            first_h = row.height() * 0.56
+            primary_size = max(13, size - 1)
+            secondary_size = self._dual_line_secondary_font_size()
+            primary_h = self._island_lyric_row_content_height(lines[0], primary_size, True)
+            secondary_h = self._island_lyric_row_content_height(lines[1], secondary_size, secondary_bold)
+            first_h = max(primary_h, row.height() - secondary_h - self._u(1.0))
             first = QRectF(row.left(), row.top(), row.width(), first_h)
-            second = QRectF(row.left(), first.bottom() - self._u(1.0), row.width(), row.bottom() - first.bottom())
-            self._paint_live_lyric_text(painter, first, lines[0], max(13, size - 1), self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), True, phase, centered=True, centered_scroll=True)
-            self._paint_live_lyric_text(painter, second, lines[1], self._dual_line_secondary_font_size(), self._music_lyric_base_text_color(92), self._music_lyric_text_color(max(84, int(alpha * 0.74))), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
+            second = QRectF(row.left(), first.bottom() + self._u(1.0), row.width(), secondary_h)
+            if "whole_block_progress" in phase:
+                self._paint_wave_stream_whole_block(painter, (
+                    (first, lines[0], primary_size, True,
+                     self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), None),
+                    (second, lines[1], secondary_size, secondary_bold,
+                     self._music_lyric_base_text_color(92), self._music_lyric_text_color(max(84, int(alpha * 0.74))), secondary_spacing),
+                ), phase)
+            else:
+                self._paint_live_lyric_text(painter, first, lines[0], primary_size, self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), True, phase, centered=True, centered_scroll=True)
+                self._paint_live_lyric_text(painter, second, lines[1], secondary_size, self._music_lyric_base_text_color(92), self._music_lyric_text_color(max(84, int(alpha * 0.74))), secondary_bold, phase, centered=True, centered_scroll=True, spacing_percent=secondary_spacing)
             return
         text = lines[0] if len(lines) == 1 else "  ".join(lines[:2])
         if active:
             self._paint_live_lyric_text(painter, row, text, size, self._music_lyric_base_text_color(126), self._music_lyric_text_color(alpha), bold, phase, centered=True, centered_scroll=True)
         else:
-            self._paint_scrolling_text(painter, row, text, size, self._music_lyric_text_color(max(0, min(255, alpha))), bold, centered=True, centered_scroll=True)
+            self._paint_scrolling_text(
+                painter, row, text, size, self._music_lyric_text_color(max(0, min(255, alpha))),
+                bold, centered=True, centered_scroll=True,
+                font=self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal),
+            )
 
     def _paint_lyric_viewport(self, painter: QPainter, rect: QRectF):
         painter.save()
@@ -14087,17 +15834,9 @@ class IslandStackVisual(QWidget):
             self._paint_album_island(painter, rect)
             painter.restore()
             return
-        if self._ember_enabled():
-            self._paint_ember_lyrics(painter, rect, expanded=True)
-            painter.restore()
-            return
-        if self._gelv_enabled():
-            self._paint_gelv_expanded_lyrics(painter, rect)
-            painter.restore()
-            return
         if len(self.lyrics) <= 1 and self._is_instrumental_track():
             now = time.monotonic()
-            phase = self._lyric_phase(now)
+            phase = self._island_display_phase(now)
             row = QRectF(rect.left(), rect.center().y() - self._u(17.0), rect.width(), self._u(34.0))
             text = self.lyrics[0] if self.lyrics else getattr(self, "no_lyrics_text", "暂无歌词")
             self._paint_live_lyric_text(
@@ -14116,60 +15855,123 @@ class IslandStackVisual(QWidget):
             return
         active_size = max(14, min(24, int(getattr(self, "lyric_font_size", 18))))
         side_size = max(10, active_size - 7)
-        active_lines = self._current_lyric_display_lines()
-        active_line_h = self._u(max(30.0, active_size + 12.0))
-        active_h = active_line_h * (1.55 if len(active_lines) > 1 else 1.0)
-        side_h = self._u(max(22.0, side_size + 11.0))
+        now = getattr(self, "_island_lyric_frame_at", None)
+        now = time.monotonic() if now is None else now
+        active_phase = self._island_display_phase(now)
+        source_index = max(0, min(len(self.lyrics) - 1, int(active_phase.get("active_index", self.lyric_index))))
+        active_index = max(0, min(
+            len(self.lyrics) - 1,
+            int(active_phase.get("visual_focus_index", source_index)),
+        ))
+        active_lines = self._lyric_display_lines(self.lyrics[active_index])
+        active_line_h = max(
+            self._u(max(30.0, active_size + 12.0)),
+            self._island_lyric_row_content_height(active_lines[0] if active_lines else "", active_size, True),
+        )
+        if len(active_lines) > 1:
+            secondary_bold = int(getattr(self, "dual_line_secondary_weight", 72)) >= 78
+            active_h = max(
+                active_line_h * 1.55,
+                self._island_lyric_row_content_height(active_lines[0], max(13, active_size - 1), True)
+                + self._u(1.0)
+                + self._island_lyric_row_content_height(active_lines[1], self._dual_line_secondary_font_size(), secondary_bold),
+            )
+        else:
+            active_h = active_line_h
+        side_h = max(
+            self._u(max(22.0, side_size + 11.0)),
+            self._island_lyric_row_content_height("Mg国", side_size, False),
+        )
         gap = self._u(7.0 if len(active_lines) > 1 else 9.0)
         center_row = QRectF(rect.left(), rect.center().y() - active_h / 2.0, rect.width(), active_h)
-        now = time.monotonic()
-        active_phase = self._lyric_phase(now)
         is_seek_transition = (
             getattr(self, "lyric_transition_kind", "") == "seek"
             and self.prev_lyric_index != self.lyric_index
+            and active_index == source_index
         )
-        elapsed, eased = self._lyric_transition_progress(0.48 if is_seek_transition else 0.42)
-        slide_distance = self._u(9.0) if is_seek_transition else active_line_h * 0.82
-        slide = (1.0 - eased) * slide_distance
-        live_progress = max(0.0, min(1.0, float(active_phase.get("progress", 0.0))))
-        lyric_bloom = math.sin(live_progress * math.pi)
-        live_lift = lyric_bloom * self._u(4.2)
-        active_y = slide - live_lift if self.prev_lyric_index != self.lyric_index else -live_lift
-        next_parallax = self._u(3.0 * lyric_bloom)
-        rows: list[tuple[int, float, float, float, bool, int, bool]] = []
-        if len(self.lyrics) > 1:
-            rows.append((self.lyric_index - 1, -side_h - gap + active_y * 0.18, side_h, side_size, False, 70, False))
-        if is_seek_transition and elapsed < 0.48:
-            rows.append((self.prev_lyric_index, -self._u(8.0) * eased, side_h, side_size, False, int(52 * (1.0 - eased)), False))
-        elif self.prev_lyric_index != self.lyric_index and elapsed < 0.30:
-            out = min(1.0, elapsed / 0.30)
-            rows.append((self.prev_lyric_index, -out * active_line_h * 0.96, active_line_h, active_size, True, int(78 * (1.0 - out)), False))
-        rows.append((self.lyric_index, active_y, active_h, active_size, True, 246, True))
-        if len(self.lyrics) > 1:
-            next_slide = self._u(4.0) * (1.0 - eased) if is_seek_transition else slide
-            rows.append((self.lyric_index + 1, active_h + gap + next_slide + next_parallax, side_h, side_size, False, 76, False))
+        if active_index != source_index:
+            active_phase = dict(active_phase)
+            active_phase["progress"] = 0.0
+            active_phase["whole_row"] = False
+            for key in ("timed_primary_text", "timed_units", "timed_position",
+                        "timed_line_end", "timed_character_front", "whole_block_progress"):
+                active_phase.pop(key, None)
+        target_tops = tuple(
+            center_row.top() - side_h - gap - (active_index - 1 - index) * (side_h + gap)
+            if index < active_index else (
+                center_row.top() + active_h + gap + (index - active_index - 1) * (side_h + gap)
+                if index > active_index else center_row.top()
+            )
+            for index in range(len(self.lyrics))
+        )
+        spring = getattr(self, "_wave_line_spring", None)
+        if not isinstance(spring, LogicalLineSpringChain):
+            spring = LogicalLineSpringChain()
+            self._wave_line_spring = spring
+        track_identity = str(getattr(self, "media_track_id", "") or "") or (
+            str(getattr(self, "track_title", "") or ""),
+            str(getattr(self, "artist", "") or ""),
+        )
+        identity_source = (track_identity, tuple(self.lyrics))
+        if identity_source != getattr(self, "_wave_row_identity_source", None):
+            occurrences: dict[str, int] = {}
+            identities = []
+            for text in self.lyrics:
+                lines = self._lyric_display_lines(text)
+                primary = lines[0] if lines else str(text)
+                occurrence = occurrences.get(primary, 0)
+                occurrences[primary] = occurrence + 1
+                identities.append((track_identity, primary, occurrence))
+            self._wave_row_identity_source = identity_source
+            self._wave_row_identities = tuple(identities)
+        row_ids = self._wave_row_identities
+        spring_key = (track_identity, active_size, round(rect.width(), 2))
+        if spring.row_ids is not None and row_ids != spring.row_ids:
+            previous_ids = {identity: index for index, identity in enumerate(spring.row_ids)}
+            first, last = spring.visible_range or (0, 0)
+            offsets = sorted(
+                spring.position_for(previous_ids[identity]) - target_tops[index]
+                for index, identity in enumerate(row_ids)
+                if identity in previous_ids and first <= previous_ids[identity] < last
+            )
+            viewport_offset = offsets[len(offsets) // 2] if offsets else 0.0
+        elif spring.row_ids == row_ids:
+            viewport_offset = spring.viewport_pose(target_tops)[0]
+        else:
+            viewport_offset = 0.0
+        # Find the lyrics physically crossing the island, including skipped
+        # sentences. The swept old-to-new interval can span an entire song;
+        # only this small moving window needs independent spring steps.
+        visible_first = max(0, bisect_left(
+            target_tops, rect.top() - max(active_h, side_h) - viewport_offset,
+        ) - 2)
+        visible_last = min(len(self.lyrics), bisect_right(
+            target_tops, rect.bottom() - viewport_offset,
+        ) + 2)
+        spring_frame = spring.frame(
+            spring_key,
+            target_tops,
+            active_index,
+            now,
+            animate=True,
+            seek=is_seek_transition,
+            visible_range=(visible_first, visible_last),
+            row_ids=row_ids,
+        )
 
-        painted: set[tuple[int, bool]] = set()
-        for raw_index, y_offset, row_h, size, bold, base_alpha, is_active in rows:
-            idx = raw_index % len(self.lyrics)
-            key = (idx, is_active)
-            if key in painted:
-                continue
-            painted.add(key)
-            if not is_active and raw_index == self.prev_lyric_index and self.prev_lyric_index != self.lyric_index:
-                alpha = base_alpha
-            else:
-                alpha = int(base_alpha * ((0.18 + 0.82 * eased) if is_seek_transition else (0.30 + 0.70 * elapsed)))
-            if alpha <= 3:
-                continue
+        for idx in range(visible_first, visible_last):
+            is_active = idx == active_index
+            row_h = active_h if is_active else side_h
+            size = active_size if is_active else side_size
+            alpha = 246 if is_active else (70 if idx < active_index else 76)
             row = QRectF(center_row)
-            row.moveTop(center_row.top() + y_offset)
+            row.moveTop(spring_frame.positions[idx])
             row.setHeight(row_h)
             if row.bottom() < rect.top() + self._u(2) or row.top() > rect.bottom() - self._u(2):
                 continue
             painter.save()
             painter.setOpacity(max(0.0, min(1.0, alpha / 255.0)))
-            self._paint_expanded_lyric_row(painter, row, self.lyrics[idx], size, alpha, bold, is_active, active_phase)
+            self._paint_expanded_lyric_row(painter, row, self.lyrics[idx], size, alpha, is_active, is_active, active_phase)
             painter.restore()
         painter.restore()
 
@@ -14197,6 +15999,7 @@ class IslandStackVisual(QWidget):
         joined_panel = bool(not folded and self._plugin_panel_visible())
         if not joined_panel:
             self._paint_plugin_solid_shell(painter, rect, radius, folded=folded)
+            self._paint_current_island_space_glow(painter, rect, radius)
         if folded or rect.height() < self._u(22):
             return
 
@@ -14246,6 +16049,17 @@ class IslandStackVisual(QWidget):
         shell_rect = self._plugin_panel_shell_rect(rect)
         radius = self._plugin_panel_shell_radius(shell_rect)
         self._paint_plugin_solid_shell(painter, shell_rect, radius, folded=False)
+        self._paint_current_island_space_glow(painter, shell_rect, radius)
+        # The expanded strip and panel share one opaque shell; a strip click's
+        # light belongs to that backing, not the strip's transparent host area.
+        if str(getattr(self, "_island_glow_current_visual_key", "") or "") == "plugin-panel":
+            self._paint_island_button_ripples(
+                painter,
+                float(getattr(self, "_island_glow_paint_now", 0.0) or time.monotonic()),
+                owner_key="plugin",
+                shell_rect=shell_rect,
+                shell_path=self._rounded_path(shell_rect, radius),
+            )
         plugins = [
             (
                 label,
@@ -16429,6 +18243,7 @@ class IslandStackVisual(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(ref["accent"] if done else QColor(21, 21, 20, 244))
         painter.drawRoundedRect(rect, radius, radius)
+        self._paint_current_island_space_glow(painter, rect, radius)
         painter.setPen(QPen(QColor(46, 46, 44, 210) if not done else QColor(255, 184, 0, 245), self._u(1.0)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), radius - self._u(0.8), radius - self._u(0.8))
@@ -16528,6 +18343,7 @@ class IslandStackVisual(QWidget):
         text_color = theme["text"]
         painter.setBrush(theme["alert"])
         painter.drawRoundedRect(rect, radius, radius)
+        self._paint_current_island_space_glow(painter, rect, radius)
         painter.setPen(QPen(theme["stroke"], self._u(1.0)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), radius - self._u(0.8), radius - self._u(0.8))
@@ -16585,6 +18401,7 @@ class IslandStackVisual(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bg)
         painter.drawRoundedRect(rect, radius, radius)
+        self._paint_current_island_space_glow(painter, rect, radius)
         painter.setPen(QPen(QColor(255, 255, 255, 70), self._u(1.0)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(rect.adjusted(self._u(0.8), self._u(0.8), -self._u(0.8), -self._u(0.8)), max(1.0, radius - self._u(0.8)), max(1.0, radius - self._u(0.8)))
@@ -16629,6 +18446,7 @@ class IslandStackVisual(QWidget):
         for segment in self._taskbar_plugin_rail_segments(rect, color, status, progress):
             painter.setBrush(segment["color"])
             painter.drawRect(segment["rect"])
+        self._paint_current_island_space_glow(painter, rect, radius)
         painter.restore()
 
     def _paint_taskbar_plugin_block(
@@ -16652,6 +18470,7 @@ class IslandStackVisual(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(0, 0, 0, 238))
         painter.drawRoundedRect(rect, radius, radius)
+        self._paint_current_island_space_glow(painter, rect, radius)
         accent = QColor(color)
         painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 218))
         icon_size = min(rect.width(), rect.height()) * 0.48
@@ -16722,11 +18541,13 @@ class IslandStackVisual(QWidget):
             if rect.width() < rect.height():
                 painter.setBrush(QColor(accent.red(), accent.green(), accent.blue(), 232))
                 painter.drawRoundedRect(rect, rect.width() / 2.0, rect.width() / 2.0)
+                self._paint_current_island_space_glow(painter, rect, rect.width() / 2.0)
             else:
                 model = self._taskbar_message_block_model(msg, rect)
                 radius = float(model["radius"])
                 painter.setBrush(model["fill"])
                 painter.drawRoundedRect(rect, radius, radius)
+                self._paint_current_island_space_glow(painter, rect, radius)
                 inset = self._u(4.0)
                 icon_rect = rect.adjusted(inset, inset, -inset, -inset)
                 if not msg.avatar_image.isNull():
@@ -16749,6 +18570,9 @@ class IslandStackVisual(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(color.red(), color.green(), color.blue(), 225))
             painter.drawEllipse(rect)
+            ellipse_path = QPainterPath()
+            ellipse_path.addEllipse(rect)
+            self._paint_current_island_space_glow(painter, rect, min(rect.width(), rect.height()) / 2.0, ellipse_path)
             return
 
         radius = rect.height() / 2 if progress < 0.55 else min(self._u(23), rect.height() / 2)
@@ -16759,6 +18583,8 @@ class IslandStackVisual(QWidget):
             painter.drawRoundedRect(rect, radius, radius)
         else:
             self._paint_black_glass(painter, rect, radius, folded=False)
+
+        self._paint_current_island_space_glow(painter, rect, radius)
 
         painter.save()
         painter.setOpacity(progress)
@@ -16803,6 +18629,7 @@ class IslandStackVisual(QWidget):
         glow_rect = bar.adjusted(-self._u(1.4), -self._u(1.4), self._u(1.4), self._u(1.4))
         painter.fillPath(self._rounded_path(glow_rect, min(glow_rect.width(), glow_rect.height()) / 2.0), glow)
         painter.fillPath(path, fill)
+        self._paint_current_island_space_glow(painter, bar, radius)
 
         stroke = QColor(255, 255, 255, 52) if fill.lightness() < 128 else QColor(0, 0, 0, 40)
         painter.setPen(QPen(stroke, self._u(1.0)))
@@ -16822,6 +18649,7 @@ class IslandStackVisual(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.fillPath(self._rounded_path(shadow_rect, shadow_rect.height() / 2.0), shadow)
         painter.fillPath(self._rounded_path(shell, radius), background)
+        self._paint_current_island_space_glow(painter, shell, radius)
         painter.setPen(QPen(QColor(255, 255, 255, 36), self._u(1.0)))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(self._rounded_path(shell, radius))
@@ -17063,22 +18891,8 @@ class IslandStackVisual(QWidget):
         return upper, lower
 
     def _lyric_layout_key(self, text: str, size: float, bold: bool, spacing_percent: int | None = None) -> tuple[object, ...]:
-        weight = QFont.Weight.Bold if bold else QFont.Weight.Normal
-        weight_value = getattr(weight, "value", None)
-        if weight_value is None:
-            try:
-                weight_value = int(weight)
-            except Exception:
-                weight_value = str(weight)
-        return (
-            text,
-            self._font_size(size),
-            weight_value,
-            tuple(self._wave_stream_font_families()),
-            bool(getattr(self, "high_quality_font_rendering", False)),
-            int(getattr(self, "lyric_elastic_strength", 100)),
-            int(spacing_percent if spacing_percent is not None else getattr(self, "lyric_word_spacing", 100)),
-        )
+        font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        return text, font.toString()
 
     def _lyric_chunk_spacing(self, chunk: str, base_width: float, reference_width: float | None = None, spacing_percent: int | None = None) -> float:
         if not chunk or not chunk.strip():
@@ -17104,19 +18918,22 @@ class IslandStackVisual(QWidget):
         cached = cache.get(key)
         if cached is not None:
             return cached
-        chunks = tuple(self._lyric_chunks(text))
         font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
-        metrics = QFontMetrics(font)
-        reference_size = 18 if size >= 16 else 15
-        reference_font = self._wave_stream_font(reference_size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
-        reference_metrics = QFontMetrics(reference_font)
-        widths = []
-        for chunk in chunks:
-            width = float(metrics.horizontalAdvance(chunk))
-            reference_width = float(reference_metrics.horizontalAdvance(chunk))
-            widths.append(width + self._lyric_chunk_spacing(chunk, width, reference_width, spacing_percent))
-        widths = tuple(widths)
-        layout = LyricLayout(text=text, chunks=chunks, widths=widths, total_width=sum(widths), font_key=key)
+        shaped = QTextLayout(text, font)
+        apply_cjk_letter_spacing(shaped, text, font, resolve_point_size=True)
+        shaped.beginLayout()
+        line = shaped.createLine()
+        shaped.endLayout()
+        offsets = reading_unit_offsets(text)
+        chunks = tuple(utf16_slice(text, start, end - start) for start, end in zip(offsets, offsets[1:]))
+        if line.isValid():
+            positions = tuple(float(line.cursorToX(offset)[0]) for offset in offsets)
+            widths = tuple(max(0.0, right - left) for left, right in zip(positions, positions[1:]))
+            total_width = float(line.naturalTextWidth())
+        else:
+            widths = tuple(0.0 for _chunk in chunks)
+            total_width = 0.0
+        layout = LyricLayout(text=text, chunks=chunks, widths=widths, total_width=total_width, font_key=key)
         cache[key] = layout
         while len(cache) > int(getattr(self, "LYRIC_LAYOUT_CACHE_LIMIT", 48)):
             cache.pop(next(iter(cache)))
@@ -17270,47 +19087,44 @@ class IslandStackVisual(QWidget):
         progress: float,
         confidence: float,
         glow: bool = False,
+        *,
+        timed_units: tuple[object, ...] = (),
+        timed_position: float | None = None,
+        timed_line_end: float | None = None,
+        timed_character_front: float | None = None,
+        whole_row: bool = False,
     ):
-        chunks = layout.chunks
-        if not chunks:
+        if not layout.chunks or layout.total_width <= 0.0:
             return
-        base_font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
-        widths = layout.widths
-        total_w = layout.total_width
-        live_width = max(0.0, min(total_w, self._lyric_progress_width(layout, progress)))
-        focus = max(0.0, min(1.0, progress)) * max(1, len(chunks) - 1)
-        elastic_confidence = confidence
-        if len(chunks) > 48:
-            elastic_confidence *= max(0.38, 48.0 / float(len(chunks)))
-        scales = self._lyric_elastic_scales(len(chunks), progress, elastic_confidence)
-        cursor = x
-        white = QColor(255, 255, 255, live_color.alpha())
-        painter.setFont(base_font)
-        for index, chunk in enumerate(chunks):
-            width = widths[index]
-            if width <= 0.0:
-                cursor += width
-                continue
-            sung_amount = max(0.0, min(1.0, (live_width - (cursor - x)) / max(1.0, width)))
-            focus_strength = max(0.0, 1.0 - abs(index - focus) / 1.75) * elastic_confidence
-            chunk_color = self._mix_alpha_color(base_color, live_color, sung_amount)
-            chunk_color = self._mix_alpha_color(chunk_color, white, 0.22 * focus_strength, alpha=chunk_color.alpha())
-            if glow:
-                chunk_color = QColor(live_color.red(), live_color.green(), live_color.blue(), max(0, min(255, int(24 + 38 * focus_strength))))
-
-            scale = scales[index]
-            token_rect = QRectF(cursor, rect.top(), width, rect.height())
-            painter.save()
-            painter.translate(token_rect.center())
-            painter.scale(scale, scale)
-            painter.setPen(chunk_color)
-            painter.drawText(
-                QRectF(-width / 2.0, -rect.height() / 2.0, width, rect.height()),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
-                chunk,
-            )
-            painter.restore()
-            cursor += width
+        font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        renderer = getattr(self, "_wave_reading_renderer", None)
+        if not isinstance(renderer, LyricReadingRenderer):
+            renderer = LyricReadingRenderer()
+            self._wave_reading_renderer = renderer
+        # Wave Stream shares the full-screen read wipe and one-way lift.  The
+        # historical ``glow`` pass is accepted for call-site compatibility,
+        # but never scales or redraws the whole word.
+        paint_kwargs = {}
+        if timed_units and timed_position is not None:
+            paint_kwargs = {
+                "timed_units": timed_units,
+                "timed_position": timed_position,
+                "timed_line_end": timed_line_end,
+                "timed_character_front": timed_character_front,
+            }
+        if whole_row:
+            paint_kwargs = {"whole_row": True}
+        renderer.paint(
+            painter,
+            rect,
+            x,
+            layout.text,
+            font,
+            max(0.0, min(1.0, float(progress))),
+            QColor(base_color),
+            QColor(live_color),
+            **paint_kwargs,
+        )
 
     def _paint_live_lyric_text(
         self,
@@ -17326,73 +19140,48 @@ class IslandStackVisual(QWidget):
         centered_scroll: bool = False,
         spacing_percent: int | None = None,
     ):
+        if "whole_block_progress" in phase:
+            self._paint_wave_stream_whole_block(painter, (
+                (rect, text, size, bold, QColor(base_color), QColor(live_color), spacing_percent),
+            ), phase)
+            return
         progress = max(0.0, min(1.0, float(phase.get("progress", 0.0))))
-        confidence = max(0.0, min(1.0, float(phase.get("confidence", 0.0))))
-        bloom = math.sin(progress * math.pi)
-        breath = 0.5 + 0.5 * math.sin(time.monotonic() * 3.0 + progress * math.tau)
+        whole_row = bool(phase.get("whole_row", False))
         layout = self._lyric_layout(text, size, bold, spacing_percent)
         text_w = layout.total_width
-        live_width = self._lyric_progress_width(layout, progress)
-        x = self._scrolling_text_x(rect, text_w, centered, centered_scroll, focus_px=live_width)
-        color, companion = self._accent_pair()
-        pure_white = self._pure_white_music_active()
-        word_fill_enabled = self._wave_word_fill_enabled()
-        color_theme_enabled = self._wave_color_theme_enabled()
-        word_progress = progress if word_fill_enabled else 1.0
-        paint_confidence = confidence if word_fill_enabled else 0.0
-        paint_base = QColor(base_color)
-        paint_live = QColor(live_color)
-        if color_theme_enabled:
-            fill = self._wave_fill_color()
-            colorful = QColor(fill.red(), fill.green(), fill.blue(), live_color.alpha())
-            paint_live = QColor(colorful)
-            if word_fill_enabled:
-                paint_base = QColor(base_color)
-            else:
-                paint_base = QColor(colorful)
-        elif not word_fill_enabled:
-            paint_base = QColor(live_color)
-
+        x = self._scrolling_text_x(
+            rect, text_w, centered, centered_scroll,
+            focus_px=None if whole_row else progress * text_w,
+        )
         painter.save()
-        painter.setClipRect(rect)
-        if word_fill_enabled and text and confidence > 0.05 and not bool(getattr(self, "expanded", False)):
-            focus_x = x + max(0.0, min(text_w, live_width))
-            focus_radius = self._u(42 + 22 * bloom)
-            focus = QRadialGradient(QPointF(focus_x, rect.center().y()), focus_radius)
-            if pure_white:
-                focus.setColorAt(0.0, QColor(255, 255, 255, int(42 + 28 * breath)))
-                focus.setColorAt(0.35, QColor(255, 255, 255, int(26 + 18 * confidence)))
-                focus.setColorAt(1.0, QColor(255, 255, 255, 0))
-            else:
-                focus.setColorAt(0.0, QColor(255, 255, 255, int(38 + 30 * breath)))
-                focus.setColorAt(0.26, QColor(color.red(), color.green(), color.blue(), int(28 + 24 * confidence)))
-                focus.setColorAt(0.58, QColor(companion.red(), companion.green(), companion.blue(), int(18 + 12 * bloom)))
-                focus.setColorAt(1.0, QColor(companion.red(), companion.green(), companion.blue(), 0))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(focus)
-            painter.drawEllipse(QPointF(focus_x, rect.center().y()), focus_radius, focus_radius * 0.48)
-
-        if word_fill_enabled:
-            glow_alpha = int((18 if pure_white else 30) + 28 * confidence + 18 * bloom)
-            glow_color = QColor(255, 255, 255, glow_alpha)
-            self._paint_wave_stream_lyric_chunks(
-                painter,
-                rect.adjusted(-self._u(0.6), -self._u(0.4), self._u(0.6), self._u(0.4)),
-                x,
-                layout,
-                size,
-                bold,
-                glow_color,
-                glow_color,
-                word_progress,
-                confidence * 0.52,
-                glow=True,
-            )
-
-        if word_fill_enabled:
-            elastic_live = QColor(paint_live.red(), paint_live.green(), paint_live.blue(), max(0, min(255, int(paint_live.alpha() * (0.76 + 0.16 * bloom)))))
-        else:
-            elastic_live = QColor(paint_live)
+        renderer = getattr(self, "_wave_reading_renderer", None)
+        if not isinstance(renderer, LyricReadingRenderer):
+            renderer = LyricReadingRenderer()
+            self._wave_reading_renderer = renderer
+        font = self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        device_getter = getattr(painter, "device", None)
+        device = device_getter() if callable(device_getter) else None
+        dpr = device.devicePixelRatioF() if device is not None else 1.0
+        vertical_margin = renderer.vertical_clip_margin(text, font, rect.height(), dpr)
+        # The slot still bounds horizontal marquee travel; its upper/lower
+        # edges must not shave off a word as its baseline rises. The caller's
+        # shell/viewport clip remains in force through IntersectClip.
+        painter.setClipRect(
+            rect.adjusted(0.0, -vertical_margin, 0.0, vertical_margin),
+            Qt.ClipOperation.IntersectClip,
+        )
+        # Wave Stream always uses the continuous read front.  Legacy detailed
+        # fill/color and elastic knobs are intentionally ignored here.
+        timed_kwargs = {}
+        if text == phase.get("timed_primary_text") and phase.get("timed_units"):
+            timed_kwargs = {
+                "timed_units": tuple(phase["timed_units"]),
+                "timed_position": phase.get("timed_position"),
+                "timed_line_end": phase.get("timed_line_end"),
+                "timed_character_front": phase.get("timed_character_front"),
+            }
+        if whole_row:
+            timed_kwargs = {"whole_row": True}
         self._paint_wave_stream_lyric_chunks(
             painter,
             rect,
@@ -17400,10 +19189,11 @@ class IslandStackVisual(QWidget):
             layout,
             size,
             bold,
-            paint_base,
-            elastic_live,
-            word_progress,
-            paint_confidence,
+            QColor(base_color),
+            QColor(live_color),
+            progress,
+            1.0,
+            **timed_kwargs,
         )
         painter.restore()
 
@@ -17417,8 +19207,10 @@ class IslandStackVisual(QWidget):
         bold: bool,
         centered: bool = False,
         centered_scroll: bool = False,
+        *,
+        font: QFont | None = None,
     ):
-        font = self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
+        font = font if font is not None else self._font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal)
         painter.setFont(font)
         painter.setPen(color)
         fm = QFontMetrics(font)

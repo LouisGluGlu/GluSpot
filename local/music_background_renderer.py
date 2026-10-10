@@ -17,6 +17,7 @@ from local.music_reactive_plans import (
     duotone_split_band_paint_plan,
     sea_level_wave_paint_plan,
 )
+from local.music_surface_palette import background_role_color
 
 
 def _copy_color(color: QColor) -> QColor:
@@ -71,6 +72,7 @@ class MusicBackgroundPalette:
     bilateral_bridge: QColor
     full_duotone: tuple[QColor, QColor, QColor] | None = None
     sea_level: tuple[QColor, QColor, QColor] | None = None
+    solid_album_roles: tuple[QColor, QColor, QColor] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "album_color", _copy_color(self.album_color))
@@ -81,6 +83,7 @@ class MusicBackgroundPalette:
         object.__setattr__(self, "bilateral_bridge", _copy_color(self.bilateral_bridge))
         object.__setattr__(self, "full_duotone", _copy_color_tuple(self.full_duotone))
         object.__setattr__(self, "sea_level", _copy_color_tuple(self.sea_level))
+        object.__setattr__(self, "solid_album_roles", _copy_color_tuple(self.solid_album_roles))
 
     def full_duotone_palette(self) -> tuple[QColor, QColor, QColor] | None:
         return _copy_color_tuple(self.full_duotone)
@@ -122,7 +125,7 @@ class _HostBackedRenderer:
         return MusicBackgroundRenderContext(
             reactive=self.reactive_render_state(*ambience_styles),
             tuning=self._render_tuning(),
-            palette=self._render_palette(expanded=expanded),
+            palette=self._render_palette(expanded=expanded, solid_album="solid_album" in ambience_styles),
             ambient_phase=float(getattr(self.host, "ambient_phase", 0.0) or 0.0),
             wave_values=tuple(float(value) for value in wave_values),
             media_is_playing=bool(getattr(self.host, "media_is_playing", True)),
@@ -145,7 +148,7 @@ class _HostBackedRenderer:
             diffraction_ring_count=max(5, min(12, ring_count)),
         )
 
-    def _render_palette(self, *, expanded: bool | None) -> MusicBackgroundPalette:
+    def _render_palette(self, *, expanded: bool | None, solid_album: bool) -> MusicBackgroundPalette:
         solid = self._color_host_call("_solid_album_background_color", QColor(24, 24, 24))
         album = _copy_color(getattr(self.host, "album_color", solid))
         if not album.isValid():
@@ -164,6 +167,9 @@ class _HostBackedRenderer:
                 bool(expanded),
             )
         sea_level = self._color_tuple_host_call("_xiaomi_duotone_palette", self._fallback_style_palette(solid, secondary))
+        solid_roles = self._color_tuple_host_call(
+            "_solid_album_palette_colors", (album, secondary, album),
+        ) if solid_album else None
         return MusicBackgroundPalette(
             album_color=album,
             secondary_color=secondary,
@@ -173,6 +179,7 @@ class _HostBackedRenderer:
             bilateral_bridge=bilateral_bridge,
             full_duotone=full_duotone,
             sea_level=sea_level,
+            solid_album_roles=solid_roles,
         )
 
     def _fallback_style_palette(self, primary: QColor, secondary: QColor) -> tuple[QColor, QColor, QColor]:
@@ -419,13 +426,6 @@ class SolidMusicBackgroundRenderer(_HostBackedRenderer):
         shell = self._music_shell_path(rect, radius)
         base = context.palette.solid_album_background
         painter.fillPath(shell, base)
-        painter.setClipPath(shell)
-        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
-        sheen.setColorAt(0.00, QColor(255, 255, 255, 28))
-        sheen.setColorAt(0.42, QColor(255, 255, 255, 0))
-        sheen.setColorAt(1.00, QColor(0, 0, 0, 38))
-        painter.fillRect(rect, sheen)
-        self.paint_reactive_accent(painter, rect, radius, "solid_album", light_surface=True, context=context)
         painter.restore()
 
     def reactive_album_accent_pair(self, light_surface: bool, context: MusicBackgroundRenderContext | None = None) -> tuple[QColor, QColor]:
@@ -467,7 +467,14 @@ class SolidMusicBackgroundRenderer(_HostBackedRenderer):
         alpha_amount = motion.alpha_amount
         if alpha_amount <= 0.001:
             return
-        accent, companion = self.reactive_album_accent_pair(light_surface, context)
+        if ambience_style == "solid_album" and context.palette.solid_album_roles is not None:
+            primary, secondary, _characteristic = context.palette.solid_album_roles
+            # The solid surface keeps the same dark artwork roles as the large
+            # page.  The generic light-surface helper otherwise re-saturates
+            # provider blue and can paint it back over the extracted color.
+            accent, companion = background_role_color(primary), background_role_color(secondary)
+        else:
+            accent, companion = self.reactive_album_accent_pair(light_surface, context)
         shell = self._music_shell_path(rect, radius)
         painter.save()
         painter.setClipPath(shell)

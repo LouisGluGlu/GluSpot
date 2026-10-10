@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 import inspect
 import json
 import math
@@ -11,7 +13,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, MessageData, TrackData
+from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, MessageData, TimedLyricLine, TimedLyricUnit, TrackData
+from api.providers import EmptyIslandDataProvider, empty_visual_data
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtWidgets import QApplication
@@ -30,6 +33,7 @@ from local.island_presentation import (
 )
 from local.audio_reactive_engine import ReactiveSnapshot
 from local.mydockfinder import FinderGlassMaterial
+from local.music_surface_window import MusicSurfaceWindow
 
 
 class IslandStackVisualMessageTests(unittest.TestCase):
@@ -98,6 +102,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     ) -> IslandStackVisual:
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.music_ambience_style = ambience_style
+        # Legacy fixture names describe the rendered neutral tone; the
+        # product stores only system and tests must not depend on host theme.
+        if ambience_style in {"pure_black", "pure_white"}:
+            visual._music_system_dark = ambience_style == "pure_black"
         visual.music_expanded_layout_style = "standard"
         visual.album_color = QColor(28, 130, 220)
         visual.secondary_color = QColor(230, 70, 120)
@@ -349,7 +357,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.data_provider = Provider()
-        visual.music_ambience_style = "bilateral_diffraction"
+        visual.music_ambience_style = "solid_album"
         visual.lyric_flow_style = "gelv_songscatter"
         visual.expanded = True
         visual.location_mode = "free"
@@ -360,11 +368,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.animation_speed = 1.2
         visual.compact_duotone_balance = 42
         visual.expanded_duotone_balance = 64
-        visual.diffraction_frequency = 0.44
-        visual.yaoguang_color_source = "album"
-        visual.yaoguang_album_inverse_enabled = True
-        visual.yaoguang_blur_strength = 80
-        visual.yaoguang_height_mode = "spacious"
         visual._lyric_timeline_diagnostics = lambda _now: {
             "sync_lag_lines": 2,
             "visible_lyric_index": 1,
@@ -401,14 +404,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(trace["bottleneck_group"], "content")
         self.assertEqual(trace["warning_count"], 1)
         context = diagnostics["visual_runtime_context"]
-        self.assertEqual(context["ambience_style"], "bilateral_diffraction")
+        self.assertEqual(context["ambience_style"], "solid_album")
         self.assertEqual(context["lyric_flow_style"], "gelv_songscatter")
         self.assertTrue(context["expanded"])
         self.assertTrue(context["reactive_background_enabled"])
         self.assertEqual(context["reactive_background_intensity"], 88)
         self.assertEqual(context["animation_fps"], 75)
         self.assertEqual(context["lyric_animation_fps"], 50)
-        self.assertEqual(context["diffraction_frequency"], 0.44)
         report = diagnostics["runtime_verification_report"]
         self.assertEqual(report["status"], "partial")
         self.assertFalse(report["ready"])
@@ -2767,8 +2769,11 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(snapshot["v2_ember_back_opacity"], 42)
         self.assertEqual(snapshot["v2_ember_blur_panel_strength"], 37)
         self.assertAlmostEqual(snapshot["v2_ember_lyric_offset_seconds"], 0.35, delta=0.001)
-        self.assertTrue(snapshot["v2_wave_word_fill_enabled"])
-        self.assertTrue(snapshot["v2_wave_color_fill_enabled"])
+        self.assertNotIn("v2_wave_word_fill_enabled", snapshot)
+        self.assertNotIn("v2_wave_color_fill_enabled", snapshot)
+        self.assertNotIn("v2_lyric_elastic_strength", snapshot)
+        self.assertNotIn("v2_lyric_elastic_mode", snapshot)
+        self.assertNotIn("v2_lyric_word_spacing", snapshot)
         self.assertNotIn("v2_wave_color_fill_fallback", snapshot)
         self.assertEqual(snapshot["v2_no_lyrics_display_mode"], "album_island")
         self.assertEqual(snapshot["v2_album_island_cover_count"], 7)
@@ -3277,7 +3282,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(frame.right(), main_rect.left())
 
     def test_tasker_left_resize_handle_is_painted_before_main_body(self):
-        source = inspect.getsource(IslandStackVisual.paintEvent)
+        source = inspect.getsource(IslandStackVisual._paint_island_frame)
 
         handle_index = source.index("self._paint_taskbar_left_handle(painter, rect)")
         music_index = source.index("self._paint_music(painter, rect, self.expanded)")
@@ -3741,7 +3746,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     def test_music_control_icon_specs_use_svg_assets_and_theme_tone(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.media_is_playing = False
-        visual._pure_white_music_active = lambda: True
+        visual.music_ambience_style = "system"
+        with patch("local.island_stack_visual.system_dark_mode", return_value=False):
+            visual._refresh_music_system_theme(force=True)
 
         play = visual._music_control_icon_spec("music:toggle_play_pause")
         previous = visual._music_control_icon_spec("music:previous")
@@ -3761,7 +3768,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(str(pause["path"]).endswith("暂停.svg"))
         self.assertTrue(pause["path"].exists())
 
-        visual._pure_white_music_active = lambda: False
+        with patch("local.island_stack_visual.system_dark_mode", return_value=True):
+            visual._refresh_music_system_theme(force=True)
         dark_background_play = visual._music_control_icon_spec("music:toggle_play_pause")
         self.assertTrue(str(dark_background_play["path"]).endswith("暂停 (1).svg"))
         self.assertTrue(dark_background_play["path"].exists())
@@ -3781,7 +3789,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.hovered_key = "music"
         visual.hover_armed_key = "music"
         visual.tasker_music_hover_auto_expand_suppressed = False
-        visual._send_playback_command_async = lambda _command: None
+        visual._run_background = lambda _name, _callback: None
         visual._pulse_stack = lambda: None
         visual.update = lambda: None
 
@@ -3797,7 +3805,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.music_control_press_started_at = {}
         visual.media_is_playing = False
         visual.last_media_refresh_at = 1.0
-        visual._send_playback_command_async = lambda _command: None
+        visual._run_background = lambda _name, _callback: None
         visual._pulse_stack = lambda: None
         visual.update = lambda: None
 
@@ -3815,6 +3823,433 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertGreater(visual._music_control_elastic_scale("music:toggle_play_pause", now=10.08), 1.0)
         self.assertEqual(visual._music_control_elastic_scale("music:toggle_play_pause", now=10.7), 1.0)
+
+    def test_island_ripple_targets_controls_without_card_drag_or_fields(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual.update = lambda: None
+        visual.music_button_rects = {"music:next": QRectF(80.0, 25.0, 34.0, 34.0)}
+        visual.plugin_action_rects = {
+            "timer-pause": QRectF(30.0, 30.0, 24.0, 24.0),
+            "alarm-editor-focus-hour": QRectF(60.0, 30.0, 24.0, 24.0),
+            "alarm-list": QRectF(20.0, 20.0, 100.0, 50.0),
+        }
+        shell = SpringRect(QRectF(10.0, 10.0, 130.0, 70.0))
+        shell.opacity = 1.0
+        visual.motions = {"music": shell, "plugin-panel": shell}
+
+        self.assertTrue(visual._start_island_button_ripple("music:next", QPointF(94.0, 42.0), now=10.0))
+        self.assertTrue(visual._start_island_button_ripple("plugin-action:timer-pause", QPointF(42.0, 42.0), now=10.1))
+        self.assertFalse(visual._start_island_button_ripple("music", QPointF(50.0, 50.0), now=10.2))
+        self.assertFalse(visual._start_island_button_ripple("plugin-panel", QPointF(50.0, 50.0), now=10.2))
+        self.assertFalse(visual._start_island_button_ripple("plugin", QPointF(50.0, 50.0), now=10.2))
+        self.assertFalse(visual._start_island_button_ripple("music:open_surface", QPointF(50.0, 50.0), now=10.2))
+        self.assertFalse(visual._start_island_button_ripple("taskbar:left-handle", QPointF(50.0, 50.0), now=10.2))
+        self.assertFalse(visual._start_island_button_ripple("plugin-action:alarm-editor-focus-hour", QPointF(70.0, 40.0), now=10.2))
+        self.assertFalse(visual._start_island_button_ripple("plugin-action:alarm-list", QPointF(70.0, 40.0), now=10.2))
+        self.assertFalse(visual._start_island_button_ripple("", QPointF(150.0, 90.0), now=10.2))
+        self.assertEqual(len(visual._island_button_ripples), 2)
+        self.assertEqual(visual._island_button_ripples[0]["clip"], QRectF(10.0, 10.0, 130.0, 70.0))
+
+    def test_island_ripple_starts_only_on_activated_click_and_expires_on_existing_clock(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual._island_button_ripples = []
+        visual.music_button_rects = {"music:previous": QRectF(40.0, 20.0, 36.0, 36.0)}
+        visual.motions = {}
+        visual.drag_press_key = "music:previous"
+        visual.drag_press_pos = QPointF(50.0, 30.0)
+        actions: list[str] = []
+        visual.update = lambda: actions.append("update")
+        visual._activate_key = lambda key: actions.append(key)
+        event = SimpleNamespace(position=lambda: QPointF(50.0, 30.0))
+        activated = SimpleNamespace(activate_pressed_key=True, update_after_activation=True, capture_release_anchor=False)
+        dragged = SimpleNamespace(activate_pressed_key=False, update_after_activation=False, capture_release_anchor=False)
+
+        with patch("local.island_stack_visual.time.monotonic", return_value=10.0):
+            visual._apply_mouse_release_action_plan(dragged, event, QPoint())
+            self.assertEqual(visual._island_button_ripples, [])
+            visual._apply_mouse_release_action_plan(activated, event, QPoint())
+
+        self.assertEqual(actions, ["update", "music:previous", "update"])
+        self.assertEqual(len(visual._island_button_ripples), 1)
+        self.assertTrue(visual._active_visual_animation_plan(10.1).active)
+        self.assertFalse(visual._active_visual_animation_plan(10.5).active)
+
+        image = QImage(140, 80, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        visual._paint_island_button_ripples(painter, now=10.15, owner_key="music")
+        painter.end()
+        self.assertTrue(any(image.pixelColor(x, y).alpha() > 0 for y in range(10, 70) for x in range(10, 130)))
+        self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
+
+        visual._island_button_ripples = []
+        visual.drag_press_key = "music:previous"
+        outside = SimpleNamespace(position=lambda: QPointF(90.0, 30.0))
+        with patch("local.island_stack_visual.time.monotonic", return_value=10.2):
+            visual._apply_mouse_release_action_plan(activated, outside, QPoint())
+        self.assertEqual(visual._island_button_ripples, [])
+
+        visual._paint_island_button_ripples(QPainter(), now=10.5)
+        self.assertEqual(visual._island_button_ripples, [])
+
+    def test_island_ripple_does_not_start_on_alert_or_message_cards(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual.update = lambda: None
+        alert = SpringRect(QRectF(10.0, 10.0, 90.0, 38.0))
+        alert.opacity = 1.0
+        message = SpringRect(QRectF(10.0, 55.0, 90.0, 38.0))
+        message.opacity = 1.0
+        hidden = SpringRect(QRectF(10.0, 100.0, 90.0, 38.0))
+        hidden.opacity = 0.0
+        visual.motions = {"plugin-alert:time": alert, "message:one": message, "message:hidden": hidden}
+
+        self.assertFalse(visual._start_island_button_ripple("plugin-alert:time", QPointF(30.0, 25.0), now=20.0))
+        self.assertFalse(visual._start_island_button_ripple("message:one", QPointF(30.0, 70.0), now=20.1))
+        self.assertFalse(visual._start_island_button_ripple("message:hidden", QPointF(30.0, 115.0), now=20.1))
+        self.assertEqual(getattr(visual, "_island_button_ripples", []), [])
+
+    def test_island_track_navigation_glow_uses_cover_but_other_buttons_keep_their_origin(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual.update = lambda: None
+        visual.music_cover_rect = QRectF(24.0, 24.0, 60.0, 60.0)
+        visual.music_button_rects = {
+            "music:previous": QRectF(120.0, 80.0, 32.0, 32.0),
+            "music:next": QRectF(200.0, 80.0, 32.0, 32.0),
+            "music:toggle_play_pause": QRectF(160.0, 80.0, 32.0, 32.0),
+        }
+        music = SpringRect(QRectF(10.0, 10.0, 260.0, 120.0))
+        music.opacity = 1.0
+        visual.motions = {"music": music}
+
+        for index, key in enumerate(visual.music_button_rects):
+            visual._start_island_button_ripple(key, visual.music_button_rects[key].center(), now=10.0 + index * 0.01)
+
+        previous, following, toggle = visual._island_button_ripples
+        self.assertEqual(previous["center"], visual.music_cover_rect.center())
+        self.assertEqual(following["center"], visual.music_cover_rect.center())
+        self.assertEqual(toggle["center"], visual.music_button_rects["music:toggle_play_pause"].center())
+        self.assertEqual(previous["duration"], 1.72)
+        self.assertEqual(following["duration"], 1.72)
+        self.assertEqual(previous["travel_duration"], 1.5)
+        self.assertEqual(previous["source_radius_fraction"], 0.0)
+        self.assertEqual(toggle["duration"], 0.38)
+        self.assertTrue(all(ripple["owner_key"] == "music" for ripple in visual._island_button_ripples))
+        self.assertTrue(all(ripple["clip"] == music.rect for ripple in visual._island_button_ripples))
+
+        visual.music_cover_rect = QRectF()
+        visual._start_island_button_ripple("music:next", QPointF(216.0, 96.0), now=10.04)
+        self.assertEqual(visual._island_button_ripples[-1]["center"], QPointF(216.0, 96.0))
+        self.assertEqual(visual._island_button_ripples[-1]["duration"], 0.38)
+
+    def test_island_glow_is_a_circular_ring_clipped_to_its_own_shell(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual.update = lambda: None
+        visual.music_button_rects = {"music:toggle_play_pause": QRectF(96.0, 66.0, 32.0, 32.0)}
+        music = SpringRect(QRectF(10.0, 10.0, 220.0, 110.0))
+        music.opacity = 1.0
+        visual.motions = {"music": music}
+        visual._start_island_button_ripple("music:toggle_play_pause", QPointF(112.0, 82.0), now=10.0)
+        image = QImage(250, 140, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        # The ring is filled by a radial light falloff, not a painter outline.
+        painter.setPen(QColor(0, 0, 0))
+        visual._paint_island_button_ripples(painter, 10.12, owner_key="music", shell_rect=music.rect)
+        painter.end()
+
+        self.assertLess(image.pixelColor(112, 82).alpha(), 5)
+        radial_peaks = [image.pixelColor(x, y).alpha() for x, y in ((81, 82), (143, 82), (112, 51))]
+        self.assertGreater(min(radial_peaks), 80)
+        self.assertLess(max(radial_peaks) - min(radial_peaks), 12)
+        self.assertLess(image.pixelColor(122, 82).alpha(), image.pixelColor(143, 82).alpha())
+        self.assertEqual(image.pixelColor(9, 65).alpha(), 0)
+        self.assertEqual(image.pixelColor(10, 10).alpha(), 0)
+        self.assertEqual(image.pixelColor(240, 125).alpha(), 0)
+
+        other = QImage(250, 140, QImage.Format.Format_ARGB32_Premultiplied)
+        other.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(other)
+        visual._paint_island_button_ripples(painter, 10.12, owner_key="plugin-panel", shell_rect=music.rect)
+        painter.end()
+        self.assertEqual(other.pixelColor(112, 82).alpha(), 0)
+
+        # Calling without a card owner only prunes expired animation state;
+        # it must never draw above text, cover art, or the host surface.
+        no_owner = QImage(250, 140, QImage.Format.Format_ARGB32_Premultiplied)
+        no_owner.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(no_owner)
+        visual._paint_island_button_ripples(painter, 10.12)
+        painter.end()
+        self.assertEqual(no_owner.pixelColor(112, 82).alpha(), 0)
+
+    def test_island_music_glow_stays_behind_cover_and_content_in_both_layouts(self):
+        for expanded, layout in ((False, "standard"), (True, "dual_panel")):
+            with self.subTest(expanded=expanded, layout=layout):
+                visual = IslandStackVisual.__new__(IslandStackVisual)
+                visual._u = lambda value: float(value)
+                visual._animation_duration = lambda seconds, minimum=0.05: seconds
+                visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+                visual.update = lambda: None
+                visual.music_button_rects = {"music:toggle_play_pause": QRectF(100.0, 65.0, 32.0, 32.0)}
+                shell = QRectF(10.0, 10.0, 240.0, 110.0)
+                music = SpringRect(shell)
+                music.opacity = 1.0
+                visual.motions = {"music": music}
+                visual._start_island_button_ripple("music:toggle_play_pause", QPointF(116.0, 81.0), now=10.0)
+                visual._island_glow_paint_now = 10.12
+                visual._effective_music_ambience_style = lambda: "pure_black"
+                visual._normalize_music_expanded_layout_style = lambda style: str(style)
+                visual.music_expanded_layout_style = layout
+                visual._active_lyric_color_fill_paints_background = lambda _style=None: False
+                visual._music_shell_radius = lambda _rect, _expanded: 22.0
+                visual._music_shell_path = lambda rect, radius, _expanded=False: visual._rounded_path(rect, radius)
+                visual._record_visual_paint_section = lambda *_args: None
+                visual._paint_pure_black_music_background = lambda painter, rect, radius: painter.fillPath(visual._rounded_path(rect, radius), QColor(0, 0, 0))
+                visual._paint_dual_panel_music_background = lambda painter, rect, radius, _style: painter.fillPath(visual._rounded_path(rect, radius), QColor(0, 0, 0))
+                visual._paint_music_reactive_background_overlay = lambda *_args: None
+                visual._paint_music_surface_transition_wash = lambda *_args: None
+                visual._paint_music_border = lambda *_args: None
+                cover = QRectF(30.0, 30.0, 46.0, 46.0)
+                glyph = QRectF(108.0, 75.0, 16.0, 16.0)
+
+                def content(painter, _rect):
+                    painter.fillRect(cover, QColor(15, 80, 140))
+                    painter.fillRect(glyph, QColor(255, 255, 255))
+
+                visual._paint_music_compact = content
+                visual._paint_music_expanded = content
+                image = QImage(270, 140, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(QColor(0, 0, 0, 0))
+                painter = QPainter(image)
+                visual._paint_music(painter, shell, expanded)
+                painter.end()
+
+                self.assertEqual(image.pixelColor(53, 53), QColor(15, 80, 140))
+                self.assertEqual(image.pixelColor(116, 83), QColor(255, 255, 255))
+                self.assertGreater(image.pixelColor(148, 81).red(), 10)
+                self.assertEqual(image.pixelColor(8, 81).alpha(), 0)
+
+    def test_island_circular_glow_keeps_visible_curvature_in_early_frames(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual.update = lambda: None
+        visual.music_button_rects = {"music:toggle_play_pause": QRectF(96.0, 66.0, 32.0, 32.0)}
+        shell = SpringRect(QRectF(10.0, 10.0, 220.0, 110.0))
+        shell.opacity = 1.0
+        visual.motions = {"music": shell}
+        visual._start_island_button_ripple("music:toggle_play_pause", QPointF(112.0, 82.0), now=10.0)
+        peaks = []
+        for elapsed in (0.016, 0.032, 0.064, 0.128):
+            image = QImage(250, 140, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(image)
+            visual._paint_island_button_ripples(painter, 10.0 + elapsed, owner_key="music", shell_rect=shell.rect)
+            painter.end()
+            peak = max(range(113, 220), key=lambda x: image.pixelColor(x, 82).alpha())
+            self.assertGreater(image.pixelColor(peak, 82).alpha(), 50)
+            self.assertGreater(image.pixelColor(peak, 82).alpha(), image.pixelColor(112, 82).alpha() + 30)
+            peaks.append(peak)
+        self.assertEqual(peaks, sorted(set(peaks)))
+        self.assertLess(peaks[0] - 112, 25)
+
+    def test_island_album_ring_accelerates_to_right_edge_with_a_thick_soft_band(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual.update = lambda: None
+        visual.music_cover_rect = QRectF(24.0, 24.0, 60.0, 60.0)
+        visual.music_button_rects = {"music:next": QRectF(550.0, 43.0, 32.0, 32.0)}
+        shell = SpringRect(QRectF(10.0, 10.0, 600.0, 100.0))
+        shell.opacity = 1.0
+        visual.motions = {"music": shell}
+        visual._start_island_button_ripple("music:next", QPointF(566.0, 59.0), now=10.0)
+        self.assertTrue(visual._active_visual_animation_plan(11.6).active)
+        self.assertFalse(visual._active_visual_animation_plan(11.72).active)
+        at_start = QImage(630, 130, QImage.Format.Format_ARGB32_Premultiplied)
+        at_start.fill(QColor(0, 0, 0, 0))
+        start_painter = QPainter(at_start)
+        visual._paint_island_button_ripples(start_painter, 10.0, owner_key="music", shell_rect=shell.rect)
+        start_painter.end()
+        self.assertEqual(at_start.pixelColor(54, 54).alpha(), 0)
+        self.assertEqual(at_start.pixelColor(83, 54).alpha(), 0)
+        peak_positions = {}
+        for elapsed in (0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.45, 1.5):
+            with self.subTest(elapsed=elapsed):
+                image = QImage(630, 130, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(QColor(0, 0, 0, 0))
+                painter = QPainter(image)
+                visual._paint_island_button_ripples(painter, 10.0 + elapsed, owner_key="music", shell_rect=shell.rect)
+                painter.end()
+                travel = min(1.0, elapsed / 1.5)
+                expected_peak = 54 + round((shell.rect.right() - 54) * (0.4 * travel + 0.6 * travel * travel))
+                peak = max(range(55, 609), key=lambda x: image.pixelColor(x, 54).alpha())
+                peak_positions[elapsed] = peak
+                self.assertLessEqual(abs(peak - expected_peak), 8)
+                self.assertGreater(image.pixelColor(peak, 54).alpha(), 40)
+                self.assertLessEqual(image.pixelColor(peak, 54).alpha(), 145)
+                if elapsed in (0.5, 1.0):
+                    self.assertGreater(image.pixelColor(peak - 20, 54).alpha(), 45)
+                    self.assertGreater(image.pixelColor(peak + 20, 54).alpha(), 45)
+                if elapsed == 0.1:
+                    diagonal = round((peak - 54) / math.sqrt(2.0))
+                    diagonal_peak = max(image.pixelColor(54 + diagonal + dx, 54 - diagonal + dy).alpha()
+                        for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+                    self.assertLess(abs(image.pixelColor(peak, 54).alpha()
+                        - diagonal_peak), 20)
+                self.assertEqual(image.pixelColor(610, 54).alpha(), 0)
+
+        # Equal time slices cover successively more ground: the ring accelerates
+        # without an abrupt jump and still starts directly behind the cover.
+        advances = [peak_positions[b] - peak_positions[a] for a, b in (
+            (0.25, 0.5), (0.5, 0.75), (0.75, 1.0), (1.0, 1.25),
+        )]
+        self.assertEqual(advances, sorted(advances))
+        self.assertLess(peak_positions[0.1] - 54, 25)
+        self.assertGreaterEqual(peak_positions[1.5], 602)
+
+        edge_alphas = []
+        for elapsed in (1.5, 1.6, 1.7, 1.72):
+            image = QImage(630, 130, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(image)
+            visual._paint_island_button_ripples(painter, 10.0 + elapsed, owner_key="music", shell_rect=shell.rect)
+            painter.end()
+            edge_alphas.append(image.pixelColor(608, 54).alpha())
+        self.assertGreater(edge_alphas[0], edge_alphas[1])
+        self.assertGreater(edge_alphas[1], edge_alphas[2])
+        self.assertEqual(edge_alphas[3], 0)
+
+    def test_island_glow_rapid_clicks_remain_bounded_and_track_shell_geometry(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual.update = lambda: None
+        visual.music_button_rects = {"music:next": QRectF(80.0, 45.0, 32.0, 32.0)}
+        visual.music_cover_rect = QRectF(25.0, 25.0, 40.0, 40.0)
+        music = SpringRect(QRectF(10.0, 10.0, 130.0, 80.0))
+        music.opacity = 1.0
+        visual.motions = {"music": music}
+        for index in range(20):
+            visual._start_island_button_ripple("music:next", QPointF(96.0, 61.0), now=10.0 + index * 0.004)
+        self.assertEqual(len(visual._island_button_ripples), 4)
+        shifted = QRectF(60.0, 20.0, 260.0, 160.0)
+        image = QImage(340, 200, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        visual._paint_island_button_ripples(painter, 11.076, owner_key="music", shell_rect=shifted)
+        painter.end()
+        self.assertGreater(image.pixelColor(225, 90).alpha(), 25)
+        self.assertEqual(image.pixelColor(45, 45).alpha(), 0)
+        visual._paint_island_button_ripples(QPainter(), 12.3)
+        self.assertEqual(visual._island_button_ripples, [])
+
+    def test_island_glow_keeps_joined_plugin_shell_and_message_edges_clean(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._plugin_theme_colors = lambda: {
+            "shell": QColor(30, 30, 32),
+            "shell_expanded": QColor(30, 30, 32),
+            "stroke": QColor(255, 255, 255, 40),
+            "inner_stroke": QColor(0, 0, 0, 30),
+            "muted": QColor(185, 185, 190),
+        }
+        visual._system_dark_mode = lambda: True
+        visual.update = lambda: None
+        visual.plugin_action_rects = {"timer-pause": QRectF(130.0, 55.0, 30.0, 30.0)}
+        visual._plugin_panel_visible = lambda: True
+        visual._plugin_panel_shell_rect = lambda _rect: QRectF(30.0, 25.0, 190.0, 100.0)
+        visual._plugin_panel_shell_radius = lambda _rect: 22.0
+        visual._enabled_plugin_samples = lambda: []
+        joined = SpringRect(QRectF(30.0, 25.0, 190.0, 100.0))
+        joined.opacity = 1.0
+        visual.motions = {"plugin-panel": joined}
+        visual._start_island_button_ripple("plugin-action:timer-pause", QPointF(145.0, 70.0), now=10.0)
+        visual._island_glow_paint_now = 10.12
+        visual._island_glow_current_visual_key = "plugin-panel"
+        image = QImage(250, 150, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        visual._paint_plugin_panel(painter, QRectF(30.0, 25.0, 190.0, 100.0))
+        painter.end()
+        self.assertGreater(image.pixelColor(176, 70).red(), 30)
+        self.assertEqual(image.pixelColor(29, 75).alpha(), 0)
+        self.assertEqual(image.pixelColor(30, 25).alpha(), 0)
+
+        # Tiny message cards are truly elliptical, so the glow must not leave
+        # rectangular corner pixels even when the painter's own clip is broad.
+        visual._island_button_ripples = [{
+            "started_at": 10.0,
+            "duration": 0.38,
+            "center": QPointF(50.0, 50.0),
+            "clip": QRectF(30.0, 30.0, 40.0, 40.0),
+            "origin_fraction": QPointF(0.5, 0.5),
+            "owner_key": "message:one",
+            "light_surface": False,
+        }]
+        visual._island_glow_current_visual_key = "message:one"
+        visual._message_card_progress = lambda _rect: 0.0
+        tiny = QImage(100, 100, QImage.Format.Format_ARGB32_Premultiplied)
+        tiny.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(tiny)
+        visual._paint_message(painter, QRectF(30.0, 30.0, 40.0, 40.0), SimpleNamespace(name_color=QColor(30, 80, 140)), False)
+        painter.end()
+        self.assertEqual(tiny.pixelColor(30, 30).alpha(), 0)
+        self.assertGreater(tiny.pixelColor(66, 50).alpha(), 0)
+
+    def test_island_solid_album_glow_stays_inside_music_shell(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual._u = lambda value: float(value)
+        visual._animation_duration = lambda seconds, minimum=0.05: seconds
+        visual._music_control_icon_color = lambda _alpha: QColor(255, 255, 255)
+        visual.update = lambda: None
+        visual.music_button_rects = {"music:next": QRectF(180.0, 55.0, 32.0, 32.0)}
+        visual.music_cover_rect = QRectF(30.0, 30.0, 40.0, 40.0)
+        shell = QRectF(10.0, 10.0, 240.0, 110.0)
+        motion = SpringRect(shell)
+        motion.opacity = 1.0
+        visual.motions = {"music": motion}
+        visual._start_island_button_ripple("music:next", QPointF(196.0, 71.0), now=10.0)
+        visual._island_glow_paint_now = 10.12
+        visual._effective_music_ambience_style = lambda: "solid_album"
+        visual._normalize_music_expanded_layout_style = lambda style: str(style)
+        visual.music_expanded_layout_style = "standard"
+        visual._active_lyric_color_fill_paints_background = lambda _style=None: False
+        visual._music_shell_radius = lambda _rect, _expanded: 20.0
+        visual._music_shell_path = lambda rect, radius, _expanded=False: visual._rounded_path(rect, radius)
+        visual._record_visual_paint_section = lambda *_args: None
+        visual._paint_solid_album_music_background = lambda painter, rect, radius: painter.fillPath(visual._rounded_path(rect, radius), QColor(0, 0, 0))
+        visual._paint_music_reactive_background_overlay = lambda *_args: None
+        visual._paint_music_surface_transition_wash = lambda *_args: None
+        visual._paint_music_compact = lambda *_args: None
+        visual._paint_music_border = lambda *_args: None
+        image = QImage(270, 140, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        visual._paint_music(painter, shell, False)
+        painter.end()
+
+        self.assertEqual(image.pixelColor(5, 68).alpha(), 0)
+        self.assertLess(image.pixelColor(17, 68).red(), 24)
+        self.assertGreater(image.pixelColor(85, 50).red(), 3)
 
     def test_mydockfinder_listener_switches_allowed_modes(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -5475,7 +5910,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         image.fill(Qt.GlobalColor.transparent)
         painter = QPainter(image)
 
-        for index in range(7):
+        for index in range(31):
             visual._paint_cover(
                 painter,
                 QRectF(8.0 + index, 8.0, 42.0 + index, 42.0),
@@ -5485,7 +5920,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             )
         painter.end()
 
-        self.assertLessEqual(len(visual._scaled_album_art_cache), 4)
+        self.assertEqual(len(visual._scaled_album_art_cache), visual.SCALED_ALBUM_ART_CACHE_LIMIT)
+        self.assertLessEqual(sum(cover.sizeInBytes() for cover in visual._scaled_album_art_cache.values()), visual.SCALED_ALBUM_ART_CACHE_PIXEL_BUDGET)
 
     def test_lyric_layout_cache_keeps_small_recent_working_set(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -6610,9 +7046,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.update = lambda: None
         visual._notify_settings_changed = lambda: None
 
-        self.assertTrue(visual._sync_music_background_to_taskbar_color(force=True))
-        self.assertEqual(visual.music_ambience_style, "pure_white")
-        self.assertEqual(saved["v2_music_ambience_style"], "pure_white")
+        with patch("local.island_stack_visual.system_dark_mode", return_value=False):
+            self.assertTrue(visual._sync_music_background_to_taskbar_color(force=True))
+        self.assertEqual(visual.music_ambience_style, "system")
+        self.assertEqual(saved["v2_music_ambience_style"], "system")
         self.assertEqual(saved["v2_music_background_follow_previous_style"], "sea_level")
 
         visual.taskbar_material_is_light = False
@@ -6620,10 +7057,11 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual.music_ambience_style, "sea_level")
         self.assertEqual(saved["v2_music_background_follow_previous_style"], "")
 
-    def test_pure_white_music_background_uses_dark_lyric_text(self):
+    def test_system_light_music_background_uses_dark_lyric_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "tasker"
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
 
         self.assertEqual(visual._music_lyric_text_color().black(), 255)
 
@@ -6636,14 +7074,16 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.update = lambda: None
         visual._notify_settings_changed = lambda: None
 
-        visual.set_music_ambience_style("pure_white", notify=False)
+        with patch("local.island_stack_visual.system_dark_mode", return_value=False):
+            visual.set_music_ambience_style("pure_white", notify=False)
 
-        self.assertEqual(visual.music_ambience_style, "pure_white")
+        self.assertEqual(visual.music_ambience_style, "system")
         self.assertEqual(visual._music_lyric_text_color().black(), 255)
 
-    def test_pure_white_expanded_music_title_and_artist_use_dark_text(self):
+    def test_system_light_expanded_music_title_and_artist_use_dark_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.track_title = "Title"
         visual.artist = "Artist"
         visual.media_is_playing = True
@@ -6664,9 +7104,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual([color.black() for color in colors[:2]], [255, 255])
 
-    def test_pure_white_album_island_expanded_title_and_artist_use_dark_text(self):
+    def test_system_light_album_island_expanded_title_and_artist_use_dark_text(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.track_title = "Title"
         visual.artist = "Artist"
         visual.media_is_playing = True
@@ -6964,7 +7405,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(center.red() + center.green() + center.blue(), 620)
         self.assertLess(self._count_dark_pixels(reactive_image), 4)
 
-    def test_pure_white_wave_stream_keeps_black_base_and_allows_word_fill(self):
+    def test_pure_white_wave_stream_keeps_black_reading_tone_without_old_glow_pass(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.music_ambience_style = "pure_white"
         visual.wave_word_fill_enabled = True
@@ -6996,43 +7437,11 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         )
         painter.end()
 
-        glow_call = next(call for call in calls if call[2])
-        live_call = next(call for call in calls if not call[2])
-        self.assertLess(glow_call[0].black(), 32)
-        self.assertLess(glow_call[1].black(), 32)
+        self.assertEqual(len(calls), 1)
+        live_call = calls[0]
+        self.assertFalse(live_call[2])
         self.assertEqual(live_call[0].black(), 255)
         self.assertEqual(live_call[1].black(), 255)
-
-    def test_yaoguang_ember_compact_height_gets_extra_headroom(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.font_shrink_scale = 1.0
-        visual.high_quality_font_rendering = False
-        visual.lyric_flow_style = "ember_fade"
-        visual.lyrics = ["And die with a smile\n满怀笑意就此逝去"]
-        visual.lyric_index = 0
-        visual.ember_font_size = 18
-        visual.ember_font_weight = "normal"
-        visual.ember_line_mode = "scroll"
-        visual.ember_dual_line_enabled = True
-        visual.track_title = "title"
-        visual.artist = "artist"
-        visual.no_lyrics_text = "no lyrics"
-        visual._empty_music_text_active = lambda: False
-        visual._compact_lyric_lines = lambda: visual.lyrics
-        visual._clean_lyric_for_width = lambda text: str(text)
-        visual._taskbar_compact_active = lambda: False
-        visual._taskbar_edge_compact_active = lambda: False
-        visual._should_paint_album_island = lambda: False
-        visual._gelv_enabled = lambda: False
-        visual._effective_music_ambience_style = lambda: str(getattr(visual, "music_ambience_style", "sea_level"))
-
-        visual.music_ambience_style = "sea_level"
-        regular = visual._compact_music_content_height_raw()
-        visual.music_ambience_style = "yaoguang"
-        yaoguang = visual._compact_music_content_height_raw()
-
-        self.assertGreaterEqual(yaoguang, regular + 12.0)
 
     def test_ember_base_font_size_uses_independent_setting(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -7044,9 +7453,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual._ember_base_font_size(expanded=False, line_count=1), 21)
         self.assertEqual(visual._ember_base_font_size(expanded=True, line_count=1), 21)
 
-    def test_pure_white_gelv_line_keeps_black_base_and_allows_word_fill(self):
+    def test_system_light_legacy_gelv_helper_keeps_black_base_and_allows_word_fill(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.gelv_color_fill_enabled = True
         visual.gelv_word_fill_enabled = True
         visual.album_color = QColor("#00D7FF")
@@ -7073,7 +7483,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     def test_gelv_songscatter_theme_matrix_splits_color_and_word_fill(self):
         def capture(color_theme: bool, word_fill: bool) -> dict[str, object]:
             visual = IslandStackVisual.__new__(IslandStackVisual)
-            visual.music_ambience_style = "pure_white"
+            visual.music_ambience_style = "system"
+            visual._music_system_dark = False
             visual.gelv_color_fill_enabled = color_theme
             visual.gelv_word_fill_enabled = word_fill
             visual.album_color = QColor("#00D7FF")
@@ -7154,7 +7565,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.expanded = False
         self.assertFalse(visual._expanded_word_backplate_enabled())
         visual.expanded = True
-        for style in ("pure_black", "pure_white", "bilateral_diffraction"):
+        for style in ("pure_black", "pure_white", "solid_album"):
             visual.music_ambience_style = style
             self.assertFalse(visual._expanded_word_backplate_enabled())
 
@@ -7373,15 +7784,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         painter.end()
 
         self.assertEqual(calls, [("upper words", False), ("lower words", False)])
-
-    def test_bilateral_diffraction_frequency_increases_wave_count(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.diffraction_frequency = 0.0
-        low = visual._bilateral_diffraction_ring_count()
-        visual.diffraction_frequency = 1.0
-        high = visual._bilateral_diffraction_ring_count()
-
-        self.assertLess(low, high)
 
     def test_enabled_plugin_ids_filter_plugin_samples_without_count_slider(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -7605,41 +8007,19 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreaterEqual(heavy.weight(), QFont.Weight.Black)
 
     def test_wave_stream_chunks_use_wave_font_channel(self):
-        class FakePainter:
-            def __init__(self):
-                self.fonts = []
-
-            def setFont(self, font):
-                self.fonts.append(font)
-
-            def save(self):
-                pass
-
-            def translate(self, *_args):
-                pass
-
-            def scale(self, *_args):
-                pass
-
-            def setPen(self, *_args):
-                pass
-
-            def drawText(self, *_args):
-                pass
-
-            def restore(self):
-                pass
+        from local.music_lyric_reading import LyricReadingRenderer
 
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._font = lambda *_args, **_kwargs: "ui-font"
-        visual._wave_stream_font = lambda *_args, **_kwargs: "wave-font"
-        visual._lyric_progress_width = lambda layout, progress: layout.total_width * progress
-        visual._lyric_elastic_scales = lambda count, _progress, _confidence: [1.0] * count
+        visual._font = lambda *_args, **_kwargs: self.fail("UI font should not be used")
+        visual._wave_stream_font = lambda *_args, **_kwargs: QFont("Georgia", 18)
         layout = LyricLayout("one", ("one",), (24.0,), 24.0, ())
-        painter = FakePainter()
+        renderer = LyricReadingRenderer()
+        fonts = []
+        renderer.paint = lambda _painter, _rect, _x, _text, font, *_args: fonts.append(font.family())
+        visual._wave_reading_renderer = renderer
 
         visual._paint_wave_stream_lyric_chunks(
-            painter,
+            object(),
             QRectF(0.0, 0.0, 120.0, 32.0),
             0.0,
             layout,
@@ -7651,7 +8031,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             1.0,
         )
 
-        self.assertEqual(painter.fonts[0], "wave-font")
+        self.assertEqual(fonts, ["Georgia"])
 
     def test_lyric_layout_uses_wave_stream_font_family_not_ui_font(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -7659,8 +8039,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         key = visual._lyric_layout_key("one two", 18, True)
 
-        self.assertIn(tuple(visual._wave_stream_font_families()), key)
-        self.assertNotIn("Arial", key)
+        self.assertEqual(key[1], visual._wave_stream_font(18, QFont.Weight.Bold).toString())
+        self.assertNotIn("Arial", key[1])
 
     def test_gelv_font_defaults_to_bold_weight(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -7701,7 +8081,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         italic = visual._ember_font(18, back_layer=False)
         self.assertTrue(italic.italic())
 
-    def test_ember_split_mode_three_lines_grows_free_island_but_stick_scrolls(self):
+    def test_removed_ember_split_settings_do_not_grow_live_island(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "ember_fade"
         visual.ember_line_mode = "split"
@@ -7723,7 +8103,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual._ember_effective_line_mode(expanded=False), "split")
         self.assertEqual(len(visual._ember_current_display_lines(expanded=False)), 3)
         free_height = visual._compact_music_content_height_raw()
-        self.assertGreaterEqual(free_height, 92.0)
+        visual.ember_line_mode = "scroll"
+        self.assertEqual(visual._compact_music_content_height_raw(), free_height)
+        self.assertGreaterEqual(free_height, 46.0)
 
         visual.location_mode = "stick"
         self.assertEqual(visual._ember_effective_line_mode(expanded=False), "scroll")
@@ -7747,7 +8129,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
     def test_ember_scroll_mode_hides_translation_when_dual_line_is_off(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "ember_fade"
-        visual.music_ambience_style = "yaoguang"
+        visual.music_ambience_style = "sea_level"
         visual.ember_line_mode = "scroll"
         visual.ember_dual_line_enabled = False
         visual.lyrics = ["Tonight will be the night\n今夜会是所有夜晚里独一无二的一夜"]
@@ -7825,12 +8207,12 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual._ember_effective_line_mode(expanded=False), "scroll")
         self.assertEqual(len(visual._ember_current_display_lines(expanded=False)), 1)
 
-    def test_ember_show_cover_switch_controls_compact_cover_independently(self):
+    def test_removed_ember_cover_switch_does_not_override_shared_cover_setting(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "ember_fade"
         visual.compact_lyric_show_cover = True
         visual.ember_show_cover = False
-        self.assertFalse(visual._compact_lyric_cover_enabled())
+        self.assertTrue(visual._compact_lyric_cover_enabled())
 
         visual.lyric_flow_style = "wave_stream"
         self.assertTrue(visual._compact_lyric_cover_enabled())
@@ -7873,9 +8255,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual([len(line.split()) for line in words], [5, 4])
         self.assertEqual([len(line) for line in cjk], [7, 6])
 
-    def test_ember_front_color_defaults_to_black_on_pure_white_background(self):
+    def test_legacy_ember_front_color_defaults_to_black_on_system_light_background(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "pure_white"
+        visual.music_ambience_style = "system"
+        visual._music_system_dark = False
         visual.ember_color_fill_enabled = False
 
         color = visual._ember_front_read_color()
@@ -8473,7 +8856,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._advance_music_reactive_frame(10.0)
         sea_level = visual._music_reactive_style_response("sea_level")
         duotone = visual._music_reactive_style_response("duotone_full")
-        bilateral = visual._music_reactive_style_response("bilateral_diffraction")
         solid_album = visual._music_reactive_style_response("solid_album")
         pure_black = visual._music_reactive_style_response("pure_black")
         pure_white = visual._music_reactive_style_response("pure_white")
@@ -8482,8 +8864,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(sea_level["wave_height"], 1.0)
         self.assertGreater(duotone["transition_softness"], 0.045)
         self.assertGreater(duotone["interference_alpha"], 1.10)
-        self.assertGreater(bilateral["side_wave_alpha"], 0.0)
-        self.assertGreater(bilateral["side_wave_height"], 0.0)
         self.assertGreater(solid_album["solid_accent_alpha"], 0.0)
         self.assertGreater(pure_black["solid_accent_alpha"], 0.0)
         self.assertGreater(pure_white["solid_accent_alpha"], 0.0)
@@ -8637,7 +9017,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_native_music_background_methods_delegate_to_renderer(self):
         methods = (
-            ("_paint_bilateral_diffraction_ambience", "paint_bilateral_diffraction_ambience"),
             ("_paint_full_duotone_ambience", "paint_full_duotone_ambience"),
             ("_paint_xiaomi_duotone_ambience", "paint_sea_level_ambience"),
             ("_paint_xiaomi_duotone_wave", "paint_sea_level_wave"),
@@ -8931,7 +9310,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             metrics = QFontMetrics(visual._gelv_font(float(row["size"])))
             self.assertGreaterEqual(row["rect"].height(), metrics.height() + 1.0)
 
-    def test_gelv_compact_music_size_adapts_to_independent_font_settings(self):
+    def test_gelv_compact_music_size_ignores_legacy_independent_font_settings(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.expanded = False
         visual.lyric_flow_style = "gelv_songscatter"
@@ -8945,7 +9324,11 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.gelv_secondary_font_size = 18
         _large_w, large_h = visual._main_size_for_kind(IslandKind.MUSIC, 420.0)
 
-        self.assertGreater(large_h, small_h)
+        self.assertEqual(large_h, small_h)
+        visual.lyric_flow_style = "wave_stream"
+        _wave_w, wave_h = visual._main_size_for_kind(IslandKind.MUSIC, 420.0)
+        self.assertGreaterEqual(wave_h, 46.0 * IslandStackVisual.VISUAL_SCALE)
+        self.assertGreaterEqual(large_h, 46.0 * IslandStackVisual.VISUAL_SCALE)
 
     def test_gelv_compact_rows_are_tighter_than_expanded_rows(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -9383,10 +9766,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertFalse(calls[0]["glow"])
         self.assertEqual(calls[0]["live"].getRgb()[:3], (255, 255, 255))
         self.assertEqual(calls[0]["base"].getRgb()[:3], (255, 255, 255))
-        self.assertAlmostEqual(calls[0]["progress"], 1.0, delta=0.001)
-        self.assertAlmostEqual(calls[0]["confidence"], 0.0, delta=0.001)
+        self.assertAlmostEqual(calls[0]["progress"], 0.5, delta=0.001)
+        self.assertAlmostEqual(calls[0]["confidence"], 1.0, delta=0.001)
 
-    def test_wave_stream_read_word_and_colorful_are_independent_switches(self):
+    def test_wave_stream_reading_ignores_removed_fill_switches(self):
         class FakePainter:
             def save(self):
                 pass
@@ -9434,9 +9817,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             centered_scroll=True,
         )
 
-        self.assertTrue(visual._active_lyric_color_fill_enabled())
+        self.assertFalse(visual._active_lyric_color_fill_enabled())
         self.assertEqual(calls[-1]["base"].getRgb()[:3], (255, 255, 255))
-        self.assertNotEqual(calls[-1]["live"].getRgb()[:3], (255, 255, 255))
+        self.assertEqual(calls[-1]["live"].getRgb()[:3], (255, 255, 255))
         self.assertAlmostEqual(calls[-1]["progress"], 0.5, delta=0.001)
 
         visual.wave_word_fill_enabled = False
@@ -9454,8 +9837,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         )
 
         self.assertEqual(calls[-1]["base"].getRgb()[:3], calls[-1]["live"].getRgb()[:3])
-        self.assertNotEqual(calls[-1]["live"].getRgb()[:3], (255, 255, 255))
-        self.assertAlmostEqual(calls[-1]["progress"], 1.0, delta=0.001)
+        self.assertEqual(calls[-1]["live"].getRgb()[:3], (255, 255, 255))
+        self.assertAlmostEqual(calls[-1]["progress"], 0.5, delta=0.001)
 
         visual.album_color = QColor(120, 120, 120)
         self.assertTrue(visual.wave_color_fill_enabled)
@@ -9469,13 +9852,17 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertLess(x_late, x_start)
 
-    def test_compact_lyric_viewport_routes_to_gelv_renderer(self):
+    def test_compact_gelv_viewport_routes_to_shared_continuous_reader(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "gelv_songscatter"
         visual.lyrics = ["当前歌词", "下一句"]
         visual.lyric_index = 0
+        visual._should_paint_album_island = lambda: False
+        visual._compact_lyric_lines = lambda: visual.lyrics
+        visual._lyric_phase = lambda _now: {"progress": 0.4}
+        visual._paint_live_lyric_text = lambda *_args, **_kwargs: calls.append("shared")
         calls = []
-        visual._paint_gelv_compact_lyrics = lambda *_args: calls.append("gelv")
+        visual._paint_gelv_compact_lyrics = lambda *_args: self.fail("Legacy scatter renderer must not run")
         image = QImage(300, 90, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -9483,9 +9870,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._paint_compact_lyric_viewport(painter, QRectF(0.0, 0.0, 260.0, 70.0))
         painter.end()
 
-        self.assertEqual(calls, ["gelv"])
+        self.assertEqual(calls, ["shared"])
 
-    def test_lyric_viewports_route_to_ember_renderer_when_selected(self):
+    def test_removed_ember_selection_uses_shared_lyric_viewports(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.lyric_flow_style = "ember_fade"
         visual.lyrics = ["current lyric", "next lyric"]
@@ -9500,10 +9887,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._lyric_phase = lambda _now: {"progress": 0.5, "confidence": 1.0}
         visual._lyric_transition_progress = lambda _duration: (1.0, 1.0)
         visual._current_lyric_display_lines = lambda: ["current lyric"]
-        visual._paint_live_lyric_text = lambda *_args, **_kwargs: None
-        visual._paint_expanded_lyric_row = lambda *_args, **_kwargs: None
         calls = []
-        visual._paint_ember_lyrics = lambda _painter, _rect, expanded=False: calls.append(expanded)
+        visual._paint_live_lyric_text = lambda *_args, **_kwargs: calls.append("compact")
+        visual._paint_expanded_lyric_row = lambda *_args, **_kwargs: calls.append("expanded")
+        visual._paint_ember_lyrics = lambda *_args, **_kwargs: self.fail("Removed Ember renderer must not run")
         image = QImage(320, 140, QImage.Format.Format_ARGB32)
         image.fill(QColor(0, 0, 0, 0))
         painter = QPainter(image)
@@ -9512,7 +9899,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._paint_lyric_viewport(painter, QRectF(0.0, 0.0, 300.0, 110.0))
         painter.end()
 
-        self.assertEqual(calls, [False, True])
+        self.assertEqual(calls[0], "compact")
+        self.assertIn("expanded", calls)
 
     def test_ember_renderer_paints_visible_text_pixels(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -9640,30 +10028,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         color = visual._gelv_fill_color()
 
         self.assertGreater(color.saturation(), visual.album_color.saturation())
-
-    def test_gelv_colorful_is_allowed_on_yaoguang_when_album_inverse_is_enabled(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "yaoguang"
-        visual.lyric_flow_style = "gelv_songscatter"
-        visual.gelv_color_fill_enabled = True
-        visual.album_color = QColor(80, 120, 170)
-        visual.yaoguang_color_source = "album"
-        visual.yaoguang_album_inverse_enabled = False
-
-        self.assertFalse(visual._gelv_color_theme_enabled())
-
-        visual.yaoguang_album_inverse_enabled = True
-
-        self.assertTrue(visual._gelv_color_theme_enabled())
-
-    def test_yaoguang_blur_strength_accepts_two_hundred_percent(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.update = lambda: None
-        visual._notify_settings_changed = lambda: None
-
-        visual.set_yaoguang_blur_strength(250, notify=False)
-
-        self.assertEqual(visual.yaoguang_blur_strength, 200)
 
     def test_album_island_cover_count_allows_only_odd_choices(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -9944,7 +10308,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(QRectF(center_slot["rect"]).center().x(), 180.0)
         self.assertGreater(QRectF(right_slot["rect"]).center().x(), QRectF(center_slot["rect"]).center().x())
 
-    def test_album_island_secondary_shrink_style_removes_perspective_tilt(self):
+    def test_album_island_legacy_shrink_style_uses_canonical_perspective(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.album_island_cover_count = 5
         visual.album_island_cover_size = 30
@@ -9964,6 +10328,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         side_slots = [slot for slot in slots if not bool(slot["center"])]
         self.assertTrue(side_slots)
         self.assertTrue(all(abs(float(slot["tilt"])) <= 0.01 for slot in side_slots))
+        self.assertTrue(all(isinstance(slot["perspective"], dict) for slot in side_slots))
+        self.assertLess(side_slots[0]["perspective"]["right_height"], side_slots[0]["perspective"]["left_height"])
 
     def test_album_island_secondary_perspective_style_keeps_flatter_side_covers(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -10323,7 +10689,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
                     self.assertGreater(QColor(image.pixelColor(attached_point)).alpha(), 220)
 
     def test_edge_notch_clip_wraps_all_main_island_kinds_before_music_branch(self):
-        source = inspect.getsource(IslandStackVisual.paintEvent)
+        source = inspect.getsource(IslandStackVisual._paint_island_frame)
         plan_start = source.index("paint_plan = stack_frame_paint_plan(visuals, self.motions")
         loop_start = source.index("for paint_item in paint_plan.paint_items", plan_start)
         music_branch = source.index("if visual.kind == IslandKind.MUSIC", loop_start)
@@ -10540,6 +10906,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             secondary_color=ColorToken(4, 5, 6),
             audio_frames=(AudioFrame(0.0, 0.0, 0.0),),
             album_art_bytes=self._png_bytes(QColor(10, 120, 210)),
+            album_art_source="thumbnail",
             track_id="song",
             album_queue=(AlbumQueueEntry("Next", "Artist", album_art_bytes=queue_bytes),),
         )
@@ -10548,6 +10915,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual(len(visual.album_queue), 1)
         self.assertFalse(visual.album_queue[0]["album_art"].isNull())
+        self.assertEqual(visual.album_art_source, "thumbnail")
 
     def test_album_queue_from_track_keeps_missing_future_cover_as_placeholder_and_collapses_repeated_art(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -10624,7 +10992,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         _width, height = visual._main_size_for_kind(IslandKind.MUSIC, 420.0)
 
-        self.assertAlmostEqual(height, 80.0 * IslandStackVisual.VISUAL_SCALE)
+        self.assertGreaterEqual(height, 80.0 * IslandStackVisual.VISUAL_SCALE)
 
     def test_dual_line_compact_music_width_tracks_current_lyric(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -10813,6 +11181,229 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         )
 
         self.assertEqual(lines, [(10.0, "第一行歌词\n第二行歌词"), (14.0, "下一句")])
+
+    def test_coalesced_timed_lyric_data_keeps_primary_units_and_timing_kind(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        units = (
+            SimpleNamespace(start_seconds=10.0, end_seconds=10.5, text="谁"),
+            SimpleNamespace(start_seconds=10.5, end_seconds=11.1, text="人"),
+            SimpleNamespace(start_seconds=11.1, end_seconds=12.4, text="都"),
+        )
+        rows, row_units, kinds = visual._coalesced_timed_lyric_data([
+            SimpleNamespace(time_seconds=10.0, text="谁人都", units=units, timing_kind="unit"),
+            SimpleNamespace(time_seconds=10.0, text="Anyone", units=(), timing_kind="line"),
+            SimpleNamespace(time_seconds=14.0, text="下一句", units=(), timing_kind="synthetic"),
+        ])
+
+        self.assertEqual(rows, [(10.0, "谁人都\nAnyone"), (14.0, "下一句")])
+        self.assertEqual(row_units, [units, ()])
+        self.assertEqual(kinds, ["unit", "synthetic"])
+
+    def test_coalesced_timed_lyric_data_rejects_units_for_other_text(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        wrong_units = (SimpleNamespace(start_seconds=1.0, end_seconds=2.0, text="旧词"),)
+
+        rows, row_units, kinds = visual._coalesced_timed_lyric_data([
+            SimpleNamespace(time_seconds=1.0, text="新词", units=wrong_units, timing_kind="unit"),
+        ])
+
+        self.assertEqual(rows, [(1.0, "新词")])
+        self.assertEqual(row_units, [()])
+        self.assertEqual(kinds, ["line"])
+
+    def test_coalesced_timed_lyric_data_promotes_timed_original_after_translation(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        units = (SimpleNamespace(start_seconds=10.0, end_seconds=11.0, text="原文"),)
+
+        rows, row_units, kinds = visual._coalesced_timed_lyric_data([
+            SimpleNamespace(time_seconds=10.0, text="Translation", units=(), timing_kind="line"),
+            SimpleNamespace(time_seconds=10.0, text="原文", units=units, timing_kind="unit"),
+        ])
+
+        self.assertEqual(rows, [(10.0, "原文\nTranslation")])
+        self.assertEqual(row_units, [units])
+        self.assertEqual(kinds, ["unit"])
+
+    def test_lyric_phase_uses_actual_unit_clock_without_reading_future_characters(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.timed_lyrics = [(10.0, "谁都"), (14.0, "下一句")]
+        visual.timed_lyric_units = [
+            (
+                TimedLyricUnit(10.0, 11.0, "谁"),
+                TimedLyricUnit(12.0, 13.0, "都"),
+            ),
+            (),
+        ]
+        visual.timed_lyric_timing_kinds = ["unit", "line"]
+        visual.lyric_index = 0
+        visual.lyric_changed_at = 10.0
+        visual.lyric_last_phase_index = -1
+        visual.lyric_last_phase_progress = 0.0
+        visual.lyric_last_phase_at = 10.0
+        visual.lyric_transition_kind = ""
+        visual.media_is_playing = True
+        visual._effective_lyric_offset_seconds = lambda: 0.0
+        position = [10.5]
+        visual._estimated_media_position = lambda _now: position[0]
+
+        self.assertAlmostEqual(visual._lyric_phase(10.5)["progress"], 0.25)
+        position[0] = 11.5
+        self.assertAlmostEqual(visual._lyric_phase(11.5)["progress"], 0.5)
+        position[0] = 12.5
+        self.assertAlmostEqual(visual._lyric_phase(12.5)["progress"], 0.75)
+        visual.media_is_playing = False
+        self.assertAlmostEqual(visual._lyric_phase(20.0)["progress"], 0.75)
+
+    def test_low_perception_treats_one_marker_for_a_sentence_as_row_timing(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.timed_lyrics = [(10.0, "Hello world"), (14.0, "Good night")]
+        visual.timed_lyric_units = [
+            (TimedLyricUnit(10.0, None, "Hello world"),),
+            (TimedLyricUnit(14.0, None, "Good night"),),
+        ]
+        visual.timed_lyric_timing_kinds = ["unit", "unit"]
+        visual.music_surface_reading_strategy = "low_perception"
+        visual.lyric_index = 0
+        visual.lyric_changed_at = 10.0
+        visual.lyric_last_phase_index = -1
+        visual.lyric_last_phase_progress = 0.0
+        visual.lyric_last_phase_at = 10.0
+        visual.lyric_transition_kind = ""
+        visual.media_is_playing = True
+        visual._effective_lyric_offset_seconds = lambda: 0.0
+        visual._estimated_media_position = lambda _now: 11.0
+
+        phase = visual._lyric_phase(11.0)
+        self.assertTrue(phase["whole_row"])
+        self.assertNotIn("timed_character_front", phase)
+
+    def test_lyric_offset_slider_reanchors_backward_and_applies_active_player_profile(self):
+        visual = IslandStackVisual(data_provider=EmptyIslandDataProvider(empty_visual_data()))
+        visual.timer.stop()
+        surface_calls = []
+        visual.music_fullscreen_overlay = SimpleNamespace(
+            on_lyric_offset_changed=lambda: surface_calls.append("reanchor"),
+        )
+        try:
+            visual.timed_lyrics = [(0.0, "first"), (5.0, "second"), (10.0, "third")]
+            visual.lyrics = [text for _start, text in visual.timed_lyrics]
+            visual.lyric_index = 1
+            visual.media_is_playing = False
+            visual.media_position_seconds = 5.4
+            visual.media_position_sync_at = time.monotonic()
+            visual.media_app_lyric_offset_seconds = 0.0
+            visual.lyric_last_phase_index = 1
+            visual.lyric_last_phase_progress = 0.9
+
+            visual.set_lyric_offset_seconds(-2.0, notify=False)
+            self.assertEqual(visual.lyric_index, 0)
+            self.assertEqual(visual.lyric_last_phase_index, -1)
+            self.assertEqual(surface_calls, ["reanchor"])
+
+            visual.media_lyric_offset_adapter = "netease_betterncm"
+            self.assertFalse(visual.set_active_music_app_lyric_offset("qq", 3.0))
+            self.assertTrue(visual.set_active_music_app_lyric_offset("netease", 3.0))
+            self.assertEqual(visual.media_app_lyric_offset_seconds, 3.0)
+            self.assertEqual(visual.lyric_index, 1)
+            self.assertEqual(surface_calls, ["reanchor", "reanchor"])
+        finally:
+            visual.music_fullscreen_overlay = None
+            visual.close()
+
+    def test_lyric_phase_keeps_line_average_and_synthetic_line_modes(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.timed_lyrics = [(10.0, "谁都"), (14.0, "下一句")]
+        visual.timed_lyric_units = [(), ()]
+        visual.timed_lyric_timing_kinds = ["line", "synthetic"]
+        visual.lyric_index = 0
+        visual.lyric_changed_at = 10.0
+        visual.lyric_last_phase_index = -1
+        visual.lyric_last_phase_progress = 0.0
+        visual.lyric_last_phase_at = 10.0
+        visual.lyric_transition_kind = ""
+        visual.media_is_playing = True
+        visual._effective_lyric_offset_seconds = lambda: 0.0
+        position = [11.0]
+        visual._estimated_media_position = lambda _now: position[0]
+
+        self.assertAlmostEqual(visual._lyric_phase(11.0)["progress"], 0.25)
+        visual.lyric_index = 1
+        position[0] = 14.2
+        self.assertEqual(visual._lyric_phase(14.2)["progress"], 1.0)
+
+    def test_track_data_units_reach_island_phase_through_visual_update(self):
+        visual = IslandStackVisual(data_provider=EmptyIslandDataProvider(empty_visual_data()))
+        visual.timer.stop()
+        self.assertEqual(visual.timer.timerType(), Qt.TimerType.PreciseTimer)
+        units = (
+            TimedLyricUnit(10.0, 11.0, "\u8c01"),
+            TimedLyricUnit(11.0, 12.0, "\u4eba"),
+            TimedLyricUnit(12.0, 14.0, "\u90fd"),
+        )
+        timed = (
+            TimedLyricLine(10.0, "\u8c01\u4eba\u90fd", units, "unit"),
+            TimedLyricLine(10.0, "Anyone"),
+            TimedLyricLine(14.0, "\u4e0b\u4e00\u53e5"),
+        )
+        track = TrackData(
+            title="Song", artist="Artist", lyrics=tuple(line.text for line in timed),
+            album_color=ColorToken(60, 60, 60), secondary_color=ColorToken(40, 40, 40),
+            audio_frames=(), timed_lyrics=timed, track_id="timed-song",
+            position_seconds=10.5, duration_seconds=30.0, is_playing=False,
+            lyric_offset_adapter="netease_betterncm",
+        )
+        try:
+            visual._apply_visual_data(IslandVisualData(track, (), ()))
+            self.assertEqual(visual.timed_lyrics[0][1], "\u8c01\u4eba\u90fd\nAnyone")
+            self.assertEqual(visual.timed_lyric_units[0], units)
+            self.assertEqual(visual.timed_lyric_timing_kinds[0], "unit")
+            self.assertEqual(visual.media_lyric_offset_adapter, "netease_betterncm")
+            phase = visual._lyric_phase(time.monotonic())
+            self.assertAlmostEqual(phase["progress"], 0.5 / 3.0)
+            self.assertEqual(phase["timed_primary_text"], "\u8c01\u4eba\u90fd")
+            self.assertEqual(phase["timed_units"], units)
+
+            synthetic = (
+                TimedLyricLine(20.0, "Plain song", timing_kind="synthetic"),
+                TimedLyricLine(24.0, "Next", timing_kind="synthetic"),
+            )
+            next_track = replace(
+                track, title="Other", track_id="synthetic-song",
+                timed_lyrics=synthetic, lyrics=("Plain song", "Next"),
+                position_seconds=20.5,
+            )
+            visual._apply_visual_data(IslandVisualData(next_track, (), ()))
+            self.assertEqual(visual.timed_lyric_timing_kinds[0], "synthetic")
+            self.assertEqual(visual._lyric_phase(time.monotonic())["progress"], 1.0)
+        finally:
+            visual.close()
+
+    def test_same_text_real_timing_upgrade_refreshes_once_and_reanchors_island(self):
+        visual = IslandStackVisual(data_provider=EmptyIslandDataProvider(empty_visual_data()))
+        visual.timer.stop()
+        track = TrackData(
+            title="same song", artist="artist", lyrics=("谁都", "下一句"),
+            album_color=ColorToken(60, 60, 60), secondary_color=ColorToken(40, 40, 40),
+            audio_frames=(), timed_lyrics=(TimedLyricLine(0.0, "谁都"), TimedLyricLine(4.0, "下一句")),
+            track_id="upgrade-song", position_seconds=1.5, duration_seconds=30.0, is_playing=False,
+        )
+        try:
+            visual._apply_visual_data(IslandVisualData(track, (), ()))
+            visual.lyric_last_phase_index = 0
+            visual.lyric_last_phase_progress = 0.9
+            units = (TimedLyricUnit(0.0, 2.0, "谁"), TimedLyricUnit(2.0, 4.0, "都"))
+            upgraded = replace(track, timed_lyrics=(TimedLyricLine(0.0, "谁都", units, "unit"), TimedLyricLine(4.0, "下一句")))
+            self.assertTrue(visual._apply_visual_data(IslandVisualData(upgraded, (), ())))
+            self.assertEqual(visual.lyric_last_phase_index, -1)
+            self.assertEqual(visual.timed_lyric_timing_kinds[0], "unit")
+            self.assertAlmostEqual(visual._lyric_phase(time.monotonic())["progress"], 0.375)
+            timing_containers = (visual.timed_lyrics, visual.timed_lyric_units, visual.timed_lyric_timing_kinds)
+            self.assertFalse(visual._apply_visual_data(IslandVisualData(upgraded, (), ())))
+            self.assertAlmostEqual(visual.lyric_last_phase_progress, 0.375)
+            for previous, current in zip(timing_containers, (visual.timed_lyrics, visual.timed_lyric_units, visual.timed_lyric_timing_kinds)):
+                self.assertIs(previous, current)
+        finally:
+            visual.close()
 
     def test_coalesced_timed_lyrics_does_not_merge_adjacent_duet_lines(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -11569,12 +12160,14 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             album_art_bytes=self._png_bytes(QColor(0, 0, 0)),
             track_id="same-track",
             position_seconds=12.0,
+            position_sampled_at=9.5,
         )
 
         visual._apply_visual_data(IslandVisualData(track=track, messages=(), plugins=()))
 
         kept = visual.album_art.pixelColor(0, 0)
         self.assertEqual((kept.red(), kept.green(), kept.blue()), (210, 36, 44))
+        self.assertEqual(visual.media_position_sampled_at, 9.5)
 
     def test_message_refresh_black_placeholder_album_art_does_not_replace_existing_cover(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -11676,6 +12269,107 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(transition_calls, [])
         self.assertEqual(visual.album_history, [])
         self.assertEqual(visual.lyric_index, 0)
+
+    def test_coarse_uia_lyric_clock_stays_in_observed_row_until_new_sample(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.timed_lyrics = [(20.0, "observed"), (24.0, "next"), (28.0, "later")]
+        visual.media_position_seconds = 23.92
+        visual.media_position_sync_at = 100.0
+        visual.media_duration_seconds = 100.0
+        visual.media_is_playing = True
+        visual.media_position_source = "netease-uia-lyrics"
+
+        self.assertAlmostEqual(visual._estimated_media_position(101.0), 23.92)
+        self.assertAlmostEqual(visual._estimated_media_position(105.0), 23.92)
+        visual.media_position_seconds = 24.25
+        visual.media_position_sync_at = 105.0
+        self.assertAlmostEqual(visual._estimated_media_position(110.0), 27.92)
+
+        visual.media_position_seconds = 23.92
+        visual.media_position_sync_at = 100.0
+        visual.media_position_source = "netease-uia-progress"
+        self.assertAlmostEqual(visual._estimated_media_position(101.0), 24.92)
+        visual.media_position_source = "local-background"
+        self.assertAlmostEqual(visual._estimated_media_position(101.0), 24.92)
+
+    def test_coarse_uia_lyric_row_does_not_cross_despite_normal_visual_lead(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.timed_lyrics = [(20.0, "observed"), (24.0, "next"), (28.0, "later")]
+        visual.lyrics = ["observed", "next", "later"]
+        visual.lyric_index = 0
+        visual.prev_lyric_index = 0
+        visual.media_position_seconds = 23.92
+        visual.media_position_sync_at = 100.0
+        visual.media_duration_seconds = 100.0
+        visual.media_is_playing = True
+        visual.media_position_source = "netease-uia-lyrics"
+        visual.lyric_offset_seconds = 0.0
+        visual.media_app_lyric_offset_seconds = 0.0
+        visual.lyric_last_sync_position = 23.0
+
+        for now in (100.0, 100.5, 101.0, 105.0):
+            self.assertFalse(visual._sync_timed_lyrics(now))
+            self.assertEqual(visual.lyric_index, 0)
+        visual.media_position_seconds = 24.25
+        visual.media_position_sync_at = 105.0
+        self.assertTrue(visual._sync_timed_lyrics(105.1))
+        self.assertEqual(visual.lyric_index, 1)
+
+        visual.lyric_index = 0
+        visual.media_position_seconds = 23.92
+        visual.media_position_sync_at = 100.0
+        visual.media_position_source = "netease-uia-progress"
+        self.assertTrue(visual._sync_timed_lyrics(100.0))
+        self.assertEqual(visual.lyric_index, 1)
+
+    def test_same_title_new_duration_with_message_resets_old_song_clock(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.media_track_id = "old-version"
+        visual.track_title = "Song"
+        visual.artist = "Artist"
+        visual.media_position_sync_at = 10.0
+        visual.media_position_seconds = 92.0
+        visual.media_duration_seconds = 120.0
+        visual.media_raw_position_seconds = 92.0
+        visual.media_raw_position_source = "windows-media"
+        visual.lyrics = ["line"]
+        visual.timed_lyrics = []
+        visual.lyric_index = 0
+        visual.prev_lyric_index = 0
+        visual.messages = []
+        visual._seen_provider_message_keys = set()
+        visual.listened_seconds_total = 0.0
+        visual._scaled_album_art_cache = {}
+        visual.album_history = []
+        visual.album_queue = []
+        visual.album_queue_signature = ""
+        visual.album_island_transition_started_at = 0.0
+        visual.album_art = QImage(8, 8, QImage.Format.Format_ARGB32)
+        visual.album_art.fill(QColor(210, 36, 44))
+        visual._estimated_media_position = lambda _now: 92.0
+        visual._prepare_album_flow_for_track_change = lambda _track_id: 1
+        visual._clear_lyric_metrics_cache = lambda: None
+        visual._sync_timed_lyrics = lambda *_args, **_kwargs: None
+        track = TrackData(
+            title="Song",
+            artist="Artist",
+            lyrics=("new version",),
+            album_color=ColorToken(1, 2, 3),
+            secondary_color=ColorToken(4, 5, 6),
+            audio_frames=(AudioFrame(0.0, 0.0, 0.0),),
+            track_id="new-version",
+            duration_seconds=210.0,
+            position_seconds=0.0,
+        )
+
+        visual._apply_visual_data(IslandVisualData(
+            track=track,
+            messages=(MessageData("WeChat", "Alice", "new", ColorToken(75, 210, 110), ColorToken(75, 210, 110)),),
+            plugins=(),
+        ))
+        self.assertEqual(visual.media_track_id, "new-version")
+        self.assertEqual(visual.media_position_seconds, 0.0)
+        self.assertEqual(visual.lyrics, ["new version"])
 
     def test_message_popup_paint_does_not_change_album_cover_pixels(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -12046,429 +12740,140 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual.album_history, [])
         self.assertEqual(visual.album_island_transition_started_at, 0.0)
 
-    def test_music_ambience_accepts_color_fill_black_styles(self):
+    def test_music_ambience_migrates_removed_styles_and_keeps_supported_styles(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.update = lambda: None
         visual._notify_settings_changed = lambda: None
 
         visual.set_music_ambience_style("pure_black", notify=False)
-        self.assertEqual(visual.music_ambience_style, "pure_black")
+        self.assertEqual(visual.music_ambience_style, "system")
+
+        visual.set_music_ambience_style("pure_white", notify=False)
+        self.assertEqual(visual.music_ambience_style, "system")
+
+        visual.set_music_ambience_style("duotone_full", notify=False)
+        self.assertEqual(visual.music_ambience_style, "sea_level")
 
         visual.set_music_ambience_style("bilateral_diffraction", notify=False)
-        self.assertEqual(visual.music_ambience_style, "bilateral_diffraction")
+        self.assertEqual(visual.music_ambience_style, "sea_level")
 
         visual.set_music_ambience_style("yaoguang", notify=False)
-        self.assertEqual(visual.music_ambience_style, "yaoguang")
+        self.assertEqual(visual.music_ambience_style, "sea_level")
 
         visual.set_music_ambience_style("solid_album", notify=False)
         self.assertEqual(visual.music_ambience_style, "solid_album")
 
-    def test_solid_album_background_blocks_color_fill_and_uses_black_to_white_lyrics(self):
+    def test_solid_album_background_blocks_color_fill_and_uses_contrast_neutral_unread_lyrics(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.music_ambience_style = "solid_album"
         visual.lyric_flow_style = "wave_stream"
         visual.wave_color_fill_enabled = True
         visual.gelv_color_fill_enabled = False
+        visual.album_color = QColor(180, 90, 45)
+        visual.secondary_color = QColor(180, 90, 45)
 
         self.assertFalse(visual._active_lyric_color_fill_enabled())
-        self.assertEqual(visual._music_lyric_base_text_color().getRgb()[:3], (0, 0, 0))
+        unread = visual._music_lyric_base_text_color()
+        self.assertEqual(unread.getRgb(), (255, 255, 255, 132))
+        self.assertLess(visual._music_lyric_base_text_color(82).alpha(), unread.alpha())
         self.assertEqual(visual._music_lyric_text_color().getRgb()[:3], (255, 255, 255))
 
-    def test_solid_album_background_color_saturates_album_color_and_rejects_neutrals(self):
+    def test_solid_album_background_uses_monochrome_album_gray_not_blue_fallback(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_color = QColor(82, 124, 168)
-        visual.solid_album_background_fallback = "#2288CC"
+        visual.music_ambience_style = "solid_album"
+        visual.album_art = QImage(60, 60, QImage.Format.Format_RGB32)
+        visual.album_art.fill(QColor(220, 220, 220))
+        visual.album_color = QColor(22, 105, 205)
+        visual.secondary_color = QColor(16, 80, 190)
+        visual.solid_album_background_fallback = "#16BCFF"
 
         color = visual._solid_album_background_color()
+        unread = visual._music_lyric_base_text_color()
 
-        self.assertGreater(color.saturation(), visual.album_color.saturation())
-        self.assertGreaterEqual(color.saturation(), 190)
+        self.assertEqual(color.red(), color.green())
+        self.assertEqual(color.green(), color.blue())
+        self.assertEqual(unread.red(), unread.green())
+        self.assertEqual(unread.green(), unread.blue())
+        self.assertNotEqual(color.name().upper(), "#16BCFF")
 
-        visual.album_color = QColor(248, 248, 248)
-        fallback = visual._solid_album_background_color()
-
-        self.assertGreaterEqual(fallback.saturation(), 190)
-        self.assertLess(fallback.value(), 245)
-        self.assertNotEqual(fallback.name().upper(), "#F8F8F8")
-
-    def test_yaoguang_outer_color_saturates_user_color_and_rejects_neutrals(self):
+    def test_solid_album_preserves_role_extraction_but_displays_original_primary_and_neutral_ink(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.update = lambda: None
-        visual._notify_settings_changed = lambda: None
+        visual.music_ambience_style = "solid_album"
+        art = QImage(100, 100, QImage.Format.Format_RGB32)
+        art.fill(QColor(8, 9, 12))
+        with QPainter(art) as painter:
+            painter.fillRect(0, 55, 100, 35, QColor(181, 112, 59))
+            painter.fillRect(0, 90, 100, 10, QColor(226, 184, 43))
+        visual.album_art = art
+        visual.album_color = QColor(21, 46, 92)
+        visual.secondary_color = QColor(61, 89, 142)
 
-        visual.set_yaoguang_outer_color("#8C4DFF", notify=False)
-        color = visual._yaoguang_outer_color()
+        palette = visual._solid_album_surface_palette()
+        backdrop = visual._solid_album_background_color()
+        unread = visual._music_lyric_base_text_color()
+        repeat = visual._music_lyric_base_text_color()
 
-        self.assertEqual(visual.yaoguang_outer_color, "#8C4DFF")
-        self.assertGreaterEqual(color.saturation(), 170)
-        self.assertGreater(color.blue(), color.green())
+        self.assertGreater(palette.secondary.red(), palette.secondary.blue() + 60)
+        self.assertGreater(palette.characteristic.red(), palette.characteristic.blue() + 80)
+        self.assertEqual(backdrop.getRgb(), (8, 9, 12, 255))
+        self.assertEqual(unread.getRgb(), (255, 255, 255, 132))
+        self.assertEqual(unread.rgba(), repeat.rgba())
+        composite = MusicSurfaceWindow._composited_color(unread, backdrop)
+        self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(composite, backdrop), 2.0)
 
-        visual.set_yaoguang_outer_color("#F6F6F6", notify=False)
-        fallback = visual._yaoguang_outer_color()
-
-        self.assertGreaterEqual(fallback.saturation(), 170)
-        self.assertNotEqual(fallback.name().upper(), "#F6F6F6")
-
-    def test_yaoguang_outer_color_can_follow_album_color_and_inverse(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.album_color = QColor(36, 186, 118)
-        visual.yaoguang_outer_color = "#6C35F2"
-        visual.yaoguang_color_source = "album"
-        visual.yaoguang_album_inverse_enabled = False
-
-        album_color = visual._yaoguang_outer_color()
-
-        self.assertGreater(album_color.green(), album_color.blue())
-        self.assertGreater(album_color.saturation(), 170)
-
-        visual.yaoguang_album_inverse_enabled = True
-        inverse = visual._yaoguang_outer_color()
-        album_hue = QColor(36, 186, 118).getHsvF()[0]
-        inverse_hue = inverse.getHsvF()[0]
-        expected_hue = (album_hue + 0.5) % 1.0
-        hue_distance = abs(inverse_hue - expected_hue)
-        hue_distance = min(hue_distance, 1.0 - hue_distance)
-
-        self.assertLess(hue_distance, 0.08)
-        self.assertGreater(inverse.red(), inverse.green())
-
-    def test_yaoguang_background_renders_blurred_layered_rectangles_without_white_center(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.yaoguang_outer_color = "#6C35F2"
-        visual.yaoguang_blur_strength = 58
-        visual._edge_notch_active = lambda: False
-
-        image = QImage(360, 130, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-        rect = QRectF(20.0, 18.0, 320.0, 96.0)
-        visual._paint_yaoguang_music_background(painter, rect, 30.0, expanded=True)
-        painter.end()
-
-        def luma(color: QColor) -> float:
-            return color.red() * 0.2126 + color.green() * 0.7152 + color.blue() * 0.0722
-
-        center = image.pixelColor(180, 66)
-        selected_layer = image.pixelColor(48, 66)
-        top_edge = image.pixelColor(180, 21)
-        bottom_edge = image.pixelColor(180, 111)
-
-        self.assertGreater(luma(center), 160.0)
-        self.assertLess(max(center.red(), center.green(), center.blue()), 246)
-        self.assertGreater(center.blue(), center.green())
-        self.assertGreater(selected_layer.blue(), selected_layer.green())
-        self.assertLess(luma(top_edge), 42.0)
-        self.assertLess(luma(bottom_edge), 42.0)
-
-    def test_yaoguang_compact_color_stack_has_even_black_frame_and_equal_height_layers(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.yaoguang_outer_color = "#6C35F2"
-        visual.yaoguang_blur_strength = 0
-        visual._edge_notch_active = lambda: False
-
-        image = QImage(360, 92, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-        rect = QRectF(20.0, 16.0, 320.0, 58.0)
-        visual._paint_yaoguang_music_background(painter, rect, 29.0, expanded=False)
-        painter.end()
-
-        def luma(color: QColor) -> float:
-            return color.red() * 0.2126 + color.green() * 0.7152 + color.blue() * 0.0722
-
-        def is_inner(color: QColor) -> bool:
-            return color.alpha() > 180 and (luma(color) > 48.0 or color.blue() > 58)
-
-        center_x = int(rect.center().x())
-        center_y = int(rect.center().y())
-        top_margin = next(y - int(rect.top()) for y in range(int(rect.top()), int(rect.bottom())) if is_inner(image.pixelColor(center_x, y)))
-        left_margin = next(x - int(rect.left()) for x in range(int(rect.left()), int(rect.right())) if is_inner(image.pixelColor(x, center_y)))
-        bottom_margin = next(int(rect.bottom()) - y for y in range(int(rect.bottom()) - 1, int(rect.top()), -1) if is_inner(image.pixelColor(center_x, y)))
-        right_margin = next(int(rect.right()) - x for x in range(int(rect.right()) - 1, int(rect.left()), -1) if is_inner(image.pixelColor(x, center_y)))
-
-        self.assertAlmostEqual(top_margin, left_margin, delta=2)
-        self.assertAlmostEqual(top_margin, bottom_margin, delta=2)
-        self.assertAlmostEqual(left_margin, right_margin, delta=2)
-
-        inner_top = int(rect.top()) + top_margin + 2
-        upper_center = image.pixelColor(center_x, inner_top)
-        middle_center = image.pixelColor(center_x, center_y)
-
-        self.assertGreater(luma(upper_center), 150.0)
-        self.assertLess(abs(luma(upper_center) - luma(middle_center)), 34.0)
-
-    def test_yaoguang_blur_affects_inner_color_without_softening_outer_black_frame(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.yaoguang_outer_color = "#6C35F2"
-        visual.yaoguang_blur_strength = 100
-        visual._edge_notch_active = lambda: False
-
-        image = QImage(360, 130, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-        rect = QRectF(20.0, 18.0, 320.0, 96.0)
-        visual._paint_yaoguang_music_background(painter, rect, 30.0, expanded=True)
-        painter.end()
-
-        def luma(color: QColor) -> float:
-            return color.red() * 0.2126 + color.green() * 0.7152 + color.blue() * 0.0722
-
-        frame_samples = (
-            image.pixelColor(int(rect.center().x()), int(rect.top()) + 6),
-            image.pixelColor(int(rect.center().x()), int(rect.bottom()) - 6),
-            image.pixelColor(int(rect.left()) + 6, int(rect.center().y())),
-            image.pixelColor(int(rect.right()) - 6, int(rect.center().y())),
+    def test_solid_album_keeps_a_single_role_color_across_island_shell(self):
+        visual = self._reactive_music_background_visual(
+            "solid_album", response=self._music_reactive_response(), bands=(0.0, 0.0, 0.0),
         )
+        art = QImage(100, 100, QImage.Format.Format_RGB32)
+        art.fill(QColor(8, 9, 12))
+        with QPainter(art) as painter:
+            painter.fillRect(0, 55, 100, 45, QColor(181, 112, 59))
+        visual.album_art = art
+        image = self._paint_music_background_image(visual)
+        samples = [image.pixelColor(x, 48) for x in (45, 160, 255)]
 
-        for color in frame_samples:
-            self.assertLess(luma(color), 20.0)
-            self.assertLess(color.blue(), 28)
+        self.assertTrue(all(color.getRgb() == (8, 9, 12, 255) for color in samples))
 
-    def test_yaoguang_blur_strength_controls_layer_softness(self):
-        def render_inner_layer_edge_contrast(strength: int) -> float:
-            visual = IslandStackVisual.__new__(IslandStackVisual)
-            visual.yaoguang_outer_color = "#6C35F2"
-            visual.yaoguang_blur_strength = strength
-            visual._edge_notch_active = lambda: False
-            image = QImage(360, 92, QImage.Format.Format_ARGB32)
-            image.fill(QColor(0, 0, 0, 0))
-            painter = QPainter(image)
-            visual._paint_yaoguang_music_background(painter, QRectF(20.0, 16.0, 320.0, 58.0), 29.0, expanded=False)
-            painter.end()
-            left = image.pixelColor(50, 45)
-            right = image.pixelColor(60, 45)
-
-            def luma(color: QColor) -> float:
-                return color.red() * 0.2126 + color.green() * 0.7152 + color.blue() * 0.0722
-
-            return abs(luma(right) - luma(left))
-
-        low_blur_contrast = render_inner_layer_edge_contrast(0)
-        high_blur_contrast = render_inner_layer_edge_contrast(100)
-
-        self.assertLess(high_blur_contrast, low_blur_contrast - 20.0)
-
-    def test_yaoguang_blur_uses_vector_soft_layers_instead_of_scaled_bitmap(self):
-        source = inspect.getsource(IslandStackVisual._paint_yaoguang_music_background)
-
-        self.assertNotIn(".scaled(", source)
-        self.assertIn("_paint_yaoguang_soft_rect", source)
-
-    def test_yaoguang_compact_cover_splits_album_area_from_lyric_capsule(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.location_mode = "free"
-        visual.lyric_flow_style = "wave_stream"
-        visual.compact_lyric_show_cover = True
-
-        rect = QRectF(20.0, 16.0, 360.0, 58.0)
-        cover = visual._yaoguang_compact_cover_rect(rect)
-        capsule = visual._yaoguang_compact_background_rect(rect)
-
-        self.assertLessEqual(cover.left(), rect.left() + 10.0)
-        self.assertGreaterEqual(capsule.left() - cover.right(), 16.0)
-        self.assertLess(capsule.width(), rect.width() - cover.width())
-
-        visual.compact_lyric_show_cover = False
-        no_cover_capsule = visual._yaoguang_compact_background_rect(rect)
-
-        self.assertAlmostEqual(no_cover_capsule.left(), rect.left(), delta=0.1)
-        self.assertGreater(no_cover_capsule.width(), capsule.width() + cover.width())
-
-    def test_yaoguang_compact_black_capsule_frame_masks_scrolling_lyrics(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.music_ambience_style = "yaoguang"
-        visual.yaoguang_outer_color = "#4CC6D8"
-        visual.yaoguang_blur_strength = 58
-        visual.compact_lyric_show_cover = True
-        visual.lyric_flow_style = "wave_stream"
-        visual.location_mode = "free"
-        visual.expanded = False
-        visual._taskbar_compact_active = lambda: False
-        visual._taskbar_edge_compact_active = lambda: False
-        visual._paint_music_surface_transition_wash = lambda *_args: None
-        visual._paint_music_border = lambda *_args: None
-
-        rect = QRectF(16.0, 16.0, 320.0, 48.0)
-        capsule = visual._yaoguang_compact_background_rect(rect)
-        frame = visual._yaoguang_frame_width(capsule, expanded=False)
-        probe = QPoint(int(round(capsule.left() + frame * 0.48)), int(round(capsule.center().y())))
-
-        def paint_over_frame(painter: QPainter, _rect: QRectF):
-            painter.fillRect(QRectF(probe.x() - 2, probe.y() - 2, 4, 4), QColor(255, 0, 0, 255))
-
-        visual._paint_music_compact = paint_over_frame
-        image = QImage(380, 86, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_music(painter, rect, expanded=False)
-        painter.end()
-
-        masked = image.pixelColor(probe)
-        self.assertLess(masked.red(), 32)
-        self.assertLess(masked.green(), 24)
-        self.assertLess(masked.blue(), 32)
-
-    def test_yaoguang_compact_lyric_viewport_clips_to_inner_color_capsule(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.music_ambience_style = "yaoguang"
-        visual.lyric_flow_style = "wave_stream"
-        visual.compact_lyric_show_cover = True
-        visual.location_mode = "free"
-        visual.expanded = False
-        visual.lyrics = ["current lyric"]
-        visual.lyric_index = 0
-        visual._taskbar_cover_only_music_active = lambda _rect: False
-        visual._empty_music_text_active = lambda: False
-        visual._should_paint_album_island = lambda: False
-        visual._has_current_two_line_lyric = lambda: False
-        visual._taskbar_compact_active = lambda: False
-        visual._taskbar_edge_compact_active = lambda: False
-        visual._effective_music_ambience_style = lambda: "yaoguang"
-        visual._paint_cover = lambda *_args, **_kwargs: None
-        visual._paint_taskbar_music_hover_overlay = lambda *_args, **_kwargs: None
-        visual._compact_lyric_lines = lambda: ["current lyric"]
-        visual._lyric_phase = lambda _now: {"progress": 0.5, "confidence": 1.0}
-        visual._compact_primary_lyric_font_size = lambda: 18
-        visual._lyric_display_lines = lambda text: [str(text)]
-        visual._music_lyric_base_text_color = lambda alpha=132: QColor(0, 0, 0, alpha)
-        visual._music_lyric_text_color = lambda alpha=246: QColor(0, 0, 0, alpha)
-
-        rect = QRectF(16.0, 16.0, 320.0, 48.0)
-        capsule = visual._yaoguang_compact_background_rect(rect)
-        frame = visual._yaoguang_frame_width(capsule, expanded=False)
-        probe = QPoint(int(capsule.center().x()), int(capsule.top() + frame * 0.45))
-
-        def paint_leaking_transition(painter: QPainter, *_args, **_kwargs):
-            painter.fillRect(QRectF(probe.x() - 2, probe.y() - 2, 4, 4), QColor(255, 0, 0, 255))
-
-        visual._paint_live_lyric_text = paint_leaking_transition
-        image = QImage(380, 86, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_music_compact(painter, rect)
-        painter.end()
-
-        masked = image.pixelColor(probe)
-        self.assertLess(masked.red(), 32)
-
-    def test_yaoguang_compact_dual_line_lyrics_keep_inner_vertical_inset(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.music_ambience_style = "yaoguang"
-        visual.lyric_flow_style = "wave_stream"
-        visual.compact_lyric_show_cover = True
-        visual.location_mode = "free"
-        visual.expanded = False
-        visual.lyrics = ["And die with a smile\n满怀笑意就此逝去"]
-        visual.lyric_index = 0
-        visual.prev_lyric_index = 0
-        visual.lyric_font_size = 18
-        visual.dual_line_font_size = 12
-        visual.dual_line_secondary_weight = 72
-        visual.dual_line_secondary_spacing = 100
-        visual.font_shrink_scale = 1.0
-        visual.wave_font_weight = "bold"
-        visual.high_quality_font_rendering = False
-        visual._lyric_layout_cache = {}
-        visual._taskbar_cover_only_music_active = lambda _rect: False
-        visual._empty_music_text_active = lambda: False
-        visual._should_paint_album_island = lambda: False
-        visual._has_current_two_line_lyric = lambda: True
-        visual._taskbar_compact_active = lambda: False
-        visual._taskbar_edge_compact_active = lambda: False
-        visual._effective_music_ambience_style = lambda: "yaoguang"
-        visual._paint_cover = lambda *_args, **_kwargs: None
-        visual._paint_taskbar_music_hover_overlay = lambda *_args, **_kwargs: None
-        visual._compact_lyric_lines = lambda: visual.lyrics
-        visual._lyric_phase = lambda _now: {"progress": 0.5, "confidence": 1.0}
-        visual._lyric_display_lines = lambda text: [line.strip() for line in str(text).splitlines() if line.strip()]
-        visual._music_lyric_base_text_color = lambda alpha=132: QColor(0, 0, 0, alpha)
-        visual._music_lyric_text_color = lambda alpha=246: QColor(0, 0, 0, alpha)
-        lyric_rows = []
-
-        def capture_lyric_row(_painter, row_rect: QRectF, text: str, size: float, *_args, **_kwargs):
-            lyric_rows.append((QRectF(row_rect), text, size))
-
-        visual._paint_live_lyric_text = capture_lyric_row
-
-        rect = QRectF(0.0, 0.0, 390.0, 80.0)
-        inner = visual._yaoguang_compact_inner_rect(rect)
-        image = QImage(430, 110, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_music_compact(painter, rect)
-        painter.end()
-
-        self.assertEqual(len(lyric_rows), 2)
-        self.assertGreaterEqual(lyric_rows[0][0].top() - inner.top(), 4.0)
-        self.assertGreaterEqual(inner.bottom() - lyric_rows[1][0].bottom(), 4.0)
-
-    def test_yaoguang_wave_dual_line_rows_use_fuller_sizes(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.music_ambience_style = "yaoguang"
-        visual.lyric_font_size = 18
-        visual.dual_line_font_size = 12
-        visual.wave_font_weight = "bold"
-        visual.font_shrink_scale = 1.0
-        visual.high_quality_font_rendering = False
-        visual._effective_music_ambience_style = lambda: "yaoguang"
-        visual._top_notch_height_mode_active = lambda _mode: False
-
-        first, second, primary_size, secondary_size = visual._compact_dual_line_lyric_rows(
-            QRectF(0.0, 0.0, 280.0, 52.0),
-            compact_size=16,
-            secondary_bold=False,
+    def test_solid_album_reactive_light_stays_with_artwork_roles_not_provider_blue(self):
+        visual = self._reactive_music_background_visual(
+            "solid_album",
+            response=self._music_reactive_response(
+                energy=0.9, solid_accent_alpha=1.0, solid_accent_lightness=0.8,
+                side_wave_height=0.7, surface_glow=0.7,
+            ),
+            bands=(0.9, 0.8, 0.7),
         )
+        art = QImage(100, 100, QImage.Format.Format_RGB32)
+        art.fill(QColor(8, 9, 12))
+        with QPainter(art) as painter:
+            painter.fillRect(0, 55, 100, 35, QColor(181, 112, 59))
+            painter.fillRect(0, 90, 100, 10, QColor(226, 184, 43))
+        visual.album_art = art
+        # The host's provider swatches are deliberately blue/pink. The solid
+        # style must use the artwork's shadow/warm companion even in motion.
+        image = self._paint_music_background_image(visual)
+        for x in (42, 75, 160, 245, 258):
+            sample = image.pixelColor(x, 48)
+            self.assertEqual(sample.getRgb(), (8, 9, 12, 255))
 
-        self.assertEqual(primary_size, 16)
-        self.assertGreaterEqual(secondary_size, 13)
-        self.assertLessEqual(second.top() - first.bottom(), 1.5)
+        visual.album_art.fill(QColor(210, 210, 210))
+        monochrome = self._paint_music_background_image(visual)
+        for x in (42, 75, 160, 245, 258):
+            sample = monochrome.pixelColor(x, 48)
+            self.assertLessEqual(max(sample.red(), sample.green(), sample.blue()) - min(sample.red(), sample.green(), sample.blue()), 2)
 
-    def test_yaoguang_spacious_height_mode_expands_non_tasker_compact_height_only(self):
+    def test_solid_album_palette_does_not_change_other_island_lyric_styles(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "yaoguang"
-        visual.lyric_flow_style = "wave_stream"
-        visual.lyrics = ["single line"]
-        visual._has_current_two_line_lyric = lambda: False
-        visual._taskbar_compact_active = lambda: False
-        visual._should_paint_album_island = lambda: False
-
-        visual.yaoguang_height_mode = "regular"
-        regular = visual._compact_music_content_height_raw()
-        visual.yaoguang_height_mode = "spacious"
-        spacious = visual._compact_music_content_height_raw()
-
-        self.assertGreater(spacious, regular)
-        self.assertEqual(spacious - regular, 10.0)
-
-        visual._taskbar_compact_active = lambda: True
-        self.assertEqual(visual._compact_music_content_height_raw(), regular)
-
-    def test_yaoguang_tasker_inner_radius_tracks_taskbar_corner_radius(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual.location_mode = "tasker"
-        visual.taskbar_corner_style = "win11"
-        visual._taskbar_height = lambda: 44.0
-        rect = QRectF(0.0, 0.0, 320.0, 44.0)
-        radius = visual._music_shell_radius(rect, expanded=False)
-
-        self.assertEqual(visual._yaoguang_layer_radius(rect, radius, 0.0), radius)
-
-    def test_yaoguang_background_uses_black_text_like_light_background(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "yaoguang"
-
-        self.assertEqual(visual._music_lyric_text_color().getRgb()[:3], (0, 0, 0))
-        self.assertEqual(visual._music_lyric_base_text_color().getRgb()[:3], (0, 0, 0))
-        self.assertEqual(visual._music_control_icon_color().getRgb()[:3], (0, 0, 0))
+        visual.album_color = QColor(204, 50, 54)
+        for style, expected in (
+            ("sea_level", (255, 255, 255)),
+            ("pure_black", (255, 255, 255)),
+            ("pure_white", (0, 0, 0)),
+        ):
+            visual.music_ambience_style = style
+            visual._music_system_dark = style != "pure_white"
+            self.assertEqual(visual._music_lyric_base_text_color().getRgb()[:3], expected)
 
     def test_ember_scroll_line_starts_at_left_edge_and_advances_by_line_progress(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -12504,14 +12909,14 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertFalse(visual._active_lyric_color_fill_enabled())
 
         visual.set_music_ambience_style("duotone_full", notify=False)
-        self.assertEqual(visual.music_ambience_style, "duotone_full")
+        self.assertEqual(visual.music_ambience_style, "sea_level")
         self.assertFalse(visual._active_lyric_color_fill_enabled())
 
-        visual.set_music_ambience_style("yaoguang", notify=False)
-        self.assertEqual(visual.music_ambience_style, "yaoguang")
+        visual.set_music_ambience_style("solid_album", notify=False)
+        self.assertEqual(visual.music_ambience_style, "solid_album")
         self.assertFalse(visual._active_lyric_color_fill_enabled())
 
-    def test_color_fill_switches_preserve_intent_on_temporarily_conflicting_ambience(self):
+    def test_legacy_gelv_and_ember_color_fill_settings_stay_inactive(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.album_color = QColor(80, 120, 170)
         visual.music_ambience_style = "sea_level"
@@ -12526,7 +12931,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.gelv_color_fill_enabled)
         self.assertFalse(visual._active_lyric_color_fill_enabled())
         visual.music_ambience_style = "pure_black"
-        self.assertTrue(visual._active_lyric_color_fill_enabled())
+        self.assertFalse(visual._active_lyric_color_fill_enabled())
 
         visual.lyric_flow_style = "wave_stream"
         visual.music_ambience_style = "sea_level"
@@ -12536,7 +12941,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.wave_color_fill_enabled)
         self.assertFalse(visual._active_lyric_color_fill_enabled())
         visual.music_ambience_style = "pure_black"
-        self.assertTrue(visual._active_lyric_color_fill_enabled())
+        self.assertFalse(visual._active_lyric_color_fill_enabled())
 
         visual.lyric_flow_style = "ember_fade"
         visual.music_ambience_style = "sea_level"
@@ -12546,41 +12951,18 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.ember_color_fill_enabled)
         self.assertFalse(visual._active_lyric_color_fill_enabled())
         visual.music_ambience_style = "pure_black"
-        self.assertTrue(visual._active_lyric_color_fill_enabled())
+        self.assertFalse(visual._active_lyric_color_fill_enabled())
 
-    def test_bilateral_diffraction_background_is_used_for_color_fill(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.lyric_flow_style = "gelv_songscatter"
-        visual.gelv_color_fill_enabled = True
-        visual.music_ambience_style = "bilateral_diffraction"
-        calls = []
-        visual._paint_bilateral_diffraction_ambience = lambda *_args: calls.append("diffraction")
-        visual._paint_music_glass_body = lambda *_args: calls.append("shell")
-        visual._paint_bottom_ambience = lambda *_args: calls.append("ambience")
-        visual._paint_music_blur_mask = lambda *_args: calls.append("blur")
-        visual._paint_music_light_wave = lambda *_args: calls.append("wave")
-        visual._paint_music_compact = lambda *_args: calls.append("compact")
-        visual._paint_music_border = lambda *_args: calls.append("border")
-        image = QImage(320, 90, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_music(painter, QRectF(20.0, 20.0, 240.0, 48.0), False)
-        painter.end()
-
-        self.assertEqual(calls, ["diffraction", "compact", "border"])
-
-    def test_music_surface_paint_plan_order_drives_bilateral_diffraction_adapter(self):
+    def test_music_surface_paint_plan_orders_solid_album_background_before_content(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual._u = lambda value: float(value)
         visual._taskbar_compact_active = lambda: False
-        visual._effective_music_ambience_style = lambda: "bilateral_diffraction"
+        visual._effective_music_ambience_style = lambda: "solid_album"
         visual._normalize_music_expanded_layout_style = lambda style: str(style)
         visual._active_lyric_color_fill_paints_background = lambda _style=None: False
         visual.music_expanded_layout_style = "standard"
         calls = []
-        visual._paint_pure_black_music_background = lambda *_args: calls.append("black")
-        visual._paint_bilateral_diffraction_ambience = lambda *_args: calls.append("diffraction")
+        visual._paint_solid_album_music_background = lambda *_args: calls.append("solid")
         visual._paint_music_reactive_background_overlay = lambda *_args: calls.append("reactive")
         visual._paint_music_surface_transition_wash = lambda *_args: calls.append("transition")
         visual._paint_music_compact = lambda *_args: calls.append("compact")
@@ -12588,19 +12970,18 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         visual._paint_music(None, QRectF(20.0, 20.0, 240.0, 48.0), False)
 
-        self.assertEqual(calls, ["black", "diffraction", "reactive", "transition", "compact", "border"])
+        self.assertEqual(calls, ["solid", "reactive", "transition", "compact", "border"])
 
     def test_music_surface_paint_records_step_diagnostics(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual._u = lambda value: float(value)
         visual._taskbar_compact_active = lambda: False
-        visual._effective_music_ambience_style = lambda: "bilateral_diffraction"
+        visual._effective_music_ambience_style = lambda: "solid_album"
         visual._normalize_music_expanded_layout_style = lambda style: str(style)
         visual._active_lyric_color_fill_paints_background = lambda _style=None: False
         visual.music_expanded_layout_style = "standard"
         calls = []
-        visual._paint_pure_black_music_background = lambda *_args: calls.append("black")
-        visual._paint_bilateral_diffraction_ambience = lambda *_args: calls.append("diffraction")
+        visual._paint_solid_album_music_background = lambda *_args: calls.append("solid")
         visual._paint_music_reactive_background_overlay = lambda *_args: calls.append("reactive")
         visual._paint_music_surface_transition_wash = lambda *_args: calls.append("transition")
         visual._paint_music_compact = lambda *_args: calls.append("compact")
@@ -12610,11 +12991,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             visual._paint_music(None, QRectF(20.0, 20.0, 240.0, 48.0), False)
         diagnostics = visual._visual_paint_section_diagnostics_summary()
 
-        self.assertEqual(calls, ["black", "diffraction", "reactive", "transition", "compact", "border"])
+        self.assertEqual(calls, ["solid", "reactive", "transition", "compact", "border"])
         self.assertIn("music.total", diagnostics["sections"])
         for section in (
-            "music.pure_black_background",
-            "music.bilateral_diffraction_ambience",
+            "music.solid_album_background",
             "music.reactive_overlay",
             "music.surface_transition",
             "music.compact_content",
@@ -12625,25 +13005,30 @@ class IslandStackVisualMessageTests(unittest.TestCase):
                 self.assertEqual(diagnostics["sections"][section]["sample_count"], 1)
         self.assertGreater(diagnostics["sections"]["music.total"]["last_ms"], 0.0)
 
-    def test_music_surface_paint_plan_order_keeps_yaoguang_compact_frame_after_content(self):
+    def test_removed_music_styles_fall_back_before_building_paint_plan(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual._u = lambda value: float(value)
         visual._taskbar_compact_active = lambda: False
-        visual._effective_music_ambience_style = lambda: "yaoguang"
         visual._normalize_music_expanded_layout_style = lambda style: str(style)
         visual._active_lyric_color_fill_paints_background = lambda _style=None: False
         visual.music_expanded_layout_style = "standard"
         calls = []
-        visual._paint_yaoguang_compact_music_background = lambda *_args: calls.append("yaoguang")
+        visual._paint_music_glass_body = lambda *_args: calls.append("glass")
+        visual._paint_bottom_ambience = lambda *_args: calls.append("ambience")
+        visual._paint_music_blur_mask = lambda *_args: calls.append("blur")
+        visual._paint_music_light_wave = lambda *_args: calls.append("wave")
         visual._paint_music_reactive_background_overlay = lambda *_args: calls.append("reactive")
         visual._paint_music_surface_transition_wash = lambda *_args: calls.append("transition")
         visual._paint_music_compact = lambda *_args: calls.append("compact")
-        visual._paint_yaoguang_compact_frame_overlay = lambda *_args: calls.append("frame")
         visual._paint_music_border = lambda *_args: calls.append("border")
 
-        visual._paint_music(None, QRectF(20.0, 20.0, 240.0, 48.0), False)
-
-        self.assertEqual(calls, ["yaoguang", "reactive", "transition", "compact", "frame", "border"])
+        for style in ("yaoguang", "bilateral_diffraction"):
+            with self.subTest(style=style):
+                visual.music_ambience_style = style
+                calls.clear()
+                self.assertEqual(visual._effective_music_ambience_style(), "sea_level")
+                visual._paint_music(None, QRectF(20.0, 20.0, 240.0, 48.0), False)
+                self.assertEqual(calls, ["glass", "ambience", "blur", "wave", "reactive", "transition", "compact", "border"])
 
     def test_music_surface_paint_plan_order_keeps_dual_panel_isolated(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -12664,60 +13049,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertEqual(calls, ["dual", "expanded", "border"])
 
-    def test_compact_bilateral_diffraction_uses_circular_rings(self):
-        class FakePainter:
-            def __init__(self):
-                self.arc_rects = []
-
-            def save(self):
-                pass
-
-            def restore(self):
-                pass
-
-            def setClipPath(self, *_args):
-                pass
-
-            def setPen(self, *_args):
-                pass
-
-            def setBrush(self, *_args):
-                pass
-
-            def fillRect(self, *_args):
-                pass
-
-            def translate(self, *_args):
-                pass
-
-            def scale(self, *_args):
-                pass
-
-            def drawEllipse(self, *_args):
-                pass
-
-            def drawArc(self, rect, *_args):
-                self.arc_rects.append(QRectF(rect))
-
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.lyric_flow_style = "wave_stream"
-        visual.wave_color_fill_enabled = True
-        visual.album_color = QColor(22, 188, 255)
-        visual.secondary_color = QColor(255, 58, 148)
-        visual.current_audio_bands = (0.24, 0.32, 0.18)
-        visual.ambient_intensity = 0.0
-        visual.music_flow_intensity = 0.74
-        visual.media_is_playing = True
-        visual.wave_values = [0.25] * 36
-        visual.ambient_phase = 0.0
-        painter = FakePainter()
-
-        visual._paint_bilateral_diffraction_ambience(painter, QRectF(20.0, 20.0, 240.0, 48.0), 24.0, False)
-
-        self.assertTrue(painter.arc_rects)
-        self.assertEqual(len(painter.arc_rects), 14)
-        for rect in painter.arc_rects:
-            self.assertAlmostEqual(rect.width(), rect.height(), delta=0.01)
 
     def test_finder_time_side_alert_keeps_own_background_instead_of_material_replacement(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -15457,7 +15788,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         painter.end()
 
         save = visual.plugin_action_rects["alarm-editor-save"]
-        pixel = image.pixelColor(save.center().toPoint())
+        # The center contains the dark “确定” glyph; sample the button fill.
+        pixel = image.pixelColor(QPoint(round(save.left() + save.width() * 0.2), round(save.center().y())))
         self.assertGreater(pixel.red(), 210)
         self.assertGreater(pixel.green(), 150)
         self.assertLess(pixel.blue(), 60)

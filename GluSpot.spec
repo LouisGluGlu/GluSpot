@@ -1,16 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 
 ROOT = Path(SPECPATH)
-APP_VERSION = "6.402"
+APP_VERSION = "6.412"
+AIRPLAY_EXE = ROOT / "build" / "native-airplay" / "GluSpotAirPlay.exe"
+AIRPLAY_LICENSES = AIRPLAY_EXE.parent / "licenses"
+DISCOVERY_LICENSES = ROOT / "build" / "audio-licenses"
+if not AIRPLAY_EXE.is_file() or not AIRPLAY_LICENSES.is_dir():
+    raise RuntimeError("Build the AirPlay helper with packaging/windows/build-airplay.ps1 before packaging")
+if not (DISCOVERY_LICENSES / "SOURCE.json").is_file():
+    raise RuntimeError("Run packaging/windows/prepare-audio-licenses.py before packaging")
 
 datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "data"), "data"),
     (str(ROOT / "lyrics"), "lyrics"),
+    (str(AIRPLAY_LICENSES), "native/licenses"),
+    (str(DISCOVERY_LICENSES), "licenses/audio-discovery"),
 ]
+datas += collect_data_files("ToJyutping") + copy_metadata("ToJyutping")
+datas += collect_data_files("zeroconf") + copy_metadata("zeroconf") + copy_metadata("ifaddr")
 
 hiddenimports = [
     "winsdk.windows.media.control",
@@ -20,21 +32,32 @@ hiddenimports = [
     "pywinauto",
     "uiautomation",
     "PIL",
+    "ToJyutping",
+    "zeroconf",
+    "ifaddr",
 ]
 
 a = Analysis(
     [str(ROOT / "local" / "main.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=[(str(AIRPLAY_EXE), "native")],
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=[str(ROOT / "packaging" / "windows" / "hooks")],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(ROOT / "packaging" / "windows" / "runtime_qt_dlls.py")],
     excludes=[],
     noarchive=False,
     optimize=0,
 )
+# Qt6Core.dll imports the unversioned Windows ICU API (for example ucnv_open).
+# PyInstaller can pick up Poppler's versioned ICU from the build host's PATH;
+# placing that icuuc.dll beside the app makes the Windows loader select it first.
+# Let Qt use the compatible Windows system ICU instead.
+a.binaries = [
+    entry for entry in a.binaries
+    if Path(entry[0]).name.lower() not in {"icuuc.dll", "icudt78.dll"}
+]
 pyz = PYZ(a.pure)
 
 exe = EXE(

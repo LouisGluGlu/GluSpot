@@ -955,11 +955,17 @@ def media_visual_track_changed(
     previous_track_id: object,
     same_visible_track: bool,
     message_refresh: bool,
+    same_media_generation: bool = True,
 ) -> bool:
     changed = bool(initial) or str(incoming_track_id or "") != str(previous_track_id or "")
     if not changed:
         return False
-    if not bool(initial) and bool(message_refresh) and bool(same_visible_track):
+    if (
+        not bool(initial)
+        and bool(message_refresh)
+        and bool(same_visible_track)
+        and bool(same_media_generation)
+    ):
         return False
     return True
 

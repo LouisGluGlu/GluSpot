@@ -5,8 +5,17 @@ import random
 import threading
 import time
 import warnings
+from collections import deque
 
 from api.models import AudioFrame
+
+
+CAPTURE_SAMPLE_RATE = 44100
+CAPTURE_READ_FRAMES = 1024
+CAPTURE_BUFFER_FRAMES = 4096
+OUTPUT_CHECK_INTERVAL_SECONDS = 2.0
+DISCONTINUITY_WINDOW_SECONDS = 2.0
+DISCONTINUITY_LIMIT = 3
 
 
 class LiveAudioAnalyzer:
@@ -19,6 +28,12 @@ class LiveAudioAnalyzer:
         self._last_real_frame_at = 0.0
         self._started_at = time.monotonic()
         self._smooth = [0.22, 0.20, 0.14]
+        self._stop_event = threading.Event()
+        self._capture_active = False
+        self._capture_device_id = ""
+        self._suspended_device_id = ""
+        self._capture_discontinuities = 0
+        self._capture_restarts = 0
         self._start_capture()
 
     def get_frame(self, is_playing: bool = True, position_seconds: float = 0.0) -> AudioFrame:
@@ -36,10 +51,19 @@ class LiveAudioAnalyzer:
             "has_recent_frame": self._has_recent_real_frame(),
             "last_real_frame_age": round(time.monotonic() - self._last_real_frame_at, 3) if self._last_real_frame_at else None,
             "last_error": self._last_error,
+            "capture_active": bool(getattr(self, "_capture_active", False)),
+            "capture_device_id": str(getattr(self, "_capture_device_id", "")),
+            "suspended_device_id": str(getattr(self, "_suspended_device_id", "")),
+            "capture_discontinuities": int(getattr(self, "_capture_discontinuities", 0)),
+            "capture_restarts": int(getattr(self, "_capture_restarts", 0)),
+            "capture_buffer_frames": CAPTURE_BUFFER_FRAMES,
         }
 
     def stop(self):
         self._running = False
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None:
+            stop_event.set()
         if self._status != "unavailable":
             self._status = "stopped"
         thread = self._thread
@@ -61,22 +85,111 @@ class LiveAudioAnalyzer:
             except Exception:
                 SoundcardRuntimeWarning = RuntimeWarning
 
-            speaker = sc.default_speaker()
-            block_size = 1024
-            self._status = "capturing"
-            with sc.get_microphone(id=str(speaker.name), include_loopback=True).recorder(samplerate=44100, channels=2) as recorder:
-                while self._running:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning, message="data discontinuity.*")
-                        block = recorder.record(numframes=block_size)
-                    frame = self._analyze_block(block, 44100, np)
-                    if frame is not None:
-                        self._frame = frame
-                        self._last_real_frame_at = time.monotonic()
+            while self._running:
+                speaker = sc.default_speaker()
+                endpoint_id = speaker.id
+                self._capture_device_id = str(endpoint_id)
+                if str(getattr(self, "_suspended_device_id", "")) == str(endpoint_id):
+                    self._wait_for_output_change(sc, endpoint_id)
+                    continue
+                # Match the render endpoint by its unique WASAPI ID. A headset's
+                # output and real microphone can share a friendly name; selecting
+                # by name may open the microphone and switch Bluetooth to hands-free.
+                loopback = sc.get_microphone(id=endpoint_id, include_loopback=True)
+                if not getattr(loopback, "isloopback", False):
+                    raise RuntimeError("default speaker did not resolve to a loopback endpoint")
+                try:
+                    self._capture_endpoint(sc, loopback, endpoint_id, SoundcardRuntimeWarning, np)
+                except Exception as exc:
+                    if not self._running:
+                        break
+                    self._suspend_capture(endpoint_id, str(exc))
+                finally:
+                    self._capture_active = False
+                if self._running and str(getattr(self, "_suspended_device_id", "")) == str(endpoint_id):
+                    # An optional visualizer must not keep opening a failing
+                    # Bluetooth endpoint every provider retry. Remain on its
+                    # existing visual fallback until the output actually changes.
+                    self._wait_for_output_change(sc, endpoint_id)
+                if self._running:
+                    self._capture_restarts = int(getattr(self, "_capture_restarts", 0)) + 1
         except Exception as exc:
             self._last_error = str(exc)
             self._status = "unavailable"
             self._running = False
+
+    def _capture_endpoint(self, sc, loopback, endpoint_id, warning_type, np):
+        recent_discontinuities: deque[float] = deque()
+        next_output_check = time.monotonic() + OUTPUT_CHECK_INTERVAL_SECONDS
+        # This is a background meter, not a low-latency audio client. Soundcard's
+        # default buffer is a device period (often about 10 ms); give capture
+        # roughly 93 ms of headroom without changing its 1024-frame reads.
+        with loopback.recorder(
+            samplerate=CAPTURE_SAMPLE_RATE,
+            channels=2,
+            blocksize=CAPTURE_BUFFER_FRAMES,
+            exclusive_mode=False,
+        ) as recorder:
+            self._capture_active = True
+            self._suspended_device_id = ""
+            self._last_error = ""
+            self._status = "capturing"
+            while self._running:
+                with warnings.catch_warnings(record=True) as captured_warnings:
+                    warnings.filterwarnings("always", category=warning_type, message="data discontinuity.*")
+                    block = recorder.record(numframes=CAPTURE_READ_FRAMES)
+                if not self._running:
+                    break
+                now = time.monotonic()
+                discontinuities = [
+                    item for item in captured_warnings
+                    if issubclass(item.category, warning_type) and str(item.message).startswith("data discontinuity")
+                ]
+                for item in captured_warnings:
+                    if item not in discontinuities:
+                        warnings.warn_explicit(item.message, item.category, item.filename, item.lineno)
+                if discontinuities:
+                    self._capture_discontinuities = int(getattr(self, "_capture_discontinuities", 0)) + len(discontinuities)
+                    recent_discontinuities.extend(now for _item in discontinuities)
+                while recent_discontinuities and now - recent_discontinuities[0] > DISCONTINUITY_WINDOW_SECONDS:
+                    recent_discontinuities.popleft()
+                if len(recent_discontinuities) >= DISCONTINUITY_LIMIT:
+                    self._suspend_capture(endpoint_id, "repeated loopback data discontinuity; live analysis suspended")
+                    break
+                frame = self._analyze_block(block, CAPTURE_SAMPLE_RATE, np)
+                if frame is not None:
+                    self._frame = frame
+                    self._last_real_frame_at = now
+                if now >= next_output_check:
+                    next_output_check = now + OUTPUT_CHECK_INTERVAL_SECONDS
+                    if sc.default_speaker().id != endpoint_id:
+                        # Leave the old context before opening the new endpoint.
+                        self._last_real_frame_at = 0.0
+                        break
+
+    def _suspend_capture(self, endpoint_id, reason: str):
+        self._suspended_device_id = str(endpoint_id)
+        self._status = "suspended"
+        self._last_error = reason
+        self._last_real_frame_at = 0.0
+
+    def _wait_for_output_change(self, sc, endpoint_id):
+        while self._running:
+            stop_event = getattr(self, "_stop_event", None)
+            if stop_event is not None:
+                if stop_event.wait(OUTPUT_CHECK_INTERVAL_SECONDS):
+                    break
+            else:
+                time.sleep(OUTPUT_CHECK_INTERVAL_SECONDS)
+            if not self._running:
+                break
+            try:
+                if sc.default_speaker().id != endpoint_id:
+                    return
+            except Exception:
+                # A disconnected headset can briefly leave no default output.
+                # Enumeration is safe; do not open a stream until it changes.
+                continue
 
     def _analyze_block(self, block, sample_rate: int, np) -> AudioFrame | None:
         data = np.asarray(block, dtype=np.float32)

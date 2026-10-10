@@ -2,7 +2,73 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass
+import math
 from typing import Sequence
+import unicodedata
+
+
+def _spoken_token_count(text: str) -> int:
+    """Count Latin words and CJK graphemes in one source timestamp span."""
+    count = 0
+    in_word = False
+    for index, character in enumerate(str(text)):
+        cjk = (
+            "\u2e80" <= character <= "\u9fff"
+            or "\uf900" <= character <= "\ufaff"
+            or "\u3040" <= character <= "\u30ff"
+            or "\u31f0" <= character <= "\u31ff"
+            or "\u1100" <= character <= "\u11ff"
+            or "\u3130" <= character <= "\u318f"
+            or "\uac00" <= character <= "\ud7af"
+        )
+        if cjk:
+            count += 1
+            in_word = False
+        elif character.isalnum():
+            if not in_word:
+                count += 1
+            in_word = True
+        elif unicodedata.category(character).startswith("M") and in_word:
+            continue
+        elif character in {"'", "’", "-", "‐", "‑"} and in_word and (
+            index + 1 < len(text) and text[index + 1].isalnum()
+        ):
+            continue
+        else:
+            in_word = False
+    return count
+
+
+def genuinely_timed_unit_row(units: Sequence[object]) -> bool:
+    """Require separate source times for every spoken word or CJK grapheme.
+
+    Some enhanced LRC files put a single word marker in front of an entire
+    sentence. That is a usable row anchor, but it cannot certify OBO timing.
+    A single Latin word with an explicit start and end is genuinely timed.
+    A start-only marker has no measured reading duration; its end would have
+    to be guessed from the next lyric row.
+    """
+    starts: list[float] = []
+    ends: list[float | None] = []
+    for unit in units:
+        count = _spoken_token_count(str(getattr(unit, "text", "")))
+        if count > 1:
+            return False
+        if not count:
+            continue
+        try:
+            start = float(getattr(unit, "start_seconds"))
+            end_value = getattr(unit, "end_seconds", None)
+            end = None if end_value is None else float(end_value)
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return False
+        if not math.isfinite(start) or (end is not None and (not math.isfinite(end) or end < start)):
+            return False
+        starts.append(start)
+        ends.append(end)
+    if len(starts) == 1:
+        return ends[0] is not None and ends[0] > starts[0]
+    return bool(starts) and all(starts[index] > starts[index - 1] for index in range(1, len(starts)))
 
 
 @dataclass(frozen=True)
