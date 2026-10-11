@@ -17,6 +17,7 @@ from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_mode_controls import paint_presentation_glyph
 from local.music_source_icons import music_source_icon_image, paint_music_source_icon
+from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop
 from local.playback_entry_window import ENTRY_SOURCES, EntryNavigationButton, MusicSourceButton, _entry_font
 
 
@@ -54,9 +55,10 @@ class _LibraryActionButton(QAbstractButton):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#3d2d32") if self.kind == "logout" and self.underMouse() else QColor("#272a31"))
-            painter.drawRoundedRect(rect, 12, 12)
+            backdrop, source = widget_glass_backdrop(self, rect)
+            paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
+                              tint=QColor("#c04d66") if self.kind == "logout" else None,
+                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
             paint_music_source_icon(painter, rect.adjusted(10, 10, -10, -10), self.kind,
                                      tint=QColor("white") if self.kind == "switch" else None)
             if self.hasFocus():
@@ -77,9 +79,13 @@ class _ModeButton(QAbstractButton):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-            painter.setPen(QPen(QColor("#a8a8a8"), 1.3) if self.hasFocus() else Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#3c404b") if self.underMouse() else QColor("#292c34"))
-            painter.drawRoundedRect(rect, 12, 12)
+            backdrop, source = widget_glass_backdrop(self, rect)
+            paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
+                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
+            if self.hasFocus():
+                painter.setPen(QPen(QColor("#a8a8a8"), 1.3))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(rect, 12, 12)
             side = min(28.0, rect.width() * .65)
             glyph = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2, side, side)
             paint_presentation_glyph(painter, glyph, "windowed" if self.mode == "window" else self.mode,
@@ -128,16 +134,16 @@ class _CollectionCover(QAbstractButton):
             clip = QPainterPath()
             clip.addRoundedRect(rect, 14, 14)
             painter.setClipPath(clip)
-            painter.fillRect(rect, QColor("#252525"))
             if not self.image.isNull():
                 _paint_crop(painter, rect, self.image)
             else:
                 # Clearly branded placeholder, never a fabricated album cover.
                 source = next((item for item in ENTRY_SOURCES if item.source_id == self.source_id), ENTRY_SOURCES[0])
                 accent = QColor(source.color)
-                accent.setAlpha(28)
-                painter.fillRect(rect, QColor("#23262e"))
-                painter.fillRect(rect, accent)
+                backdrop, source_rect = widget_glass_backdrop(self, rect)
+                paint_liquid_glass(painter, rect, radius=14, tint=accent,
+                                  hovered=self.underMouse(), pressed=self.isDown(),
+                                  backdrop=backdrop, backdrop_rect=source_rect, cache_token=(id(self), "face"))
                 side = min(44.0, rect.width() * .36)
                 icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2 - 8, side, side)
                 paint_music_source_icon(painter, icon, source.source_id)
@@ -299,7 +305,9 @@ class MusicLibraryWindow(QWidget):
         self.search.setFont(_entry_font(16))
         search_icon = QPixmap.fromImage(music_source_icon_image("search", QSize(68, 68)))
         search_icon.setDevicePixelRatio(2.0)
-        self.search_button = QPushButton(self.search)
+        self.search_button = GlassPushButton(self.search)
+        self.search_button.setProperty("glassRadius", 15.0)
+        self.search_button.setGlassLight(False)
         self.search_button.setIcon(QIcon(search_icon))
         self.search_button.setIconSize(QSize(22, 22))
         self.search_button.setAccessibleName("搜索歌曲与歌单")

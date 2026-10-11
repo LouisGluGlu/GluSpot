@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from local.ui_theme import app_dark_mode, is_theme_change_event
+from local.liquid_glass import paint_liquid_glass, widget_glass_backdrop
 
 
 class IosSwitch(QWidget):
@@ -104,21 +105,26 @@ class IosSwitch(QWidget):
             bg = QColor(52, 199, 89) if self._checked else (QColor(72, 72, 76) if dark else QColor(209, 209, 214))
         else:
             bg = QColor(70, 70, 74) if dark else QColor(220, 220, 224)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        painter.drawRoundedRect(switch, switch_h / 2.0, switch_h / 2.0)
+        backdrop, source = widget_glass_backdrop(self, switch)
+        paint_liquid_glass(painter, switch, radius=switch_h / 2.0, tint=bg,
+                          light=not dark, hovered=enabled and self.underMouse(),
+                          backdrop=backdrop, backdrop_rect=source,
+                          opacity=1.0 if enabled else .6, cache_token=(id(self), "track"))
 
         knob = switch_h - 4.0
         knob_x = switch.right() - knob - 2.0 if self._checked else switch.left() + 2.0
         knob_rect = QRectF(knob_x, switch.top() + 2.0, knob, knob)
-        painter.setBrush(QColor(255, 255, 255))
-        painter.drawEllipse(knob_rect)
-        painter.setPen(QPen(QColor(0, 0, 0, 18), 1.0))
-        painter.drawEllipse(knob_rect.adjusted(0.5, 0.5, -0.5, -0.5))
+        knob_backdrop, knob_source = widget_glass_backdrop(self, knob_rect)
+        paint_liquid_glass(painter, knob_rect, radius=knob / 2, tint=QColor("white"), light=True,
+                          backdrop=knob_backdrop, backdrop_rect=knob_source,
+                          opacity=1.0 if enabled else .6, cache_token=(id(self), "knob"))
 
         painter.setFont(QFont("Microsoft YaHei UI", 6, QFont.Weight.Bold))
         if enabled:
-            painter.setPen(QColor(255, 255, 255, 215) if self._checked else QColor(116, 116, 120, 190))
+            if dark:
+                painter.setPen(QColor(255, 255, 255, 215) if self._checked else QColor("#c4c4ca"))
+            else:
+                painter.setPen(QColor("#16472c") if self._checked else QColor("#5c5c62"))
         else:
             painter.setPen(QColor(150, 150, 156) if dark else QColor(168, 168, 174))
         state_text = "开" if self._checked else "关"

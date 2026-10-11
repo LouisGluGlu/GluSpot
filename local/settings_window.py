@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from local.ios_widgets import IosSwitch
+from local.liquid_glass import GlassPushButton
 from local.branding import APP_NAME, install_custom_icon, resolve_icon_paths
 from local.mac_style import (
     mac_preferences_stylesheet,
@@ -91,7 +92,7 @@ class _MusicCacheClearJob(QRunnable):
         self.signals.finished.emit(self.kind, result)
 
 
-class ColorButton(QPushButton):
+class ColorButton(GlassPushButton):
     def __init__(self, color: str, callback, parent=None):
         super().__init__(parent)
         self._callback = callback
@@ -108,6 +109,9 @@ class ColorButton(QPushButton):
         if not qcolor.isValid():
             qcolor = QColor("#46D6FF")
         self._color = qcolor.name().upper()
+        self.setGlassTint(qcolor)
+        self.setGlassLight(qcolor.lightness() > 155)
+        self.setProperty("glassRadius", 17.0)
         self.setStyleSheet(
             f"QPushButton {{ border: 2px solid #ffffff; border-radius: 17px; background: {self._color}; }}"
             "QPushButton:hover { border-color: #2f7df6; }"
@@ -118,6 +122,15 @@ class ColorButton(QPushButton):
         if color.isValid():
             self.set_color(color.name())
             self._callback()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        # The glass rim surrounds an exact swatch of the selected value.
+        with QPainter(self) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(self._color))
+            painter.drawEllipse(QRectF(self.rect()).adjusted(9, 9, -9, -9))
 
 
 class StatusLamp(QWidget):
@@ -832,8 +845,20 @@ class SettingsWindow(QDialog):
         t = self._theme()
         try:
             self.setStyleSheet(mac_preferences_stylesheet(t))
+            self._refresh_glass_buttons()
         finally:
             self._applying_theme = False
+
+    def _refresh_glass_buttons(self):
+        light = not self._settings_dark_mode()
+        for button in self.findChildren(GlassPushButton):
+            if isinstance(button, ColorButton):
+                continue
+            button.setGlassLight(light and button.objectName() not in {"Primary", "Danger"})
+            if button.objectName() == "DetailToggle":
+                # Checked details retain the current theme's text contrast.
+                button.setProperty("glassActive", False)
+                button.setProperty("glassRadius", 7.0)
 
     def _section_style(self, top: int = 12, bottom: int = 8) -> str:
         return f"font-size: 15px; font-weight: 700; color: {self._theme()['section_text']}; padding: {top}px 0 {bottom}px 0;"
@@ -1019,6 +1044,7 @@ class SettingsWindow(QDialog):
         self.nav.currentRowChanged.connect(self._select_settings_page)
         self._rebuild_settings_nav("")
         self.nav.setCurrentRow(0)
+        self._refresh_glass_buttons()
 
     def _create_settings_search_page(self) -> QScrollArea:
         scroll = SmoothScrollArea()
@@ -1289,8 +1315,9 @@ class SettingsWindow(QDialog):
                 text_box.addWidget(meta_label)
             row_layout.addLayout(text_box, 1)
 
-            open_button = QPushButton("打开")
+            open_button = GlassPushButton("打开")
             open_button.setObjectName("SearchResultAction")
+            open_button.setGlassLight(not self._settings_dark_mode())
             entry_id = str(entry.get("id", ""))
             open_button.clicked.connect(lambda _checked=False, item_id=entry_id: self._activate_settings_search_entry(item_id))
             row_layout.addWidget(open_button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -1499,7 +1526,7 @@ class SettingsWindow(QDialog):
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(8)
         line_edit.setSizePolicy(QSizePolicy.Policy.Expanding, line_edit.sizePolicy().verticalPolicy())
-        browse_button = QPushButton("选择")
+        browse_button = GlassPushButton("选择")
         browse_button.setObjectName("PathBrowseButton")
         browse_button.clicked.connect(browse_callback)
         container_layout.addWidget(line_edit, 1)
@@ -1611,7 +1638,7 @@ class SettingsWindow(QDialog):
         panel_layout.setContentsMargins(0, 4, 0, 0)
         panel_layout.setSpacing(0)
 
-        toggle = QPushButton()
+        toggle = GlassPushButton()
         toggle.setObjectName("DetailToggle")
         toggle.setCheckable(True)
         toggle.setProperty("detail_title", title)
@@ -2091,7 +2118,7 @@ class SettingsWindow(QDialog):
         )
         c.addWidget(self.owned_playback_switch)
         c.addWidget(self.system_capture_switch)
-        self.online_login_button = QPushButton("登录音乐来源")
+        self.online_login_button = GlassPushButton("登录音乐来源")
         self.online_login_button.clicked.connect(self._open_online_music_login)
         c.addWidget(self.online_login_button)
 
@@ -2146,7 +2173,7 @@ class SettingsWindow(QDialog):
             self._set_lyric_flow_style,
         )
         self._row(c, "文字流转", self.lyric_flow_style)
-        self.reset_album_record_button = QPushButton("归零已听记录")
+        self.reset_album_record_button = GlassPushButton("归零已听记录")
         self.reset_album_record_button.clicked.connect(self._reset_album_island_record)
         c.addWidget(self.reset_album_record_button)
 
@@ -2305,10 +2332,10 @@ class SettingsWindow(QDialog):
         icon_buttons_layout = QHBoxLayout(icon_buttons)
         icon_buttons_layout.setContentsMargins(0, 0, 0, 0)
         icon_buttons_layout.setSpacing(8)
-        choose_icon = QPushButton("上传图标")
+        choose_icon = GlassPushButton("上传图标")
         choose_icon.setObjectName("Primary")
         choose_icon.clicked.connect(self._choose_custom_icon)
-        reset_icon = QPushButton("恢复默认")
+        reset_icon = GlassPushButton("恢复默认")
         reset_icon.clicked.connect(self._reset_custom_icon)
         icon_buttons_layout.addWidget(choose_icon)
         icon_buttons_layout.addWidget(reset_icon)
@@ -2321,17 +2348,17 @@ class SettingsWindow(QDialog):
         app_location = str(Path(__file__).resolve().parents[1])
         self.app_location_label = self._readonly_value(app_location)
         self._row(l, "应用位置", self.app_location_label)
-        open_location = QPushButton("打开位置")
+        open_location = GlassPushButton("打开位置")
         open_location.clicked.connect(self._open_app_location)
         self._row(l, "浏览", open_location)
 
         cache_card = self._card(layout)
         cache_layout = cache_card.layout()
         cache_layout.addWidget(self._section_label("缓存管理", top=0))
-        self.clear_artwork_cache_button = QPushButton("清理封面并重试")
+        self.clear_artwork_cache_button = GlassPushButton("清理封面并重试")
         self.clear_artwork_cache_button.clicked.connect(lambda: self._clear_music_cache("artwork"))
         self._row(cache_layout, "专辑封面缓存", self.clear_artwork_cache_button)
-        self.clear_lyrics_cache_button = QPushButton("清理在线歌词")
+        self.clear_lyrics_cache_button = GlassPushButton("清理在线歌词")
         self.clear_lyrics_cache_button.clicked.connect(lambda: self._clear_music_cache("lyrics"))
         self._row(cache_layout, "在线歌词缓存", self.clear_lyrics_cache_button)
         cache_hint = QLabel("保留手动歌词、设置和歌词偏移；清理后重新获取当前歌曲。")
@@ -2354,11 +2381,11 @@ class SettingsWindow(QDialog):
             label = self._diagnostic_value_label()
             self._diagnostic_labels[key] = label
             self._row(diagnostic_layout, title, label)
-        refresh = QPushButton("刷新诊断")
+        refresh = GlassPushButton("刷新诊断")
         refresh.setObjectName("Primary")
         refresh.clicked.connect(self._refresh_diagnostics)
         diagnostic_layout.addWidget(refresh)
-        export = QPushButton("导出诊断")
+        export = GlassPushButton("导出诊断")
         export.clicked.connect(self._export_diagnostics)
         diagnostic_layout.addWidget(export)
         self._diagnostic_export_status = QLabel("")
@@ -2446,10 +2473,10 @@ class SettingsWindow(QDialog):
         c = card.layout()
 
         row_one = QHBoxLayout()
-        add_btn = QPushButton("新增消息")
+        add_btn = GlassPushButton("新增消息")
         add_btn.setObjectName("Primary")
         add_btn.clicked.connect(self._add_message)
-        clear_btn = QPushButton("清空消息")
+        clear_btn = GlassPushButton("清空消息")
         clear_btn.clicked.connect(self._clear_messages)
         row_one.addWidget(add_btn)
         row_one.addWidget(clear_btn)
@@ -2457,7 +2484,7 @@ class SettingsWindow(QDialog):
 
         row_two = QHBoxLayout()
         for index, label in enumerate(("插件 1", "插件 2", "插件 3")):
-            button = QPushButton(label)
+            button = GlassPushButton(label)
             button.clicked.connect(lambda _checked=False, i=index: self._focus_plugin(i))
             row_two.addWidget(button)
         c.addLayout(row_two)
@@ -2479,11 +2506,11 @@ class SettingsWindow(QDialog):
             label = self._diagnostic_value_label()
             self._diagnostic_labels[key] = label
             self._row(c, title, label)
-        refresh = QPushButton("刷新诊断")
+        refresh = GlassPushButton("刷新诊断")
         refresh.setObjectName("Primary")
         refresh.clicked.connect(self._refresh_diagnostics)
         c.addWidget(refresh)
-        export = QPushButton("导出诊断")
+        export = GlassPushButton("导出诊断")
         export.clicked.connect(self._export_diagnostics)
         c.addWidget(export)
         self._diagnostic_export_status = QLabel("")

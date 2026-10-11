@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from api.models import AudioFrame
 from local.owned_audio_bridge import OwnedAudioBridge
 from local.personal_dj_icon import (DJ_RING_CYCLE_SECONDS, DJ_RING_HOLD_SECONDS, DJ_RING_TRAVEL_SECONDS,
-                                   paint_personal_dj_icon, personal_dj_ring_poses, personal_dj_status_color,
+                                   paint_personal_dj_icon, personal_dj_ring_color, personal_dj_ring_poses, personal_dj_status_color,
                                    personal_dj_status_opacity, personal_dj_travel_progress)
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_owned_audio_bridge_handoff import Owner
@@ -332,7 +332,7 @@ class PersonalDjControlTests(unittest.TestCase):
         self.assertEqual(personal_dj_ring_poses(0), personal_dj_ring_poses(DJ_RING_CYCLE_SECONDS * 3))
 
     def test_longer_ring_motion_is_continuous_fast_early_and_slow_near_the_hold(self):
-        self.assertGreater(DJ_RING_TRAVEL_SECONDS, 1.5)
+        self.assertEqual(DJ_RING_TRAVEL_SECONDS, 2.0)
         self.assertEqual(DJ_RING_HOLD_SECONDS, .5)
         self.assertEqual(DJ_RING_CYCLE_SECONDS, DJ_RING_TRAVEL_SECONDS + DJ_RING_HOLD_SECONDS)
         travel = DJ_RING_TRAVEL_SECONDS
@@ -350,6 +350,20 @@ class PersonalDjControlTests(unittest.TestCase):
         self.assertEqual(personal_dj_travel_progress(-1), 0)
         self.assertEqual(personal_dj_travel_progress(travel + DJ_RING_HOLD_SECONDS * .5), 1)
         self.assertEqual(personal_dj_travel_progress(DJ_RING_CYCLE_SECONDS), 0)
+
+    def test_spatial_color_keeps_theme_in_center_and_equal_lighter_sides(self):
+        theme = QColor("#ab467c")
+        self.assertEqual(personal_dj_ring_color(theme, .5), theme)
+        for distance in (.09, .18, .27, .36):
+            with self.subTest(distance=distance):
+                left = personal_dj_ring_color(theme, .5 - distance)
+                right = personal_dj_ring_color(theme, .5 + distance)
+                self.assertLessEqual(max(abs(a - b) for a, b in zip(left.getRgb(), right.getRgb())), 1)
+                self.assertGreater(left.lightness(), theme.lightness())
+        positions = [.14 + .72 * index / 1000 for index in range(1001)]
+        colors = [personal_dj_ring_color(theme, position) for position in positions]
+        self.assertTrue(all(max(abs(a - b) for a, b in zip(first.getRgb(), second.getRgb())) <= 1
+                            for first, second in zip(colors, colors[1:])))
 
     def test_five_ring_centers_preserve_transparent_and_colored_backdrops(self):
         rect = QRectF(16, 16, 288, 168)

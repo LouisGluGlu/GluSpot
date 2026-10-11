@@ -99,6 +99,7 @@ from local.lyric_unit_timing import (
     timed_unit_reading_front,
 )
 from local.branding import APP_NAME, APP_VERSION
+from local.liquid_glass import paint_liquid_glass
 from local.diagnostics_export import (
     build_diagnostics_export_payload,
     default_diagnostics_export_path,
@@ -3302,10 +3303,17 @@ class IslandStackVisual(QWidget):
                 rect.width() * scale,
                 rect.height() * scale,
             )
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(self._music_control_fill_color(fill_alpha))
         corner = float(radius) if radius is not None else min(rect.height() / 2.0, self._u(10.0))
-        painter.drawRoundedRect(rect, corner, corner)
+        # The island paints its scene directly, so use the transparent optical
+        # fallback here rather than capturing the widget or sampling old notices.
+        ink = self._music_control_icon_color(255)
+        paint_liquid_glass(
+            painter, rect, radius=corner, light=ink.lightness() < 128,
+            hovered=str(getattr(self, "hovered_key", "")) == command,
+            pressed=(bool(getattr(self, "drag_candidate", False))
+                     and not bool(getattr(self, "dragging", False))
+                     and str(getattr(self, "drag_press_key", "")) == command),
+        )
         pad = max(self._u(3.0), min(self._u(7.0), rect.height() * 0.24))
         icon_rect = rect.adjusted(pad, pad, -pad, -pad)
         if self._paint_music_control_svg_icon(painter, command, icon_rect):

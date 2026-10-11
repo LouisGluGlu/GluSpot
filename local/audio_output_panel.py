@@ -18,6 +18,7 @@ from local.audio_output_panel_pose import output_panel_pose
 from local.music_lyric_motion import MotionSimulationClock
 from local.music_surface_palette import relative_luminance
 from local.no_wheel_widgets import NoWheelSlider
+from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop
 
 
 class _VolumeSlider(NoWheelSlider):
@@ -293,30 +294,32 @@ class _OutputRow(QAbstractButton):
         with QPainter(self) as painter:
             self.paint_contents(painter)
 
-    def paint_contents(self, painter):
+    def paint_contents(self, painter, *, glass_backdrop=None, glass_source=None):
         """Draw cached row state on its widget or the unfolding chooser."""
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         capsule = QPainterPath()
         capsule.addRoundedRect(bounds, 27, 27)
-        painter.setPen(Qt.PenStyle.NoPen)
-        fill = QColor(self.track_fill)
-        fill.setAlpha(round(255 * self.progress))
-        painter.fillPath(capsule, fill)
+        if glass_backdrop is None:
+            backdrop, source = widget_glass_backdrop(self, bounds)
+        else:
+            backdrop, source = glass_backdrop, glass_source
+        paint_liquid_glass(painter, bounds, radius=27, tint=self.track_fill,
+                          light=self.ink.lightness() < 128, hovered=self.underMouse(),
+                          pressed=self.isDown(), backdrop=backdrop, backdrop_rect=source,
+                          opacity=1.0 if self.isEnabled() else .48, cache_token=(id(self), "face"))
         if not self.volume_slider.isHidden():
             painter.save()
-            painter.setClipPath(capsule)
-            fill = QColor(self.selected_fill)
-            fill.setAlpha(round(255 * self.progress))
-            painter.fillRect(self.volume_fill_rect(), fill)
+            painter.setClipRect(self.volume_fill_rect(), Qt.ClipOperation.IntersectClip)
+            paint_liquid_glass(painter, bounds, radius=27, tint=self.selected_fill,
+                              light=True, active=True, hovered=self.underMouse(), pressed=self.isDown(),
+                              backdrop=backdrop, backdrop_rect=source, opacity=self.progress,
+                              cache_token=(id(self), "volume"))
             painter.restore()
         if self.hasFocus():
             painter.setPen(QPen(self.accent, 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(capsule)
-        if self.progress < .1 and (self.underMouse() or self.hasFocus()):
-            painter.setBrush(self.hover_fill)
-            painter.drawRoundedRect(bounds, 30, 30)
         ink = QColor(self.ink if self.progress > .5 else self.muted)
         arrival = 1 - math.exp(-self.elapsed * 12)
         painter.save()
@@ -469,18 +472,18 @@ class AudioOutputPanel(QWidget):
         # controls competing with the device list.
         self.title_label = QLabel("音频输出", self)
         self.title_label.hide()
-        self.refresh_button = QPushButton("↻", self)
+        self.refresh_button = GlassPushButton("↻", self)
         self.refresh_button.setAccessibleName("刷新音频设备")
         self.refresh_button.setToolTip("刷新设备")
         self.refresh_button.clicked.connect(self._refresh)
         self.refresh_button.setShortcut("F5")
-        self.add_button = QPushButton("＋", self)
+        self.add_button = GlassPushButton("＋", self)
         self.add_button.setAccessibleName("通过 IP 地址添加 AirPlay 设备")
         self.add_button.setToolTip("通过 IP 地址添加 AirPlay 设备")
         self.add_button.setEnabled(callable(getattr(provider, "add_homepod", None)))
         self.add_button.clicked.connect(self._add_homepod)
         self.add_button.setShortcut("Ctrl+N")
-        self.close_button = QPushButton("×", self)
+        self.close_button = GlassPushButton("×", self)
         self.close_button.setAccessibleName("关闭设备面板")
         self.close_button.clicked.connect(self.dismiss)
         for button in (self.refresh_button, self.add_button, self.close_button):
@@ -504,7 +507,7 @@ class AudioOutputPanel(QWidget):
         self.empty_label = QLabel("暂无可用输出设备")
         self.empty_label.setMargin(12)
         self.rows_layout.addWidget(self.empty_label)
-        self.stop_button = QPushButton("停止投放")
+        self.stop_button = GlassPushButton("停止投放")
         self.stop_button.setFixedHeight(30)
         self.stop_button.clicked.connect(self._stop)
         self.rows_layout.addWidget(self.stop_button)
@@ -724,6 +727,9 @@ class AudioOutputPanel(QWidget):
             QScrollBar::handle:vertical {{ background: {muted}; border-radius: 2px; min-height: 24px; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
+        for button in (self.refresh_button, self.add_button, self.close_button, self.stop_button):
+            button.setGlassLight(light)
+            button.setProperty("glassRadius", 14.0)
         for row in self._rows.values():
             self._style_row(row)
 
@@ -810,14 +816,28 @@ class AudioOutputPanel(QWidget):
     def contains_visible_point(self, point):
         return self._pose_path().contains(QPointF(point))
 
+    def _glass_material_for_rect(self, rect):
+        """Read the material actually painted below the current morph pose."""
+        if self._material.isNull():
+            return widget_glass_backdrop(self, rect)
+        sx = self._material.width() / max(1, self.width())
+        sy = self._material.height() / max(1, self.height())
+        return self._material, QRectF(rect.x() * sx, rect.y() * sy,
+                                     rect.width() * sx, rect.height() * sy)
+
     def _paint_morph_row(self, painter, row, target, opacity=1.0):
         if target.width() <= 0 or target.height() <= 0:
             return
         painter.save()
         painter.setOpacity(max(0.0, min(1.0, opacity)))
         painter.translate(target.topLeft())
-        painter.scale(target.width() / max(1, row.width()), target.height() / max(1, row.height()))
-        row.paint_contents(painter)
+        sx, sy = target.width() / max(1, row.width()), target.height() / max(1, row.height())
+        painter.scale(sx, sy)
+        face = QRectF(row.rect()).adjusted(1, 1, -1, -1)
+        material_rect = QRectF(target.x() + face.x() * sx, target.y() + face.y() * sy,
+                              face.width() * sx, face.height() * sy)
+        backdrop, source = self._glass_material_for_rect(material_rect)
+        row.paint_contents(painter, glass_backdrop=backdrop, glass_source=source)
         painter.restore()
 
     def _paint_unfolding_rows(self, painter, pose):
@@ -845,9 +865,10 @@ class AudioOutputPanel(QWidget):
         if row_blend < 1:
             painter.save()
             painter.setOpacity(1 - row_blend)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._selected_fill)
-            painter.drawRoundedRect(first, first.height() / 2, first.height() / 2)
+            backdrop, source = self._glass_material_for_rect(first)
+            paint_liquid_glass(painter, first, radius=first.height() / 2,
+                              tint=self._selected_fill, light=True, active=True,
+                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "source"))
             diameter = min(first.height(), self._source_rect.height())
             target = QRectF(first.left() + (first.width() - diameter) * (1 - pose.horizontal) / 2,
                             first.center().y() - diameter / 2, diameter, diameter)

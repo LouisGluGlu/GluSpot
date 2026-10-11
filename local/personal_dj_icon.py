@@ -1,4 +1,4 @@
-"""Five travelling speech rings, with measured PCM deformation and one accent."""
+"""Five hollow speech rings with measured PCM deformation and positional hue."""
 from __future__ import annotations
 
 import math
@@ -7,7 +7,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
 
 
-DJ_RING_TRAVEL_SECONDS = 1.65
+DJ_RING_TRAVEL_SECONDS = 2.0
 DJ_RING_HOLD_SECONDS = .5
 DJ_RING_CYCLE_SECONDS = DJ_RING_TRAVEL_SECONDS + DJ_RING_HOLD_SECONDS
 
@@ -42,7 +42,7 @@ def paint_personal_dj_icon(
     painter: QPainter, rect: QRectF, color: QColor, *, bands=None,
     elapsed: float = 0.0, neutral: QColor | None = None,
 ):
-    """Paint hollow overlapping outlines; only identity four carries the accent."""
+    """Keep theme hue in the center, with lighter rings towards both sides."""
     values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
     levels = tuple(max(0.0, min(1.0, float(level) * 4.0)) for level in values)
     neutral = QColor(neutral or QColor(245, 246, 248))
@@ -57,7 +57,7 @@ def paint_personal_dj_icon(
         ellipse = QRectF(rect.left() + rect.width() * x - width / 2,
                          rect.center().y() - height / 2, width, height)
         painter.setOpacity(parent_opacity * opacity)
-        ink = QColor(color if identity == 4 else neutral)
+        ink = personal_dj_ring_color(color, x, neutral=neutral)
         pen_width = max(.85, rect.width() * .037)
         def side_light(alpha: int):
             gradient = QLinearGradient(QPointF(ellipse.left(), ellipse.center().y()),
@@ -76,6 +76,19 @@ def paint_personal_dj_icon(
                             Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawEllipse(ellipse)
     painter.restore()
+
+
+def personal_dj_ring_color(color: QColor, x: float, *, neutral: QColor | None = None) -> QColor:
+    """Blend by live position, so a travelling ring never jumps between hues."""
+    distance = min(1.0, abs(float(x) - .5) / .36)
+    fraction = .60 * distance
+    # Disabled rings retain their existing neutral, non-glowing appearance.
+    target = QColor(neutral or QColor(245, 246, 248))
+    if target.lightness() < 80:
+        return QColor(color)
+    return QColor(round(color.red() + (255 - color.red()) * fraction),
+                  round(color.green() + (255 - color.green()) * fraction),
+                  round(color.blue() + (255 - color.blue()) * fraction), color.alpha())
 
 
 def personal_dj_status_color(state: str) -> QColor | None:

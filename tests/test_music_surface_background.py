@@ -35,6 +35,68 @@ def _advance(renderer: AlbumFlowBackgroundRenderer, colors: tuple[QColor, ...], 
 class AlbumFlowBackgroundTests(unittest.TestCase):
     COLORS = (QColor(222, 53, 44), QColor(35, 120, 216), QColor(199, 170, 52))
 
+    @staticmethod
+    def _previous_ambient_color(source):
+        hue, saturation, value, _alpha = source.getHsv()
+        return AlbumFlowBackgroundRenderer._bounded_luminance(
+            QColor.fromHsv(hue, saturation, min(220, round(80 + value * .55))))
+
+    def test_pure_pigments_soften_and_darken_without_rotating_the_album_hue(self):
+        for source in (QColor(34, 34, 254), *(QColor.fromHsv(hue, 250, 245) for hue in range(0, 360, 30))):
+            with self.subTest(source=source.name()):
+                previous = self._previous_ambient_color(source)
+                actual = AlbumFlowBackgroundRenderer._ambient_color(source)
+                hue_delta = abs(source.hsvHue() - actual.hsvHue()) % 360
+                self.assertLessEqual(min(hue_delta, 360 - hue_delta), 1)
+                self.assertLess(actual.hsvSaturationF(), previous.hsvSaturationF() * .80)
+                self.assertLess(actual.valueF(), previous.valueF())
+                self.assertLess(relative_luminance(actual), relative_luminance(previous) * .90)
+
+    def test_moderate_pigments_dark_shadows_and_single_hue_layers_keep_established_mapping(self):
+        for source in (QColor.fromHsv(240, 175, 254), QColor.fromHsv(0, 180, 210),
+                       QColor.fromHsv(60, 255, 45), QColor(7, 22, 38), QColor(30, 3, 8)):
+            with self.subTest(source=source.name()):
+                self.assertEqual(AlbumFlowBackgroundRenderer._ambient_color(source), self._previous_ambient_color(source))
+        colors = (QColor(34, 34, 254),)
+        roles = single_hue_background_colors(colors, weights=(1.0,))
+        slots = AlbumFlowBackgroundRenderer._palette_slots(colors, (1.0,))
+        self.assertEqual(slots[:4], tuple(AlbumFlowBackgroundRenderer._bounded_luminance(color) for color in roles))
+
+    def test_purity_compression_enters_continuously_and_retains_source_color_objects(self):
+        sources = tuple(QColor.fromHsv(240, saturation, 254) for saturation in range(170, 256))
+        originals = tuple(source.rgba() for source in sources)
+        displayed = tuple(AlbumFlowBackgroundRenderer._ambient_color(source) for source in sources)
+        self.assertEqual(tuple(source.rgba() for source in sources), originals)
+        for first, second in zip(displayed, displayed[1:]):
+            # Continuous compression plus RGB8 luminance rounding may move
+            # four channel steps at its steepest point; there is no branch
+            # jump when a source first enters the high-purity interval.
+            self.assertLessEqual(max(abs(a-b) for a, b in zip(first.getRgb()[:3], second.getRgb()[:3])), 4)
+        self.assertLessEqual(max(abs(a-b) for a, b in zip(displayed[10].getRgb()[:3], displayed[11].getRgb()[:3])), 1)
+
+    def test_blue_dominant_multicolor_fields_reduce_saturation_and_luminance_through_motion(self):
+        # The supplied screenshot has this supported blue plus purple, warm
+        # and neutral regions, so the existing single-hue route cannot apply.
+        colors = (QColor(34, 34, 254), QColor(88, 10, 115), QColor(188, 145, 102), QColor(66, 66, 66))
+        self.assertFalse(single_hue_background_colors(colors, weights=(.62, .18, .12, .08)))
+        actual_slots = AlbumFlowBackgroundRenderer._palette_slots(colors)
+        with patch.object(AlbumFlowBackgroundRenderer, "_ambient_color", side_effect=self._previous_ambient_color):
+            previous_slots = AlbumFlowBackgroundRenderer._palette_slots(colors)
+        renderer = AlbumFlowBackgroundRenderer()
+        actual_chroma, previous_chroma, actual_light, previous_light = [], [], [], []
+        for second in range(0, 61, 5):
+            renderer._geometry_seconds = second * .74
+            actual = np.asarray(_pixels(renderer._paint_field(QSize(256, 144), actual_slots))).astype(float)
+            previous = np.asarray(_pixels(renderer._paint_field(QSize(256, 144), previous_slots))).astype(float)
+            for pixels, chromas, lights in ((actual, actual_chroma, actual_light), (previous, previous_chroma, previous_light)):
+                high, low = pixels.max(2), pixels.min(2)
+                chromas.append(float(np.mean((high-low) / np.maximum(high, 1))))
+                linear = np.where(pixels / 255 <= .04045, pixels / 255 / 12.92, ((pixels / 255 + .055) / 1.055) ** 2.4)
+                lights.append(float(np.mean(linear @ np.array((.2126, .7152, .0722)))))
+        self.assertLess(max(actual_chroma), max(previous_chroma) * .82)
+        self.assertLess(np.mean(actual_light), np.mean(previous_light) * .95)
+        self.assertGreater(max(actual_light) - min(actual_light), .004)
+
     def test_bright_single_hue_has_soft_tonal_depth_instead_of_a_saturated_wash(self):
         for source in (QColor(233, 31, 20), QColor(16, 135, 164),
                        QColor(242, 204, 12), QColor(181, 35, 230)):
@@ -223,7 +285,7 @@ class AlbumFlowBackgroundTests(unittest.TestCase):
         self.assertGreater(np.percentile(levels, 90), 125)
         self.assertGreater(np.percentile(levels, 90) - np.percentile(levels, 10), 25)
 
-    def test_real_pigments_keep_saturated_cores_and_large_quiet_dark_regions(self):
+    def test_real_pigments_keep_distinct_colored_cores_and_large_quiet_dark_regions(self):
         colors = (QColor(0, 0, 0), QColor(222, 25, 45), QColor(30, 80, 220), QColor(220, 220, 220))
         renderer = AlbumFlowBackgroundRenderer()
         slots = renderer._palette_slots(colors)
@@ -233,8 +295,10 @@ class AlbumFlowBackgroundTests(unittest.TestCase):
             rgb = np.asarray(_pixels(renderer._paint_field(QSize(256, 144), slots))).astype(float)
             high, low = rgb.max(2), rgb.min(2)
             saturation = np.divide(high-low, high, out=np.zeros_like(high), where=high>0)
-            reds.append(np.mean((rgb[:,:,0] > rgb[:,:,2]*1.8) & (saturation>.65) & (high>100)))
-            blues.append(np.mean((rgb[:,:,2] > rgb[:,:,0]*1.8) & (saturation>.65) & (high>100)))
+            # Highly pure cores now soften under the requested presentation
+            # policy while remaining clearly colored over the quiet base.
+            reds.append(np.mean((rgb[:,:,0] > rgb[:,:,2]*1.8) & (saturation>.52) & (high>100)))
+            blues.append(np.mean((rgb[:,:,2] > rgb[:,:,0]*1.8) & (saturation>.52) & (high>100)))
             darks.append(np.mean(high<40))
         self.assertGreater(max(reds), .03)
         self.assertGreater(max(blues), .03)
