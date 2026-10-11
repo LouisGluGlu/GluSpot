@@ -6,8 +6,8 @@ this checkout's `launch.bat` after exiting the running source instance.
 
 ## Requested visual behavior
 
-The six supplied references define the bottom-right location, five overlapping
-elliptical rings, a circular enabled/disabled face, a larger speech glyph above
+The supplied references define the bottom-right location, five hollow overlapping
+elliptical outlines, a circular enabled/disabled face, a larger speech glyph above
 a small next-song title capsule, and a separate loading-state outline. The
 colored rings in the motion reference identify movement only; those colors are
 not a product palette.
@@ -21,6 +21,16 @@ The ring animation uses the current song's album accent for one traveling
 halo and background-aware neutral ink for the remaining rings. It moves along
 a straight right-to-left path, changing size with depth, over 0.85 seconds
 with decreasing speed, followed by a 0.5-second hold.
+
+The latest correction removes every ring's interior fill. Album detail and
+other ring outlines remain visible through each ellipse; the single accent
+halo and measured-frequency motion remain. During speech, one shared dark
+mask with feathered edges separates the bottom-right glyph and caption from
+busy artwork and lyrics. It fades with the existing speech expansion rather
+than becoming five opaque faces. This is a native vector soft mask, without
+per-frame background capture or raster blur. Its bounded region is included
+in local repaint damage so shrinking and hiding cannot leave a dark patch;
+the mask does not enlarge the existing button hit area.
 
 An additional blue outline indicates introduction loading, green indicates a
 prepared introduction, and red indicates failure. Blue and green glow rises
@@ -55,7 +65,23 @@ playback is established; a loading or paused decoder cannot open it early.
 
 ## Verification and limits
 
-The final frozen source passed **4026 Python tests in 192.253 seconds**, with
+The corrected source passed **4031 Python tests in 208.109 seconds**, with no
+skips, using `.venv/Scripts/python.exe -X utf8 -X faulthandler -m unittest
+discover tests -v`. Compilation, dependency consistency, whitespace and
+independent paint/boundary/privacy review passed.
+
+The hollow-ring correction additionally passed **43 focused control tests at
+each of DPR 1 and DPR 2**, using `-m unittest tests.test_personal_dj_control -v`.
+The native previews passed **114 checks** across 640 x 360, 960 x 540 and
+1920 x 1080 at both DPRs. Pixel checks cover transparent and colored ring
+centers, overlapping outlines, soft-mask alpha and feathering, inherited
+opacity, speech entrance/exit, local repaint bounds and unchanged normal or
+centered artwork, library, top controls and transport regions. Animation and
+checkerboard previews were inspected. Audio/provider behavior is unchanged
+by this paint-only correction; the actual Qt audio scenarios below belong
+to the preceding presentation checkpoint.
+
+The preceding presentation source passed **4026 Python tests in 192.253 seconds**, with
 no skips, using `.venv/Scripts/python.exe -X utf8 -X faulthandler -m unittest
 discover tests -v`. Compilation, dependency consistency and whitespace checks
 passed. An earlier full run was deliberately stopped after discovering a
