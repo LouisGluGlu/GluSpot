@@ -30,6 +30,12 @@ class ReadbackSender(Sender):
 
 
 class OwnedVolumeTests(unittest.TestCase):
+    def test_absolute_percent_command_updates_endpoint_without_second_gain(self):
+        self.assertTrue(self.controller.set_volume("one", .335))
+        self.controller._step()
+        self.assertEqual(self.backend.writes, [("one", .34)])
+        self.assertEqual(self.controller.snapshot().devices[0].volume, .34)
+
     def setUp(self):
         self.backend, self.bridge, self.sender = ReadbackBackend(), Bridge(), ReadbackSender()
         self.controller = OwnedAudioOutputController(self.bridge, backend=self.backend,

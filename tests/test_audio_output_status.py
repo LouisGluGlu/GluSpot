@@ -235,7 +235,8 @@ class MusicSurfaceOutputStatusTests(unittest.TestCase):
         # link or single-device image when group membership changes.
         self.window._audio_output_kinds = ("homepod-mini", "homepod")
         grouped = self._controls()
-        self.assertNotEqual(bytes(image.copy(circle).constBits()), bytes(grouped.copy(circle).constBits()))
+        single_crop, grouped_crop = image.copy(circle), grouped.copy(circle)
+        self.assertNotEqual(bytes(single_crop.constBits()), bytes(grouped_crop.constBits()))
 
     def test_unchanged_kind_or_volume_does_not_repaint(self):
         self.window._sync_audio_output_status()

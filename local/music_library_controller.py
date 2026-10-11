@@ -287,6 +287,7 @@ class MusicLibraryController(QObject):
                 self._collections = (
                     LibraryCollection("daily", "daily", "每日推荐", ""),
                     LibraryCollection("fm", "fm", "私人漫游", ""),
+                    LibraryCollection("dj", "dj", "私人DJ", ""),
                 )
             if page is not None:
                 self._append_catalog(page)
@@ -387,6 +388,8 @@ class MusicLibraryController(QObject):
             accepted = self.player.play_daily(self._source)
         elif row.kind == "fm":
             accepted = self.player.play_personal_fm(self._source)
+        elif row.kind == "dj":
+            accepted = self.player.play_personal_dj(self._source)
         elif row.kind == "playlist":
             accepted = self.player.play_playlist(self._source, row.playlist_id)
         elif row.kind == "song" and row.song is not None and row.song.source_id == self._source:
@@ -425,6 +428,11 @@ class MusicLibraryController(QObject):
                 "format": "播放器无法解码此音频，请尝试其他歌曲",
                 "access_denied": "平台拒绝了此音频的访问，请检查账号权限",
                 "invalid_stream": "平台返回的播放地址无效，请重试",
+                "invalid_response": "音乐服务返回了无效音频，请重试",
+                "incomplete": "音频下载未完成，请检查网络后重试",
+                "expired": "音频授权已过期，请重新选择此项目",
+                "too_large": "当前音频过大，暂时无法播放，请选择其他歌曲",
+                "storage": "无法保存播放缓存，请检查磁盘可用空间后重试",
             }
             self.window.set_error(failures.get(getattr(self.player, "failure_reason", ""), messages[status]))
 

@@ -254,6 +254,14 @@ class _AppGuard:
 
 
 class AudioRouteControllerTests(unittest.TestCase):
+    def test_program_percent_sets_absolute_system_target_and_external_readback_remains_actual(self):
+        self.assertTrue(self.controller.set_volume("headphones", .335))
+        self.controller._step()
+        self.assertEqual(self.backend.volume_calls, [("headphones", .34)])
+        self.backend.volumes["headphones"] = .6234
+        self.controller._refresh_devices()
+        self.assertEqual(next(d.volume for d in self.controller.snapshot().devices if d.id == "headphones"), .6234)
+
     def setUp(self):
         self.backend, self.discovery, self.sender = _Backend(), _Discovery(), _Sender()
         self.router = _AppRouter(lambda: None, lambda _source: None)

@@ -521,7 +521,8 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         dpr = normal.devicePixelRatio()
         bounds = QRectF(logical.x() * dpr, logical.y() * dpr,
                         logical.width() * dpr, logical.height() * dpr).toAlignedRect()
-        self.assertEqual(bytes(transitional.copy(bounds).constBits()), bytes(normal.copy(bounds).constBits()))
+        transition_crop, normal_crop = transitional.copy(bounds), normal.copy(bounds)
+        self.assertEqual(bytes(transition_crop.constBits()), bytes(normal_crop.constBits()))
 
     def test_native_handoff_does_not_offset_or_leak_effect_cached_rows(self):
         self.owner.setStyleSheet("background: #000000;")

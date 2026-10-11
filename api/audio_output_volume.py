@@ -10,6 +10,23 @@ import time
 from api.audio_routes import AudioRouteDevice
 
 
+def output_volume_target(value):
+    """An absolute device command in the UI's integer-percent units.
+
+    This applies only to commands. Actual endpoint/sender readback retains its
+    precision and remains authoritative; there is no additional Qt gain.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        scalar = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(scalar) or not 0 <= scalar <= 1:
+        return None
+    return math.floor(scalar * 100 + .5) / 100
+
+
 @dataclass(frozen=True)
 class _VolumeIntent:
     value: float
@@ -82,7 +99,7 @@ class AudioOutputVolumeHistory:
             self.observe(device, fence)
             intent = self._intents.get(device.id)
             audible = intent.value if intent is not None else 0 if device.volume_muted else self._scalar(device.volume)
-            target = self._history.get(device.id, .3) if audible == 0 else 0.0
+            target = (output_volume_target(self._history.get(device.id, .3)) or .3) if audible == 0 else 0.0
             self.request(device.id, target, fence)
             return target
 

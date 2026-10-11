@@ -15,6 +15,19 @@ from api.online_music_bridge import NodeOnlineMusicBackend
 
 
 class OnlineMusicBridgeTests(unittest.TestCase):
+    def test_personal_dj_calls_pinned_module_without_guessed_persona_or_location(self):
+        self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
+            "module/aidj_content_rcmd.js": r'''module.exports=async q=>({body:{code:200,
+                authorized:q.cookie.MUSIC_U==='synthetic',
+                noPersonaOrLocation:!('latitude' in q)&&!('voiceId' in q)&&!('timbreKey' in q),
+                data:{aiDjResources:[{type:'audio'},{type:'song'}]}}});''',
+            "util/request.js": "module.exports=async()=>({body:{}});",
+        })
+        body = self.backend.request("netease", "personal_dj", {}, {"cookie": {"MUSIC_U": "synthetic"}})["data"]
+        self.assertTrue(body["authorized"])
+        self.assertTrue(body["noPersonaOrLocation"])
+        self.assertEqual([r["type"] for r in body["data"]["aiDjResources"]], ["audio", "song"])
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
@@ -28,7 +41,16 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         manifest.write_text(json.dumps({"version": "4.41.1"}), encoding="utf-8")
         self.backend = NodeOnlineMusicBackend(self.node, self.modules, timeout_seconds=1)
         self.backend.bridge_path = self.root / "fixture.cjs"
-        self.addCleanup(self.backend.close)
+        self.addCleanup(self.close_fixture_backend)
+
+    def close_fixture_backend(self):
+        # Production close intentionally reaps off-thread for GUI shutdown.
+        # Windows retains a child's cwd until termination; a test must wait
+        # before TemporaryDirectory recursively removes that isolated cwd.
+        process = self.backend._process
+        self.backend.close()
+        if process is not None:
+            process.wait(timeout=3)
 
     def script(self, body):
         self.backend.bridge_path.write_text(body, encoding="utf-8")

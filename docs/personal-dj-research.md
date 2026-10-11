@@ -1,6 +1,29 @@
 # NetEase personal roaming and Private DJ research
 
-Research date: October 11, 2026. GluSpot source version: `6.412`. This is a read-only capability study; it does not implement Private DJ or change account state.
+Research date: October 11, 2026. GluSpot source version: `6.412`.
+
+## Current implementation update
+
+The subsequent implementation now exposes the pinned `aidj_content_rcmd`
+through the existing bridge and service. Authenticated requests returned
+genuine speech and songs in order; the strict parser was checked against a
+six-resource response. A service-provided voice file (428,870 bytes) and its
+authorized song (2,922,669 bytes, not a trial) passed the complete download
+boundary. Both downloads took one HTTP request and their session files were
+cleaned afterward. These probes preserved the protected account file's SHA256
+and printed no signed addresses, credentials or account identity.
+
+The music library now offers **私人DJ**, with genuine speech/song playback and
+DJ continuation through the owned player. `M791-C2` remains an unidentified
+persona: `announcerName` was null and the module has no verified persona-choice
+input. **豆花** cannot yet be claimed as the returned voice. See
+[current behavior and final verification](buffered-playback-and-personal-dj.md).
+
+## Original study, before authenticated implementation
+
+The remainder records the preceding read-only study and its evidence cutoff.
+Statements that no response/runtime was available describe that historical
+cutoff, superseded by the implementation update above.
 
 ## Conclusion
 

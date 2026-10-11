@@ -394,6 +394,9 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
 
     def test_window_title_double_click_retargets_an_inflight_snapshot(self):
         self.window._fullscreen = False
+        # At DPR 2 the fixture's 1280x720 rectangle can already equal the
+        # actual fullscreen destination, leaving no transition to reverse.
+        self.window.setGeometry(self.window._normal_geometry)
         self._render()
         with patch.object(self.window, "_capture_transition_snapshot", return_value=self._snapshot()):
             self.window.toggle_presentation_mode()

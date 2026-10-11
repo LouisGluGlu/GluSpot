@@ -110,7 +110,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.service = SimpleNamespace(stream_url=lambda *args: None, lyrics=lambda *args: None)
         self.lyrics = LocalLyricsStore(root=Path(self.temp.name))
         self.player = OwnedMusicPlayer(self.service, self.lyrics, player=self.qt_player,
-                                      audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=self.prefetch_tasks)
+                                      audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=self.prefetch_tasks, stream_cache=None)
         self.songs = (OnlineSong("netease", "1", "第一首", duration_seconds=120),
                       OnlineSong("netease", "2", "第二首", duration_seconds=150))
 
@@ -556,7 +556,7 @@ class OwnedPlaybackTests(unittest.TestCase):
             return ()
         self.service.personal_fm = fetch
         player = OwnedMusicPlayer(self.service, self.lyrics, player=Player(), audio=object(),
-                                  tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=workers)
+                                  tasks=self.tasks, artwork_tasks=self.artwork_tasks, prefetch_tasks=workers, stream_cache=None)
         try:
             player.play_queue(self.songs)
             player._fm_source = "netease"
@@ -774,7 +774,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         release, entered = threading.Event(), threading.Event()
         workers = MusicTasks()
         player = OwnedMusicPlayer(self.service, self.lyrics, player=Player(), audio=object(),
-            tasks=self.tasks, artwork_tasks=workers)
+            tasks=self.tasks, artwork_tasks=workers, stream_cache=None)
         def fetch(url):
             entered.set()
             release.wait(2)
@@ -925,7 +925,7 @@ class OwnedControlThreadTests(unittest.TestCase):
         self.tasks, self.artwork_tasks = Tasks(), Tasks()
         self.service = SimpleNamespace(stream_url=lambda *args: None, lyrics=lambda *args: None)
         self.player = OwnedMusicPlayer(self.service, LocalLyricsStore(root=Path(self.temp.name)),
-            player=self.qt_player, audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks)
+            player=self.qt_player, audio=object(), tasks=self.tasks, artwork_tasks=self.artwork_tasks, stream_cache=None)
         self.songs = (OnlineSong("netease", "1", "first", duration_seconds=120),
                       OnlineSong("netease", "2", "second", duration_seconds=150))
         self.player.play_queue(self.songs)

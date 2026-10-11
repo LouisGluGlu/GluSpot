@@ -11,7 +11,7 @@ import time
 from api.airplay_discovery import AirPlayDiscovery
 from api.audio_route_controller import AudioRouteController
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
-from api.audio_output_volume import AudioOutputVolumeHistory
+from api.audio_output_volume import AudioOutputVolumeHistory, output_volume_target
 from api.owned_pcm_process import OwnedPcmProcess
 
 
@@ -93,7 +93,7 @@ class OwnedAudioOutputController:
         return self._enqueue("toggle", identity)
 
     def set_volume(self, identity, value):
-        volume = AudioRouteController._volume_scalar(value)
+        volume = output_volume_target(value)
         device = next((d for d in self.snapshot().devices if d.id == identity), None)
         if (volume is None or device is None or device.volume is None
                 or not device.available and device.transport != "airplay"):

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.lyrics import LocalLyricsStore
 from api.online_music import LyricPayload, OnlineSong, StreamInfo
+from api.owned_stream_cache import OwnedStreamCache
 from local.music_tasks import MusicTasks
 from local.owned_music_player import OwnedMusicPlayer
 
@@ -116,7 +117,8 @@ def run(output: Path, timeout: float) -> dict:
     audio = QAudioOutput()
     audio.setVolume(0.0)
     tasks = MusicTasks()
-    owned = OwnedMusicPlayer(FixtureService(), LocalLyricsStore(root=output / "lyrics"), audio=audio, tasks=tasks)
+    owned = OwnedMusicPlayer(FixtureService(), LocalLyricsStore(root=output / "lyrics"), audio=audio, tasks=tasks,
+        stream_cache=OwnedStreamCache(output / "audio-cache"))
     player = owned.player
     player.playbackStateChanged.connect(lambda state: states.append({"at": elapsed(), "state": state.name}))
     player.mediaStatusChanged.connect(lambda status: statuses.append({"at": elapsed(), "status": status.name}))

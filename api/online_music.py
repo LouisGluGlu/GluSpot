@@ -50,6 +50,10 @@ class OnlineSong:
     album: str = ""
     duration_seconds: float = 0.0
     artwork_url: str = ""
+    media_kind: str = "song"
+    # Service-provided DJ speech has its own expiring authorized address. It
+    # must never be sent to the ordinary song URL or lyric endpoints.
+    direct_stream: StreamInfo | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -126,7 +130,7 @@ class _LoginAttempt:
 
 class OnlineMusicService:
     _names = (("netease", "网易云音乐"), ("kugou", "酷狗音乐"), ("qq", "QQ音乐"), ("qishui", "汽水音乐"))
-    _capabilities = {"netease": ("qr_login", "playlist", "daily", "personal_fm", "stream", "lyrics", "search"), "qq": ("qr_login", "playlist", "stream", "search"), "kugou": ("qr_login", "playlist", "stream", "search"), "qishui": ()}
+    _capabilities = {"netease": ("qr_login", "playlist", "daily", "personal_fm", "personal_dj", "stream", "lyrics", "search"), "qq": ("qr_login", "playlist", "stream", "search"), "kugou": ("qr_login", "playlist", "stream", "search"), "qishui": ()}
 
     def __init__(self, backend: OnlineBackend | None = None, credential_store: ProtectedCredentialStore | None = None, *, clock=time.time):
         if backend is None:
@@ -549,6 +553,78 @@ class OnlineMusicService:
         data = self._catalog(source_id, "personal_fm", {})
         raw = data.get("data") if isinstance(data.get("data"), list) else self._list(data, "songs")
         return tuple(song for item in raw if isinstance(item, dict) and (song := self._song(source_id, item)).song_id and song.title)
+
+    def personal_dj(self, source_id: str = "netease") -> tuple[OnlineSong, ...]:
+        """Preserve the actual aidj resource order, including genuine speech."""
+        if source_id != "netease":
+            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持私人DJ")
+        return self._personal_dj_batch(self._catalog(source_id, "personal_dj", {}))
+
+    def _personal_dj_batch(self, data: Any) -> tuple[OnlineSong, ...]:
+        # Schema checked against an authenticated response from pinned 4.41.1.
+        # Reject incomplete batches rather than silently lose introductions.
+        def invalid():
+            raise OnlineMusicError("response", "netease", "私人DJ未返回完整的语音与歌曲队列，请重试")
+        if not isinstance(data, dict) or data.get("code") != 200:
+            invalid()
+        payload = data.get("data")
+        resources = payload.get("aiDjResources") if isinstance(payload, dict) else None
+        if not isinstance(resources, list) or not 1 <= len(resources) <= 64:
+            invalid()
+        songs = {}
+        for resource in resources:
+            if not isinstance(resource, dict) or not isinstance(resource.get("value"), dict):
+                invalid()
+            if resource.get("type") == "song":
+                value = resource["value"]
+                raw = value.get("songData")
+                identity = str(value.get("songId", ""))
+                if not isinstance(raw, dict) or not re.fullmatch(r"[0-9]{1,24}", identity):
+                    invalid()
+                song = self._song("netease", raw)
+                if song.song_id != identity or not song.title:
+                    invalid()
+                songs[identity] = song
+        result = []
+        voices = 0
+        for resource in resources:
+            kind, value = resource.get("type"), resource["value"]
+            if kind == "song":
+                result.append(songs[str(value["songId"])])
+            elif kind == "audio":
+                audios = value.get("audioList")
+                if not isinstance(audios, list) or not 1 <= len(audios) <= 8:
+                    invalid()
+                for audio in audios:
+                    if not isinstance(audio, dict):
+                        invalid()
+                    url = self._http_url(audio.get("audioUrl"))
+                    identity = audio.get("audioId")
+                    duration, ttl = audio.get("duration"), audio.get("validTime")
+                    if (not url or any(ord(c) < 32 for c in url)
+                            or not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", identity)
+                            or isinstance(duration, bool) or not isinstance(duration, (int, float))
+                            or not 0 < duration <= 1800 or not math.isfinite(duration)
+                            or isinstance(ttl, bool) or not isinstance(ttl, (int, float))
+                            or not 0 < ttl <= 86400 or not math.isfinite(ttl)):
+                        invalid()
+                    related = audio.get("introductionRelatedSongIds")
+                    related = related if isinstance(related, list) else []
+                    associated = next((songs[str(key)] for key in related[:16] if str(key) in songs), None)
+                    label = audio.get("textType")
+                    label = label if isinstance(label, str) and len(label) <= 24 and not any(ord(c) < 32 for c in label) else "语音"
+                    stream = StreamInfo("netease", "dj:" + identity, url, True, quality="dj_voice", expires_at=self._clock() + ttl)
+                    result.append(OnlineSong("netease", stream.song_id, "私人DJ · " + (label or "语音"),
+                        "私人DJ", associated.title if associated else "", float(duration),
+                        associated.artwork_url if associated else "", "dj_voice", stream))
+                    voices += 1
+            else:
+                invalid()
+            if len(result) > 96:
+                invalid()
+        if not songs or not voices:
+            invalid()
+        return tuple(result)
 
     def stream_url(self, source_id: str, song_id: str) -> StreamInfo:
         data = self._catalog(source_id, "stream_url", {"song_id": str(song_id)})
