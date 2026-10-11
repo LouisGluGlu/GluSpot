@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
+
+import numpy as np
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6 import QtMultimedia
 from PySide6.QtMultimedia import QAudioFormat, QMediaDevices
+from api.audio_analyzer import analyze_frequency_block
+from api.models import AudioFrame
 
 
 class OwnedAudioBridge(QObject):
@@ -29,6 +34,9 @@ class OwnedAudioBridge(QObject):
         self._last_position = None
         self._restarting = False
         self._owner_token = self.media_token()
+        self._dj_frames = deque(maxlen=96)
+        self._dj_lock = threading.RLock()
+        self._dj_smooth = [0.0, 0.0, 0.0]
         self.requested.connect(self._apply, Qt.ConnectionType.QueuedConnection)
         buffer_output_type = getattr(QtMultimedia, "QAudioBufferOutput", None)
         self.supported = buffer_output_type is not None and callable(getattr(owned.player, "setAudioBufferOutput", None))
@@ -53,6 +61,42 @@ class OwnedAudioBridge(QObject):
     def media_token(self):
         track = self.owned.track
         return (getattr(track, "track_id", ""), getattr(self.owned, "_epoch", 0))
+
+    def get_personal_dj_audio_frame(self):
+        speaking = getattr(self.owned, "is_personal_dj_speaking", None)
+        if self._closed or not callable(speaking) or not speaking() or self.media_token() != self._owner_token:
+            return None
+        # Qt can decode ahead. Select the sample at its real presentation
+        # clock, not the most recently decoded buffer or a simulated pulse.
+        position = self.owned.player.position() / 1000.0
+        with self._dj_lock:
+            frames = tuple(self._dj_frames)
+        for start, end, frame in reversed(frames):
+            if start <= position < end:
+                return frame
+        return None
+
+    def _sample_personal_dj_buffer(self, buffer):
+        speaking = getattr(self.owned, "is_personal_dj_speaking", None)
+        if not callable(speaking) or not speaking() or self.media_token() != self._owner_token:
+            return
+        format_ = buffer.format()
+        if (format_.sampleRate() != 44100 or format_.channelCount() != 2
+                or format_.sampleFormat() != QAudioFormat.SampleFormat.Int16
+                or buffer.byteCount() != buffer.frameCount() * 4 or buffer.byteCount() > 176400 or buffer.startTime() < 0):
+            return
+        samples = np.frombuffer(buffer.constData(), dtype="<i2").reshape(-1, 2)
+        start = buffer.startTime() / 1000000.0
+        # At most twenty small transforms per one-second Qt buffer; the
+        # retained timeline stores frequency values only, never raw audio.
+        for offset in range(0, len(samples), 2205):
+            block = samples[offset:offset + 2205].astype(np.float32) / 32768.0
+            frame = analyze_frequency_block(block, 44100, np, self._dj_smooth)
+            if frame is None:
+                self._dj_smooth[:] = [0.0, 0.0, 0.0]
+            with self._dj_lock:
+                self._dj_frames.append((start + offset / 44100.0,
+                    start + min(len(samples), offset + 2205) / 44100.0, frame or AudioFrame(0.0, 0.0, 0.0)))
 
     @staticmethod
     def endpoint_id(device):
@@ -185,6 +229,9 @@ class OwnedAudioBridge(QObject):
             self._owner_token = token
             self._last_buffer_end = None
             self._last_position = None
+            with self._dj_lock:
+                self._dj_frames.clear()
+            self._dj_smooth[:] = [0.0, 0.0, 0.0]
             self._restarting = self._direct
             if self._controller is not None:
                 self._controller.media_changed(token)
@@ -193,14 +240,22 @@ class OwnedAudioBridge(QObject):
     def _position_changed(self, milliseconds):
         now = time.monotonic()
         previous, self._last_position = self._last_position, (milliseconds, now)
-        if not self._direct or self._controller is None or previous is None or self._restarting:
-            return
         if self.media_token() != self._owner_token:
             self._owner_changed()
+            return
+        if previous is None:
             return
         old_position, sampled = previous
         rate = self.owned.player.playbackRate() if hasattr(self.owned.player, "playbackRate") else 1.0
         expected = max(0.0, now - sampled) * 1000 * max(0.0, rate)
+        # Speech can seek without changing the track epoch. Invalidate the
+        # frequency history independently of a coordinated output session.
+        if milliseconds < old_position - 50 or milliseconds - old_position > expected + 100:
+            with self._dj_lock:
+                self._dj_frames.clear()
+            self._dj_smooth[:] = [0.0, 0.0, 0.0]
+        if not self._direct or self._controller is None or self._restarting:
+            return
         if milliseconds < old_position - 500 or milliseconds - old_position > expected + 800:
             self._restarting = True
             self._last_buffer_end = None
@@ -208,6 +263,9 @@ class OwnedAudioBridge(QObject):
 
     @Slot(object)
     def _buffer(self, buffer):
+        if self._closed or not buffer.isValid() or not buffer.frameCount():
+            return
+        self._sample_personal_dj_buffer(buffer)
         if self._closed or not self._direct or self._restarting or self._controller is None or not buffer.isValid() or not buffer.frameCount():
             return
         if self.media_token() != self._direct_token:
@@ -243,6 +301,8 @@ class OwnedAudioBridge(QObject):
             return
         self.set_direct(False, 0)
         self._closed = True
+        with self._dj_lock:
+            self._dj_frames.clear()
         if self.supported:
             self.owned.player.setAudioBufferOutput(None)
         self._controller = None

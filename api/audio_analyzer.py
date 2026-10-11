@@ -18,6 +18,28 @@ DISCONTINUITY_WINDOW_SECONDS = 2.0
 DISCONTINUITY_LIMIT = 3
 
 
+def analyze_frequency_block(block, sample_rate: int, np, smooth) -> AudioFrame | None:
+    """Analyze real PCM using the shared bands; never invent a fallback frame."""
+    data = np.asarray(block, dtype=np.float32)
+    if data.size == 0:
+        return None
+    if len(data.shape) > 1:
+        data = data.mean(axis=1)
+    data = data - float(np.mean(data))
+    if not np.isfinite(data).all() or float(np.max(np.abs(data))) < 0.00008:
+        return None
+    spectrum = np.abs(np.fft.rfft(data * np.hanning(len(data))))
+    freqs = np.fft.rfftfreq(len(data), 1.0 / sample_rate)
+    normalized = []
+    for index, (low_hz, high_hz) in enumerate(((20, 220), (220, 2200), (2200, 14000))):
+        mask = (freqs >= low_hz) & (freqs < high_hz)
+        value = float(np.sqrt(np.mean(np.square(spectrum[mask]))) / max(1.0, len(spectrum))) if np.any(mask) else 0.0
+        compressed = max(0.0, min(1.0, math.log1p(value * 96.0) / math.log1p(96.0)))
+        smooth[index] = smooth[index] * 0.52 + compressed * 0.48
+        normalized.append(smooth[index])
+    return AudioFrame(*normalized)
+
+
 class LiveAudioAnalyzer:
     def __init__(self):
         self._frame = AudioFrame(0.0, 0.0, 0.0)
@@ -192,27 +214,7 @@ class LiveAudioAnalyzer:
                 continue
 
     def _analyze_block(self, block, sample_rate: int, np) -> AudioFrame | None:
-        data = np.asarray(block, dtype=np.float32)
-        if data.size == 0:
-            return None
-        if len(data.shape) > 1:
-            data = data.mean(axis=1)
-        data = data - float(np.mean(data))
-        if float(np.max(np.abs(data))) < 0.00008:
-            return None
-        window = np.hanning(len(data))
-        spectrum = np.abs(np.fft.rfft(data * window))
-        freqs = np.fft.rfftfreq(len(data), 1.0 / sample_rate)
-        low = self._band_energy(spectrum, freqs, 20, 220, np)
-        mid = self._band_energy(spectrum, freqs, 220, 2200, np)
-        high = self._band_energy(spectrum, freqs, 2200, 14000, np)
-        values = [low, mid, high]
-        normalized = []
-        for index, value in enumerate(values):
-            compressed = max(0.0, min(1.0, math.log1p(value * 96.0) / math.log1p(96.0)))
-            self._smooth[index] = self._smooth[index] * 0.52 + compressed * 0.48
-            normalized.append(self._smooth[index])
-        return AudioFrame(*normalized)
+        return analyze_frequency_block(block, sample_rate, np, self._smooth)
 
     def _band_energy(self, spectrum, freqs, low_hz: int, high_hz: int, np) -> float:
         mask = (freqs >= low_hz) & (freqs < high_hz)

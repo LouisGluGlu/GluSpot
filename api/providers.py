@@ -271,6 +271,28 @@ class PlaybackSourceProvider:
     def get_owned_playback_modes(self):
         return self.owned.available_playback_modes() if self._owned_active() else ()
 
+    def get_owned_personal_dj_enabled(self):
+        if not self.is_owned_personal_fm() or not self.owned.personal_dj_available():
+            return None
+        return self.owned.personal_dj_enabled
+
+    def is_owned_personal_dj_speaking(self):
+        return self.get_owned_personal_dj_enabled() is True and self.owned.is_personal_dj_speaking()
+
+    def get_owned_personal_dj_audio_frame(self):
+        return (self._owned_audio_bridge.get_personal_dj_audio_frame()
+            if self.is_owned_personal_dj_speaking() else None)
+
+    def set_owned_personal_dj_enabled(self, enabled):
+        if self.get_owned_personal_dj_enabled() is None or not isinstance(enabled, bool):
+            return False
+        if not self.owned.set_personal_dj_enabled(enabled):
+            return False
+        persist = self.settings_setter
+        if callable(persist):
+            persist("v2_personal_dj_enabled", enabled)
+        return True
+
     def set_owned_playback_mode(self, mode):
         if not self._owned_active() or mode not in self.get_owned_playback_modes():
             return False

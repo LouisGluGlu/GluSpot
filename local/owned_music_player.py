@@ -36,6 +36,15 @@ class _StreamRecovery:
     progress_position_ms: int = 0
 
 
+@dataclass
+class _CatalogStream:
+    epoch: int
+    source: QUrl
+    decoded_duration_ms: int
+    ended: bool = False
+    error: QMediaPlayer.Error | None = None
+
+
 class OwnedMusicPlayer(QObject):
     ARTWORK_NEIGHBORS = 3
     ARTWORK_CACHE_MAX_BYTES = 32 * 1024 * 1024
@@ -85,8 +94,13 @@ class OwnedMusicPlayer(QObject):
         self.failure_reason = ""
         self._epoch = 0
         self._catalog_epoch = 0
+        self._catalog_pending_epoch = 0
+        self._catalog_pending_kind = ""
+        self._catalog_stream = None
         self._fm_source = ""
         self._fm_kind = "fm"
+        self.personal_dj_enabled = False
+        self._fm_generation = 0
         self._stream_epoch = 0
         self._stream_trial = False
         self._decoded_duration_ms = 0
@@ -121,6 +135,7 @@ class OwnedMusicPlayer(QObject):
         self._fm_prefetch_attempt = None
         self._fm_advance_pending = False
         self._fm_skip_voice_pending = False
+        self._autoplay_after_load = True
         self._closed = False
 
     def _set_status(self, value):
@@ -149,10 +164,104 @@ class OwnedMusicPlayer(QObject):
     def is_personal_fm(self):
         return bool(self._fm_source)
 
+    def personal_dj_available(self):
+        return self._fm_source == "netease"
+
+    def is_personal_dj_speaking(self):
+        retained = self._catalog_stream if self._catalog_stream_is_current() else None
+        current_voice = (self._stream_epoch == self._epoch or retained is not None
+            and not retained.ended and retained.error is None)
+        return bool(self.personal_dj_enabled and self._fm_source == "netease"
+            and self.queue and 0 <= self.index < len(self.queue)
+            and self.queue[self.index].media_kind == "dj_voice"
+            and self.track is not None and self.track.is_playing
+            and current_voice)
+
+    def set_personal_dj_enabled(self, enabled):
+        """Change FM's genuine introduction feature without reopening music.
+
+        A separate recommendation generation fences old FM/DJ replies while
+        the current song's stream, download lease and lyric epoch remain valid.
+        The preference can be restored before a catalog is opened.
+        """
+        if not isinstance(enabled, bool) or self._closed:
+            return False
+        if QThread.currentThread() != self.thread():
+            return self._request_control("personal_dj", enabled, None)
+        if enabled == self.personal_dj_enabled:
+            return True
+        retained = self._catalog_stream if self._catalog_stream_is_current() else None
+        waiting = self._fm_advance_pending or (self._stream_epoch == 0
+            and self.status in {"loading_catalog", "catalog_unavailable"}
+            and (retained is None or retained.ended
+                or self._catalog_pending_kind in {"fm_continue", "fm_skip_continue"}))
+        if (self._catalog_pending_epoch and self._catalog_pending_kind
+                not in {"fm", "dj", "fm_continue", "fm_skip_continue"}):
+            # Even an old FM EOF cannot supersede an explicitly selected new
+            # playlist/daily catalog while that replacement is still pending.
+            waiting = False
+        self.personal_dj_enabled = enabled
+        self._fm_generation += 1
+        self._mode_epoch += 1
+        ended = False
+        if (self._catalog_pending_epoch and self._catalog_pending_kind
+                in {"fm", "dj", "fm_continue", "fm_skip_continue"}):
+            # The preference invalidates this request's service generation.
+            # End its transaction now, rather than waiting for a stale reply
+            # that can no longer finish the current source's clock or EOF.
+            self._catalog_epoch += 1
+            self._catalog_pending_epoch = 0
+            ended = self._restore_catalog_stream()
+            self._set_status("catalog_unavailable")
+            if (retained is not None and retained.error is not None and not ended
+                    and retained.epoch == self._epoch and retained.source == self.player.source()):
+                self._error(retained.error)
+        if self._fm_source != "netease" or not self.queue:
+            if ended:
+                self._end_current_stream()
+            self.changed.emit()
+            return True
+        self._fm_kind = "dj" if enabled else "fm"
+        self._fm_prefetch_pending = False
+        self._fm_prefetch_attempt = None
+        self._fm_advance_pending = waiting
+        self._fm_skip_voice_pending = False
+        # A new DJ batch owns its following songs; avoid inserting speech
+        # before unrelated recommendations from the former FM batch.
+        future = () if enabled else tuple(song for song in self.queue[self.index + 1:]
+            if song.media_kind != "dj_voice")
+        self.queue = self.queue[:self.index + 1] + future
+        voice_current = self.queue[self.index].media_kind == "dj_voice"
+        introduced_audio = (self._take_prefetched_audio(future[0])
+            if not enabled and voice_current and future else None)
+        self._clear_audio_prefetch()
+        if introduced_audio is not None:
+            self._prefetched_audio = introduced_audio
+        if not enabled and voice_current:
+            # Stop speech immediately on explicit disable, and select the song
+            # it introduced. Old speech downloads cannot replace that song.
+            target = self.index + 1
+            if target < len(self.queue):
+                resume = self.player.playbackState() != QMediaPlayer.PlaybackState.PausedState
+                self.index = target
+                self._load_song(autoplay=resume)
+                return True
+            self.player.stop()
+            self._advance_fm(skip_voice=True)
+            return True
+        self._refresh_artwork_window()
+        self._apply_cached_artwork()
+        self._pump_artwork()
+        self._prefetch_fm()
+        self._prefetch_audio()
+        return True
+
     def available_playback_modes(self):
         return ("sequential", "repeat_one") if self.is_personal_fm() else ("sequential", "shuffle", "repeat_one")
 
     def _set_fm_source(self, source, kind="fm"):
+        if (source, kind if source else "fm") != (self._fm_source, self._fm_kind):
+            self._fm_generation += 1
         if source and not self._fm_source:
             self._normal_playback_mode = self.playback_mode
             self.playback_mode = "sequential"
@@ -177,6 +286,7 @@ class OwnedMusicPlayer(QObject):
             self._refresh_artwork_window()
             self._apply_cached_artwork()
             self._pump_artwork()
+            self._prefetch_fm()
             self._prefetch_audio()
         else:
             self.changed.emit()
@@ -278,10 +388,14 @@ class OwnedMusicPlayer(QObject):
         return self._catalog("daily", source_id, lambda: self.service.daily_recommendations(source_id))
 
     def play_personal_fm(self, source_id="netease"):
-        return self._catalog("fm", source_id, lambda: self.service.personal_fm(source_id))
+        kind = "dj" if source_id == "netease" and self.personal_dj_enabled else "fm"
+        fetch = self.service.personal_dj if kind == "dj" else self.service.personal_fm
+        return self._catalog(kind, source_id, lambda: fetch(source_id))
 
     def play_personal_dj(self, source_id="netease"):
-        return self._catalog("dj", source_id, lambda: self.service.personal_dj(source_id))
+        # Compatibility entry point: this is FM with introductions enabled,
+        # never a separate playback mode or catalog destination.
+        return self.set_personal_dj_enabled(True) and self.play_personal_fm(source_id)
 
     def play_playlist(self, source_id, playlist_id):
         epoch = self._catalog_epoch + 1
@@ -304,7 +418,18 @@ class OwnedMusicPlayer(QObject):
     def _catalog(self, kind, source_id, action):
         if self._closed:
             return False
+        # The existing Qt source continues while its replacement is fetched.
+        # Retain only a healthy, genuinely opened stream, never pending audio
+        # or an in-progress recovery. Consecutive requests share that source.
+        if not self._catalog_stream_is_current():
+            self._catalog_stream = (_CatalogStream(self._epoch, QUrl(self.player.source()),
+                self._decoded_duration_ms) if self.track is not None
+                and self._stream_epoch == self._epoch and self._stream_epoch != 0
+                and self._stream_fault is None and self._stream_recovery is None
+                and not self.player.source().isEmpty() else None)
         self._catalog_epoch += 1
+        self._catalog_pending_epoch = self._catalog_epoch
+        self._catalog_pending_kind = kind
         self._fm_prefetch_pending = False
         self._fm_advance_pending = False
         self._fm_skip_voice_pending = False
@@ -317,15 +442,73 @@ class OwnedMusicPlayer(QObject):
         self._decoded_duration_ms = 0
         self.failure_reason = ""
         self._set_status("loading_catalog")
-        accepted = self.tasks.submit(("catalog", epoch, kind, source_id),
-            lambda: action() if not self._closed and epoch == self._catalog_epoch else ())
+        generation = self._fm_generation
+        fm_request = kind in {"fm", "dj", "fm_continue", "fm_skip_continue"}
+        accepted = self.tasks.submit(("catalog", epoch, kind, source_id, generation),
+            lambda: action() if not self._closed and epoch == self._catalog_epoch
+            and (not fm_request or generation == self._fm_generation) else ())
         if not accepted:
+            self._catalog_pending_epoch = 0
+            retained = self._catalog_stream
+            ended = self._restore_catalog_stream()
             self._set_status("busy")
+            current = (retained is not None and retained.epoch == self._epoch
+                and retained.source == self.player.source())
+            if ended and current:
+                self._end_current_stream()
+            elif current and retained.error is not None:
+                self._error(retained.error)
         return accepted
 
-    def _load_song(self):
+    def _catalog_stream_is_current(self):
+        stream = self._catalog_stream
+        return bool(stream is not None and not self._closed and self.track is not None
+            and stream.epoch == self._epoch and stream.source == self.player.source())
+
+    def _restore_catalog_stream(self):
+        current = self._catalog_stream_is_current()
+        stream, self._catalog_stream = self._catalog_stream, None
+        if not current:
+            return False
+        # Never play here: a user's pause during the request remains a pause.
+        self._stream_epoch = stream.epoch
+        self._decoded_duration_ms = stream.decoded_duration_ms
+        position = self._qt_position_ms()
+        if round(self.track.position_seconds * 1000) != position:
+            self._position_changed(position)
+        if (self._closed or self.track is None or stream.epoch != self._epoch
+                or stream.source != self.player.source()):
+            return False
+        if stream.decoded_duration_ms > 0 and round(self.track.duration_seconds * 1000) != stream.decoded_duration_ms:
+            self._duration_changed(stream.decoded_duration_ms)
+        playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState and not stream.ended
+        if self.track.is_playing != playing:
+            self.track = replace(self.track, is_playing=playing)
+            self.changed.emit()
+        return stream.ended
+
+    def _catalog_failed(self, error):
+        self._catalog_pending_epoch = 0
+        self.failure_reason = self._request_failure(error)
+        retained = self._catalog_stream if self._catalog_stream_is_current() else None
+        ended = self._restore_catalog_stream()
+        self._set_status("catalog_unavailable")
+        current = (retained is not None and retained.epoch == self._epoch
+            and retained.source == self.player.source())
+        if ended and current:
+            self._end_current_stream()
+        elif current and retained.error is not None:
+            self._error(retained.error)
+
+    def _load_song(self, *, autoplay=True):
         if self._closed:
             return False
+        if self._catalog_pending_epoch:
+            # A later explicit song choice cancels a pending replacement.
+            self._catalog_epoch += 1
+        self._catalog_pending_epoch = 0
+        self._catalog_stream = None
+        self._autoplay_after_load = autoplay
         self._epoch += 1
         self._reset_lyrics_payload()
         epoch = self._epoch
@@ -398,18 +581,22 @@ class OwnedMusicPlayer(QObject):
             self._fm_prefetch_completed(epoch, extra, result, error)
             return
         if kind == "catalog":
-            if epoch != self._catalog_epoch:
+            if epoch != self._catalog_epoch or epoch != self._catalog_pending_epoch:
+                return
+            catalog_kind, source, generation = extra
+            if (catalog_kind in {"fm", "dj", "fm_continue", "fm_skip_continue"}
+                    and generation != self._fm_generation):
                 return
             if error or not result:
-                self.failure_reason = self._request_failure(error)
-                self._set_status("catalog_unavailable")
+                self._catalog_failed(error)
                 return
-            catalog_kind, source = extra
             if catalog_kind in {"fm_continue", "fm_skip_continue"}:
                 incoming = self._unique_fm_songs(source, result)
                 if not incoming:
-                    self._set_status("catalog_unavailable")
+                    self._catalog_failed(None)
                     return
+                self._catalog_pending_epoch = 0
+                self._catalog_stream = None
                 self.index = len(self.queue)
                 self.queue += incoming
                 if self._fm_kind == "dj":
@@ -422,6 +609,11 @@ class OwnedMusicPlayer(QObject):
                         return
                 self._load_song()
                 return
+            if not all(isinstance(song, OnlineSong) for song in result):
+                self._catalog_failed("invalid_response")
+                return
+            self._catalog_pending_epoch = 0
+            self._catalog_stream = None
             self._replace_queue(result, fm_source=source if catalog_kind in {"fm", "dj"} else "",
                 fm_kind="dj" if catalog_kind == "dj" else "fm")
             return
@@ -465,7 +657,7 @@ class OwnedMusicPlayer(QObject):
                 return
             self._start_stream_audio(result, QUrl(result.url))
         elif kind == "lyrics":
-            if self._stream_epoch != epoch:
+            if self._stream_epoch != epoch and not self._catalog_stream_is_current():
                 return
             if error or result is None:
                 self._lyrics_unavailable()
@@ -481,7 +673,8 @@ class OwnedMusicPlayer(QObject):
                 return
             self._apply_lyrics_match(match)
         elif kind == "lyrics_refresh":
-            if self._lyrics_parse_pending != token or self._stream_epoch != epoch:
+            if self._lyrics_parse_pending != token or (self._stream_epoch != epoch
+                    and not self._catalog_stream_is_current()):
                 return
             self._lyrics_parse_pending = None
             if extra[0] != self._lyrics_generation:
@@ -574,7 +767,11 @@ class OwnedMusicPlayer(QObject):
                     self._lyrics_reparse_failed()
             self._check_stream_recovery()
             return
-        self.player.play()
+        if self._autoplay_after_load:
+            self.player.play()
+        else:
+            self.player.pause()
+            self._set_status("trial" if self._stream_trial else "playing")
         # QMediaPlayer confirms PlayingState asynchronously. A synchronous
         # decoder/network error must not be overwritten by a queued play.
         if self._stream_epoch != epoch or self.status == "playback_failed":
@@ -674,7 +871,8 @@ class OwnedMusicPlayer(QObject):
         if self._lyrics_parse_pending is not None:
             return True
         payload, epoch = self._lyric_payload, self._epoch
-        if payload is None or self._closed or self.track is None or self._stream_epoch != epoch:
+        if payload is None or self._closed or self.track is None or (self._stream_epoch != epoch
+                and not self._catalog_stream_is_current()):
             return False
         token = ("lyrics_refresh", epoch, self._lyrics_generation)
         preferences = self._lyrics_preferences_snapshot()
@@ -810,6 +1008,7 @@ class OwnedMusicPlayer(QObject):
 
     def _prefetch_fm(self):
         if (not self._fm_source or self._fm_prefetch_pending or self._closed
+                or self.playback_mode == "repeat_one" and self.queue[self.index].media_kind != "dj_voice"
                 or len(self.queue) - self.index - 1 >= self.ARTWORK_NEIGHBORS):
             return
         attempt = (self._queue_epoch, self.queue[-1].song_id)
@@ -817,16 +1016,18 @@ class OwnedMusicPlayer(QObject):
             return
         self._fm_prefetch_attempt = attempt
         epoch, source, catalog_epoch = self._queue_epoch, self._fm_source, self._catalog_epoch
+        generation = self._fm_generation
         fetch = self.service.personal_dj if self._fm_kind == "dj" else self.service.personal_fm
         self._fm_prefetch_pending = True
-        if not self.prefetch_tasks.submit(("fm_prefetch", epoch, catalog_epoch, source),
+        if not self.prefetch_tasks.submit(("fm_prefetch", epoch, catalog_epoch, source, generation),
                 lambda: fetch(source) if not self._closed and epoch == self._queue_epoch
-                and catalog_epoch == self._catalog_epoch else ()):
+                and catalog_epoch == self._catalog_epoch and generation == self._fm_generation else ()):
             self._fm_prefetch_pending = False
 
     def _fm_prefetch_completed(self, epoch, extra, result, error):
-        catalog_epoch, source = extra
-        if epoch != self._queue_epoch or catalog_epoch != self._catalog_epoch or source != self._fm_source:
+        catalog_epoch, source, generation = extra
+        if (epoch != self._queue_epoch or catalog_epoch != self._catalog_epoch or source != self._fm_source
+                or generation != self._fm_generation):
             return
         self._fm_prefetch_pending = False
         if error or not result:
@@ -866,8 +1067,14 @@ class OwnedMusicPlayer(QObject):
             # Preserve complete service pairs rather than orphan introductions
             # by deduplicating their songs against the previous batch.
             incoming = tuple(result)
-            return incoming if (0 < len(incoming) <= 96 and all(isinstance(song, OnlineSong)
-                and song.source_id == source for song in incoming)) else ()
+            if not (0 < len(incoming) <= 96 and all(isinstance(song, OnlineSong)
+                    and song.source_id == source for song in incoming)):
+                return ()
+            # Real DJ responses can begin with an unintroduced song. During
+            # continuation choose the first genuine introduction instead of
+            # promising speech before a song for which the server supplied none.
+            first_voice = next((i for i, song in enumerate(incoming) if song.media_kind == "dj_voice"), None)
+            return incoming[first_voice:] if first_voice is not None else ()
         existing = {(song.source_id, song.song_id) for song in self.queue}
         incoming = []
         for song in result:
@@ -913,6 +1120,9 @@ class OwnedMusicPlayer(QObject):
             romanization=payload.romanization, source=payload.source or payload.source_id)
 
     def _position_changed(self, milliseconds):
+        if self._closed or (self._stream_epoch != self._epoch
+                and not self._catalog_stream_is_current()):
+            return
         recovery = self._stream_recovery
         if recovery is not None and (recovery.phase != "progress"
                 or milliseconds < recovery.position_ms - self.STREAM_RECOVERY_SEEK_TOLERANCE_MS):
@@ -924,6 +1134,10 @@ class OwnedMusicPlayer(QObject):
             self.changed.emit()
 
     def _duration_changed(self, milliseconds):
+        if self._catalog_pending_epoch and self._catalog_stream_is_current():
+            self._catalog_stream.decoded_duration_ms = max(0, milliseconds)
+        elif self._closed or self._stream_epoch != self._epoch:
+            return
         if self.track is not None and self._stream_epoch == self._epoch:
             self._decoded_duration_ms = max(0, milliseconds)
         if self.track is not None and milliseconds > 0:
@@ -936,13 +1150,24 @@ class OwnedMusicPlayer(QObject):
             self._stream_fault = (epoch, reason, self._qt_position_ms(), time.monotonic())
         if self.track is not None:
             self.track = replace(self.track, is_playing=(state == QMediaPlayer.PlaybackState.PlayingState
+                and (self._stream_epoch == self._epoch or self._catalog_stream_is_current()) and not self._closed
                 and self.status != "playback_failed" and self._stream_recovery is None))
             if (state == QMediaPlayer.PlaybackState.PlayingState
-                    and self._stream_epoch == self._epoch and not self._closed and self._stream_recovery is None):
+                    and self._stream_epoch == self._epoch and not self._catalog_pending_epoch
+                    and not self._closed and self._stream_recovery is None):
                 self._set_status("trial" if self._stream_trial else "playing")
             self.changed.emit()
 
     def _media_status(self, status):
+        if self._catalog_pending_epoch and self._catalog_stream_is_current():
+            if status == QMediaPlayer.MediaStatus.EndOfMedia:
+                self._catalog_stream.ended = True
+                self.track = replace(self.track, is_playing=False)
+                self.changed.emit()
+            elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+                if self._catalog_stream.error is None:
+                    self._catalog_stream.error = QMediaPlayer.Error.ResourceError
+            return
         if self._closed or self.track is None or self._stream_epoch != self._epoch:
             return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
@@ -958,6 +1183,7 @@ class OwnedMusicPlayer(QObject):
 
     def _end_current_stream(self):
         self._clear_stream_fault()
+        self._stream_epoch = 0
         if self.playback_mode == "repeat_one" and self.queue[self.index].media_kind != "dj_voice":
             self._load_song()
         else:
@@ -969,6 +1195,12 @@ class OwnedMusicPlayer(QObject):
             "incomplete", "expired", "too_large", "storage", "access_denied"} else "unavailable"
 
     def _error(self, code, *_args):
+        if code != QMediaPlayer.Error.NoError and self._catalog_pending_epoch and self._catalog_stream_is_current():
+            # Keep the old decoder's buffered-tail evidence. If replacement
+            # fails, replay this into the existing fault/recovery machinery;
+            # successful replacement discards it with the old source.
+            self._catalog_stream.error = code
+            return
         if (code == QMediaPlayer.Error.NoError or self._closed or self.track is None
                 or self._stream_epoch != self._epoch):
             return
@@ -1151,6 +1383,8 @@ class OwnedMusicPlayer(QObject):
         if QThread.currentThread() != self.thread():
             return self._request_control("command", command, self.track.track_id)
         if command == "toggle_play_pause":
+            if self._catalog_stream is not None:
+                self._catalog_stream.ended = False
             if self._stream_recovery is not None:
                 self._stream_recovery.resume = not self._stream_recovery.resume
                 if not self._stream_recovery.resume:
@@ -1167,7 +1401,8 @@ class OwnedMusicPlayer(QObject):
                 self.player.play()
             return True
         if command in {"previous", "next"}:
-            if self._fm_kind == "dj" and self._fm_source:
+            if self._fm_source and (self._fm_kind == "dj"
+                    or any(song.media_kind == "dj_voice" for song in self.queue)):
                 step = -1 if command == "previous" else 1
                 target = self.index + step
                 while 0 <= target < len(self.queue) and self.queue[target].media_kind == "dj_voice":
@@ -1196,6 +1431,8 @@ class OwnedMusicPlayer(QObject):
             return False
         self._clear_stream_recovery()
         self._clear_stream_fault()
+        if self._catalog_stream is not None:
+            self._catalog_stream.ended = False
         epoch, stream_epoch = self._epoch, self._stream_epoch
         self.player.setPosition(round(seconds * 1000))
         if recovery is not None:
@@ -1226,7 +1463,9 @@ class OwnedMusicPlayer(QObject):
             if (self._closed or result.get("cancelled") or time.monotonic() >= deadline
                     or result.get("generation") != (self._epoch, self._catalog_epoch, self._queue_epoch, self._mode_epoch)):
                 return
-            if kind == "mode":
+            if kind == "personal_dj":
+                result["succeeded"] = self.set_personal_dj_enabled(value)
+            elif kind == "mode":
                 result["succeeded"] = self.set_playback_mode(value)
             elif self.track is not None and self.track.track_id == track_id:
                 if kind == "lyrics_refresh":
@@ -1258,6 +1497,8 @@ class OwnedMusicPlayer(QObject):
         self._epoch += 1
         self._reset_lyrics_payload()
         self._catalog_epoch += 1
+        self._catalog_pending_epoch = 0
+        self._catalog_stream = None
         self._stream_epoch = 0
         self._stream_trial = False
         self._clear_stream_recovery()

@@ -82,6 +82,7 @@ from local.audio_output_motion import OutputConnectionMotion, connection_capsule
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
 from local.music_source_icons import paint_music_source_icon
+from local.personal_dj_icon import paint_personal_dj_icon
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -187,6 +188,12 @@ class MusicSurfaceWindow(QWidget):
         self._owned_playback_mode: str | None = None
         self._owned_playback_modes: tuple[str, ...] = ()
         self._owned_personal_fm = False
+        self._owned_personal_dj_enabled = None
+        self._owned_dj_speaking = False
+        self._dj_activity_from = self._dj_activity_to = 0.0
+        self._dj_activity_started_at = 0.0
+        self._dj_last_reveal = 0.0
+        self._dj_audio_frame = None
         self._audio_output_panel: AudioOutputPanel | None = None
         self._audio_output_kinds: tuple[str, ...] = ()
         self._audio_output_membership = OutputMembershipTracker()
@@ -504,6 +511,14 @@ class MusicSurfaceWindow(QWidget):
     ):
         self._cancel_mode_transition()
         self._reset_control_idle()
+        if (not self.isVisible() and self._track_visual is not None
+                and self._track_visual[0] != self._visual_track_identity()):
+            # A hidden page has not observed intervening songs. Prepare the
+            # current track through the normal artwork/lyric handoff, without
+            # capturing its old page in the new presentation's destination.
+            palette = self._art_palette()
+            self._track_transition(time.monotonic(), QColor(palette.primary), QColor(palette.secondary))
+            self._previous_track_visual = None
         if self._closing_for_shutdown:
             self._timer.timeout.connect(self._on_animation_tick)
             self._audio_output_status_timer.timeout.connect(self._sync_audio_output_status)
@@ -759,7 +774,7 @@ class MusicSurfaceWindow(QWidget):
         return self._control_reveal_at(time.monotonic()) >= 0.75
 
     def _transition_window_control_contains(self, key: str, rect: QRectF, point: QPointF) -> bool:
-        if key == "library" and not self._geometry_transition_snapshot.isNull() and self._mode_snapshot_size.isValid():
+        if key in {"library", "personal_dj"} and not self._geometry_transition_snapshot.isNull() and self._mode_snapshot_size.isValid():
             captured = self._mode_snapshot_control_rects.get(key)
             if captured is None:
                 return False
@@ -848,6 +863,18 @@ class MusicSurfaceWindow(QWidget):
         self._sync_window_control_rects()
         self._sync_surface_shape()
         self.update()
+
+    def _finish_stale_track_transition(self):
+        if (self._geometry_transition_snapshot.isNull() or self._mode_lyric_snapshot_track is None
+                or self._mode_lyric_snapshot_track == self._visual_track_identity()):
+            return
+        # Finish the chosen destination when its frozen bitmap belongs to
+        # the preceding song. Cancelling midway would strand its geometry.
+        target = self._mode_animation.endValue()
+        self._mode_animation.stop()
+        if isinstance(target, QRect) and target.isValid():
+            self.setGeometry(target)
+        self._finish_mode_transition()
 
     def _rebase_snapshot_lyric_motion(self):
         """Make the live lyric pose inherit the bitmap's final local scale."""
@@ -1640,6 +1667,7 @@ class MusicSurfaceWindow(QWidget):
         """
         if self._closing_for_shutdown:
             return
+        self._finish_stale_track_transition()
         self._advance_audio_output_motion(time.monotonic())
         if self._mode_animation.state() == QAbstractAnimation.State.Paused:
             if self._timer.interval() != self._transition_frame_interval():
@@ -1743,6 +1771,7 @@ class MusicSurfaceWindow(QWidget):
         ):
             self._prewarm_metadata_text()
         self._update_control_animation_regions(now)
+        self._update_personal_dj_control(now)
         if (self.isVisible() and self._owned_personal_fm
                 and self._owned_playback_mode == "sequential"
                 and self._control_last_tick_reveal >= 0.999
@@ -4274,6 +4303,25 @@ class MusicSurfaceWindow(QWidget):
             tuple(float(self._lyric_group_blur_level(row, focus, pair_starts)) for row in range(len(visual_ranges)))
             if resetting or state["focus"] != focus else state["desired"]
         )
+        if self._browse_index is not None or self._browse_return_from is not None:
+            # Wheel browsing makes every visible sentence readable, including
+            # while the existing viewport animation returns to the real clock.
+            # Keep current positions so leaving browse cannot revive an old
+            # playback focus or restart a blur fade from stale geometry.
+            clear = (0.0,) * len(visual_ranges)
+            self._lyric_blur_follow_state = {
+                "token": token, "focus": focus, "positions": row_positions,
+                "origins": row_positions, "from": clear, "levels": clear,
+                "progress": [1.0] * len(visual_ranges), "moving": True,
+                "visual_indices": visual_indices, "desired": desired,
+                "browse_clear": True,
+            }
+            return clear, True
+        restoring_browse = not resetting and bool(state.pop("browse_clear", False))
+        if restoring_browse:
+            # A click or completed automatic return hands the column back to
+            # the ordinary physical-travel blend, starting with its clear ink.
+            state["focus"] = None
         if resetting:
             self._lyric_blur_follow_state = {
                 "token": token, "focus": focus, "positions": row_positions,
@@ -4310,6 +4358,10 @@ class MusicSurfaceWindow(QWidget):
             )
         state["levels"] = tuple(levels)
         state["positions"] = row_positions
+        if restoring_browse and all(progress >= 1.0 for progress in state["progress"]):
+            # The viewport may already be centred (or the player may be
+            # paused), so no further spring movement is required for reading.
+            state["moving"] = True
         return state["levels"], state["moving"]
 
     def _paint_intro_countdown(
@@ -6455,7 +6507,8 @@ class MusicSurfaceWindow(QWidget):
                 painter.save()
                 if unobscured_path is not None:
                     painter.setClipPath(unobscured_path)
-                painter.setOpacity(normal_opacity)
+                metadata_transition = transition if previous and cover_fraction < 0.1 else 1.0
+                painter.setOpacity(normal_opacity * metadata_transition)
                 painter.setFont(title_font)
                 painter.setPen(QColor(255, 255, 255, 242))
                 self._paint_scrolling_metadata(
@@ -6465,7 +6518,7 @@ class MusicSurfaceWindow(QWidget):
                 )
                 if previous and cover_fraction < 0.1:
                     painter.save()
-                    painter.setOpacity(1.0 - transition)
+                    painter.setOpacity(normal_opacity * (1.0 - transition))
                     self._paint_scrolling_metadata(
                         painter, title_rect, previous[1], title_font,
                         metadata_now, previous[0], field="title", animate=False,
@@ -6480,7 +6533,7 @@ class MusicSurfaceWindow(QWidget):
                 )
                 if previous and cover_fraction < 0.1:
                     painter.save()
-                    painter.setOpacity(1.0 - transition)
+                    painter.setOpacity(normal_opacity * (1.0 - transition))
                     self._paint_scrolling_metadata(
                         painter, artist_rect, previous[2], artist_font,
                         metadata_now, previous[0], field="artist", animate=False,
@@ -7719,6 +7772,8 @@ class MusicSurfaceWindow(QWidget):
         if paint_region is None or paint_region.intersects(self._library_damage_rect(rect)):
             self._paint_library_back(painter, rect)
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed)
+        if paint_region is None or paint_region.intersects(self._personal_dj_button_rect(rect).adjusted(-8, -8, 8, 30).toAlignedRect()):
+            self._paint_personal_dj_control(painter, rect)
         controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
         controls_top = min(
             rect.bottom() - 18.0 * surface_scale - controls_height,
@@ -7864,7 +7919,7 @@ class MusicSurfaceWindow(QWidget):
 
     @staticmethod
     def _window_control_contains(key: str, rect: QRectF, point: QPointF) -> bool:
-        if key != "library":
+        if key not in {"library", "personal_dj"}:
             return rect.contains(point)
         shape = QPainterPath()
         radius = min(rect.width(), rect.height()) / 2.0
@@ -7947,6 +8002,8 @@ class MusicSurfaceWindow(QWidget):
             self._sync_window_control_rects()
             self.update()
 
+        self._sync_personal_dj_state()
+
     def _playback_mode_tooltip(self) -> str:
         if self._owned_personal_fm:
             return ("私人漫游 · ∞ 续播 · 点击切换为单曲循环" if self._owned_playback_mode == "sequential"
@@ -7980,6 +8037,95 @@ class MusicSurfaceWindow(QWidget):
         # All bands come from the existing lyric characteristic color. The
         # repeated deep endpoint joins each horizontal sweep without a seam.
         return ((0.0, deep), (1 / 3, QColor(accent)), (2 / 3, light), (1.0, deep))
+
+    def _personal_dj_button_rect(self, rect: QRectF) -> QRectF:
+        scale = self._surface_scale(rect)
+        fm = self._playback_mode_button_rect(self._window_control_base_rect(rect), scale)
+        side = fm.width() * .78
+        return QRectF(fm.right() - side * .5, fm.bottom() + 10.0 * scale, side, side)
+
+    def _personal_dj_activity_at(self, now: float) -> float:
+        progress = max(0.0, min(1.0, (now - self._dj_activity_started_at) / .32))
+        return self._dj_activity_from + (self._dj_activity_to - self._dj_activity_from) * self._control_spring_progress(progress)
+
+    def _personal_dj_reveal_at(self, now: float) -> float:
+        if self._owned_personal_dj_enabled is None:
+            return 0.0
+        return max(self._control_reveal_at(now), self._personal_dj_activity_at(now))
+
+    def _sync_personal_dj_state(self):
+        provider = getattr(self.owner, "data_provider", None)
+        getter = getattr(provider, "get_owned_personal_dj_enabled", None)
+        speaking_getter = getattr(provider, "is_owned_personal_dj_speaking", None)
+        try:
+            enabled = getter() if self._owned_personal_fm and callable(getter) else None
+            enabled = enabled if isinstance(enabled, bool) else None
+            speaking = enabled is True and callable(speaking_getter) and bool(speaking_getter())
+        except Exception:
+            enabled, speaking = None, False
+        if (enabled, speaking) == (self._owned_personal_dj_enabled, self._owned_dj_speaking):
+            return
+        now = time.monotonic()
+        self._dj_activity_from = self._personal_dj_activity_at(now)
+        self._dj_activity_to = 1.0 if speaking else 0.0
+        self._dj_activity_started_at = now
+        self._owned_personal_dj_enabled, self._owned_dj_speaking = enabled, speaking
+        self._dj_audio_frame = None
+        self._sync_window_control_rects()
+        self.update(self._personal_dj_button_rect(QRectF(self.rect())).adjusted(-8, -8, 8, 30).toAlignedRect())
+
+    def _update_personal_dj_control(self, now: float):
+        reveal = self._personal_dj_reveal_at(now)
+        changed = abs(reveal - self._dj_last_reveal) > .001
+        self._dj_last_reveal = reveal
+        self._dj_audio_frame = None
+        if self._owned_dj_speaking:
+            getter = getattr(getattr(self.owner, "data_provider", None), "get_owned_personal_dj_audio_frame", None)
+            try:
+                self._dj_audio_frame = getter() if callable(getter) else None
+            except Exception:
+                pass
+        if self.isVisible() and not self._capturing_transition_snapshot and (changed or reveal > .001 and self._owned_dj_speaking):
+            self.update(self._personal_dj_button_rect(QRectF(self.rect())).adjusted(-8, -8, 8, 30).toAlignedRect())
+
+    def _personal_dj_tooltip(self):
+        return "私人漫游 · 私人DJ已开启 · 点击关闭" if self._owned_personal_dj_enabled else "私人漫游 · 私人DJ已关闭 · 点击开启"
+
+    def _toggle_personal_dj(self):
+        self._sync_owned_playback_mode()
+        setter = getattr(getattr(self.owner, "data_provider", None), "set_owned_personal_dj_enabled", None)
+        if self._owned_personal_dj_enabled is None or not callable(setter):
+            return False
+        try:
+            changed = bool(setter(not self._owned_personal_dj_enabled))
+        except Exception:
+            changed = False
+        self._sync_personal_dj_state()
+        self.setToolTip(self._personal_dj_tooltip())
+        return changed
+
+    def _window_button_clickable(self, key: str, shared: bool) -> bool:
+        return shared or key == "personal_dj" and self._personal_dj_reveal_at(time.monotonic()) >= .75
+
+    def _paint_personal_dj_control(self, painter: QPainter, rect: QRectF):
+        now = time.monotonic()
+        reveal = self._personal_dj_reveal_at(now)
+        if reveal <= .001:
+            return
+        button = self._personal_dj_button_rect(rect)
+        painter.save()
+        painter.setOpacity(reveal)
+        painter.translate(self._window_control_shift(button, reveal))
+        hovered = self._hovered_window_button == "personal_dj"
+        painter.setPen(QPen(QColor(170, 172, 175, 160), max(1.0, self._surface_scale(rect))))
+        painter.setBrush(QColor(65 if hovered else 42, 66 if hovered else 43, 69 if hovered else 46, 235))
+        painter.drawEllipse(button)
+        color = self._future_lyric_color(button) if self._owned_personal_dj_enabled else QColor(205, 207, 211)
+        inner = button.adjusted(button.width() * .22, button.height() * .16, -button.width() * .22, -button.height() * .16)
+        # Vector glow is small and uncached. No frame-time raster blur or
+        # unbounded cache keys are generated by actual speech frequencies.
+        paint_personal_dj_icon(painter, inner, color, bands=self._dj_audio_frame if self._owned_dj_speaking else None)
+        painter.restore()
 
     def _audio_output_available(self) -> bool:
         return callable(getattr(getattr(self.owner, "data_provider", None), "get_audio_route_snapshot", None))
@@ -8285,6 +8431,10 @@ class MusicSurfaceWindow(QWidget):
         if reveal >= 0.75 and self._owned_playback_mode is not None:
             self._button_rects["playback_mode"] = self._playback_mode_button_rect(
                 button, self._surface_scale(rect)).translated(self._window_control_shift(button, reveal))
+        dj_reveal = self._personal_dj_reveal_at(time.monotonic())
+        if dj_reveal >= .75:
+            dj_button = self._personal_dj_button_rect(rect)
+            self._button_rects["personal_dj"] = dj_button.translated(self._window_control_shift(dj_button, dj_reveal))
         if reveal >= 0.75 and self._audio_output_available():
             audio = self._audio_output_button_rect(button, self._surface_scale(rect))
             pose = self._audio_output_motion.pose
@@ -8605,6 +8755,11 @@ class MusicSurfaceWindow(QWidget):
         if self._library_back_available() and reveal > 0.001:
             face = self._library_button_face(rect, self._library_expansion_at(now)).translated(self._library_control_shift(rect, reveal))
             occluder.addRoundedRect(face, face.height() / 2, face.height() / 2)
+        dj_reveal = self._personal_dj_reveal_at(now)
+        if dj_reveal > .001:
+            face = self._personal_dj_button_rect(rect)
+            face.translate(self._window_control_shift(face, dj_reveal))
+            occluder.addEllipse(face)
         # Transparent/absent artwork still owns its foreground slot. Rings
         # illuminate only the space behind it, never the thumbnail or plate.
         painter.setClipPath(space.subtracted(occluder), Qt.ClipOperation.IntersectClip)
@@ -8765,7 +8920,7 @@ class MusicSurfaceWindow(QWidget):
         self._drag_origin = event.globalPosition().toPoint()
         self._drag_geometry = QRect(self.geometry())
         self._pressed_window_button = next((key for key, rect in self._button_rects.items()
-                                            if controls_clickable and self._window_control_contains(key, rect, event.position())), "")
+                                            if self._window_button_clickable(key, controls_clickable) and self._window_control_contains(key, rect, event.position())), "")
         if self._pressed_window_button == "library":
             self._resize_edges = set()
         self._pressed_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_clickable else ""
@@ -8807,14 +8962,14 @@ class MusicSurfaceWindow(QWidget):
                 return
             controls_hoverable = self._control_reveal_at(time.monotonic()) >= 0.75
             window_button = next((key for key, rect in self._button_rects.items()
-                                  if controls_hoverable and self._window_control_contains(key, rect, event.position())), "")
+                                  if self._window_button_clickable(key, controls_hoverable) and self._window_control_contains(key, rect, event.position())), "")
             media_button = next((key for key, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_hoverable else ""
             if window_button != self._hovered_window_button or media_button != self._hovered_media_command:
                 self._hovered_window_button = window_button
                 self._hovered_media_command = media_button
                 self._set_library_expanded(window_button == "library", time.monotonic())
                 self.setToolTip({"mode": "切换到窗口", "return": "返回岛模式", "library": "返回音乐库",
-                                 "playback_mode": self._playback_mode_tooltip()}.get(window_button, ""))
+                                 "playback_mode": self._playback_mode_tooltip(), "personal_dj": self._personal_dj_tooltip()}.get(window_button, ""))
                 self.update()
             if window_button or media_button:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -8884,7 +9039,7 @@ class MusicSurfaceWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and not self._moving and not self._resize_edges:
             point = event.position()
             release_window_button = next((key for key, rect in self._button_rects.items()
-                                          if controls_clickable and self._window_control_contains(key, rect, point)), "")
+                                          if self._window_button_clickable(key, controls_clickable) and self._window_control_contains(key, rect, point)), "")
             release_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(point)), "") if controls_clickable else ""
             release_lyric_index = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(point)), None)
             pressed_window_button = str(getattr(self, "_pressed_window_button", "") or "")
@@ -8900,6 +9055,8 @@ class MusicSurfaceWindow(QWidget):
                 self._toggle_translation()
             elif pressed_window_button == "playback_mode" and release_window_button == "playback_mode":
                 self._cycle_owned_playback_mode()
+            elif pressed_window_button == "personal_dj" and release_window_button == "personal_dj":
+                self._toggle_personal_dj()
             elif pressed_window_button == "audio_output" and release_window_button == "audio_output":
                 self._toggle_audio_output_panel()
             elif pressed_lyric_index is not None and release_lyric_index == pressed_lyric_index:
@@ -8955,6 +9112,12 @@ class MusicSurfaceWindow(QWidget):
             self._hovered_lyric_index = None
             self.update()
             return
+        # Selecting a line ends the temporary clear browsing presentation
+        # immediately. The fenced asynchronous command still controls whether
+        # a seek target is accepted; the viewport follows the real clock.
+        self._clear_lyric_browse()
+        self._hovered_lyric_index = None
+        self.update()
         self._seek_pending = True
         self._seek_request_source_app = str(getattr(self.owner, "media_source_app", "") or "")
 

@@ -185,7 +185,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
 
     def test_open_loads_only_current_account_and_real_catalog_with_netease_collections(self):
         self.open()
-        self.assertEqual([row.kind for row in self.window.collections], ["daily", "fm", "dj", "playlist"])
+        self.assertEqual([row.kind for row in self.window.collections], ["daily", "fm", "playlist"])
         self.assertEqual(self.window._account.user_id, "netease-user")
         self.assertEqual(self.service.calls, [("account", "netease", False), ("playlists", "netease", 50, 0)])
         self.assertEqual(self.settings.values["v2_online_music_source"], "netease")
@@ -364,7 +364,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         token, action = self.tasks.latest("search")
         self.search("")
         self.tasks.completed.emit(token, ({"songs": CatalogPage((self.song,), 30, True)}, []), None)
-        self.assertEqual([row.kind for row in self.window.collections], ["daily", "fm", "dj", "playlist"])
+        self.assertEqual([row.kind for row in self.window.collections], ["daily", "fm", "playlist"])
         self.assertFalse(self.controller._pending)
 
     def test_artwork_source_switch_discards_old_avatar_and_cover_and_pumps_new_jobs(self):
@@ -433,12 +433,20 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.player.calls, [])
         self.assertIsNone(self.controller._opening)
 
-    def test_netease_dj_entry_dispatches_to_real_owned_dj_action(self):
+    def test_netease_dj_has_no_standalone_entry_and_fm_keeps_its_existing_dispatch(self):
         self.open()
-        row = next(row for row in self.window.collections if row.kind == "dj")
+        self.assertFalse(any(row.kind == "dj" for row in self.window.collections))
+        row = next(row for row in self.window.collections if row.kind == "fm")
         self.controller.play_collection(row, "window", QRect())
-        self.assertEqual(self.player.calls[-1], ("dj", "netease"))
+        self.assertEqual(self.player.calls[-1], ("fm", "netease"))
         self.assertIsNotNone(self.controller._opening)
+
+    def test_stale_standalone_dj_collection_cannot_start_an_independent_mode(self):
+        self.open()
+        stale = LibraryCollection("dj", "dj", "私人DJ", "")
+        self.controller.play_collection(stale, "window", QRect())
+        self.assertEqual(self.player.calls, [])
+        self.assertIsNone(self.controller._opening)
 
     def test_buffered_failure_reports_actual_network_expiry_or_storage_reason(self):
         for reason, message in (("incomplete", "下载未完成"), ("expired", "授权已过期"), ("storage", "磁盘")):
@@ -449,6 +457,28 @@ class MusicLibraryControllerTests(unittest.TestCase):
             self.player._set_status("stream_unavailable")
             self.assertIn(message, self.window._error)
             self.assertIsNone(self.controller._opening)
+
+    def test_failed_catalog_selection_explicitly_keeps_the_existing_song(self):
+        self.open()
+        self.player.play_queue((self.song,))
+        playing = self.player.track
+        self.controller.play_collection(self.window.collections[0], "window", QRect())
+        self.player._set_status("catalog_unavailable")
+        self.assertIn("当前歌曲继续播放", self.window._error)
+        self.assertIs(self.player.track, playing)
+        self.assertTrue(self.window.isVisible())
+        self.assertIsNone(self.controller._opening)
+        self.assertNotIn(("stop",), self.player.calls)
+        self.assertEqual(self.island.calls, [])
+
+    def test_failed_new_stream_does_not_claim_previous_song_continues(self):
+        self.open()
+        self.controller.play_collection(self.window.collections[0], "window", QRect())
+        self.player.track = replace(track(self.song), is_playing=False)
+        self.player._set_status("loading_stream")
+        self.player._set_status("stream_unavailable")
+        self.assertNotIn("当前歌曲继续播放", self.window._error)
+        self.assertIsNone(self.controller._opening)
 
     def test_refused_and_failed_thumbnail_jobs_release_visible_slot_for_scroll_retry(self):
         self.open()
@@ -719,6 +749,23 @@ class OwnedControllerHandoffTests(unittest.TestCase):
         self.assertFalse(self.window._opening)
         self.assertTrue(self.window._rows[0].isEnabled())
         self.assertEqual(self.player.status, "busy")
+
+    def test_real_owned_refused_catalog_keeps_current_audio_and_specific_failure(self):
+        old = OnlineSong("netease", "old", "old song")
+        self.player.play_queue((old,))
+        token, _ = self.play_tasks.latest("stream")
+        self.play_tasks.completed.emit(token, StreamInfo("netease", "old", "https://example.test/old.mp3", True), None)
+        current = self.player.track
+        self.assertTrue(current.is_playing)
+        self.play_tasks.accepting = False
+        self.window.set_collections((LibraryCollection("fm", "fm", "私人漫游", ""),))
+        self.window._rows[0].cover.click()
+        self.assertIs(self.player.track, current)
+        self.assertTrue(current.is_playing)
+        self.assertIn("服务繁忙", self.window._error)
+        self.assertIn("当前歌曲继续播放", self.window._error)
+        self.assertIsNone(self.controller._opening)
+        self.assertEqual(self.island.calls, [])
 
     def test_real_owned_catalog_to_rejected_stream_does_not_handoff(self):
         playlist = LibraryCollection("playlist:netease:one", "playlist", "one", "", "one")

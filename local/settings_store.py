@@ -155,6 +155,7 @@ DEFAULT_SETTINGS = {
     "v2_playback_onboarding_completed": False,
     "v2_owned_playback_enabled": True,
     "v2_owned_playback_mode": "sequential",
+    "v2_personal_dj_enabled": False,
     "v2_system_capture_enabled": False,
     "v2_startup_mode": "none",
     "v2_custom_icon_path": "",
@@ -407,7 +408,7 @@ class SettingsManager(QObject):
             migrated = any(key in data for key in _REMOVED_VISUAL_SETTING_KEYS)
             self._settings.update({key: value for key, value in data.items() if key not in _REMOVED_VISUAL_SETTING_KEYS})
             for key, default in (("v2_owned_playback_enabled", True), ("v2_system_capture_enabled", False),
-                                 ("v2_playback_onboarding_completed", False)):
+                                 ("v2_playback_onboarding_completed", False), ("v2_personal_dj_enabled", False)):
                 if not isinstance(self._settings.get(key), bool):
                     self._settings[key] = default
                     migrated = True
@@ -484,6 +485,8 @@ class SettingsManager(QObject):
 
     def set(self, key: str, value):
         if key in _REMOVED_VISUAL_SETTING_KEYS or key in FIXED_DEFAULT_SETTING_KEYS:
+            return
+        if key == "v2_personal_dj_enabled" and not isinstance(value, bool):
             return
         if key == "v2_owned_playback_mode" and value not in ("sequential", "shuffle", "repeat_one"):
             value = "sequential"

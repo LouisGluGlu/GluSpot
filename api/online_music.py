@@ -587,7 +587,7 @@ class OnlineMusicService:
                 songs[identity] = song
         result = []
         voices = 0
-        for resource in resources:
+        for resource_position, resource in enumerate(resources):
             kind, value = resource.get("type"), resource["value"]
             if kind == "song":
                 result.append(songs[str(value["songId"])])
@@ -610,7 +610,12 @@ class OnlineMusicService:
                         invalid()
                     related = audio.get("introductionRelatedSongIds")
                     related = related if isinstance(related, list) else []
-                    associated = next((songs[str(key)] for key in related[:16] if str(key) in songs), None)
+                    following = next((following for following in resources[resource_position + 1:]
+                        if following.get("type") == "song"), None)
+                    following_id = str(following["value"]["songId"]) if following is not None else ""
+                    if following_id not in {str(key) for key in related[:16]}:
+                        invalid()
+                    associated = songs[following_id]
                     label = audio.get("textType")
                     label = label if isinstance(label, str) and len(label) <= 24 and not any(ord(c) < 32 for c in label) else "语音"
                     stream = StreamInfo("netease", "dj:" + identity, url, True, quality="dj_voice", expires_at=self._clock() + ttl)
