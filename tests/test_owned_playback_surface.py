@@ -12,9 +12,10 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from api.audio_routes import AudioRouteSnapshot
 from local.branding import ROOT_DIR
-from local.music_source_icons import music_source_icon_image
+from local.music_source_icons import music_source_icon_image, _rendered_icon
 from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_surface_palette import artwork_surface_palette
 
 
 class _Provider:
@@ -23,6 +24,7 @@ class _Provider:
         self.owned = True
         self.calls = []
         self.accept = True
+        self.fm = False
 
     def _owned_active(self):
         return self.owned
@@ -36,6 +38,12 @@ class _Provider:
             self.mode = mode
             return True
         return False
+
+    def is_owned_personal_fm(self):
+        return self.owned and self.fm
+
+    def get_owned_playback_modes(self):
+        return (("sequential", "repeat_one") if self.fm else ("sequential", "shuffle", "repeat_one")) if self.owned else ()
 
     def get_audio_route_snapshot(self):
         return AudioRouteSnapshot(capture_scope="owned-player")
@@ -171,6 +179,16 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         self.assertFalse(self.window._cycle_owned_playback_mode())
         self.assertEqual(self.provider.calls, [])
 
+    def test_missing_owned_mode_interface_does_not_add_an_idle_full_repaint(self):
+        self.owner.data_provider = SimpleNamespace()
+        self.window._owned_playback_mode = None
+        self.window._owned_playback_modes = ()
+        self.window._owned_personal_fm = False
+        with patch.object(self.window, "update") as update:
+            self.window._sync_owned_playback_mode()
+            self.window._sync_owned_playback_mode()
+        update.assert_not_called()
+
     def test_source_change_between_press_and_release_cannot_set_system_mode(self):
         self.window._reset_control_idle()
         self.window._sync_window_control_rects()
@@ -238,6 +256,99 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         self.assertIn(blue.rgba(), seen[0])
         self.assertIn(purple.rgba(), seen[1])
 
+    def test_fm_actual_clicks_alternate_only_continuation_and_repeat(self):
+        self.provider.fm = True
+        self.window._sync_owned_playback_mode()
+        for mode in ("repeat_one", "sequential", "repeat_one", "sequential"):
+            self.window._reset_control_idle()
+            self.window._sync_window_control_rects()
+            event = self._event(self.window._button_rects["playback_mode"].center())
+            self.window.mousePressEvent(event)
+            self.window.mouseReleaseEvent(event)
+            self.assertEqual(self.provider.mode, mode)
+        self.assertEqual(self.provider.calls, ["repeat_one", "sequential"] * 2)
+        self.assertIn("∞ 续播", self.window._playback_mode_tooltip())
+        self.provider.fm = False
+        self.window._sync_owned_playback_mode()
+        self.assertTrue(self.window._cycle_owned_playback_mode())
+        self.assertEqual(self.provider.mode, "shuffle")
+
+    def test_fm_context_changes_at_release_and_same_mode_updates_asset(self):
+        self.window._reset_control_idle()
+        self.window._sync_window_control_rects()
+        event = self._event(self.window._button_rects["playback_mode"].center())
+        self.window.mousePressEvent(event)
+        self.provider.fm = True
+        self.window.mouseReleaseEvent(event)
+        self.assertEqual(self.provider.calls, ["repeat_one"])
+        self.provider.mode = "sequential"
+        self.window._sync_owned_playback_mode()
+        image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        with QPainter(image) as painter, patch("local.music_surface_window.paint_music_source_icon", wraps=paint_music_source_icon) as paint:
+            self.window._paint_window_controls(painter, QRectF(self.window.rect()))
+        keys = [call.args[2] for call in paint.call_args_list]
+        self.assertIn("personal_fm", keys)
+        self.assertNotIn("sequence", keys)
+
+    def test_fm_gradient_uses_actual_lyric_tone_and_occupied_album_lightness(self):
+        rect = QRectF(10, 10, 30, 30)
+        for source, neutral in ((QColor("#eeeeee"), QColor("black")), (QColor("#151515"), QColor("white"))):
+            palette = artwork_surface_palette(QImage(), source, source)
+            with patch.object(self.window, "_art_palette", return_value=palette), patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
+                self.assertEqual(self.window._personal_fm_ink(rect, 0), QColor("#248ace"))
+                self.assertEqual(self.window._personal_fm_ink(rect, 2), neutral)
+                self.assertEqual(self.window._personal_fm_ink(rect, 1), self.window._mix_color(QColor("#248ace"), neutral, .5))
+                self.assertEqual(self.window._personal_fm_ink(rect, 4), QColor("#248ace"))
+                before = self.window._personal_fm_ink(rect, .9)
+                after = self.window._personal_fm_ink(rect, .91667)
+                self.assertLessEqual(max(abs(a-b) for a,b in zip(before.getRgb(), after.getRgb())), 4)
+
+    def test_fm_visible_raster_animates_without_control_layer_or_svg_cache_churn(self):
+        self.provider.fm = True
+        self.window._sync_owned_playback_mode()
+        self.window._fullscreen = True
+        self.window._reset_control_idle(now=0)
+        rasters = []
+        before = _rendered_icon.cache_info().misses
+        layers_before = len(self.window._control_layer_cache)
+        with patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
+            for instant in (0, .5, 1, 1.5, 2):
+                with patch("local.music_surface_window.time.monotonic", return_value=instant):
+                    image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(Qt.GlobalColor.transparent)
+                    with QPainter(image) as painter:
+                        self.window._paint_window_controls(painter, QRectF(self.window.rect()))
+                    crop = self.window._button_rects["playback_mode"].toAlignedRect()
+                    rasters.append(bytes(image.copy(crop).constBits()))
+        self.assertEqual(len(set(rasters)), 5)
+        self.assertLessEqual(_rendered_icon.cache_info().misses - before, 1)
+        self.assertEqual(len(self.window._control_layer_cache), layers_before)
+
+    def test_fm_fade_freezes_tint_and_hidden_ticks_do_not_request_color_updates(self):
+        self.provider.fm = True
+        self.window._sync_owned_playback_mode()
+        self.window._reset_control_idle(now=0)
+        seen = []
+        original = self.window._paint_control_layer
+        def observe(painter, bounds, reveal, shift, key, draw, **kwargs):
+            seen.append(key)
+            return original(painter, bounds, reveal, shift, key, draw, **kwargs)
+        idle = self.window.WINDOWED_CONTROL_IDLE_SECONDS
+        with patch.object(self.window, "_paint_control_layer", side_effect=observe):
+            for instant in (idle + .01, idle + .08):
+                with patch("local.music_surface_window.time.monotonic", return_value=instant):
+                    image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                    with QPainter(image) as painter:
+                        self.window._paint_window_controls(painter, QRectF(self.window.rect()))
+        self.assertEqual(seen[0], seen[1])
+        self.assertLessEqual(len(self.window._control_layer_cache), 1)
+        self.window.hide()
+        with patch.object(self.window, "update") as update, patch("local.music_surface_window.time.monotonic", return_value=idle + 5):
+            self.window._advance_surface_animation_tick()
+        base = self.window._window_control_base_rect(QRectF(self.window.rect()))
+        fm_dirty = self.window._playback_mode_button_rect(base, self.window._surface_scale()).adjusted(-3, -3, 3, 3).toAlignedRect()
+        self.assertNotIn(((fm_dirty,), {}), [(call.args, call.kwargs) for call in update.call_args_list])
+
 
 class OwnedPlaybackAssetTests(unittest.TestCase):
     @classmethod
@@ -250,6 +361,7 @@ class OwnedPlaybackAssetTests(unittest.TestCase):
             "shuffle": "a2784902611c85b1b3d433297ae270ba5f34cd34248e70b5bc47cb7de185eaa0",
             "sequence": "11c76facd25e99de9703b085fbcf31ace5547767bf55a745e0c2de37896210ce",
             "repeat_one": "45485b17ef9b28b87a34401eacd12db798dc6d7ced84bb6fd6d85f96fe0789da",
+            "personal_fm": "9134eea47cbb4b776f08b58c7f03e51d851fccd8b521c176ba907ab62c0415e1",
         }
         for key, digest in hashes.items():
             with self.subTest(key=key):

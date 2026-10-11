@@ -27,3 +27,15 @@ On 2026-10-11, the song-page library return action uses `library_back.svg`,
 an original 24 px rounded-stroke return arrow paired with the existing
 “音乐库” label. It remains readable at the same scale as adjacent controls.
 The original supplied `library.svg` stays byte-identical for provenance.
+
+On 2026-10-11, the user supplied `@无限.svg`, copied byte-identically as
+`personal_fm.svg` (SHA-256
+`9134eea47cbb4b776f08b58c7f03e51d851fccd8b521c176ba907ab62c0415e1`).
+It contains the same local SVG/path-only geometry and standard public SVG 1.1
+DOCTYPE, without scripts, event handlers, references or entity definitions.
+Only personal FM continuation uses this icon. Its exact existing lyric accent
+travels smoothly to black for a light occupied album tone or white for a dark
+one, then back, over four seconds. A thin neutral edge preserves readability.
+The render cache retains one mask per size rather than every animation tint;
+the existing control fade freezes its color and reuses the shared blur layer.
+Single-track repeat and all ordinary playlist icons retain their existing ink.

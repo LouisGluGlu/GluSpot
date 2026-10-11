@@ -10,7 +10,7 @@ import threading
 import random
 import copy
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
@@ -22,6 +22,17 @@ from api.online_music_artwork import ONLINE_ARTWORK_MAX_BYTES, fetch_online_artw
 from local.music_tasks import MusicTasks
 
 
+@dataclass
+class _StreamRecovery:
+    epoch: int
+    position_ms: int
+    deadline: float
+    reason: str
+    phase: str = "authorize"
+    resume: bool = True
+    progress_position_ms: int = 0
+
+
 class OwnedMusicPlayer(QObject):
     ARTWORK_NEIGHBORS = 3
     ARTWORK_CACHE_MAX_BYTES = 32 * 1024 * 1024
@@ -29,6 +40,8 @@ class OwnedMusicPlayer(QObject):
     SHUFFLE_HISTORY_LIMIT = 256
     STREAM_FAULT_STALL_SECONDS = 1.0
     STREAM_FAULT_END_TOLERANCE_MS = 500
+    STREAM_RECOVERY_TIMEOUT_SECONDS = 12.0
+    STREAM_RECOVERY_SEEK_TOLERANCE_MS = 250
     changed = Signal()
     statusChanged = Signal(str)
     _control_requested = Signal(object)
@@ -65,6 +78,8 @@ class OwnedMusicPlayer(QObject):
         self._stream_trial = False
         self._decoded_duration_ms = 0
         self._stream_fault = None
+        self._stream_recovery = None
+        self._stream_recovery_attempted = False
         self._stream_fault_timer = QTimer(self)
         self._stream_fault_timer.setInterval(250)
         self._stream_fault_timer.timeout.connect(self._check_stream_fault)
@@ -75,6 +90,7 @@ class OwnedMusicPlayer(QObject):
         self._lyrics_generation = 0
         self._lyrics_parse_pending = None
         self.playback_mode = "sequential"
+        self._normal_playback_mode = "sequential"
         self._mode_epoch = 0
         self._random = random.Random()
         self._shuffle_history = []
@@ -109,25 +125,37 @@ class OwnedMusicPlayer(QObject):
         if not 0 <= index < len(songs):
             return False
         self._catalog_epoch += 1
-        self._fm_source = fm_source
+        self._set_fm_source(fm_source)
         self._reset_queue_cache()
         self.queue = songs
         self.index = index
-        if self._fm_source and self.playback_mode == "shuffle":
-            self._shuffle_fm_pending()
         self._reset_playback_order()
         return self._load_song()
 
+    def is_personal_fm(self):
+        return bool(self._fm_source)
+
+    def available_playback_modes(self):
+        return ("sequential", "repeat_one") if self.is_personal_fm() else ("sequential", "shuffle", "repeat_one")
+
+    def _set_fm_source(self, source):
+        if source and not self._fm_source:
+            self._normal_playback_mode = self.playback_mode
+            self.playback_mode = "sequential"
+        elif self._fm_source and not source:
+            self.playback_mode = self._normal_playback_mode
+        self._fm_source = source
+
     def set_playback_mode(self, mode):
-        if not isinstance(mode, str) or mode not in self.PLAYBACK_MODES or self._closed:
+        if not isinstance(mode, str) or mode not in self.available_playback_modes() or self._closed:
             return False
         if QThread.currentThread() != self.thread():
             return self._request_control("mode", mode, None)
         if mode == self.playback_mode:
             return True
         self.playback_mode = mode
-        if self._fm_source and mode == "shuffle":
-            self._shuffle_fm_pending()
+        if not self._fm_source:
+            self._normal_playback_mode = mode
         self._reset_playback_order()
         if self.track is not None and self.queue:
             self._refresh_artwork_window()
@@ -149,11 +177,6 @@ class OwnedMusicPlayer(QObject):
         if bag:
             self._random.shuffle(bag)
         self._shuffle_bag = deque(bag)
-
-    def _shuffle_fm_pending(self):
-        pending = list(self.queue[self.index + 1:])
-        self._random.shuffle(pending)
-        self.queue = self.queue[:self.index + 1] + tuple(pending)
 
     def _shuffle_indices(self):
         # Duplicate catalog entries are one song in a random cycle. Otherwise
@@ -265,6 +288,7 @@ class OwnedMusicPlayer(QObject):
         epoch = self._catalog_epoch
         # A previous stream or Qt state must not confirm a new catalog opening.
         self._stream_epoch = 0
+        self._clear_stream_recovery()
         self._clear_stream_fault()
         self._decoded_duration_ms = 0
         self.failure_reason = ""
@@ -283,6 +307,8 @@ class OwnedMusicPlayer(QObject):
         epoch = self._epoch
         self._stream_epoch = 0
         self._stream_trial = False
+        self._clear_stream_recovery()
+        self._stream_recovery_attempted = False
         self._clear_stream_fault()
         self._decoded_duration_ms = 0
         self._fm_advance_pending = False
@@ -357,8 +383,13 @@ class OwnedMusicPlayer(QObject):
         if kind == "stream":
             if extra and extra[0] != self._catalog_epoch:
                 return
+            if self._stream_epoch == 0 and self.status == "playback_failed":
+                return
             if error or result is None or not result.playable:
                 self.failure_reason = self._request_failure(error)
+                if self._stream_recovery is not None:
+                    self._finish_stream_failure(self.failure_reason)
+                    return
                 self._set_status("stream_unavailable")
                 self._lyrics_unavailable()
                 return
@@ -371,13 +402,28 @@ class OwnedMusicPlayer(QObject):
                 valid_url = False
             if not valid_url:
                 self.failure_reason = "invalid_stream"
+                if self._stream_recovery is not None:
+                    self._finish_stream_failure(self.failure_reason)
+                    return
                 self._set_status("stream_unavailable")
                 self._lyrics_unavailable()
                 return
             self._stream_epoch = epoch
             self._stream_trial = bool(result.trial)
+            if self._stream_recovery is not None:
+                self._stream_recovery.phase = "load"
             self.player.setSource(QUrl(result.url))
             if self._stream_epoch != epoch or self.status == "playback_failed":
+                return
+            if self._stream_recovery is not None:
+                if self._lyric_payload is None:
+                    song = self.queue[self.index]
+                    preferences = self._lyrics_preferences_snapshot()
+                    if not self.tasks.submit(("lyrics", epoch, self._lyrics_generation),
+                            lambda: self._fetch_lyrics(song, preferences)
+                            if not self._closed and epoch == self._epoch else None):
+                        self._lyrics_reparse_failed()
+                self._check_stream_recovery()
                 return
             self.player.play()
             # QMediaPlayer confirms PlayingState asynchronously. A synchronous
@@ -625,8 +671,6 @@ class OwnedMusicPlayer(QObject):
                 existing.add((source, song.song_id))
                 if len(incoming) == self.ARTWORK_NEIGHBORS:
                     break
-        if self.playback_mode == "shuffle":
-            self._random.shuffle(incoming)
         return tuple(incoming)
 
     def _advance_fm(self):
@@ -660,6 +704,10 @@ class OwnedMusicPlayer(QObject):
             romanization=payload.romanization, source=payload.source or payload.source_id)
 
     def _position_changed(self, milliseconds):
+        recovery = self._stream_recovery
+        if recovery is not None and (recovery.phase != "progress"
+                or milliseconds < recovery.position_ms - self.STREAM_RECOVERY_SEEK_TOLERANCE_MS):
+            return
         if self.track is not None:
             seconds = max(0.0, milliseconds / 1000.0)
             self.track = replace(self.track, position_seconds=seconds, position_observed_seconds=seconds,
@@ -679,9 +727,9 @@ class OwnedMusicPlayer(QObject):
             self._stream_fault = (epoch, reason, self._qt_position_ms(), time.monotonic())
         if self.track is not None:
             self.track = replace(self.track, is_playing=(state == QMediaPlayer.PlaybackState.PlayingState
-                and self.status != "playback_failed"))
+                and self.status != "playback_failed" and self._stream_recovery is None))
             if (state == QMediaPlayer.PlaybackState.PlayingState
-                    and self._stream_epoch == self._epoch and not self._closed):
+                    and self._stream_epoch == self._epoch and not self._closed and self._stream_recovery is None):
                 self._set_status("trial" if self._stream_trial else "playing")
             self.changed.emit()
 
@@ -689,9 +737,15 @@ class OwnedMusicPlayer(QObject):
         if self._closed or self.track is None or self._stream_epoch != self._epoch:
             return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._end_current_stream()
-        elif status == QMediaPlayer.MediaStatus.InvalidMedia and self._stream_fault is not None:
-            self._finish_stream_failure(self._stream_fault[1])
+            if self._stream_recovery is not None:
+                self._finish_stream_failure(self._stream_recovery.reason)
+            else:
+                self._end_current_stream()
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            if self._stream_recovery is not None:
+                self._finish_stream_failure(self._stream_recovery.reason)
+            elif self._stream_fault is not None:
+                self._finish_stream_failure(self._stream_fault[1])
 
     def _end_current_stream(self):
         self._clear_stream_fault()
@@ -714,6 +768,9 @@ class OwnedMusicPlayer(QObject):
             QMediaPlayer.Error.AccessDeniedError: "access_denied",
             QMediaPlayer.Error.ResourceError: "resource",
         }.get(code, "backend")
+        if self._stream_recovery is not None:
+            self._finish_stream_failure(reason)
+            return
         if (code in {QMediaPlayer.Error.ResourceError, QMediaPlayer.Error.NetworkError}
                 and (self._stream_fault is not None
                      or self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)):
@@ -733,9 +790,112 @@ class OwnedMusicPlayer(QObject):
 
     def _clear_stream_fault(self):
         self._stream_fault = None
-        self._stream_fault_timer.stop()
+        if self._stream_recovery is None:
+            self._stream_fault_timer.stop()
+
+    def _clear_stream_recovery(self):
+        self._stream_recovery = None
+        if self._stream_fault is None:
+            self._stream_fault_timer.stop()
+
+    def _recover_stream(self, reason, position):
+        if (self._stream_recovery_attempted or not self.queue or not 0 <= self.index < len(self.queue)
+                or position <= 0 or self._decoded_duration_ms <= position
+                or not self.player.isSeekable()):
+            return False
+        self._stream_recovery_attempted = True
+        self._clear_stream_fault()
+        self._epoch += 1
+        epoch, catalog_epoch = self._epoch, self._catalog_epoch
+        self._stream_epoch = 0
+        self._decoded_duration_ms = 0
+        self._lyrics_generation += 1
+        self._lyrics_parse_pending = None
+        self._stream_recovery = _StreamRecovery(epoch, position,
+            time.monotonic() + self.STREAM_RECOVERY_TIMEOUT_SECONDS, reason)
+        recovery = self._stream_recovery
+        self.track = replace(self.track, is_playing=False, position_seconds=position / 1000,
+            position_observed_seconds=position / 1000, position_sampled_at=time.monotonic())
+        self._set_status("recovering_stream")
+        if self._stream_recovery is not recovery or self._epoch != epoch:
+            return True
+        # The changed decoder has a new media token, including for the shared
+        # output bridge. Invalidate its old PCM before resetting Qt's source.
+        self.changed.emit()
+        if self._stream_recovery is not recovery or self._epoch != epoch:
+            return True
+        self.player.stop()
+        if self._stream_recovery is not recovery or self._epoch != epoch:
+            return True
+        self.player.setSource(QUrl())
+        if self._stream_recovery is not recovery or self._epoch != epoch:
+            return True
+        song = self.queue[self.index]
+        accepted = self.tasks.submit(("stream", epoch, catalog_epoch),
+            lambda: self.service.stream_url(song.source_id, song.song_id)
+            if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch else None)
+        if accepted:
+            self._stream_fault_timer.start()
+        else:
+            self._finish_stream_failure(reason)
+        return True
+
+    def _check_stream_recovery(self):
+        recovery = self._stream_recovery
+        if recovery is None:
+            return
+        if self._closed or self.track is None or recovery.epoch != self._epoch:
+            self._clear_stream_recovery()
+            return
+        if time.monotonic() >= recovery.deadline:
+            self._finish_stream_failure(recovery.reason)
+            return
+        if recovery.phase == "authorize":
+            return
+        if recovery.phase == "load":
+            if (self.player.mediaStatus() not in {QMediaPlayer.MediaStatus.LoadedMedia,
+                    QMediaPlayer.MediaStatus.BufferingMedia, QMediaPlayer.MediaStatus.BufferedMedia}
+                    or not self.player.isSeekable() or self._decoded_duration_ms <= 0):
+                return
+            if recovery.position_ms >= self._decoded_duration_ms:
+                self._finish_stream_failure(recovery.reason)
+                return
+            recovery.phase = "seek"
+            self.player.setPosition(recovery.position_ms)
+            if self._stream_recovery is not recovery or self._stream_epoch != recovery.epoch:
+                return
+        position = self._qt_position_ms()
+        if recovery.phase == "seek":
+            if abs(position - recovery.position_ms) > self.STREAM_RECOVERY_SEEK_TOLERANCE_MS:
+                return
+            recovery.progress_position_ms = position
+            self.track = replace(self.track, position_seconds=position / 1000,
+                position_observed_seconds=position / 1000, position_sampled_at=time.monotonic())
+            self.changed.emit()
+            if self._stream_recovery is not recovery or self._stream_epoch != recovery.epoch:
+                return
+            if not recovery.resume:
+                self._clear_stream_recovery()
+                self.failure_reason = ""
+                self._set_status("trial" if self._stream_trial else "playing")
+                self.changed.emit()
+                return
+            recovery.phase = "progress"
+            self.player.play()
+        elif recovery.phase == "progress" and (not recovery.resume or position > recovery.progress_position_ms + 20):
+            self._clear_stream_recovery()
+            self.failure_reason = ""
+            self.track = replace(self.track,
+                is_playing=self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
+                position_seconds=position / 1000, position_observed_seconds=position / 1000,
+                position_sampled_at=time.monotonic())
+            self._set_status("trial" if self._stream_trial else "playing")
+            self.changed.emit()
 
     def _check_stream_fault(self):
+        if self._stream_recovery is not None:
+            self._check_stream_recovery()
+            return
         fault = self._stream_fault
         if fault is None:
             return
@@ -757,9 +917,11 @@ class OwnedMusicPlayer(QObject):
             self.player.pause()
             self._end_current_stream()
         else:
-            self._finish_stream_failure(reason)
+            if not self._recover_stream(reason, position):
+                self._finish_stream_failure(reason)
 
     def _finish_stream_failure(self, reason):
+        self._clear_stream_recovery()
         self._clear_stream_fault()
         self._stream_epoch = 0
         self._reset_lyrics_payload()
@@ -778,6 +940,14 @@ class OwnedMusicPlayer(QObject):
         if QThread.currentThread() != self.thread():
             return self._request_control("command", command, self.track.track_id)
         if command == "toggle_play_pause":
+            if self._stream_recovery is not None:
+                self._stream_recovery.resume = not self._stream_recovery.resume
+                if not self._stream_recovery.resume:
+                    self.player.pause()
+                elif self._stream_recovery.phase == "progress":
+                    self.player.play()
+                self.changed.emit()
+                return True
             if self.status in {"playback_failed", "stream_unavailable"} and self._stream_epoch == 0:
                 return self._load_song() if self.queue and 0 <= self.index < len(self.queue) else False
             if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -799,8 +969,21 @@ class OwnedMusicPlayer(QObject):
         if not self.player.isSeekable():
             return False
         seconds = max(0.0, min(float(seconds), self.track.duration_seconds))
+        recovery = self._stream_recovery
+        if recovery is not None and recovery.phase == "authorize":
+            return False
+        self._clear_stream_recovery()
         self._clear_stream_fault()
+        epoch, stream_epoch = self._epoch, self._stream_epoch
         self.player.setPosition(round(seconds * 1000))
+        if recovery is not None:
+            if self._closed or self._epoch != epoch or self._stream_epoch != stream_epoch or self.status == "playback_failed":
+                return False
+            self._set_status("trial" if self._stream_trial else "playing")
+            if self._closed or self._epoch != epoch or self._stream_epoch != stream_epoch or self.status == "playback_failed":
+                return False
+            if recovery.resume:
+                self.player.play()
         return True
 
     def _request_control(self, kind, value, track_id):
@@ -851,10 +1034,11 @@ class OwnedMusicPlayer(QObject):
         self._catalog_epoch += 1
         self._stream_epoch = 0
         self._stream_trial = False
+        self._clear_stream_recovery()
         self._clear_stream_fault()
         self._decoded_duration_ms = 0
         self.failure_reason = ""
-        self._fm_source = ""
+        self._set_fm_source("")
         self._reset_queue_cache()
         self.track = None
         self.queue = ()

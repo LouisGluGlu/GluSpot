@@ -38,6 +38,9 @@ class DecoderClockPlayer(Player):
     def isSeekable(self):
         return self.seekable
 
+    def mediaStatus(self):
+        return QMediaPlayer.MediaStatus.LoadedMedia
+
 
 class OwnedStreamFaultTests(unittest.TestCase):
     @classmethod
@@ -59,8 +62,11 @@ class OwnedStreamFaultTests(unittest.TestCase):
         self.owned.close()
         self.temp.cleanup()
 
-    def start(self, duration=4000, position=3800, trial=False):
+    def start(self, duration=4000, position=3800, trial=False, recovery_used=True):
         self.owned.play_queue(self.songs)
+        # These observer regressions also cover terminal behavior after the
+        # one recovery budget has been consumed. Fresh recovery is tested below.
+        self.owned._stream_recovery_attempted = recovery_used
         self.authorize(trial)
         if duration:
             self.qt.durationChanged.emit(duration)

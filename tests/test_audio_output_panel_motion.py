@@ -161,8 +161,106 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         other = self.panel._rows["bluetooth"]
         self._move(other.join_button, other.join_button.rect().center(), 102.0)
         self._move(other.join_button, other.join_button.rect().center(), 102.51)
-        self.assertTrue(other.details_visible)
+        self.assertFalse(other.details_visible)
+        self.assertEqual(other.details_progress, 0)
         self.assertFalse(row.details_visible)
+
+    def test_active_hover_font_has_fractional_frames_and_reverses_from_current_size(self):
+        row = self.panel._rows["local"]
+        row.elapsed = 100
+        normal_size = row.name_font_size
+        self._move(row, QPoint(90, 25), 101.0)
+        self._move(row, QPoint(90, 25), 101.49)
+        self.assertEqual(row.name_font_size, normal_size)
+        self._move(row, QPoint(90, 25), 101.51)
+        self.panel._animation_timer.stop()
+        self.assertEqual(row.name_font_size, normal_size)
+        normal = self._native_image(row)
+        row.render(normal)
+        row.advance(.025)
+        partial_size = row.name_font_size
+        self.assertGreater(partial_size, 10)
+        self.assertLess(partial_size, normal_size)
+        self.assertNotEqual(partial_size, round(partial_size))
+        partial = self._native_image(row)
+        row.render(partial)
+        self.assertNotEqual(bytes(normal.constBits()), bytes(partial.constBits()))
+        self.app.sendEvent(row, QEvent(QEvent.Type.Leave))
+        self.panel._animation_timer.stop()
+        self.assertEqual(row.name_font_size, partial_size)
+        row.advance(.025)
+        reverse_size = row.name_font_size
+        self.assertGreater(reverse_size, partial_size)
+        self.assertLess(reverse_size, normal_size)
+        row.advance(1)
+        self.assertEqual(row.name_font_size, normal_size)
+        self.assertFalse(row.details_animating)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_unselected_hover_keeps_exact_name_raster_and_does_not_arm_details(self):
+        row = self.panel._rows["bluetooth"]
+        row.elapsed = 100
+        row.progress = 0
+        with patch.object(row, "underMouse", return_value=False):
+            before = self._native_image(row)
+            row.render(before)
+            self._move(row.join_button, row.join_button.rect().center(), 101)
+            self._move(row.join_button, row.join_button.rect().center(), 101.6)
+            self.assertFalse(self.panel._hover_detail_timer.isActive())
+            row.advance(1)
+            after = self._native_image(row)
+            row.render(after)
+        self.assertEqual(bytes(before.constBits()), bytes(after.constBits()))
+        self.assertFalse(row.details_visible)
+        self.assertEqual(row.details_progress, 0)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_confirmed_muted_member_animates_but_pending_and_removed_members_do_not(self):
+        self.provider.snapshot = replace(self.provider.snapshot, devices=tuple(
+            replace(d, volume_muted=True) if d.id == "local" else d
+            for d in self.provider.snapshot.devices))
+        self.panel.sync_snapshot()
+        row = self.panel._rows["local"]
+        self._move(row, QPoint(90, 25), 101)
+        self._move(row, QPoint(90, 25), 101.6)
+        self.panel._animation_timer.stop()
+        row.advance(.03)
+        self.assertGreater(row.details_progress, 0)
+        self.assertEqual(row.displayed_volume, 0)
+        self.provider.snapshot = replace(self.provider.snapshot, pending_id="local", state="connecting")
+        self.panel.sync_snapshot()
+        self.assertEqual(row.state, "pending")
+        self.assertEqual(row.details_progress, 0)
+        row.set_details_visible(True)
+        row.advance(.1)
+        self.assertEqual(row.details_progress, 0)
+        self.provider.snapshot = replace(self.provider.snapshot, pending_id="", active_id="bluetooth", state="ready")
+        self.panel.sync_snapshot()
+        self.assertEqual(row.state, "available")
+        self.assertEqual(row.details_progress, 0)
+
+    def test_font_animation_restarts_shared_timer_and_stops_after_both_directions(self):
+        row = self.panel._rows["local"]
+        row.elapsed = 100
+        row.progress = 1
+        row.set_details_visible(True)
+        self.assertTrue(self.panel._animation_timer.isActive())
+        self.panel._clock.reset(200)
+        for index in range(60):
+            self.panel._advance_animation(200 + (index + 1) / 60)
+        self.assertEqual(row.details_progress, 1)
+        self.assertFalse(self.panel._animation_timer.isActive())
+        row.set_details_visible(False)
+        self.assertTrue(self.panel._animation_timer.isActive())
+        self.panel._clock.reset(201)
+        for index in range(60):
+            self.panel._advance_animation(201 + (index + 1) / 60)
+        self.assertEqual(row.details_progress, 0)
+        self.assertFalse(self.panel._animation_timer.isActive())
+        row.set_details_visible(True)
+        self.panel.dismiss(immediate=True)
+        self.assertFalse(self.panel._animation_timer.isActive())
+        self.assertEqual(row.details_progress, 0)
 
     def test_stationary_hover_timer_reveals_without_extra_mouse_move(self):
         row = self.panel._rows["local"]
@@ -351,12 +449,14 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
 
     def test_transition_uses_shared_row_painter_without_device_reads(self):
         row = self.panel._rows["local"]
-        natural = self._native_image(row)
-        row.render(natural)
-        direct = self._native_image(row)
-        with QPainter(direct) as painter:
-            row.paint_contents(painter)
-        self.assertEqual(bytes(natural.constBits()), bytes(direct.constBits()))
+        for progress in (0, .37, 1):
+            row.details_progress = progress
+            natural = self._native_image(row)
+            row.render(natural)
+            direct = self._native_image(row)
+            with QPainter(direct) as painter:
+                row.paint_contents(painter)
+            self.assertEqual(bytes(natural.constBits()), bytes(direct.constBits()))
         for amount in (0, .48, .8):
             self.panel._reveal = amount
             self.panel._apply_reveal_pose()

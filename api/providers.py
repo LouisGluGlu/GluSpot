@@ -265,14 +265,20 @@ class PlaybackSourceProvider:
         mode = getattr(self.owned, "playback_mode", None)
         return mode if mode in ("sequential", "shuffle", "repeat_one") else None
 
+    def is_owned_personal_fm(self):
+        return self._owned_active() and self.owned.is_personal_fm()
+
+    def get_owned_playback_modes(self):
+        return self.owned.available_playback_modes() if self._owned_active() else ()
+
     def set_owned_playback_mode(self, mode):
-        if not self._owned_active() or mode not in ("sequential", "shuffle", "repeat_one"):
+        if not self._owned_active() or mode not in self.get_owned_playback_modes():
             return False
         setter = getattr(self.owned, "set_playback_mode", None)
         if not callable(setter) or not setter(mode):
             return False
         persist = self.settings_setter
-        if callable(persist):
+        if callable(persist) and not self.is_owned_personal_fm():
             persist("v2_owned_playback_mode", mode)
         return True
 

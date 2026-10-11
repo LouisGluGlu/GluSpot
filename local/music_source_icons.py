@@ -12,10 +12,10 @@ from local.branding import ROOT_DIR
 
 
 MUSIC_SOURCE_ICON_KEYS = frozenset({"qq", "qishui", "kugou", "netease", "search", "logout", "switch"})
-MUSIC_CONTROL_ICON_KEYS = frozenset({"library", "library_back", "shuffle", "sequence", "repeat_one"})
+MUSIC_CONTROL_ICON_KEYS = frozenset({"library", "library_back", "shuffle", "sequence", "repeat_one", "personal_fm"})
 
 
-@lru_cache(maxsize=12)
+@lru_cache(maxsize=13)
 def _svg_renderer(key: str) -> QSvgRenderer | None:
     if key not in MUSIC_SOURCE_ICON_KEYS | MUSIC_CONTROL_ICON_KEYS:
         return None
@@ -53,6 +53,14 @@ def music_source_icon_image(key: str, size: QSize, *, tint: QColor | None = None
     if key not in MUSIC_SOURCE_ICON_KEYS | MUSIC_CONTROL_ICON_KEYS or size.isEmpty():
         return QImage()
     width, height = (max(1, min(256, value)) for value in (size.width(), size.height()))
+    if key == "personal_fm" and tint is not None:
+        # Continuously changing FM ink reuses one SVG mask per size instead
+        # of evicting static platform/control rasters with every color frame.
+        image = _rendered_icon(key, width, height, None).copy()
+        with QPainter(image) as painter:
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            painter.fillRect(image.rect(), tint)
+        return image
     return _rendered_icon(key, width, height, tint.rgba() if tint is not None else None).copy()
 
 
