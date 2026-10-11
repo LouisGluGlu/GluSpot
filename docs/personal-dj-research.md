@@ -36,6 +36,52 @@ did not establish a switching endpoint or valid name-to-ID mapping for the
 four personas; it does not imply the official app lacks them. No real account
 or client setting was accessed for this public-source check.
 
+### Expanded public-source check
+
+A further bounded check covered the original adapter contribution, independent
+desktop players and their API contracts, current official product information,
+and indexed public code. It still did **not** establish a voice-selection
+endpoint or an auditable mapping for **豆花、黄俊、李源、庞舸**.
+
+| Source, fixed revision | Observed contract | Voice-selection evidence |
+| --- | --- | --- |
+| [Original adapter PR #1785](https://github.com/Binaryify/NeteaseCloudMusicApi/pull/1785), merged August 18, 2023; merge `6b28f34` | Recommendation module and documentation, including optional location | No persona selector in the contributed module |
+| [SPlayer `radioPersonalDj`](https://github.com/SPlayer-Dev/SPlayer/blob/40d9ec606cc1e323c964ffea7bf0ab02f137e93b/src/api/radio.ts#L44) | Calls `/aidj/content/rcmd` without a voice parameter | No persona-selection contract at this call site |
+| [QCloudMusicApi module](https://github.com/s12mmm3/QCloudMusicApi/blob/bd07813dd415577cb86a75d558e430bb1e8a416b/QCloudMusicApi/module.cpp#L87) | Same recommendation URI and `extInfo`/optional-location fields | No persona selector in this implementation |
+| [HyPlayer recommendation contract](https://github.com/HyPlayer/HyPlayer.NeteaseProvider/blob/c11cd1278ed0b3a232242eded7e6d14d1c9f8683/HyPlayer.NeteaseApi/ApiContracts/PersonalFM/AiDjContentRcmdInfo.cs), used by its [FM strategy](https://github.com/HyPlayer/HyPlayer/blob/158928459a0c952aea482872bd7e4d6e9bf86d5d/HyPlayer/Services/Playback/Strategies/PersonalFmStrategy.cs#L101) | Independent typed contract for `/api/aidj/content/rcmd/info`; request has `IsNewToAidj` and optional coordinates; response models song/audio resources and `introductionRelatedSongIds` | No voice-name/ID input or voice catalog in this contract |
+| [HyPlayer skip contract](https://github.com/HyPlayer/HyPlayer.NeteaseProvider/blob/c11cd1278ed0b3a232242eded7e6d14d1c9f8683/HyPlayer.NeteaseApi/ApiContracts/PersonalFM/AiDjSkip.cs) | `/api/v1/radio/skip` with song/time/mode fields | A skip/reporting contract, not evidence of persona selection; not invoked here |
+
+The [official App Store listing](https://apps.apple.com/cn/app/id590338362)
+continues to describe upgraded AI Private DJ, but publishes no selection schema
+or four-persona IDs. A [2023 launch article](https://news.qq.com/rain/a/20230811A03CPI00)
+names **黄俊** as the launch voice and describes future voice-library expansion.
+That secondary article cannot identify the current response's `M791-C2`:
+`announcerName=null` remains the only observed name evidence for that response.
+The user's requested names and official-client screenshot establish the target
+experience, not a name-to-ID mapping.
+
+Sourcegraph searches included recommendation URI/field names, `timbreKey`,
+`aiDjResources`, `announcerName`, and the exact observed `M791-C2`, with forks
+and archived repositories included. They exposed the implementations above but
+no usable selector or mapping. Public GitHub issue/commit searches also produced
+no usable selection contract. These are bounded index/search results, not proof
+that an interface does not exist. Some searches had index shard/time limits;
+grep.app returned HTTP 429, multiple general-search providers challenged or
+redirected requests, and connected search/GitHub tools were unavailable. No
+authenticated code search, user account, private client data, or account
+preference was used. Downloaded public research material stays in ignored
+runtime storage and is not included in source control.
+
+The smallest next verification is a public official-client request schema, or
+an explicitly authorized **test-account** comparison before and after one voice
+change. Record only endpoint/field names and nonsecret voice identifiers,
+restore the original preference, and compare returned speech metadata. This
+check was not performed here. Once that evidence exists, the existing optional
+bridge/service/provider can carry the verified voice catalog and selection
+contract; a separate recommendation generation can cancel stale future speech
+without reopening the current song. This is a proposed integration boundary,
+not a claim that a particular endpoint, header, or persona ID is valid.
+
 ## Original study, before authenticated implementation
 
 The remainder records the preceding read-only study and its evidence cutoff.

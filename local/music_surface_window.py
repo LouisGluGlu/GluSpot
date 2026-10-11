@@ -82,7 +82,7 @@ from local.audio_output_motion import OutputConnectionMotion, connection_capsule
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
 from local.music_source_icons import paint_music_source_icon
-from local.personal_dj_icon import paint_personal_dj_icon
+from local.personal_dj_icon import paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -194,6 +194,13 @@ class MusicSurfaceWindow(QWidget):
         self._dj_activity_started_at = 0.0
         self._dj_last_reveal = 0.0
         self._dj_audio_frame = None
+        self._dj_presentation_state = "idle"
+        self._dj_next_title = ""
+        self._dj_presentation_token = None
+        self._dj_ring_started_at = time.monotonic()
+        self._dj_failed_until = 0.0
+        self._dj_last_damage = QRect()
+        self._mode_snapshot_dj_hit_path = QPainterPath()
         self._audio_output_panel: AudioOutputPanel | None = None
         self._audio_output_kinds: tuple[str, ...] = ()
         self._audio_output_membership = OutputMembershipTracker()
@@ -751,6 +758,7 @@ class MusicSurfaceWindow(QWidget):
         self._mode_snapshot_size = QSize(size)
         self._mode_snapshot_title_fraction = 0.0 if fullscreen else self.TITLE_BAR_HEIGHT / max(1, size.height())
         self._mode_snapshot_controls_clickable = self._control_reveal_at(time.monotonic()) >= 0.75
+        self._mode_snapshot_dj_hit_path = self._personal_dj_hit_path(QRectF(0, 0, size.width(), size.height()), time.monotonic())
 
     def _transition_control_rects(self):
         if self._geometry_transition_snapshot.isNull() or not self._mode_snapshot_size.isValid():
@@ -783,6 +791,8 @@ class MusicSurfaceWindow(QWidget):
             point = QPointF(point.x() * self._mode_snapshot_size.width() / max(1, self.width()),
                             point.y() * self._mode_snapshot_size.height() / max(1, self.height()))
             rect = captured
+            if key == "personal_dj" and not self._mode_snapshot_dj_hit_path.isEmpty():
+                return self._mode_snapshot_dj_hit_path.contains(point)
         return self._window_control_contains(key, rect, point)
 
     def _capture_transition_snapshot(self) -> QImage:
@@ -7772,7 +7782,7 @@ class MusicSurfaceWindow(QWidget):
         if paint_region is None or paint_region.intersects(self._library_damage_rect(rect)):
             self._paint_library_back(painter, rect)
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed)
-        if paint_region is None or paint_region.intersects(self._personal_dj_button_rect(rect).adjusted(-8, -8, 8, 30).toAlignedRect()):
+        if paint_region is None or paint_region.intersects(self._personal_dj_damage_rect(rect)):
             self._paint_personal_dj_control(painter, rect)
         controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
         controls_top = min(
@@ -7917,8 +7927,15 @@ class MusicSurfaceWindow(QWidget):
         padding = math.ceil(20.0 * self._surface_scale(rect))
         return self._library_button_rect(rect, 1.0).adjusted(-padding, -padding, padding, padding).intersected(rect).toAlignedRect()
 
-    @staticmethod
-    def _window_control_contains(key: str, rect: QRectF, point: QPointF) -> bool:
+    def _window_control_contains(self, key: str, rect: QRectF, point: QPointF) -> bool:
+        if key == "personal_dj":
+            path = self._personal_dj_hit_path(QRectF(self.rect()), time.monotonic(), shifted=False)
+            bounds = path.boundingRect()
+            if bounds.width() <= 0.0 or bounds.height() <= 0.0:
+                return False
+            point = QPointF(bounds.left() + (point.x() - rect.left()) * bounds.width() / max(.001, rect.width()),
+                            bounds.top() + (point.y() - rect.top()) * bounds.height() / max(.001, rect.height()))
+            return path.contains(point)
         if key not in {"library", "personal_dj"}:
             return rect.contains(point)
         shape = QPainterPath()
@@ -8039,10 +8056,52 @@ class MusicSurfaceWindow(QWidget):
         return ((0.0, deep), (1 / 3, QColor(accent)), (2 / 3, light), (1.0, deep))
 
     def _personal_dj_button_rect(self, rect: QRectF) -> QRectF:
+        icon, caption = self._personal_dj_geometry(rect, time.monotonic())
+        return icon.united(caption)
+
+    def _personal_dj_geometry(self, rect: QRectF, now: float, *, expansion: float | None = None):
         scale = self._surface_scale(rect)
-        fm = self._playback_mode_button_rect(self._window_control_base_rect(rect), scale)
-        side = fm.width() * .78
-        return QRectF(fm.right() - side * .5, fm.bottom() + 10.0 * scale, side, side)
+        side = max(32.0, 44.0 * scale)
+        margin = max(10.0, 18.0 * scale)
+        expansion = self._personal_dj_activity_at(now) if expansion is None else max(0.0, min(1.0, expansion))
+        base = QRectF(rect.right() - margin - side, rect.bottom() - margin - side, side, side)
+        font = self._surface_font(max(10.0, 14.0 * scale), QFont.Weight.DemiBold)
+        key = (self._dj_next_title, font.toString(), round(scale, 3))
+        if getattr(self, "_dj_caption_width_key", None) != key:
+            self._dj_caption_width_key = key
+            self._dj_caption_width = min(250.0 * scale, max(side * 2.2,
+                QFontMetricsF(font).horizontalAdvance(self._dj_next_title) + 28.0 * scale))
+        width = max(side * 2, self._dj_caption_width)
+        pill_height = max(24.0, 30.0 * scale)
+        pill = QRectF(rect.right() - margin - width, rect.bottom() - margin - pill_height, width, pill_height)
+        large_side = side * 2
+        large = QRectF(pill.center().x() - large_side / 2, pill.top() - max(7.0, 10.0 * scale) - large_side, large_side, large_side)
+        def blend(start, end):
+            return QRectF(*(a + (b - a) * expansion for a, b in zip(
+                (start.x(), start.y(), start.width(), start.height()),
+                (end.x(), end.y(), end.width(), end.height()))))
+        return blend(base, large), blend(base, pill)
+
+    def _personal_dj_damage_rect(self, rect: QRectF) -> QRect:
+        icon, caption = self._personal_dj_geometry(rect, time.monotonic(), expansion=1.0)
+        padding = max(8.0, 12.0 * self._surface_scale(rect))
+        return icon.united(caption).adjusted(-padding, -padding, padding, padding).intersected(rect).toAlignedRect()
+
+    def _personal_dj_control_shift(self, rect: QRectF, reveal: float) -> QPointF:
+        bounds = self._personal_dj_button_rect(rect)
+        return QPointF(14.0 * self._surface_scale(rect) * (1.0 - reveal),
+                       (rect.bottom() - bounds.top() + 4.0) * (1.0 - reveal))
+
+    def _personal_dj_hit_path(self, rect: QRectF, now: float, *, shifted: bool = True):
+        icon, caption = self._personal_dj_geometry(rect, now)
+        shape = QPainterPath()
+        shape.setFillRule(Qt.FillRule.WindingFill)
+        shape.addEllipse(icon)
+        shape.addRoundedRect(caption, caption.height() / 2, caption.height() / 2)
+        if shifted:
+            shift = self._personal_dj_control_shift(rect, self._personal_dj_reveal_at(now))
+            shape.translate(shift)
+        return shape
 
     def _personal_dj_activity_at(self, now: float) -> float:
         progress = max(0.0, min(1.0, (now - self._dj_activity_started_at) / .32))
@@ -8061,20 +8120,47 @@ class MusicSurfaceWindow(QWidget):
             enabled = getter() if self._owned_personal_fm and callable(getter) else None
             enabled = enabled if isinstance(enabled, bool) else None
             speaking = enabled is True and callable(speaking_getter) and bool(speaking_getter())
+            presentation_getter = getattr(provider, "get_personal_dj_presentation", None)
+            presentation = presentation_getter() if enabled is True and callable(presentation_getter) else {}
+            presentation = presentation if isinstance(presentation, dict) else {}
+            state = presentation.get("state", "speaking" if speaking else "idle")
+            state = state if state in {"idle", "loading", "ready", "speaking", "failed"} else "idle"
+            title = presentation.get("next_title", "")
+            title = title[:256] if isinstance(title, str) else ""
+            token = presentation.get("token")
+            token = token if isinstance(token, (str, int, tuple)) else None
         except Exception:
             enabled, speaking = None, False
-        if (enabled, speaking) == (self._owned_personal_dj_enabled, self._owned_dj_speaking):
-            return
+            state, title, token = "idle", "", None
         now = time.monotonic()
+        if not speaking and not title and self._personal_dj_activity_at(now) > .001:
+            # Keep the real outgoing caption's width through its contraction;
+            # clearing provider text must not snap a wide pill to a short one.
+            title = self._dj_next_title
+        if state == "failed":
+            self._dj_failed_until = now + 1.2
+        elif state == "idle" and now < self._dj_failed_until and enabled is True:
+            state = "failed"
+        if (enabled, speaking, state, title, token) == (self._owned_personal_dj_enabled, self._owned_dj_speaking,
+                self._dj_presentation_state, self._dj_next_title, self._dj_presentation_token):
+            return
+        if token != self._dj_presentation_token:
+            self._dj_ring_started_at = now
         self._dj_activity_from = self._personal_dj_activity_at(now)
         self._dj_activity_to = 1.0 if speaking else 0.0
         self._dj_activity_started_at = now
         self._owned_personal_dj_enabled, self._owned_dj_speaking = enabled, speaking
+        self._dj_presentation_state, self._dj_next_title, self._dj_presentation_token = state, title, token
         self._dj_audio_frame = None
         self._sync_window_control_rects()
-        self.update(self._personal_dj_button_rect(QRectF(self.rect())).adjusted(-8, -8, 8, 30).toAlignedRect())
+        damage = self._personal_dj_damage_rect(QRectF(self.rect()))
+        self.update(damage.united(self._dj_last_damage))
+        self._dj_last_damage = damage
 
     def _update_personal_dj_control(self, now: float):
+        # This provider presentation is an immutable in-memory player read,
+        # independent of the slower device-enumeration/status cadence.
+        self._sync_personal_dj_state()
         reveal = self._personal_dj_reveal_at(now)
         changed = abs(reveal - self._dj_last_reveal) > .001
         self._dj_last_reveal = reveal
@@ -8085,8 +8171,10 @@ class MusicSurfaceWindow(QWidget):
                 self._dj_audio_frame = getter() if callable(getter) else None
             except Exception:
                 pass
-        if self.isVisible() and not self._capturing_transition_snapshot and (changed or reveal > .001 and self._owned_dj_speaking):
-            self.update(self._personal_dj_button_rect(QRectF(self.rect())).adjusted(-8, -8, 8, 30).toAlignedRect())
+        if self.isVisible() and not self._capturing_transition_snapshot and (changed or reveal > .001):
+            damage = self._personal_dj_damage_rect(QRectF(self.rect()))
+            self.update(damage.united(self._dj_last_damage))
+            self._dj_last_damage = damage
 
     def _personal_dj_tooltip(self):
         return "私人漫游 · 私人DJ已开启 · 点击关闭" if self._owned_personal_dj_enabled else "私人漫游 · 私人DJ已关闭 · 点击开启"
@@ -8113,18 +8201,50 @@ class MusicSurfaceWindow(QWidget):
         if reveal <= .001:
             return
         button = self._personal_dj_button_rect(rect)
+        icon, caption = self._personal_dj_geometry(rect, now)
+        expansion = self._personal_dj_activity_at(now)
+        scale = self._surface_scale(rect)
+        elapsed = max(0.0, now - self._dj_ring_started_at)
         painter.save()
         painter.setOpacity(reveal)
-        painter.translate(self._window_control_shift(button, reveal))
+        painter.translate(self._personal_dj_control_shift(rect, reveal))
         hovered = self._hovered_window_button == "personal_dj"
-        painter.setPen(QPen(QColor(170, 172, 175, 160), max(1.0, self._surface_scale(rect))))
-        painter.setBrush(QColor(65 if hovered else 42, 66 if hovered else 43, 69 if hovered else 46, 235))
-        painter.drawEllipse(button)
-        color = self._future_lyric_color(button) if self._owned_personal_dj_enabled else QColor(205, 207, 211)
-        inner = button.adjusted(button.width() * .22, button.height() * .16, -button.width() * .22, -button.height() * .16)
-        # Vector glow is small and uncached. No frame-time raster blur or
-        # unbounded cache keys are generated by actual speech frequencies.
-        paint_personal_dj_icon(painter, inner, color, bands=self._dj_audio_frame if self._owned_dj_speaking else None)
+        frame = self._dj_audio_frame if self._owned_dj_speaking else None
+        energy = min(1.0, max(frame.low, frame.mid, frame.high) * 4) if frame is not None else 0.0
+        background = QColor(65 if hovered else 42, 66 if hovered else 43, 69 if hovered else 46, 239)
+        painter.setBrush(background)
+        border = QColor(170, 172, 175, round(150 + 80 * energy))
+        painter.setPen(QPen(border, max(1.0, scale) + energy * scale * 1.5))
+        painter.drawRoundedRect(caption, caption.height() / 2, caption.height() / 2)
+        if expansion < .999:
+            painter.save()
+            painter.setOpacity(reveal * (1.0 - expansion))
+            painter.drawEllipse(icon)
+            painter.restore()
+        status_color = personal_dj_status_color(self._dj_presentation_state)
+        if status_color is not None:
+            opacity = personal_dj_status_opacity(self._dj_presentation_state, elapsed)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for spread, alpha in ((3.5, 23), (2.0, 45), (1.0, 230)):
+                color = QColor(status_color)
+                color.setAlpha(round(170 + 60 * opacity if spread == 1.0 else alpha * opacity))
+                painter.setPen(QPen(color, max(1.2, 1.8 * scale) * spread))
+                painter.drawEllipse(icon.adjusted(-1.2 * scale, -1.2 * scale, 1.2 * scale, 1.2 * scale))
+        color = self._future_lyric_color(button) if self._owned_personal_dj_enabled else QColor(27, 28, 30)
+        inner = icon.adjusted(icon.width() * .18, icon.height() * .14, -icon.width() * .18, -icon.height() * .14)
+        neutral = QColor(245, 246, 248) if self._owned_personal_dj_enabled else QColor(27, 28, 30)
+        paint_personal_dj_icon(painter, inner, color, bands=frame, elapsed=elapsed, neutral=neutral, backdrop=background)
+        if expansion > .25 and self._dj_next_title:
+            painter.save()
+            painter.setOpacity(reveal * min(1.0, (expansion - .25) / .75))
+            painter.setClipRect(caption)
+            font = self._surface_font(max(10.0, 14.0 * scale), QFont.Weight.DemiBold)
+            painter.setFont(font)
+            painter.setPen(QColor(250, 250, 252))
+            text_rect = caption.adjusted(12.0 * scale, 0, -12.0 * scale, 0)
+            title = QFontMetricsF(font).elidedText(self._dj_next_title, Qt.TextElideMode.ElideRight, max(1, round(text_rect.width())))
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, title)
+            painter.restore()
         painter.restore()
 
     def _audio_output_available(self) -> bool:
@@ -8434,7 +8554,7 @@ class MusicSurfaceWindow(QWidget):
         dj_reveal = self._personal_dj_reveal_at(time.monotonic())
         if dj_reveal >= .75:
             dj_button = self._personal_dj_button_rect(rect)
-            self._button_rects["personal_dj"] = dj_button.translated(self._window_control_shift(dj_button, dj_reveal))
+            self._button_rects["personal_dj"] = dj_button.translated(self._personal_dj_control_shift(rect, dj_reveal))
         if reveal >= 0.75 and self._audio_output_available():
             audio = self._audio_output_button_rect(button, self._surface_scale(rect))
             pose = self._audio_output_motion.pose
@@ -8757,9 +8877,7 @@ class MusicSurfaceWindow(QWidget):
             occluder.addRoundedRect(face, face.height() / 2, face.height() / 2)
         dj_reveal = self._personal_dj_reveal_at(now)
         if dj_reveal > .001:
-            face = self._personal_dj_button_rect(rect)
-            face.translate(self._window_control_shift(face, dj_reveal))
-            occluder.addEllipse(face)
+            occluder.addPath(self._personal_dj_hit_path(rect, now))
         # Transparent/absent artwork still owns its foreground slot. Rings
         # illuminate only the space behind it, never the thumbnail or plate.
         painter.setClipPath(space.subtracted(occluder), Qt.ClipOperation.IntersectClip)

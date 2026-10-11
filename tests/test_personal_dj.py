@@ -28,6 +28,7 @@ class PersonalDJParsingTests(unittest.TestCase):
         self.assertEqual(voice.duration_seconds, 14.341224)
         self.assertEqual(song.duration_seconds, 245)
         self.assertEqual(voice.artwork_url, song.artwork_url)
+        self.assertEqual(voice.introduced_song_id, song.song_id)
         self.assertEqual(voice.direct_stream.expires_at, 87399)
         self.assertTrue(voice.direct_stream.playable)
         self.assertIsNone(song.direct_stream)

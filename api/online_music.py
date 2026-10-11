@@ -54,6 +54,8 @@ class OnlineSong:
     # Service-provided DJ speech has its own expiring authorized address. It
     # must never be sent to the ordinary song URL or lyric endpoints.
     direct_stream: StreamInfo | None = field(default=None, repr=False)
+    # Verified service association; speech and visual songs are distinct.
+    introduced_song_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -621,7 +623,7 @@ class OnlineMusicService:
                     stream = StreamInfo("netease", "dj:" + identity, url, True, quality="dj_voice", expires_at=self._clock() + ttl)
                     result.append(OnlineSong("netease", stream.song_id, "私人DJ · " + (label or "语音"),
                         "私人DJ", associated.title if associated else "", float(duration),
-                        associated.artwork_url if associated else "", "dj_voice", stream))
+                        associated.artwork_url if associated else "", "dj_voice", stream, following_id))
                     voices += 1
             else:
                 invalid()

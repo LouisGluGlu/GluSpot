@@ -448,6 +448,32 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.player.calls, [])
         self.assertIsNone(self.controller._opening)
 
+    def test_fm_real_introduction_opens_paused_song_surface_without_waiting_for_music(self):
+        self.open()
+        row = next(row for row in self.window.collections if row.kind == "fm")
+        self.controller.play_collection(row, "window", QRect())
+        self.player.track = replace(track(self.song), is_playing=False)
+        self.player.is_personal_dj_speaking = lambda: True
+        self.player._set_status("loading_stream")
+        self.player._set_status("playing")
+        self.player.changed.emit()
+        self.assertIsNone(self.controller._opening)
+        self.assertIn(("visual", "owned:netease:song-1"), self.island.calls)
+        self.assertTrue(any(call[0] == "surface" for call in self.island.calls))
+        self.assertFalse(self.player.track.is_playing)
+
+    def test_paused_song_and_unestablished_intro_cannot_open_surface(self):
+        self.open()
+        row = next(row for row in self.window.collections if row.kind == "fm")
+        self.controller.play_collection(row, "window", QRect())
+        self.player.track = replace(track(self.song), is_playing=False)
+        self.player.is_personal_dj_speaking = lambda: False
+        self.player._set_status("loading_stream")
+        self.player._set_status("playing")
+        self.player.changed.emit()
+        self.assertIsNotNone(self.controller._opening)
+        self.assertEqual(self.island.calls, [])
+
     def test_buffered_failure_reports_actual_network_expiry_or_storage_reason(self):
         for reason, message in (("incomplete", "下载未完成"), ("expired", "授权已过期"), ("storage", "磁盘")):
             self.open()

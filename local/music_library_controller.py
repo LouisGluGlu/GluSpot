@@ -445,7 +445,9 @@ class MusicLibraryController(QObject):
         if self._opening is None or self.player.track is None:
             return
         # Old playback can emit position signals while a catalog request runs.
-        if not self._opening_ready or self.player.status not in {"playing", "trial"} or not self.player.track.is_playing:
+        speaking = getattr(self.player, "is_personal_dj_speaking", None)
+        audible = self.player.track.is_playing or callable(speaking) and speaking()
+        if not self._opening_ready or self.player.status not in {"playing", "trial"} or not audible:
             return
         mode, rect, snapshot = self._opening
         self._opening = None

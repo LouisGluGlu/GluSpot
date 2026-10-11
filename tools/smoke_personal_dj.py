@@ -82,6 +82,11 @@ def run_case(output, scenario, timeout):
             if label not in {"voice1", "voice2", "voice3", "voice4", "song101", "song102", "song103", "song104"}:
                 self.send_error(404)
                 return
+            if scenario == "voice_failure" and label == "voice2":
+                with lock:
+                    counters["rejected_voice_downloads"] += 1
+                self.send_error(404)
+                return
             payload = voice_payload if label.startswith("voice") else song_payload
             low, high, partial = 0, len(payload) - 1, False
             header = self.headers.get("Range", "")
@@ -132,14 +137,18 @@ def run_case(output, scenario, timeout):
             with lock:
                 batch = min(counters["personal_dj"], 2)
             resources = []
-            for index in ((2, 3) if scenario == "fm_toggle" else ((1, 2) if batch == 1 else (3, 4))):
+            if scenario == "multi_intro":
+                indices = (1, 3) if batch == 1 else (4,)
+            else:
+                indices = (2, 3) if scenario == "fm_toggle" else ((1, 2) if batch == 1 else (3, 4))
+            for index in indices:
                 song_id = str(100 + index)
+                voices = (1, 2) if scenario == "multi_intro" and index == 1 else (index,)
+                audio_list = [{"audioId": "voice" + str(voice), "audioUrl": address + "voice" + str(voice),
+                    "duration": .7, "validTime": 60, "textType": "介绍",
+                    "introductionRelatedSongIds": [int(song_id)]} for voice in voices]
                 resources.extend((
-                    {"type": "audio", "value": {"audioList": [{
-                        "audioId": "voice" + str(index), "audioUrl": address + "voice" + str(index),
-                        "duration": .7, "validTime": 60, "textType": "介绍",
-                        "introductionRelatedSongIds": [int(song_id)],
-                    }]}},
+                    {"type": "audio", "value": {"audioList": audio_list}},
                     {"type": "song", "value": {"songId": song_id, "songData": {
                         "id": int(song_id), "name": "Synthetic song " + song_id,
                         "duration": 1300, "artists": [{"name": "Fixture"}], "album": {"name": "Generated PCM"},
@@ -188,6 +197,7 @@ def run_case(output, scenario, timeout):
         set_owned_personal_dj_enabled=owned.set_personal_dj_enabled,
         is_owned_personal_dj_speaking=owned.is_personal_dj_speaking,
         get_owned_personal_dj_audio_frame=bridge.get_personal_dj_audio_frame,
+        get_personal_dj_presentation=owned.get_personal_dj_presentation,
     )
     surface = MusicSurfaceWindow(view_owner)
     surface._timer.stop()
@@ -214,6 +224,11 @@ def run_case(output, scenario, timeout):
             "epoch": owned._epoch, "position_ms": player.position(), "duration_ms": player.duration(),
             "qt_state": player.playbackState().name, "owned_state": owned.status,
             "is_playing": bool(track and track.is_playing),
+            "visual_track_id": track.track_id if track else "",
+            "visual_title": track.title if track else "",
+            "visual_position": track.position_seconds if track else None,
+            "visual_duration": track.duration_seconds if track else None,
+            "dj_presentation": owned.get_personal_dj_presentation(),
             "dj_bands": [frame.low, frame.mid, frame.high] if frame is not None else None,
             "dj_frame_matches_current_presentation": aligned,
             "dj_ui_consumed_same_frame": frame is not None and surface._dj_audio_frame == frame,
@@ -252,11 +267,26 @@ def run_case(output, scenario, timeout):
         nonlocal timed_out
         sample = snapshot()
         observations.append(sample)
-        if sample["qt_state"] == "PlayingState" and sample["is_playing"] and sample["position_ms"] >= 80:
+        if sample["qt_state"] == "PlayingState" and sample["position_ms"] >= 80:
             if sample["epoch"] not in seen_epochs:
                 seen_epochs.add(sample["epoch"])
                 segments.append(sample["segment"])
-        if scenario == "fm_toggle":
+        if scenario in {"manual_next", "manual_previous"}:
+            if sample["segment"] == "song101" and sample["position_ms"] >= 150 and "manual_next_accepted" not in controls:
+                controls["manual_previous_visual"] = sample["visual_track_id"]
+                controls["manual_previous_position"] = sample["visual_position"]
+                controls["manual_next_accepted"] = owned.send_playback_command("next")
+            if sample["segment"] == "song102" and sample["position_ms"] >= 150:
+                if scenario == "manual_next":
+                    loop.quit()
+                elif "manual_previous_accepted" not in controls:
+                    controls["manual_previous_accepted"] = owned.send_playback_command("previous")
+            if scenario == "manual_previous" and controls.get("manual_previous_accepted") and len(segments) >= 6 and sample["segment"] == "song101" and sample["position_ms"] >= 150:
+                loop.quit()
+        elif scenario == "voice_failure":
+            if sample["segment"] == "song102" and sample["position_ms"] >= 150:
+                loop.quit()
+        elif scenario == "fm_toggle":
             if sample["segment"] == "song101" and sample["position_ms"] >= 100 and "enabled" not in controls:
                 epoch, source, position = owned._epoch, player.source(), player.position()
                 controls["enabled"] = owned.set_personal_dj_enabled(True)
@@ -315,7 +345,7 @@ def run_case(output, scenario, timeout):
         final = snapshot("final")
         with lock:
             counts, calls, http = dict(counters), list(service_calls), list(requests)
-        established = [sample for sample in observations if sample["is_playing"]]
+        established = [sample for sample in observations if sample["qt_state"] == "PlayingState"]
         measured = [sample for sample in observations if sample["dj_bands"] is not None
             and max(sample["dj_bands"]) > .02]
         errors = [event for event in events if event["kind"] == "error"]
@@ -350,8 +380,46 @@ def run_case(output, scenario, timeout):
             "no_qt_errors": not errors,
             "no_terminal_failure": owned.status not in {"playback_failed", "stream_unavailable", "catalog_unavailable"},
             "no_timeout": not timed_out,
+            "speech_never_replaces_song_visual_with_voice_metadata": all(
+                not sample["visual_track_id"].startswith("owned:netease:dj:") and "私人DJ" not in sample["visual_title"]
+                for sample in observations),
+            "music_visual_paused_while_actual_speech_plays": all(
+                not sample["is_playing"] for sample in established if sample["segment"].startswith("voice")),
+            "speech_title_matches_introduced_song": all(
+                sample["dj_presentation"]["next_title"] == "Synthetic song " + str(
+                    101 if scenario == "multi_intro" and sample["segment"] == "voice2"
+                    else 100 + int(sample["segment"].removeprefix("voice")))
+                for sample in established if sample["segment"].startswith("voice")),
+            "voice_decoder_duration_does_not_replace_song_duration": all(
+                sample["visual_duration"] == 1.3 for sample in established if sample["segment"].startswith("voice")),
+            "voice_decoder_position_does_not_advance_song_visual_clock": all(
+                len({sample["visual_position"] for sample in established
+                    if sample["epoch"] == epoch and sample["segment"].startswith("voice")}) <= 1
+                for epoch in seen_epochs),
         }
-        if scenario == "fm_toggle":
+        if scenario == "multi_intro":
+            checks.update({"multiple_intro_segments_preserve_target_order": segments[:5] == ["voice1", "voice2", "song101", "voice3", "song103"],
+                "prefetch_never_replaces_current_speech_token": all(
+                    len({sample["dj_presentation"]["token"] for sample in established if sample["epoch"] == epoch}) <= 1
+                    for epoch in seen_epochs if any(sample["epoch"] == epoch and sample["segment"].startswith("voice") for sample in established))})
+        elif scenario in {"manual_next", "manual_previous"}:
+            checks.update({
+                "manual_next_accepted": bool(controls.get("manual_next_accepted")),
+                "manual_next_plays_intro_before_target_song": segments[:4] == ["voice1", "song101", "voice2", "song102"],
+                "manual_next_preserves_previous_song_visual_during_speech": any(
+                    sample["segment"] == "voice2" and sample["qt_state"] == "PlayingState" for sample in observations)
+                    and all(sample["visual_track_id"] == controls.get("manual_previous_visual")
+                        for sample in established if sample["segment"] == "voice2"),
+            })
+            if scenario == "manual_previous":
+                checks.update({"manual_previous_accepted": bool(controls.get("manual_previous_accepted")),
+                    "manual_previous_replays_matching_real_intro": segments[:6] == ["voice1", "song101", "voice2", "song102", "voice1", "song101"]})
+        elif scenario == "voice_failure":
+            checks.update({"actual_voice_http_rejection_observed": counts.get("rejected_voice_downloads", 0) > 0,
+                "failed_voice_does_not_block_associated_song": segments[:3] == ["voice1", "song101", "song102"],
+                "failed_voice_never_plays": "voice2" not in segments,
+                "failed_voice_presentation_observed": any(sample["dj_presentation"]["state"] == "failed" for sample in observations)})
+        elif scenario == "fm_toggle":
             checks.update({"starts_in_ordinary_fm": counts.get("personal_fm", 0) > 0,
                 "same_fm_context_has_real_dj_batch": counts.get("personal_dj", 0) > 0 and owned.is_personal_fm(),
                 "enable_preserves_current_decoded_song": bool(controls.get("enabled") and controls.get("current_song_unchanged")),
@@ -411,11 +479,12 @@ def run_case(output, scenario, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path(".runtime/personal-dj-smoke"))
-    parser.add_argument("--scenario", choices=("all", "sequence", "pause", "seek", "repeat", "fm_toggle"), default="all")
+    scenarios = ("sequence", "pause", "seek", "repeat", "fm_toggle", "manual_next", "manual_previous", "voice_failure", "multi_intro")
+    parser.add_argument("--scenario", choices=("all", *scenarios), default="all")
     parser.add_argument("--timeout", type=float, default=12)
     options = parser.parse_args()
     reports = []
-    for scenario in (("sequence", "pause", "seek", "repeat", "fm_toggle") if options.scenario == "all" else (options.scenario,)):
+    for scenario in (scenarios if options.scenario == "all" else (options.scenario,)):
         report = run_case(options.output.resolve() / scenario, scenario, max(8, min(options.timeout, 30)))
         reports.append(report)
         print(json.dumps({key: report[key] for key in ("passed", "scenario", "checks", "elapsed_seconds")}, ensure_ascii=False), flush=True)
