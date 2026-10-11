@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton
 
 from local.ui_theme import app_dark_mode
+from local.liquid_glass import paint_liquid_glass, widget_glass_backdrop
 
 
 def mac_preferences_theme(dark: bool | None = None) -> dict[str, str]:
@@ -108,14 +109,10 @@ class MacTrafficButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(QColor(0, 0, 0, 36))
-        painter.setBrush(self._color)
-        painter.drawEllipse(rect)
-
-        highlight = QColor(255, 255, 255, 72 if self._hovered else 48)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(highlight)
-        painter.drawEllipse(QRectF(rect.left() + 2.0, rect.top() + 1.6, 3.2, 2.4))
+        backdrop, source = widget_glass_backdrop(self, rect)
+        paint_liquid_glass(painter, rect, radius=rect.height() / 2, tint=self._color,
+                          light=True, hovered=self._hovered, pressed=self.isDown(), active=True,
+                          backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
 
         if self._hovered:
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)

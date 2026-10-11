@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QImage, QMouseEvent, QPainter, QWheelEvent
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 
 from api.audio_routes import AudioRouteDevice
 from local.audio_output_panel import AudioOutputPanel
+from local.liquid_glass import clear_glass_cache
 from tests.test_audio_output_panel import _RouteProvider
 
 
@@ -466,6 +468,54 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
                 self.panel.render(frame)
             self.assertEqual(before, (self.panel._reveal, self.panel._reveal_velocity, row.elapsed))
             self.assertEqual(self.provider.calls, [])
+
+    def _contrasting_panel_material(self):
+        self.panel._material = QImage(max(1, self.panel.width() // 2), max(1, self.panel.height() // 2),
+                                      QImage.Format.Format_RGB32)
+        with QPainter(self.panel._material) as painter:
+            painter.fillRect(self.panel._material.rect(), QColor("#2048cf"))
+            painter.fillRect(0, 0, self.panel._material.width(), self.panel._material.height() // 2,
+                             QColor("#cf4820"))
+        self.owner._background_cache = QImage(self.owner.size(), QImage.Format.Format_RGB32)
+        self.owner._background_cache.fill(QColor("#20cf48"))
+        # Discard the setup frame's ten-Hz material slot before checking hue.
+        clear_glass_cache()
+
+    def test_morph_glass_samples_current_target_before_final_row_position(self):
+        self._contrasting_panel_material()
+        row = self.panel._rows["homepod"]
+        geometry = row.geometry()
+        start = QRectF(12, 8, row.width(), row.height())
+        finish = QRectF(row.mapTo(self.panel, QPoint()), row.size())
+        rendered = []
+        for target in (start, finish):
+            image = self._native_image(self.panel)
+            with QPainter(image) as painter:
+                self.panel._paint_morph_row(painter, row, target)
+            point = QPointF(target.left() + target.width() * .8, target.center().y())
+            dpr = image.devicePixelRatio()
+            rendered.append(image.pixelColor(round(point.x() * dpr), round(point.y() * dpr)))
+        warm, cool = rendered
+        self.assertGreater(warm.red(), warm.blue() + 25)
+        self.assertGreater(cool.blue(), cool.red() + 25)
+        self.assertEqual(row.geometry(), geometry)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_compact_source_face_samples_panel_material_at_its_current_position(self):
+        self._contrasting_panel_material()
+        colors = []
+        for first in (QRectF(12, 8, 42, 42), QRectF(12, self.panel.height() - 50, 42, 42)):
+            image = self._native_image(self.panel)
+            pose = SimpleNamespace(first_rect=first, horizontal=0, row_unfold=0,
+                                   shell_rect=QRectF(self.panel.rect()))
+            with QPainter(image) as painter, patch("local.audio_output_panel.paint_audio_output_status"):
+                self.panel._paint_unfolding_rows(painter, pose)
+            dpr = image.devicePixelRatio()
+            colors.append(image.pixelColor(round(first.center().x() * dpr), round(first.center().y() * dpr)))
+        warm, cool = colors
+        self.assertGreater(warm.red(), warm.blue() + 3)
+        self.assertGreater(cool.blue(), cool.red() + 3)
+        self.assertEqual(self.provider.calls, [])
 
     def test_reversal_restores_first_capsule_before_returning_source_circle(self):
         self.panel.dismiss()

@@ -6,10 +6,11 @@ from dataclasses import dataclass, replace
 import math
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath
 
 from local.audio_output_icons import paint_audio_output_icon, paint_audio_output_status
 from local.audio_output_status import ConnectedOutputStatus, OutputMember
+from local.liquid_glass import paint_liquid_glass
 from local.music_lyric_motion import MotionSimulationClock
 
 
@@ -161,16 +162,23 @@ def connection_capsule_rect(circle: QRectF, pose: ConnectionPose,
 
 
 def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPose,
-                          font: QFont, *, available_left: float = 16.0) -> None:
+                          font: QFont, *, available_left: float = 16.0,
+                          backdrop: QImage | None = None,
+                          backdrop_rect: QRectF | None = None) -> None:
     """Direct vector transforms avoid caching a whole control row each frame."""
     painter.save()
     base_opacity = painter.opacity()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     capsule = connection_capsule_rect(circle, pose, font, available_left)
     p = pose.capsule
-    painter.setPen(QPen(QColor(round(168 - 93 * p), round(170 - 94 * p), round(172 - 95 * p)), 1.2))
-    painter.setBrush(QColor(round(248 - 193 * p), round(249 - 193 * p), round(250 - 193 * p), 245))
-    painter.drawRoundedRect(capsule, circle.height() / 2, circle.height() / 2)
+    # Blend the pale circular face into the darker caption material without
+    # a theme snap halfway through the existing capsule motion. Text/glyphs
+    # remain sharp and follow their original independent transforms below.
+    for light, weight in ((True, 1 - p), (False, p)):
+        if weight > 0:
+            paint_liquid_glass(painter, capsule, radius=circle.height() / 2,
+                               light=light, backdrop=backdrop,
+                               backdrop_rect=backdrop_rect, opacity=weight)
     shape = QPainterPath()
     shape.addRoundedRect(capsule.adjusted(1, 1, -1, -1), circle.height() / 2, circle.height() / 2)
     painter.setClipPath(shape)

@@ -4569,7 +4569,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                     6,
                 )
 
-    def test_transport_has_three_large_slots_without_a_visible_backplate(self):
+    def test_transport_has_large_hit_slots_and_separate_glass_faces(self):
         self.owner.track_title = "Attention"
         self.owner.artist = "Charlie Puth"
         self.owner.album_color = QColor(204, 50, 54)
@@ -4646,8 +4646,10 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         playing, _ = paint(playing=True)
         paused, _ = paint(playing=False)
         middle = self.window._media_button_rects["toggle_play_pause"].center()
-        self.assertEqual(playing.pixelColor(round(middle.x()), round(middle.y())), background)
+        self.assertNotEqual(playing.pixelColor(round(middle.x()), round(middle.y())), background)
         self.assertNotEqual(paused.pixelColor(round(middle.x()), round(middle.y())), background)
+        self.assertNotEqual(playing.pixelColor(round(middle.x()), round(middle.y())),
+                            paused.pixelColor(round(middle.x()), round(middle.y())))
 
     def test_fullscreen_skip_feedback_expands_circular_light_from_cover_and_scales_only_icon(self):
         self.window.resize(1190, 666)

@@ -20,6 +20,7 @@ from local.island_stack_visual import IslandStackVisual
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_source_icons import paint_music_source_icon
+from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop
 
 
 @dataclass(frozen=True)
@@ -57,9 +58,13 @@ class EntryNavigationButton(QAbstractButton):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-            painter.setPen(QPen(QColor("#494b51"), 1) if self.hasFocus() else Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#303238") if self.underMouse() else QColor("#23252a"))
-            painter.drawRoundedRect(rect, 12, 12)
+            backdrop, source = widget_glass_backdrop(self, rect)
+            paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
+                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
+            if self.hasFocus():
+                painter.setPen(QPen(QColor("#afb6c8"), 1.5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(rect, 12, 12)
             painter.setPen(QPen(QColor("#e8e9ec"), 2, Qt.PenStyle.SolidLine,
                                 Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             center = rect.center()
@@ -122,9 +127,11 @@ class PlaybackModeButton(QAbstractButton):
                     painter.setPen(QPen(QColor(255, 255, 255, alpha), spread * 2))
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
-            painter.setPen(QPen(QColor(255, 255, 255, 225), 1) if self.isChecked() else Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#f4f4f4") if self.isChecked() else QColor("#8c8e91"))
-            painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+            backdrop, source = widget_glass_backdrop(self, rect)
+            paint_liquid_glass(painter, rect, radius=rect.height() / 2, light=self.isChecked(),
+                              tint=QColor("#f4f4f4") if self.isChecked() else QColor("#8c8e91"),
+                              hovered=self.underMouse(), pressed=self.isDown(), active=self.isChecked(),
+                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
             font = _entry_font(max(18, min(32, round(rect.height() * .43))), heavy=True)
             layout = self._reading.whole_line(self.text(), font)
             width = layout.lineAt(0).naturalTextWidth() if layout.lineCount() else 0
@@ -157,9 +164,12 @@ class MusicSourceButton(QAbstractButton):
             if not self.isEnabled():
                 painter.setOpacity(.38)
             rect = QRectF(self.rect()).adjusted(8, 8, -8, -24 if self.show_caption else -8)
-            painter.setPen(QPen(QColor(self.source.color), 1.5) if self.isChecked() else QPen(QColor("#3c3e44"), 1))
-            painter.setBrush(QColor("#2b2d33") if self.isChecked() else QColor("#202227"))
-            painter.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 16, 16)
+            face = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+            backdrop, source = widget_glass_backdrop(self, face)
+            paint_liquid_glass(painter, face, radius=16,
+                              tint=QColor(self.source.color), hovered=self.underMouse(), pressed=self.isDown(),
+                              active=self.isChecked(), backdrop=backdrop, backdrop_rect=source,
+                              cache_token=(id(self), "face"))
             if self.isChecked() or self.hasFocus():
                 painter.setPen(QPen(QColor(self.source.color), 3))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -168,7 +178,7 @@ class MusicSourceButton(QAbstractButton):
             icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2, side, side)
             paint_music_source_icon(painter, icon, self.source.source_id)
             painter.setFont(_entry_font(12))
-            painter.setPen(QColor("#e2e3e7"))
+            painter.setPen(QColor("#16181c") if self.isChecked() else QColor("#e2e3e7"))
             title = self.source.name.replace("音乐", "").strip()
             if self.show_caption:
                 painter.drawText(QRectF(2, self.height() - 25, self.width() - 4, 20), Qt.AlignmentFlag.AlignCenter, title)
@@ -238,7 +248,7 @@ class PlaybackEntryWindow(QWidget):
         self.system_button.settle()
         self.owned_button.toggled.connect(lambda checked: self._ensure_mode(self.owned_button, checked))
         self.system_button.toggled.connect(lambda checked: self._ensure_mode(self.system_button, checked))
-        self.continue_button = QPushButton("继续", self)
+        self.continue_button = GlassPushButton("继续", self)
         self.continue_button.setAccessibleName("继续选择播放来源")
         self.continue_button.clicked.connect(self._accept_modes)
         self.close_button = EntryNavigationButton("close", "关闭播放来源窗口", self)
@@ -247,9 +257,9 @@ class PlaybackEntryWindow(QWidget):
         self.back_button = EntryNavigationButton("back", "返回播放模式", self)
         self.back_button.setAccessibleName("返回播放模式")
         self.back_button.clicked.connect(self._go_back)
-        self.refresh_button = QPushButton("刷新二维码", self)
+        self.refresh_button = GlassPushButton("刷新二维码", self)
         self.refresh_button.clicked.connect(self._refresh_login)
-        self.enter_button = QPushButton("继续", self)
+        self.enter_button = GlassPushButton("继续", self)
         self.enter_button.clicked.connect(self._accept_login)
         self.message_label = QLabel("选择音乐来源", self)
         self.message_label.setWordWrap(True)
@@ -262,6 +272,8 @@ class PlaybackEntryWindow(QWidget):
             button.setToolTip(f"{button.source.name}：正在确认服务状态")
             button.clicked.connect(lambda checked=False, sid=source_id: self.select_source(sid))
         for button in (self.continue_button, self.refresh_button, self.enter_button):
+            button.setGlassLight(False)
+            button.setProperty("glassRadius", 12.0)
             button.setFont(_entry_font(15))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setStyleSheet("QPushButton { color: #f4f5f7; background: #343740; border: 1px solid #494c56; border-radius: 12px; padding: 6px 15px; } QPushButton:hover { background: #41454f; } QPushButton:disabled { color: #747782; } QPushButton:focus { border: 2px solid #afb6c8; }")
@@ -327,6 +339,7 @@ class PlaybackEntryWindow(QWidget):
         self._release_login()
         self._frame_timer.stop()
         self.page = "sources"
+        self._background_frame = QImage()
         self._accept_snapshots = True
         self.selected_source = ""
         for button in self.source_buttons.values():
@@ -419,6 +432,8 @@ class PlaybackEntryWindow(QWidget):
         source = next(item for item in ENTRY_SOURCES if item.source_id == account.source_id)
         ink = "#131313" if account.source_id == "qq" else "#ffffff"
         self.enter_button.setStyleSheet(f"QPushButton {{ color: {ink}; background: {source.color}; border: none; border-radius: 12px; padding: 6px 20px; }} QPushButton:focus {{ border: 2px solid #b7baca; }}")
+        self.enter_button.setGlassTint(QColor(source.color))
+        self.enter_button.setGlassLight(ink != "#ffffff")
         self._set_expanded(self._expanded)
         self.update()
 
@@ -453,6 +468,8 @@ class PlaybackEntryWindow(QWidget):
             self.enter_button.setText("继续")
             self.enter_button.setFont(_entry_font(15))
             self.enter_button.setStyleSheet("QPushButton { color: #f4f5f7; background: #343740; border: 1px solid #494c56; border-radius: 12px; padding: 6px 15px; } QPushButton:focus { border: 2px solid #afb6c8; }")
+            self.enter_button.setProperty("glassTint", None)
+            self.enter_button.setGlassLight(False)
 
     def _layout_children(self):
         modes = self.page == "modes"

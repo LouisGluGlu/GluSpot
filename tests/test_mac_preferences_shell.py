@@ -840,7 +840,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("setFixedSize(10, 10)", style)
         self.assertIn("setFixedSize(48, 18)", style)
         self.assertIn("drawRoundedRect", style)
-        self.assertIn("drawEllipse", style)
+        self.assertIn("paint_liquid_glass", style)
         self.assertIn("layout.setContentsMargins(5, 4, 5, 4)", style)
         self.assertIn("layout.setSpacing(4)", style)
         self.assertNotIn("QLinearGradient", style)

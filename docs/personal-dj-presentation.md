@@ -17,10 +17,11 @@ the DJ control at twice its compact diameter. During speech, the backing
 circle unfolds into the title capsule beneath the rings; the title identifies
 the upcoming music, while measured low/mid/high speech energy drives the glyph
 and outline. Completion reverses the presentation into the compact control.
-The ring animation uses the current song's album accent for one traveling
-halo and background-aware neutral ink for the remaining rings. It moves along
+The October 12 follow-up uses the current song's album accent at the center,
+with continuously lighter ring ink towards both sides, and retains one traveling
+halo. It moves along
 a straight right-to-left path, changing size with smooth cosine depth, over
-1.65 seconds, followed by a 0.5-second hold. A short smooth attack and long
+2 seconds, followed by a 0.5-second hold. A short smooth attack and long
 deceleration make the speed pulse visible while slowing the full cycle. The
 original time law integrates `56*p*(1-p)^6`; speed is zero at both ends.
 Wrapping rings fade smoothly before changing sides. Fractional geometry and
@@ -102,6 +103,10 @@ from either project is bundled. Neither reference establishes the requested
 left-bright/right-dark light model, which is an original pen-gradient treatment.
 
 ## Verification and limits
+
+The October 12 material/timing follow-up and its latest validation are documented
+in [soft pigments and Liquid Glass](soft-pigment-and-liquid-glass.md). The counts
+below record the preceding October 11 implementation.
 
 The final frozen source passed **4046 Python tests in 252.956 seconds**, with
 no skips, using `.venv/Scripts/python.exe -X utf8 -X faulthandler -m unittest

@@ -34,7 +34,7 @@ class AlbumFlowBackgroundRenderer:
     PALETTE_TRANSITION_SECONDS = 1.2
     MAX_COLORS = 6
     # White read ink needs a brightness envelope, not an HSV value cap that
-    # unnecessarily dims saturated reds/blues. Neutral highlights stay near
+    # unnecessarily dims ordinary reds/blues. Neutral highlights stay near
     # the reference's light gray while all moving pigments satisfy this cap.
     MAX_LUMINANCE = 0.265
 
@@ -56,26 +56,40 @@ class AlbumFlowBackgroundRenderer:
 
     @classmethod
     def _ambient_color(cls, source: QColor) -> QColor:
-        """Retain source hue and gray order independently of island roles."""
+        """Soften pure display pigments while retaining hue and gray order."""
         source = QColor(source)
         hue, saturation, value, _alpha = source.getHsv()
         if hue < 0 or saturation < 35 or max(source.getRgb()[:3]) - min(source.getRgb()[:3]) < 12:
             # Monotonic: black remains dark, white remains a light field.
             level = round(31 + 109 * (value / 255.0) ** 0.85)
             return QColor(level, level, level)
-        # A photographic shadow is permitted to be a visible colored mass,
-        # but a bright blue must not be replaced by its dark lyric role.
+        # A photographic shadow is permitted to be a visible colored mass.
+        # Only bright, highly pure pigments soften: the sampled palette,
+        # Solid island and characteristic/control ink keep their source roles.
         color = QColor.fromHsv(hue, saturation, min(220, round(80 + value * 0.55)))
-        return cls._bounded_luminance(color)
+        original = cls._bounded_luminance(color)
+        purity = min(1.0, max(0.0, (saturation - 180) / 60.0))
+        visibility = min(1.0, max(0.0, (value - 64) / 96.0))
+        soften = purity * purity * (3.0 - 2.0 * purity) * visibility * visibility * (3.0 - 2.0 * visibility)
+        if soften <= 0.0:
+            return original
+        softened = QColor.fromHsvF(hue / 360.0, saturation / 255.0 * (1.0 - .34 * soften),
+                                   color.valueF() * (1.0 - .16 * soften))
+        # Blue has low perceptual luminance despite a high HSV value.
+        # Desaturation raises its red/green channels, so constrain the result
+        # against its previous display luminance as well as the lyric envelope.
+        return cls._bounded_luminance(softened,
+            maximum=min(cls.MAX_LUMINANCE, relative_luminance(original) * (1.0 - .16 * soften)))
 
     @classmethod
-    def _bounded_luminance(cls, color: QColor) -> QColor:
-        if relative_luminance(color) > cls.MAX_LUMINANCE:
+    def _bounded_luminance(cls, color: QColor, *, maximum: float | None = None) -> QColor:
+        maximum = cls.MAX_LUMINANCE if maximum is None else max(0.0, min(cls.MAX_LUMINANCE, maximum))
+        if relative_luminance(color) > maximum:
             low, high = 0.0, 1.0
             for _ in range(12):
                 factor = (low + high) * 0.5
                 candidate = QColor(*(round(channel * factor) for channel in color.getRgb()[:3]))
-                if relative_luminance(candidate) > cls.MAX_LUMINANCE:
+                if relative_luminance(candidate) > maximum:
                     high = factor
                 else:
                     low = factor

@@ -43,6 +43,18 @@ def _ink_contrast(ink: QColor, backdrop: QColor) -> float:
 
 
 class MusicSurfacePaletteTests(unittest.TestCase):
+    def test_pure_blue_multicolor_cover_preserves_exact_source_and_solid_island_roles(self):
+        blue, purple, warm, neutral = (QColor(34, 34, 254), QColor(88, 10, 115),
+                                       QColor(188, 145, 102), QColor(66, 66, 66))
+        palette = artwork_surface_palette(_artwork(((62, blue), (80, purple), (92, warm), (100, neutral))),
+                                          QColor("black"), QColor("black"))
+        self.assertEqual(palette.source_primary, blue)
+        self.assertEqual(palette.ambient_colors[0], blue)
+        self.assertIn(purple, palette.ambient_colors)
+        self.assertIn(warm, palette.ambient_colors)
+        self.assertEqual(solid_album_background_color(palette), blue)
+        self.assertFalse(single_hue_background_colors(palette.ambient_colors, weights=palette.ambient_weights))
+
     def test_bright_single_hue_display_layers_keep_hue_and_solid_source(self):
         for source in (QColor(233, 31, 20), QColor(16, 135, 164),
                        QColor(242, 204, 12), QColor(181, 35, 230)):
