@@ -396,6 +396,15 @@ def run_case(output, scenario, timeout):
                 len({sample["visual_position"] for sample in established
                     if sample["epoch"] == epoch and sample["segment"].startswith("voice")}) <= 1
                 for epoch in seen_epochs),
+            "speech_displays_introduced_song_visual_at_paused_start": all(
+                sample["visual_track_id"] == "owned:netease:" + str(
+                    101 if scenario == "multi_intro" and sample["segment"] == "voice2"
+                    else 100 + int(sample["segment"].removeprefix("voice")))
+                and sample["visual_title"] == sample["dj_presentation"]["next_title"]
+                and sample["visual_position"] == 0.0 and not sample["is_playing"]
+                for sample in established if sample["segment"].startswith("voice")),
+            "introduced_song_lyrics_available_during_speech": any(
+                sample["song_lyrics_loaded"] and sample["segment"].startswith("voice") for sample in established),
         }
         if scenario == "multi_intro":
             checks.update({"multiple_intro_segments_preserve_target_order": segments[:5] == ["voice1", "voice2", "song101", "voice3", "song103"],
@@ -406,9 +415,10 @@ def run_case(output, scenario, timeout):
             checks.update({
                 "manual_next_accepted": bool(controls.get("manual_next_accepted")),
                 "manual_next_plays_intro_before_target_song": segments[:4] == ["voice1", "song101", "voice2", "song102"],
-                "manual_next_preserves_previous_song_visual_during_speech": any(
+                "manual_next_shows_introduced_song_paused_during_speech": any(
                     sample["segment"] == "voice2" and sample["qt_state"] == "PlayingState" for sample in observations)
-                    and all(sample["visual_track_id"] == controls.get("manual_previous_visual")
+                    and all(sample["visual_track_id"] == "owned:netease:102" and sample["visual_position"] == 0
+                        and not sample["is_playing"]
                         for sample in established if sample["segment"] == "voice2"),
             })
             if scenario == "manual_previous":
