@@ -71,6 +71,8 @@ from local.music_surface_palette import (
     artwork_surface_palette,
     cached_artwork_surface_palette,
     background_role_color,
+    solid_album_background_color,
+    solid_album_ink_color,
     future_lyric_color as select_future_lyric_color,
 )
 from local.audio_output_panel import AudioOutputPanel
@@ -182,6 +184,8 @@ class MusicSurfaceWindow(QWidget):
         self._closing_for_shutdown = False
         self._button_rects: dict[str, QRectF] = {}
         self._owned_playback_mode: str | None = None
+        self._owned_playback_modes: tuple[str, ...] = ()
+        self._owned_personal_fm = False
         self._audio_output_panel: AudioOutputPanel | None = None
         self._audio_output_kinds: tuple[str, ...] = ()
         self._audio_output_membership = OutputMembershipTracker()
@@ -1705,6 +1709,14 @@ class MusicSurfaceWindow(QWidget):
         ):
             self._prewarm_metadata_text()
         self._update_control_animation_regions(now)
+        if (self.isVisible() and self._owned_personal_fm
+                and self._owned_playback_mode == "sequential"
+                and self._control_last_tick_reveal >= 0.999
+                and not self._capturing_transition_snapshot):
+            # Only the tiny FM control needs frames for its live color cycle.
+            base = self._window_control_base_rect(QRectF(self.rect()))
+            self.update(self._playback_mode_button_rect(base, self._surface_scale())
+                        .adjusted(-3, -3, 3, 3).toAlignedRect())
         self._update_transport_feedback_regions(now)
         # A paused track may have no other repaint during the two-second
         # windowed lead-in. Queue only the two small control regions until
@@ -7804,19 +7816,32 @@ class MusicSurfaceWindow(QWidget):
         provider = getattr(self.owner, "data_provider", None)
         getter = getattr(provider, "get_owned_playback_mode", None)
         setter = getattr(provider, "set_owned_playback_mode", None)
+        modes_getter = getattr(provider, "get_owned_playback_modes", None)
+        fm_getter = getattr(provider, "is_owned_personal_fm", None)
         try:
             mode = getter() if callable(getter) and callable(setter) else None
+            modes = tuple(modes_getter()) if callable(modes_getter) else ("sequential", "shuffle", "repeat_one")
+            personal_fm = bool(fm_getter()) if callable(fm_getter) else False
         except Exception:
             mode = None
-        mode = mode if mode in {"sequential", "shuffle", "repeat_one"} else None
-        if mode != self._owned_playback_mode:
+            modes, personal_fm = (), False
+        modes = tuple(value for value in modes if value in {"sequential", "shuffle", "repeat_one"})
+        mode = mode if mode in modes else None
+        if mode is None:
+            modes, personal_fm = (), False
+        if (mode, modes, personal_fm) != (self._owned_playback_mode, self._owned_playback_modes, self._owned_personal_fm):
             self._owned_playback_mode = mode
+            self._owned_playback_modes = modes
+            self._owned_personal_fm = personal_fm
             if self._hovered_window_button == "playback_mode":
                 self.setToolTip(self._playback_mode_tooltip())
             self._sync_window_control_rects()
             self.update()
 
     def _playback_mode_tooltip(self) -> str:
+        if self._owned_personal_fm:
+            return ("私人漫游 · ∞ 续播 · 点击切换为单曲循环" if self._owned_playback_mode == "sequential"
+                    else "单曲循环 · 点击切换为∞ 漫游续播")
         labels = {"sequential": ("顺序播放 · 歌单循环", "随机播放"),
                   "shuffle": ("随机播放", "单曲循环"),
                   "repeat_one": ("单曲循环", "顺序播放")}
@@ -7827,8 +7852,8 @@ class MusicSurfaceWindow(QWidget):
         # Recheck the provider at release so a source switch cannot send this
         # owned-player action to the system track displayed after the press.
         self._sync_owned_playback_mode()
-        modes = {"sequential": "shuffle", "shuffle": "repeat_one", "repeat_one": "sequential"}
-        following = modes.get(self._owned_playback_mode)
+        modes = self._owned_playback_modes
+        following = modes[(modes.index(self._owned_playback_mode) + 1) % len(modes)] if self._owned_playback_mode in modes else None
         setter = getattr(getattr(self.owner, "data_provider", None), "set_owned_playback_mode", None)
         if following is None or not callable(setter):
             return False
@@ -7839,6 +7864,13 @@ class MusicSurfaceWindow(QWidget):
         self._sync_owned_playback_mode()
         self.setToolTip(self._playback_mode_tooltip())
         return changed
+
+    def _personal_fm_ink(self, region: QRectF, now: float) -> QColor:
+        accent = self._future_lyric_color(region)
+        neutral = solid_album_ink_color(solid_album_background_color(self._art_palette()), 255)
+        # Smoothly travel accent -> album-appropriate neutral -> accent.
+        blend = (1.0 - math.cos(float(now) * math.tau / 4.0)) / 2.0
+        return self._mix_color(accent, neutral, blend)
 
     def _audio_output_available(self) -> bool:
         return callable(getattr(getattr(self.owner, "data_provider", None), "get_audio_route_snapshot", None))
@@ -8175,7 +8207,11 @@ class MusicSurfaceWindow(QWidget):
         playback_button = self._playback_mode_button_rect(button, scale)
         playback_hovered = self._hovered_window_button == "playback_mode"
         playback_pressed = self._pressed_window_button == "playback_mode"
+        fm_continuous = self._owned_personal_fm and playback_mode == "sequential"
+        playback_asset = "personal_fm" if fm_continuous else ("sequence" if playback_mode == "sequential" else playback_mode)
         playback_active = playback_mode in {"shuffle", "repeat_one"}
+        now = time.monotonic()
+        reveal = self._control_reveal_at(now)
         playback_ink = QColor(255, 255, 255, 242)
         if playback_active:
             samples = self._background_sample_colors(playback_button)
@@ -8190,6 +8226,17 @@ class MusicSurfaceWindow(QWidget):
                 if self._contrast_ratio(self._composited_color(playback_ink, face_color), face_color) >= 4.5:
                     break
                 playback_ink = playback_ink.darker(112)
+        if fm_continuous:
+            album_ink = solid_album_ink_color(solid_album_background_color(self._art_palette()))
+            playback_active = album_ink.red() == 0
+            # Freeze the tiny glyph while its shared control layer blurs;
+            # visible frames tint a cached SVG mask without new blur rasters.
+            ink_time = now if reveal >= 0.999 else self._control_transition_started_at
+            playback_ink = self._personal_fm_ink(playback_button, ink_time)
+        default_playback_ink = QColor(playback_ink)
+        if fm_continuous:
+            idle_seconds = self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen else self.WINDOWED_CONTROL_IDLE_SECONDS
+            default_playback_ink = self._personal_fm_ink(playback_button, self._control_last_motion_at + idle_seconds)
         if playback_mode is not None:
             bounds = bounds.united(playback_button)
         audio_available = self._audio_output_available()
@@ -8205,11 +8252,11 @@ class MusicSurfaceWindow(QWidget):
         translated = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
         translation_hovered = self._hovered_window_button == "translation"
         translation_pressed = self._pressed_window_button == "translation"
-        reveal = self._control_reveal_at(time.monotonic())
         hovered = self._hovered_window_button == key
         pressed = self._pressed_window_button == key
 
-        def draw(layer: QPainter, *, hovered_state: bool = hovered, pressed_state: bool = pressed):
+        def draw(layer: QPainter, *, hovered_state: bool = hovered, pressed_state: bool = pressed,
+                 mode_ink: QColor = playback_ink):
             layer.save()
             def face(target: QRectF, is_hovered: bool = False, is_pressed: bool = False,
                      active: bool = False):
@@ -8235,8 +8282,15 @@ class MusicSurfaceWindow(QWidget):
                 paint_audio_output_status(layer, audio_button, audio_kinds, audio_ink, count=audio_count)
             if playback_mode is not None:
                 face(playback_button, playback_hovered, playback_pressed, playback_active)
+                if fm_continuous:
+                    # Keep the exact lyric hue readable even at the pale
+                    # end of the gradient on a pale album/control face.
+                    edge = QColor(30, 31, 32, 190) if playback_active else QColor(245, 246, 247, 190)
+                    icon = icon_rect(playback_button, 0.55)
+                    for dx, dy in ((-.55, 0), (.55, 0), (0, -.55), (0, .55)):
+                        paint_music_source_icon(layer, icon.translated(dx * scale, dy * scale), playback_asset, tint=edge)
                 paint_music_source_icon(layer, icon_rect(playback_button, 0.55),
-                                        "sequence" if playback_mode == "sequential" else playback_mode, tint=playback_ink)
+                                        playback_asset, tint=mode_ink)
             translation_symbol = self._translation_symbol_path(icon_rect(translation, 0.58))
             if translated:
                 # The vector symbol is removed from the face, so its ink is
@@ -8263,15 +8317,15 @@ class MusicSurfaceWindow(QWidget):
             layer.restore()
 
         def draw_default(layer: QPainter):
-            draw(layer, hovered_state=False, pressed_state=False)
+            draw(layer, hovered_state=False, pressed_state=False, mode_ink=default_playback_ink)
 
         self._paint_control_layer(
             painter, bounds, reveal, self._window_control_shift(button, reveal),
             ("window", key, round(scale, 3), translated,
-             translation_hovered, translation_pressed, playback_mode, playback_ink.rgba(), playback_hovered, playback_pressed,
+             translation_hovered, translation_pressed, playback_mode, playback_asset, playback_ink.rgba(), playback_hovered, playback_pressed,
              hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw,
             prewarm_default=(("window", key, round(scale, 3), translated,
-                               translation_hovered, translation_pressed, playback_mode, playback_ink.rgba(), playback_hovered, playback_pressed,
+                               translation_hovered, translation_pressed, playback_mode, playback_asset, default_playback_ink.rgba(), playback_hovered, playback_pressed,
                                False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw_default),
         )
         if audio_available and not audio_active and audio_pose is not None:

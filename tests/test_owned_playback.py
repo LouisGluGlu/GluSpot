@@ -274,7 +274,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual(self.player._shuffle_history, [0])
         self.assertTrue(all(index == 0 for index in self.player._shuffle_pending))
 
-    def test_fm_shuffle_only_reorders_unplayed_batch_and_continues_new_songs(self):
+    def test_fm_preserves_service_order_and_continues_without_looping_history(self):
         songs = self.covered_songs(9)
         self.player._random.shuffle = lambda values: values.reverse()
         self.player.set_playback_mode("shuffle")
@@ -282,11 +282,14 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.player.play_personal_fm()
         token, action = self.tasks.jobs[-1]
         self.tasks.completed.emit(token, action(), None)
-        self.assertEqual([song.song_id for song in self.player.queue], ["0", "2", "1"])
-        self.assertEqual([entry.track_id for entry in self.player.track.album_queue], ["owned:netease:2", "owned:netease:1"])
+        self.assertEqual(self.player.playback_mode, "sequential")
+        self.assertEqual(self.player.available_playback_modes(), ("sequential", "repeat_one"))
+        self.assertTrue(self.player.is_personal_fm())
+        self.assertEqual([song.song_id for song in self.player.queue], ["0", "1", "2"])
+        self.assertEqual([entry.track_id for entry in self.player.track.album_queue], ["owned:netease:1", "owned:netease:2"])
         self.authorize_current()
         self.prefetch_tasks.completed.emit(self.prefetch_tasks.jobs[-1][0], songs[3:6], None)
-        self.assertEqual([song.song_id for song in self.player.queue], ["0", "2", "1", "5", "4", "3"])
+        self.assertEqual([song.song_id for song in self.player.queue], ["0", "1", "2", "3", "4", "5"])
         self.finish_artwork()
         played = [self.player.queue[self.player.index].song_id]
         for _ in range(5):
@@ -295,22 +298,22 @@ class OwnedPlaybackTests(unittest.TestCase):
             self.assertEqual(self.player.track.track_id, advertised)
             played.append(self.player.queue[self.player.index].song_id)
             self.finish_artwork()
-        self.assertEqual(played, ["0", "2", "1", "5", "4", "3"])
-        self.assertEqual([song.song_id for song in self.player.queue[:self.player.index]], ["1", "5", "4"])
+        self.assertEqual(played, ["0", "1", "2", "3", "4", "5"])
+        self.assertEqual([song.song_id for song in self.player.queue[:self.player.index]], ["2", "3", "4"])
         self.assertTrue(self.player.send_playback_command("previous"))
         self.assertEqual(self.player.track.track_id, "owned:netease:4")
         self.assertEqual(self.player.track.album_art_bytes, b"art:4")
         self.assertTrue(self.player.send_playback_command("next"))
-        self.assertEqual(self.player.track.track_id, "owned:netease:3")
+        self.assertEqual(self.player.track.track_id, "owned:netease:5")
         self.service.personal_fm = lambda source: songs[6:9]
         self.assertTrue(self.player.send_playback_command("next"))
         token, action = self.tasks.jobs[-1]
         self.assertEqual(token[2], "fm_continue")
         self.tasks.completed.emit(token, action(), None)
-        self.assertEqual(self.player.track.track_id, "owned:netease:8")
-        self.assertEqual([song.song_id for song in self.player.queue[self.player.index:]], ["8", "7", "6"])
+        self.assertEqual(self.player.track.track_id, "owned:netease:6")
+        self.assertEqual([song.song_id for song in self.player.queue[self.player.index:]], ["6", "7", "8"])
 
-    def test_fm_switch_to_shuffle_keeps_current_and_history_then_repeat_eof_current(self):
+    def test_fm_rejects_shuffle_and_repeat_keeps_current_and_history(self):
         songs = self.covered_songs(7)
         self.service.personal_fm = lambda source: songs[:3]
         self.player.play_personal_fm()
@@ -320,8 +323,8 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.prefetch_tasks.completed.emit(self.prefetch_tasks.jobs[-1][0], songs[3:6], None)
         self.player.send_playback_command("next")
         self.player._random.shuffle = lambda values: values.reverse()
-        self.player.set_playback_mode("shuffle")
-        self.assertEqual([song.song_id for song in self.player.queue], ["0", "1", "5", "4", "3", "2"])
+        self.assertFalse(self.player.set_playback_mode("shuffle"))
+        self.assertEqual([song.song_id for song in self.player.queue], ["0", "1", "2", "3", "4", "5"])
         self.assertEqual(self.player.track.track_id, "owned:netease:1")
         self.player.set_playback_mode("repeat_one")
         self.authorize_current()
@@ -330,7 +333,37 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual(self.player.track.track_id, "owned:netease:1")
         self.assertEqual(len([token for token, _ in self.tasks.jobs if token[0] == "catalog"]), catalog_count)
         self.player.send_playback_command("next")
-        self.assertEqual(self.player.track.track_id, "owned:netease:5")
+        self.assertEqual(self.player.track.track_id, "owned:netease:2")
+
+    def test_fm_entry_repeat_and_exit_preserve_ordinary_queue_preference(self):
+        for normal_mode in ("sequential", "shuffle", "repeat_one"):
+            with self.subTest(mode=normal_mode):
+                self.player.play_queue(self.songs)
+                self.player.set_playback_mode(normal_mode)
+                self.service.personal_fm = lambda source: self.songs
+                self.player.play_personal_fm()
+                token, action = self.tasks.jobs[-1]
+                self.tasks.completed.emit(token, action(), None)
+                self.assertEqual(self.player.playback_mode, "sequential")
+                self.player.set_playback_mode("repeat_one")
+                self.player._load_song()
+                self.assertEqual(self.player.playback_mode, "repeat_one")
+                self.player._replace_queue(self.songs, fm_source="netease")
+                self.assertEqual(self.player.playback_mode, "repeat_one")
+                self.player.play_queue(self.songs)
+                self.assertFalse(self.player.is_personal_fm())
+                self.assertEqual(self.player.playback_mode, normal_mode)
+                self.assertEqual(self.player.available_playback_modes(), ("sequential", "shuffle", "repeat_one"))
+
+    def test_stopping_fm_restores_ordinary_mode_before_next_fm_session(self):
+        self.player.set_playback_mode("shuffle")
+        self.player._replace_queue(self.songs, fm_source="netease")
+        self.player.set_playback_mode("repeat_one")
+        self.player.stop()
+        self.assertEqual(self.player.playback_mode, "shuffle")
+        self.assertFalse(self.player.is_personal_fm())
+        self.player._replace_queue(self.songs, fm_source="netease")
+        self.assertEqual(self.player.playback_mode, "sequential")
 
     def test_manual_previous_cancels_waiting_fm_next_without_losing_new_batch(self):
         songs = self.covered_songs(6)

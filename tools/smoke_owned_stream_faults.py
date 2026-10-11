@@ -97,7 +97,8 @@ def run_case(output, scenario, mode, timeout):
     class FixtureService:
         def stream_url(self, source_id, song_id):
             ordinal = 1 + sum(call["operation"] == "stream" for call in calls)
-            kind = "healthy" if scenario == "healthy" or ordinal > 1 else \
+            kind = "midstream" if scenario in {"midstream", "retry"} and ordinal <= 2 else \
+                "healthy" if scenario == "healthy" or ordinal > 1 else \
                 "midstream" if scenario in {"midstream", "retry"} else "tail"
             calls.append({"operation": "stream", "song_id": song_id, "at": elapsed(),
                 "worker": threading.get_ident() != owner_thread})
@@ -161,12 +162,13 @@ def run_case(output, scenario, mode, timeout):
             controls["retry_at"] = elapsed()
             controls["failed_qt_player_paused"] = player.playbackState() == QMediaPlayer.PlaybackState.PausedState
             controls["failure_kept_lyrics"] = owned.track.lyrics == ("First fixture line", "Last fixture line")
-            controls["no_automatic_retry"] = sum(call["operation"] == "stream" for call in calls) == 1
+            controls["automatic_recovery_bounded_to_one"] = sum(call["operation"] == "stream" for call in calls) == 2
             controls["retry_accepted"] = owned.send_playback_command("toggle_play_pause")
-            controls["retry_new_epoch"] = owned._epoch == first_epoch + 1
+            controls["retry_new_epoch"] = owned._epoch == first_epoch + 2
             controls["retry_same_song"] = owned.track.track_id == "owned:netease:0"
         stream_calls = sum(call["operation"] == "stream" for call in calls)
-        if (owned._epoch > first_epoch and stream_calls >= 2 and owned.status == "playing"
+        expected_epoch = first_epoch + (2 if scenario == "retry" else 1)
+        if (owned._epoch >= expected_epoch and stream_calls >= (3 if scenario == "retry" else 2) and owned.status == "playing"
                 and player.position() >= 250):
             loop.quit()
         elif owned.status in {"playback_failed", "stream_unavailable"}:
@@ -213,14 +215,17 @@ def run_case(output, scenario, mode, timeout):
                 "missing_end_of_media_reproduced": not first_eof})
         if scenario == "midstream":
             checks.update({"midstream_failure_is_bounded": terminal and elapsed() < timeout,
-                "midstream_does_not_skip_song": len(stream_calls) == 1 and owned.index == 0,
+                "midstream_does_not_skip_song": len(stream_calls) == 2 and owned.index == 0
+                    and all(call["song_id"] == "0" for call in stream_calls),
+                "automatic_recovery_bounded_to_one": owned._epoch == first_epoch + 1,
                 "terminal_qt_player_paused": player.playbackState() == QMediaPlayer.PlaybackState.PausedState,
                 "terminal_lyrics_retained": owned.track.lyrics == ("First fixture line", "Last fixture line"),
                 "terminal_visual_paused": not owned.track.is_playing})
         else:
-            checks.update({"existing_playback_mode_preserved": len(stream_calls) == 2 and stream_calls[1]["song_id"] == expected_id,
+            checks.update({"existing_playback_mode_preserved": len(stream_calls) == (3 if scenario == "retry" else 2)
+                    and stream_calls[-1]["song_id"] == expected_id,
                 "next_stream_really_progresses": owned.status == "playing" and player.position() >= 250,
-                "one_transition_only": owned._epoch == first_epoch + 1})
+                "one_transition_only": owned._epoch == first_epoch + (2 if scenario == "retry" else 1)})
             if scenario != "retry":
                 checks["no_terminal_failure"] = not any(event["status"] == "playback_failed" for event in events)
         if scenario == "pause":
@@ -232,7 +237,7 @@ def run_case(output, scenario, mode, timeout):
                 ("seek_accepted", "seek_cleared_fault", "seek_kept_epoch", "seek_kept_lyrics")})
         if scenario == "retry":
             checks.update({name: bool(controls.get(name)) for name in
-                ("failed_qt_player_paused", "failure_kept_lyrics", "no_automatic_retry",
+                ("failed_qt_player_paused", "failure_kept_lyrics", "automatic_recovery_bounded_to_one",
                  "retry_accepted", "retry_new_epoch", "retry_same_song")})
         report = {"passed": all(checks.values()), "checks": checks, "scenario": scenario, "mode": mode,
             "qt_version": qVersion(), "elapsed_seconds": elapsed(), "controls": controls,

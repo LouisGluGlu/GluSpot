@@ -61,6 +61,31 @@ class OwnedModeProviderTests(unittest.TestCase):
         self.assertFalse(self.provider.set_owned_playback_mode("repeat_one"))
         self.assertEqual(self.saved, [])
 
+    def test_personal_fm_capabilities_do_not_overwrite_saved_playlist_preference(self):
+        songs = (OnlineSong("netease", "one", "One"),)
+        self.player.play_queue(songs)
+        self.assertTrue(self.provider.set_owned_playback_mode("shuffle"))
+        self.player.service.personal_fm = lambda *_: songs
+        self.player.play_personal_fm()
+        token, action = self.player.tasks.jobs[-1]
+        self.player.tasks.completed.emit(token, action(), None)
+        self.assertTrue(self.provider.is_owned_personal_fm())
+        self.assertEqual(self.provider.get_owned_playback_modes(), ("sequential", "repeat_one"))
+        self.assertFalse(self.provider.set_owned_playback_mode("shuffle"))
+        self.assertTrue(self.provider.set_owned_playback_mode("repeat_one"))
+        self.assertTrue(self.provider.set_owned_playback_mode("sequential"))
+        self.assertEqual(self.saved, [("v2_owned_playback_mode", "shuffle")])
+        self.player.play_queue(songs)
+        self.assertFalse(self.provider.is_owned_personal_fm())
+        self.assertEqual(self.provider.get_owned_playback_mode(), "shuffle")
+        self.assertEqual(self.provider.get_owned_playback_modes(), ("sequential", "shuffle", "repeat_one"))
+
+    def test_system_capture_has_no_owned_mode_context_or_capabilities(self):
+        self.player._replace_queue((OnlineSong("netease", "one", "One"),), fm_source="netease")
+        self.values["v2_owned_playback_enabled"] = False
+        self.assertFalse(self.provider.is_owned_personal_fm())
+        self.assertEqual(self.provider.get_owned_playback_modes(), ())
+
 
 if __name__ == "__main__":
     unittest.main()

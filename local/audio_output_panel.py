@@ -91,6 +91,7 @@ class _OutputRow(QAbstractButton):
     solo_requested = Signal(str)
     join_requested = Signal(str)
     mute_requested = Signal(str)
+    details_animation_requested = Signal()
 
     def __init__(self, device: AudioRouteDevice, parent=None):
         super().__init__(parent)
@@ -108,6 +109,7 @@ class _OutputRow(QAbstractButton):
         self._requested_volume: float | None = None
         self._request_until = 0.0
         self.details_visible = False
+        self.details_progress = 0.0
         self._pointer_action = ""
         self.volume_slider = _VolumeSlider(self)
         # Pointer activation belongs to the row's solo/mute zones. Retain the
@@ -149,11 +151,25 @@ class _OutputRow(QAbstractButton):
         super().mouseReleaseEvent(event)
         self._pointer_action = ""
 
-    def set_details_visible(self, visible):
-        visible = bool(visible)
+    def set_details_visible(self, visible, *, immediate=False):
+        visible = bool(visible and self.state == "active" and self.isEnabled())
         if self.details_visible != visible:
             self.details_visible = visible
+            if not immediate:
+                self.details_animation_requested.emit()
             self.update()
+        if immediate:
+            self.details_progress = float(visible)
+            self.update()
+
+    @property
+    def details_animating(self):
+        return abs(float(self.details_visible) - self.details_progress) > .001
+
+    @property
+    def name_font_size(self):
+        normal = max(13, round(14 * self.height() / 56))
+        return normal + (10 - normal) * self.details_progress
 
     @property
     def displayed_volume(self):
@@ -173,6 +189,10 @@ class _OutputRow(QAbstractButton):
         usable = bool(device.available or self.state in {"active", "pending"} and
                       device.transport == "airplay" and device.volume is not None)
         self.setEnabled(usable)
+        if self.state != "active" or not usable:
+            # Inactive rows retain their ordinary font even during a route
+            # transition; a hover fade belongs only to a confirmed output.
+            self.set_details_visible(False, immediate=True)
         self.setAccessibleName(str(device.name))
         self.setToolTip(str(device.name))
         known = device.volume is not None and math.isfinite(device.volume)
@@ -254,6 +274,10 @@ class _OutputRow(QAbstractButton):
     def advance(self, elapsed: float):
         self.elapsed += elapsed
         self.progress += ((1.0 if self.state == "active" else 0.0) - self.progress) * (1 - math.exp(-elapsed * 15))
+        target = float(self.details_visible)
+        self.details_progress += (target - self.details_progress) * (1 - math.exp(-elapsed * 18))
+        if not self.details_animating:
+            self.details_progress = target
         self.sync_volume_style()
         self.update()
         self.volume_slider.update()
@@ -308,21 +332,24 @@ class _OutputRow(QAbstractButton):
             paint_audio_output_icon(painter, icon, self.device.kind, QColor(40, 40, 44))
         painter.restore()
         font = QFont(self.label_font)
-        font.setPixelSize(10 if self.details_visible else max(13, round(14 * self.height() / 56)))
+        normal_size = max(13, round(14 * self.height() / 56))
+        font.setPixelSize(normal_size)
         font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(ink)
         detail = bool(self.delay_text or self.state == "pending")
-        right_space = 69 if self.details_visible and self.state == "active" else 47 if self.state == "available" else 12
+        right_space = 12 + 57 * self.details_progress if self.state == "active" else 47 if self.state == "available" else 12
         name_rect = QRectF(52, (self.height() - 34) / 2 if detail else (self.height() - 25) / 2,
                            max(1, self.width() - 52 - right_space), 18 if detail else 25)
-        name = QFontMetricsF(font).elidedText(str(self.device.name), Qt.TextElideMode.ElideRight, name_rect.width())
-        painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter, name)
+        name_scale = self.name_font_size / normal_size
+        name = QFontMetricsF(font).elidedText(str(self.device.name), Qt.TextElideMode.ElideRight,
+                                           name_rect.width() / name_scale)
+        self._paint_name(painter, name_rect, name, name_scale)
         if not self.volume_slider.isHidden():
             painter.save()
             painter.setClipRect(self.volume_fill_rect())
             painter.setPen(QColor(40, 40, 44))
-            painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter, name)
+            self._paint_name(painter, name_rect, name, name_scale)
             painter.restore()
         font.setPixelSize(10)
         font.setWeight(QFont.Weight.Normal)
@@ -337,7 +364,7 @@ class _OutputRow(QAbstractButton):
                 painter.setPen(QColor(40, 40, 44))
                 painter.drawText(detail, Qt.AlignmentFlag.AlignVCenter, self.delay_text)
                 painter.restore()
-        if self.details_visible and self.state == "active":
+        if self.details_progress > 0 and self.state == "active":
             volume = self.displayed_volume
             glyph = QRectF(self.width() - 65, (self.height() - 21) / 2, 21, 21)
             amount = QRectF(self.width() - 39, (self.height() - 25) / 2, 29, 25)
@@ -346,6 +373,7 @@ class _OutputRow(QAbstractButton):
             painter.setFont(font)
             for color, clipped in ((ink, False), (QColor(40, 40, 44), True)):
                 painter.save()
+                painter.setOpacity(painter.opacity() * self.details_progress)
                 if clipped:
                     painter.setClipRect(self.volume_fill_rect(), Qt.ClipOperation.IntersectClip)
                 _paint_volume_symbol(painter, glyph, color, silent=volume == 0, unknown=volume is None)
@@ -369,6 +397,21 @@ class _OutputRow(QAbstractButton):
             painter.setPen(QPen(ink, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawArc(QRectF(self.width() - 25, (self.height() - 12) / 2, 12, 12),
                             int(-self.elapsed * 280 * 16), 250 * 16)
+
+    @staticmethod
+    def _paint_name(painter, rect, text, scale):
+        if scale == 1.0:
+            painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter, text)
+            return
+        # Qt pixel font sizes are integral. Transform the native glyphs at the
+        # row's actual DPR so intermediate sizes remain continuous.
+        painter.save()
+        painter.translate(rect.left(), rect.center().y())
+        painter.scale(scale, scale)
+        painter.drawText(QRectF(0, -rect.height() / scale / 2,
+                               rect.width() / scale, rect.height() / scale),
+                         Qt.AlignmentFlag.AlignVCenter, text)
+        painter.restore()
 
 class AudioOutputPanel(QWidget):
     """Cached frosted popup that queues actions through published route state."""
@@ -537,7 +580,8 @@ class AudioOutputPanel(QWidget):
 
     def _reveal_hover_details(self):
         if (self.isVisible() and self._native_content_ready()
-                and (row := self._rows.get(self._hover_row_id)) and row.isEnabled()):
+                and (row := self._rows.get(self._hover_row_id)) and row.isEnabled()
+                and row.state == "active"):
             row.set_details_visible(True)
 
     def _update_volume_hover(self, global_position, now):
@@ -546,7 +590,7 @@ class AudioOutputPanel(QWidget):
         if hovered_id != self._hover_row_id:
             self._clear_row_hover()
             self._hover_row_id, self._hover_row_since = hovered_id, now
-            if hovered:
+            if hovered and hovered.state == "active" and hovered.isEnabled():
                 self._hover_detail_timer.start()
         elif hovered and now - self._hover_row_since >= self.ROW_HOVER_SECONDS:
             self._reveal_hover_details()
@@ -633,7 +677,7 @@ class AudioOutputPanel(QWidget):
         self.rows_widget.move(self._rows_base_pos + QPoint(0, round(self._edge_offset)))
 
     def _start_animation(self):
-        if not self._animation_timer.isActive():
+        if self.isVisible() and not self._animation_timer.isActive():
             self._clock.reset(time.monotonic())
             self._animation_timer.start()
 
@@ -947,6 +991,8 @@ class AudioOutputPanel(QWidget):
         self._poll_timer.stop()
         self._reveal_target = self._reveal = self._reveal_velocity = 0.0
         self._clear_row_hover()
+        for row in self._rows.values():
+            row.set_details_visible(False, immediate=True)
         self._edge_offset = self._edge_velocity = 0.0
         self.clearMask()
         super().hideEvent(event)
@@ -1053,6 +1099,7 @@ class AudioOutputPanel(QWidget):
             self._capture_material()
         animating = (snapshot.pending_id or snapshot.pending_ids or any(
             abs(row.progress - (1 if row.state == "active" else 0)) > .01 or row.elapsed < .5
+            or row.details_animating
             for row in self._rows.values()))
         if self.isVisible() and animating and not self._animation_timer.isActive():
             self._clock.reset(time.monotonic())
@@ -1138,6 +1185,7 @@ class AudioOutputPanel(QWidget):
                     row.solo_requested.connect(self._select)
                     row.join_requested.connect(self._join)
                     row.mute_requested.connect(self._toggle_mute)
+                    row.details_animation_requested.connect(self._start_animation)
                     row.volume_requested.connect(self._volume_changed)
                     row.volume_slider.sliderReleased.connect(self.sync_snapshot)
                     self._rows[device.id] = row
@@ -1213,7 +1261,8 @@ class AudioOutputPanel(QWidget):
         for row in self._rows.values():
             row.advance(elapsed)
         pending = bool(self._snapshot and (self._snapshot.pending_id or self._snapshot.pending_ids))
-        rows_animating = any(row.elapsed < .5 or abs(row.progress - (1 if row.state == "active" else 0)) > .01 for row in self._rows.values())
+        rows_animating = any(row.elapsed < .5 or abs(row.progress - (1 if row.state == "active" else 0)) > .01
+                             or row.details_animating for row in self._rows.values())
         if settled and not pending and not rows_animating and abs(self._edge_offset) < .1 and abs(self._edge_velocity) < .2:
             self._edge_offset = self._edge_velocity = 0.0
             self._apply_edge_offset()

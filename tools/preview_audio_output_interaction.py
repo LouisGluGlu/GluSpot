@@ -55,7 +55,7 @@ class _Backdrop(QWidget):
             painter.setFont(QFont("Segoe UI", 10))
             painter.drawText(QRectF(24, 5, self.width() - 48, 23), "GluSpot · OFFLINE UI FIXTURE")
             painter.drawText(QRectF(24, 32, self.width() / 2 - 24, 23), "未悬停")
-            painter.drawText(QRectF(self.width() / 2 + 12, 32, self.width() / 2 - 24, 23), "参考图各行悬停状态")
+            painter.drawText(QRectF(self.width() / 2 + 12, 32, self.width() / 2 - 24, 23), "参与输出悬停 · 未选字体保持不变")
 
 
 def _settle(panel):
@@ -95,6 +95,7 @@ def main():
             left, right = panels
             for row in right._rows.values():
                 row.set_details_visible(True)
+                row.advance(1)
             theme = "light" if light else "dark"
             prefix = f"{theme}-{source_size}"
             path = options.output / f"{prefix}-comparison.png"
@@ -102,7 +103,7 @@ def main():
                 raise RuntimeError(f"Could not save {path}")
             before = tuple(right.provider.calls)
             for row in right._rows.values():
-                row.set_details_visible(False)
+                row.set_details_visible(False, immediate=True)
             selected = right._rows["fixture-muted"]
             point = QPoint(selected.width() - 17, selected.height() // 2)
             global_point = selected.mapToGlobal(point)
@@ -112,13 +113,37 @@ def main():
             QTest.qWait(520)
             if not selected.details_visible:
                 raise AssertionError("Stationary half-second native row hover did not reveal volume.")
+            motion = []
+            def save_motion(stage):
+                path = options.output / f"{prefix}-font-{stage}.png"
+                owner.grab().save(str(path))
+                motion.append({"stage": stage, "path": str(path.resolve()),
+                               "name_size": selected.name_font_size,
+                               "details_progress": selected.details_progress})
+            save_motion("early")
+            QTest.qWait(80)
+            save_motion("middle")
+            QTest.qWait(360)
+            save_motion("settled")
             native_hover = options.output / f"{prefix}-native-muted-hover.png"
             owner.grab().save(str(native_hover))
+            selected_size = selected.name_font_size
+            app.sendEvent(selected, QEvent(QEvent.Type.Leave))
+            if selected.name_font_size != selected_size:
+                raise AssertionError("Font snapped instead of reversing from its current size.")
+            QTest.qWait(60)
+            save_motion("reverse")
+            QTest.qWait(380)
+            save_motion("restored")
+            inactive = right._rows["fixture-join"]
+            if inactive.details_visible or inactive.details_progress != 0:
+                raise AssertionError("Unselected row changed its hover font.")
             unknown = replace(right.provider.snapshot.devices[2], volume=None, volume_muted=False)
             right.provider.snapshot = replace(right.provider.snapshot,
                 devices=tuple(unknown if device.id == unknown.id else device for device in right.provider.snapshot.devices))
             right.sync_snapshot()
             selected.set_details_visible(True)
+            selected.advance(1)
             if selected.displayed_volume is not None:
                 raise AssertionError("Unknown-volume fixture invented a percentage.")
             owner.grab().save(str(options.output / f"{prefix}-unknown-volume.png"))
@@ -134,6 +159,7 @@ def main():
                 "theme": theme, "source_size": source_size, "device_pixel_ratio": owner.devicePixelRatioF(),
                 "panel_size": [right.width(), right.height()], "row_size": [selected.width(), selected.height()],
                 "known_percentages": [100, 50, 0], "unknown_percentage": None,
+                "font_motion": motion, "unselected_name_size": inactive.name_font_size,
                 "horizontal_scroll_max": right.scroll.horizontalScrollBar().maximum(),
             })
             for panel in panels:
