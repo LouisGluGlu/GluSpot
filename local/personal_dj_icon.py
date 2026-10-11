@@ -3,27 +3,37 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
 
 
-DJ_RING_TRAVEL_SECONDS = .85
+DJ_RING_TRAVEL_SECONDS = 1.65
 DJ_RING_HOLD_SECONDS = .5
 DJ_RING_CYCLE_SECONDS = DJ_RING_TRAVEL_SECONDS + DJ_RING_HOLD_SECONDS
+
+
+def personal_dj_travel_progress(elapsed: float) -> float:
+    """A short smooth attack followed by a long release, then a quiet hold."""
+    phase = min(1.0, (max(0.0, float(elapsed)) % DJ_RING_CYCLE_SECONDS) / DJ_RING_TRAVEL_SECONDS)
+    # Integral of a positive pulse velocity, 56*p*(1-p)^6. Both ends
+    # have zero velocity; no frame accumulation or loop-boundary snap.
+    return 1.0 - (1.0 - phase) ** 7 * (1.0 + 7.0 * phase)
 
 
 def personal_dj_ring_poses(elapsed: float):
     """Keep ring identity through right-to-left travel and the half-second hold."""
     elapsed = max(0.0, float(elapsed))
     phase = min(1.0, (elapsed % DJ_RING_CYCLE_SECONDS) / DJ_RING_TRAVEL_SECONDS)
-    travel = 1.0 - (1.0 - phase) ** 3
+    travel = personal_dj_travel_progress(elapsed)
     poses = []
     for identity in range(5):
         slot = ((identity + .5 - 5.0 * travel) % 5.0) - .5
         edge = min((slot + .5) / .3, (4.5 - slot) / .3, 1.0)
-        opacity = max(.0, edge) if 0.0 < phase < 1.0 else 1.0
+        fade = max(0.0, edge)
+        opacity = fade * fade * (3.0 - 2.0 * fade) if 0.0 < phase < 1.0 else 1.0
         x = .14 + slot * .18
-        height = .38 + .56 * max(0.0, 1.0 - abs(slot - 2.0) / 2.0)
+        depth = min(2.0, abs(slot - 2.0))
+        height = .38 + .28 * (1.0 + math.cos(depth * math.pi / 2.0))
         poses.append((identity, x, height, opacity))
     return tuple(sorted(poses, key=lambda item: item[1]))
 
@@ -49,14 +59,21 @@ def paint_personal_dj_icon(
         painter.setOpacity(parent_opacity * opacity)
         ink = QColor(color if identity == 4 else neutral)
         pen_width = max(.85, rect.width() * .037)
+        def side_light(alpha: int):
+            gradient = QLinearGradient(QPointF(ellipse.left(), ellipse.center().y()),
+                                       QPointF(ellipse.right(), ellipse.center().y()))
+            for stop, shade, opacity_fraction in ((0.0, 100, 1.0), (.3, 108, .95),
+                                                  (.55, 155, .68), (1.0, 240, .30)):
+                tone = ink.darker(shade)
+                tone.setAlpha(round(alpha * opacity_fraction))
+                gradient.setColorAt(stop, tone)
+            return QBrush(gradient)
         if identity == 4:
             for multiplier, alpha in ((3.8, 24), (2.2, 48)):
-                glow = QColor(ink)
-                glow.setAlpha(round(alpha * (.35 + .65 * energy)))
-                painter.setPen(QPen(glow, pen_width * multiplier))
+                painter.setPen(QPen(side_light(round(alpha * (.35 + .65 * energy))), pen_width * multiplier))
                 painter.drawEllipse(ellipse)
-        ink.setAlpha(round(200 + 55 * energy))
-        painter.setPen(QPen(ink, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setPen(QPen(side_light(round(230 + 25 * energy)), pen_width,
+                            Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawEllipse(ellipse)
     painter.restore()
 

@@ -630,14 +630,21 @@ class OwnedMusicPlayer(QObject):
                 return self._load_song(autoplay=autoplay)
             return self._voice_failed("invalid_response")
         song = self.queue[self.index]
+        visual_song = self.queue[introduced] if voice else song
+        same_visual = old_track is not None and old_track.track_id == f"owned:{visual_song.source_id}:{visual_song.song_id}"
+        keep_visual = same_visual and (voice or self._dj_active_epoch == self._epoch)
         ready_lyrics = self._dj_next_lyrics
         self._ready_song_lyrics = (ready_lyrics if not voice and ready_lyrics is not None
             and ready_lyrics[:2] == (song.source_id, song.song_id) else None)
         self._dj_next_lyrics = None
         self._autoplay_after_load = autoplay
         self._epoch += 1
-        if not voice:
+        if not keep_visual:
             self._reset_lyrics_payload()
+        else:
+            # A parse task belongs to its decoder epoch even when the same
+            # paused visual/payload survives speech -> speech/music.
+            self._lyrics_parse_pending = None
         epoch = self._epoch
         self._stream_epoch = 0
         self._stream_trial = False
@@ -667,7 +674,9 @@ class OwnedMusicPlayer(QObject):
         self._release_prepared_audio()
         visual_song = self.queue[introduced] if voice else song
         visual_cached = self._art_cache.get(self._art_key(visual_song))
-        self.track = (replace(old_track, is_playing=False) if voice and old_track is not None else TrackData(
+        self.track = (replace(old_track, is_playing=False, position_seconds=0.0,
+            position_observed_seconds=0.0, position_sampled_at=time.monotonic(),
+            album_queue=self._album_queue()) if keep_visual else TrackData(
             visual_song.title, visual_song.artist, ("加载歌词中",), visual_cached[1] if visual_cached else ColorToken(58, 68, 88),
             visual_cached[2] if visual_cached else ColorToken(34, 44, 62), (),
             album_art_bytes=visual_cached[0] if visual_cached else b"",
@@ -683,10 +692,16 @@ class OwnedMusicPlayer(QObject):
         if voice:
             self._set_dj_presentation("loading", self.index)
             target = self.queue[introduced]
+            if keep_visual and self._lyric_payload is not None:
+                # Multi-part speech has a new decoder epoch but the same
+                # genuine visual payload. Resume a cancelled preference parse
+                # without waiting for another account request or audio file.
+                self._queue_lyrics_reparse()
             preferences = self._lyrics_preferences_snapshot()
-            self.tasks.submit(("dj_lyrics", epoch, self._catalog_epoch, target.source_id, target.song_id, self._lyrics_generation),
+            if not self.tasks.submit(("dj_lyrics", epoch, self._catalog_epoch, target.source_id, target.song_id, self._lyrics_generation),
                 lambda: self._fetch_lyrics(target, preferences) if not self._closed
-                and epoch == self._epoch and self._is_voice_segment() else None)
+                and epoch == self._epoch and self._is_voice_segment() else None) and self._lyrics_parse_pending is None:
+                self._lyrics_reparse_failed()
         else:
             self._dj_state = "idle"
             if self._dj_failed_until <= time.monotonic():
@@ -823,7 +838,13 @@ class OwnedMusicPlayer(QObject):
             self._apply_lyrics_match(match)
         elif kind == "dj_lyrics":
             catalog_epoch, source, identity, generation = extra
-            if catalog_epoch != self._catalog_epoch or not self._is_voice_segment() or error or result is None:
+            if catalog_epoch != self._catalog_epoch or not self._is_voice_segment():
+                return
+            if error or result is None:
+                # A failed first target fetch must finish the loading marker.
+                # A retained multipart payload may still be parsing offline.
+                if self._lyrics_parse_pending is None:
+                    self._lyrics_reparse_failed()
                 return
             payload, match = result
             target = self._introduced_song_index()
@@ -831,16 +852,16 @@ class OwnedMusicPlayer(QObject):
                     and (payload.source_id, payload.song_id) == (source, identity)
                     and (self.queue[target].source_id, self.queue[target].song_id) == (source, identity)):
                 self._dj_next_lyrics = (source, identity, payload, match, generation)
-                # A first entry has no previous-song lyrics to preserve.
-                if self.track.track_id == f"owned:{source}:{identity}" and self.track.lyrics == ("加载歌词中",):
+                # The visible paused song is the one this genuine speech
+                # introduces, including during multi-part introductions.
+                if self.track.track_id == f"owned:{source}:{identity}":
+                    self._lyric_payload = payload
                     if generation == self._lyrics_generation:
                         self._apply_lyrics_match(match)
                     else:
-                        self._lyric_payload = payload
                         self._queue_lyrics_reparse()
         elif kind == "lyrics_refresh":
-            if self._lyrics_parse_pending != token or (self._stream_epoch != epoch
-                    and not self._catalog_stream_is_current()):
+            if self._lyrics_parse_pending != token or not self._lyrics_parse_context_is_current(epoch):
                 return
             self._lyrics_parse_pending = None
             if extra[0] != self._lyrics_generation:
@@ -966,13 +987,16 @@ class OwnedMusicPlayer(QObject):
         ready, self._ready_song_lyrics = self._ready_song_lyrics, None
         if ready is not None and ready[:2] == (song.source_id, song.song_id):
             self._lyric_payload = ready[2]
-            # _load_song increments the parser generation once. A preference
-            # change during speech/loading invalidates its prefetched match,
-            # while retaining the genuine payload for an offline reparse.
-            if ready[4] == self._lyrics_generation - 1:
+            # Speech and its paused visual song share this payload. Changed
+            # preferences invalidate only the parsed match, so the genuine
+            # payload can be reparsed without another account request.
+            if ready[4] == self._lyrics_generation:
                 self._apply_lyrics_match(ready[3])
             else:
                 self._queue_lyrics_reparse()
+        elif (self._lyric_payload is not None
+                and (self._lyric_payload.source_id, self._lyric_payload.song_id) == (song.source_id, song.song_id)):
+            self._queue_lyrics_reparse()
         else:
             preferences = self._lyrics_preferences_snapshot()
             if not self.tasks.submit(("lyrics", epoch, self._lyrics_generation), lambda: self._fetch_lyrics(song, preferences)
@@ -1067,8 +1091,7 @@ class OwnedMusicPlayer(QObject):
         if self._lyrics_parse_pending is not None:
             return True
         payload, epoch = self._lyric_payload, self._epoch
-        if payload is None or self._closed or self.track is None or (self._stream_epoch != epoch
-                and not self._catalog_stream_is_current()):
+        if payload is None or self._closed or self.track is None or not self._lyrics_parse_context_is_current(epoch):
             return False
         token = ("lyrics_refresh", epoch, self._lyrics_generation)
         preferences = self._lyrics_preferences_snapshot()
@@ -1080,6 +1103,19 @@ class OwnedMusicPlayer(QObject):
             self._lyrics_reparse_failed()
         return accepted
 
+    def _lyrics_parse_context_is_current(self, epoch):
+        if self._stream_epoch == epoch or self._catalog_stream_is_current():
+            return True
+        # Parsing the introduced song is pure visual work. Its verified
+        # association and payload identity remain valid before speech audio is
+        # ready; the completion token still fences decoder/preference epochs.
+        target = self._introduced_song_index() if self._is_voice_segment() else None
+        if target is None or self.track is None or self._lyric_payload is None:
+            return False
+        song = self.queue[target]
+        return (self.track.track_id == f"owned:{song.source_id}:{song.song_id}"
+            and (self._lyric_payload.source_id, self._lyric_payload.song_id) == (song.source_id, song.song_id))
+
     def _lyrics_reparse_failed(self):
         # Keep established lyrics after a failed preference change, while a
         # failed first parse must terminate the existing loading marker.
@@ -1089,10 +1125,8 @@ class OwnedMusicPlayer(QObject):
 
     def _lyrics_unavailable(self):
         if self.track is not None:
-            voice = bool(self.queue and 0 <= self.index < len(self.queue)
-                         and self.queue[self.index].media_kind == "dj_voice")
             self.track = replace(self.track, timed_lyrics=(),
-                lyrics=("私人DJ正在介绍音乐" if voice else "暂无歌词",), lyrics_source="")
+                lyrics=("暂无歌词",), lyrics_source="")
             self.changed.emit()
 
     @staticmethod
@@ -1324,8 +1358,8 @@ class OwnedMusicPlayer(QObject):
                 and not self._catalog_stream_is_current()):
             return
         if self._is_voice_segment():
-            # The decoder is speech; the public lyric clock belongs to the
-            # paused previous song and must not follow the speech timeline.
+            # The decoder is speech; the introduced song's visible clock
+            # stays paused at zero until its music actually starts.
             return
         recovery = self._stream_recovery
         if recovery is not None and (recovery.phase != "progress"
@@ -1659,8 +1693,8 @@ class OwnedMusicPlayer(QObject):
         if self._closed:
             return False
         if self._is_voice_segment():
-            # The visible lyric timestamp is a different paused song. Seeking
-            # it must not seek an unrelated spoken introduction.
+            # The visible timestamp belongs to the paused introduced song.
+            # It must not seek the independent spoken introduction.
             return False
         if QThread.currentThread() != self.thread():
             return self._request_control("seek", seconds, expected_track_id or self.track.track_id)

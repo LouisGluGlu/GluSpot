@@ -398,7 +398,7 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertEqual(self.owned.index, 0)
         self.assertEqual(self.owned.get_personal_dj_presentation()["next_title"], "Song 1")
 
-    def test_voice_preserves_previous_song_visual_lyrics_clock_and_prepares_next_lyrics(self):
+    def test_voice_displays_introduced_song_visual_lyrics_with_paused_zero_clock_then_starts_music(self):
         self.start()
         self.owned._end_current_stream()
         self.run_latest(self.tasks, "stream")
@@ -414,9 +414,14 @@ class DJPlaybackTests(unittest.TestCase):
         self.qt.positionChanged.emit(7000)
         self.qt.durationChanged.emit(10000)
         self.run_latest(self.tasks, "dj_lyrics")
-        for field in ("track_id", "title", "artist", "album_art_bytes", "album_color", "secondary_color",
-                "lyrics", "timed_lyrics", "duration_seconds", "position_seconds"):
-            self.assertEqual(getattr(self.owned.track, field), getattr(previous, field), field)
+        self.assertNotEqual(self.owned.track.track_id, previous.track_id)
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-2")
+        self.assertEqual(self.owned.track.title, "Song 2")
+        self.assertEqual(self.owned.track.duration_seconds, 120)
+        self.assertEqual(self.owned.track.position_seconds, 0)
+        self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
+        self.assertTrue(self.owned.track.timed_lyrics)
+        paused_visual = self.owned.track
         self.assertEqual(self.owned.get_personal_dj_presentation()["next_title"], "Song 2")
         lyric_calls = len([call for call in self.calls if call == ("lyrics", "song-2")])
         self.qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
@@ -425,7 +430,70 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertTrue(self.owned.track.is_playing)
         self.assertEqual(self.owned.track.position_seconds, 0)
         self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
+        self.assertEqual(self.owned.track.timed_lyrics, paused_visual.timed_lyrics)
+        self.assertEqual(self.owned.track.album_art_bytes, paused_visual.album_art_bytes)
         self.assertEqual(len([call for call in self.calls if call == ("lyrics", "song-2")]), lyric_calls)
+
+    def test_manual_intro_switches_real_cover_and_target_lyrics_before_music_and_ignores_voice_clock(self):
+        self.start()
+        self.owned._end_current_stream()
+        self.run_latest(self.tasks, "stream")
+        self.run_latest(self.tasks, "lyrics")
+        target = replace(self.owned.queue[3], artwork_url="https://example.test/real-next-cover.png")
+        self.owned.queue = self.owned.queue[:3] + (target,) + self.owned.queue[4:]
+        key = self.owned._art_key(target)
+        from api.models import ColorToken
+        self.owned._art_cache[key] = (b"actual-next-cover", ColorToken(130, 70, 25), ColorToken(55, 24, 18))
+        self.owned.send_playback_command("next")
+        self.assertEqual(self.owned.track.title, target.title)
+        self.assertEqual(self.owned.track.album_art_bytes, b"actual-next-cover")
+        self.assertEqual(self.owned.track.album_color, ColorToken(130, 70, 25))
+        self.assertEqual(self.owned.track.position_seconds, 0)
+        self.assertFalse(self.owned.track.is_playing)
+        self.run_latest(self.tasks, "stream")
+        self.run_latest(self.tasks, "dj_lyrics")
+        self.qt.positionChanged.emit(5500)
+        self.qt.durationChanged.emit(10000)
+        self.assertEqual(self.owned.track.title, target.title)
+        self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
+        self.assertEqual(self.owned.track.duration_seconds, target.duration_seconds)
+        self.assertEqual(self.owned.track.position_seconds, 0)
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertFalse(self.owned.seek_playback_position(1, self.owned.track.track_id))
+
+    def test_multipart_intro_keeps_target_lyrics_when_the_later_lyric_request_has_not_finished(self):
+        voice, song = segments(2)
+        second_stream = replace(voice.direct_stream, song_id="dj:part-two")
+        second = replace(voice, song_id=second_stream.song_id, direct_stream=second_stream)
+        self.batch = (voice, second, song)
+        self.start()
+        self.run_latest(self.tasks, "dj_lyrics")
+        paused = self.owned.track
+        self.owned._end_current_stream()
+        self.run_latest(self.tasks, "stream")
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-2")
+        self.assertEqual(self.owned.track.lyrics, paused.lyrics)
+        self.assertEqual(self.owned.track.timed_lyrics, paused.timed_lyrics)
+        self.assertEqual(self.owned.track.position_seconds, 0)
+        self.assertFalse(self.owned.track.is_playing)
+        self.owned._end_current_stream()
+        self.run_latest(self.tasks, "stream")
+        self.assertEqual(self.owned.track.lyrics, paused.lyrics)
+        self.assertTrue(self.owned.track.is_playing)
+
+    def test_cancel_intro_before_target_lyric_reply_keeps_new_selected_song_and_stop_clears_state(self):
+        self.start()
+        old_token, old_action = next(job for job in reversed(self.tasks.jobs) if job[0][0] == "dj_lyrics")
+        old_result = old_action()
+        self.owned.play_queue((segments(9)[1],))
+        self.run_latest(self.tasks, "stream")
+        self.tasks.completed.emit(old_token, old_result, None)
+        self.assertEqual(self.owned.track.title, "Song 9")
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-9")
+        self.assertEqual(self.owned.track.lyrics, ("加载歌词中",))
+        self.owned.stop()
+        self.assertIsNone(self.owned.track)
+        self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "idle")
 
     def test_pause_during_intro_preparation_stays_ready_until_user_resumes(self):
         self.start()
@@ -535,6 +603,142 @@ class DJPlaybackTests(unittest.TestCase):
         self.run_latest(self.tasks, "lyrics_refresh")
         self.assertEqual(self.owned.track.lyrics, ("new",))
         self.assertEqual(len([call for call in self.calls if call == ("lyrics", "song-2")]), before)
+
+    def test_translation_changed_before_voice_stream_reparses_target_lyrics_while_audio_is_pending(self):
+        settings = {"v2_enable_dual_line_lyrics": False}
+        self.owned.lyrics_store.settings_getter = lambda key, default=None: settings.get(key, default)
+        self.service.lyrics = lambda source, identity: LyricPayload(source, identity,
+            raw_lrc="[00:01]Shine on", translation="[00:01]继续闪耀")
+        self.owned.play_personal_dj()
+        self.run_latest(self.tasks, "catalog")
+        token, action = next(job for job in self.tasks.jobs if job[0][0] == "dj_lyrics")
+        old_result = action()
+        self.assertEqual(old_result[1].lyrics, ("Shine on",))
+        settings["v2_enable_dual_line_lyrics"] = True
+        self.owned.refresh_lyrics()
+        self.tasks.completed.emit(token, old_result, None)
+        self.assertEqual(self.owned._stream_epoch, 0)
+        self.run_latest(self.tasks, "lyrics_refresh")
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+        self.assertEqual(self.owned.track.position_seconds, 0)
+        self.assertFalse(self.owned.track.is_playing)
+        self.run_latest(self.tasks, "stream")
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+
+    def test_multipart_intro_restarts_retained_payload_reparse_and_rejects_old_epoch_after_request_failure(self):
+        voice, song = segments(2)
+        second_stream = replace(voice.direct_stream, song_id="dj:part-two")
+        self.batch = (voice, replace(voice, song_id=second_stream.song_id, direct_stream=second_stream), song)
+        settings = {"v2_enable_dual_line_lyrics": False}
+        self.owned.lyrics_store.settings_getter = lambda key, default=None: settings.get(key, default)
+        self.service.lyrics = lambda source, identity: LyricPayload(source, identity,
+            raw_lrc="[00:01]Shine on", translation="[00:01]继续闪耀")
+        self.start()
+        self.run_latest(self.tasks, "dj_lyrics")
+        settings["v2_enable_dual_line_lyrics"] = True
+        self.owned.refresh_lyrics()
+        old_token, old_action = next(job for job in reversed(self.tasks.jobs) if job[0][0] == "lyrics_refresh")
+        old_result = old_action()
+        self.owned._end_current_stream()
+        self.tasks.completed.emit(old_token, old_result, None)
+        self.assertEqual(self.owned.track.lyrics, ("Shine on",))
+        failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_lyrics")
+        self.tasks.completed.emit(failed, None, "request_failed")
+        self.run_latest(self.tasks, "lyrics_refresh")
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
+        self.assertEqual(self.owned._stream_epoch, 0)
+        self.assertFalse(self.owned.track.is_playing)
+        self.run_latest(self.tasks, "stream")
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
+
+    def test_introduced_song_without_lyrics_uses_song_placeholder_and_keeps_speech_playing(self):
+        self.service.lyrics = lambda source, identity: LyricPayload(source, identity)
+        self.start()
+        self.run_latest(self.tasks, "dj_lyrics")
+        self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+        self.assertFalse(self.owned.track.is_playing)
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.owned._end_current_stream()
+        self.run_latest(self.tasks, "stream")
+        self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
+        self.assertTrue(self.owned.track.is_playing)
+
+    def test_failed_intro_lyrics_terminate_loading_and_music_retries_actual_song_lyrics(self):
+        for error in ("request_failed", None):
+            with self.subTest(error=error):
+                self.owned.stop()
+                self.start()
+                failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_lyrics")
+                self.tasks.completed.emit(failed, None, error)
+                self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
+                self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+                self.assertFalse(self.owned.track.is_playing)
+                self.assertTrue(self.owned.is_personal_dj_speaking())
+                self.assertIsNone(self.owned._lyric_payload)
+                self.owned._end_current_stream()
+                self.run_latest(self.tasks, "stream")
+                self.run_latest(self.tasks, "lyrics")
+                self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
+                self.assertTrue(self.owned.track.is_playing)
+
+    def test_multipart_failed_fetch_keeps_loading_until_retained_target_payload_parse_completes(self):
+        voice, song = segments(2)
+        second_stream = replace(voice.direct_stream, song_id="dj:part-two")
+        self.batch = (voice, replace(voice, song_id=second_stream.song_id, direct_stream=second_stream), song)
+        settings = {"v2_enable_dual_line_lyrics": False}
+        self.owned.lyrics_store.settings_getter = lambda key, default=None: settings.get(key, default)
+        self.service.lyrics = lambda source, identity: LyricPayload(source, identity,
+            raw_lrc="[00:01]Shine on", translation="[00:01]继续闪耀")
+        self.start()
+        token, action = next(job for job in self.tasks.jobs if job[0][0] == "dj_lyrics")
+        old_result = action()
+        settings["v2_enable_dual_line_lyrics"] = True
+        self.owned.refresh_lyrics()
+        self.tasks.completed.emit(token, old_result, None)
+        self.owned._end_current_stream()
+        pending = self.owned._lyrics_parse_pending
+        self.assertIsNotNone(pending)
+        failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_lyrics")
+        self.tasks.completed.emit(failed, None, "request_failed")
+        self.assertEqual(self.owned.track.lyrics, ("加载歌词中",))
+        self.assertEqual(self.owned._lyrics_parse_pending, pending)
+        self.run_latest(self.tasks, "lyrics_refresh")
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
+        self.assertFalse(self.owned.track.is_playing)
+
+    def test_failed_target_preference_parse_uses_song_placeholder_before_speech_and_later_recovers(self):
+        self.owned.play_personal_dj()
+        self.run_latest(self.tasks, "catalog")
+        token, action = next(job for job in self.tasks.jobs if job[0][0] == "dj_lyrics")
+        old_result = action()
+        self.owned.refresh_lyrics()
+        self.tasks.completed.emit(token, old_result, None)
+        parse = self.owned._lyrics_parse_pending
+        self.tasks.completed.emit(parse, None, "request_failed")
+        self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+        self.run_latest(self.tasks, "stream")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertFalse(self.owned.track.is_playing)
+        self.owned._end_current_stream()
+        self.run_latest(self.tasks, "stream")
+        self.run_latest(self.tasks, "lyrics_refresh")
+        self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
+        self.assertTrue(self.owned.track.is_playing)
+
+    def test_rejected_intro_target_fetch_uses_song_placeholder_without_blocking_speech(self):
+        submit = self.tasks.submit
+        def reject_target(token, action):
+            accepted = submit(token, action)
+            return accepted and token[0] != "dj_lyrics"
+        with patch.object(self.tasks, "submit", side_effect=reject_target):
+            self.start()
+        self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
+        self.assertFalse(self.owned.track.is_playing)
+        self.assertTrue(self.owned.is_personal_dj_speaking())
 
     def test_pause_during_foreground_fm_continuation_does_not_replay_old_ended_source(self):
         self.start()

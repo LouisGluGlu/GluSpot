@@ -10,7 +10,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication
 
 from api.lyrics import LocalLyricsStore
-from api.online_music import OnlineSong, StreamInfo
+from api.online_music import LyricPayload, OnlineSong, StreamInfo
 from api.owned_stream_cache import PreparedAudio, StreamDownloadError
 from local.owned_music_player import OwnedMusicPlayer
 from tests.test_personal_dj_playback import segments
@@ -124,7 +124,7 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.assertEqual(Path(self.qt.source().toLocalFile()), voice.path)
         self.assertFalse(self.owned.track.is_playing)
         self.assertEqual((self.owned.track.track_id, self.owned.track.position_seconds),
-            (previous.track_id, previous.position_seconds))
+            ("owned:netease:song-2", 0.0))
         _, following = self.perform(self.downloads, "audio_prefetch")
         self.assertEqual(self.owned._prefetched_audio, following)
         self.assertEqual(self.owned._prepared_audio, voice)
@@ -134,6 +134,31 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.assertEqual(Path(self.qt.source().toLocalFile()), following.path)
         self.assertEqual(self.owned.track.title, "Song 2")
         self.assertTrue(self.owned.track.is_playing)
+
+    def test_translation_changed_before_complete_voice_file_reparses_target_without_starting_audio(self):
+        settings = {"v2_enable_dual_line_lyrics": False}
+        self.owned.lyrics_store.settings_getter = lambda key, default=None: settings.get(key, default)
+        self.service.lyrics = Mock(side_effect=lambda source, identity: LyricPayload(source, identity,
+            raw_lrc="[00:01]Shine on", translation="[00:01]继续闪耀"))
+        self.owned.personal_dj_enabled = True
+        self.service.personal_dj = lambda source: ()
+        self.owned._replace_queue(segments(1), fm_source="netease", fm_kind="dj")
+        token, action = next(job for job in self.tasks.jobs if job[0][0] == "dj_lyrics")
+        old_result = action()
+        self.perform(self.tasks, "stream")
+        settings["v2_enable_dual_line_lyrics"] = True
+        self.owned.refresh_lyrics()
+        self.tasks.completed.emit(token, old_result, None)
+        self.perform(self.tasks, "lyrics_refresh")
+        self.assertEqual(self.owned._stream_epoch, 0)
+        self.assertTrue(self.qt.source().isEmpty())
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+        self.assertFalse(self.owned.track.is_playing)
+        self.perform(self.downloads, "audio")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
+        self.assertEqual(self.service.lyrics.call_count, 1)
 
     def test_failed_intro_prefetch_does_not_pause_music_and_actual_failure_advances_song(self):
         songs = (segments(1)[1],) + segments(2)
@@ -198,7 +223,7 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.assertEqual(current["next_title"], "Song 2")
         self.assertGreater(current["token"], speaking["token"])
         self.assertEqual(self.owned._prepared_audio, prepared_second)
-        self.assertEqual(self.owned.track.title, "Song 1")
+        self.assertEqual(self.owned.track.title, "Song 2")
         self.assertFalse(self.owned.track.is_playing)
 
     def test_cancelled_current_result_releases_only_unused_lease(self):

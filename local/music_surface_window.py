@@ -8069,13 +8069,13 @@ class MusicSurfaceWindow(QWidget):
         key = (self._dj_next_title, font.toString(), round(scale, 3))
         if getattr(self, "_dj_caption_width_key", None) != key:
             self._dj_caption_width_key = key
-            self._dj_caption_width = min(250.0 * scale, max(side * 2.2,
+            self._dj_caption_width = min(250.0 * scale, max(side * 4.4,
                 QFontMetricsF(font).horizontalAdvance(self._dj_next_title) + 28.0 * scale))
         width = max(side * 2, self._dj_caption_width)
-        pill_height = max(24.0, 30.0 * scale)
+        pill_height = max(32.0, 44.0 * scale)
         pill = QRectF(rect.right() - margin - width, rect.bottom() - margin - pill_height, width, pill_height)
         large_side = side * 2
-        large = QRectF(pill.center().x() - large_side / 2, pill.top() - max(7.0, 10.0 * scale) - large_side, large_side, large_side)
+        large = QRectF(pill.center().x() - large_side / 2, pill.top() - 44.0 * scale - large_side, large_side, large_side)
         def blend(start, end):
             return QRectF(*(a + (b - a) * expansion for a, b in zip(
                 (start.x(), start.y(), start.width(), start.height()),
@@ -8083,15 +8083,18 @@ class MusicSurfaceWindow(QWidget):
         return blend(base, large), blend(base, pill)
 
     def _personal_dj_backdrop_rect(self, rect: QRectF) -> QRectF:
-        icon, caption = self._personal_dj_geometry(rect, time.monotonic(), expansion=1.0)
-        scale = self._surface_scale(rect)
-        horizontal, vertical = max(14.0, 28.0 * scale), max(12.0, 22.0 * scale)
-        return icon.united(caption).adjusted(-horizontal, -vertical, horizontal, vertical).intersected(rect)
+        return QRectF(rect.right() - rect.width() * .32, rect.bottom() - rect.height() * .56,
+                      rect.width() * .32, rect.height() * .56)
 
     def _personal_dj_damage_rect(self, rect: QRectF) -> QRect:
-        # Include the feathered speech backdrop even while it is shrinking,
-        # so local updates erase every pixel of the previous presentation.
-        return self._personal_dj_backdrop_rect(rect).toAlignedRect()
+        icon, caption = self._personal_dj_geometry(rect, time.monotonic(), expansion=1.0)
+        padding = max(8.0, 12.0 * self._surface_scale(rect))
+        damage = icon.united(caption).adjusted(-padding, -padding, padding, padding)
+        if self._owned_dj_speaking or self._personal_dj_activity_at(time.monotonic()) > .001:
+            damage = damage.united(self._personal_dj_backdrop_rect(rect))
+        # The caller also unites the previous damage, erasing the dark corner
+        # when speech finishes without repainting it during ordinary idle.
+        return damage.intersected(rect).toAlignedRect()
 
     def _paint_personal_dj_backdrop(self, painter: QPainter, rect: QRectF, expansion: float):
         if expansion <= .001:
@@ -8099,12 +8102,13 @@ class MusicSurfaceWindow(QWidget):
         bounds = self._personal_dj_backdrop_rect(rect)
         painter.save()
         painter.setOpacity(painter.opacity() * expansion)
-        painter.translate(bounds.center())
-        painter.scale(bounds.width() / 2.0, bounds.height() / 2.0)
+        painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
+        painter.translate(rect.bottomRight())
+        painter.scale(bounds.width(), bounds.height())
         # One shared soft mask keeps album/lyric detail visible through the
         # rings. Native vector feathering needs no per-frame background copy.
         gradient = QRadialGradient(QPointF(0, 0), 1.0)
-        for stop, alpha in ((0.0, 158), (.45, 144), (.7, 95), (.9, 26), (1.0, 0)):
+        for stop, alpha in ((0.0, 177), (.35, 164), (.68, 104), (.88, 31), (1.0, 0)):
             gradient.setColorAt(stop, QColor(9, 11, 16, alpha))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(gradient))
@@ -8224,15 +8228,15 @@ class MusicSurfaceWindow(QWidget):
         reveal = self._personal_dj_reveal_at(now)
         if reveal <= .001:
             return
-        button = self._personal_dj_button_rect(rect)
         icon, caption = self._personal_dj_geometry(rect, now)
+        button = icon.united(caption)
         expansion = self._personal_dj_activity_at(now)
         scale = self._surface_scale(rect)
         elapsed = max(0.0, now - self._dj_ring_started_at)
         painter.save()
         painter.setOpacity(reveal)
-        painter.translate(self._personal_dj_control_shift(rect, reveal))
         self._paint_personal_dj_backdrop(painter, rect, expansion)
+        painter.translate(self._personal_dj_control_shift(rect, reveal))
         hovered = self._hovered_window_button == "personal_dj"
         frame = self._dj_audio_frame if self._owned_dj_speaking else None
         energy = min(1.0, max(frame.low, frame.mid, frame.high) * 4) if frame is not None else 0.0

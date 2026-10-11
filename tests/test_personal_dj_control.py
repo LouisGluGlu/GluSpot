@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import math
 import unittest
 from unittest.mock import Mock, patch
 
@@ -12,7 +13,9 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from api.models import AudioFrame
 from local.owned_audio_bridge import OwnedAudioBridge
-from local.personal_dj_icon import paint_personal_dj_icon, personal_dj_ring_poses, personal_dj_status_color, personal_dj_status_opacity
+from local.personal_dj_icon import (DJ_RING_CYCLE_SECONDS, DJ_RING_HOLD_SECONDS, DJ_RING_TRAVEL_SECONDS,
+                                   paint_personal_dj_icon, personal_dj_ring_poses, personal_dj_status_color,
+                                   personal_dj_status_opacity, personal_dj_travel_progress)
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_owned_audio_bridge_handoff import Owner
 from tests.test_owned_playback_surface import _Provider
@@ -310,15 +313,43 @@ class PersonalDjControlTests(unittest.TestCase):
 
     def test_five_rings_complete_accent_right_left_right_cycle_then_hold_half_second(self):
         first = {identity: (x, height) for identity, x, height, _ in personal_dj_ring_poses(0)}
-        left_at = .85 * (1.0 - .2 ** (1.0 / 3.0))
+        low, high = 0, DJ_RING_TRAVEL_SECONDS
+        for _ in range(40):
+            middle = (low + high) / 2
+            if personal_dj_travel_progress(middle) < .8:
+                low = middle
+            else:
+                high = middle
+        left_at = (low + high) / 2
         middle = {identity: (x, height) for identity, x, height, _ in personal_dj_ring_poses(left_at)}
         self.assertEqual(len(first), 5)
         self.assertLess(middle[4][0], first[4][0])
         self.assertAlmostEqual(middle[4][0], first[0][0])
-        complete = {identity: (x, height) for identity, x, height, _ in personal_dj_ring_poses(.85)}
+        complete = {identity: (x, height) for identity, x, height, _ in personal_dj_ring_poses(DJ_RING_TRAVEL_SECONDS)}
         self.assertEqual(complete[4], first[4])
-        self.assertEqual(personal_dj_ring_poses(.86), personal_dj_ring_poses(1.34))
-        self.assertEqual(personal_dj_ring_poses(0), personal_dj_ring_poses(6.75))
+        self.assertEqual(personal_dj_ring_poses(DJ_RING_TRAVEL_SECONDS + .01),
+                         personal_dj_ring_poses(DJ_RING_CYCLE_SECONDS - .01))
+        self.assertEqual(personal_dj_ring_poses(0), personal_dj_ring_poses(DJ_RING_CYCLE_SECONDS * 3))
+
+    def test_longer_ring_motion_is_continuous_fast_early_and_slow_near_the_hold(self):
+        self.assertGreater(DJ_RING_TRAVEL_SECONDS, 1.5)
+        self.assertEqual(DJ_RING_HOLD_SECONDS, .5)
+        self.assertEqual(DJ_RING_CYCLE_SECONDS, DJ_RING_TRAVEL_SECONDS + DJ_RING_HOLD_SECONDS)
+        travel = DJ_RING_TRAVEL_SECONDS
+        values = [personal_dj_travel_progress(travel * index / 200) for index in range(201)]
+        self.assertEqual(values[0], 0)
+        self.assertEqual(values[-1], 1)
+        self.assertTrue(all(0 <= value <= 1 for value in values))
+        self.assertTrue(all(first <= second for first, second in zip(values, values[1:])))
+        early_change = personal_dj_travel_progress(travel * .20) - personal_dj_travel_progress(travel * .15)
+        late_change = personal_dj_travel_progress(travel * .85) - personal_dj_travel_progress(travel * .80)
+        self.assertGreater(early_change, late_change * 8)
+        epsilon = .0001
+        self.assertLess(personal_dj_travel_progress(epsilon) - personal_dj_travel_progress(0), epsilon * .02)
+        self.assertLess(personal_dj_travel_progress(travel) - personal_dj_travel_progress(travel - epsilon), epsilon * .02)
+        self.assertEqual(personal_dj_travel_progress(-1), 0)
+        self.assertEqual(personal_dj_travel_progress(travel + DJ_RING_HOLD_SECONDS * .5), 1)
+        self.assertEqual(personal_dj_travel_progress(DJ_RING_CYCLE_SECONDS), 0)
 
     def test_five_ring_centers_preserve_transparent_and_colored_backdrops(self):
         rect = QRectF(16, 16, 288, 168)
@@ -354,14 +385,40 @@ class PersonalDjControlTests(unittest.TestCase):
         for y in range(20, 180):
             for x in range(round(later_center.x() - 20), round(later_center.x())):
                 first, second = earlier.pixelColor(x, y), later.pixelColor(x, y)
-                if first.alpha() > 150 and second.alpha() == 0:
+                if first.alpha() > 40 and second.alpha() == 0:
                     crossings.append((x, y))
         self.assertGreater(len(crossings), 20)
         for x, y in crossings:
             actual = combined.pixelColor(x, y)
-            self.assertGreater(actual.alpha(), 150)
-            self.assertGreater(actual.red(), 220)
-            self.assertGreater(actual.green(), 220)
+            self.assertEqual(actual, earlier.pixelColor(x, y))
+
+    def test_each_hollow_ring_has_left_side_light_through_travel_and_frequency_deformation(self):
+        rect = QRectF(16, 16, 288, 168)
+        bands = AudioFrame(.2, .1, .05)
+        for elapsed in (0, .2, .65):
+            for identity, x, height_fraction, opacity in personal_dj_ring_poses(elapsed):
+                if opacity < .9:
+                    continue
+                with self.subTest(elapsed=elapsed, identity=identity):
+                    image = QImage(320, 200, QImage.Format.Format_RGB32)
+                    image.fill(QColor("#000000"))
+                    pose = ((identity, x, height_fraction, opacity),)
+                    with patch("local.personal_dj_icon.personal_dj_ring_poses", return_value=pose), QPainter(image) as painter:
+                        paint_personal_dj_icon(painter, rect, QColor("#f19fc3"), elapsed=elapsed, bands=bands)
+                    center_x = round(rect.left() + rect.width() * x)
+                    # Integrate the actual strokes on each half, so frequency
+                    # deformation and native antialiasing cannot move a sample
+                    # off the line and produce a false lighting comparison.
+                    def light(left, right):
+                        value = 0
+                        for py in range(16, 184):
+                            for px in range(max(0, left), min(320, right)):
+                                pixel = image.pixelColor(px, py)
+                                value += .2126 * pixel.red() + .7152 * pixel.green() + .0722 * pixel.blue()
+                        return value
+                    left, right = light(0, center_x), light(center_x, 320)
+                    self.assertGreater(left, right * 1.4)
+                    self.assertEqual(image.pixelColor(center_x, round(rect.center().y())), QColor("#000000"))
 
     def test_visible_idle_ring_animation_updates_only_local_damage_and_keeps_zero_raster_growth(self):
         self.enabled = True
@@ -408,7 +465,7 @@ class PersonalDjControlTests(unittest.TestCase):
         icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
         ring_center = image.pixelColor(icon.center().toPoint())
         self.assertGreater(ring_center.alpha(), 40)
-        self.assertLessEqual(ring_center.alpha(), 158)
+        self.assertLessEqual(ring_center.alpha(), 177)
         self.assertGreater(image.pixelColor(caption.center().toPoint()).alpha(), 200)
 
     def test_speech_backdrop_is_feathered_bounded_and_respects_parent_opacity(self):
@@ -420,19 +477,20 @@ class PersonalDjControlTests(unittest.TestCase):
             image.fill(Qt.GlobalColor.transparent)
             with QPainter(image) as painter:
                 self.window._paint_personal_dj_backdrop(painter, region, 1)
-            center = bounds.center()
-            radius = bounds.width() / 2
-            alphas = [image.pixelColor(QPointF(center.x() + radius * fraction, center.y()).toPoint()).alpha()
-                      for fraction in (0, .45, .7, .9, .98)]
-            self.assertGreater(alphas[0], 150)
-            self.assertLessEqual(alphas[0], 158)
+            center = QPointF(region.right() - 1, region.bottom() - 1)
+            alphas = [image.pixelColor(QPointF(center.x() - bounds.width() * fraction / math.sqrt(2),
+                                              center.y() - bounds.height() * fraction / math.sqrt(2)).toPoint()).alpha()
+                      for fraction in (0, .35, .68, .88, .98)]
+            self.assertGreater(alphas[0], 170)
+            self.assertLessEqual(alphas[0], 177)
             self.assertTrue(all(first > second for first, second in zip(alphas, alphas[1:])), alphas)
             self.assertLess(alphas[-1], 10)
-            for edge in (bounds.topLeft(), bounds.topRight(), bounds.bottomLeft(), bounds.bottomRight()):
+            for edge in (bounds.topLeft(), bounds.topRight(), bounds.bottomLeft()):
                 point = edge.toPoint()
                 if image.rect().contains(point):
                     self.assertEqual(image.pixelColor(point).alpha(), 0)
             self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
+            self.window._owned_dj_speaking = True
             self.assertTrue(self.window._personal_dj_damage_rect(region).contains(bounds.toAlignedRect()))
 
             reduced = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
@@ -441,8 +499,8 @@ class PersonalDjControlTests(unittest.TestCase):
                 painter.setOpacity(.6)
                 self.window._paint_personal_dj_backdrop(painter, region, .5)
                 self.assertAlmostEqual(painter.opacity(), .6)
-            self.assertGreater(reduced.pixelColor(center.toPoint()).alpha(), 40)
-            self.assertLessEqual(reduced.pixelColor(center.toPoint()).alpha(), 48)
+            self.assertGreater(reduced.pixelColor(center.toPoint()).alpha(), 49)
+            self.assertLessEqual(reduced.pixelColor(center.toPoint()).alpha(), 54)
 
     def test_speech_backdrop_handoff_fades_with_activity_and_clears_after_closing(self):
         self.enabled = True
@@ -457,7 +515,7 @@ class PersonalDjControlTests(unittest.TestCase):
             image.fill(Qt.GlobalColor.transparent)
             with patch("local.music_surface_window.time.monotonic", return_value=now), QPainter(image) as painter:
                 self.window._paint_personal_dj_backdrop(painter, region, self.window._personal_dj_activity_at(now))
-                center = self.window._personal_dj_backdrop_rect(region).center().toPoint()
+                center = QPointF(region.right() - 1, region.bottom() - 1).toPoint()
             return image.pixelColor(center).alpha()
 
         self.assertEqual(mask_alpha(100.4), 0)
@@ -488,8 +546,9 @@ class PersonalDjControlTests(unittest.TestCase):
                 with patch("local.music_surface_window.time.monotonic", return_value=100.4):
                     bounds = self.window._personal_dj_backdrop_rect(region)
                     self.assertTrue(region.contains(bounds))
-                    self.assertGreater(bounds.left(), region.width() * .60)
-                    self.assertGreater(bounds.top(), region.height() * .55)
+                    self.assertAlmostEqual(bounds.left() / region.width(), .68)
+                    self.assertAlmostEqual(bounds.top() / region.height(), .44)
+                    self.assertEqual(bounds.bottomRight(), region.bottomRight())
                     image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
                     image.fill(QColor("#ddb579"))
                     original = image.copy()
@@ -508,6 +567,53 @@ class PersonalDjControlTests(unittest.TestCase):
                         cropped = image.copy(slot.toAlignedRect())
                         before = original.copy(slot.toAlignedRect())
                         self.assertEqual(bytes(cropped.constBits()), bytes(before.constBits()))
+
+    def test_expanded_speech_places_double_glyph_above_wide_title_inside_corner_mask(self):
+        self.window._dj_next_title = "下一首真实歌曲"
+        for size in ((640, 360), (960, 540), (1920, 1080)):
+            with self.subTest(size=size):
+                self.window.resize(*size)
+                region = QRectF(self.window.rect())
+                compact, _ = self.window._personal_dj_geometry(region, 100, expansion=0)
+                icon, caption = self.window._personal_dj_geometry(region, 100.4, expansion=1)
+                mask = self.window._personal_dj_backdrop_rect(region)
+                self.assertAlmostEqual(icon.width(), compact.width() * 2)
+                self.assertGreaterEqual(caption.width(), icon.width() * 1.9)
+                self.assertGreater(caption.top() - icon.bottom(), icon.height() * .35)
+                self.assertLess(caption.top() - icon.bottom(), icon.height() * .65)
+                self.assertGreater(icon.center().x() / region.width(), .84)
+                self.assertLess(icon.center().x() / region.width(), .94)
+                self.assertGreater(icon.center().y() / region.height(), .68)
+                self.assertLess(icon.center().y() / region.height(), .86)
+                self.assertTrue(mask.contains(icon.united(caption)))
+
+    def test_local_damage_expands_for_speech_and_repaints_previous_mask_on_exit(self):
+        self.enabled = True
+        with patch("local.music_surface_window.time.monotonic", return_value=100):
+            self.window._sync_owned_playback_mode()
+            self.window._reset_control_idle(100)
+        region = QRectF(self.window.rect())
+        with patch("local.music_surface_window.time.monotonic", return_value=100.4):
+            idle = self.window._personal_dj_damage_rect(region)
+        self.assertLess(idle.height(), region.height() * .35)
+        self.speaking = True
+        self.presentation = {"state": "speaking", "next_title": "下一首真实歌曲", "token": 2}
+        with patch("local.music_surface_window.time.monotonic", return_value=101):
+            self.window._sync_personal_dj_state()
+        with patch("local.music_surface_window.time.monotonic", return_value=101.4):
+            speech = self.window._personal_dj_damage_rect(region)
+            self.window._dj_last_damage = speech
+            self.assertTrue(speech.contains(self.window._personal_dj_backdrop_rect(region).toAlignedRect()))
+            self.assertLess(speech.width() * speech.height(), region.width() * region.height() * .22)
+        self.speaking = False
+        self.presentation = {"state": "idle", "next_title": "", "token": 3}
+        with patch("local.music_surface_window.time.monotonic", return_value=101.4):
+            self.window._sync_personal_dj_state()
+        with patch("local.music_surface_window.time.monotonic", return_value=101.8), patch.object(self.window, "isVisible", return_value=True), patch.object(self.window, "update") as update:
+            self.window._update_personal_dj_control(101.8)
+        self.assertTrue(any(args.args[0].contains(speech) for args in update.call_args_list))
+        with patch("local.music_surface_window.time.monotonic", return_value=101.8):
+            self.assertLess(self.window._personal_dj_damage_rect(region).height(), region.height() * .35)
 
     def test_real_frequency_glow_changes_glyph_without_raster_blur_or_cache_growth(self):
         self.enabled = self.speaking = True
