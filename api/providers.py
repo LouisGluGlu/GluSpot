@@ -283,6 +283,10 @@ class PlaybackSourceProvider:
         return (self._owned_audio_bridge.get_personal_dj_audio_frame()
             if self.is_owned_personal_dj_speaking() else None)
 
+    def get_personal_dj_presentation(self):
+        return (self.owned.get_personal_dj_presentation() if self.get_owned_personal_dj_enabled() is True
+            else {"state": "idle", "next_title": "", "speaking": False, "token": 0})
+
     def set_owned_personal_dj_enabled(self, enabled):
         if self.get_owned_personal_dj_enabled() is None or not isinstance(enabled, bool):
             return False

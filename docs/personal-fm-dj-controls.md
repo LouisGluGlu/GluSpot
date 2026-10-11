@@ -3,6 +3,11 @@
 October 11, 2026 source follow-up. GluSpot remains `6.412`; the packaged EXE
 is unchanged. Restart this checkout's `launch.bat` to load the source changes.
 
+The subsequent [presentation and manual-navigation follow-up](personal-dj-presentation.md)
+supersedes the below/right-of-infinity layout and full-page voice presentation
+described at this checkpoint. DJ now appears at the bottom right, preserves the
+previous music's paused page, and uses real introductions during manual navigation.
+
 ## Private DJ belongs to personal FM
 
 The NetEase library keeps daily recommendations, personal FM and playlists;

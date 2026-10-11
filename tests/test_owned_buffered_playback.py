@@ -1,5 +1,6 @@
 """Complete-file ownership, asynchronous handoff and next-song cancellation."""
 from pathlib import Path
+from dataclasses import replace
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -12,6 +13,7 @@ from api.lyrics import LocalLyricsStore
 from api.online_music import OnlineSong, StreamInfo
 from api.owned_stream_cache import PreparedAudio, StreamDownloadError
 from local.owned_music_player import OwnedMusicPlayer
+from tests.test_personal_dj_playback import segments
 from tests.test_owned_playback import Player, Tasks
 
 
@@ -100,6 +102,104 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.assertEqual(len(self.cache.preparations), downloads)
         self.assertIn(active.lease, self.cache.released)
         self.assertIn(upcoming.lease, self.cache.leases)
+
+    def test_music_prefetches_real_intro_loading_ready_and_voice_prepares_silent_following_song(self):
+        songs = (segments(1)[1],) + segments(2)
+        self.owned.personal_dj_enabled = True
+        self.service.personal_dj = lambda source: ()
+        self.owned._replace_queue(songs, fm_source="netease", fm_kind="dj")
+        self.perform(self.tasks, "stream")
+        self.perform(self.downloads, "audio")
+        self.qt.positionChanged.emit(65000)
+        previous = self.owned.track
+        self.assertTrue(previous.is_playing)
+        self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "loading")
+        self.assertEqual(self.owned.get_personal_dj_presentation()["next_title"], "Song 2")
+        _, voice = self.perform(self.downloads, "audio_prefetch")
+        self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "ready")
+        self.assertTrue(self.owned.track.is_playing)
+        self.owned.send_playback_command("next")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertEqual(self.owned._prepared_audio, voice)
+        self.assertEqual(Path(self.qt.source().toLocalFile()), voice.path)
+        self.assertFalse(self.owned.track.is_playing)
+        self.assertEqual((self.owned.track.track_id, self.owned.track.position_seconds),
+            (previous.track_id, previous.position_seconds))
+        _, following = self.perform(self.downloads, "audio_prefetch")
+        self.assertEqual(self.owned._prefetched_audio, following)
+        self.assertEqual(self.owned._prepared_audio, voice)
+        self.assertEqual(Path(self.qt.source().toLocalFile()), voice.path)
+        self.qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.owned._prepared_audio, following)
+        self.assertEqual(Path(self.qt.source().toLocalFile()), following.path)
+        self.assertEqual(self.owned.track.title, "Song 2")
+        self.assertTrue(self.owned.track.is_playing)
+
+    def test_failed_intro_prefetch_does_not_pause_music_and_actual_failure_advances_song(self):
+        songs = (segments(1)[1],) + segments(2)
+        self.owned.personal_dj_enabled = True
+        self.service.personal_dj = lambda source: ()
+        self.owned._replace_queue(songs, fm_source="netease", fm_kind="dj")
+        self.perform(self.tasks, "stream")
+        self.perform(self.downloads, "audio")
+        failed = next(token for token, _ in reversed(self.downloads.jobs) if token[0] == "audio_prefetch")
+        source = self.qt.source()
+        self.downloads.completed.emit(failed, None, "network")
+        self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "failed")
+        from unittest.mock import patch
+        with patch("local.owned_music_player.time.monotonic", return_value=self.owned._dj_failed_until + 1):
+            self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "idle")
+        self.assertTrue(self.owned.track.is_playing)
+        self.assertEqual(self.qt.source(), source)
+        self.owned.send_playback_command("next")
+        self.perform(self.tasks, "stream")
+        token = next(token for token, _ in reversed(self.downloads.jobs) if token[0] == "audio")
+        self.downloads.completed.emit(token, None, "network")
+        self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-2")
+        self.perform(self.tasks, "stream")
+        self.perform(self.downloads, "audio")
+        self.assertTrue(self.owned.track.is_playing)
+        self.assertEqual(self.owned.track.title, "Song 2")
+
+    def test_cancelled_voice_and_following_song_downloads_never_replace_new_queue_and_release_leases(self):
+        self.owned.personal_dj_enabled = True
+        self.service.personal_dj = lambda source: ()
+        self.owned._replace_queue(segments(1), fm_source="netease", fm_kind="dj")
+        self.perform(self.tasks, "stream")
+        self.perform(self.downloads, "audio")
+        stale_token, action = next(job for job in reversed(self.downloads.jobs) if job[0][0] == "audio_prefetch")
+        stale = action()
+        self.owned.play_queue((OnlineSong("qq", "chosen", "chosen music"),))
+        self.downloads.completed.emit(stale_token, stale, None)
+        self.assertIn(stale.lease, self.cache.released)
+        self.assertEqual(self.owned.track.track_id, "owned:qq:chosen")
+        self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "idle")
+
+    def test_multiple_real_intro_segments_prefetch_without_replacing_current_presentation(self):
+        voice, song = segments(2)
+        second_stream = replace(voice.direct_stream, song_id="dj:second-part")
+        second_voice = replace(voice, song_id=second_stream.song_id, direct_stream=second_stream)
+        self.owned.personal_dj_enabled = True
+        self.service.personal_dj = lambda source: ()
+        self.owned._replace_queue((segments(1)[1], voice, second_voice, song), fm_source="netease", fm_kind="dj")
+        self.perform(self.tasks, "stream")
+        self.perform(self.downloads, "audio")
+        self.perform(self.downloads, "audio_prefetch")
+        self.owned.send_playback_command("next")
+        speaking = self.owned.get_personal_dj_presentation()
+        self.assertEqual(speaking["state"], "speaking")
+        self.assertEqual(speaking["next_title"], "Song 2")
+        _, prepared_second = self.perform(self.downloads, "audio_prefetch")
+        self.assertEqual(self.owned.get_personal_dj_presentation(), speaking)
+        self.assertEqual(self.owned._prefetched_audio, prepared_second)
+        self.qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        current = self.owned.get_personal_dj_presentation()
+        self.assertEqual(current["state"], "speaking")
+        self.assertEqual(current["next_title"], "Song 2")
+        self.assertGreater(current["token"], speaking["token"])
+        self.assertEqual(self.owned._prepared_audio, prepared_second)
+        self.assertEqual(self.owned.track.title, "Song 1")
+        self.assertFalse(self.owned.track.is_playing)
 
     def test_cancelled_current_result_releases_only_unused_lease(self):
         self.owned.play_queue(self.songs)

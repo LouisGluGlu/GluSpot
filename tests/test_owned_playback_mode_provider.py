@@ -118,12 +118,12 @@ class OwnedModeProviderTests(unittest.TestCase):
         self.provider._owned_audio_bridge.get_personal_dj_audio_frame = lambda: frame
         self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
         self.player._stream_epoch = self.player._epoch
-        from dataclasses import replace
-        self.player.track = replace(self.player.track, is_playing=True)
+        self.player.player.play()
+        self.assertFalse(self.player.track.is_playing)
         self.assertIs(self.provider.get_owned_personal_dj_audio_frame(), frame)
-        self.player.track = replace(self.player.track, is_playing=False)
+        self.player.player.pause()
         self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
-        self.player.track = replace(self.player.track, is_playing=True)
+        self.player.player.play()
         self.values["v2_owned_playback_enabled"] = False
         self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
         self.values["v2_owned_playback_enabled"] = True
