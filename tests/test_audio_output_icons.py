@@ -295,7 +295,8 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         # destination keep exactly the same cached frame and hit rectangles.
         for identity in ("translation", "return"):
             bounds = self.window._button_rects[identity].toAlignedRect()
-            self.assertEqual(bytes(closed.copy(bounds).constBits()), bytes(image.copy(bounds).constBits()))
+            closed_crop, menu_crop = closed.copy(bounds), image.copy(bounds)
+            self.assertEqual(bytes(closed_crop.constBits()), bytes(menu_crop.constBits()))
         self.window._audio_output_panel = None
         restored = self._controls()
         self.assertEqual(bytes(closed.constBits()), bytes(restored.constBits()))

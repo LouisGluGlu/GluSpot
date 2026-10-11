@@ -2,11 +2,28 @@
 from dataclasses import replace
 import unittest
 
-from api.audio_output_volume import AudioOutputVolumeHistory
+from api.audio_output_volume import AudioOutputVolumeHistory, output_volume_target
 from api.audio_routes import AudioRouteDevice
 
 
 class VolumeHistoryTests(unittest.TestCase):
+    def test_absolute_targets_use_integer_percent_without_scaling_readback(self):
+        for value, expected in ((0, 0), (1, 1), (.333, .33), (.335, .34), (.005, .01), (.999, 1)):
+            self.assertEqual(output_volume_target(value), expected)
+        self.history.observe(replace(self.device, volume=.6234), 1)
+        self.assertEqual(self.history._history["one"], .6234)
+        self.assertEqual(self.history.toggle(replace(self.device, volume=0), 1), .62)
+
+    def test_invalid_absolute_targets_are_rejected(self):
+        for value in (None, True, "50", -1, 1.01, float("nan"), float("inf"), 10 ** 400):
+            self.assertIsNone(output_volume_target(value))
+
+    def test_sub_percent_history_cannot_restore_to_zero_forever(self):
+        self.history.observe(replace(self.device, volume=.004), 1)
+        muted = replace(self.device, volume=0)
+        self.assertEqual(self.history.toggle(muted, 1), .3)
+        self.assertEqual(self.history.toggle(muted, 1), 0)
+
     def setUp(self):
         self.now = 10.0
         self.history = AudioOutputVolumeHistory(max_devices=2, intent_seconds=2,

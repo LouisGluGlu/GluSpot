@@ -67,8 +67,8 @@ def main():
         app.processEvents()
         dpr = window.devicePixelRatioF()
         rows = []
-        for label, mode, instant in (("accent", "sequential", 0), ("blend", "sequential", 1),
-                                     ("neutral", "sequential", 2), ("repeat", "repeat_one", 1)):
+        for label, mode, instant in (("bands-0", "sequential", 0), ("bands-1", "sequential", 1),
+                                     ("bands-2", "sequential", 2), ("repeat", "repeat_one", 1)):
             provider.mode = mode
             window._sync_owned_playback_mode()
             window._reset_control_idle(now=instant)
@@ -78,7 +78,10 @@ def main():
                 frame = window.grab().toImage()
             asset = "personal_fm" if mode == "sequential" else mode
             call = next(call for call in reversed(painted.call_args_list) if call.args[2] == asset)
-            tint = QColor(call.kwargs["tint"])
+            stops = call.kwargs.get("gradient_stops")
+            colors = [color.name(QColor.NameFormat.HexArgb) for _, color in stops] if stops else []
+            phase = call.kwargs.get("gradient_phase", 0.0)
+            tint = QColor(call.kwargs["tint"]).name(QColor.NameFormat.HexArgb)
             path = options.output / f"{theme}-{label}.png"
             if not frame.save(str(path)):
                 raise RuntimeError(f"Could not save {path}")
@@ -87,7 +90,7 @@ def main():
             crop_path = options.output / f"{theme}-{label}-control.png"
             crop.save(str(crop_path))
             rows.append({"label": label, "mode": mode, "instant": instant,
-                         "tint": tint.name(QColor.NameFormat.HexArgb),
+                         "tint": tint, "gradient_colors": colors, "gradient_phase": phase,
                          "path": str(path.resolve()), "crop_path": str(crop_path.resolve()),
                          "crop": crop})
         sheet = native_image(560, 192, dpr)
@@ -102,13 +105,14 @@ def main():
                 painter.drawImage(QRectF(x + 18, 20, 104, 104), row["crop"])
                 painter.drawText(QRectF(x, 132, 140, 23), Qt.AlignmentFlag.AlignCenter,
                                  f"{row['label']} · {row['instant']}s")
-                painter.drawText(QRectF(x, 156, 140, 22), Qt.AlignmentFlag.AlignCenter, row["tint"])
+                painter.drawText(QRectF(x, 156, 140, 22), Qt.AlignmentFlag.AlignCenter,
+                                 f"phase {row['gradient_phase']:.2f}" if row["gradient_colors"] else row["tint"])
         sheet_path = options.output / f"{theme}-comparison.png"
         sheet.save(str(sheet_path))
         provider.mode = "sequential"
         window._sync_owned_playback_mode()
         window._reset_control_idle(now=100)
-        # Visible tint frames must reuse the same native-size SVG mask and
+        # Visible band frames must reuse the same native-size SVG mask and
         # allocate no further control/blur cache entries after warmup.
         before = _rendered_icon.cache_info()
         layer_entries = len(window._control_layer_cache)
@@ -121,11 +125,11 @@ def main():
             paint_controls_at(100 + index / 60)
         after = _rendered_icon.cache_info()
         if after.misses != before.misses or len(window._control_layer_cache) != layer_entries:
-            raise AssertionError("FM tint frames added SVG or control cache entries after warmup.")
+            raise AssertionError("FM band frames added SVG or control cache entries after warmup.")
         if window._control_layer_cache_bytes != layer_bytes:
-            raise AssertionError("FM tint frames changed control-layer raster bytes.")
+            raise AssertionError("FM band frames changed control-layer raster bytes.")
         # Exercise the real final-two-second prewarm gate, then confirm that
-        # fade frames keep one stable tint/cache key at the actual window DPR.
+        # fade frames keep one stable band offset/cache key at the actual window DPR.
         window._reset_control_idle(now=200)
         window._control_layer_next_prewarm_at = 0
         idle = window.FULLSCREEN_CONTROL_IDLE_SECONDS
@@ -136,7 +140,7 @@ def main():
         for offset in (.13, .2, .27):
             paint_controls_at(200 + idle + offset)
         if len(window._control_layer_cache) != fade_entries or window._control_layer_cache_bytes != fade_bytes:
-            raise AssertionError("Frozen FM fade tint added control-layer cache entries.")
+            raise AssertionError("Frozen FM fade bands added control-layer cache entries.")
         if fade_entries > 48 or fade_bytes > window.CONTROL_LAYER_CACHE_MAX_BYTES:
             raise AssertionError("FM prewarm exceeded the existing control-cache budget.")
         if provider.calls:
@@ -144,7 +148,7 @@ def main():
         proof["themes"].append({"theme": theme, "source_color": source, "dpr": dpr,
             "comparison": str(sheet_path.resolve()),
             "frames": [{key: value for key, value in row.items() if key != "crop"} for row in rows],
-            "tint_frames": 120, "rendered_cache_miss_delta": after.misses - before.misses,
+            "gradient_frames": 120, "rendered_cache_miss_delta": after.misses - before.misses,
             "rendered_cache_entries": after.currsize, "rendered_cache_limit": after.maxsize,
             "svg_cache_entries": _svg_renderer.cache_info().currsize,
             "svg_cache_limit": _svg_renderer.cache_info().maxsize,

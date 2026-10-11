@@ -132,6 +132,7 @@ class MusicSurfaceWindow(QWidget):
     FULLSCREEN_CONTROL_IDLE_SECONDS = 5.0
     WINDOWED_CONTROL_IDLE_SECONDS = 2.0
     FULLSCREEN_CONTROL_TRANSITION_SECONDS = 0.52
+    LIBRARY_EXPANSION_SECONDS = 0.36
     LOW_PERCEPTION_BLOCK_WIPE_SECONDS = 0.5
     SURFACE_FONT_FAMILIES = ("Segoe UI", "Microsoft YaHei UI")
     REFERENCE_SURFACE_HEIGHT = 666.0
@@ -214,12 +215,18 @@ class MusicSurfaceWindow(QWidget):
         self._control_reveal_from = 1.0
         self._control_reveal_target = 1.0
         self._control_last_tick_reveal = 1.0
+        self._library_expansion_from = 0.0
+        self._library_expansion_target = 0.0
+        self._library_expansion_started_at = self._control_last_motion_at
+        self._library_expansion_paused_at: float | None = None
+        self._library_last_tick_expansion = 0.0
         self._idle_cursor_hidden = False
         self._idle_cursor_restore_cursor: QCursor | None = None
         self._control_layer_cache: dict[tuple, QImage] = {}
         self._control_layer_cache_bytes = 0
         self._control_layer_next_prewarm_at = 0.0
-        self._control_prewarm_remaining = 2 * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
+        self._control_prewarm_library_available = self._library_back_available()
+        self._control_prewarm_remaining = (2 + int(self._control_prewarm_library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
         self._control_prewarm_requested = False
         self._lyric_motion = MusicLyricMotion()
         self._logical_line_spring = LogicalLineSpringChain()
@@ -751,6 +758,18 @@ class MusicSurfaceWindow(QWidget):
             return self._mode_snapshot_controls_clickable
         return self._control_reveal_at(time.monotonic()) >= 0.75
 
+    def _transition_window_control_contains(self, key: str, rect: QRectF, point: QPointF) -> bool:
+        if key == "library" and not self._geometry_transition_snapshot.isNull() and self._mode_snapshot_size.isValid():
+            captured = self._mode_snapshot_control_rects.get(key)
+            if captured is None:
+                return False
+            # The captured circle/capsule may be stretched differently on
+            # each axis during a mode transition. Test in snapshot space.
+            point = QPointF(point.x() * self._mode_snapshot_size.width() / max(1, self.width()),
+                            point.y() * self._mode_snapshot_size.height() / max(1, self.height()))
+            rect = captured
+        return self._window_control_contains(key, rect, point)
+
     def _capture_transition_snapshot(self) -> QImage:
         """Capture exactly one rendered frame before a geometry transition."""
         if self._capturing_transition_snapshot or self.width() <= 0 or self.height() <= 0:
@@ -1150,8 +1169,12 @@ class MusicSurfaceWindow(QWidget):
         self._control_reveal_from = 1.0
         self._control_reveal_target = 1.0
         self._control_last_tick_reveal = 1.0
+        self._reset_library_expansion(instant)
+        if self._hovered_window_button == "library":
+            self._hovered_window_button = ""
         self._control_layer_next_prewarm_at = 0.0
-        self._control_prewarm_remaining = 2 * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
+        self._control_prewarm_library_available = self._library_back_available()
+        self._control_prewarm_remaining = (2 + int(self._control_prewarm_library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
         self._control_prewarm_requested = False
         self._metadata_reveal_pending.clear()
         self._metadata_scroll_after_hide.clear()
@@ -1176,6 +1199,7 @@ class MusicSurfaceWindow(QWidget):
             # dismissed re-arms the ordinary idle timer through its callback.
             self._control_last_motion_at = instant
             self._control_reveal_from = self._control_reveal_target = 1.0
+            self._sync_library_motion_reveal(1.0, instant)
             self._sync_idle_cursor()
             return 1.0
         idle_seconds = (
@@ -1187,6 +1211,8 @@ class MusicSurfaceWindow(QWidget):
             self._control_reveal_from = 1.0
             self._control_reveal_target = 0.0
             self._control_transition_started_at = idle_at
+            self._sync_library_motion_reveal(0.5, idle_at)
+            self._set_library_expanded(False, idle_at)
             self._pressed_window_button = ""
             self._pressed_media_command = ""
             if self._hovered_window_button or self._hovered_media_command:
@@ -1196,12 +1222,12 @@ class MusicSurfaceWindow(QWidget):
         self._sync_idle_cursor()
         duration = max(0.001, self.FULLSCREEN_CONTROL_TRANSITION_SECONDS)
         progress = (instant - self._control_transition_started_at) / duration
-        if progress >= 1.0 - 1e-9:
-            return self._control_reveal_target
         eased = self._control_spring_progress(progress)
-        return max(0.0, min(1.0, self._control_reveal_from + (
+        reveal = self._control_reveal_target if progress >= 1.0 - 1e-9 else max(0.0, min(1.0, self._control_reveal_from + (
             self._control_reveal_target - self._control_reveal_from
         ) * eased))
+        self._sync_library_motion_reveal(reveal, instant)
+        return reveal
 
     def _note_pointer_moved(self, now: float | None = None):
         # An inactive window must not reveal its controls merely because the
@@ -1231,10 +1257,18 @@ class MusicSurfaceWindow(QWidget):
         self._update_metadata_control_state(now, reveal)
         changed = abs(reveal - self._control_last_tick_reveal) > 0.001
         self._control_last_tick_reveal = reveal
-        if not force and not self._controls_animating(now) and not changed:
+        expansion = self._library_expansion_at(now)
+        library_changed = abs(expansion - self._library_last_tick_expansion) > 0.001
+        self._library_last_tick_expansion = expansion
+        shared_damage = force or self._controls_animating(now) or changed
+        if not shared_damage and not library_changed:
             return
         rect = QRectF(self.rect())
         scale = self._surface_scale(rect)
+        if self.isVisible() and self._library_back_available():
+            self.update(self._library_damage_rect(rect))
+        if not shared_damage:
+            return
         self.update(QRectF(rect.right() - 390.0 * scale, 0.0, 390.0 * scale, 100.0 * scale).toAlignedRect())
         bottom_height = self.CONTROL_BOTTOM_REGION_HEIGHT * scale
         self.update(QRectF(0.0, rect.bottom() - bottom_height, 505.0 * scale, bottom_height).toAlignedRect())
@@ -1719,7 +1753,7 @@ class MusicSurfaceWindow(QWidget):
                         .adjusted(-3, -3, 3, 3).toAlignedRect())
         self._update_transport_feedback_regions(now)
         # A paused track may have no other repaint during the two-second
-        # windowed lead-in. Queue only the two small control regions until
+        # windowed lead-in. Queue only the small control regions until
         # their cached blur levels have been prepared in separate paints.
         if (
             self._control_reveal_target >= 1.0
@@ -7682,7 +7716,7 @@ class MusicSurfaceWindow(QWidget):
         window_control_exposed = paint_region is None or paint_region.intersects(
             QRectF(rect.right() - 205.0 * surface_scale, 0.0, 205.0 * surface_scale, 100.0 * surface_scale).toAlignedRect()
         )
-        if paint_region is None or paint_region.intersects(self._library_button_rect(rect).toAlignedRect()):
+        if paint_region is None or paint_region.intersects(self._library_damage_rect(rect)):
             self._paint_library_back(painter, rect)
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed)
         controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
@@ -7769,37 +7803,112 @@ class MusicSurfaceWindow(QWidget):
         width, height, top = 44.0 * scale, 44.0 * scale, 18.0 * scale
         return QRectF(rect.right() - 22.0 * scale - width, top, width, height)
 
-    def _library_button_rect(self, rect: QRectF) -> QRectF:
-        scale = self._surface_scale(rect)
-        return QRectF(18.0 * scale, max(4.0, 6.0 * scale),
-                      max(104.0, 118.0 * scale), max(44.0, 44.0 * scale))
+    def _reset_library_expansion(self, now: float):
+        self._library_expansion_from = self._library_expansion_target = 0.0
+        self._library_expansion_started_at = float(now)
+        self._library_expansion_paused_at = None
+        self._library_last_tick_expansion = 0.0
 
-    def _library_button_face(self, rect: QRectF) -> QRectF:
+    def _library_expansion_at(self, now: float) -> float:
+        instant = self._library_expansion_paused_at
+        if instant is None:
+            instant = float(now)
+        phase = (instant - self._library_expansion_started_at) / self.LIBRARY_EXPANSION_SECONDS
+        if phase >= 1.0 - 1e-9:
+            return self._library_expansion_target
+        return self._library_expansion_from + (self._library_expansion_target - self._library_expansion_from) * self._control_spring_progress(phase)
+
+    def _sync_library_motion_reveal(self, reveal: float, now: float):
+        # A moving capsule must not make a new blur raster every fade frame.
+        # Hold its exact pose while the shared layer moves; fully hidden
+        # controls restart as a circle on the next reveal.
+        if reveal <= 0.001:
+            self._reset_library_expansion(now)
+        elif reveal < 0.999 or self._control_reveal_target < 1.0:
+            if self._library_expansion_paused_at is None:
+                self._library_expansion_paused_at = float(now)
+        elif self._library_expansion_paused_at is not None:
+            self._library_expansion_started_at += float(now) - self._library_expansion_paused_at
+            self._library_expansion_paused_at = None
+
+    def _set_library_expanded(self, expanded: bool, now: float):
+        target = 1.0 if expanded else 0.0
+        if target == self._library_expansion_target:
+            return
+        self._library_expansion_from = self._library_expansion_at(now)
+        self._library_expansion_target = target
+        self._library_expansion_started_at = float(now) if self._library_expansion_paused_at is None else self._library_expansion_paused_at
+        if self.isVisible() and self._library_back_available():
+            self.update(self._library_damage_rect(QRectF(self.rect())))
+
+    def _library_button_rect(self, rect: QRectF, expansion: float | None = None) -> QRectF:
+        scale = self._surface_scale(rect)
+        expansion = self._library_expansion_at(time.monotonic()) if expansion is None else expansion
+        diameter = max(44.0, 44.0 * scale)
+        width = diameter + (max(104.0, 118.0 * scale) - diameter) * expansion
+        return QRectF(18.0 * scale, max(4.0, 6.0 * scale),
+                      width, diameter)
+
+    def _library_button_face(self, rect: QRectF, expansion: float | None = None) -> QRectF:
         inset = max(3.0, 4.0 * self._surface_scale(rect))
-        return self._library_button_rect(rect).adjusted(inset, inset, -inset, -inset)
+        return self._library_button_rect(rect, expansion).adjusted(inset, inset, -inset, -inset)
+
+    def _library_control_shift(self, rect: QRectF, reveal: float) -> QPointF:
+        button = self._library_button_rect(rect, 0.0)
+        return QPointF(-(button.right()) * (1.0 - reveal),
+                       -(button.bottom()) * (1.0 - reveal))
+
+    def _library_damage_rect(self, rect: QRectF) -> QRect:
+        padding = math.ceil(20.0 * self._surface_scale(rect))
+        return self._library_button_rect(rect, 1.0).adjusted(-padding, -padding, padding, padding).intersected(rect).toAlignedRect()
+
+    @staticmethod
+    def _window_control_contains(key: str, rect: QRectF, point: QPointF) -> bool:
+        if key != "library":
+            return rect.contains(point)
+        shape = QPainterPath()
+        radius = min(rect.width(), rect.height()) / 2.0
+        shape.addRoundedRect(rect, radius, radius)
+        return shape.contains(point)
 
     def _paint_library_back(self, painter: QPainter, rect: QRectF):
         if not self._library_back_available():
             return
-        face = self._library_button_face(rect)
+        now = time.monotonic()
+        reveal = self._control_reveal_at(now)
+        if reveal <= 0.001:
+            return
+        expansion = self._library_expansion_at(now)
         scale = max(0.9, self._surface_scale(rect))
         hovered = self._hovered_window_button == "library"
         pressed = self._pressed_window_button == "library"
-        painter.save()
-        painter.setPen(QPen(QColor(75, 76, 77, 240), 1))
-        painter.setBrush(QColor(47 if pressed else 67 if hovered else 55,
-                               48 if pressed else 68 if hovered else 56,
-                               49 if pressed else 69 if hovered else 57, 236))
-        painter.drawRoundedRect(face, face.height() / 2, face.height() / 2)
-        ink = QColor(255, 255, 255, 242)
-        icon_side = 20.0 * scale
-        icon_left = face.left() + 10.0 * scale
-        paint_music_source_icon(painter, QRectF(icon_left, face.center().y() - icon_side / 2, icon_side, icon_side),
-                                "library_back", tint=ink)
-        painter.setPen(ink)
-        painter.setFont(self._surface_font(max(12.0, 14.0 * self._surface_scale(rect)), QFont.Weight.DemiBold))
-        painter.drawText(face.adjusted(38.0 * scale, 0, -10.0 * scale, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "音乐库")
-        painter.restore()
+        def draw(layer, *, fraction=expansion, is_hovered=hovered, is_pressed=pressed):
+            face = self._library_button_face(rect, fraction)
+            layer.save()
+            layer.setPen(QPen(QColor(75, 76, 77, 240), 1))
+            layer.setBrush(QColor(47 if is_pressed else 67 if is_hovered else 55,
+                                  48 if is_pressed else 68 if is_hovered else 56,
+                                  49 if is_pressed else 69 if is_hovered else 57, 236))
+            layer.drawRoundedRect(face, face.height() / 2, face.height() / 2)
+            ink = QColor(255, 255, 255, 242)
+            icon_side = 20.0 * scale
+            center_x = face.left() + face.height() / 2
+            paint_music_source_icon(layer, QRectF(center_x - icon_side / 2, face.center().y() - icon_side / 2, icon_side, icon_side), "library_back", tint=ink)
+            if fraction > 0.001:
+                label = QRectF(face.left() + face.height(), face.top(), max(0.0, face.width() - face.height() - 6.0 * scale), face.height())
+                layer.setClipRect(label, Qt.ClipOperation.IntersectClip)
+                layer.setOpacity(fraction)
+                layer.setPen(ink)
+                layer.setFont(self._surface_font(max(12.0, 14.0 * self._surface_scale(rect)), QFont.Weight.DemiBold))
+                layer.drawText(label, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "音乐库")
+            layer.restore()
+        idle_seconds = self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen else self.WINDOWED_CONTROL_IDLE_SECONDS
+        idle_expansion = self._library_expansion_at(self._control_last_motion_at + idle_seconds)
+        key = lambda fraction, over, down: ("library", round(self._surface_scale(rect), 3), round(fraction, 5), over, down)
+        self._paint_control_layer(painter, self._library_button_rect(rect, 1.0), reveal,
+                                  self._library_control_shift(rect, reveal), key(expansion, hovered, pressed), draw,
+                                  prewarm_default=(key(idle_expansion, False, False),
+                                      lambda layer: draw(layer, fraction=idle_expansion, is_hovered=False, is_pressed=False)))
 
     @staticmethod
     def _preceding_control_rect(button: QRectF, scale: float) -> QRectF:
@@ -7865,12 +7974,12 @@ class MusicSurfaceWindow(QWidget):
         self.setToolTip(self._playback_mode_tooltip())
         return changed
 
-    def _personal_fm_ink(self, region: QRectF, now: float) -> QColor:
+    def _personal_fm_stops(self, region: QRectF) -> tuple[tuple[float, QColor], ...]:
         accent = self._future_lyric_color(region)
-        neutral = solid_album_ink_color(solid_album_background_color(self._art_palette()), 255)
-        # Smoothly travel accent -> album-appropriate neutral -> accent.
-        blend = (1.0 - math.cos(float(now) * math.tau / 4.0)) / 2.0
-        return self._mix_color(accent, neutral, blend)
+        deep, light = accent.darker(175), accent.lighter(145)
+        # All bands come from the existing lyric characteristic color. The
+        # repeated deep endpoint joins each horizontal sweep without a seam.
+        return ((0.0, deep), (1 / 3, QColor(accent)), (2 / 3, light), (1.0, deep))
 
     def _audio_output_available(self) -> bool:
         return callable(getattr(getattr(self.owner, "data_provider", None), "get_audio_route_snapshot", None))
@@ -8091,7 +8200,7 @@ class MusicSurfaceWindow(QWidget):
                 continue
             source = self._control_layer_source(image_key, layer_bounds, dpr, default_draw)
             self._build_control_blur(image_key, radius, source)
-            # The two controls share this gate; never blur both in one paint.
+            # All control layers share this gate; blur only one per paint.
             self._control_layer_next_prewarm_at = now + 0.035
             break
 
@@ -8155,6 +8264,13 @@ class MusicSurfaceWindow(QWidget):
 
     def _sync_window_control_rects(self, rect: QRectF | None = None):
         rect = QRectF(self.rect()) if rect is None else QRectF(rect)
+        library_available = self._library_back_available()
+        if library_available != self._control_prewarm_library_available:
+            # A source can change in place. Re-arm only the bounded local
+            # prewarm work; source changes must not reveal idle controls.
+            self._control_prewarm_library_available = library_available
+            self._control_prewarm_remaining = (2 + int(library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
+            self._control_prewarm_requested = False
         button = self._window_control_base_rect(rect)
         key = "mode" if self._fullscreen else "return"
         reveal = self._control_reveal_at(time.monotonic())
@@ -8164,8 +8280,8 @@ class MusicSurfaceWindow(QWidget):
                  self._window_control_shift(button, reveal))}
             if reveal >= 0.75 else {}
         )
-        if self._library_back_available():
-            self._button_rects["library"] = self._library_button_rect(rect)
+        if reveal >= 0.75 and library_available:
+            self._button_rects["library"] = self._library_button_face(rect).translated(self._library_control_shift(rect, reveal))
         if reveal >= 0.75 and self._owned_playback_mode is not None:
             self._button_rects["playback_mode"] = self._playback_mode_button_rect(
                 button, self._surface_scale(rect)).translated(self._window_control_shift(button, reveal))
@@ -8212,7 +8328,11 @@ class MusicSurfaceWindow(QWidget):
         playback_active = playback_mode in {"shuffle", "repeat_one"}
         now = time.monotonic()
         reveal = self._control_reveal_at(now)
+        if reveal <= 0.001:
+            return
         playback_ink = QColor(255, 255, 255, 242)
+        fm_stops = None
+        fm_phase = default_fm_phase = 0.0
         if playback_active:
             samples = self._background_sample_colors(playback_button)
             backdrop = sorted(samples, key=self._relative_luminance)[len(samples) // 2]
@@ -8229,14 +8349,15 @@ class MusicSurfaceWindow(QWidget):
         if fm_continuous:
             album_ink = solid_album_ink_color(solid_album_background_color(self._art_palette()))
             playback_active = album_ink.red() == 0
-            # Freeze the tiny glyph while its shared control layer blurs;
-            # visible frames tint a cached SVG mask without new blur rasters.
+            # Freeze the band offset while its shared control layer blurs;
+            # visible frames use the SVG mask without new blur rasters.
             ink_time = now if reveal >= 0.999 else self._control_transition_started_at
-            playback_ink = self._personal_fm_ink(playback_button, ink_time)
+            fm_stops = self._personal_fm_stops(playback_button)
+            fm_phase = (ink_time / 4.0) % 1.0
         default_playback_ink = QColor(playback_ink)
         if fm_continuous:
             idle_seconds = self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen else self.WINDOWED_CONTROL_IDLE_SECONDS
-            default_playback_ink = self._personal_fm_ink(playback_button, self._control_last_motion_at + idle_seconds)
+            default_fm_phase = ((self._control_last_motion_at + idle_seconds) / 4.0) % 1.0
         if playback_mode is not None:
             bounds = bounds.united(playback_button)
         audio_available = self._audio_output_available()
@@ -8256,7 +8377,7 @@ class MusicSurfaceWindow(QWidget):
         pressed = self._pressed_window_button == key
 
         def draw(layer: QPainter, *, hovered_state: bool = hovered, pressed_state: bool = pressed,
-                 mode_ink: QColor = playback_ink):
+                 mode_ink: QColor = playback_ink, gradient_phase: float = fm_phase):
             layer.save()
             def face(target: QRectF, is_hovered: bool = False, is_pressed: bool = False,
                      active: bool = False):
@@ -8289,8 +8410,8 @@ class MusicSurfaceWindow(QWidget):
                     icon = icon_rect(playback_button, 0.55)
                     for dx, dy in ((-.55, 0), (.55, 0), (0, -.55), (0, .55)):
                         paint_music_source_icon(layer, icon.translated(dx * scale, dy * scale), playback_asset, tint=edge)
-                paint_music_source_icon(layer, icon_rect(playback_button, 0.55),
-                                        playback_asset, tint=mode_ink)
+                paint_music_source_icon(layer, icon_rect(playback_button, 0.55), playback_asset,
+                                        tint=mode_ink, gradient_stops=fm_stops, gradient_phase=gradient_phase)
             translation_symbol = self._translation_symbol_path(icon_rect(translation, 0.58))
             if translated:
                 # The vector symbol is removed from the face, so its ink is
@@ -8317,16 +8438,21 @@ class MusicSurfaceWindow(QWidget):
             layer.restore()
 
         def draw_default(layer: QPainter):
-            draw(layer, hovered_state=False, pressed_state=False, mode_ink=default_playback_ink)
+            draw(layer, hovered_state=False, pressed_state=False, mode_ink=default_playback_ink,
+                 gradient_phase=default_fm_phase)
+
+        gradient_key = tuple((position, color.rgba()) for position, color in fm_stops) if fm_stops else ()
 
         self._paint_control_layer(
             painter, bounds, reveal, self._window_control_shift(button, reveal),
             ("window", key, round(scale, 3), translated,
              translation_hovered, translation_pressed, playback_mode, playback_asset, playback_ink.rgba(), playback_hovered, playback_pressed,
-             hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw,
+             hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot,
+             gradient_key, fm_phase if fm_continuous else None), draw,
             prewarm_default=(("window", key, round(scale, 3), translated,
                                translation_hovered, translation_pressed, playback_mode, playback_asset, default_playback_ink.rgba(), playback_hovered, playback_pressed,
-                               False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot), draw_default),
+                               False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot,
+                               gradient_key, default_fm_phase if fm_continuous else None), draw_default),
         )
         if audio_available and not audio_active and audio_pose is not None:
             painter.save()
@@ -8475,8 +8601,9 @@ class MusicSurfaceWindow(QWidget):
         cover = self._scaled_cover_rect(self._current_cover_rect(now), self._cover_scale_at(now))
         occluder = QPainterPath()
         occluder.addRoundedRect(cover, cover.width() * 0.055, cover.height() * 0.055)
-        if self._library_back_available():
-            face = self._library_button_face(rect)
+        reveal = self._control_reveal_at(now)
+        if self._library_back_available() and reveal > 0.001:
+            face = self._library_button_face(rect, self._library_expansion_at(now)).translated(self._library_control_shift(rect, reveal))
             occluder.addRoundedRect(face, face.height() / 2, face.height() / 2)
         # Transparent/absent artwork still owns its foreground slot. Rings
         # illuminate only the space behind it, never the thumbnail or plate.
@@ -8628,8 +8755,8 @@ class MusicSurfaceWindow(QWidget):
             self._pressed_media_command = ""
             self._pressed_window_button = next((
                 key for key, rect in self._transition_control_rects().items()
-                if (key == "library" or (self._transition_controls_clickable() and key in {"mode", "return"}))
-                and rect.contains(event.position())
+                if (self._transition_controls_clickable() and key in {"mode", "return", "library"})
+                and self._transition_window_control_contains(key, rect, event.position())
             ), "")
             self._pressed_lyric_index = None
             event.accept()
@@ -8638,7 +8765,7 @@ class MusicSurfaceWindow(QWidget):
         self._drag_origin = event.globalPosition().toPoint()
         self._drag_geometry = QRect(self.geometry())
         self._pressed_window_button = next((key for key, rect in self._button_rects.items()
-                                            if (controls_clickable or key == "library") and rect.contains(event.position())), "")
+                                            if controls_clickable and self._window_control_contains(key, rect, event.position())), "")
         if self._pressed_window_button == "library":
             self._resize_edges = set()
         self._pressed_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_clickable else ""
@@ -8655,6 +8782,7 @@ class MusicSurfaceWindow(QWidget):
         if (self._pending_fullscreen is not None or self._island_returning) and not self._geometry_transition_snapshot.isNull():
             self._hovered_lyric_index = None
             self._hovered_window_button = ""
+            self._set_library_expanded(False, time.monotonic())
             self._hovered_media_command = ""
             self._pressed_media_command = ""
             if not (event.buttons() & Qt.MouseButton.LeftButton):
@@ -8671,15 +8799,20 @@ class MusicSurfaceWindow(QWidget):
                 self._hovered_lyric_index = hover
                 self.update()
             if hover is not None:
+                if self._hovered_window_button or self._hovered_media_command:
+                    self._hovered_window_button = self._hovered_media_command = ""
+                    self._set_library_expanded(False, time.monotonic())
+                    self.update()
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
                 return
             controls_hoverable = self._control_reveal_at(time.monotonic()) >= 0.75
             window_button = next((key for key, rect in self._button_rects.items()
-                                  if (controls_hoverable or key == "library") and rect.contains(event.position())), "")
+                                  if controls_hoverable and self._window_control_contains(key, rect, event.position())), "")
             media_button = next((key for key, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_hoverable else ""
             if window_button != self._hovered_window_button or media_button != self._hovered_media_command:
                 self._hovered_window_button = window_button
                 self._hovered_media_command = media_button
+                self._set_library_expanded(window_button == "library", time.monotonic())
                 self.setToolTip({"mode": "切换到窗口", "return": "返回岛模式", "library": "返回音乐库",
                                  "playback_mode": self._playback_mode_tooltip()}.get(window_button, ""))
                 self.update()
@@ -8730,8 +8863,8 @@ class MusicSurfaceWindow(QWidget):
         if (self._pending_fullscreen is not None or self._island_returning) and not self._geometry_transition_snapshot.isNull():
             released = next((
                 key for key, rect in self._transition_control_rects().items()
-                if (key == "library" or (self._transition_controls_clickable() and key in {"mode", "return"}))
-                and rect.contains(event.position())
+                if (self._transition_controls_clickable() and key in {"mode", "return", "library"})
+                and self._transition_window_control_contains(key, rect, event.position())
             ), "")
             pressed = self._pressed_window_button
             self._moving = False
@@ -8751,7 +8884,7 @@ class MusicSurfaceWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and not self._moving and not self._resize_edges:
             point = event.position()
             release_window_button = next((key for key, rect in self._button_rects.items()
-                                          if (controls_clickable or key == "library") and rect.contains(point)), "")
+                                          if controls_clickable and self._window_control_contains(key, rect, point)), "")
             release_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(point)), "") if controls_clickable else ""
             release_lyric_index = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(point)), None)
             pressed_window_button = str(getattr(self, "_pressed_window_button", "") or "")
@@ -8878,6 +9011,7 @@ class MusicSurfaceWindow(QWidget):
         self._update_metadata_hover(None, time.monotonic())
         self._restore_idle_cursor()
         self._hovered_window_button = ""
+        self._set_library_expanded(False, time.monotonic())
         self._hovered_media_command = ""
         self._pressed_media_command = ""
         self._pressed_window_button = ""
@@ -8886,17 +9020,19 @@ class MusicSurfaceWindow(QWidget):
         super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self, event):
+        controls_clickable = self._control_reveal_at(time.monotonic()) >= 0.75
         self._note_pointer_moved()
         if (self._pending_fullscreen is not None or self._island_returning) and not self._geometry_transition_snapshot.isNull():
             over_button = any(
-                rect.contains(event.position()) for rect in self._transition_control_rects().values()
+                self._transition_controls_clickable() and self._transition_window_control_contains(key, rect, event.position())
+                for key, rect in self._transition_control_rects().items()
             )
             if (event.button() == Qt.MouseButton.LeftButton and not over_button
                     and 0.0 < event.position().y() <= self._transition_title_fraction() * self.height()):
                 self.toggle_presentation_mode()
             event.accept()
             return
-        over_button = any(rect.contains(event.position()) for rect in self._button_rects.values())
+        over_button = controls_clickable and any(self._window_control_contains(key, rect, event.position()) for key, rect in self._button_rects.items())
         if event.button() == Qt.MouseButton.LeftButton and over_button:
             event.accept()
             return

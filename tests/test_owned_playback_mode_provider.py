@@ -23,7 +23,7 @@ class OwnedModeProviderTests(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.player = OwnedMusicPlayer(SimpleNamespace(stream_url=lambda *_: None),
             LocalLyricsStore(root=Path(self.folder.name)), player=Player(), tasks=Tasks(),
-            artwork_tasks=Tasks(), prefetch_tasks=Tasks())
+            artwork_tasks=Tasks(), prefetch_tasks=Tasks(), stream_cache=None)
         self.values = {"v2_owned_playback_enabled": True, "v2_system_capture_enabled": True}
         self.saved = []
         self.system = SimpleNamespace(suspend_live_audio=lambda: None, stop_audio_cast=lambda: None,

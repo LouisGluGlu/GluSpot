@@ -111,7 +111,7 @@ def run_case(output, scenario, codec, ffmpeg, timeout):
     app.setQuitOnLastWindowClosed(False)
     audio = QAudioOutput()
     audio.setVolume(0)
-    owned = OwnedMusicPlayer(FixtureService(), LocalLyricsStore(root=output / "lyrics"), audio=audio)
+    owned = OwnedMusicPlayer(FixtureService(), LocalLyricsStore(root=output / "lyrics"), audio=audio, stream_cache=None)
     player, loop, timer = owned.player, QEventLoop(), QTimer()
     timer.setInterval(25)
     timed_out = False

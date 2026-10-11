@@ -115,7 +115,7 @@ def run_case(output, scenario, mode, timeout):
     app.setQuitOnLastWindowClosed(False)
     audio = QAudioOutput()
     audio.setVolume(0.0)
-    owned = OwnedMusicPlayer(FixtureService(), LocalLyricsStore(root=output / "lyrics"), audio=audio)
+    owned = OwnedMusicPlayer(FixtureService(), LocalLyricsStore(root=output / "lyrics"), audio=audio, stream_cache=None)
     owned._random.shuffle = lambda songs: songs.reverse()
     owned.set_playback_mode(mode)
     player = owned.player

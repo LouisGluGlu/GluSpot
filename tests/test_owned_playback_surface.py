@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import unittest
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
@@ -114,7 +115,7 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         self.window._reset_control_idle(now=100.0)
         with patch("local.music_surface_window.time.monotonic", return_value=110.0):
             self.window._sync_window_control_rects()
-        self.assertEqual(set(self.window._button_rects), {"library"})
+        self.assertEqual(set(self.window._button_rects), set())
         self.window._reset_control_idle()
         seen = []
         original = self.window._paint_control_layer
@@ -152,7 +153,10 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
                 self.assertEqual(paint.call_count, 1)
             full = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
             self.window.render(full)
-        self.assertEqual(bytes(partial.copy(dirty).constBits()), bytes(full.copy(dirty).constBits()))
+        # constBits() borrows storage; keep both crop images alive until
+        # bytes has copied their pixels rather than reading freed temporaries.
+        partial_crop, full_crop = partial.copy(dirty), full.copy(dirty)
+        self.assertEqual(bytes(partial_crop.constBits()), bytes(full_crop.constBits()))
 
     def test_spatial_ripple_cannot_change_library_face_pixels(self):
         image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
@@ -165,7 +169,8 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
                 self.window._paint_transport_spatial_light(painter, rect, 101.0)
         self.assertNotEqual(bytes(image.constBits()), bytes(original.constBits()))
         protected = self.window._library_button_face(rect).adjusted(8, 8, -8, -8).toAlignedRect()
-        self.assertEqual(bytes(image.copy(protected).constBits()), bytes(original.copy(protected).constBits()))
+        protected_crop, original_crop = image.copy(protected), original.copy(protected)
+        self.assertEqual(bytes(protected_crop.constBits()), bytes(original_crop.constBits()))
 
     def test_system_or_unsupported_mode_has_no_button_and_no_setter_action(self):
         for mode in (None, "unsupported"):
@@ -290,18 +295,22 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         self.assertIn("personal_fm", keys)
         self.assertNotIn("sequence", keys)
 
-    def test_fm_gradient_uses_actual_lyric_tone_and_occupied_album_lightness(self):
+    def test_fm_gradient_uses_deep_characteristic_light_shades_of_actual_lyric_tone(self):
         rect = QRectF(10, 10, 30, 30)
-        for source, neutral in ((QColor("#eeeeee"), QColor("black")), (QColor("#151515"), QColor("white"))):
+        accent = QColor("#248ace")
+        for source in (QColor("#eeeeee"), QColor("#151515")):
             palette = artwork_surface_palette(QImage(), source, source)
-            with patch.object(self.window, "_art_palette", return_value=palette), patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
-                self.assertEqual(self.window._personal_fm_ink(rect, 0), QColor("#248ace"))
-                self.assertEqual(self.window._personal_fm_ink(rect, 2), neutral)
-                self.assertEqual(self.window._personal_fm_ink(rect, 1), self.window._mix_color(QColor("#248ace"), neutral, .5))
-                self.assertEqual(self.window._personal_fm_ink(rect, 4), QColor("#248ace"))
-                before = self.window._personal_fm_ink(rect, .9)
-                after = self.window._personal_fm_ink(rect, .91667)
-                self.assertLessEqual(max(abs(a-b) for a,b in zip(before.getRgb(), after.getRgb())), 4)
+            with patch.object(self.window, "_art_palette", return_value=palette), patch.object(self.window, "_future_lyric_color", return_value=accent):
+                stops = self.window._personal_fm_stops(rect)
+            deep, middle, light, seam = [color for _, color in stops]
+            self.assertEqual(middle, accent)
+            self.assertEqual(deep, seam)
+            self.assertLess(deep.lightnessF(), middle.lightnessF())
+            self.assertGreater(light.lightnessF(), middle.lightnessF())
+            self.assertLess(abs(deep.hueF() - accent.hueF()), .01)
+            self.assertLess(abs(light.hueF() - accent.hueF()), .01)
+            self.assertNotIn(QColor("black"), [deep, middle, light])
+            self.assertNotIn(QColor("white"), [deep, middle, light])
 
     def test_fm_visible_raster_animates_without_control_layer_or_svg_cache_churn(self):
         self.provider.fm = True
@@ -314,17 +323,21 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         with patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
             for instant in (0, .5, 1, 1.5, 2):
                 with patch("local.music_surface_window.time.monotonic", return_value=instant):
-                    image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                    dpr = self.window.devicePixelRatioF()
+                    image = QImage(math.ceil(self.window.width() * dpr), math.ceil(self.window.height() * dpr), QImage.Format.Format_ARGB32_Premultiplied)
+                    image.setDevicePixelRatio(dpr)
                     image.fill(Qt.GlobalColor.transparent)
                     with QPainter(image) as painter:
                         self.window._paint_window_controls(painter, QRectF(self.window.rect()))
-                    crop = self.window._button_rects["playback_mode"].toAlignedRect()
-                    rasters.append(bytes(image.copy(crop).constBits()))
+                    rect = self.window._button_rects["playback_mode"]
+                    crop = QRectF(rect.x() * dpr, rect.y() * dpr, rect.width() * dpr, rect.height() * dpr).toAlignedRect()
+                    icon_crop = image.copy(crop)
+                    rasters.append(bytes(icon_crop.constBits()))
         self.assertEqual(len(set(rasters)), 5)
         self.assertLessEqual(_rendered_icon.cache_info().misses - before, 1)
         self.assertEqual(len(self.window._control_layer_cache), layers_before)
 
-    def test_fm_fade_freezes_tint_and_hidden_ticks_do_not_request_color_updates(self):
+    def test_fm_fade_freezes_gradient_phase_and_hidden_ticks_do_not_request_color_updates(self):
         self.provider.fm = True
         self.window._sync_owned_playback_mode()
         self.window._reset_control_idle(now=0)

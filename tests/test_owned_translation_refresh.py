@@ -40,7 +40,7 @@ class OwnedTranslationRefreshTests(unittest.TestCase):
             generated_root=Path(self.folder.name) / "generated", settings_getter=self.getter)
         self.tasks, self.qt_player = Tasks(), ThreadRecordingPlayer()
         self.player = OwnedMusicPlayer(self.service, self.store, player=self.qt_player,
-            audio=object(), tasks=self.tasks, artwork_tasks=Tasks(), prefetch_tasks=Tasks())
+            audio=object(), tasks=self.tasks, artwork_tasks=Tasks(), prefetch_tasks=Tasks(), stream_cache=None)
         self.addCleanup(self.player.close)
         self.system = SimpleNamespace(suspend_live_audio=Mock(), stop_audio_cast=Mock(),
             _request_immediate_media_refresh=Mock(return_value="system-refresh"))

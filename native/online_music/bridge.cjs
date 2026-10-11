@@ -63,7 +63,7 @@ async function ncmCall(state, method, params = {}) {
       else throw error;
     }
   } else {
-    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personal_fm","lyric_new","lyric","cloudsearch","song_url"]);
+    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personal_fm","aidj_content_rcmd","lyric_new","lyric","cloudsearch","song_url"]);
     if (!allowed.has(method)) fail("unsupported");
     const fn = require(path.join(state.root,"module",method + ".js"));
     result = await fn(query,state.request);
@@ -195,6 +195,7 @@ async function dispatch(source,op,p,credential,context) {
     if(op==="playlist_tracks") return await ncmCall(state,"playlist_track_all",{id:requireId(p.playlist_id),limit:p.limit,offset:p.offset});
     if(op==="daily_recommendations") return await ncmCall(state,"recommend_songs");
     if(op==="personal_fm") return await ncmCall(state,"personal_fm");
+    if(op==="personal_dj") return await ncmCall(state,"aidj_content_rcmd");
     // The pinned standard endpoint uses the existing account authorization,
     // without XEAPI startup-key registration or unblock/matching imports.
     if(op==="stream_url") return await ncmCall(state,"song_url",{id:requireId(p.song_id),br:128000});

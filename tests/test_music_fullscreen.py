@@ -5618,40 +5618,74 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
     def test_paused_windowed_controls_prewarm_locally_and_hide_on_time(self):
         self.owner.media_is_playing = False
+        self.owner._music_library_back_callback = Mock()
         self.window.resize(960, 540)
         self.window._reset_control_idle(100.0)
         output = QImage(self.window.size(), QImage.Format.Format_RGB32)
-        with patch("local.music_surface_window.time.monotonic", return_value=100.0):
-            self.window.render(output)
-        for index in range(2 * (len(self.window.CONTROL_BLUR_FRACTIONS) - 1)):
-            instant = 100.4 + index * 0.05
-            self.window._lyric_spring_active = False
-            self.window._lyric_animation_rect = QRect()
-            self.window._last_full_animation_update_at = instant
-            with patch("local.music_surface_window.time.monotonic", return_value=instant):
-                with patch.object(self.window, "update") as update:
-                    self.window._on_animation_tick()
-                self.assertTrue(update.call_args_list)
-                self.assertTrue(all(call.args and isinstance(call.args[0], QRect)
-                                    for call in update.call_args_list))
-                self.window.render(output)
-        warmed = {
-            image_key[0][0]
-            for image_key, radius in self.window._control_layer_cache
-            if radius > 0.0
-        }
-        self.assertEqual(warmed, {"window", "transport"})
-        self.assertEqual(self.window._control_prewarm_remaining, 0)
-        self.window._lyric_spring_active = False
-        self.window._lyric_animation_rect = QRect()
-        self.window._last_full_animation_update_at = 102.05
-        with patch("local.music_surface_window.time.monotonic", return_value=102.05):
-            with patch.object(self.window, "update") as update:
-                self.window._on_animation_tick()
-        self.assertTrue(update.call_args_list)
-        self.assertTrue(any(call.args and isinstance(call.args[0], QRect)
-                            for call in update.call_args_list))
-        self.assertEqual(self.window._control_reveal_at(102.52), 0.0)
+        levels = len(self.window.CONTROL_BLUR_FRACTIONS) - 1
+        for owned in (False, True):
+            with self.subTest(owned_library=owned), patch.object(self.window, "isVisible", return_value=True):
+                self.owner._owned_active = lambda: owned
+                expected_layers = {"window", "transport"} | ({"library"} if owned else set())
+                frame_budget = len(expected_layers) * levels
+                # The provider may change while this same surface is hidden.
+                # Re-budgeting must preserve idle state and hidden hit targets.
+                with patch("local.music_surface_window.time.monotonic", return_value=103.0):
+                    self.window._sync_window_control_rects()
+                    self.assertEqual(self.window._control_reveal_at(103.0), 0.0)
+                    self.assertEqual(self.window._button_rects, {})
+                self.window._reset_control_idle(100.0)
+                self.assertEqual(self.window._control_prewarm_remaining, frame_budget)
+                self.window._control_layer_cache.clear()
+                self.window._control_layer_cache_bytes = 0
+                with patch("local.music_surface_window.time.monotonic", return_value=100.0):
+                    self.window.render(output)
+                for index in range(frame_budget):
+                    instant = 100.4 + index * 0.05
+                    self.window._lyric_spring_active = False
+                    self.window._lyric_animation_rect = QRect()
+                    self.window._last_full_animation_update_at = instant
+                    with patch("local.music_surface_window.time.monotonic", return_value=instant):
+                        with patch.object(self.window, "update") as update:
+                            self.window._on_animation_tick()
+                        self.assertTrue(update.call_args_list)
+                        self.assertTrue(all(call.args and isinstance(call.args[0], QRect)
+                                            for call in update.call_args_list))
+                        self.assertTrue(all(call.args[0].width() * call.args[0].height()
+                                            < self.window.width() * self.window.height()
+                                            for call in update.call_args_list))
+                        if owned:
+                            self.assertIn(self.window._library_damage_rect(QRectF(self.window.rect())),
+                                          [call.args[0] for call in update.call_args_list])
+                        with patch.object(self.window, "_build_control_blur", wraps=self.window._build_control_blur) as blur:
+                            self.window.render(output)
+                        self.assertEqual(blur.call_count, 1)
+                    self.assertEqual(self.window._control_prewarm_remaining, frame_budget - index - 1)
+                warmed = {image_key[0][0] for image_key, radius in self.window._control_layer_cache if radius > 0.0}
+                self.assertEqual(warmed, expected_layers)
+                self.assertEqual(sum(radius > 0 for _key, radius in self.window._control_layer_cache), frame_budget)
+                self.assertEqual(self.window._control_prewarm_remaining, 0)
+                self.assertLessEqual(len(self.window._control_layer_cache), 48)
+                self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)
+                warmed_size = (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes)
+                self.window._lyric_spring_active = False
+                self.window._lyric_animation_rect = QRect()
+                self.window._last_full_animation_update_at = 102.05
+                with patch("local.music_surface_window.time.monotonic", return_value=102.05):
+                    with patch.object(self.window, "update") as update:
+                        self.window._on_animation_tick()
+                    self.assertTrue(update.call_args_list)
+                    self.assertTrue(any(call.args and isinstance(call.args[0], QRect)
+                                        for call in update.call_args_list))
+                    with patch.object(self.window, "_build_control_blur", wraps=self.window._build_control_blur) as blur:
+                        self.window.render(output)
+                    blur.assert_not_called()
+                self.assertEqual(warmed_size, (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes))
+                self.assertEqual(self.window._control_reveal_at(102.52), 0.0)
+                with patch("local.music_surface_window.time.monotonic", return_value=102.52):
+                    self.window.render(output)
+                self.assertEqual(self.window._button_rects, {})
+                self.assertEqual(self.window._media_button_rects, {})
 
     def test_idle_controls_blur_slide_out_without_leaving_click_targets(self):
         self.window.resize(1190, 666)

@@ -54,7 +54,7 @@ class OwnedStreamFaultTests(unittest.TestCase):
         self.store = LocalLyricsStore(root=Path(self.temp.name))
         self.service = SimpleNamespace(stream_url=lambda *args: None, lyrics=lambda *args: None)
         self.owned = OwnedMusicPlayer(self.service, self.store, player=self.qt, audio=object(),
-            tasks=self.tasks, artwork_tasks=self.artwork, prefetch_tasks=self.prefetch)
+            tasks=self.tasks, artwork_tasks=self.artwork, prefetch_tasks=self.prefetch, stream_cache=None)
         self.songs = tuple(OnlineSong("netease", str(index), f"Song {index}", duration_seconds=120)
             for index in range(3))
 

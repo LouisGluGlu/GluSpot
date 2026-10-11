@@ -141,7 +141,7 @@ class _CollectionCover(QAbstractButton):
                 side = min(44.0, rect.width() * .36)
                 icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2 - 8, side, side)
                 paint_music_source_icon(painter, icon, source.source_id)
-                label = {"daily": "每日推荐", "fm": "私人漫游", "playlist": "歌单", "song": "歌曲"}.get(self.kind, "音乐")
+                label = {"daily": "每日推荐", "fm": "私人漫游", "dj": "私人DJ", "playlist": "歌单", "song": "歌曲"}.get(self.kind, "音乐")
                 painter.setFont(_entry_font(12))
                 painter.setPen(QColor("#c4c7d0"))
                 painter.drawText(rect.adjusted(8, rect.height() - 30, -8, -6), Qt.AlignmentFlag.AlignCenter, label)
@@ -226,7 +226,7 @@ class _CollectionRow(QWidget):
             painter.setFont(_entry_font(13))
             painter.setPen(QColor("#989eac"))
             subtitle = self.collection.song.artist if self.collection.song is not None else {
-                "daily": "为你推荐的音乐", "fm": "私人漫游", "playlist": "歌单", "song": "歌曲"}.get(self.collection.kind, "音乐合集")
+                "daily": "为你推荐的音乐", "fm": "私人漫游", "dj": "语音介绍与推荐歌曲", "playlist": "歌单", "song": "歌曲"}.get(self.collection.kind, "音乐合集")
             painter.drawText(self._subtitle_rect, Qt.AlignmentFlag.AlignVCenter,
                              painter.fontMetrics().elidedText(subtitle, Qt.TextElideMode.ElideRight,
                                                              round(self._subtitle_rect.width())))

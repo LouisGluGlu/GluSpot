@@ -17,7 +17,7 @@ from api.airplay_discovery import AirPlayDiscovery
 from api.airplay_process import AirPlayProcess
 from api.airplay_group_process import AirPlayGroupProcess
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
-from api.audio_output_volume import AudioOutputVolumeHistory
+from api.audio_output_volume import AudioOutputVolumeHistory, output_volume_target
 from api.windows_audio_sessions import MusicAudioSource, resolve_music_audio_source
 from api.windows_app_audio_routes import AppAudioRouteMigrationTimeout, WindowsAppAudioRoutes
 
@@ -198,7 +198,7 @@ class AudioRouteController:
         return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
 
     def set_volume(self, device_id, volume):
-        value = self._volume_scalar(volume)
+        value = output_volume_target(volume)
         current = self.snapshot()
         device = next((d for d in current.devices if d.id == device_id), None)
         if value is None or device is None or device.volume is None:

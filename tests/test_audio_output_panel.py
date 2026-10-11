@@ -848,23 +848,31 @@ class AudioOutputSurfaceTests(unittest.TestCase):
         return_to_island.assert_not_called()
         self.assertFalse(self.window._audio_output_panel.isVisible())
 
-    def test_owned_library_button_stays_visible_when_transport_hides_and_click_never_sends_playback(self):
+    def test_owned_library_button_shares_idle_hiding_and_revealed_click_never_sends_playback(self):
         callback = Mock()
         self.owner._music_library_back_callback = callback
         self.owner.data_provider._owned_active = lambda: True
-        for fullscreen in (True, False):
+        for index, fullscreen in enumerate((True, False)):
             self.window._fullscreen = fullscreen
             self.window._reset_control_idle(now=100.0)
+            with patch("local.music_surface_window.time.monotonic", return_value=100.0):
+                self.window._sync_window_control_rects()
+                button = self.window._button_rects["library"]
+                self.assertAlmostEqual(button.height(), button.width())
+                self.assertTrue(QRectF(self.window.rect()).contains(button))
             with patch("local.music_surface_window.time.monotonic", return_value=110.0):
                 self.window._sync_window_control_rects()
-                self.assertEqual(set(self.window._button_rects), {"library"})
-                button = self.window._button_rects["library"]
-                self.assertGreaterEqual(button.height(), 44)
-                self.assertGreaterEqual(button.width(), 44)
-                self.assertTrue(QRectF(self.window.rect()).contains(button))
+                self.assertEqual(set(self.window._button_rects), set())
                 point = button.center()
                 event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, position=lambda: point,
                     globalPosition=lambda: QPointF(self.window.mapToGlobal(point.toPoint())), accept=lambda: None)
+                self.window.mousePressEvent(event)
+                self.window.mouseReleaseEvent(event)
+                self.assertEqual(callback.call_count, index)
+            self.window._reset_control_idle(now=120.0)
+            with patch("local.music_surface_window.time.monotonic", return_value=120.0):
+                self.window._sync_window_control_rects()
+                point = self.window._button_rects["library"].center()
                 self.window.mousePressEvent(event)
                 self.assertFalse(self.window._moving)
                 self.assertFalse(self.window._resize_edges)
