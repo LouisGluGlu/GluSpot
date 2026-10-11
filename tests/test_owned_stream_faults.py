@@ -271,6 +271,37 @@ class OwnedStreamFaultTests(unittest.TestCase):
         self.check(101.1)
         self.assertEqual(self.owned._epoch, epoch)
 
+    def test_pending_catalog_buffered_error_returns_to_existing_tail_watchdog_on_failure(self):
+        self.start()
+        self.service.daily_recommendations = lambda source: self.songs
+        self.owned.play_daily()
+        catalog = self.tasks.jobs[-1][0]
+        self.fault(at=100)
+        self.qt.setPosition(3900)
+        self.assertEqual(self.owned.track.position_seconds, 3.9)
+        self.assertEqual(self.owned.status, "loading_catalog")
+        with patch("local.owned_music_player.time.monotonic", return_value=101):
+            self.tasks.completed.emit(catalog, None, "timeout")
+        self.assertIsNotNone(self.owned._stream_fault)
+        self.assertEqual(self.owned._decoded_duration_ms, 4000)
+        self.owned._stream_fault_timer.stop()
+        self.check(102.1)
+        self.assertEqual(self.owned.index, 1)
+        self.assertEqual(self.owned.status, "loading_stream")
+
+    def test_pending_catalog_invalid_media_is_terminal_on_failure_and_keeps_lyrics(self):
+        self.start()
+        self.service.daily_recommendations = lambda source: self.songs
+        self.owned.play_daily()
+        catalog = self.tasks.jobs[-1][0]
+        self.qt.stop()
+        self.qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.InvalidMedia)
+        self.tasks.completed.emit(catalog, None, "timeout")
+        self.assertEqual(self.owned.status, "playback_failed")
+        self.assertFalse(self.owned.track.is_playing)
+        self.assertEqual(self.owned._stream_epoch, 0)
+        self.assertEqual(self.owned.track.timed_lyrics, self.timed_lyrics)
+
     def test_daily_playlist_and_fm_catalogs_share_tail_recovery(self):
         self.service.daily_recommendations = lambda source: self.songs
         self.service.personal_fm = lambda source: self.songs

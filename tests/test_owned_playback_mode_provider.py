@@ -86,6 +86,50 @@ class OwnedModeProviderTests(unittest.TestCase):
         self.assertFalse(self.provider.is_owned_personal_fm())
         self.assertEqual(self.provider.get_owned_playback_modes(), ())
 
+    def test_dj_toggle_is_available_only_in_active_netease_fm_and_saves_confirmed_boolean(self):
+        self.assertIsNone(self.provider.get_owned_personal_dj_enabled())
+        self.assertFalse(self.provider.set_owned_personal_dj_enabled(True))
+        self.player.play_queue((OnlineSong("netease", "one", "One"),))
+        self.assertIsNone(self.provider.get_owned_personal_dj_enabled())
+        self.player.service.personal_fm = lambda *_: (OnlineSong("netease", "two", "Two"),)
+        self.player.service.personal_dj = lambda *_: ()
+        self.player._set_fm_source("netease")
+        self.assertFalse(self.provider.get_owned_personal_dj_enabled())
+        self.assertTrue(self.provider.set_owned_personal_dj_enabled(True))
+        self.assertTrue(self.provider.get_owned_personal_dj_enabled())
+        self.assertEqual(self.saved, [("v2_personal_dj_enabled", True)])
+        self.assertFalse(self.provider.set_owned_personal_dj_enabled(1))
+        self.values["v2_owned_playback_enabled"] = False
+        self.assertIsNone(self.provider.get_owned_personal_dj_enabled())
+        self.assertFalse(self.provider.set_owned_personal_dj_enabled(False))
+        self.assertEqual(self.saved, [("v2_personal_dj_enabled", True)])
+
+    def test_dj_closed_player_does_not_persist_false_success(self):
+        self.player._replace_queue((OnlineSong("netease", "one", "One"),), fm_source="netease")
+        self.player._closed = True
+        self.assertFalse(self.provider.set_owned_personal_dj_enabled(True))
+        self.assertEqual(self.saved, [])
+
+    def test_dj_spectrum_cannot_leak_into_playlist_system_capture_or_paused_voice(self):
+        from tests.test_personal_dj_playback import segments
+        self.player.personal_dj_enabled = True
+        self.player._replace_queue(segments(), fm_source="netease", fm_kind="dj")
+        frame = object()
+        self.provider._owned_audio_bridge.get_personal_dj_audio_frame = lambda: frame
+        self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
+        self.player._stream_epoch = self.player._epoch
+        from dataclasses import replace
+        self.player.track = replace(self.player.track, is_playing=True)
+        self.assertIs(self.provider.get_owned_personal_dj_audio_frame(), frame)
+        self.player.track = replace(self.player.track, is_playing=False)
+        self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
+        self.player.track = replace(self.player.track, is_playing=True)
+        self.values["v2_owned_playback_enabled"] = False
+        self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
+        self.values["v2_owned_playback_enabled"] = True
+        self.player.play_queue((OnlineSong("netease", "one", "One"),))
+        self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
+
 
 if __name__ == "__main__":
     unittest.main()

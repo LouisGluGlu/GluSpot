@@ -13,38 +13,46 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
-import struct
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import wave
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from PySide6.QtCore import QEventLoop, QTimer, qVersion
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtMultimedia import QAudioBufferOutput, QAudioOutput, QMediaPlayer
+from PySide6.QtWidgets import QApplication, QWidget
 
 from api.lyrics import LocalLyricsStore
-from api.online_music import LyricPayload, OnlineMusicService, StreamInfo
+from api.online_music import LyricPayload, OnlineMusicService, OnlineSong, StreamInfo
 from api.owned_stream_cache import OwnedStreamCache
 from local.music_tasks import MusicTasks
+from local.music_surface_window import MusicSurfaceWindow
+from local.owned_audio_bridge import OwnedAudioBridge
 from local.owned_music_player import OwnedMusicPlayer
 
 
-def wav_bytes(seconds):
+def wav_bytes(seconds, frequency=1000):
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as output:
         output.setnchannels(2)
         output.setsampwidth(2)
         output.setframerate(44100)
-        output.writeframes(struct.pack("<hh", 100, -100) * round(44100 * seconds))
+        # Equal-phase stereo survives the production analyzer's mono average.
+        # This is generated PCM; only this process's Qt output is silenced.
+        mono = .28 * np.sin(2 * np.pi * frequency * np.arange(round(44100 * seconds)) / 44100)
+        stereo = np.repeat((mono * 32767).astype("<i2")[:, None], 2, axis=1)
+        output.writeframes(stereo.tobytes())
     return buffer.getvalue()
 
 
 def run_case(output, scenario, timeout):
     output.mkdir(parents=True, exist_ok=True)
-    voice_payload, song_payload = wav_bytes(.7), wav_bytes(1.3)
+    voice_payload, song_payload = wav_bytes(.7), wav_bytes(1.3, 330)
     started, gui_thread = time.monotonic(), threading.get_ident()
     lock = threading.RLock()
     counters, controls = Counter(), {}
@@ -124,7 +132,7 @@ def run_case(output, scenario, timeout):
             with lock:
                 batch = min(counters["personal_dj"], 2)
             resources = []
-            for index in ((1, 2) if batch == 1 else (3, 4)):
+            for index in ((2, 3) if scenario == "fm_toggle" else ((1, 2) if batch == 1 else (3, 4))):
                 song_id = str(100 + index)
                 resources.extend((
                     {"type": "audio", "value": {"audioList": [{
@@ -140,6 +148,12 @@ def run_case(output, scenario, timeout):
             return self.parser._personal_dj_batch({"code": 200, "data": {"aiDjResources": resources}})
 
         def personal_fm(self, source_id="netease"):
+            if scenario == "fm_toggle":
+                note_call("personal_fm")
+                with lock:
+                    identity = "101" if counters["personal_fm"] == 1 else "104"
+                return (OnlineSong("netease", identity, "Synthetic song " + identity,
+                    "Fixture", duration_seconds=1.3),)
             note_call("unexpected_personal_fm")
             raise AssertionError("DJ continuation requested the ordinary FM endpoint")
 
@@ -163,6 +177,24 @@ def run_case(output, scenario, timeout):
     audio = QAudioOutput()
     audio.setVolume(0.0)
     owned = OwnedMusicPlayer(FixtureService(), LocalLyricsStore(root=output / "lyrics"), audio=audio)
+    bridge = OwnedAudioBridge(owned)
+    view_owner = QWidget()
+    view_owner.data_provider = SimpleNamespace(
+        get_owned_playback_mode=lambda: owned.playback_mode,
+        set_owned_playback_mode=owned.set_playback_mode,
+        get_owned_playback_modes=owned.available_playback_modes,
+        is_owned_personal_fm=owned.is_personal_fm,
+        get_owned_personal_dj_enabled=lambda: owned.personal_dj_enabled,
+        set_owned_personal_dj_enabled=owned.set_personal_dj_enabled,
+        is_owned_personal_dj_speaking=owned.is_personal_dj_speaking,
+        get_owned_personal_dj_audio_frame=bridge.get_personal_dj_audio_frame,
+    )
+    surface = MusicSurfaceWindow(view_owner)
+    surface._timer.stop()
+    surface._audio_output_status_timer.stop()
+    if bridge.output is not None:
+        bridge.output.audioBufferReceived.connect(lambda buffer: counters.update(
+            {"decoded_valid_pcm_buffers": int(buffer.isValid() and buffer.frameCount() > 0)}))
     player, loop, timer = owned.player, QEventLoop(), QTimer()
     timer.setInterval(20)
     seen_epochs = set()
@@ -171,10 +203,20 @@ def run_case(output, scenario, timeout):
         song = owned.queue[owned.index] if 0 <= owned.index < len(owned.queue) else None
         label = (song.song_id.removeprefix("dj:") if song.media_kind == "dj_voice" else "song" + song.song_id) if song else ""
         track = owned.track
+        surface._sync_owned_playback_mode()
+        surface._update_personal_dj_control(time.monotonic())
+        frame = bridge.get_personal_dj_audio_frame()
+        position = player.position() / 1000.0
+        with bridge._dj_lock:
+            aligned = frame is not None and any(start <= position < end and measured is frame
+                for start, end, measured in bridge._dj_frames)
         return {"at": elapsed(), "kind": kind, "value": value, "segment": label,
             "epoch": owned._epoch, "position_ms": player.position(), "duration_ms": player.duration(),
             "qt_state": player.playbackState().name, "owned_state": owned.status,
             "is_playing": bool(track and track.is_playing),
+            "dj_bands": [frame.low, frame.mid, frame.high] if frame is not None else None,
+            "dj_frame_matches_current_presentation": aligned,
+            "dj_ui_consumed_same_frame": frame is not None and surface._dj_audio_frame == frame,
             "source_is_local_file": player.source().isLocalFile(),
             "song_lyrics_loaded": bool(track and track.lyrics == ("Synthetic first line", "Synthetic second line"))}
 
@@ -192,6 +234,8 @@ def run_case(output, scenario, timeout):
         prefix = label + "_pause"
         if prefix + "_at" not in controls and sample["position_ms"] >= 100:
             controls[prefix + "_accepted"] = owned.send_playback_command("toggle_play_pause")
+            if label.startswith("voice"):
+                controls[prefix + "_dj_frame_cleared_when_paused"] = bridge.get_personal_dj_audio_frame() is None
             controls[prefix + "_at"] = elapsed()
             controls[prefix + "_position"] = player.position()
             controls[prefix + "_epoch"] = owned._epoch
@@ -212,7 +256,25 @@ def run_case(output, scenario, timeout):
             if sample["epoch"] not in seen_epochs:
                 seen_epochs.add(sample["epoch"])
                 segments.append(sample["segment"])
-        if scenario == "pause":
+        if scenario == "fm_toggle":
+            if sample["segment"] == "song101" and sample["position_ms"] >= 100 and "enabled" not in controls:
+                epoch, source, position = owned._epoch, player.source(), player.position()
+                controls["enabled"] = owned.set_personal_dj_enabled(True)
+                controls["current_song_unchanged"] = (owned._epoch == epoch and player.source() == source
+                    and player.position() == position and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+            if sample["segment"] == "voice2" and sample["position_ms"] >= 100 and "disabled" not in controls:
+                controls["voice_pause_accepted"] = owned.send_playback_command("toggle_play_pause")
+                controls["paused_voice_has_no_frequency_frame"] = bridge.get_personal_dj_audio_frame() is None
+                controls["disabled"] = owned.set_personal_dj_enabled(False)
+                controls["disabled_at"] = elapsed()
+            if sample["segment"] == "song102" and "disabled_at" in controls and "song_resumed" not in controls:
+                if elapsed() - controls["disabled_at"] >= .2 and player.isSeekable():
+                    controls["disabled_voice_song_remains_paused"] = (
+                        player.playbackState() == QMediaPlayer.PlaybackState.PausedState and not owned.track.is_playing)
+                    controls["song_resumed"] = owned.send_playback_command("toggle_play_pause")
+            if sample["segment"] == "song103" and sample["position_ms"] >= 100:
+                loop.quit()
+        elif scenario == "pause":
             if sample["segment"] in {"voice1", "song101"}:
                 pause_round(sample["segment"], sample)
             if sample["segment"] == "voice2" and sample["position_ms"] >= 100:
@@ -247,17 +309,30 @@ def run_case(output, scenario, timeout):
     report = None
     cache = owned.stream_cache
     try:
-        accepted = owned.play_personal_dj("netease")
+        accepted = owned.play_personal_fm("netease") if scenario == "fm_toggle" else owned.play_personal_dj("netease")
         timer.start()
         loop.exec()
         final = snapshot("final")
         with lock:
             counts, calls, http = dict(counters), list(service_calls), list(requests)
         established = [sample for sample in observations if sample["is_playing"]]
+        measured = [sample for sample in observations if sample["dj_bands"] is not None
+            and max(sample["dj_bands"]) > .02]
         errors = [event for event in events if event["kind"] == "error"]
         checks = {
             "dj_start_accepted": bool(accepted),
             "real_qmedia_player": type(player) is QMediaPlayer,
+            "real_qt_audio_buffer_output_connected": type(bridge.output) is QAudioBufferOutput,
+            "actual_decoded_pcm_received_without_casting": counters.get("decoded_valid_pcm_buffers", 0) > 0 and not bridge._direct,
+            "speech_frequency_nonzero_from_actual_decoder": bool(measured),
+            "decoded_sine_selects_actual_mid_band": bool(measured) and all(
+                sample["dj_bands"][1] > max(sample["dj_bands"][0], sample["dj_bands"][2]) for sample in measured),
+            "frequency_frames_match_actual_presentation_clock": bool(measured) and all(
+                sample["dj_frame_matches_current_presentation"] for sample in measured),
+            "music_surface_consumes_actual_pcm_frame": bool(measured) and all(
+                sample["dj_ui_consumed_same_frame"] for sample in measured),
+            "ordinary_music_has_no_dj_frequency_frame": all(
+                sample["dj_bands"] is None for sample in observations if sample["segment"].startswith("song")),
             "production_default_complete_audio_cache": type(cache) is OwnedStreamCache,
             "real_music_task_workers": all(type(worker) is MusicTasks for worker in
                 (owned.tasks, owned.artwork_tasks, owned.prefetch_tasks, owned.download_tasks)),
@@ -276,13 +351,23 @@ def run_case(output, scenario, timeout):
             "no_terminal_failure": owned.status not in {"playback_failed", "stream_unavailable", "catalog_unavailable"},
             "no_timeout": not timed_out,
         }
-        if scenario == "sequence":
+        if scenario == "fm_toggle":
+            checks.update({"starts_in_ordinary_fm": counts.get("personal_fm", 0) > 0,
+                "same_fm_context_has_real_dj_batch": counts.get("personal_dj", 0) > 0 and owned.is_personal_fm(),
+                "enable_preserves_current_decoded_song": bool(controls.get("enabled") and controls.get("current_song_unchanged")),
+                "disable_paused_voice_preserves_pause": bool(controls.get("disabled") and controls.get("disabled_voice_song_remains_paused")),
+                "pause_clears_actual_speech_frequency_frame": bool(controls.get("paused_voice_has_no_frequency_frame")),
+                "introduced_song_resumed_after_disable": bool(controls.get("song_resumed")),
+                "disabled_dj_cannot_play_later_introduction": "voice3" not in segments and not owned.personal_dj_enabled,
+                "real_music_voice_music_order": segments[:4] == ["song101", "voice2", "song102", "song103"]})
+        elif scenario == "sequence":
             checks.update({"two_dj_batches_requested": counts.get("personal_dj", 0) >= 2,
                 "voice_song_order_preserved_through_natural_continuation": segments[:6] == ["voice1", "song101", "voice2", "song102", "voice3", "song103"],
                 "natural_eof_advances_to_second_batch": eof_count >= 5,
                 "second_batch_song_clock_advanced": final["segment"] == "song103" and final["position_ms"] >= 300})
         elif scenario == "pause":
             checks.update({"ordered_voice_song_after_pause": segments[:3] == ["voice1", "song101", "voice2"]})
+            checks["pause_clears_actual_speech_frequency_frame"] = bool(controls.get("voice1_pause_dj_frame_cleared_when_paused"))
             for label in ("voice1", "song101"):
                 for suffix in ("accepted", "stable", "resumed", "advanced"):
                     name = label + "_pause_" + suffix
@@ -306,6 +391,9 @@ def run_case(output, scenario, timeout):
             "limits": "No real accounts, DJ persona identity, audible continuity, physical outputs, acoustic sync or sustained internet validation."}
     finally:
         timer.stop()
+        surface.shutdown()
+        view_owner.close()
+        bridge.close()
         owned.close()
         app.processEvents()
         server.shutdown()
@@ -313,6 +401,8 @@ def run_case(output, scenario, timeout):
         server_thread.join(timeout=2)
     if report is not None:
         report["checks"]["cache_own_session_removed_after_close"] = not cache._session.exists()
+        report["checks"]["closed_bridge_has_no_frequency_frame_or_retained_timeline"] = (
+            bridge.get_personal_dj_audio_frame() is None and not bridge._dj_frames)
         report["passed"] = all(report["checks"].values())
         (output / "result.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
@@ -321,11 +411,11 @@ def run_case(output, scenario, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path(".runtime/personal-dj-smoke"))
-    parser.add_argument("--scenario", choices=("all", "sequence", "pause", "seek", "repeat"), default="all")
+    parser.add_argument("--scenario", choices=("all", "sequence", "pause", "seek", "repeat", "fm_toggle"), default="all")
     parser.add_argument("--timeout", type=float, default=12)
     options = parser.parse_args()
     reports = []
-    for scenario in (("sequence", "pause", "seek", "repeat") if options.scenario == "all" else (options.scenario,)):
+    for scenario in (("sequence", "pause", "seek", "repeat", "fm_toggle") if options.scenario == "all" else (options.scenario,)):
         report = run_case(options.output.resolve() / scenario, scenario, max(8, min(options.timeout, 30)))
         reports.append(report)
         print(json.dumps({key: report[key] for key in ("passed", "scenario", "checks", "elapsed_seconds")}, ensure_ascii=False), flush=True)

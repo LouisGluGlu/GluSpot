@@ -1759,7 +1759,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                     window.shutdown()
                     owner.close()
 
-    def test_wheel_browsed_lyric_is_crisp_without_changing_playback_reading(self):
+    def test_wheel_browsing_clears_all_visible_lyrics_without_changing_playback_reading(self):
         self.owner.media_track_id = "song"
         self.owner.timed_lyrics = [
             (float(index * 3), f"line {index}") for index in range(6)
@@ -1786,8 +1786,65 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertTrue(browsed)
         self.assertEqual(browsed[-1].kwargs["blur_level"], 0)
         self.assertTrue(playing)
-        self.assertEqual(playing[-1].kwargs["blur_level"], 1)
+        self.assertEqual(playing[-1].kwargs["blur_level"], 0)
+        drawn = future.call_args_list + sprung.call_args_list
+        self.assertGreaterEqual(len({call.args[3] for call in drawn}), 4)
+        self.assertTrue(all(call.kwargs.get("blur_level", 0) == 0 for call in drawn))
         self.assertEqual(self.window._lyric_motion.active_index, 2)
+        self.assertEqual(self.owner.media_position_seconds, 6.4)
+        self.assertEqual(self.owner.seek_calls, [])
+
+        # Native pixels of a neighboring sentence must change from the normal
+        # blurred raster to sharp ink, not merely mark the anchor as crisp.
+        clear = output.copy()
+        sample_rect = self.window._lyric_hit_rects[4].toAlignedRect()
+        normal_levels = tuple(float(self.window._lyric_group_blur_level(row, 3)) for row in range(6))
+        with (
+            patch("local.music_surface_window.time.monotonic", return_value=100.1),
+            patch.object(self.window, "_lyric_blur_follow_levels", return_value=(normal_levels, True)),
+        ):
+            self.window.render(output)
+        clear_crop = clear.copy(sample_rect)
+        blurred_crop = output.copy(sample_rect)
+        clear_pixels = clear_crop.bits().tobytes()
+        blurred_pixels = blurred_crop.bits().tobytes()
+        self.assertGreater(sum(left != right for left, right in zip(clear_pixels, blurred_pixels)), 100)
+
+    def test_clear_lyric_browse_restores_real_focus_after_automatic_return(self):
+        self.owner.media_track_id = "song"
+        self.owner.timed_lyrics = [(float(index * 3), f"line {index}") for index in range(7)]
+        self.owner.media_position_seconds = 6.4
+        self.owner._estimated_media_position = lambda _now: self.owner.media_position_seconds
+        self.window.resize(960, 540)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        with patch("local.music_surface_window.time.monotonic", return_value=100.0):
+            self.window.render(output)
+            self.window.wheelEvent(_WheelEvent(self.window._lyric_clip_rect.center(), -240))
+        with patch("local.music_surface_window.time.monotonic", return_value=100.1):
+            self.window.render(output)
+        self.assertEqual(self.window._lyric_blur_follow_state["levels"], (0.0,) * 7)
+        with patch("local.music_surface_window.time.monotonic", return_value=104.25):
+            self.window.render(output)
+        self.assertIsNone(self.window._browse_index)
+        self.assertIsNotNone(self.window._browse_return_from)
+        self.assertEqual(self.window._lyric_blur_follow_state["levels"], (0.0,) * 7)
+        with patch("local.music_surface_window.time.monotonic", return_value=104.5):
+            self.window.render(output)
+        self.assertIsNone(self.window._browse_return_from)
+        self.assertEqual(self.window._lyric_blur_follow_state["focus"], 2)
+        restored = self.window._lyric_blur_follow_state["levels"]
+        self.assertEqual(restored[2], 0.0)
+        self.assertGreater(restored[3], 0.0)
+        self.assertLess(restored[3], 1.0)
+        self.assertTrue(self.window._lyric_blur_follow_state["moving"])
+        # The last return frame hands its pose to the ordinary position spring;
+        # blur therefore restores smoothly as that remaining travel settles.
+        for step in range(1, 121):
+            with patch("local.music_surface_window.time.monotonic", return_value=104.5 + step / 60.0):
+                self.window.render(output)
+        self.assertEqual(self.window._lyric_blur_follow_state["levels"], (1.0, 1.0, 0.0, 1.0, 1.0, 2.0, 2.0))
+        self.assertEqual(self.owner.media_position_seconds, 6.4)
+        self.assertEqual(self.owner.seek_calls, [])
 
     def test_wheel_browse_refreshes_timeout_and_returns_focus_to_live_line(self):
         self.owner.media_track_id = "song"
@@ -5812,6 +5869,40 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._browse_until, 0.0)
         self.assertIsNone(self.window._browse_return_from)
         self.assertFalse(self.window._seek_pending)
+
+    def test_lyric_selection_ends_clear_browse_before_asynchronous_seek_reply(self):
+        self.owner.media_track_id = "song"
+        self.owner.timed_lyrics = [(float(index * 3), f"line {index}") for index in range(7)]
+        self.owner.media_position_seconds = 6.4
+        self.owner._estimated_media_position = lambda _now: self.owner.media_position_seconds
+        self.owner.last_media_refresh_at = 90.0
+        callbacks = []
+        self.owner._run_background = lambda name, callback: callbacks.append((name, callback))
+        self.owner.seek_playback_position = lambda _seconds: False
+        self.window.resize(960, 540)
+        output = QImage(self.window.size(), QImage.Format.Format_RGB32)
+        with patch("local.music_surface_window.time.monotonic", return_value=100.0):
+            self.window.render(output)
+            self.window.wheelEvent(_WheelEvent(self.window._lyric_clip_rect.center(), -120))
+        with patch("local.music_surface_window.time.monotonic", return_value=100.1):
+            self.window.render(output)
+            self.window._seek_to_lyric(4)
+        self.assertIsNone(self.window._browse_index)
+        self.assertIsNone(self.window._browse_return_from)
+        self.assertEqual(self.window._browse_until, 0.0)
+        self.assertTrue(self.window._seek_pending)
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(callbacks[0][0], "LyricSeek")
+        with patch("local.music_surface_window.time.monotonic", return_value=100.2):
+            self.window.render(output)
+        self.assertFalse(self.window._lyric_blur_follow_state.get("browse_clear", False))
+        self.assertEqual(self.window._lyric_blur_follow_state["focus"], 2)
+        self.assertEqual(self.owner.media_position_seconds, 6.4)
+        callbacks[0][1]()
+        self.assertFalse(self.window._seek_pending)
+        self.assertIsNone(self.window._pending_backward_seek)
+        self.assertEqual(self.owner.last_media_refresh_at, 90.0)
+        self.assertEqual(self.owner.media_position_seconds, 6.4)
 
     def test_lyric_click_without_seek_capability_still_releases_browse(self):
         self.owner.media_track_id = "song"

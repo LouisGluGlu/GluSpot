@@ -287,7 +287,6 @@ class MusicLibraryController(QObject):
                 self._collections = (
                     LibraryCollection("daily", "daily", "每日推荐", ""),
                     LibraryCollection("fm", "fm", "私人漫游", ""),
-                    LibraryCollection("dj", "dj", "私人DJ", ""),
                 )
             if page is not None:
                 self._append_catalog(page)
@@ -388,8 +387,6 @@ class MusicLibraryController(QObject):
             accepted = self.player.play_daily(self._source)
         elif row.kind == "fm":
             accepted = self.player.play_personal_fm(self._source)
-        elif row.kind == "dj":
-            accepted = self.player.play_personal_dj(self._source)
         elif row.kind == "playlist":
             accepted = self.player.play_playlist(self._source, row.playlist_id)
         elif row.kind == "song" and row.song is not None and row.song.source_id == self._source:
@@ -397,9 +394,11 @@ class MusicLibraryController(QObject):
         else:
             accepted = False
         if not accepted:
+            failure_reported = self._opening is None
             self._opening = None
             self.window.finish_open_transition()
-            self.window.set_error("此项目暂不可播放，请重试")
+            if not failure_reported:
+                self.window.set_error("此项目暂不可播放，请重试")
         elif self.player.track is not None and self.player.track is not previous_track:
             self._player_changed()
         elif self._opening is not None:
@@ -411,6 +410,9 @@ class MusicLibraryController(QObject):
             # old position/state changes synchronously before this point.
             self._opening_ready = True
         if self._opening and status in {"busy", "catalog_unavailable", "stream_unavailable", "playback_failed"}:
+            continuing_current = (status in {"busy", "catalog_unavailable"}
+                and not self._opening_ready and self.player.track is not None
+                and self.player.track.is_playing)
             self._opening = None
             self.window.finish_open_transition()
             self.window.set_loading(False)
@@ -434,7 +436,10 @@ class MusicLibraryController(QObject):
                 "too_large": "当前音频过大，暂时无法播放，请选择其他歌曲",
                 "storage": "无法保存播放缓存，请检查磁盘可用空间后重试",
             }
-            self.window.set_error(failures.get(getattr(self.player, "failure_reason", ""), messages[status]))
+            message = failures.get(getattr(self.player, "failure_reason", ""), messages[status])
+            if continuing_current:
+                message += "；当前歌曲继续播放"
+            self.window.set_error(message)
 
     def _player_changed(self):
         if self._opening is None or self.player.track is None:

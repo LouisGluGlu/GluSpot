@@ -56,8 +56,10 @@ implementation code or assets are copied. See the existing
 
 ## NetEase Private DJ
 
-The 网易云 music library adds **私人DJ** alongside daily recommendations and
-ordinary personal roaming. The pinned `aidj_content_rcmd` module returns an
+The original October 11 implementation exposed a separate **私人DJ** library
+entry. The subsequent [FM DJ/control follow-up](personal-fm-dj-controls.md)
+removes that entry: DJ is an optional feature of **私人漫游**, controlled on its
+song page. The pinned `aidj_content_rcmd` module returns an
 ordered `aiDjResources` list containing `audio` and `song` resources. Authenticated
 probes succeeded with genuine voice addresses, durations in seconds, expiry
 and related song IDs. Related covers come from matching `songData`. The strict

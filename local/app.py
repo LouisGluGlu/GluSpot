@@ -288,6 +288,7 @@ class LocalIslandApp:
         self.online_music = make_online_music_service()
         self.owned_player = OwnedMusicPlayer(self.online_music, self.system_provider.lyrics_store, self.app)
         self.owned_player.set_playback_mode(self.settings.get("v2_owned_playback_mode", "sequential"))
+        self.owned_player.set_personal_dj_enabled(self.settings.get("v2_personal_dj_enabled", False))
         self.data_provider = PlaybackSourceProvider(self.system_provider, self.owned_player, self._runtime_setting)
         self.data_provider.settings_setter = self.settings.set
         self.app.aboutToQuit.connect(self.data_provider.close_audio_outputs)
@@ -301,6 +302,8 @@ class LocalIslandApp:
         self.window.settings_setter = self.settings.set
         self._apply_startup_setting()
         self._apply_saved_settings()
+        self._owned_surface_key = None
+        self.owned_player.changed.connect(self._owned_playback_changed)
         self.settings_window = SettingsWindow(self.window, self.settings)
         self.playback_entry = PlaybackEntryController(self.settings, self.system_provider, self.window,
                                                        self.online_music, self.app)
@@ -328,9 +331,33 @@ class LocalIslandApp:
             return bool(getattr(window, "enable_dual_line_lyrics", DEFAULT_SETTINGS[key]))
         return self.settings.get(key, default)
 
+    def _owned_playback_changed(self):
+        """Publish source/play-state boundaries before another lyric poll.
+
+        Owned player mutations and their changed signal belong to Qt's GUI
+        thread. Both music surfaces read this same island owner; ordinary
+        position/artwork/lyric updates keep the existing bounded poll cadence.
+        """
+        active = self.data_provider._owned_active()
+        track = self.owned_player.track if active else None
+        key = (active, str(getattr(track, "track_id", "") or ""),
+               bool(getattr(track, "is_playing", False)))
+        if key == self._owned_surface_key:
+            return
+        self._owned_surface_key = key
+        self.window.last_media_refresh_at = 0.0
+        if self.window._refresh_media_data(time.monotonic()):
+            self.window.update()
+            surface = getattr(self.window, "music_fullscreen_overlay", None)
+            if surface is not None and surface.isVisible():
+                surface._finish_stale_track_transition()
+                surface.update()
+
     def _playback_mode_changed(self, key, value):
         if key == "v2_owned_playback_mode":
             self.owned_player.set_playback_mode(value)
+        if key == "v2_personal_dj_enabled":
+            self.owned_player.set_personal_dj_enabled(value)
         if key == "v2_owned_playback_enabled" and value is False:
             self.owned_player.stop()
         if key == "v2_system_capture_enabled" and value is False:

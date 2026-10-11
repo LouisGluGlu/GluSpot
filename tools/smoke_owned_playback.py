@@ -47,7 +47,7 @@ def _wav_bytes() -> bytes:
     return buffer.getvalue()
 
 
-def run(output: Path, timeout: float) -> dict:
+def run(output: Path, timeout: float, catalog_failure_delay: float | None = None) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     payload = _wav_bytes()
     (output / "fixture.wav").write_bytes(payload)
@@ -56,6 +56,7 @@ def run(output: Path, timeout: float) -> dict:
     requests = []
     service_calls = []
     states, statuses, positions, errors, owned_statuses = [], [], [], [], []
+    catalog_controls = {}
 
     def elapsed():
         return round(time.monotonic() - started, 6)
@@ -104,6 +105,11 @@ def run(output: Path, timeout: float) -> dict:
     loopback_url = f"http://127.0.0.1:{server.server_port}/fixture.wav"
 
     class FixtureService:
+        def daily_recommendations(self, source_id):
+            service_calls.append({"operation": "catalog", "worker_thread": threading.get_ident() != main_thread})
+            time.sleep(catalog_failure_delay or 0)
+            raise RuntimeError("Synthetic catalog failure")
+
         def stream_url(self, source_id, song_id):
             service_calls.append({"operation": "stream", "worker_thread": threading.get_ident() != main_thread})
             return StreamInfo(source_id, song_id, loopback_url, True, quality="fixture-pcm")
@@ -132,6 +138,18 @@ def run(output: Path, timeout: float) -> dict:
 
     def check():
         nonlocal timed_out
+        if catalog_failure_delay is not None:
+            if "requested" not in catalog_controls and player.position() >= 400:
+                epoch, source = owned._epoch, player.source()
+                catalog_controls["requested"] = owned.play_daily("netease")
+                catalog_controls["request_at"] = elapsed()
+                catalog_controls["remaining_at_request_seconds"] = (player.duration() - player.position()) / 1000
+                catalog_controls["source_retained"] = (owned._epoch == epoch and player.source() == source
+                    and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+            failed = any(sample["status"] == "catalog_unavailable" for sample in owned_statuses)
+            if failed and owned.track is not None and owned.track.is_playing:
+                if abs(owned.track.position_seconds - player.position() / 1000) <= .05:
+                    catalog_controls["actual_clock_after_failure"] = True
         if (any(sample["status"] == "EndOfMedia" for sample in statuses)
                 and sum(call["operation"] == "stream" for call in service_calls) >= 2
                 and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
@@ -146,7 +164,10 @@ def run(output: Path, timeout: float) -> dict:
     timer.timeout.connect(check)
     accepted = False
     try:
-        accepted = owned.play_queue((OnlineSong("netease", "loopback-fixture", "Qt decode clock fixture", duration_seconds=2.0),))
+        songs = (OnlineSong("netease", "loopback-fixture", "Qt decode clock fixture", duration_seconds=2.0),)
+        if catalog_failure_delay is not None:
+            songs += (OnlineSong("netease", "next-fixture", "Next Qt fixture", duration_seconds=2.0),)
+        accepted = owned.play_queue(songs)
         timer.start()
         loop.exec()
         last_track = owned.track
@@ -168,9 +189,24 @@ def run(output: Path, timeout: float) -> dict:
             "no_qt_errors": not errors,
             "no_timeout": not timed_out,
         }
+        if catalog_failure_delay is not None:
+            failed_at = next((sample["at"] for sample in owned_statuses if sample["status"] == "catalog_unavailable"), None)
+            eof_at = next((sample["at"] for sample in statuses if sample["status"] == "EndOfMedia"), None)
+            checks.update({
+                "new_catalog_requested_while_real_music_played": bool(catalog_controls.get("requested")),
+                "request_retains_actual_source_and_qt_playing_state": bool(catalog_controls.get("source_retained")),
+                "catalog_failure_observed": failed_at is not None,
+                "failure_timing_matches_scenario": failed_at is not None and eof_at is not None
+                    and ((failed_at < eof_at) if catalog_failure_delay < catalog_controls["remaining_at_request_seconds"]
+                         else (failed_at > eof_at)),
+                "actual_clock_observed_after_failure": bool(catalog_controls.get("actual_clock_after_failure")),
+                "old_queue_reaches_next_song_after_real_eof": last_track is not None
+                    and last_track.track_id == "owned:netease:next-fixture" and owned.index == 1,
+            })
         report = {
             "passed": all(checks.values()), "checks": checks, "qt_version": qVersion(),
             "elapsed_seconds": elapsed(), "fixture": {"duration_seconds": 2, "sample_rate": 44100, "channels": 2, "pcm_bits": 16, "bytes": len(payload)},
+            "catalog_failure_delay_seconds": catalog_failure_delay, "catalog_controls": catalog_controls,
             "scope": "Loopback HTTP and generated PCM only; no accounts, external requests, capture, global mute or global volume writes.",
             "limits": "Real Qt decoding, worker handoff, playback clock and EOF only; not audible playback, online authentication, AirPlay, acoustic synchronization or long-session validation.",
             "requests": list(requests), "service_calls": list(service_calls), "playback_states": list(states),
@@ -192,8 +228,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path(".runtime/owned-playback-smoke"))
     parser.add_argument("--timeout", type=float, default=12.0)
+    parser.add_argument("--catalog-failure-delay", type=float, help="Synthetic rejected catalog, before/after real old-song EOF")
     options = parser.parse_args()
-    report = run(options.output.resolve(), max(3.0, options.timeout))
+    delay = None if options.catalog_failure_delay is None else max(.1, min(5.0, options.catalog_failure_delay))
+    report = run(options.output.resolve(), max(3.0, options.timeout), delay)
     print(json.dumps({"passed": report["passed"], "checks": report["checks"], "elapsed_seconds": report["elapsed_seconds"], "result": str((options.output / "result.json").resolve())}, ensure_ascii=False, indent=2))
     return 0 if report["passed"] else 1
 

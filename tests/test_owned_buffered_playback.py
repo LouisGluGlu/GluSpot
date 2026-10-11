@@ -167,6 +167,47 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.assertTrue(self.qt.url.isLocalFile())
         self.assertFalse(any(token[0] == "audio_prefetch" for token, _ in self.downloads.jobs))
 
+    def test_enabling_dj_retains_current_complete_file_lease_and_revokes_only_future_download(self):
+        from tests.test_personal_dj_playback import segments
+        self.service.personal_dj = Mock(return_value=segments())
+        self.service.personal_fm = Mock(return_value=(self.songs[2],))
+        self.owned._replace_queue(self.songs, fm_source="netease")
+        self.perform(self.tasks, "stream")
+        _, active = self.perform(self.downloads, "audio")
+        old_token, old_action = next(job for job in self.downloads.jobs if job[0][0] == "audio_prefetch")
+        old_prepared = old_action()
+        source = self.qt.url
+        current_epoch = self.owned._epoch
+        self.owned.set_personal_dj_enabled(True)
+        self.assertEqual(self.qt.url, source)
+        self.assertEqual(self.owned._epoch, current_epoch)
+        self.assertIs(self.owned._prepared_audio, active)
+        self.assertIn(active.lease, self.cache.leases)
+        self.downloads.completed.emit(old_token, old_prepared, None)
+        self.assertIn(old_prepared.lease, self.cache.released)
+        self.assertNotIn(active.lease, self.cache.released)
+        self.perform(self.owned.prefetch_tasks, "fm_prefetch")
+        _, voice = self.perform(self.downloads, "audio_prefetch")
+        self.assertEqual(voice.stream.quality, "dj_voice")
+        self.owned._end_current_stream()
+        self.assertIs(self.owned._prepared_audio, voice)
+        self.assertEqual(Path(self.qt.url.toLocalFile()), voice.path)
+
+    def test_enabling_dj_during_current_download_does_not_cancel_or_unpin_current_audio(self):
+        from tests.test_personal_dj_playback import segments
+        self.service.personal_dj = Mock(return_value=segments())
+        self.service.personal_fm = Mock(return_value=self.songs)
+        self.owned._replace_queue(self.songs, fm_source="netease")
+        self.perform(self.tasks, "stream")
+        token, action = next(job for job in self.downloads.jobs if job[0][0] == "audio")
+        self.owned.set_personal_dj_enabled(True)
+        prepared = action()
+        self.downloads.completed.emit(token, prepared, None)
+        self.assertIs(self.owned._prepared_audio, prepared)
+        self.assertIn(prepared.lease, self.cache.leases)
+        self.assertTrue(self.owned.track.is_playing)
+        self.assertEqual(self.owned.track.track_id, "owned:netease:0")
+
     def test_close_invalidates_pending_io_and_releases_late_artifact(self):
         self.owned.play_queue(self.songs)
         self.perform(self.tasks, "stream")

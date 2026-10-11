@@ -13,7 +13,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication
 
 from api.lyrics import LocalLyricsStore
-from api.online_music import CatalogPage, OnlineSong, StreamInfo
+from api.online_music import CatalogPage, LyricPayload, OnlineSong, StreamInfo
 from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider
 from api.models import ColorToken
 from local.owned_music_player import OwnedMusicPlayer
@@ -55,6 +55,7 @@ class Player(QObject):
         self.state = QMediaPlayer.PlaybackState.StoppedState
         self.playbackStateChanged.emit(self.state)
     def setSource(self, url): self.url = url
+    def source(self): return self.url
     def play(self):
         self.state = QMediaPlayer.PlaybackState.PlayingState
         self.playbackStateChanged.emit(self.state)
@@ -655,6 +656,214 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.tasks.completed.emit(self.tasks.jobs[-1][0], StreamInfo("netease", "1", "https://example.test/new", True), None)
         self.assertEqual(self.player.status, "playing")
 
+    def test_loading_source_ignores_delayed_old_qt_clock_duration_and_playing_signals(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        self.qt_player.positionChanged.emit(85000)
+        self.qt_player.durationChanged.emit(120000)
+        self.player.send_playback_command("next")
+        self.qt_player.positionChanged.emit(88000)
+        self.qt_player.durationChanged.emit(120000)
+        self.qt_player.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+        self.assertEqual(self.player.track.track_id, "owned:netease:2")
+        self.assertEqual(self.player.track.position_seconds, 0)
+        self.assertEqual(self.player.track.duration_seconds, 150)
+        self.assertFalse(self.player.track.is_playing)
+        self.assertEqual(self.player.status, "loading_stream")
+        self.authorize_current()
+        self.qt_player.positionChanged.emit(1000)
+        self.qt_player.durationChanged.emit(149000)
+        self.assertEqual(self.player.track.position_seconds, 1)
+        self.assertEqual(self.player.track.duration_seconds, 149)
+        self.assertTrue(self.player.track.is_playing)
+
+    def pending_daily_catalog(self):
+        self.service.daily_recommendations = lambda source: self.songs
+        self.player.play_daily()
+        return next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "catalog")
+
+    def test_failed_catalog_restores_current_clock_duration_and_original_queue_eof(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        self.qt_player.durationChanged.emit(120000)
+        old_source, old_epoch = self.qt_player.source(), self.player._epoch
+        catalog = self.pending_daily_catalog()
+        # Real decoder duration can arrive after the new request began.
+        self.qt_player.durationChanged.emit(119000)
+        self.qt_player.playbackStateChanged.emit(QMediaPlayer.PlaybackState.PlayingState)
+        self.assertEqual(self.player.status, "loading_catalog")
+        with patch.object(self.qt_player, "play", wraps=self.qt_player.play) as play:
+            self.tasks.completed.emit(catalog, None, "timeout")
+        play.assert_not_called()
+        self.assertEqual(self.player.status, "catalog_unavailable")
+        self.assertTrue(self.player.track.is_playing)
+        self.assertEqual((self.qt_player.source(), self.player._stream_epoch), (old_source, old_epoch))
+        self.assertEqual(self.player._decoded_duration_ms, 119000)
+        self.assertEqual(self.player.track.duration_seconds, 119)
+        self.qt_player.positionChanged.emit(90000)
+        self.assertEqual(self.player.track.position_seconds, 90)
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.track.track_id, "owned:netease:2")
+        self.assertEqual(self.player.status, "loading_stream")
+
+    def test_busy_catalog_keeps_authorized_source_clock_without_reopening(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        old_track = self.player.track
+        self.tasks.accepted = False
+        with patch.object(self.qt_player, "play", wraps=self.qt_player.play) as play, \
+                patch.object(self.qt_player, "stop", wraps=self.qt_player.stop) as stop:
+            self.pending_daily_catalog()
+        play.assert_not_called()
+        stop.assert_not_called()
+        self.assertIs(self.player.track, old_track)
+        self.assertEqual(self.player.status, "busy")
+        self.qt_player.positionChanged.emit(25000)
+        self.assertEqual(self.player.track.position_seconds, 25)
+
+    def test_pause_during_failed_catalog_is_never_undone_by_restoration(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        catalog = self.pending_daily_catalog()
+        self.player.send_playback_command("toggle_play_pause")
+        with patch.object(self.qt_player, "play", wraps=self.qt_player.play) as play:
+            self.tasks.completed.emit(catalog, None, "network")
+        play.assert_not_called()
+        self.assertEqual(self.qt_player.playbackState(), QMediaPlayer.PlaybackState.PausedState)
+        self.assertFalse(self.player.track.is_playing)
+        self.assertEqual(self.player._stream_epoch, self.player._epoch)
+        self.player.send_playback_command("toggle_play_pause")
+        self.qt_player.positionChanged.emit(30000)
+        self.assertTrue(self.player.track.is_playing)
+        self.assertEqual(self.player.track.position_seconds, 30)
+
+    def test_old_eof_during_pending_catalog_is_deferred_then_continues_original_queue(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        catalog = self.pending_daily_catalog()
+        self.qt_player.stop()
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.index, 0)
+        self.assertFalse(self.player.track.is_playing)
+        self.assertEqual(self.player.status, "loading_catalog")
+        self.tasks.completed.emit(catalog, None, "timeout")
+        self.assertEqual(self.player.index, 1)
+        self.assertFalse(self.player.track.is_playing)
+        self.assertEqual(self.player.status, "loading_stream")
+        self.authorize_current()
+        self.assertTrue(self.player.track.is_playing)
+
+    def test_new_catalog_success_owns_playback_after_old_deferred_eof(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        catalog = self.pending_daily_catalog()
+        self.qt_player.stop()
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        replacement = (OnlineSong("qq", "new", "new song"),)
+        self.tasks.completed.emit(catalog, replacement, None)
+        self.assertEqual(self.player.track.track_id, "owned:qq:new")
+        self.assertEqual(self.player.status, "loading_stream")
+        self.tasks.completed.emit(catalog, None, "timeout")
+        self.assertEqual(self.player.track.track_id, "owned:qq:new")
+        self.assertEqual(self.player.status, "loading_stream")
+
+    def test_user_resuming_old_source_after_pending_eof_wins_over_failure_rollback(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        catalog = self.pending_daily_catalog()
+        self.qt_player.stop()
+        self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        observed_playing = []
+        self.player.changed.connect(lambda: observed_playing.append(bool(self.player.track and self.player.track.is_playing)))
+        self.player.send_playback_command("toggle_play_pause")
+        with patch.object(self.qt_player, "play", wraps=self.qt_player.play) as play:
+            self.tasks.completed.emit(catalog, None, "timeout")
+        play.assert_not_called()
+        self.assertEqual(self.player.index, 0)
+        self.assertTrue(self.player.track.is_playing)
+        self.assertTrue(observed_playing[-1])
+        self.assertEqual(self.player._stream_epoch, self.player._epoch)
+
+    def test_new_eof_after_pending_pause_resume_or_seek_still_advances_on_failure(self):
+        for action in ("pause_resume", "seek"):
+            with self.subTest(action=action):
+                self.player.play_queue(self.songs)
+                self.authorize_current()
+                catalog = self.pending_daily_catalog()
+                if action == "pause_resume":
+                    self.player.send_playback_command("toggle_play_pause")
+                    self.player.send_playback_command("toggle_play_pause")
+                else:
+                    self.player.seek_playback_position(30)
+                self.qt_player.stop()
+                self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+                self.tasks.completed.emit(catalog, None, "timeout")
+                self.assertEqual(self.player.index, 1)
+                self.assertEqual(self.player.status, "loading_stream")
+
+    def test_later_stop_queue_or_navigation_cannot_be_resurrected_by_catalog_reply(self):
+        for action in ("stop", "queue", "next"):
+            for result in (None, (OnlineSong("qq", "late", "late song"),)):
+                with self.subTest(action=action, result=bool(result)):
+                    self.player.play_queue(self.songs)
+                    self.authorize_current()
+                    catalog = self.pending_daily_catalog()
+                    if action == "stop":
+                        self.player.stop()
+                    elif action == "queue":
+                        self.player.play_queue((OnlineSong("qq", "chosen", "chosen song"),))
+                    else:
+                        self.player.send_playback_command("next")
+                    current = (self.player.track, self.player._epoch, self.player._stream_epoch,
+                        self.qt_player.source(), self.player.status)
+                    self.tasks.completed.emit(catalog, result, "timeout" if result is None else None)
+                    self.assertEqual((self.player.track, self.player._epoch, self.player._stream_epoch,
+                        self.qt_player.source(), self.player.status), current)
+
+    def test_only_newest_failed_catalog_can_restore_shared_original_source(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        first = self.pending_daily_catalog()
+        latest = self.pending_daily_catalog()
+        self.tasks.completed.emit(first, None, "timeout")
+        self.assertEqual(self.player.status, "loading_catalog")
+        self.assertEqual(self.player._stream_epoch, 0)
+        self.tasks.completed.emit(latest, None, "network")
+        self.assertEqual(self.player._stream_epoch, self.player._epoch)
+        self.qt_player.positionChanged.emit(23000)
+        self.assertEqual(self.player.track.position_seconds, 23)
+
+    def test_lyrics_reply_during_catalog_wait_is_retained_on_failure(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        lyrics = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "lyrics")
+        catalog = self.pending_daily_catalog()
+        payload = LyricPayload("netease", "1", raw_lrc="[00:01.00]真实歌词", source="netease")
+        match = self.lyrics.parse_online_lyrics(raw_lrc=payload.raw_lrc, source=payload.source)
+        self.tasks.completed.emit(lyrics, (payload, match), None)
+        self.assertEqual(self.player.track.lyrics, ("真实歌词",))
+        self.assertEqual(self.player.status, "loading_catalog")
+        self.tasks.completed.emit(catalog, None, "timeout")
+        self.assertEqual(self.player.track.lyrics, ("真实歌词",))
+        self.assertIs(self.player._lyric_payload, payload)
+
+    def test_pending_catalog_keeps_old_real_clock_and_pause_resume_without_confirming_opening(self):
+        self.player.play_queue(self.songs)
+        self.authorize_current()
+        catalog = self.pending_daily_catalog()
+        self.qt_player.positionChanged.emit(33000)
+        self.qt_player.durationChanged.emit(119000)
+        self.assertEqual(self.player.track.position_seconds, 33)
+        self.assertEqual(self.player.track.duration_seconds, 119)
+        self.player.send_playback_command("toggle_play_pause")
+        self.assertFalse(self.player.track.is_playing)
+        self.player.send_playback_command("toggle_play_pause")
+        self.assertTrue(self.player.track.is_playing)
+        self.assertEqual(self.player.status, "loading_catalog")
+        self.tasks.completed.emit(catalog, None, "timeout")
+        self.assertTrue(self.player.track.is_playing)
+        self.assertEqual(self.player._stream_epoch, self.player._epoch)
+
     def test_reset_and_closed_qt_errors_do_not_create_false_playback_failure(self):
         with patch.object(self.qt_player, "setSource", side_effect=lambda *args:
                 self.qt_player.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "synthetic old reset")):
@@ -795,6 +1004,7 @@ class OwnedPlaybackTests(unittest.TestCase):
 
     def test_position_observations_retain_qt_clock_and_seek_checks_identity(self):
         self.player.play_queue(self.songs)
+        self.authorize_current()
         self.qt_player.positionChanged.emit(12345)
         track = self.player.visual_data().track
         self.assertEqual(track.position_seconds, 12.345)

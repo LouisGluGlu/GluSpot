@@ -13,11 +13,28 @@ boundary. Both downloads took one HTTP request and their session files were
 cleaned afterward. These probes preserved the protected account file's SHA256
 and printed no signed addresses, credentials or account identity.
 
-The music library now offers **私人DJ**, with genuine speech/song playback and
-DJ continuation through the owned player. `M791-C2` remains an unidentified
+Private DJ now belongs to **私人漫游**, with a persistent song-page toggle,
+genuine introductions between songs and DJ continuation through the owned
+player. There is no separate DJ library destination. A further authenticated
+read-only response contained `song → audio → song → audio → song`; each voice's
+`introductionRelatedSongIds` identified the following song. The protected
+account file remained unchanged. See [FM integration and controls](personal-fm-dj-controls.md).
+
+The user's four requested personas are **豆花、黄俊、李源、庞舸**.
+`M791-C2` remains an unidentified
 persona: `announcerName` was null and the module has no verified persona-choice
 input. **豆花** cannot yet be claimed as the returned voice. See
 [current behavior and final verification](buffered-playback-and-personal-dj.md).
+
+A further bounded public-source check verified that the [current upstream
+module at `2db6684`](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/2db6684453297ee86dec0492842f2320b08182d9/module/aidj_content_rcmd.js)
+and types are byte-identical to the pinned 4.41.1 versions. Its complete
+repository tree did not expose an additional AI DJ selection module. The
+[independent Rust implementation](https://github.com/SPlayer-Dev/ncm-api-rs/blob/133b65bfe482e41ebccf018870d3fce07bf58eb3/src/api/aidj_content_rcmd.rs)
+uses the same recommendation endpoint and location-only inputs. This research
+did not establish a switching endpoint or valid name-to-ID mapping for the
+four personas; it does not imply the official app lacks them. No real account
+or client setting was accessed for this public-source check.
 
 ## Original study, before authenticated implementation
 

@@ -68,6 +68,27 @@ class PersonalDJParsingTests(unittest.TestCase):
         with self.assertRaises(OnlineMusicError):
             self.service._personal_dj_batch(value)
 
+    def test_introduction_must_identify_following_song_and_never_previous_song(self):
+        value = batch()
+        song = copy.deepcopy(value["data"]["aiDjResources"][1])
+        song["value"]["songId"] = "10"
+        song["value"]["songData"]["id"] = 10
+        value["data"]["aiDjResources"] = [value["data"]["aiDjResources"][1], value["data"]["aiDjResources"][0], song]
+        with self.assertRaises(OnlineMusicError):
+            self.service._personal_dj_batch(value)
+        value["data"]["aiDjResources"][1]["value"]["audioList"][0]["introductionRelatedSongIds"] = [10]
+        self.assertEqual([s.media_kind for s in self.service._personal_dj_batch(value)], ["song", "dj_voice", "song"])
+
+    def test_trailing_or_unassociated_speech_is_rejected_before_playback(self):
+        for mutation in ("trailing", "unassociated"):
+            value = batch()
+            if mutation == "trailing":
+                value["data"]["aiDjResources"].reverse()
+            else:
+                value["data"]["aiDjResources"][0]["value"]["audioList"][0].pop("introductionRelatedSongIds")
+            with self.subTest(mutation=mutation), self.assertRaises(OnlineMusicError):
+                self.service._personal_dj_batch(value)
+
 
 class PersonalDJServiceTests(unittest.TestCase):
     setUp = fixtures.OnlineMusicServiceTests.setUp

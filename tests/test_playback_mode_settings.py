@@ -120,6 +120,27 @@ class PlaybackModePersistenceTests(unittest.TestCase):
                 self.assertEqual(repaired.get("v2_owned_playback_mode"), "sequential")
                 repaired.save_now()
 
+    def test_personal_dj_toggle_survives_restart_and_rejects_corrupt_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch("local.settings_store.SETTINGS_FILE", str(path)), \
+                    patch("local.settings_store.APP_DATA_DIR", directory), \
+                    patch("local.settings_store.legacy_app_data_dirs", return_value=()):
+                manager = SettingsManager()
+                self.assertFalse(manager.get("v2_personal_dj_enabled"))
+                manager.set("v2_personal_dj_enabled", True)
+                manager.save_now()
+                restored = SettingsManager()
+                self.assertTrue(restored.get("v2_personal_dj_enabled"))
+                for invalid in (1, "false", None, [], {}):
+                    restored.set("v2_personal_dj_enabled", invalid)
+                    self.assertTrue(restored.get("v2_personal_dj_enabled"))
+                restored.save_now()
+                path.write_text(json.dumps({"v2_personal_dj_enabled": "true"}), encoding="utf-8")
+                repaired = SettingsManager()
+                self.assertFalse(repaired.get("v2_personal_dj_enabled"))
+                repaired.save_now()
+
 
 if __name__ == "__main__":
     unittest.main()
