@@ -320,6 +320,49 @@ class PersonalDjControlTests(unittest.TestCase):
         self.assertEqual(personal_dj_ring_poses(.86), personal_dj_ring_poses(1.34))
         self.assertEqual(personal_dj_ring_poses(0), personal_dj_ring_poses(6.75))
 
+    def test_five_ring_centers_preserve_transparent_and_colored_backdrops(self):
+        rect = QRectF(16, 16, 288, 168)
+        for backdrop in (Qt.GlobalColor.transparent, QColor("#f1ca69"), QColor("#234a69")):
+            with self.subTest(backdrop=backdrop):
+                image = QImage(320, 200, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(backdrop)
+                original = image.copy()
+                with QPainter(image) as painter:
+                    paint_personal_dj_icon(painter, rect, QColor("#f19fc3"), elapsed=0)
+                for _identity, x, _height, _opacity in personal_dj_ring_poses(0):
+                    center = QPointF(rect.left() + rect.width() * x, rect.center().y())
+                    # A hollow ellipse must leave its unobstructed center exact,
+                    # including the input alpha; the outer glow is not a fill.
+                    self.assertEqual(image.pixelColor(center.toPoint()), original.pixelColor(center.toPoint()))
+                self.assertNotEqual(bytes(image.constBits()), bytes(original.constBits()))
+
+    def test_overlapping_ring_interiors_do_not_erase_another_rings_outline(self):
+        rect = QRectF(16, 16, 288, 168)
+        poses = personal_dj_ring_poses(0)
+        rendered = []
+        for selected in (poses, (poses[1],), (poses[2],)):
+            image = QImage(320, 200, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with patch("local.personal_dj_icon.personal_dj_ring_poses", return_value=selected), QPainter(image) as painter:
+                paint_personal_dj_icon(painter, rect, QColor("#f19fc3"), elapsed=0)
+            rendered.append(image)
+        combined, earlier, later = rendered
+        later_center = QPointF(rect.left() + rect.width() * poses[2][1], rect.center().y())
+        # Observe production pixels from an earlier outline inside the next
+        # ellipse. A filled later face would replace these bright strokes.
+        crossings = []
+        for y in range(20, 180):
+            for x in range(round(later_center.x() - 20), round(later_center.x())):
+                first, second = earlier.pixelColor(x, y), later.pixelColor(x, y)
+                if first.alpha() > 150 and second.alpha() == 0:
+                    crossings.append((x, y))
+        self.assertGreater(len(crossings), 20)
+        for x, y in crossings:
+            actual = combined.pixelColor(x, y)
+            self.assertGreater(actual.alpha(), 150)
+            self.assertGreater(actual.red(), 220)
+            self.assertGreater(actual.green(), 220)
+
     def test_visible_idle_ring_animation_updates_only_local_damage_and_keeps_zero_raster_growth(self):
         self.enabled = True
         with patch("local.music_surface_window.time.monotonic", return_value=100):
@@ -351,7 +394,7 @@ class PersonalDjControlTests(unittest.TestCase):
                 self.assertEqual(bytes(protected_crop.constBits()), bytes(original_crop.constBits()))
             self.assertNotEqual(bytes(image.constBits()), bytes(original.constBits()))
 
-    def test_fully_expanded_speech_has_caption_background_and_no_large_circle_plate(self):
+    def test_fully_expanded_speech_has_caption_background_and_only_soft_ring_backdrop(self):
         self.enabled = self.speaking = True
         self.presentation = {"state": "speaking", "next_title": "A real next song", "token": 4}
         with patch("local.music_surface_window.time.monotonic", return_value=100):
@@ -363,8 +406,108 @@ class PersonalDjControlTests(unittest.TestCase):
         ):
             self.window._paint_personal_dj_control(painter, QRectF(self.window.rect()))
         icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.4)
-        self.assertEqual(image.pixelColor(icon.center().toPoint()).alpha(), 0)
+        ring_center = image.pixelColor(icon.center().toPoint())
+        self.assertGreater(ring_center.alpha(), 40)
+        self.assertLessEqual(ring_center.alpha(), 158)
         self.assertGreater(image.pixelColor(caption.center().toPoint()).alpha(), 200)
+
+    def test_speech_backdrop_is_feathered_bounded_and_respects_parent_opacity(self):
+        self.window._dj_next_title = "A real next song"
+        region = QRectF(self.window.rect())
+        with patch("local.music_surface_window.time.monotonic", return_value=100.4):
+            bounds = self.window._personal_dj_backdrop_rect(region)
+            image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with QPainter(image) as painter:
+                self.window._paint_personal_dj_backdrop(painter, region, 1)
+            center = bounds.center()
+            radius = bounds.width() / 2
+            alphas = [image.pixelColor(QPointF(center.x() + radius * fraction, center.y()).toPoint()).alpha()
+                      for fraction in (0, .45, .7, .9, .98)]
+            self.assertGreater(alphas[0], 150)
+            self.assertLessEqual(alphas[0], 158)
+            self.assertTrue(all(first > second for first, second in zip(alphas, alphas[1:])), alphas)
+            self.assertLess(alphas[-1], 10)
+            for edge in (bounds.topLeft(), bounds.topRight(), bounds.bottomLeft(), bounds.bottomRight()):
+                point = edge.toPoint()
+                if image.rect().contains(point):
+                    self.assertEqual(image.pixelColor(point).alpha(), 0)
+            self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
+            self.assertTrue(self.window._personal_dj_damage_rect(region).contains(bounds.toAlignedRect()))
+
+            reduced = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            reduced.fill(Qt.GlobalColor.transparent)
+            with QPainter(reduced) as painter:
+                painter.setOpacity(.6)
+                self.window._paint_personal_dj_backdrop(painter, region, .5)
+                self.assertAlmostEqual(painter.opacity(), .6)
+            self.assertGreater(reduced.pixelColor(center.toPoint()).alpha(), 40)
+            self.assertLessEqual(reduced.pixelColor(center.toPoint()).alpha(), 48)
+
+    def test_speech_backdrop_handoff_fades_with_activity_and_clears_after_closing(self):
+        self.enabled = True
+        self.window._reset_control_idle(100)
+        self.presentation = {"state": "ready", "next_title": "The next real song", "token": 4}
+        with patch("local.music_surface_window.time.monotonic", return_value=100):
+            self.window._sync_owned_playback_mode()
+        region = QRectF(self.window.rect())
+
+        def mask_alpha(now):
+            image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with patch("local.music_surface_window.time.monotonic", return_value=now), QPainter(image) as painter:
+                self.window._paint_personal_dj_backdrop(painter, region, self.window._personal_dj_activity_at(now))
+                center = self.window._personal_dj_backdrop_rect(region).center().toPoint()
+            return image.pixelColor(center).alpha()
+
+        self.assertEqual(mask_alpha(100.4), 0)
+        self.speaking = True
+        self.presentation.update(state="speaking", speaking=True)
+        with patch("local.music_surface_window.time.monotonic", return_value=101):
+            self.window._sync_personal_dj_state()
+        self.assertEqual(mask_alpha(101), 0)
+        entering = mask_alpha(101.08)
+        full = mask_alpha(101.4)
+        self.assertGreater(entering, 0)
+        self.assertLess(entering, full)
+        self.speaking = False
+        self.presentation.update(state="idle", speaking=False, next_title="", token=5)
+        with patch("local.music_surface_window.time.monotonic", return_value=101.4):
+            self.window._sync_personal_dj_state()
+        self.assertEqual(mask_alpha(101.4), full)
+        self.assertGreater(mask_alpha(101.48), 0)
+        self.assertLess(mask_alpha(101.48), full)
+        self.assertEqual(mask_alpha(101.8), 0)
+
+    def test_backdrop_preserves_artwork_and_other_controls_at_all_supported_sizes(self):
+        self.window._dj_next_title = "An intentionally long next-song title that needs elision"
+        for size in ((640, 360), (960, 540), (1920, 1080)):
+            with self.subTest(size=size):
+                self.window.resize(*size)
+                region = QRectF(self.window.rect())
+                with patch("local.music_surface_window.time.monotonic", return_value=100.4):
+                    bounds = self.window._personal_dj_backdrop_rect(region)
+                    self.assertTrue(region.contains(bounds))
+                    self.assertGreater(bounds.left(), region.width() * .60)
+                    self.assertGreater(bounds.top(), region.height() * .55)
+                    image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(QColor("#ddb579"))
+                    original = image.copy()
+                    with QPainter(image) as painter:
+                        self.window._paint_personal_dj_backdrop(painter, region, 1)
+                    protected = [self.window._window_control_base_rect(region),
+                                 self.window._library_button_face(region, 1)]
+                    for centered in (0, 1):
+                        self.window._cover_layout_from = self.window._cover_layout_to = centered
+                        protected.append(self.window._current_cover_rect(100.4))
+                        surface = QImage(self.window.size(), QImage.Format.Format_RGB32)
+                        self.window.render(surface)
+                        self.assertTrue(self.window._media_control_panel_rect.isValid())
+                        protected.append(QRectF(self.window._media_control_panel_rect))
+                    for slot in protected:
+                        cropped = image.copy(slot.toAlignedRect())
+                        before = original.copy(slot.toAlignedRect())
+                        self.assertEqual(bytes(cropped.constBits()), bytes(before.constBits()))
 
     def test_real_frequency_glow_changes_glyph_without_raster_blur_or_cache_growth(self):
         self.enabled = self.speaking = True

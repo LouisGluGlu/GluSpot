@@ -30,16 +30,16 @@ def personal_dj_ring_poses(elapsed: float):
 
 def paint_personal_dj_icon(
     painter: QPainter, rect: QRectF, color: QColor, *, bands=None,
-    elapsed: float = 0.0, neutral: QColor | None = None, backdrop: QColor | None = None,
+    elapsed: float = 0.0, neutral: QColor | None = None,
 ):
-    """Paint native overlapping ellipses; only identity four carries the accent."""
+    """Paint hollow overlapping outlines; only identity four carries the accent."""
     values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
     levels = tuple(max(0.0, min(1.0, float(level) * 4.0)) for level in values)
     neutral = QColor(neutral or QColor(245, 246, 248))
-    backdrop = QColor(backdrop or QColor(43, 44, 47))
     painter.save()
     parent_opacity = painter.opacity()
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
     for identity, x, height_fraction, opacity in personal_dj_ring_poses(elapsed):
         energy = levels[(0, 1, 2, 1, 0)[identity]]
         height = rect.height() * min(1.0, height_fraction + energy * .10)
@@ -50,15 +50,11 @@ def paint_personal_dj_icon(
         ink = QColor(color if identity == 4 else neutral)
         pen_width = max(.85, rect.width() * .037)
         if identity == 4:
-            painter.setBrush(Qt.BrushStyle.NoBrush)
             for multiplier, alpha in ((3.8, 24), (2.2, 48)):
                 glow = QColor(ink)
                 glow.setAlpha(round(alpha * (.35 + .65 * energy)))
                 painter.setPen(QPen(glow, pen_width * multiplier))
                 painter.drawEllipse(ellipse)
-        face = QColor(backdrop)
-        face.setAlpha(238)
-        painter.setBrush(face)
         ink.setAlpha(round(200 + 55 * energy))
         painter.setPen(QPen(ink, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawEllipse(ellipse)

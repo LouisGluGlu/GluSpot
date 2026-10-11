@@ -8082,10 +8082,34 @@ class MusicSurfaceWindow(QWidget):
                 (end.x(), end.y(), end.width(), end.height()))))
         return blend(base, large), blend(base, pill)
 
-    def _personal_dj_damage_rect(self, rect: QRectF) -> QRect:
+    def _personal_dj_backdrop_rect(self, rect: QRectF) -> QRectF:
         icon, caption = self._personal_dj_geometry(rect, time.monotonic(), expansion=1.0)
-        padding = max(8.0, 12.0 * self._surface_scale(rect))
-        return icon.united(caption).adjusted(-padding, -padding, padding, padding).intersected(rect).toAlignedRect()
+        scale = self._surface_scale(rect)
+        horizontal, vertical = max(14.0, 28.0 * scale), max(12.0, 22.0 * scale)
+        return icon.united(caption).adjusted(-horizontal, -vertical, horizontal, vertical).intersected(rect)
+
+    def _personal_dj_damage_rect(self, rect: QRectF) -> QRect:
+        # Include the feathered speech backdrop even while it is shrinking,
+        # so local updates erase every pixel of the previous presentation.
+        return self._personal_dj_backdrop_rect(rect).toAlignedRect()
+
+    def _paint_personal_dj_backdrop(self, painter: QPainter, rect: QRectF, expansion: float):
+        if expansion <= .001:
+            return
+        bounds = self._personal_dj_backdrop_rect(rect)
+        painter.save()
+        painter.setOpacity(painter.opacity() * expansion)
+        painter.translate(bounds.center())
+        painter.scale(bounds.width() / 2.0, bounds.height() / 2.0)
+        # One shared soft mask keeps album/lyric detail visible through the
+        # rings. Native vector feathering needs no per-frame background copy.
+        gradient = QRadialGradient(QPointF(0, 0), 1.0)
+        for stop, alpha in ((0.0, 158), (.45, 144), (.7, 95), (.9, 26), (1.0, 0)):
+            gradient.setColorAt(stop, QColor(9, 11, 16, alpha))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(gradient))
+        painter.drawEllipse(QRectF(-1, -1, 2, 2))
+        painter.restore()
 
     def _personal_dj_control_shift(self, rect: QRectF, reveal: float) -> QPointF:
         bounds = self._personal_dj_button_rect(rect)
@@ -8208,6 +8232,7 @@ class MusicSurfaceWindow(QWidget):
         painter.save()
         painter.setOpacity(reveal)
         painter.translate(self._personal_dj_control_shift(rect, reveal))
+        self._paint_personal_dj_backdrop(painter, rect, expansion)
         hovered = self._hovered_window_button == "personal_dj"
         frame = self._dj_audio_frame if self._owned_dj_speaking else None
         energy = min(1.0, max(frame.low, frame.mid, frame.high) * 4) if frame is not None else 0.0
@@ -8233,7 +8258,7 @@ class MusicSurfaceWindow(QWidget):
         color = self._future_lyric_color(button) if self._owned_personal_dj_enabled else QColor(27, 28, 30)
         inner = icon.adjusted(icon.width() * .18, icon.height() * .14, -icon.width() * .18, -icon.height() * .14)
         neutral = QColor(245, 246, 248) if self._owned_personal_dj_enabled else QColor(27, 28, 30)
-        paint_personal_dj_icon(painter, inner, color, bands=frame, elapsed=elapsed, neutral=neutral, backdrop=background)
+        paint_personal_dj_icon(painter, inner, color, bands=frame, elapsed=elapsed, neutral=neutral)
         if expansion > .25 and self._dj_next_title:
             painter.save()
             painter.setOpacity(reveal * min(1.0, (expansion - .25) / .75))
