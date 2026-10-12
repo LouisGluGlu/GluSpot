@@ -164,7 +164,13 @@ class PersonalDjVoiceSelectionTests(unittest.TestCase):
         presentation = self.owned.get_personal_dj_presentation()
         self.assertTrue(self.owned.set_personal_dj_voice("M795-NP"))
         self.assertEqual(self.current_state(), before)
-        self.assertEqual(self.owned.get_personal_dj_presentation(), presentation)
+        after_presentation = self.owned.get_personal_dj_presentation()
+        # The current introduction stays untouched; canceled recommendations
+        # must no longer advertise the former voice's next-song preparation.
+        self.assertEqual({key: value for key, value in after_presentation.items()
+            if not key.startswith("next_preload_")}, {key: value for key, value in presentation.items()
+            if not key.startswith("next_preload_")})
+        self.assertEqual(after_presentation["next_preload_state"], "idle")
         self.assertEqual([song.song_id for song in self.owned.queue], ["dj:voice-1", "song-1"])
         self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")

@@ -5,6 +5,7 @@ import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
+from local.music_surface_palette import relative_luminance
 
 
 DJ_RING_TRAVEL_SECONDS = 2.0
@@ -41,6 +42,7 @@ def personal_dj_ring_poses(elapsed: float):
 def paint_personal_dj_icon(
     painter: QPainter, rect: QRectF, color: QColor, *, bands=None,
     elapsed: float = 0.0, neutral: QColor | None = None,
+    max_lightening: float = .60,
 ):
     """Keep theme hue in the center, with lighter rings towards both sides."""
     values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
@@ -57,7 +59,7 @@ def paint_personal_dj_icon(
         ellipse = QRectF(rect.left() + rect.width() * x - width / 2,
                          rect.center().y() - height / 2, width, height)
         painter.setOpacity(parent_opacity * opacity)
-        ink = personal_dj_ring_color(color, x, neutral=neutral)
+        ink = personal_dj_ring_color(color, x, neutral=neutral, max_lightening=max_lightening)
         pen_width = max(.85, rect.width() * .037)
         def side_light(alpha: int):
             gradient = QLinearGradient(QPointF(ellipse.left(), ellipse.center().y()),
@@ -78,10 +80,11 @@ def paint_personal_dj_icon(
     painter.restore()
 
 
-def personal_dj_ring_color(color: QColor, x: float, *, neutral: QColor | None = None) -> QColor:
+def personal_dj_ring_color(color: QColor, x: float, *, neutral: QColor | None = None,
+                          max_lightening: float = .60) -> QColor:
     """Blend by live position, so a travelling ring never jumps between hues."""
     distance = min(1.0, abs(float(x) - .5) / .36)
-    fraction = .60 * distance
+    fraction = max(0.0, min(.60, float(max_lightening))) * distance
     # Disabled rings retain their existing neutral, non-glowing appearance.
     target = QColor(neutral or QColor(245, 246, 248))
     if target.lightness() < 80:
@@ -89,6 +92,36 @@ def personal_dj_ring_color(color: QColor, x: float, *, neutral: QColor | None = 
     return QColor(round(color.red() + (255 - color.red()) * fraction),
                   round(color.green() + (255 - color.green()) * fraction),
                   round(color.blue() + (255 - color.blue()) * fraction), color.alpha())
+
+
+def personal_dj_lightening_limit(color: QColor, backdrop: QColor) -> float:
+    """Keep pale side rings from crossing a light/gray island's background."""
+    alpha = min(color.alphaF(), 230. / 255.)
+    backdrop_luminance = relative_luminance(backdrop)
+    def composite_at(fraction):
+        ring = QColor(*(round(a + (255 - a) * fraction) for a in color.getRgb()[:3]))
+        return QColor(*(round(a * alpha + b * (1. - alpha))
+            for a, b in zip(ring.getRgb()[:3], backdrop.getRgb()[:3])))
+    def contrast(fraction):
+        composite = composite_at(fraction)
+        luminance = relative_luminance(composite)
+        return (max(luminance, backdrop_luminance) + .05) / (min(luminance, backdrop_luminance) + .05)
+    # If ink is already lighter than the background, moving toward white
+    # cannot cross it. Preserve the established full-page/dark-island tones.
+    if relative_luminance(color) >= backdrop_luminance:
+        return .60
+    threshold = min(2.30, contrast(0.0))
+    # Search only up to the background crossing, never a brighter end point
+    # that regained contrast after passing through an invisible middle tone.
+    low, high = 0.0, .60
+    for _ in range(14):
+        mid = (low + high) / 2.
+        composite = composite_at(mid)
+        if relative_luminance(composite) >= backdrop_luminance or contrast(mid) < threshold:
+            high = mid
+        else:
+            low = mid
+    return low
 
 
 def personal_dj_status_color(state: str) -> QColor | None:
