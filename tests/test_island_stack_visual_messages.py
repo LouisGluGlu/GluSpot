@@ -4505,6 +4505,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.mapToGlobal = lambda _point: QPoint(960, 1040)
         visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
         visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(910.0, 1040.0, 96.0, 40.0)
+        visual._taskbar_auto_hide_enabled_for_screen = lambda _screen: False
+        visual._taskbar_autohide_hidden_for_screen = lambda *_args: False
         visual._update_taskbar_material_for_screen = lambda *_args: None
         visual._taskbar_stack_direction_for_rect = lambda *_args: -1
         visual._main_kind = lambda: IslandKind.MUSIC
@@ -4632,6 +4634,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.mapToGlobal = lambda _point: QPoint(960, 1080)
         visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
         visual._taskbar_track_rect_for_screen = lambda _screen, _taskbar: QRectF(180.0, 1040.0, 1500.0, 40.0)
+        visual._taskbar_auto_hide_enabled_for_screen = lambda _screen: False
+        visual._taskbar_autohide_hidden_for_screen = lambda *_args: False
         visual._update_taskbar_material_for_screen = lambda *_args: None
         visual._main_kind = lambda: IslandKind.MUSIC
         visual._stack_target_width = lambda _kind: 760.0
@@ -5013,6 +5017,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.mapToGlobal = lambda _point: QPoint(840, 1040)
         visual._taskbar_rect_for_screen = lambda _screen: None
         visual._taskbar_hidden_fallback_rect_for_screen = lambda _screen: QRectF(0.0, 1040.0, 1920.0, 40.0)
+        visual._taskbar_auto_hide_enabled_for_screen = lambda _screen: False
+        visual._taskbar_autohide_hidden_for_screen = lambda *_args: False
         visual._update_taskbar_material_for_screen = lambda *_args: None
         visual._taskbar_stack_direction_for_rect = lambda *_args: -1
         visual._main_kind = lambda: IslandKind.MUSIC

@@ -582,7 +582,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.provider.snapshot = replace(self.provider.snapshot, devices=(replace(self.provider.devices[0], volume_muted=True),))
         self.panel.sync_snapshot()
         self.assertEqual(row.displayed_volume, 0)
-        self.assertEqual(row.volume_fill_rect().width(), 0)
+        self.assertTrue(row.volume_pending)
+        self.assertEqual(row.volume_text, "目标 71%")
 
     def test_unknown_active_volume_has_no_fabricated_percentage_but_can_request_restore(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod")

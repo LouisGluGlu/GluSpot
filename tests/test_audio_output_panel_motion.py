@@ -269,7 +269,7 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
             replace(d, volume=0) if d.id == "local" else d for d in self.provider.snapshot.devices))
         self.panel.sync_snapshot()
         row = self.panel._rows["local"]
-        self.assertEqual(row.volume_fill_rect().width(), 0)
+        self.assertEqual(row.volume_text, "0%")
         self.assertTrue(row.volume_hit(QPointF(row.volume_slider.geometry().center())))
         QTest.mouseClick(row.volume_slider, Qt.MouseButton.LeftButton,
                          pos=QPoint(row.volume_slider.width() // 2, 12))
@@ -509,14 +509,16 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
             self.assertAlmostEqual(mapped.top(), source.top(), delta=.5)
             self.assertAlmostEqual(mapped.right(), source.right(), delta=.5)
 
-    def test_menu_width_follows_source_proportion_without_double_dpi_scaling(self):
-        for diameter, expected in ((35, 280), (42, 280), (50, 310), (64, 397)):
+    def test_menu_typography_and_width_are_independent_of_entry_size(self):
+        for diameter in (35, 42, 50, 64, 82):
             with self.subTest(diameter=diameter):
                 self.panel.open_at(QPoint(610, 74), source_rect=QRectF(610 - diameter, 20, diameter, diameter))
                 self.panel._animation_timer.stop()
                 self.panel._poll_timer.stop()
-                self.assertEqual(self.panel.width(), expected)
-                self.assertEqual(self.panel._rows["local"].height(), max(64, round(diameter * 1.05)))
+                self.assertEqual(self.panel.width(), 360)
+                self.assertEqual(self.panel._rows["local"].height(), 72)
+                self.assertEqual(self.panel._rows["local"].name_font_size, 14)
+                self.assertEqual(self.panel._source_rect.size(), QRectF(0, 0, diameter, diameter).size())
                 self.assertLessEqual(self.panel.x() + self.panel.width(), self.owner.width() - 12)
 
     def test_compact_chooser_clamps_to_small_views_and_retains_native_volume(self):
@@ -630,8 +632,13 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
             dpr = image.devicePixelRatio()
             rendered.append(image.pixelColor(round(point.x() * dpr), round(point.y() * dpr)))
         warm, cool = rendered
-        self.assertEqual(warm, QColor("#cf4820"))
-        self.assertEqual(cool, QColor("#2048cf"))
+        # The new uniform face adds a small transparent pigment; it must
+        # still sample the target position, not the row's final cached one.
+        for observed, backing in ((warm, QColor("#cf4820")), (cool, QColor("#2048cf"))):
+            self.assertTrue(all(abs(a - b) <= 5 for a, b in
+                                zip(observed.getRgb()[:3], backing.getRgb()[:3])))
+        self.assertGreater(warm.red(), warm.blue() + 100)
+        self.assertGreater(cool.blue(), cool.red() + 100)
         self.assertEqual(row.geometry(), geometry)
         self.assertEqual(self.provider.calls, [])
 
@@ -727,7 +734,12 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.owner.render(frame)
         row = self.panel._rows["local"]
         center = row.mapTo(self.owner, QPoint(80, 40))
-        self.assertGreater(frame.pixelColor(center).lightness(), 200)
+        native = QImage(self.panel.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        native.fill(QColor("#000000"))
+        self.panel.render(native)
+        local_center = self.panel.mapFrom(self.owner, center)
+        self.assertEqual(frame.pixelColor(center), native.pixelColor(local_center))
+        self.assertGreater(frame.pixelColor(center).alpha(), 240)
         outside = QPoint(self.panel.x() + self.panel.width() + 10, center.y())
         if self.owner.rect().contains(outside):
             self.assertEqual(frame.pixelColor(outside).lightness(), 0)
@@ -761,13 +773,15 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.assertTrue(self.panel.status_label.isVisible())
         self.assertEqual(self.panel.status_label.text(), "无法连接设备")
 
-    def test_row_capsule_paints_actual_half_volume_and_unknown_selection(self):
+    def test_row_capsule_keeps_uniform_volume_independent_material_and_native_selection(self):
         row = self.panel._rows["local"]
         row.progress = 1
         frame = QImage(row.size(), QImage.Format.Format_ARGB32_Premultiplied)
         frame.fill(Qt.GlobalColor.transparent)
         row.render(frame)
-        self.assertGreater(frame.pixelColor(8, 28).lightness(), frame.pixelColor(row.width() - 20, 28).lightness() + 70)
+        # Sample the uninterrupted face below text, icons and the gain track.
+        self.assertLess(abs(frame.pixelColor(65, row.height() - 7).lightness() -
+                            frame.pixelColor(row.width() - 65, row.height() - 7).lightness()), 5)
         other = self.panel._rows["bluetooth"]
         other.progress = 0
         other.render(frame)
