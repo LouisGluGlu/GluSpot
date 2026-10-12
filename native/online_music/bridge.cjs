@@ -32,7 +32,13 @@ function safeAccount(source, profile) {
   if (!profile || typeof profile !== "object") return {source_id: source, logged_in: false};
   const id = profile.userId || profile.userid || profile.user_id || profile.str_musicid || profile.musicid || profile.uin;
   if (!id || String(id) === "0") return {source_id: source, logged_in: false};
-  return {source_id: source, logged_in: true, user_id: String(id), nickname: String(profile.nickname || profile.nickName || profile.nick || profile.name || ""), avatar_url: String(profile.avatarUrl || profile.avatarurl || profile.pic || profile.headurl || profile.avatar || "")};
+  // The pinned QQ GetLoginUserInfo keeps current display fields under info;
+  // credential-derived identity remains at the top level. Do not publish the
+  // rest of info (which can contain private contact/location metadata).
+  const info=source==="qq" && profile.info && typeof profile.info==="object" && !Array.isArray(profile.info)?profile.info:{};
+  const nickname=info.nick || info.nickname || profile.nickname || profile.nickName || profile.nick_name || profile.nick || profile.username || profile.name || "";
+  const avatar=info.logo || info.avatarUrl || profile.avatarUrl || profile.avatarurl || profile.sizable_avatar || profile.pic || profile.img || profile.headurl || profile.avatar || "";
+  return {source_id: source, logged_in: true, user_id: String(id), nickname: String(nickname), avatar_url: String(avatar)};
 }
 function ncmState(credential, repository=sources) {
   let state = repository.get("netease");
@@ -92,18 +98,19 @@ async function ncmPersonalDjCall(state, operation, params) {
 }
 function qqState(credential, repository=sources) {
   let state = repository.get("qq");
-  if (!state) {
+  const restored=credential && Array.isArray(credential.sessions);
+  if (!state || restored) {
     const root = path.join(moduleRoot,"@yakult-green-tea","qq-music-api");
     // These exact exports/contracts are verified against pinned 3.1.4.
     const mod = require(path.join(root,"dist","src","services","auth","qrLogin.node.js"));
-    state = {service:mod.createNodeQrLoginService(), sessions:[], token:""};
+    // Python's complete protected envelope is authoritative. The pinned
+    // useRepository merges its old in-memory records over incoming records;
+    // reusing that resolver across auth/catalog lanes could resurrect a logged
+    // out account or overwrite refreshed fields under the same token. Keep the
+    // cached module, but restore into a fresh non-network service/resolver.
+    state = {service:mod.createNodeQrLoginService(), sessions:restored?credential.sessions:[], token:restored?String(credential.token || ""):""};
     state.service.configureAuthSessionRepository({kind:"gluspot-protected-host",load:() => state.sessions,save:value => {state.sessions = JSON.parse(JSON.stringify(value));}});
     repository.set("qq",state);
-  }
-  if (credential && Array.isArray(credential.sessions)) {
-    state.sessions = credential.sessions;
-    state.token = String(credential.token || "");
-    state.service.configureAuthSessionRepository({kind:"gluspot-protected-host",load:() => state.sessions,save:value => {state.sessions = JSON.parse(JSON.stringify(value));}});
   }
   return state;
 }
@@ -179,7 +186,20 @@ async function qqSearch(state,p) {
   const section=data.body[p.kind==="songs"?"song":"songlist"];
   return searchWindow(section && section.list,data.meta.sum,p,data.meta.nextpage);
 }
+function prepareLoginModules(source) {
+  // These are the same pinned modules used by the real QR path below. Requiring
+  // them preloads code only: do not call a module, construct an account service,
+  // create a QR key/session, or import the upstream HTTP/.env entry points.
+  const files={
+    netease:["@neteasecloudmusicapienhanced/api/util/request.js","@neteasecloudmusicapienhanced/api/module/login_qr_key.js","@neteasecloudmusicapienhanced/api/module/login_qr_create.js"],
+    kugou:["kugoumusicapi/util/index.js","kugoumusicapi/util/request.js","kugoumusicapi/module/register_dev.js","kugoumusicapi/module/login_qr_key.js","kugoumusicapi/module/login_qr_create.js"],
+    qq:["@yakult-green-tea/qq-music-api/dist/src/services/auth/qrLogin.node.js"]
+  };
+  if(!files[source]) fail("unsupported");
+  for(const file of files[source]) require(path.join(moduleRoot,file));
+}
 async function dispatch(source,op,p,credential,context) {
+  if(op==="prepare_login") {prepareLoginModules(source);return {ready:true};}
   if(source==="netease") {
     const state=await operationState(source,op,p,credential,ncmState);context.state=state;
     if(op==="begin_login") {
@@ -282,7 +302,10 @@ async function dispatch(source,op,p,credential,context) {
       if(!state.cookie.token || !state.cookie.userid) return {source_id:source,logged_in:false};
       const body=await kgCall(state,"user_detail");
       if(Number(body.status)!==1 || body.error_code!==undefined && Number(body.error_code)!==0 || !body.data || typeof body.data!=="object" || Array.isArray(body.data) || Object.keys(body.data).length===0) return {source_id:source,logged_in:false};
-      return safeAccount(source,{...(body.data || {}),userid:state.cookie.userid});
+      const data=body.data;
+      const nested=data.user_info || data.userinfo || data.profile;
+      const profile=nested && typeof nested==="object" && !Array.isArray(nested)?nested:data;
+      return safeAccount(source,{...profile,userid:state.cookie.userid});
     }
     if(op==="logout") {delete state.cookie.token;delete state.cookie.userid;return {};}
     if(!state.cookie.token || !state.cookie.userid) fail("auth_required");
@@ -294,8 +317,16 @@ async function dispatch(source,op,p,credential,context) {
       if(Number(body.status)!==1 || body.error_code!==undefined && Number(body.error_code)!==0 || !data || typeof data!=="object" || Array.isArray(data)) fail("invalid_response");
       return searchWindow(data.lists || data.info || [],data.total,params);
     }
-    if(op==="playlists") return await kgCall(state,"user_playlist",{userid:state.cookie.userid,pagesize:p.limit,page:Math.floor(p.offset/p.limit)+1});
-    if(op==="playlist_tracks") return await kgCall(state,"playlist_track_all",{id:requireId(p.playlist_id),pagesize:p.limit,page:Math.floor(p.offset/p.limit)+1});
+    if(op==="playlists" || op==="playlist_tracks") {
+      const method=op==="playlists"?"user_playlist":"playlist_track_all";
+      const body=await kgCall(state,method,op==="playlists"
+        ?{userid:state.cookie.userid,pagesize:p.limit,page:Math.floor(p.offset/p.limit)+1}
+        :{id:requireId(p.playlist_id),pagesize:p.limit,page:Math.floor(p.offset/p.limit)+1});
+      // A denied/failed user-library request must not become a successful empty
+      // library. Match the pinned module's numeric/string status convention.
+      if(Number(body.status)!==1 || body.error_code!==undefined && Number(body.error_code)!==0 || !body.data || typeof body.data!=="object") fail("invalid_response");
+      return body;
+    }
     if(op==="stream_url") return await kgCall(state,"song_url",{hash:requireId(p.song_id),quality:"128"});
   }
   fail("unsupported");

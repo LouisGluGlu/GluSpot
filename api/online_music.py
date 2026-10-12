@@ -167,6 +167,12 @@ class OnlineMusicService:
             sources.append(MusicSource(source, name, ready, reason, self._capabilities[source] if ready else ()))
         return tuple(sources)
 
+    def prepare_login_runtime(self, source_id: str) -> bool:
+        """Optional, offline module preparation when the login page is shown."""
+        self._check_source(source_id)
+        prepare = getattr(self.backend, "prepare_login", None)
+        return bool(prepare(source_id)) if callable(prepare) else False
+
     def _check_source(self, source_id: str) -> None:
         if source_id not in self._accounts:
             raise OnlineMusicError("unsupported", source_id, "未知音乐来源")
@@ -224,7 +230,7 @@ class OnlineMusicService:
     def _account(source_id: str, data: Any) -> AccountSnapshot:
         if not isinstance(data, dict) or data.get("logged_in") is not True or not str(data.get("user_id", "")).strip():
             return AccountSnapshot(source_id, state="signed_out", message="此来源尚未登录或登录已过期")
-        return AccountSnapshot(source_id, True, str(data["user_id"])[:128], str(data.get("nickname", ""))[:256], OnlineMusicService._http_url(data.get("avatar_url", "")), "verified", "")
+        return AccountSnapshot(source_id, True, str(data["user_id"])[:128], str(data.get("nickname", ""))[:256], OnlineMusicService._artwork_url(data.get("avatar_url", "")), "verified", "")
 
     @staticmethod
     def _http_url(value: Any) -> str:
@@ -235,6 +241,16 @@ class OnlineMusicService:
             return value if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password else ""
         except ValueError:
             return ""
+
+    @staticmethod
+    def _artwork_url(value: Any) -> str:
+        """Normalize actual platform image templates; retain strict URL checks."""
+        if not isinstance(value, str):
+            return ""
+        value = value.replace("{size}", "500")
+        if value.startswith("//"):
+            value = "https:" + value
+        return OnlineMusicService._http_url(value)
 
     def begin_login(self, source_id: str) -> LoginSnapshot:
         self._check_source(source_id)
@@ -482,7 +498,7 @@ class OnlineMusicService:
         nested = item.get("songInfo") or item.get("songinfo") or item.get("musicData")
         if isinstance(nested, dict):
             item = nested
-        album = item.get("al") or item.get("album") or item.get("albuminfo") or {}
+        album = item.get("al") or item.get("album") or item.get("albuminfo") or item.get("album_info") or {}
         album = album if isinstance(album, dict) else {"name": str(album)}
         artists = item.get("ar") or item.get("artists") or item.get("singer") or item.get("singerinfo") or []
         artist = " / ".join(str(a.get("name", "")) for a in artists if isinstance(a, dict)) if isinstance(artists, list) else ""
@@ -498,24 +514,22 @@ class OnlineMusicService:
         except (ValueError, TypeError):
             duration = 0.0
         song_id = item.get("mid") or item.get("songmid") or item.get("hash") or item.get("FileHash") or item.get("id") or item.get("songid") or ""
-        cover = album.get("picUrl") or item.get("picUrl") or item.get("cover") or item.get("img") or ""
+        transform = item.get("trans_param")
+        transform = transform if isinstance(transform, dict) else {}
+        cover = album.get("picUrl") or album.get("sizable_cover") or album.get("cover") or item.get("picUrl") or item.get("sizable_cover") or transform.get("union_cover") or item.get("cover") or item.get("img") or ""
         if source_id == "qq" and not cover and isinstance(album.get("mid"), str) and re.fullmatch(r"[A-Za-z0-9]{1,64}", album["mid"]):
             cover = f"https://y.gtimg.cn/music/photo_new/T002R500x500M000{album['mid']}.jpg"
-        if isinstance(cover, str):
-            cover = cover.replace("{size}", "500")
-        return OnlineSong(source_id, str(song_id), str(item.get("name") or item.get("title") or item.get("songname") or item.get("SongName") or item.get("audio_name") or item.get("filename") or item.get("FileName") or ""), artist, str(album.get("name") or item.get("album_name") or item.get("AlbumName") or ""), duration, OnlineMusicService._http_url(cover))
+        return OnlineSong(source_id, str(song_id), str(item.get("name") or item.get("title") or item.get("songname") or item.get("SongName") or item.get("audio_name") or item.get("filename") or item.get("FileName") or ""), artist, str(album.get("name") or item.get("album_name") or item.get("AlbumName") or ""), duration, OnlineMusicService._artwork_url(cover))
 
     @staticmethod
     def _playlist(source_id: str, item: dict[str, Any]) -> OnlinePlaylist:
-        cover = item.get("coverImgUrl") or item.get("cover_url") or item.get("bigpicUrl") or item.get("picUrl") or item.get("picurl") or item.get("img") or item.get("imgurl") or item.get("logo") or ""
-        if isinstance(cover, str):
-            cover = cover.replace("{size}", "500")
+        cover = item.get("coverImgUrl") or item.get("cover_url") or item.get("bigpicUrl") or item.get("picUrl") or item.get("picurl") or item.get("coverUrl") or item.get("sizable_cover") or item.get("pic") or item.get("img") or item.get("imgurl") or item.get("logo") or item.get("albumPicUrl") or ""
         return OnlinePlaylist(
             source_id,
             str((item.get("global_collection_id") or item.get("gid") if source_id == "kugou" else None) or item.get("id") or item.get("tid") or item.get("dissid") or item.get("dirId") or item.get("dirid") or item.get("global_collection_id") or item.get("listid") or item.get("specialid") or ""),
-            str(item.get("name") or item.get("title") or item.get("diss_name") or item.get("dissname") or item.get("listname") or item.get("specialname") or ""),
-            OnlineMusicService._http_url(cover),
-            OnlineMusicService._nonnegative_int(item.get("trackCount") or item.get("song_cnt") or item.get("count") or item.get("song_count") or item.get("songnum")),
+            str(item.get("name") or item.get("title") or item.get("dirName") or item.get("dirname") or item.get("diss_name") or item.get("dissname") or item.get("listname") or item.get("specialname") or ""),
+            OnlineMusicService._artwork_url(cover),
+            OnlineMusicService._nonnegative_int(item.get("trackCount") or item.get("songNum") or item.get("song_cnt") or item.get("count") or item.get("song_count") or item.get("songnum") or item.get("m_count") or item.get("music_num")),
         )
 
     def playlists(self, source_id: str, limit: int = 100, offset: int = 0) -> CatalogPage:
@@ -525,11 +539,25 @@ class OnlineMusicService:
             account = self.account_status(source_id, refresh=True)
         data = self._catalog(source_id, "playlists", {"user_id": account.user_id, "limit": limit, "offset": offset})
         raw = self._list(data, "playlist", "playlists", "v_playlist", "list", "lists", "info")
+        total = None
         if source_id == "qq":
+            total = len(raw)
             raw = raw[offset:offset + limit]
-        items = tuple(self._playlist(source_id, item) for item in raw)
+        elif source_id == "kugou":
+            # get_all_list mixes playlists and favorited albums. Consume raw
+            # rows for pagination, but never send an album to the playlist URL.
+            payload = data.get("data") if isinstance(data.get("data"), dict) else data
+            for key in ("total", "list_count", "total_count", "count"):
+                value = payload.get(key)
+                if isinstance(value, (int, str)) and not isinstance(value, bool) and str(value).isdigit():
+                    total = int(value)
+                    break
+        items = tuple(self._playlist(source_id, item) for item in raw
+                      if source_id != "kugou" or str(item.get("source", "")) != "2" and "musiclib_id" not in item and "musicLibId" not in item)
         items = tuple(item for item in items if item.playlist_id and item.title)
-        return CatalogPage(items, offset + len(raw), bool(data.get("more") or len(raw) == limit), None)
+        next_offset = offset + len(raw)
+        has_more = next_offset < total if total is not None else bool(data.get("more") or len(raw) == limit)
+        return CatalogPage(items, next_offset, has_more and bool(raw), total)
 
     def search(self, source_id: str, query: str, kind: str = "songs", limit: int = 30, offset: int = 0) -> CatalogPage:
         self._check_source(source_id)

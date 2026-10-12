@@ -41,6 +41,20 @@
 
 QQ owned 歌单接口每页最多 100 首，服务据此限制单页并保留后续分页标记。其回退接口只能读取前 1000 首，超出后明确返回不支持，不将截断声称为完整歌单。QQ 收藏歌单接受固定包核对过的 `dissid/dirId/dirid`；酷狗曲目端点需要 `global_collection_id`，优先保留此 ID，避免误用其他列表编号。
 
+### October 12：头像与歌单字段修复
+
+QQ 的真实 `GetLoginUserInfo` 把昵称、头像放在 `info.nick/info.logo`，身份由固定包的顶层 `musicid/str_musicid` 提供。此前桥接只读取顶层展示字段，造成已经验证的账号没有头像和昵称。现在仅提取这些公开展示字段，保持现有身份验证；不向 Python/UI 传递 `info` 中的联系、地区等额外信息。真实 QQ 自建歌单条目是 `tid/dirId/dirName/songNum/picUrl/bigpicUrl`，此前缺少 `dirName` 导致实际歌单被当作无标题条目丢弃。现在兼容这组字段及收藏歌单的 `coverUrl/albumPicUrl`，保留已有编号和授权读取路径；完整返回列表的本地分页按原始列表长度停止。
+
+酷狗保留固定 `user_detail` 模块，兼容 `data.user_info/userinfo/profile` 中的 `nick_name/username/sizable_avatar/pic`。图片统一处理平台 `{size}` 模板与 `//` 地址，继续拒绝带凭据、无合法主机的 URL；授权音频的 URL 验证没有放宽。歌单支持 `sizable_cover/pic`、`m_count/music_num`，歌曲支持实际 `album_info` 和 `trans_param.union_cover` 的专辑封面。`user_playlist` 的响应会混合歌单和收藏专辑；目录仅把歌单交给现有歌单曲目端点，分页仍消耗原始响应行数，使用 `list_count/total` 等计数并防止空页循环。平台明确拒绝的目录请求不再伪装成成功空歌单。
+
+音乐库现在先发布已验证账号和头像，再独立请求初始歌单。等待歌单不再挡住账号展示；初始歌单在同一来源的搜索期间返回，会保留到原目录而不覆盖搜索。退出、关窗和切源仍作废旧代次。QQ/酷狗目录失败的提示不再宣称有网易云专属推荐入口。
+
+接口证据来自固定安装包及 Folia `43605cd8e562b7aa0e5897478856ce3604a054a1` 的 [QQ schema](https://github.com/chthollyphile/folia-major/blob/43605cd8e562b7aa0e5897478856ce3604a054a1/src/services/onlineMusic/qqNormalize.ts) 与 [酷狗 schema/分页](https://github.com/chthollyphile/folia-major/blob/43605cd8e562b7aa0e5897478856ce3604a054a1/src/services/onlineMusic/kugouProvider.ts)。桥接和 Python 修复独立编写，没有复制参考项目的实现源文件或新增依赖。
+
+只读真实 QQ 验证在修复前复现昵称/头像为空和两张歌单被过滤；修复后昵称、头像、两张歌单及两张封面均有效，两张歌单各两首歌曲具备标题、歌手和专辑图，各第一首取得非试听授权流。该次账号、目录、曲目与流验证共 1.156 秒；账户文件字节哈希和修改时间前后相同，没有实际播放或更改用户账号。脱敏本地证据：ignored `.runtime/platform-library-readonly-verified.json`。这只证明所选账户与条目的接口可用，未证明长期 QQ 播放或整个目录权限。机器没有现存酷狗账号，因此酷狗新字段使用源码和实际 Node 子进程 fixtures 验证，没有宣称真实酷狗登录后验收。
+
+汽水继续明确不可用。重新核对 Mineradio `d43de565acabfdc1a9c9820a27e81a98ccbebcef` 的 [QR 桥接](https://github.com/XxHuberrr/Mineradio-paused/blob/d43de565acabfdc1a9c9820a27e81a98ccbebcef/qishui-qr-login.js)、[认证宿主](https://github.com/XxHuberrr/Mineradio-paused/blob/d43de565acabfdc1a9c9820a27e81a98ccbebcef/qishui-auth-v6.js) 和 [分发说明](https://github.com/XxHuberrr/Mineradio-paused/blob/d43de565acabfdc1a9c9820a27e81a98ccbebcef/docs/THIRD_PARTY_PORTS.md)：它依赖 Electron `BrowserWindow/session`、平台安全脚本、隔离浏览器状态和可交互的二次验证。GluSpot 当前 stdio Node 运行时不提供这个浏览器宿主，安全资源的分发授权也尚未核验。不能把该 Electron 模块当作现有 Node 模块接入后宣称扫码、头像、歌单完成；没有复制其安全运行时或增加伪账号/伪目录。
+
 网易流仅调用当前账号可获得的标准音质地址；桥接 allowlist 没有解锁、跨源匹配或替代音源操作。返回 URL 为空时为不可播放；平台提供试听信息时保留其性质。原先绕过上游启动入口却直接请求 XEAPI v1，缺少该路径所需的密钥状态，导致真实授权流失败；现使用固定包已有的标准授权模块，不再依赖 XEAPI 初始化。网易旧版 FM 的 `duration` 与新版 `dt` 均按毫秒转换，QQ/酷狗秒字段保留。QQ/酷狗逐字歌词尚未接入。登录后的内容界面与用户确认范围参见[入口实施记录](owned-playback-entry.md)。
 
 ## 当前平台歌曲与歌单搜索
@@ -59,7 +73,7 @@ QQ 搜索调用公开目录接口，不将账号 credential 拼入请求 URL；�
 
 ## 私密数据与扫码生命周期
 
-子进程只通过私有 stdin/stdout JSON 行交换命令和响应，不启动 API HTTP 服务器。桥接 bypass 上游 server/main/.env 入口，抑制上游 console，丢弃 stderr；固定错误消息不输出上游原始文本。继承环境中过滤 COOKIE/TOKEN/SECRET 字段，子进程缓存位于 `%LOCALAPPDATA%/GluSpot/cache/online-music-bridge`，不在仓库。Node 15 秒请求截止后退出；Python 默认 18 秒等待，超时终止已放弃进程。关闭不等待长请求锁，由后台回收子进程。
+子进程只通过私有 stdin/stdout JSON 行交换命令和响应，不启动 API HTTP 服务器。目录、歌词与 DJ 保留原有串行 transport；扫码、账号验证与注销使用每平台一个懒启动的独立 transport，最多三个，避免目录请求拖慢二维码。登录来源选择页实际显示时，后台 `prepare_login` 只加载该平台扫码所需的固定模块，不联网、不生成二维码、不读写账号；普通构造与可用性查询不预热。桥接 bypass 上游 server/main/.env 入口，抑制上游 console，丢弃 stderr；固定错误消息不输出上游原始文本。继承环境中过滤 COOKIE/TOKEN/SECRET 字段，子进程缓存位于 `%LOCALAPPDATA%/GluSpot/cache/online-music-bridge`，不在仓库。Node 15 秒请求截止后退出；Python 默认 18 秒等待，超时终止已放弃进程。关闭不等待长请求锁，由后台回收全部子进程。参见 [二维码耗时、预热内存成本与验证范围](login-runtime-latency.md)。
 
 QQ 使用自定义内存会话仓库和内存设备状态；其私有 envelope 必须包含完整 `{token, sessions}`，仅保存 opaque token 不足以重启恢复。网易和酷狗保存完整 cookie map。所有持久账户记录经当前 Windows 用户 DPAPI 加密，写到 `%LOCALAPPDATA%/GluSpot/accounts/{source}.dpapi`，不写普通设置，无明文回退。存储拒绝文件或祖先目录符号链接/目录连接，使用受限大小、源名称校验和原子替换。公开快照不含认证 cookie 或完整 QQ 会话；二维码图片、二维码 URL 和播放流 URL 不进入对象 repr。
 

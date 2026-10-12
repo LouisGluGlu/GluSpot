@@ -35,7 +35,6 @@ from PySide6.QtWidgets import (
 
 from local.ios_widgets import IosSwitch
 from local.liquid_glass import GlassPushButton
-from local.control_hover import install_container_hover, install_control_hover, install_item_hover
 from local.branding import APP_NAME, install_custom_icon, resolve_icon_paths
 from local.mac_style import (
     mac_preferences_stylesheet,
@@ -789,6 +788,7 @@ class SettingsWindow(QDialog):
 
     def __init__(self, island_widget: QWidget, settings_manager=None, parent=None):
         super().__init__(parent)
+        self.setProperty("controlHoverDisabled", True)
         self.island_widget = island_widget
         self.settings = settings_manager
         self._plugin_page_index = -1
@@ -828,8 +828,6 @@ class SettingsWindow(QDialog):
         self._update_theme_schedule_controls()
         self._update_music_background_follow_dependency_controls()
         self._apply_settings_font()
-        install_container_hover(self)
-        install_item_hover(self.nav)
 
     def _theme(self) -> dict[str, str]:
         return mac_preferences_theme()
@@ -1665,7 +1663,6 @@ class SettingsWindow(QDialog):
             toggle.setText(f"{base_title} 详细设置" + (" · 收起" if opened else ""))
 
         toggle.toggled.connect(update_open_state)
-        install_control_hover(toggle, menu_callback=lambda: toggle.setChecked(True))
         layout.addWidget(panel)
         self._detail_panels.append((toggle, body))
         self._register_settings_search_entry(title, panel, terms=(toggle.text(),), priority=6)

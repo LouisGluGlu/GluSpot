@@ -23,6 +23,16 @@ HOVER_SCALE = 1.10
 MENU_HOVER_DELAY_MS = 500
 
 
+def _control_hover_allowed(widget: QWidget) -> bool:
+    """Settings opt out before child construction, including later parenting."""
+    current = widget
+    while current is not None:
+        if current.property("controlHoverDisabled"):
+            return False
+        current = current.parentWidget()
+    return True
+
+
 def _unit(value: float) -> float:
     return min(1., max(0., float(value)))
 
@@ -197,7 +207,7 @@ class WidgetHoverGroup(QObject):
 
     def _valid(self, record):
         widget = record.widget()
-        if widget is None or not isValid(widget) or widget.parentWidget() is not self.host or not widget.isVisible():
+        if widget is None or not isValid(widget) or widget.parentWidget() is not self.host or not widget.isVisible() or not _control_hover_allowed(widget):
             return False
         if record.enabled_when is not None and not record.enabled_when():
             return False
@@ -430,6 +440,8 @@ class WidgetHoverGroup(QObject):
             return False
         kind = event.type()
         record = next((item for item in self.controls if item.widget() is watched), None)
+        if record is not None and not _control_hover_allowed(watched):
+            return False
         if kind == QEvent.Type.Paint and record and self._moving(record, time.monotonic()):
             origin = QPointF(self.host.mapTo(self.overlay.parentWidget(), QPoint()))
             self.overlay.update(self.visual_rect(record).translated(origin).adjusted(-2, -2, 2, 2).toAlignedRect())
@@ -508,7 +520,8 @@ class _HoverRegistration(QObject):
 
     def attach(self):
         parent = self.widget.parentWidget()
-        if parent is None:
+        if parent is None or not _control_hover_allowed(self.widget):
+            self.group, self.record = None, None
             return
         group = getattr(parent, "_control_hover_group", None)
         if group is None:
@@ -528,6 +541,8 @@ class _HoverRegistration(QObject):
 def install_control_hover(widget: QWidget, *, menu_callback=None, max_scale: float | None = None,
                           enabled_when=None, bounds_provider=None):
     """Register an existing control; repeated installation remains harmless."""
+    if not _control_hover_allowed(widget):
+        return None
     registration = getattr(widget, "_control_hover_registration", None)
     if registration is None:
         registration = widget._control_hover_registration = _HoverRegistration(widget)
@@ -556,6 +571,8 @@ def install_container_hover(container: QWidget):
     Composite controls keep one visual transform so a spin box's editor and
     buttons cannot drift apart, and an embedded search action retains its hit.
     """
+    if not _control_hover_allowed(container):
+        return
     kinds = (QAbstractButton, QComboBox, QSlider, QAbstractSpinBox, QLineEdit)
     for widget in container.findChildren(QWidget):
         if not isinstance(widget, kinds):
@@ -710,6 +727,8 @@ class _HoverItemDelegate(QStyledItemDelegate):
 
 
 def install_item_hover(view):
+    if not _control_hover_allowed(view):
+        return None
     if getattr(view, "_control_hover_delegate", None) is None:
         delegate = view._control_hover_delegate = _HoverItemDelegate(view)
         view.setItemDelegate(delegate)

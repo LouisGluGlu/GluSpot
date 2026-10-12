@@ -42,6 +42,7 @@ class MusicLibraryController(QObject):
         self._offsets = {"songs": 0, "playlists": 0}
         self._more = {"songs": False, "playlists": False}
         self._pending = False
+        self._catalog_pending = False
         self._logout_pending = False
         self._opening = None
         self._closed = False
@@ -77,6 +78,7 @@ class MusicLibraryController(QObject):
         self.window.raise_()
         self.window.activateWindow()
         self._pending = True
+        self._catalog_pending = False
         epoch, request = self._epoch, self._request
         def fetch():
             if self._closed or epoch != self._epoch:
@@ -84,13 +86,7 @@ class MusicLibraryController(QObject):
             account = self.service.account_status(source_id)
             if not account.logged_in:
                 account = self.service.account_status(source_id, refresh=True)
-            if not account.logged_in:
-                return account, None
-            try:
-                page = self.service.playlists(source_id, limit=50, offset=0)
-            except Exception:
-                page = None
-            return account, page
+            return account
         if not self.tasks.submit(("open", epoch, request), fetch):
             self._pending = False
             self.window.set_error("服务繁忙，请稍后重新进入")
@@ -150,6 +146,7 @@ class MusicLibraryController(QObject):
         self._epoch += 1
         self._request += 1
         self._pending = False
+        self._catalog_pending = False
         was_opening, self._opening = self._opening, None
         if was_opening is not None:
             self.player.stop()
@@ -212,7 +209,7 @@ class MusicLibraryController(QObject):
             self.window.set_error("服务繁忙，请稍后搜索")
 
     def load_more(self):
-        if self._pending or self._closed or self._logout_pending:
+        if self._pending or self._catalog_pending or self._closed or self._logout_pending:
             return
         if self._query:
             if any(self._more.values()):
@@ -256,6 +253,26 @@ class MusicLibraryController(QObject):
                                           for row in self._collections)
                 self.window.set_collections(self._collections)
             return
+        if kind == "initial_catalog":
+            # The account/avatar is already visible. Search may advance its
+            # own request id while this original catalog arrives; retain the
+            # source's catalog without replacing visible search results.
+            if self._closed or epoch != self._epoch:
+                return
+            self._catalog_pending = False
+            if not self._query:
+                self._pending = False
+                self.window.set_loading(False)
+            if error or result is None:
+                if not self._query:
+                    message = "歌单暂未加载，请切换平台后重新进入"
+                    if self._source == "netease":
+                        message += "；推荐入口仍可使用"
+                    self.window.set_error(message)
+            else:
+                self._append_catalog(result)
+            self._prepare_recommendation_art()
+            return
         if self._closed or epoch != self._epoch or request != self._request:
             return
         self._pending = False
@@ -274,7 +291,7 @@ class MusicLibraryController(QObject):
             self.entry.show_login(source)
             return
         if kind == "open":
-            account, page = result
+            account = result
             if not account.logged_in:
                 self.window.hide()
                 self.entry.show_login(self._source)
@@ -288,20 +305,16 @@ class MusicLibraryController(QObject):
                     LibraryCollection("daily", "daily", "每日推荐", ""),
                     LibraryCollection("fm", "fm", "私人漫游", ""),
                 )
-            if page is not None:
-                self._append_catalog(page)
-            else:
-                self.window.set_collections(self._collections)
-                self.window.set_error("歌单暂未加载，请切换平台后重新进入；推荐入口仍可使用")
-            if self._source == "netease":
-                # The catalog has no recommendation artwork. Retrieve actual
-                # song covers independently, without delaying the first list.
-                for key, fetch in (("daily", self.service.daily_recommendations),
-                                   ("fm", self.service.personal_fm)):
-                    source = self._source
-                    self.tasks.submit(("recommendation_art", self._epoch, self._request, key),
-                        lambda fetch=fetch, source=source, epoch=self._epoch:
-                            fetch(source) if not self._closed and epoch == self._epoch else ())
+            self.window.set_collections(self._collections)
+            self._catalog_pending = self._pending = True
+            self.window.set_loading(True, "正在加载歌单…")
+            source = self._source
+            if not self.tasks.submit(("initial_catalog", epoch, request),
+                    lambda source=source, epoch=epoch: self.service.playlists(source, limit=50, offset=0)
+                    if not self._closed and epoch == self._epoch else None):
+                self._catalog_pending = self._pending = False
+                self.window.set_loading(False)
+                self.window.set_error("歌单加载繁忙，请切换平台后重新进入")
         elif kind == "catalog":
             self._append_catalog(result)
         elif kind == "search":
@@ -318,13 +331,26 @@ class MusicLibraryController(QObject):
             if errors:
                 self.window.set_error("部分搜索结果暂不可用，请重新搜索")
 
+    def _prepare_recommendation_art(self):
+        if self._source != "netease":
+            return
+        # The catalog has no recommendation artwork. Retrieve actual song
+        # covers independently, without delaying account/avatar presentation.
+        for key, fetch in (("daily", self.service.daily_recommendations),
+                           ("fm", self.service.personal_fm)):
+            source = self._source
+            self.tasks.submit(("recommendation_art", self._epoch, self._request, key),
+                lambda fetch=fetch, source=source, epoch=self._epoch:
+                    fetch(source) if not self._closed and epoch == self._epoch else ())
+
     def _append_catalog(self, page):
         old_offset = self._catalog_offset
         self._collections = self._append_unique(self._collections, self._rows(page.items))
         self._catalog_offset = page.next_offset
         self._catalog_has_more = bool(page.has_more and page.next_offset > old_offset)
-        self.window.set_collections(self._collections)
-        self.window.set_has_more(self._catalog_has_more)
+        if not self._query:
+            self.window.set_collections(self._collections)
+            self.window.set_has_more(self._catalog_has_more)
 
     def _queue_art(self, key, url):
         if key in self._art_keys:

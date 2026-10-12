@@ -320,6 +320,34 @@ class ControlHoverWidgetTests(unittest.TestCase):
         self.assertEqual(view.currentRow(), 2)
         self.assertIs(install_item_hover(view), delegate)
 
+    def test_opted_out_container_keeps_native_controls_without_hover_menus(self):
+        panel = QWidget(self.owner)
+        panel.setProperty("controlHoverDisabled", True)
+        button = GlassPushButton("Settings", panel)
+        combo = NoWheelComboBox(panel)
+        combo.addItems(["First", "Second"])
+        view = QListWidget(panel)
+        view.addItems(["Basic", "Media"])
+        install_container_hover(panel)
+        self.assertIsNone(install_control_hover(button))
+        self.assertIsNone(getattr(button, "_control_hover_registration", None))
+        self.assertIsNone(getattr(combo, "_control_hover_registration", None))
+        self.assertIsNone(install_item_hover(view))
+        spy = QSignalSpy(button.clicked)
+        button.click()
+        self.assertEqual(spy.count(), 1)
+
+    def test_control_parented_late_into_settings_cannot_keep_old_motion(self):
+        panel = QWidget(self.owner)
+        panel.setProperty("controlHoverDisabled", True)
+        self.first.setParent(panel)
+        registration = self.first._control_hover_registration
+        self.assertIsNone(registration.group)
+        self.assertIsNone(registration.record)
+        self.assertFalse(self.group._valid(self.record))
+        self.group._tick()
+        self.assertIsNone(self.group.active)
+
 
 if __name__ == "__main__":
     unittest.main()
