@@ -1,8 +1,43 @@
 # NetEase personal roaming and Private DJ research
 
-Research date: October 11, 2026. GluSpot source version: `6.412`.
+Research dates: October 11–12, 2026. GluSpot source version: `6.412`.
 
-## Current implementation update
+## October 12: verified four-voice catalog and selection
+
+The earlier missing-interface conclusion is superseded. Bounded static
+inspection of the official public Android 9.6.05 package established the
+real timbre catalog, the top-level recommendation `timbreKey`, and the
+client profile. Read-only requests then returned **豆花 `F793-C2`、黄俊
+`M791-C2`、李源 `M792-NP`、庞舸 `M795-NP`**, followed by genuine speech
+whose metadata matched each requested key. The protected account file
+remained byte-identical. Selection needs no official preference mutation.
+See [verified client contract and evidence](personal-dj-client-contract.md).
+
+Runtime uses the real catalog rather than the evidence table as a hardcoded
+mapping. Its worker validates current-account membership and speech identity;
+only the two DJ requests use the verified compatibility profile. The older
+sections below record their original evidence cutoff, not the current
+availability of the four requested voices.
+
+A subsequent six-request verification through the actual production service
+and bridge parsed all four selected-voice queues successfully, without
+credential writes or physical playback. The service sometimes omits an
+individual song's introduction; this is retained rather than fabricated.
+The bounded first-audio unassociated-prefix compatibility and 57 focused
+parser/service/bridge tests are documented with the verified contract.
+
+The real catalog also supplies `playUrl` auditions, distinct from the boolean
+`defaultAudio` choice marker. Four bounded audio downloads matched declared
+sizes, preserved the protected account and remained in ignored research
+storage. Local unprompted ASR found different self-introductions rather than
+the requested common audition sentence; no audio was uploaded for recognition.
+The service now retains validated audition streams without printing their
+addresses. No arbitrary-text synthesis API for these personas was verified.
+The user approved playing the genuine official auditions rather than the
+original common sentence.
+See [audition evidence and parser boundary](personal-dj-client-contract.md#official-audition-evidence).
+
+## Earlier October 11 implementation evidence
 
 The subsequent implementation now exposes the pinned `aidj_content_rcmd`
 through the existing bridge and service. Authenticated requests returned
@@ -20,10 +55,11 @@ read-only response contained `song → audio → song → audio → song`; each 
 `introductionRelatedSongIds` identified the following song. The protected
 account file remained unchanged. See [FM integration and controls](personal-fm-dj-controls.md).
 
-The user's four requested personas are **豆花、黄俊、李源、庞舸**.
-`M791-C2` remains an unidentified
-persona: `announcerName` was null and the module has no verified persona-choice
-input. **豆花** cannot yet be claimed as the returned voice. See
+At this earlier implementation cutoff, the user's four requested personas
+were **豆花、黄俊、李源、庞舸**. `M791-C2` was still unidentified
+because `announcerName` was null and the module had no verified persona-choice
+input. **豆花** could not then be claimed as the returned voice. The October 12
+catalog now identifies `M791-C2` as 黄俊. See
 [current behavior and final verification](buffered-playback-and-personal-dj.md).
 
 A further bounded public-source check verified that the [current upstream

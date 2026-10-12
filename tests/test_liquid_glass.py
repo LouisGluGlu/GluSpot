@@ -1,4 +1,4 @@
-"""Optical sampling, bounded caching and native painter-state regressions."""
+"""Native glass-rim regressions: original pigment, clear center and state."""
 from __future__ import annotations
 
 import unittest
@@ -8,12 +8,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
-from local.liquid_glass import (GLASS_CACHE_BYTES, GLASS_CACHE_ENTRIES,
-                                GLASS_GEOMETRY_BYTES, GLASS_GEOMETRY_ENTRIES,
-                                clear_glass_cache, glass_cache_info,
-                                glass_geometry_cache_info, paint_liquid_glass, widget_glass_backdrop)
-from local.music_surface_window import MusicSurfaceWindow
-from tests.test_music_surface_transition import _TransitionOwner
+from local.liquid_glass import GLASS_FACE_OPACITY, paint_liquid_glass, widget_glass_backdrop
 
 
 class LiquidGlassTests(unittest.TestCase):
@@ -21,75 +16,68 @@ class LiquidGlassTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def setUp(self):
-        clear_glass_cache()
-
-    def tearDown(self):
-        clear_glass_cache()
-
-    @staticmethod
-    def scene():
-        image = QImage(180, 100, QImage.Format.Format_RGB32)
-        for y in range(image.height()):
-            for x in range(image.width()):
-                image.setPixelColor(x, y, QColor((x * 7) % 255, (y * 13) % 255, (x + y) % 255))
-        return image
-
-    def render(self, backdrop=None, source=None, **options):
+    def render(self, **options):
         image = QImage(180, 100, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         with QPainter(image) as painter:
-            paint_liquid_glass(painter, QRectF(20, 20, 140, 60), backdrop=backdrop,
-                               backdrop_rect=source, cache_token="test", **options)
+            paint_liquid_glass(painter, QRectF(20, 20, 140, 60), **options)
         return image
 
-    def test_lens_uses_actual_backdrop_and_keeps_round_corners_clear(self):
-        scene = self.scene()
-        first = self.render(scene, QRectF(20, 20, 140, 60))
-        other = self.render(scene, QRectF(0, 0, 140, 60))
-        fallback = self.render()
-        self.assertNotEqual(first.pixelColor(90, 50), fallback.pixelColor(90, 50))
-        self.assertNotEqual(first.pixelColor(90, 50), other.pixelColor(90, 50))
-        self.assertEqual(first.pixelColor(20, 20).alpha(), 0)
-        self.assertEqual(first.pixelColor(90, 50).alpha(), 255)
-        self.assertGreater(fallback.pixelColor(90, 50).alpha(), 100)
-        self.assertLess(fallback.pixelColor(90, 50).alpha(), 230)
+    def test_original_face_keeps_pigment_and_only_reduces_its_own_alpha(self):
+        for color in (QColor(55, 56, 57, 236), QColor('#34c759'), QColor(248, 249, 250, 245),
+                      QColor(18, 20, 24, 24)):
+            with self.subTest(color=color):
+                image = self.render(base_color=color)
+                # Compare native premultiplied pixels, including low-alpha
+                # channel quantization, rather than unpremultiplied RGB deltas.
+                reference = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
+                reference.fill(Qt.GlobalColor.transparent)
+                expected = QColor(color)
+                expected.setAlphaF(color.alphaF() * GLASS_FACE_OPACITY)
+                with QPainter(reference) as painter:
+                    painter.fillRect(reference.rect(), expected)
+                self.assertEqual(image.pixel(90, 50), reference.pixel(0, 0))
+                self.assertEqual(image.pixelColor(20, 20).alpha(), 0)
+                self.assertEqual(image.pixelColor(0, 0).alpha(), 0)
 
-    def test_states_change_material_without_losing_transparency(self):
-        idle, hover, pressed, active = (self.render(**opts) for opts in
-                                       ({}, {"hovered": True}, {"pressed": True}, {"active": True}))
-        self.assertGreater(hover.pixelColor(90, 50).lightness(), idle.pixelColor(90, 50).lightness())
-        self.assertLess(pressed.pixelColor(90, 50).lightness(), hover.pixelColor(90, 50).lightness())
-        self.assertGreater(active.pixelColor(90, 50).lightness(), 200)
-        self.assertLess(active.pixelColor(90, 50).alpha(), 255)
+    def test_rim_only_has_empty_center_and_no_new_button_plate(self):
+        image = self.render()
+        self.assertEqual(image.pixelColor(90, 50).alpha(), 0)
+        self.assertGreater(image.pixelColor(90, 20).alpha(), 0)
+        for y in range(26, 74):
+            for x in range(50, 130):
+                self.assertEqual(image.pixelColor(x, y).alpha(), 0)
 
-    def test_cache_reuses_then_refreshes_in_place_at_bounded_rate(self):
-        scene = self.scene()
-        with patch("local.liquid_glass.time.monotonic", return_value=1):
-            first = self.render(scene)
-        scene.fill(QColor("#e45f73"))
-        with patch("local.liquid_glass.time.monotonic", return_value=1.05):
-            held = self.render(scene)
-        with patch("local.liquid_glass.time.monotonic", return_value=1.11):
-            refreshed = self.render(scene)
-        self.assertEqual(first, held)
-        self.assertNotEqual(first, refreshed)
-        self.assertEqual(glass_cache_info()[0], 1)
+    def test_hover_press_and_selection_do_not_recolor_original_center(self):
+        color = QColor(73, 108, 179, 230)
+        idle, hover, pressed, active = (self.render(base_color=color, **opts) for opts in
+                                       ({}, {'hovered': True}, {'pressed': True}, {'active': True}))
+        for image in (hover, pressed, active):
+            self.assertEqual(image.pixelColor(90, 50), idle.pixelColor(90, 50))
+        self.assertNotEqual(idle, hover)
+        self.assertNotEqual(hover, pressed)
+        self.assertEqual(idle, active)
 
-    def test_material_cache_is_bounded_during_many_buttons_and_resizes(self):
-        source = self.scene()
-        output = QImage(400, 200, QImage.Format.Format_ARGB32_Premultiplied)
-        output.fill(Qt.GlobalColor.transparent)
-        with QPainter(output) as painter:
-            for i in range(GLASS_CACHE_ENTRIES + 12):
-                paint_liquid_glass(painter, QRectF(2, 2, 300 + i % 30, 190),
-                                   backdrop=source, cache_token=i)
-        entries, size = glass_cache_info()
-        self.assertLessEqual(entries, GLASS_CACHE_ENTRIES)
-        self.assertLessEqual(size, GLASS_CACHE_BYTES)
-        entries, size = glass_geometry_cache_info()
-        self.assertLessEqual(entries, GLASS_GEOMETRY_ENTRIES)
-        self.assertLessEqual(size, GLASS_GEOMETRY_BYTES)
+    def test_cached_backdrop_and_legacy_tint_never_add_a_replacement_layer(self):
+        first = QImage(180, 100, QImage.Format.Format_RGB32)
+        first.fill(QColor('#e41f38'))
+        second = QImage(first.size(), first.format())
+        second.fill(QColor('#247bbf'))
+        color = QColor(55, 56, 57, 236)
+        plain = self.render(base_color=color)
+        for scene in (first, second):
+            actual = self.render(base_color=color, backdrop=scene, backdrop_rect=QRectF(scene.rect()),
+                                 tint=QColor('red'), cache_token='old')
+            self.assertEqual(actual, plain)
+
+    def test_center_has_no_wash_or_bloom_and_original_color_is_not_mutated(self):
+        color = QColor(104, 31, 61, 212)
+        original = QColor(color)
+        image = self.render(base_color=color, border_color=QColor(75, 76, 77, 240), radius=12)
+        for y in (30, 50, 70):
+            for x in (40, 90, 140):
+                self.assertEqual(image.pixelColor(x, y), image.pixelColor(90, 50))
+        self.assertEqual(color, original)
 
     def test_painter_opacity_clip_transform_and_pen_are_restored(self):
         image = QImage(200, 100, QImage.Format.Format_ARGB32_Premultiplied)
@@ -99,72 +87,30 @@ class LiquidGlassTests(unittest.TestCase):
             painter.translate(3, 4)
             painter.setClipRect(QRectF(0, 0, 190, 80))
             before = (painter.opacity(), painter.transform(), painter.clipBoundingRect(), painter.pen())
-            paint_liquid_glass(painter, QRectF(20, 20, 140, 60), backdrop=self.scene(), opacity=.5)
+            paint_liquid_glass(painter, QRectF(20, 20, 140, 60), base_color=QColor(55, 56, 57, 236), opacity=.5)
             after = (painter.opacity(), painter.transform(), painter.clipBoundingRect(), painter.pen())
         self.assertEqual(before, after)
+        self.assertAlmostEqual(image.pixelColor(93, 54).alpha(), 236 * GLASS_FACE_OPACITY * .3, delta=1)
 
     def test_backdrop_mapping_is_local_and_never_captures_widgets(self):
         host, child = QWidget(), QWidget()
         child.setParent(host)
         host.resize(400, 200)
         child.setGeometry(100, 50, 80, 40)
-        host._background_cache = self.scene()
-        with patch.object(host, "grab", side_effect=AssertionError("capture forbidden")), \
-             patch.object(host, "render", side_effect=AssertionError("capture forbidden")):
+        host._background_cache = QImage(180, 100, QImage.Format.Format_RGB32)
+        with patch.object(host, 'grab', side_effect=AssertionError('capture forbidden')), \
+             patch.object(host, 'render', side_effect=AssertionError('capture forbidden')):
             image, region = widget_glass_backdrop(child)
         self.assertEqual(image, host._background_cache)
         self.assertEqual(region, QRectF(45, 25, 36, 20))
         host.close()
 
-    def test_light_and_dark_rims_leave_content_ink_outside_material_owner(self):
-        # The material is purely a background; caller-painted glyphs remain exact.
-        image = self.render(light=True)
+    def test_caller_glyph_pixels_remain_sharp_and_exact(self):
+        image = self.render(base_color=QColor('#f5f5f7'), light=True)
         with QPainter(image) as painter:
-            painter.fillRect(QRectF(80, 40, 20, 20), QColor("#14151a"))
-        self.assertEqual(image.pixelColor(90, 50), QColor("#14151a"))
-
-    def test_control_prewarm_backdrop_stays_consistent_through_idle_and_reversal(self):
-        owner = _TransitionOwner()
-        window = MusicSurfaceWindow(owner)
-        window._timer.stop()
-        window._audio_output_status_timer.stop()
-        window._fullscreen = True
-        window._reset_control_idle(100)
-        first = self.scene()
-        window._background_cache = first
-        lead = window.FULLSCREEN_CONTROL_IDLE_SECONDS - 2
-        try:
-            with patch("local.music_surface_window.time.monotonic", return_value=100 + lead):
-                frozen = window._shared_glass_background()
-                initial_key = window._control_glass_cache_key()
-            window._background_cache = QImage(first.size(), QImage.Format.Format_RGB32)
-            window._background_cache.fill(QColor("#47b389"))
-            with patch("local.music_surface_window.time.monotonic", return_value=100 + lead + .5):
-                self.assertEqual(window._shared_glass_background(), frozen)
-                self.assertEqual(window._control_glass_cache_key(), initial_key)
-            window._control_reveal_target = 0
-            window._control_reveal_from = 1
-            window._control_transition_started_at = 110
-            with patch("local.music_surface_window.time.monotonic", return_value=110.1):
-                self.assertEqual(window._shared_glass_background(), frozen)
-            window._control_reveal_from, window._control_reveal_target = .5, 1
-            window._control_last_motion_at = window._control_transition_started_at = 110.1
-            with patch("local.music_surface_window.time.monotonic", return_value=110.2):
-                self.assertEqual(window._shared_glass_background(), frozen)
-            with patch("local.music_surface_window.time.monotonic", return_value=112):
-                self.assertEqual(window._shared_glass_background(), window._background_cache)
-            window._control_prewarm_remaining = 0
-            with patch("local.music_surface_window.time.monotonic", return_value=110.1 + lead):
-                self.assertNotEqual(window._control_glass_cache_key(), initial_key)
-                self.assertGreater(window._control_prewarm_remaining, 0)
-                frozen = window._shared_glass_background()
-                owner.media_track_id = "another-song"
-                window._background_cache = first
-                self.assertNotEqual(window._shared_glass_background(), frozen)
-        finally:
-            window.shutdown()
-            owner.close()
+            painter.fillRect(QRectF(80, 40, 20, 20), QColor('#14151a'))
+        self.assertEqual(image.pixelColor(90, 50), QColor('#14151a'))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

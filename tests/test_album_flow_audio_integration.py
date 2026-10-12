@@ -294,8 +294,10 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                         for identity in ("homepod", "bluetooth")}
         slider = panel._rows["homepod-2"].volume_slider
         self.provider.calls.clear()
-        QTest.mouseClick(slider, Qt.MouseButton.LeftButton,
-                         pos=QPoint(round(slider.width() * .53), slider.height() // 2))
+        # The row's mouse volume/name zone deliberately toggles mute. The
+        # retained native scrubber adjusts volume by keyboard/accessibility.
+        slider.setFocus(Qt.FocusReason.OtherFocusReason)
+        QTest.keyClick(slider, Qt.Key.Key_Right)
         self.assertEqual(len(self.provider.calls), 1)
         operation, identity, requested = self.provider.calls[0]
         self.assertEqual((operation, identity), ("volume", "homepod-2"))

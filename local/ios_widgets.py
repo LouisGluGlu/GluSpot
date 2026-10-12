@@ -5,7 +5,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from local.ui_theme import app_dark_mode, is_theme_change_event
-from local.liquid_glass import paint_liquid_glass, widget_glass_backdrop
+from local.liquid_glass import paint_liquid_glass
+from local.control_hover import install_control_hover
 
 
 class IosSwitch(QWidget):
@@ -24,6 +25,7 @@ class IosSwitch(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(self.CONTROL_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        install_control_hover(self)
 
     def text(self) -> str:
         return self._text
@@ -105,26 +107,25 @@ class IosSwitch(QWidget):
             bg = QColor(52, 199, 89) if self._checked else (QColor(72, 72, 76) if dark else QColor(209, 209, 214))
         else:
             bg = QColor(70, 70, 74) if dark else QColor(220, 220, 224)
-        backdrop, source = widget_glass_backdrop(self, switch)
-        paint_liquid_glass(painter, switch, radius=switch_h / 2.0, tint=bg,
+        paint_liquid_glass(painter, switch, radius=switch_h / 2.0, base_color=bg,
                           light=not dark, hovered=enabled and self.underMouse(),
-                          backdrop=backdrop, backdrop_rect=source,
-                          opacity=1.0 if enabled else .6, cache_token=(id(self), "track"))
+                          opacity=1.0 if enabled else .6)
 
         knob = switch_h - 4.0
         knob_x = switch.right() - knob - 2.0 if self._checked else switch.left() + 2.0
         knob_rect = QRectF(knob_x, switch.top() + 2.0, knob, knob)
-        knob_backdrop, knob_source = widget_glass_backdrop(self, knob_rect)
-        paint_liquid_glass(painter, knob_rect, radius=knob / 2, tint=QColor("white"), light=True,
-                          backdrop=knob_backdrop, backdrop_rect=knob_source,
-                          opacity=1.0 if enabled else .6, cache_token=(id(self), "knob"))
+        paint_liquid_glass(painter, knob_rect, radius=knob / 2, base_color=QColor("white"), light=True,
+                          border_color=QColor(0, 0, 0, 18),
+                          opacity=1.0 if enabled else .6)
 
         painter.setFont(QFont("Microsoft YaHei UI", 6, QFont.Weight.Bold))
         if enabled:
-            if dark:
-                painter.setPen(QColor(255, 255, 255, 215) if self._checked else QColor("#c4c4ca"))
+            if self._checked:
+                painter.setPen(QColor("#0b2819"))
+            elif dark:
+                painter.setPen(QColor("#c4c4ca"))
             else:
-                painter.setPen(QColor("#16472c") if self._checked else QColor("#5c5c62"))
+                painter.setPen(QColor("#38383e"))
         else:
             painter.setPen(QColor(150, 150, 156) if dark else QColor(168, 168, 174))
         state_text = "开" if self._checked else "关"

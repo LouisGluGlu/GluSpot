@@ -11,7 +11,7 @@ import unicodedata
 from PIL import Image, ImageFilter
 
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QTextBoundaryFinder, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QRegion, QTextCharFormat, QTextLayout, QTextOption
+from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QRegion, QTextCharFormat, QTextLayout, QTextOption, QTransform
 from PySide6.QtWidgets import QWidget
 
 from api.lyric_timeline import active_index_for_position
@@ -84,6 +84,7 @@ from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentat
 from local.music_source_icons import paint_music_source_icon
 from local.personal_dj_icon import paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
 from local.liquid_glass import paint_liquid_glass
+from local.control_hover import HoverMotion, MENU_HOVER_DELAY_MS, advance_neighbor_spring, hover_scale, neighbor_displacement
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -230,6 +231,26 @@ class MusicSurfaceWindow(QWidget):
         self._control_reveal_from = 1.0
         self._control_reveal_target = 1.0
         self._control_last_tick_reveal = 1.0
+        self._control_hover_motions: dict[str, HoverMotion] = {}
+        self._control_neighbor_offsets: dict[str, QPointF] = {}
+        self._control_neighbor_velocities: dict[str, QPointF] = {}
+        self._control_hover_tick_at = self._control_last_motion_at
+        self._control_hover_menu_key = ""
+        self._control_hover_menu_started_at = 0.0
+        self._control_hover_menu_triggered = False
+        self._control_hover_menu_timer = QTimer(self)
+        self._control_hover_menu_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._control_hover_menu_timer.setSingleShot(True)
+        self._control_hover_menu_timer.setInterval(MENU_HOVER_DELAY_MS)
+        self._control_hover_menu_timer.timeout.connect(self._check_control_hover_menu)
+        self._dj_voice_selector_active = False
+        self._dj_voice_selector_pointer = False
+        self._dj_voice_selector_widget = None
+        self._dj_voice_selector_motion = HoverMotion()
+        self._dj_voice_selector_close_timer = QTimer(self)
+        self._dj_voice_selector_close_timer.setSingleShot(True)
+        self._dj_voice_selector_close_timer.setInterval(2000)
+        self._dj_voice_selector_close_timer.timeout.connect(self._check_dj_voice_selector_leave)
         self._library_expansion_from = 0.0
         self._library_expansion_target = 0.0
         self._library_expansion_started_at = self._control_last_motion_at
@@ -243,7 +264,6 @@ class MusicSurfaceWindow(QWidget):
         self._control_prewarm_library_available = self._library_back_available()
         self._control_prewarm_remaining = (2 + int(self._control_prewarm_library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
         self._control_prewarm_requested = False
-        self._control_glass_background = QImage()
         self._lyric_motion = MusicLyricMotion()
         self._logical_line_spring = LogicalLineSpringChain()
         self._visual_row_ids_key = None
@@ -1208,6 +1228,7 @@ class MusicSurfaceWindow(QWidget):
         self._control_reveal_from = 1.0
         self._control_reveal_target = 1.0
         self._control_last_tick_reveal = 1.0
+        self._reset_control_hover(instant)
         self._reset_library_expansion(instant)
         if self._hovered_window_button == "library":
             self._hovered_window_button = ""
@@ -1216,8 +1237,196 @@ class MusicSurfaceWindow(QWidget):
         self._control_prewarm_remaining = (2 + int(self._control_prewarm_library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
         self._control_prewarm_requested = False
         self._metadata_reveal_pending.clear()
-        self._control_glass_background = QImage()
         self._metadata_scroll_after_hide.clear()
+
+    def _reset_control_hover(self, now: float | None = None):
+        self._control_hover_motions.clear()
+        self._control_neighbor_offsets.clear()
+        self._control_neighbor_velocities.clear()
+        self._control_hover_tick_at = time.monotonic() if now is None else now
+        self._control_hover_menu_timer.stop()
+        self._control_hover_menu_key = ""
+        self._control_hover_menu_triggered = False
+
+    def _set_control_hover(self, window_key: str, media_key: str, now: float, *, arm_selector_leave: bool = True):
+        """One continuous hover clock drives paint and the matching hit shapes."""
+        targets = {window_key} if window_key else set()
+        if media_key:
+            targets.add("media:" + media_key)
+        if self._dj_voice_selector_active:
+            targets.add("personal_dj")
+        for key in targets | self._control_hover_motions.keys():
+            if key not in self._control_hover_motions:
+                self._control_hover_motions[key] = HoverMotion()
+            self._control_hover_motions[key].set_hovered(key in targets, now)
+        menu_key = window_key if window_key in {"audio_output", "personal_dj"} else ""
+        if menu_key != self._control_hover_menu_key:
+            self._control_hover_menu_timer.stop()
+            self._control_hover_menu_key = menu_key
+            self._control_hover_menu_started_at = now
+            self._control_hover_menu_triggered = False
+            if menu_key:
+                self._control_hover_menu_timer.start()
+        if window_key == "personal_dj" and arm_selector_leave:
+            self._dj_voice_selector_close_timer.stop()
+        elif arm_selector_leave and self._dj_voice_selector_active and not self._dj_voice_selector_pointer:
+            if not self._dj_voice_selector_close_timer.isActive():
+                self._dj_voice_selector_close_timer.start()
+
+    def _hover_control_rect(self, key: str, button: QRectF, group: dict[str, QRectF], now: float) -> QRectF:
+        # Retain one exact hover pose through shared blur/hide, avoiding a
+        # newly rasterized blurred layer on every exit frame.
+        instant = (self._control_transition_started_at if self._control_reveal_target < 1.0 else now)
+        own = self._control_hover_motions.get(key)
+        factor = hover_scale(own.value(instant) if own is not None else 0.0)
+        offset = self._control_neighbor_offsets.get(key, QPointF())
+        if factor == 1.0 and offset.isNull():
+            return QRectF(button)
+        center = button.center()
+        result = QRectF(center.x() - button.width() * factor / 2,
+                        center.y() - button.height() * factor / 2,
+                        button.width() * factor, button.height() * factor)
+        result.translate(offset)
+        return result
+
+    @staticmethod
+    def _control_rect_transform(base: QRectF, posed: QRectF) -> QTransform:
+        transform = QTransform()
+        transform.translate(posed.center().x(), posed.center().y())
+        transform.scale(posed.width() / max(.001, base.width()), posed.height() / max(.001, base.height()))
+        transform.translate(-base.center().x(), -base.center().y())
+        return transform
+
+    def _transport_hover_group(self, panel: QRectF) -> dict[str, QRectF]:
+        slot = panel.width() / 3.0
+        return {"media:" + command: QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
+                for index, command in enumerate(("previous", "toggle_play_pause", "next"))}
+
+    def _advance_control_neighbor_motion(self, now: float) -> bool:
+        elapsed = max(0.0, min(.08, now - self._control_hover_tick_at))
+        self._control_hover_tick_at = now
+        if self._control_reveal_target < 1.0:
+            return False
+        if (not any(motion.value(now) > .00001 for motion in self._control_hover_motions.values())
+                and not any(not offset.isNull() for offset in self._control_neighbor_offsets.values())
+                and not any(not velocity.isNull() for velocity in self._control_neighbor_velocities.values())):
+            return False
+        groups = (self._top_control_hover_group(QRectF(self.rect())),
+                  self._transport_hover_group(self._media_control_panel_rect))
+        changed = False
+        for group in groups:
+            for key, button in group.items():
+                target = QPointF()
+                for other_key, other in group.items():
+                    motion = self._control_hover_motions.get(other_key)
+                    if other_key != key and motion is not None:
+                        target += neighbor_displacement(button, other, motion.value(now))
+                offset = QPointF(self._control_neighbor_offsets.get(key, QPointF()))
+                velocity = QPointF(self._control_neighbor_velocities.get(key, QPointF()))
+                previous = QPointF(offset)
+                # A damped spring gives nearby peers a small elastic settle.
+                # Bound integration after a suspended/native modal frame.
+                offset, velocity = advance_neighbor_spring(offset, velocity, target, elapsed)
+                self._control_neighbor_offsets[key] = offset
+                self._control_neighbor_velocities[key] = velocity
+                changed |= (abs(offset.x() - previous.x()) + abs(offset.y() - previous.y()) > .0001
+                            or abs(velocity.x()) + abs(velocity.y()) > .01)
+        return changed
+
+    def _top_control_hover_group(self, rect: QRectF) -> dict[str, QRectF]:
+        base, scale = self._window_control_base_rect(rect), self._surface_scale(rect)
+        group = {"mode" if self._fullscreen else "return": base,
+                 "translation": self._translation_button_rect(base, scale)}
+        if self._owned_playback_mode is not None:
+            group["playback_mode"] = self._playback_mode_button_rect(base, scale)
+        if self._audio_output_available():
+            group["audio_output"] = self._audio_output_button_rect(base, scale)
+        return group
+
+    def _control_hover_pose_key(self, group: dict[str, QRectF], now: float) -> tuple:
+        return tuple((key, tuple(round(value, 4) for value in (pose.x(), pose.y(), pose.width(), pose.height())))
+                     for key, button in group.items()
+                     for pose in (self._hover_control_rect(key, button, group, now),) if pose != button)
+
+    def _check_control_hover_menu(self):
+        key, now = self._control_hover_menu_key, time.monotonic()
+        if (not key or self._control_hover_menu_triggered or not self.isVisible()
+                or not self._geometry_transition_snapshot.isNull()):
+            return
+        remaining = MENU_HOVER_DELAY_MS / 1000 - (now - self._control_hover_menu_started_at)
+        if remaining > .001:
+            self._control_hover_menu_timer.start(max(1, math.ceil(remaining * 1000)))
+            return
+        self._sync_window_control_rects()
+        button = self._button_rects.get(key)
+        point = QPointF(self.mapFromGlobal(QCursor.pos()))
+        if button is None or not self._window_control_contains(key, button, point):
+            return
+        self._control_hover_menu_triggered = True
+        if key == "audio_output":
+            self._open_audio_output_panel()
+        elif key == "personal_dj":
+            self._open_dj_voice_selector(now)
+
+    def _notify_dj_voice_selector(self, visible: bool):
+        callback = getattr(self.owner, "_personal_dj_voice_hover_callback", None)
+        if callable(callback):
+            widget = callback(self, visible)
+            if isinstance(widget, QWidget):
+                self._dj_voice_selector_widget = widget
+
+    def _open_dj_voice_selector(self, now: float):
+        if self._owned_personal_dj_enabled is None or not callable(getattr(self.owner, "_personal_dj_voice_hover_callback", None)):
+            return
+        self._dismiss_audio_output_panel()
+        self._dj_voice_selector_active = True
+        self._dj_voice_selector_motion.set_hovered(True, now)
+        self._dj_voice_selector_close_timer.stop()
+        self._notify_dj_voice_selector(True)
+        self.update(self._personal_dj_damage_rect(QRectF(self.rect())))
+
+    def _set_dj_voice_selector_hover(self, hovered: bool):
+        """Called by the child selector while the pointer traverses its caption."""
+        self._dj_voice_selector_pointer = bool(hovered)
+        if hovered:
+            self._dj_voice_selector_close_timer.stop()
+        elif self._dj_voice_selector_active and not self._dj_voice_selector_close_timer.isActive():
+            self._dj_voice_selector_close_timer.start()
+
+    def _dj_voice_selector_contains_pointer(self) -> bool:
+        position = QCursor.pos()
+        widget = self._dj_voice_selector_widget
+        if widget is not None and widget.isVisible() and widget.rect().contains(widget.mapFromGlobal(position)):
+            return True
+        # The connecting corridor lets the pointer cross from the large icon
+        # to the caption while keeping the same two-second leave deadline.
+        bounds = self._personal_dj_button_rect(QRectF(self.rect()))
+        bounds.translate(self._personal_dj_control_shift(QRectF(self.rect()), self._personal_dj_reveal_at(time.monotonic())))
+        return bounds.adjusted(-6, -6, 6, 6).contains(QPointF(self.mapFromGlobal(position)))
+
+    def _check_dj_voice_selector_leave(self):
+        if (self._dj_voice_selector_active and not self._dj_voice_selector_pointer
+                and not self._dj_voice_selector_contains_pointer()):
+            # A child caption can retain the parent's last icon hover key.
+            # The actual pointer, rather than that stale key, owns departure.
+            if self._hovered_window_button == "personal_dj":
+                self._hovered_window_button = ""
+            self._close_dj_voice_selector()
+
+    def _close_dj_voice_selector(self, *, immediate: bool = False):
+        was_active = self._dj_voice_selector_active
+        self._dj_voice_selector_active = self._dj_voice_selector_pointer = False
+        self._dj_voice_selector_close_timer.stop()
+        self._dj_voice_selector_motion.set_hovered(False, time.monotonic())
+        if self._hovered_window_button != "personal_dj":
+            motion = self._control_hover_motions.get("personal_dj")
+            if motion is not None:
+                motion.set_hovered(False, time.monotonic())
+        if immediate:
+            self._dj_voice_selector_motion = HoverMotion()
+        if was_active:
+            self._notify_dj_voice_selector(False)
+            self.update(self._personal_dj_damage_rect(QRectF(self.rect())))
 
     @staticmethod
     def _control_spring_progress(progress: float) -> float:
@@ -1242,6 +1451,12 @@ class MusicSurfaceWindow(QWidget):
             self._sync_library_motion_reveal(1.0, instant)
             self._sync_idle_cursor()
             return 1.0
+        if self._dj_voice_selector_active:
+            self._control_last_motion_at = instant
+            self._control_reveal_from = self._control_reveal_target = 1.0
+            self._sync_library_motion_reveal(1.0, instant)
+            self._sync_idle_cursor()
+            return 1.0
         idle_seconds = (
             self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen
             else self.WINDOWED_CONTROL_IDLE_SECONDS
@@ -1258,6 +1473,7 @@ class MusicSurfaceWindow(QWidget):
             if self._hovered_window_button or self._hovered_media_command:
                 self._hovered_window_button = ""
                 self._hovered_media_command = ""
+                self._set_control_hover("", "", idle_at)
                 self.unsetCursor()
         self._sync_idle_cursor()
         duration = max(0.001, self.FULLSCREEN_CONTROL_TRANSITION_SECONDS)
@@ -1294,13 +1510,20 @@ class MusicSurfaceWindow(QWidget):
 
     def _update_control_animation_regions(self, now: float, *, force: bool = False):
         reveal = self._control_reveal_at(now)
+        if reveal <= .001 and self._control_hover_motions:
+            self._reset_control_hover(now)
+        self._set_control_hover(self._hovered_window_button, self._hovered_media_command, now, arm_selector_leave=False)
+        hover_changed = any(motion.is_animating(now) for motion in self._control_hover_motions.values())
+        hover_changed = self._advance_control_neighbor_motion(now) or hover_changed
+        if self._dj_voice_selector_active:
+            self._notify_dj_voice_selector(True)
         self._update_metadata_control_state(now, reveal)
         changed = abs(reveal - self._control_last_tick_reveal) > 0.001
         self._control_last_tick_reveal = reveal
         expansion = self._library_expansion_at(now)
         library_changed = abs(expansion - self._library_last_tick_expansion) > 0.001
         self._library_last_tick_expansion = expansion
-        shared_damage = force or self._controls_animating(now) or changed
+        shared_damage = force or self._controls_animating(now) or changed or hover_changed
         if not shared_damage and not library_changed:
             return
         rect = QRectF(self.rect())
@@ -1309,7 +1532,7 @@ class MusicSurfaceWindow(QWidget):
             self.update(self._library_damage_rect(rect))
         if not shared_damage:
             return
-        self.update(QRectF(rect.right() - 390.0 * scale, 0.0, 390.0 * scale, 100.0 * scale).toAlignedRect())
+        self.update(QRectF(rect.right() - 420.0 * scale, 0.0, 420.0 * scale, 105.0 * scale).toAlignedRect())
         bottom_height = self.CONTROL_BOTTOM_REGION_HEIGHT * scale
         self.update(QRectF(0.0, rect.bottom() - bottom_height, 505.0 * scale, bottom_height).toAlignedRect())
         if self._cover_layout_from > 0.0 or self._cover_layout_to > 0.0:
@@ -2080,13 +2303,33 @@ class MusicSurfaceWindow(QWidget):
         progress = max(0.0, min(1.0, (instant - self._cover_scale_started_at) / duration))
         eased = progress * progress * (3.0 - 2.0 * progress)
         current = self._cover_scale_from + (self._cover_scale_to - self._cover_scale_from) * eased
-        target = 1.0 if self._display_playing_state(instant) else self.COVER_PAUSE_SCALE
+        target = 1.0 if self._cover_visual_playing_state(instant) else self.COVER_PAUSE_SCALE
         if target != self._cover_scale_to:
             self._cover_scale_from = current
             self._cover_scale_to = target
             self._cover_scale_started_at = instant
             return current
         return current
+
+    def _cover_visual_playing_state(self, now: float) -> bool:
+        # The introduced music can play quietly underneath real DJ speech.
+        # Retain its paused cover pose without misrepresenting the transport
+        # state or reversing Play/Pause's actual command intent.
+        provider = getattr(self.owner, "data_provider", None)
+        getter = getattr(provider, "get_personal_dj_presentation", None)
+        try:
+            presentation = getter() if callable(getter) else {}
+            presentation = presentation if isinstance(presentation, dict) else {}
+            if "cover_paused" in presentation:
+                cover_paused = bool(presentation["cover_paused"])
+            else:
+                speaking_getter = getattr(provider, "is_owned_personal_dj_speaking", None)
+                cover_paused = bool(speaking_getter()) if callable(speaking_getter) else False
+            if cover_paused:
+                return False
+        except Exception:
+            pass
+        return self._display_playing_state(now)
 
     def _cover_scale_animating(self, now: float) -> bool:
         self._cover_scale_at(now)
@@ -7946,46 +8189,10 @@ class MusicSurfaceWindow(QWidget):
         shape.addRoundedRect(rect, radius, radius)
         return shape.contains(point)
 
-    def _shared_glass_background(self) -> QImage:
-        """Use the same small backdrop for visible prewarm and its hide/reveal.
-
-        The existing blur cache is prepared before idle. Freezing only this
-        tiny backing at that lead-in prevents a cached face jumping back to an
-        older moving field, without rebuilding Pillow layers during animation.
-        """
-        now = time.monotonic()
-        idle_seconds = self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen else self.WINDOWED_CONTROL_IDLE_SECONDS
-        hold = (self._control_reveal_target < 1.0
-                or self._controls_animating(now)
-                or now - self._control_last_motion_at >= max(.3, idle_seconds - 2.0))
-        identity = (self._visual_track_identity(), self.width(), self.height(), self._fullscreen,
-                    self._art_palette_cache_key, self._background_cache_key)
-        frozen = getattr(self, "_control_glass_background", QImage())
-        if not hold or identity != getattr(self, "_control_glass_identity", None):
-            frozen = QImage()
-            self._control_glass_identity = identity
-        if hold and frozen.isNull() and not self._background_cache.isNull():
-            frozen = QImage(self._background_cache)
-            self._control_glass_generation = getattr(self, "_control_glass_generation", 0) + 1
-            self._control_prewarm_remaining = (2 + int(self._library_back_available())) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
-        self._control_glass_background = frozen
-        return self._background_cache if frozen.isNull() else frozen
-
-    def _control_glass_cache_key(self):
-        self._shared_glass_background()
-        return self._visual_track_identity(), getattr(self, "_control_glass_generation", 0)
-
     def _paint_surface_glass(self, painter: QPainter, target: QRectF, *, hovered=False,
-                             pressed=False, active=False, shared=True):
-        image = self._shared_glass_background() if shared else self._background_cache
-        source = QRectF(target.x() * image.width() / max(1, self.width()),
-                        target.y() * image.height() / max(1, self.height()),
-                        target.width() * image.width() / max(1, self.width()),
-                        target.height() * image.height() / max(1, self.height()))
+                             pressed=False, active=False, base_color=None, border_color=None):
         paint_liquid_glass(painter, target, hovered=hovered, pressed=pressed, active=active,
-                           backdrop=image, backdrop_rect=source,
-                           cache_token=(id(self), "shared", getattr(self, "_control_glass_generation", 0))
-                           if shared else (id(self), "live-dj"))
+                           base_color=base_color, border_color=border_color, light=active)
 
     def _paint_library_back(self, painter: QPainter, rect: QRectF):
         if not self._library_back_available():
@@ -8000,10 +8207,17 @@ class MusicSurfaceWindow(QWidget):
         pressed = self._pressed_window_button == "library"
         def draw(layer, *, fraction=expansion, is_hovered=hovered, is_pressed=pressed):
             face = self._library_button_face(rect, fraction)
+            original_height = face.height()
+            face = self._hover_control_rect("library", face, {"library": face}, now)
+            growth = face.height() / max(.001, original_height)
             layer.save()
-            self._paint_surface_glass(layer, face, hovered=is_hovered, pressed=is_pressed)
+            self._paint_surface_glass(layer, face, hovered=is_hovered, pressed=is_pressed,
+                                      base_color=QColor(47 if is_pressed else 67 if is_hovered else 55,
+                                                        48 if is_pressed else 68 if is_hovered else 56,
+                                                        49 if is_pressed else 69 if is_hovered else 57, 236),
+                                      border_color=QColor(75, 76, 77, 240))
             ink = QColor(255, 255, 255, 242)
-            icon_side = 20.0 * scale
+            icon_side = 20.0 * scale * growth
             center_x = face.left() + face.height() / 2
             paint_music_source_icon(layer, QRectF(center_x - icon_side / 2, face.center().y() - icon_side / 2, icon_side, icon_side), "library_back", tint=ink)
             if fraction > 0.001:
@@ -8011,13 +8225,13 @@ class MusicSurfaceWindow(QWidget):
                 layer.setClipRect(label, Qt.ClipOperation.IntersectClip)
                 layer.setOpacity(fraction)
                 layer.setPen(ink)
-                layer.setFont(self._surface_font(max(12.0, 14.0 * self._surface_scale(rect)), QFont.Weight.DemiBold))
+                layer.setFont(self._surface_font(max(12.0, 14.0 * self._surface_scale(rect)) * growth, QFont.Weight.DemiBold))
                 layer.drawText(label, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "音乐库")
             layer.restore()
         idle_seconds = self.FULLSCREEN_CONTROL_IDLE_SECONDS if self._fullscreen else self.WINDOWED_CONTROL_IDLE_SECONDS
         idle_expansion = self._library_expansion_at(self._control_last_motion_at + idle_seconds)
-        glass_key = self._control_glass_cache_key()
-        key = lambda fraction, over, down: ("library", glass_key, round(self._surface_scale(rect), 3), round(fraction, 5), over, down)
+        hover_key = self._control_hover_pose_key({"library": self._library_button_face(rect, expansion)}, now)
+        key = lambda fraction, over, down: ("library", round(self._surface_scale(rect), 3), round(fraction, 5), over, down, hover_key)
         self._paint_control_layer(painter, self._library_button_rect(rect, 1.0), reveal,
                                   self._library_control_shift(rect, reveal), key(expansion, hovered, pressed), draw,
                                   prewarm_default=(key(idle_expansion, False, False),
@@ -8104,7 +8318,7 @@ class MusicSurfaceWindow(QWidget):
         scale = self._surface_scale(rect)
         side = max(32.0, 44.0 * scale)
         margin = max(10.0, 18.0 * scale)
-        expansion = self._personal_dj_activity_at(now) if expansion is None else max(0.0, min(1.0, expansion))
+        expansion = max(self._personal_dj_activity_at(now), self._dj_voice_selector_motion.value(now)) if expansion is None else max(0.0, min(1.0, expansion))
         base = QRectF(rect.right() - margin - side, rect.bottom() - margin - side, side, side)
         font = self._surface_font(max(10.0, 14.0 * scale), QFont.Weight.DemiBold)
         key = (self._dj_next_title, font.toString(), round(scale, 3))
@@ -8121,7 +8335,11 @@ class MusicSurfaceWindow(QWidget):
             return QRectF(*(a + (b - a) * expansion for a, b in zip(
                 (start.x(), start.y(), start.width(), start.height()),
                 (end.x(), end.y(), end.width(), end.height()))))
-        return blend(base, large), blend(base, pill)
+        icon, caption = blend(base, large), blend(base, pill)
+        whole = icon.united(caption)
+        posed = self._hover_control_rect("personal_dj", whole, {"personal_dj": whole}, now)
+        transform = self._control_rect_transform(whole, posed)
+        return transform.mapRect(icon), transform.mapRect(caption)
 
     def _personal_dj_backdrop_rect(self, rect: QRectF) -> QRectF:
         return QRectF(rect.right() - rect.width() * .32, rect.bottom() - rect.height() * .56,
@@ -8202,6 +8420,8 @@ class MusicSurfaceWindow(QWidget):
             enabled, speaking = None, False
             state, title, token = "idle", "", None
         now = time.monotonic()
+        if enabled is None:
+            self._close_dj_voice_selector(immediate=True)
         if not speaking and not title and self._personal_dj_activity_at(now) > .001:
             # Keep the real outgoing caption's width through its contraction;
             # clearing provider text must not snap a wide pill to a short one.
@@ -8271,18 +8491,20 @@ class MusicSurfaceWindow(QWidget):
             return
         icon, caption = self._personal_dj_geometry(rect, now)
         button = icon.united(caption)
-        expansion = self._personal_dj_activity_at(now)
+        speech_expansion = self._personal_dj_activity_at(now)
+        expansion = max(speech_expansion, self._dj_voice_selector_motion.value(now))
         scale = self._surface_scale(rect)
         elapsed = max(0.0, now - self._dj_ring_started_at)
         painter.save()
         painter.setOpacity(reveal)
-        self._paint_personal_dj_backdrop(painter, rect, expansion)
+        self._paint_personal_dj_backdrop(painter, rect, speech_expansion)
         painter.translate(self._personal_dj_control_shift(rect, reveal))
         hovered = self._hovered_window_button == "personal_dj"
         frame = self._dj_audio_frame if self._owned_dj_speaking else None
         energy = min(1.0, max(frame.low, frame.mid, frame.high) * 4) if frame is not None else 0.0
+        background = QColor(65 if hovered else 42, 66 if hovered else 43, 69 if hovered else 46, 239)
         self._paint_surface_glass(painter, caption, hovered=hovered,
-                                 pressed=self._pressed_window_button == "personal_dj", shared=False)
+                                 pressed=self._pressed_window_button == "personal_dj", base_color=background)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         border = QColor(170, 172, 175, round(150 + 80 * energy))
         painter.setPen(QPen(border, max(1.0, scale) + energy * scale * 1.5))
@@ -8291,7 +8513,9 @@ class MusicSurfaceWindow(QWidget):
             painter.save()
             painter.setOpacity(reveal * (1.0 - expansion))
             self._paint_surface_glass(painter, icon, hovered=hovered,
-                                     pressed=self._pressed_window_button == "personal_dj", shared=False)
+                                     pressed=self._pressed_window_button == "personal_dj", base_color=background)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(icon)
             painter.restore()
         status_color = personal_dj_status_color(self._dj_presentation_state)
         if status_color is not None:
@@ -8306,7 +8530,7 @@ class MusicSurfaceWindow(QWidget):
         inner = icon.adjusted(icon.width() * .18, icon.height() * .14, -icon.width() * .18, -icon.height() * .14)
         neutral = QColor(245, 246, 248) if self._owned_personal_dj_enabled else QColor(27, 28, 30)
         paint_personal_dj_icon(painter, inner, color, bands=frame, elapsed=elapsed, neutral=neutral)
-        if expansion > .25 and self._dj_next_title:
+        if expansion > .25 and self._dj_next_title and not self._dj_voice_selector_active:
             painter.save()
             painter.setOpacity(reveal * min(1.0, (expansion - .25) / .75))
             painter.setClipRect(caption)
@@ -8401,6 +8625,9 @@ class MusicSurfaceWindow(QWidget):
         return self._preceding_control_rect(anchor, scale)
 
     def _dismiss_audio_output_panel(self, *, immediate: bool = False):
+        if immediate:
+            self._close_dj_voice_selector(immediate=True)
+            self._control_hover_menu_timer.stop()
         panel = getattr(self, "_audio_output_panel", None)
         if panel is not None:
             panel.dismiss(immediate=immediate)
@@ -8409,15 +8636,24 @@ class MusicSurfaceWindow(QWidget):
         if self._audio_output_panel is not None and self._audio_output_panel.isVisible():
             self._dismiss_audio_output_panel()
             return
+        self._open_audio_output_panel()
+
+    def _open_audio_output_panel(self):
+        if self._audio_output_panel is not None and self._audio_output_panel.isVisible():
+            return
         if not self._audio_output_available():
             return
+        self._close_dj_voice_selector()
         self._audio_output_motion.settle(self._audio_output_membership.current, time.monotonic())
         if self._audio_output_panel is None:
             self._audio_output_panel = AudioOutputPanel(self.owner.data_provider, self)
             self._audio_output_panel.dismissed.connect(self._note_pointer_moved)
-        button = self._audio_output_button_rect(self._window_control_base_rect(QRectF(self.rect())), self._surface_scale())
+        now, rect = time.monotonic(), QRectF(self.rect())
+        base = self._window_control_base_rect(rect)
+        button = self._audio_output_button_rect(base, self._surface_scale())
+        button = self._hover_control_rect("audio_output", button, self._top_control_hover_group(rect), now)
         button.translate(self._window_control_shift(button, self._control_reveal_at(time.monotonic())))
-        self._reset_control_idle()
+        self._note_pointer_moved(now)
         self._audio_output_panel.open_at(QPoint(round(button.right()), round(button.top())), source_rect=button)
         self._update_audio_output_region()
 
@@ -8610,30 +8846,26 @@ class MusicSurfaceWindow(QWidget):
             self._control_prewarm_remaining = (2 + int(library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
             self._control_prewarm_requested = False
         button = self._window_control_base_rect(rect)
-        key = "mode" if self._fullscreen else "return"
-        reveal = self._control_reveal_at(time.monotonic())
-        self._button_rects = (
-            {key: button.translated(self._window_control_shift(button, reveal)),
-             "translation": self._translation_button_rect(button, self._surface_scale(rect)).translated(
-                 self._window_control_shift(button, reveal))}
-            if reveal >= 0.75 else {}
-        )
+        now = time.monotonic()
+        reveal = self._control_reveal_at(now)
+        group = self._top_control_hover_group(rect)
+        self._button_rects = ({key: self._hover_control_rect(key, target, group, now).translated(
+            self._window_control_shift(button, reveal)) for key, target in group.items()}
+            if reveal >= .75 else {})
         if reveal >= 0.75 and library_available:
-            self._button_rects["library"] = self._library_button_face(rect).translated(self._library_control_shift(rect, reveal))
-        if reveal >= 0.75 and self._owned_playback_mode is not None:
-            self._button_rects["playback_mode"] = self._playback_mode_button_rect(
-                button, self._surface_scale(rect)).translated(self._window_control_shift(button, reveal))
-        dj_reveal = self._personal_dj_reveal_at(time.monotonic())
+            library = self._library_button_face(rect)
+            self._button_rects["library"] = self._hover_control_rect("library", library, {"library": library}, now).translated(self._library_control_shift(rect, reveal))
+        dj_reveal = self._personal_dj_reveal_at(now)
         if dj_reveal >= .75:
             dj_button = self._personal_dj_button_rect(rect)
             self._button_rects["personal_dj"] = dj_button.translated(self._personal_dj_control_shift(rect, dj_reveal))
-        if reveal >= 0.75 and self._audio_output_available():
+        if reveal >= .75 and "audio_output" in group:
             audio = self._audio_output_button_rect(button, self._surface_scale(rect))
             pose = self._audio_output_motion.pose
             if pose is not None:
                 audio = connection_capsule_rect(audio, pose, self._surface_font(
                     16.0 * self._surface_scale(rect), QFont.Weight.DemiBold), 16.0 * self._surface_scale(rect))
-            self._button_rects["audio_output"] = audio.translated(self._window_control_shift(button, reveal))
+            self._button_rects["audio_output"] = self._hover_control_rect("audio_output", audio, group, now).translated(self._window_control_shift(button, reveal))
         if self._hovered_window_button not in self._button_rects:
             self._hovered_window_button = ""
 
@@ -8717,14 +8949,31 @@ class MusicSurfaceWindow(QWidget):
         translation_pressed = self._pressed_window_button == "translation"
         hovered = self._hovered_window_button == key
         pressed = self._pressed_window_button == key
+        hover_group = self._top_control_hover_group(rect)
+        hover_pose_key = self._control_hover_pose_key(hover_group, now)
+        posed_button = self._hover_control_rect(key, button, hover_group, now)
+        posed_translation = self._hover_control_rect("translation", translation, hover_group, now)
+        posed_playback = self._hover_control_rect("playback_mode", playback_button, hover_group, now)
+        posed_audio = self._hover_control_rect("audio_output", audio_button, hover_group, now)
 
         def draw(layer: QPainter, *, hovered_state: bool = hovered, pressed_state: bool = pressed,
-                 mode_ink: QColor = playback_ink, gradient_phase: float = fm_phase):
+                 mode_ink: QColor = playback_ink, gradient_phase: float = fm_phase,
+                 use_hover_pose: bool = True):
+            button, translation, playback_button, audio_button = (
+                (posed_button, posed_translation, posed_playback, posed_audio) if use_hover_pose else
+                (self._window_control_base_rect(rect), self._translation_button_rect(self._window_control_base_rect(rect), scale),
+                 self._playback_mode_button_rect(self._window_control_base_rect(rect), scale),
+                 self._audio_output_button_rect(self._window_control_base_rect(rect), scale)))
             layer.save()
             def face(target: QRectF, is_hovered: bool = False, is_pressed: bool = False,
                      active: bool = False):
+                border = QColor(168, 170, 172, 245) if active else QColor(75, 76, 77, 240)
+                fill = QColor(248, 249, 250, 245) if active else QColor(
+                    47 if is_pressed else (67 if is_hovered else 55),
+                    48 if is_pressed else (68 if is_hovered else 56),
+                    49 if is_pressed else (69 if is_hovered else 57), 236)
                 self._paint_surface_glass(layer, target, hovered=is_hovered,
-                                         pressed=is_pressed, active=active)
+                                         pressed=is_pressed, active=active, base_color=fill, border_color=border)
 
             def icon_rect(target: QRectF, fraction: float = 0.55):
                 side = target.width() * fraction
@@ -8773,35 +9022,32 @@ class MusicSurfaceWindow(QWidget):
 
         def draw_default(layer: QPainter):
             draw(layer, hovered_state=False, pressed_state=False, mode_ink=default_playback_ink,
-                 gradient_phase=default_fm_phase)
+                 gradient_phase=default_fm_phase, use_hover_pose=False)
 
         gradient_key = tuple((position, color.rgba()) for position, color in fm_stops) if fm_stops else ()
-        glass_key = self._control_glass_cache_key()
 
         self._paint_control_layer(
             painter, bounds, reveal, self._window_control_shift(button, reveal),
-            ("window", key, glass_key, round(scale, 3), translated,
+            ("window", key, round(scale, 3), translated,
              translation_hovered, translation_pressed, playback_mode, playback_asset, playback_ink.rgba(), playback_hovered, playback_pressed,
              hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot,
-             gradient_key, fm_phase if fm_continuous else None), draw,
-            prewarm_default=(("window", key, glass_key, round(scale, 3), translated,
+             gradient_key, fm_phase if fm_continuous else None, hover_pose_key), draw,
+            prewarm_default=(("window", key, round(scale, 3), translated,
                                translation_hovered, translation_pressed, playback_mode, playback_asset, default_playback_ink.rgba(), playback_hovered, playback_pressed,
                                False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot,
-                               gradient_key, default_fm_phase if fm_continuous else None), draw_default),
+                               gradient_key, default_fm_phase if fm_continuous else None, ()), draw_default),
         )
         if audio_available and not audio_active and audio_pose is not None:
             painter.save()
             painter.setOpacity(reveal ** .75)
             painter.translate(self._window_control_shift(button, reveal))
-            font = self._surface_font(16.0 * scale, QFont.Weight.DemiBold)
-            capsule = connection_capsule_rect(audio_button, audio_pose, font, 16.0 * scale)
-            image = self._background_cache
-            source = QRectF(capsule.x() * image.width() / max(1, self.width()),
-                            capsule.y() * image.height() / max(1, self.height()),
-                            capsule.width() * image.width() / max(1, self.width()),
-                            capsule.height() * image.height() / max(1, self.height()))
-            paint_connection_pose(painter, audio_button, audio_pose, font,
-                                  available_left=16.0 * scale, backdrop=image, backdrop_rect=source)
+            connection = connection_capsule_rect(audio_button, audio_pose, self._surface_font(
+                16.0 * scale, QFont.Weight.DemiBold), 16.0 * scale)
+            posed_connection = self._hover_control_rect("audio_output", connection, hover_group, now)
+            painter.setTransform(self._control_rect_transform(connection, posed_connection), True)
+            paint_connection_pose(painter, audio_button, audio_pose,
+                                  self._surface_font(16.0 * scale, QFont.Weight.DemiBold),
+                                  available_left=16.0 * scale)
             painter.restore()
 
     @staticmethod
@@ -8944,7 +9190,8 @@ class MusicSurfaceWindow(QWidget):
         occluder.addRoundedRect(cover, cover.width() * 0.055, cover.height() * 0.055)
         reveal = self._control_reveal_at(now)
         if self._library_back_available() and reveal > 0.001:
-            face = self._library_button_face(rect, self._library_expansion_at(now)).translated(self._library_control_shift(rect, reveal))
+            face = self._library_button_face(rect, self._library_expansion_at(now))
+            face = self._hover_control_rect("library", face, {"library": face}, now).translated(self._library_control_shift(rect, reveal))
             occluder.addRoundedRect(face, face.height() / 2, face.height() / 2)
         dj_reveal = self._personal_dj_reveal_at(now)
         if dj_reveal > .001:
@@ -8975,7 +9222,7 @@ class MusicSurfaceWindow(QWidget):
         self, painter: QPainter, rect: QRectF, primary: QColor, secondary: QColor,
         *, paint_ink: bool = True,
     ):
-        # Separate optical circles preserve the existing broad hit regions.
+        # The panel remains a layout/hit-test region, but has no visible plate.
         panel = QRectF(rect)
         scale = self._surface_scale()
         panel.setHeight(min(self.TRANSPORT_PANEL_HEIGHT * scale, panel.height()))
@@ -8986,11 +9233,12 @@ class MusicSurfaceWindow(QWidget):
         now = time.monotonic()
         reveal = self._control_reveal_at(now)
         shift = self._transport_control_shift(panel, reveal)
+        hover_group = self._transport_hover_group(panel)
         self._media_button_rects = {}
         for index, command in enumerate(commands):
             button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
             if reveal >= 0.75:
-                self._media_button_rects[command] = button.translated(shift)
+                self._media_button_rects[command] = self._hover_control_rect("media:" + command, button, hover_group, now).translated(shift)
         if not paint_ink:
             return
         accent = self._future_lyric_color(panel)
@@ -9009,27 +9257,25 @@ class MusicSurfaceWindow(QWidget):
                 if frame is not None:
                     feedback[command] = (frame, state)
         active_commands = tuple(command for command in commands if command in feedback)
-        glass_key = self._control_glass_cache_key()
         def draw(
             layer: QPainter, *, hovered_command: str = self._hovered_media_command,
             pressed_command: str = self._pressed_media_command,
             animated_commands: tuple[str, ...] = active_commands,
+            use_hover_pose: bool = True,
         ):
             for index, command in enumerate(commands):
-                button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
-                face_side = min(58.0 * scale, panel.height() - 2.0 * scale, slot - 10.0 * scale)
-                face = QRectF(button.center().x() - face_side / 2, button.center().y() - face_side / 2,
-                              face_side, face_side)
-                self._paint_surface_glass(layer, face, hovered=hovered_command == command,
-                                         pressed=pressed_command == command)
                 if command in animated_commands:
                     continue
+                button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
+                if use_hover_pose:
+                    button = self._hover_control_rect("media:" + command, button, hover_group, now)
                 icon_color = QColor(accent)
                 if pressed_command == command:
                     icon_color.setAlpha(round(icon_color.alpha() * 0.70))
                 elif hovered_command == command:
                     icon_color.setAlpha(255)
-                icon_side = min(40.0 * scale, panel.height() - 12.0 * scale)
+                growth = button.height() / max(.001, panel.height())
+                icon_side = min(44.0 * scale, panel.height() - 12.0 * scale) * growth
                 icon_rect = QRectF(
                     button.center().x() - icon_side / 2.0,
                     button.center().y() - icon_side / 2.0,
@@ -9039,17 +9285,17 @@ class MusicSurfaceWindow(QWidget):
                 self._paint_transport_icon(layer, icon_rect, command, icon_color)
 
         def draw_default(layer: QPainter):
-            draw(layer, hovered_command="", pressed_command="", animated_commands=())
+            draw(layer, hovered_command="", pressed_command="", animated_commands=(), use_hover_pose=False)
 
         self._paint_control_layer(
             painter, panel, reveal, shift,
             (
-                "transport", glass_key, round(scale, 3), accent.rgba(),
+                "transport", round(scale, 3), accent.rgba(),
                 self._display_playing_state(), self._hovered_media_command,
-                self._pressed_media_command, active_commands,
+                self._pressed_media_command, active_commands, self._control_hover_pose_key(hover_group, now),
             ), draw,
             prewarm_default=(
-                ("transport", glass_key, round(scale, 3), accent.rgba(), self._display_playing_state(), "", "", ()),
+                ("transport", round(scale, 3), accent.rgba(), self._display_playing_state(), "", "", (), ()),
                 draw_default,
             ),
         )
@@ -9057,7 +9303,9 @@ class MusicSurfaceWindow(QWidget):
             frame, _state = feedback[command]
             index = commands.index(command)
             button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
-            icon_side = min(40.0 * scale, panel.height() - 12.0 * scale)
+            button = self._hover_control_rect("media:" + command, button, hover_group, now)
+            growth = button.height() / max(.001, panel.height())
+            icon_side = min(44.0 * scale, panel.height() - 12.0 * scale) * growth
             icon_rect = QRectF(
                 button.center().x() - icon_side / 2.0,
                 button.center().y() - icon_side / 2.0,
@@ -9134,6 +9382,7 @@ class MusicSurfaceWindow(QWidget):
             self._hovered_window_button = ""
             self._set_library_expanded(False, time.monotonic())
             self._hovered_media_command = ""
+            self._set_control_hover("", "", time.monotonic())
             self._pressed_media_command = ""
             if not (event.buttons() & Qt.MouseButton.LeftButton):
                 self._pressed_window_button = ""
@@ -9149,6 +9398,7 @@ class MusicSurfaceWindow(QWidget):
                 self._hovered_lyric_index = hover
                 self.update()
             if hover is not None:
+                self._set_control_hover("", "", time.monotonic())
                 if self._hovered_window_button or self._hovered_media_command:
                     self._hovered_window_button = self._hovered_media_command = ""
                     self._set_library_expanded(False, time.monotonic())
@@ -9159,6 +9409,7 @@ class MusicSurfaceWindow(QWidget):
             window_button = next((key for key, rect in self._button_rects.items()
                                   if self._window_button_clickable(key, controls_hoverable) and self._window_control_contains(key, rect, event.position())), "")
             media_button = next((key for key, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_hoverable else ""
+            self._set_control_hover(window_button, media_button, time.monotonic())
             if window_button != self._hovered_window_button or media_button != self._hovered_media_command:
                 self._hovered_window_button = window_button
                 self._hovered_media_command = media_button
@@ -9371,6 +9622,7 @@ class MusicSurfaceWindow(QWidget):
         self._hovered_window_button = ""
         self._set_library_expanded(False, time.monotonic())
         self._hovered_media_command = ""
+        self._set_control_hover("", "", time.monotonic())
         self._pressed_media_command = ""
         self._pressed_window_button = ""
         self._pressed_lyric_index = None
@@ -9407,6 +9659,9 @@ class MusicSurfaceWindow(QWidget):
     def keyPressEvent(self, event):
         self._note_pointer_moved()
         if event.key() == Qt.Key.Key_Escape:
+            if self._dj_voice_selector_active:
+                self._close_dj_voice_selector()
+                return
             if self._audio_output_panel is not None and self._audio_output_panel.isVisible():
                 self._dismiss_audio_output_panel()
                 return

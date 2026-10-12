@@ -15,7 +15,45 @@ specific techniques and limitations, not a production-maturity guarantee.
 `Kehua00/GlassUI` returned 404 for repository metadata, tree and README during this
 review. No implementation claim is made for that name.
 
-## Application to GluSpot
+## October 12 correction: original faces and a fine glass rim
+
+The user's live [iOS-effect page](https://ios26-lg.vercel.app/) was inspected
+in their selected Chrome tab, visually and through its computed CSS and actual
+stylesheet. At this observation the control uses a white background at .08
+alpha, a transparent 2px border, a 2px white rim at .6 alpha and a soft shadow.
+Two sharp white pseudo-elements form the plus. Its backdrop-filter references
+the page's SVG filter. The original translucent face and continuous bright edge
+are the relevant evidence. This live page is unversioned; the observation does
+not establish immutable provenance or an asset license. No page code or assets
+are copied into Qt.
+
+A fresh public read of rdev still resolves master to
+`ac48eab18d1f7f444ae30002d240cae29c863a21`. Its
+[separate masked borders](https://github.com/rdev/liquid-glass-react/blob/ac48eab18d1f7f444ae30002d240cae29c863a21/src/index.tsx#L508)
+use a 1.5px ring that excludes the center and narrow inset highlights. Its large
+outer shadow, saturation boosts and broad optical backing are not applied to
+GluSpot's compact controls.
+
+The revised native helper draws the owner's original state color at 80% of its
+original alpha, with 1.3px directional rims and narrow inner highlights at that same boundary. It
+does not sample the center or replace the owner's pigment. Original transparent
+states retain empty centers. Standard Qt actions retain their QSS bevel and
+radius, drawing text/icons separately at full sharpness. The sampled lens,
+geometry/material caches, NumPy material work and song-page background freeze
+are removed. The material itself has no timer, scene sample, or browser runtime.
+The subsequent hover implementation composites each control's own native
+pixels only while it moves; that separate path preserves layout geometry and
+does not sample the desktop or replace the original button material.
+
+Song transport returns to its original plate-free glyphs and broad hit slots.
+Other buttons keep their circles/capsules/cards, original selection colors and
+device volume geometry. Connection feedback uses one original continuous face.
+Translation's transparent cutout, DJ energy outlines and idle hiding remain.
+Background pigment softening and the 2-second DJ pulse remain independent.
+Current verification is recorded in
+[the handoff document](soft-pigment-and-liquid-glass.md).
+
+## Historical implementation, superseded by the correction above
 
 The original Qt material samples only an already prepared application image,
 softens the interior and displaces the rounded rim with bounded raster/cache
@@ -38,7 +76,14 @@ Album-color darkening/softening is separate from glass rendering. Geometry or
 material defaults that boost saturation or create strong field folding are not
 used as evidence for an appropriate palette policy.
 
-## Verification of the music integrations
+## Current correction verification
+
+The current fine-rim/hover source passed 4212 Python tests (246.139 seconds,
+no skips or Qt callback tracebacks), final DPR 1/2 control/lifetime checks and
+native visual review. Actual muted DJ/playback checks and hardware limitations
+are recorded in [the current handoff](dj-voices-hover-and-ducking.md).
+
+## Historical optical-backing music verification
 
 The native Windows Qt command below passed all **885 tests** at
 `QT_SCALE_FACTOR=1` (4.274 seconds) and again at `QT_SCALE_FACTOR=2`

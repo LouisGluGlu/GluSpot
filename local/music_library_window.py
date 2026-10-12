@@ -17,7 +17,8 @@ from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_mode_controls import paint_presentation_glyph
 from local.music_source_icons import music_source_icon_image, paint_music_source_icon
-from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop
+from local.liquid_glass import GlassPushButton, paint_liquid_glass
+from local.control_hover import HOVER_SECONDS, install_control_hover
 from local.playback_entry_window import ENTRY_SOURCES, EntryNavigationButton, MusicSourceButton, _entry_font
 
 
@@ -50,15 +51,14 @@ class _LibraryActionButton(QAbstractButton):
         self.setAccessibleName(label)
         self.setToolTip(label)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        install_control_hover(self)
 
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-            backdrop, source = widget_glass_backdrop(self, rect)
             paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              tint=QColor("#c04d66") if self.kind == "logout" else None,
-                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
+                              base_color=QColor("#3d2d32") if self.kind == "logout" and self.underMouse() else QColor("#272a31"))
             paint_music_source_icon(painter, rect.adjusted(10, 10, -10, -10), self.kind,
                                      tint=QColor("white") if self.kind == "switch" else None)
             if self.hasFocus():
@@ -74,14 +74,14 @@ class _ModeButton(QAbstractButton):
         self.setAccessibleName({"fullscreen": "全屏播放", "window": "窗口播放", "island": "岛模式播放"}[mode])
         self.setToolTip(self.accessibleName())
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        install_control_hover(self)
 
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
-            backdrop, source = widget_glass_backdrop(self, rect)
             paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
+                              base_color=QColor("#3c404b") if self.underMouse() else QColor("#292c34"))
             if self.hasFocus():
                 painter.setPen(QPen(QColor("#a8a8a8"), 1.3))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -101,9 +101,10 @@ class _CollectionCover(QAbstractButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hover = 0.0
         self._animation = QVariantAnimation(self)
-        self._animation.setDuration(160)
-        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._animation.setDuration(round(HOVER_SECONDS * 1000))
+        self._animation.setEasingCurve(QEasingCurve.Type.OutQuint)
         self._animation.valueChanged.connect(self._set_hover)
+        install_control_hover(self, max_scale=1.03)
 
     def _set_hover(self, value):
         self._hover = float(value)
@@ -140,10 +141,11 @@ class _CollectionCover(QAbstractButton):
                 # Clearly branded placeholder, never a fabricated album cover.
                 source = next((item for item in ENTRY_SOURCES if item.source_id == self.source_id), ENTRY_SOURCES[0])
                 accent = QColor(source.color)
-                backdrop, source_rect = widget_glass_backdrop(self, rect)
-                paint_liquid_glass(painter, rect, radius=14, tint=accent,
-                                  hovered=self.underMouse(), pressed=self.isDown(),
-                                  backdrop=backdrop, backdrop_rect=source_rect, cache_token=(id(self), "face"))
+                base = QColor("#23262e")
+                base = QColor(*(round(a * 227 / 255 + b * 28 / 255)
+                                for a, b in zip(base.getRgb()[:3], accent.getRgb()[:3])))
+                paint_liquid_glass(painter, rect, radius=14, base_color=base,
+                                  hovered=self.underMouse(), pressed=self.isDown())
                 side = min(44.0, rect.width() * .36)
                 icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2 - 8, side, side)
                 paint_music_source_icon(painter, icon, source.source_id)
@@ -330,6 +332,7 @@ class MusicLibraryWindow(QWidget):
         self.scroll.viewport().installEventFilter(self)
         self.scroll.verticalScrollBar().valueChanged.connect(self._scroll_changed)
         self._layout()
+        install_control_hover(self.search, max_scale=1.04)
 
     @property
     def collections(self) -> tuple[LibraryCollection, ...]:

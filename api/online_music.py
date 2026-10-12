@@ -68,6 +68,17 @@ class OnlinePlaylist:
 
 
 @dataclass(frozen=True)
+class PersonalDjVoice:
+    timbre_key: str
+    name: str
+    description: str = ""
+    is_default: bool = False
+    # Genuine catalog audition; service addresses stay out of repr/logging.
+    preview_stream: StreamInfo | None = field(default=None, repr=False)
+    preview_duration_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
 class CatalogPage:
     items: tuple[OnlineSong | OnlinePlaylist, ...]
     next_offset: int = 0
@@ -146,6 +157,7 @@ class OnlineMusicService:
         self._credentials: dict[str, dict[str, Any]] = {}
         self._attempts: dict[str, _LoginAttempt] = {}
         self._generations = {source: 0 for source, _ in self._names}
+        self._dj_voice_catalogs: dict[str, tuple[int, tuple[PersonalDjVoice, ...]]] = {}
         self._closed = False
 
     def list_sources(self) -> tuple[MusicSource, ...]:
@@ -306,6 +318,7 @@ class OnlineMusicService:
                         raise OnlineMusicError("credential", source_id, "账号已确认，但本机加密保存失败，请重试") from None
                     self._credentials[source_id] = credential
                     self._accounts[source_id] = account
+                    self._dj_voice_catalogs.pop(source_id, None)
                 attempt.snapshot = self._snapshot_state(snapshot, state, messages[state], account)
                 return attempt.snapshot
         except OnlineMusicError as error:
@@ -375,6 +388,8 @@ class OnlineMusicService:
                         self._credentials[source_id] = refreshed
                     except (CredentialProtectionError, OSError):
                         self._accounts[source_id] = AccountSnapshot(source_id, state="error", message="本机加密保存失败，请重新登录")
+                if not self._accounts[source_id].logged_in:
+                    self._dj_voice_catalogs.pop(source_id, None)
                 return self._accounts[source_id]
             return self._accounts[source_id]
 
@@ -385,6 +400,7 @@ class OnlineMusicService:
             self._generations[source_id] += 1
             self._accounts[source_id] = AccountSnapshot(source_id)
             self._credentials.pop(source_id, None)
+            self._dj_voice_catalogs.pop(source_id, None)
             for attempt in self._attempts.values():
                 if attempt.snapshot.source_id == source_id:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
@@ -397,8 +413,11 @@ class OnlineMusicService:
         except OnlineMusicError:
             pass
 
-    def _catalog(self, source_id: str, operation: str, params: dict[str, Any]) -> Any:
+    def _catalog(self, source_id: str, operation: str, params: dict[str, Any], *, expected_generation: int | None = None) -> Any:
         self._check_source(source_id)
+        with self._lock:
+            if expected_generation is not None and expected_generation != self._generations[source_id]:
+                raise OnlineMusicError("cancelled", source_id, "音乐请求已取消")
         if not self.account_status(source_id).logged_in:
             account = self.account_status(source_id, refresh=True)
             if not account.logged_in:
@@ -406,6 +425,8 @@ class OnlineMusicService:
         credential = self._load_credential(source_id)
         with self._lock:
             generation = self._generations[source_id]
+            if expected_generation is not None and expected_generation != generation:
+                raise OnlineMusicError("cancelled", source_id, "音乐请求已取消")
         response = self.backend.request(source_id, operation, params, credential)
         with self._lock:
             if self._closed or generation != self._generations[source_id]:
@@ -423,6 +444,7 @@ class OnlineMusicService:
         if data.get("code") in {301, 401, 403}:
             with self._lock:
                 self._accounts[source_id] = AccountSnapshot(source_id, state="expired", message="登录已过期，请重新登录")
+                self._dj_voice_catalogs.pop(source_id, None)
             raise OnlineMusicError("auth_required", source_id, "登录已过期，请重新登录")
         return data
 
@@ -556,13 +578,86 @@ class OnlineMusicService:
         raw = data.get("data") if isinstance(data.get("data"), list) else self._list(data, "songs")
         return tuple(song for item in raw if isinstance(item, dict) and (song := self._song(source_id, item)).song_id and song.title)
 
-    def personal_dj(self, source_id: str = "netease") -> tuple[OnlineSong, ...]:
+    def personal_dj_voices_cached(self, source_id: str = "netease") -> tuple[PersonalDjVoice, ...]:
+        """Current account-generation snapshot, without network or account data."""
+        with self._lock:
+            cached = self._dj_voice_catalogs.get(source_id)
+            if (self._closed or cached is None or cached[0] != self._generations.get(source_id)
+                    or not self._accounts.get(source_id, AccountSnapshot(source_id)).logged_in):
+                return ()
+            return cached[1]
+
+    def personal_dj_voices(self, source_id: str = "netease") -> tuple[PersonalDjVoice, ...]:
+        """Fetch only the real service catalog; name-to-key mappings are not invented."""
+        if source_id != "netease":
+            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持私人DJ音色")
+        with self._lock:
+            generation = self._generations[source_id]
+        data = self._catalog(source_id, "personal_dj_voices", {})
+        payload = data.get("data")
+        rows = payload.get("timbreOptionsInfos") if isinstance(payload, dict) else None
+        if data.get("code") != 200 or not isinstance(rows, list) or not 1 <= len(rows) <= 64:
+            raise OnlineMusicError("response", source_id, "私人DJ音色目录暂不可用，请重试")
+        voices, seen = [], set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise OnlineMusicError("response", source_id, "私人DJ音色目录无效")
+            key, name, desc, default = (row.get("timbreKey"), row.get("name"), row.get("desc"), row.get("defaultAudio"))
+            if (not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key) or key in seen
+                    or not isinstance(name, str) or not 1 <= len(name.strip()) <= 80
+                    or not isinstance(desc, str) or len(desc) > 512 or not isinstance(default, bool)
+                    or any(ord(c) < 32 for c in name + desc)):
+                raise OnlineMusicError("response", source_id, "私人DJ音色目录无效")
+            # Mode-bound celebrity voices do not belong to default personal FM.
+            binding = row.get("bindingMode")
+            if binding not in (None, ""):
+                continue
+            seen.add(key)
+            preview, duration = None, 0.0
+            if row.get("playUrl") not in (None, ""):
+                url, duration_value = self._http_url(row.get("playUrl")), row.get("duration")
+                if (not url or any(ord(c) < 32 for c in url) or isinstance(duration_value, bool)
+                        or not isinstance(duration_value, (int, float)) or not 0 < duration_value <= 120
+                        or not math.isfinite(duration_value)):
+                    raise OnlineMusicError("response", source_id, "私人DJ试听音频无效")
+                duration = float(duration_value)
+                preview = StreamInfo(source_id, "dj-preview:" + key, url, True, quality="dj_preview")
+            voices.append(PersonalDjVoice(key, name.strip(), desc, default, preview, duration))
+        if not voices:
+            raise OnlineMusicError("response", source_id, "私人DJ音色目录暂不可用，请重试")
+        result = tuple(voices)
+        with self._lock:
+            if self._closed or generation != self._generations[source_id]:
+                raise OnlineMusicError("cancelled", source_id, "音乐请求已取消")
+            cached = self._dj_voice_catalogs.get(source_id)
+            if cached is not None and cached[0] == generation:
+                previous = {voice.timbre_key: voice for voice in cached[1]}
+                # A same-account refresh must not impersonate account
+                # replacement to an active audition's identity fence.
+                # Dataclass equality includes every retained field and the
+                # full StreamInfo (including its hidden URL).
+                result = tuple(previous[voice.timbre_key]
+                    if voice.timbre_key in previous and previous[voice.timbre_key] == voice else voice
+                    for voice in result)
+            self._dj_voice_catalogs[source_id] = (generation, result)
+        return result
+
+    def personal_dj(self, source_id: str = "netease", timbre_key: str = "") -> tuple[OnlineSong, ...]:
         """Preserve the actual aidj resource order, including genuine speech."""
         if source_id != "netease":
             raise OnlineMusicError("unsupported", source_id, "此来源暂不支持私人DJ")
-        return self._personal_dj_batch(self._catalog(source_id, "personal_dj", {}))
+        if not isinstance(timbre_key, str) or timbre_key and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", timbre_key):
+            raise OnlineMusicError("argument", source_id, "无效的私人DJ音色")
+        with self._lock:
+            generation = self._generations[source_id]
+        voices = self.personal_dj_voices_cached(source_id) or self.personal_dj_voices(source_id)
+        selected = next((voice for voice in voices if voice.timbre_key == timbre_key), None) if timbre_key else next((voice for voice in voices if voice.is_default), voices[0])
+        if selected is None:
+            raise OnlineMusicError("argument", source_id, "此私人DJ音色当前不可用")
+        return self._personal_dj_batch(self._catalog(source_id, "personal_dj", {"timbre_key": selected.timbre_key},
+            expected_generation=generation), selected.timbre_key)
 
-    def _personal_dj_batch(self, data: Any) -> tuple[OnlineSong, ...]:
+    def _personal_dj_batch(self, data: Any, expected_timbre_key: str = "") -> tuple[OnlineSong, ...]:
         # Schema checked against an authenticated response from pinned 4.41.1.
         # Reject incomplete batches rather than silently lose introductions.
         def invalid():
@@ -597,8 +692,10 @@ class OnlineMusicService:
                 audios = value.get("audioList")
                 if not isinstance(audios, list) or not 1 <= len(audios) <= 8:
                     invalid()
-                for audio in audios:
+                for audio_position, audio in enumerate(audios):
                     if not isinstance(audio, dict):
+                        invalid()
+                    if expected_timbre_key and audio.get("timbreKey") != expected_timbre_key:
                         invalid()
                     url = self._http_url(audio.get("audioUrl"))
                     identity = audio.get("audioId")
@@ -611,10 +708,22 @@ class OnlineMusicService:
                             or not 0 < ttl <= 86400 or not math.isfinite(ttl)):
                         invalid()
                     related = audio.get("introductionRelatedSongIds")
-                    related = related if isinstance(related, list) else []
                     following = next((following for following in resources[resource_position + 1:]
                         if following.get("type") == "song"), None)
                     following_id = str(following["value"]["songId"]) if following is not None else ""
+                    # An observed opening prefix has no song association. It is
+                    # not an introduction: ignore only this bounded first-item
+                    # shape, before a real same-list introduction to the first
+                    # song. Every audio still receives schema/key validation.
+                    if (resource_position == 0 and audio_position == 0
+                            and (related is None or related == []) and following_id
+                            and any(isinstance(later, dict)
+                                and isinstance(later.get("introductionRelatedSongIds"), list)
+                                and following_id in {str(key) for key in later["introductionRelatedSongIds"][:16]}
+                                for later in audios[1:])):
+                        continue
+                    if not isinstance(related, list):
+                        invalid()
                     if following_id not in {str(key) for key in related[:16]}:
                         invalid()
                     associated = songs[following_id]
@@ -667,6 +776,7 @@ class OnlineMusicService:
                 if attempt.snapshot.state in {"waiting", "scanned"}:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
             self._credentials.clear()
+            self._dj_voice_catalogs.clear()
         self.backend.close()
 
 

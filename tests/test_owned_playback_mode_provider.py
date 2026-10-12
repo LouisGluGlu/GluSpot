@@ -23,7 +23,7 @@ class OwnedModeProviderTests(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.player = OwnedMusicPlayer(SimpleNamespace(stream_url=lambda *_: None),
             LocalLyricsStore(root=Path(self.folder.name)), player=Player(), tasks=Tasks(),
-            artwork_tasks=Tasks(), prefetch_tasks=Tasks(), stream_cache=None)
+            dj_player=Player(), dj_audio=object(), artwork_tasks=Tasks(), prefetch_tasks=Tasks(), stream_cache=None)
         self.values = {"v2_owned_playback_enabled": True, "v2_system_capture_enabled": True}
         self.saved = []
         self.system = SimpleNamespace(suspend_live_audio=lambda: None, stop_audio_cast=lambda: None,
@@ -118,8 +118,10 @@ class OwnedModeProviderTests(unittest.TestCase):
         self.provider._owned_audio_bridge.get_personal_dj_audio_frame = lambda: frame
         self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())
         self.player._stream_epoch = self.player._epoch
+        self.player._dj_source_ready = True
         self.player.player.play()
-        self.assertFalse(self.player.track.is_playing)
+        self.assertTrue(self.player.track.is_playing)
+        self.assertTrue(self.player.is_personal_dj_speaking())
         self.assertIs(self.provider.get_owned_personal_dj_audio_frame(), frame)
         self.player.player.pause()
         self.assertIsNone(self.provider.get_owned_personal_dj_audio_frame())

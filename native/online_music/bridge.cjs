@@ -72,6 +72,24 @@ async function ncmCall(state, method, params = {}) {
   mergeCookies(state.cookie,result.cookie);
   return result.body;
 }
+async function ncmPersonalDjCall(state, operation, params) {
+  // Verified official 9.6.05 catalog/selection contract, documented in
+  // docs/personal-dj-client-contract.md. Only these two DJ requests use this
+  // profile; stored credentials and every ordinary music call keep theirs.
+  let uri, data;
+  if(operation==="personal_dj_voices") {
+    uri="/api/aidj/audio/timbre/get";data={};
+  } else if(operation==="personal_dj") {
+    if(typeof params.timbre_key!=="string" || !/^[A-Za-z0-9_-]{1,128}$/.test(params.timbre_key)) fail("invalid_response");
+    uri="/api/aidj/content/rcmd/info";
+    data={extInfo:JSON.stringify({noAidjToAidj:false,lastRequestTimestamp:Date.now(),listenedTs:false,manualedTimbre:true}),timbreKey:params.timbre_key};
+  } else fail("unsupported");
+  const createOption=require(path.join(state.root,"util","option.js"));
+  const result=await state.request(uri,data,createOption({cookie:{...state.cookie,os:"android",appver:"9.6.05",versioncode:"9006005"},timeout:12000,randomCNIP:false,ip:"",realIP:"",domain:"https://interface3.music.163.com"}));
+  if(!result || typeof result.body!=="object" || Array.isArray(result.body)) fail("invalid_response");
+  mergeCookies(state.cookie,result.cookie);
+  return result.body;
+}
 function qqState(credential, repository=sources) {
   let state = repository.get("qq");
   if (!state) {
@@ -195,7 +213,7 @@ async function dispatch(source,op,p,credential,context) {
     if(op==="playlist_tracks") return await ncmCall(state,"playlist_track_all",{id:requireId(p.playlist_id),limit:p.limit,offset:p.offset});
     if(op==="daily_recommendations") return await ncmCall(state,"recommend_songs");
     if(op==="personal_fm") return await ncmCall(state,"personal_fm");
-    if(op==="personal_dj") return await ncmCall(state,"aidj_content_rcmd");
+    if(op==="personal_dj_voices" || op==="personal_dj") return await ncmPersonalDjCall(state,op,p);
     // The pinned standard endpoint uses the existing account authorization,
     // without XEAPI startup-key registration or unblock/matching imports.
     if(op==="stream_url") return await ncmCall(state,"song_url",{id:requireId(p.song_id),br:128000});

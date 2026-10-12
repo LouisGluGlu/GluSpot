@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from local.ios_widgets import IosSwitch
 from local.liquid_glass import GlassPushButton
+from local.control_hover import install_container_hover, install_control_hover, install_item_hover
 from local.branding import APP_NAME, install_custom_icon, resolve_icon_paths
 from local.mac_style import (
     mac_preferences_stylesheet,
@@ -109,7 +110,6 @@ class ColorButton(GlassPushButton):
         if not qcolor.isValid():
             qcolor = QColor("#46D6FF")
         self._color = qcolor.name().upper()
-        self.setGlassTint(qcolor)
         self.setGlassLight(qcolor.lightness() > 155)
         self.setProperty("glassRadius", 17.0)
         self.setStyleSheet(
@@ -122,15 +122,6 @@ class ColorButton(GlassPushButton):
         if color.isValid():
             self.set_color(color.name())
             self._callback()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        # The glass rim surrounds an exact swatch of the selected value.
-        with QPainter(self) as painter:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(self._color))
-            painter.drawEllipse(QRectF(self.rect()).adjusted(9, 9, -9, -9))
 
 
 class StatusLamp(QWidget):
@@ -834,6 +825,8 @@ class SettingsWindow(QDialog):
         self._update_theme_schedule_controls()
         self._update_music_background_follow_dependency_controls()
         self._apply_settings_font()
+        install_container_hover(self)
+        install_item_hover(self.nav)
 
     def _theme(self) -> dict[str, str]:
         return mac_preferences_theme()
@@ -855,9 +848,8 @@ class SettingsWindow(QDialog):
             if isinstance(button, ColorButton):
                 continue
             button.setGlassLight(light and button.objectName() not in {"Primary", "Danger"})
+            button.setProperty("glassRadius", 5.0)
             if button.objectName() == "DetailToggle":
-                # Checked details retain the current theme's text contrast.
-                button.setProperty("glassActive", False)
                 button.setProperty("glassRadius", 7.0)
 
     def _section_style(self, top: int = 12, bottom: int = 8) -> str:
@@ -1318,6 +1310,7 @@ class SettingsWindow(QDialog):
             open_button = GlassPushButton("打开")
             open_button.setObjectName("SearchResultAction")
             open_button.setGlassLight(not self._settings_dark_mode())
+            open_button.setProperty("glassRadius", 5.0)
             entry_id = str(entry.get("id", ""))
             open_button.clicked.connect(lambda _checked=False, item_id=entry_id: self._activate_settings_search_entry(item_id))
             row_layout.addWidget(open_button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -1669,6 +1662,7 @@ class SettingsWindow(QDialog):
             toggle.setText(f"{base_title} 详细设置" + (" · 收起" if opened else ""))
 
         toggle.toggled.connect(update_open_state)
+        install_control_hover(toggle, menu_callback=lambda: toggle.setChecked(True))
         layout.addWidget(panel)
         self._detail_panels.append((toggle, body))
         self._register_settings_search_entry(title, panel, terms=(toggle.text(),), priority=6)
@@ -2121,6 +2115,9 @@ class SettingsWindow(QDialog):
         self.online_login_button = GlassPushButton("登录音乐来源")
         self.online_login_button.clicked.connect(self._open_online_music_login)
         c.addWidget(self.online_login_button)
+        self.personal_dj_voice_button = GlassPushButton("私人DJ音色")
+        self.personal_dj_voice_button.clicked.connect(self._open_personal_dj_voices)
+        c.addWidget(self.personal_dj_voice_button)
 
         c = self._card(layout).layout()
         c.addWidget(self._section_label("音乐软件监听", 2, 8))
@@ -3125,6 +3122,11 @@ class SettingsWindow(QDialog):
 
     def _open_online_music_login(self):
         callback = getattr(self, "online_music_login_callback", None)
+        if callable(callback):
+            callback()
+
+    def _open_personal_dj_voices(self):
+        callback = getattr(self, "personal_dj_voice_callback", None)
         if callable(callback):
             callback()
 

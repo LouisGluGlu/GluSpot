@@ -20,7 +20,8 @@ from local.island_stack_visual import IslandStackVisual
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_source_icons import paint_music_source_icon
-from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop
+from local.liquid_glass import GlassPushButton, paint_liquid_glass
+from local.control_hover import install_control_hover
 
 
 @dataclass(frozen=True)
@@ -53,18 +54,15 @@ class EntryNavigationButton(QAbstractButton):
         self.setAccessibleName(label)
         self.setToolTip(label)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        install_control_hover(self)
 
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-            backdrop, source = widget_glass_backdrop(self, rect)
             paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
-            if self.hasFocus():
-                painter.setPen(QPen(QColor("#afb6c8"), 1.5))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(rect, 12, 12)
+                              base_color=QColor("#303238") if self.underMouse() else QColor("#23252a"),
+                              border_color=QColor("#494b51") if self.hasFocus() else None)
             painter.setPen(QPen(QColor("#e8e9ec"), 2, Qt.PenStyle.SolidLine,
                                 Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             center = rect.center()
@@ -92,6 +90,7 @@ class PlaybackModeButton(QAbstractButton):
         self._selected_at: float | None = None
         self._keyboard_focus = False
         self.toggled.connect(self._selection_changed)
+        install_control_hover(self)
 
     def _selection_changed(self, checked: bool):
         self._selected_at = time.monotonic() if checked else None
@@ -127,11 +126,10 @@ class PlaybackModeButton(QAbstractButton):
                     painter.setPen(QPen(QColor(255, 255, 255, alpha), spread * 2))
                     painter.setBrush(Qt.BrushStyle.NoBrush)
                     painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
-            backdrop, source = widget_glass_backdrop(self, rect)
             paint_liquid_glass(painter, rect, radius=rect.height() / 2, light=self.isChecked(),
-                              tint=QColor("#f4f4f4") if self.isChecked() else QColor("#8c8e91"),
-                              hovered=self.underMouse(), pressed=self.isDown(), active=self.isChecked(),
-                              backdrop=backdrop, backdrop_rect=source, cache_token=(id(self), "face"))
+                              base_color=QColor("#f4f4f4") if self.isChecked() else QColor("#8c8e91"),
+                              border_color=QColor(255, 255, 255, 225) if self.isChecked() else None,
+                              hovered=self.underMouse(), pressed=self.isDown(), active=self.isChecked())
             font = _entry_font(max(18, min(32, round(rect.height() * .43))), heavy=True)
             layout = self._reading.whole_line(self.text(), font)
             width = layout.lineAt(0).naturalTextWidth() if layout.lineCount() else 0
@@ -158,6 +156,8 @@ class MusicSourceButton(QAbstractButton):
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        install_control_hover(self)
+
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -165,11 +165,11 @@ class MusicSourceButton(QAbstractButton):
                 painter.setOpacity(.38)
             rect = QRectF(self.rect()).adjusted(8, 8, -8, -24 if self.show_caption else -8)
             face = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-            backdrop, source = widget_glass_backdrop(self, face)
             paint_liquid_glass(painter, face, radius=16,
-                              tint=QColor(self.source.color), hovered=self.underMouse(), pressed=self.isDown(),
-                              active=self.isChecked(), backdrop=backdrop, backdrop_rect=source,
-                              cache_token=(id(self), "face"))
+                              base_color=QColor("#2b2d33") if self.isChecked() else QColor("#202227"),
+                              border_color=QColor(self.source.color) if self.isChecked() else QColor("#3c3e44"),
+                              hovered=self.underMouse(), pressed=self.isDown(),
+                              active=self.isChecked())
             if self.isChecked() or self.hasFocus():
                 painter.setPen(QPen(QColor(self.source.color), 3))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -178,7 +178,7 @@ class MusicSourceButton(QAbstractButton):
             icon = QRectF(rect.center().x() - side / 2, rect.center().y() - side / 2, side, side)
             paint_music_source_icon(painter, icon, self.source.source_id)
             painter.setFont(_entry_font(12))
-            painter.setPen(QColor("#16181c") if self.isChecked() else QColor("#e2e3e7"))
+            painter.setPen(QColor("#e2e3e7"))
             title = self.source.name.replace("音乐", "").strip()
             if self.show_caption:
                 painter.drawText(QRectF(2, self.height() - 25, self.width() - 4, 20), Qt.AlignmentFlag.AlignCenter, title)
@@ -432,7 +432,6 @@ class PlaybackEntryWindow(QWidget):
         source = next(item for item in ENTRY_SOURCES if item.source_id == account.source_id)
         ink = "#131313" if account.source_id == "qq" else "#ffffff"
         self.enter_button.setStyleSheet(f"QPushButton {{ color: {ink}; background: {source.color}; border: none; border-radius: 12px; padding: 6px 20px; }} QPushButton:focus {{ border: 2px solid #b7baca; }}")
-        self.enter_button.setGlassTint(QColor(source.color))
         self.enter_button.setGlassLight(ink != "#ffffff")
         self._set_expanded(self._expanded)
         self.update()
@@ -468,7 +467,6 @@ class PlaybackEntryWindow(QWidget):
             self.enter_button.setText("继续")
             self.enter_button.setFont(_entry_font(15))
             self.enter_button.setStyleSheet("QPushButton { color: #f4f5f7; background: #343740; border: 1px solid #494c56; border-radius: 12px; padding: 6px 15px; } QPushButton:focus { border: 2px solid #afb6c8; }")
-            self.enter_button.setProperty("glassTint", None)
             self.enter_button.setGlassLight(False)
 
     def _layout_children(self):

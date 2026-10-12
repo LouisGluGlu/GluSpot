@@ -35,12 +35,13 @@ class DJPlaybackTests(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.tasks, self.artwork, self.prefetch = Tasks(), Tasks(), Tasks()
         self.qt = Player()
+        self.dj_qt = Player()
         self.calls = []
         self.batch = segments(1) + segments(2)
         self.service = SimpleNamespace(personal_dj=self.dj, personal_fm=self.fm,
             stream_url=self.stream, lyrics=self.lyrics)
         self.owned = OwnedMusicPlayer(self.service, LocalLyricsStore(root=Path(self.folder.name)),
-            player=self.qt, audio=object(), tasks=self.tasks, artwork_tasks=self.artwork,
+            player=self.qt, audio=object(), dj_player=self.dj_qt, dj_audio=object(), tasks=self.tasks, artwork_tasks=self.artwork,
             prefetch_tasks=self.prefetch, stream_cache=None)
         self.addCleanup(self.folder.cleanup)
         self.addCleanup(self.owned.close)
@@ -64,6 +65,8 @@ class DJPlaybackTests(unittest.TestCase):
         except Exception as exc:
             result, error = None, getattr(exc, "code", "request_failed")
         tasks.completed.emit(token, result, error)
+        if kind == "stream" and self.owned._dj_overlay_voices and not self.owned._dj_source_ready:
+            self.run_latest(tasks, "dj_stream")
         return token
 
     def start(self):
@@ -91,7 +94,8 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertTrue(self.owned.personal_dj_enabled)
         self.assertEqual(self.owned._fm_kind, "dj")
         self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.assertEqual(self.calls, [("dj", "netease")])
+        self.assertIn(("dj", "netease"), self.calls)
+        self.assertIn(("stream", "song-1"), self.calls)
 
     def test_retained_playing_voice_during_catalog_wait_drives_provider_frame_until_pause_eof_or_fault(self):
         self.start()
@@ -137,7 +141,7 @@ class DJPlaybackTests(unittest.TestCase):
         self.owned._end_current_stream()
         self.run_latest(self.tasks, "stream")
         self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.owned._end_current_stream()
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-1")
 
     def test_enable_while_current_audio_authorization_is_pending_cannot_cancel_it(self):
@@ -179,7 +183,7 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertTrue(self.owned.is_personal_dj_speaking())
         self.assertTrue(self.owned.set_personal_dj_enabled(False))
         self.assertFalse(self.owned.is_personal_dj_speaking())
-        self.assertGreater(self.owned._epoch, old_epoch)
+        self.assertEqual(self.owned._epoch, old_epoch)
         self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-1")
         self.run_latest(self.tasks, "stream")
         self.assertTrue(self.owned.track.is_playing)
@@ -342,14 +346,29 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertFalse(self.owned.set_personal_dj_enabled(True))
         self.assertFalse(self.owned.personal_dj_enabled)
 
-    def test_continuation_omits_unintroduced_leading_song_and_uses_genuine_next_intro(self):
+    def test_continuation_keeps_unintroduced_leading_songs_in_actual_service_order(self):
         self.start_fm()
-        self.batch = (segments(9)[1],) + segments(4)
+        self.batch = (segments(9)[1], segments(8)[1]) + segments(4) + (segments(5)[1],)
         self.owned.set_personal_dj_enabled(True)
         self.run_latest(self.prefetch, "fm_prefetch")
-        self.assertEqual([s.song_id for s in self.owned.queue], ["song-3", "dj:voice-4", "song-4"])
+        self.assertEqual([s.song_id for s in self.owned.queue],
+            ["song-3", "song-9", "song-8", "dj:voice-4", "song-4", "song-5"])
         self.owned._end_current_stream()
-        self.assertEqual(self.owned.queue[self.owned.index].song_id, "dj:voice-4")
+        self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-9")
+        self.run_latest(self.tasks, "stream")
+        self.assertFalse(self.owned.is_personal_dj_speaking())
+        self.owned._end_current_stream()
+        self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-8")
+        self.run_latest(self.tasks, "stream")
+        self.assertFalse(self.owned.is_personal_dj_speaking())
+        self.owned._end_current_stream()
+        self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-4")
+        self.run_latest(self.tasks, "stream")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-4")
+        self.owned._end_current_stream()
+        self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-5")
 
     def test_busy_song_load_after_disabling_voice_still_confirms_feature_is_disabled(self):
         self.start()
@@ -357,18 +376,19 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertTrue(self.owned.set_personal_dj_enabled(False))
         self.assertFalse(self.owned.personal_dj_enabled)
         self.assertFalse(self.owned.is_personal_dj_speaking())
-        self.assertEqual(self.owned.status, "busy")
-        self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.StoppedState)
+        self.assertEqual(self.owned.status, "playing")
+        self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.PlayingState)
 
     def test_genuine_voice_skips_song_and_lyric_endpoints_and_retains_queue_order(self):
         self.start()
         self.assertEqual([s.media_kind for s in self.owned.queue], ["dj_voice", "song", "dj_voice", "song"])
-        self.assertEqual(self.calls, [("dj", "netease")])
+        self.assertIn(("dj", "netease"), self.calls)
+        self.assertIn(("stream", "song-1"), self.calls)
         self.assertEqual(self.owned.track.title, "Song 1")
-        self.assertFalse(self.owned.track.is_playing)
+        self.assertTrue(self.owned.track.is_playing)
         self.assertNotIn("私人DJ", self.owned.track.lyrics)
         self.assertEqual(self.owned.get_personal_dj_presentation()["next_title"], "Song 1")
-        self.assertTrue(self.qt.url.toString().endswith("voice-1.mp3"))
+        self.assertTrue(self.dj_qt.url.toString().endswith("voice-1.mp3"))
         self.assertTrue(self.owned.is_personal_fm())
         self.assertEqual(self.owned.available_playback_modes(), ("sequential", "repeat_one"))
 
@@ -386,99 +406,77 @@ class DJPlaybackTests(unittest.TestCase):
 
     def test_manual_next_previous_replay_genuine_introduction_for_target_song(self):
         self.start()
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
         self.assertTrue(self.owned.send_playback_command("next"))
-        self.assertEqual(self.owned.index, 2)
+        self.assertEqual(self.owned.index, 3)
         self.run_latest(self.tasks, "stream")
         self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.assertTrue(self.owned.send_playback_command("previous"))
-        self.assertEqual(self.owned.index, 0)
+        self.assertEqual(self.owned.index, 1)
         self.assertEqual(self.owned.get_personal_dj_presentation()["next_title"], "Song 1")
 
-    def test_voice_displays_introduced_song_visual_lyrics_with_paused_zero_clock_then_starts_music(self):
+    def test_voice_displays_introduced_music_with_advancing_clock_and_preserved_lyrics_on_voice_end(self):
         self.start()
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
-        self.run_latest(self.tasks, "lyrics")
+        self.run_latest(self.tasks, "dj_lyrics")
         self.qt.positionChanged.emit(91000)
-        self.qt.durationChanged.emit(120000)
         previous = self.owned.track
         self.owned.send_playback_command("next")
-        self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "loading")
         self.run_latest(self.tasks, "stream")
-        self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.assertFalse(self.owned.track.is_playing)
-        self.qt.positionChanged.emit(7000)
-        self.qt.durationChanged.emit(10000)
         self.run_latest(self.tasks, "dj_lyrics")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertTrue(self.owned.track.is_playing)
+        self.qt.positionChanged.emit(7000)
+        self.dj_qt.positionChanged.emit(1300)
         self.assertNotEqual(self.owned.track.track_id, previous.track_id)
         self.assertEqual(self.owned.track.track_id, "owned:netease:song-2")
-        self.assertEqual(self.owned.track.title, "Song 2")
-        self.assertEqual(self.owned.track.duration_seconds, 120)
-        self.assertEqual(self.owned.track.position_seconds, 0)
+        self.assertEqual(self.owned.track.position_seconds, 7)
         self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
-        self.assertTrue(self.owned.track.timed_lyrics)
-        paused_visual = self.owned.track
-        self.assertEqual(self.owned.get_personal_dj_presentation()["next_title"], "Song 2")
-        lyric_calls = len([call for call in self.calls if call == ("lyrics", "song-2")])
-        self.qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
-        self.run_latest(self.tasks, "stream")
-        self.assertEqual(self.owned.track.title, "Song 2")
+        before = (self.owned._epoch, self.qt.source(), self.owned.track.timed_lyrics, self.owned.track.album_art_bytes)
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual((self.owned._epoch, self.qt.source(), self.owned.track.timed_lyrics, self.owned.track.album_art_bytes), before)
+        self.assertEqual(self.owned.track.position_seconds, 7)
         self.assertTrue(self.owned.track.is_playing)
-        self.assertEqual(self.owned.track.position_seconds, 0)
-        self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
-        self.assertEqual(self.owned.track.timed_lyrics, paused_visual.timed_lyrics)
-        self.assertEqual(self.owned.track.album_art_bytes, paused_visual.album_art_bytes)
-        self.assertEqual(len([call for call in self.calls if call == ("lyrics", "song-2")]), lyric_calls)
 
-    def test_manual_intro_switches_real_cover_and_target_lyrics_before_music_and_ignores_voice_clock(self):
+    def test_manual_intro_switches_real_cover_and_target_lyrics_with_independent_voice_clock(self):
         self.start()
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
-        self.run_latest(self.tasks, "lyrics")
+        self.run_latest(self.tasks, "dj_lyrics")
         target = replace(self.owned.queue[3], artwork_url="https://example.test/real-next-cover.png")
         self.owned.queue = self.owned.queue[:3] + (target,) + self.owned.queue[4:]
         key = self.owned._art_key(target)
         from api.models import ColorToken
         self.owned._art_cache[key] = (b"actual-next-cover", ColorToken(130, 70, 25), ColorToken(55, 24, 18))
         self.owned.send_playback_command("next")
-        self.assertEqual(self.owned.track.title, target.title)
         self.assertEqual(self.owned.track.album_art_bytes, b"actual-next-cover")
         self.assertEqual(self.owned.track.album_color, ColorToken(130, 70, 25))
-        self.assertEqual(self.owned.track.position_seconds, 0)
-        self.assertFalse(self.owned.track.is_playing)
         self.run_latest(self.tasks, "stream")
         self.run_latest(self.tasks, "dj_lyrics")
         self.qt.positionChanged.emit(5500)
-        self.qt.durationChanged.emit(10000)
+        self.dj_qt.positionChanged.emit(1000)
         self.assertEqual(self.owned.track.title, target.title)
         self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
         self.assertEqual(self.owned.track.duration_seconds, target.duration_seconds)
-        self.assertEqual(self.owned.track.position_seconds, 0)
+        self.assertEqual(self.owned.track.position_seconds, 5.5)
         self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.assertFalse(self.owned.seek_playback_position(1, self.owned.track.track_id))
+        self.assertTrue(self.owned.seek_playback_position(1, self.owned.track.track_id))
+        self.assertFalse(self.owned.is_personal_dj_speaking())
 
-    def test_multipart_intro_keeps_target_lyrics_when_the_later_lyric_request_has_not_finished(self):
+    def test_multipart_intro_keeps_music_clock_source_and_target_lyrics(self):
         voice, song = segments(2)
         second_stream = replace(voice.direct_stream, song_id="dj:part-two")
         second = replace(voice, song_id=second_stream.song_id, direct_stream=second_stream)
         self.batch = (voice, second, song)
         self.start()
         self.run_latest(self.tasks, "dj_lyrics")
-        paused = self.owned.track
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
-        self.assertEqual(self.owned.track.track_id, "owned:netease:song-2")
-        self.assertEqual(self.owned.track.lyrics, paused.lyrics)
-        self.assertEqual(self.owned.track.timed_lyrics, paused.timed_lyrics)
-        self.assertEqual(self.owned.track.position_seconds, 0)
-        self.assertFalse(self.owned.track.is_playing)
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
-        self.assertEqual(self.owned.track.lyrics, paused.lyrics)
+        self.qt.positionChanged.emit(4500)
+        before = (self.owned._epoch, self.qt.source(), self.owned.track.lyrics, self.owned.track.timed_lyrics)
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.run_latest(self.tasks, "dj_stream")
+        self.assertEqual((self.owned._epoch, self.qt.source(), self.owned.track.lyrics, self.owned.track.timed_lyrics), before)
+        self.assertEqual(self.owned.track.position_seconds, 4.5)
+        self.assertTrue(self.owned.track.is_playing)
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.owned.track.position_seconds, 4.5)
         self.assertTrue(self.owned.track.is_playing)
 
     def test_cancel_intro_before_target_lyric_reply_keeps_new_selected_song_and_stop_clears_state(self):
@@ -507,14 +505,12 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertFalse(self.owned.is_personal_dj_speaking())
         self.owned.send_playback_command("toggle_play_pause")
         self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.assertFalse(self.owned.track.is_playing)
+        self.assertTrue(self.owned.track.is_playing)
 
-    def test_intro_request_failure_falls_through_to_associated_song_and_failure_expires(self):
+    def test_intro_request_failure_keeps_associated_music_and_failure_expires(self):
         self.start()
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
         self.owned.send_playback_command("next")
-        failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "stream")
+        failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_stream")
         self.tasks.completed.emit(failed, None, "network")
         self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-2")
         self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "failed")
@@ -568,10 +564,11 @@ class DJPlaybackTests(unittest.TestCase):
         self.batch = segments(1)
         self.start()
         previous = self.owned.get_personal_dj_presentation()["token"]
+        self.owned.index = self.owned._intro_start_for_song(self.owned.index)
         self.owned._load_song()
         self.assertGreater(self.owned.get_personal_dj_presentation()["token"], previous)
         self.run_latest(self.tasks, "stream")
-        self.qt.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "fixture")
+        self.dj_qt.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "fixture")
         self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "failed")
         self.owned.set_personal_dj_enabled(False)
         self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "idle")
@@ -641,15 +638,15 @@ class DJPlaybackTests(unittest.TestCase):
         self.owned.refresh_lyrics()
         old_token, old_action = next(job for job in reversed(self.tasks.jobs) if job[0][0] == "lyrics_refresh")
         old_result = old_action()
-        self.owned._end_current_stream()
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.tasks.completed.emit(old_token, old_result, None)
-        self.assertEqual(self.owned.track.lyrics, ("Shine on",))
+        self.assertIn("继续闪耀", self.owned.track.lyrics[0])
         failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_lyrics")
         self.tasks.completed.emit(failed, None, "request_failed")
         self.run_latest(self.tasks, "lyrics_refresh")
         self.assertIn("继续闪耀", self.owned.track.lyrics[0])
-        self.assertEqual(self.owned._stream_epoch, 0)
-        self.assertFalse(self.owned.track.is_playing)
+        self.assertEqual(self.owned._stream_epoch, self.owned._epoch)
+        self.assertTrue(self.owned.track.is_playing)
         self.run_latest(self.tasks, "stream")
         self.assertIn("继续闪耀", self.owned.track.lyrics[0])
 
@@ -659,10 +656,9 @@ class DJPlaybackTests(unittest.TestCase):
         self.run_latest(self.tasks, "dj_lyrics")
         self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
         self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
-        self.assertFalse(self.owned.track.is_playing)
+        self.assertTrue(self.owned.track.is_playing)
         self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
         self.assertTrue(self.owned.track.is_playing)
 
@@ -675,7 +671,7 @@ class DJPlaybackTests(unittest.TestCase):
                 self.tasks.completed.emit(failed, None, error)
                 self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
                 self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
-                self.assertFalse(self.owned.track.is_playing)
+                self.assertTrue(self.owned.track.is_playing)
                 self.assertTrue(self.owned.is_personal_dj_speaking())
                 self.assertIsNone(self.owned._lyric_payload)
                 self.owned._end_current_stream()
@@ -698,7 +694,7 @@ class DJPlaybackTests(unittest.TestCase):
         settings["v2_enable_dual_line_lyrics"] = True
         self.owned.refresh_lyrics()
         self.tasks.completed.emit(token, old_result, None)
-        self.owned._end_current_stream()
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         pending = self.owned._lyrics_parse_pending
         self.assertIsNotNone(pending)
         failed = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "dj_lyrics")
@@ -707,7 +703,7 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertEqual(self.owned._lyrics_parse_pending, pending)
         self.run_latest(self.tasks, "lyrics_refresh")
         self.assertIn("继续闪耀", self.owned.track.lyrics[0])
-        self.assertFalse(self.owned.track.is_playing)
+        self.assertTrue(self.owned.track.is_playing)
 
     def test_failed_target_preference_parse_uses_song_placeholder_before_speech_and_later_recovers(self):
         self.owned.play_personal_dj()
@@ -722,9 +718,8 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
         self.run_latest(self.tasks, "stream")
         self.assertTrue(self.owned.is_personal_dj_speaking())
-        self.assertFalse(self.owned.track.is_playing)
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
+        self.assertTrue(self.owned.track.is_playing)
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.run_latest(self.tasks, "lyrics_refresh")
         self.assertEqual(self.owned.track.lyrics, ("真实歌词",))
         self.assertTrue(self.owned.track.is_playing)
@@ -737,7 +732,7 @@ class DJPlaybackTests(unittest.TestCase):
         with patch.object(self.tasks, "submit", side_effect=reject_target):
             self.start()
         self.assertEqual(self.owned.track.lyrics, ("暂无歌词",))
-        self.assertFalse(self.owned.track.is_playing)
+        self.assertTrue(self.owned.track.is_playing)
         self.assertTrue(self.owned.is_personal_dj_speaking())
 
     def test_pause_during_foreground_fm_continuation_does_not_replay_old_ended_source(self):
@@ -755,7 +750,7 @@ class DJPlaybackTests(unittest.TestCase):
         self.batch = segments(7)
         self.run_latest(self.tasks, "catalog")
         self.run_latest(self.tasks, "stream")
-        self.assertEqual(self.owned.queue[self.owned.index].song_id, "dj:voice-7")
+        self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-7")
         self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.PausedState)
         self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "ready")
 
@@ -778,7 +773,7 @@ class DJPlaybackTests(unittest.TestCase):
                         self.owned.index, self.owned.status))
                 self.owned.changed.connect(cancel)
                 try:
-                    self.owned._voice_failed("network")
+                    self.owned._fail_dj_overlay("network")
                     self.assertEqual((self.owned._epoch, self.owned.track, self.owned.queue,
                         self.owned.index, self.owned.status), observed[1])
                 finally:
@@ -824,13 +819,13 @@ class DJPlaybackTests(unittest.TestCase):
                 self.owned._fm_prefetch_pending = pending
                 self.assertTrue(self.owned.send_playback_command("next"))
                 self.run_latest(self.prefetch if pending else self.tasks, "fm_prefetch" if pending else "catalog")
-                self.assertEqual(self.owned.queue[self.owned.index].song_id, "dj:voice-4")
+                self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-4")
                 self.assertFalse(self.owned._fm_skip_voice_pending)
 
     def test_artwork_neighbors_are_three_songs_and_history_keeps_three_songs(self):
         self.batch = tuple(song for i in range(1, 7) for song in segments(i))
         self.start()
-        self.assertEqual([entry.title for entry in self.owned._album_queue()], ["Song 1", "Song 2", "Song 3"])
+        self.assertEqual([entry.title for entry in self.owned._album_queue()], ["Song 2", "Song 3", "Song 4"])
         self.owned.index = 9
         self.owned._load_song()
         previous = self.owned._previous_indices(include_voice=False)
