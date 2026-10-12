@@ -527,7 +527,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         QTest.keyClick(row, Qt.Key.Key_Space)
         self.assertIn(("mute", "local"), self.provider.calls)
 
-    def test_selected_icon_solos_and_name_or_slider_area_mutes(self):
+    def test_selected_icon_solos_and_name_mutes_separate_from_slider(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
         self._open()
         self.panel._reveal = 1.0
@@ -537,11 +537,10 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.provider.calls.clear()
         QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(24, row.height() // 2))
         QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(95, row.height() // 2))
-        QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(95, row.height() - 12))
         QTest.mouseClick(row.solo_button, Qt.MouseButton.LeftButton)
-        self.assertEqual(self.provider.calls, [("select", "bluetooth"), ("mute", "bluetooth"), ("mute", "bluetooth"), ("select", "bluetooth")])
+        self.assertEqual(self.provider.calls, [("select", "bluetooth"), ("mute", "bluetooth"), ("select", "bluetooth")])
         self.assertIn("仅播放到", row.solo_button.accessibleName())
-        self.assertTrue(row.volume_slider.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+        self.assertFalse(row.volume_slider.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
         self.assertEqual(row.state, "active")
         self.assertEqual(row.device.volume, .62)
 

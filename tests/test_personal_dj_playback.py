@@ -223,19 +223,20 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertEqual([s.song_id for s in self.owned.queue], ["song-3"])
         self.assertTrue(self.owned._fm_prefetch_pending)
 
-    def test_repeat_one_defers_new_dj_recommendations_and_never_repeats_intro(self):
+    def test_repeat_one_prepares_new_dj_recommendations_without_repeating_intro(self):
         self.start_fm()
         self.owned.set_playback_mode("repeat_one")
         before = len(self.prefetch.jobs)
         self.owned.set_personal_dj_enabled(True)
-        self.assertEqual(len(self.prefetch.jobs), before)
+        self.assertGreater(len(self.prefetch.jobs), before)
+        self.run_latest(self.prefetch, "fm_prefetch")
+        prepared_count = len(self.prefetch.jobs)
         self.owned._end_current_stream()
         self.run_latest(self.tasks, "stream")
         self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-3")
-        self.assertEqual(len(self.prefetch.jobs), before)
+        self.assertEqual(len(self.prefetch.jobs), prepared_count)
         self.owned.set_playback_mode("sequential")
         self.assertGreater(len(self.prefetch.jobs), before)
-        self.run_latest(self.prefetch, "fm_prefetch")
         self.assertEqual(self.owned.queue[self.owned.index + 1].media_kind, "dj_voice")
 
     def test_late_foreground_dj_catalog_after_disable_cannot_replace_current_fm(self):
@@ -800,12 +801,15 @@ class DJPlaybackTests(unittest.TestCase):
         self.owned._end_current_stream()
         self.run_latest(self.tasks, "stream")
         self.batch = (replace(segments(3)[0], introduced_song_id="song-2"), segments(2)[1])
+        before_batch = len(self.prefetch.jobs)
         self.run_latest(self.prefetch, "fm_prefetch")
         old_count = len(self.prefetch.jobs)
+        self.assertEqual(old_count, before_batch + 1)
         self.owned.index = 3
         self.owned._load_song()
         self.run_latest(self.tasks, "stream")
-        self.assertEqual(len(self.prefetch.jobs), old_count + 1)
+        self.assertEqual(len(self.prefetch.jobs), old_count)
+        self.assertTrue(self.owned._fm_prefetch_pending)
 
     def test_manual_next_at_batch_end_preserves_new_intro_with_and_without_pending_prefetch(self):
         for pending in (False, True):

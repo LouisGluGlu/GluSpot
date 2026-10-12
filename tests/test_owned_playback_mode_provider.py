@@ -112,6 +112,7 @@ class OwnedModeProviderTests(unittest.TestCase):
 
     def test_dj_spectrum_cannot_leak_into_playlist_system_capture_or_paused_voice(self):
         from tests.test_personal_dj_playback import segments
+        self.player.service.personal_dj = lambda *_: ()
         self.player.personal_dj_enabled = True
         self.player._replace_queue(segments(), fm_source="netease", fm_kind="dj")
         frame = object()

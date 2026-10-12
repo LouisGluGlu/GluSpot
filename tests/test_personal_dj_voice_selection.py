@@ -208,16 +208,18 @@ class PersonalDjVoiceSelectionTests(unittest.TestCase):
         self.assertEqual(self.dj_calls[-1], ("netease", "M792-NP"))
         self.assertEqual(self.owned.queue[0].song_id, "dj:voice-7")
 
-    def test_repeat_one_defers_new_voice_batch_until_continuation_is_enabled(self):
+    def test_repeat_one_prepares_new_voice_batch_without_changing_current_music(self):
         self.start_music()
         self.owned.set_playback_mode("repeat_one")
         count = len(self.prefetch.jobs)
         self.owned.set_personal_dj_voice("M791-C2")
-        self.assertEqual(len(self.prefetch.jobs), count)
+        self.assertEqual(len(self.prefetch.jobs), count + 1)
         self.assertEqual(self.owned.playback_mode, "repeat_one")
-        self.owned.set_playback_mode("sequential")
+        current = self.current_state()
         self.finish(self.prefetch, "fm_prefetch")
         self.assertEqual(self.dj_calls[-1], ("netease", "M791-C2"))
+        self.assertEqual(self.current_state(), current)
+        self.owned.set_playback_mode("sequential")
 
     def test_thread_control_generation_rejects_old_voice_click(self):
         self.start_music()

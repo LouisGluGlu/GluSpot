@@ -20,7 +20,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from api.models import AlbumQueueEntry, ColorToken, IslandVisualData, TrackData
 from api.online_music import LyricPayload, OnlineMusicError, OnlineSong, StreamInfo
 from api.online_music_artwork import ONLINE_ARTWORK_MAX_BYTES, fetch_online_artwork, online_artwork_colors
-from api.owned_stream_cache import OwnedStreamCache, PreparedAudio
+from api.owned_stream_cache import OwnedStreamCache, PreparedAudio, StreamDownloadError
 from local.music_tasks import MusicTasks
 
 _DEFAULT_STREAM_CACHE = object()
@@ -55,6 +55,8 @@ class OwnedMusicPlayer(QObject):
     STREAM_FAULT_END_TOLERANCE_MS = 500
     STREAM_RECOVERY_TIMEOUT_SECONDS = 12.0
     STREAM_RECOVERY_SEEK_TOLERANCE_MS = 250
+    DJ_PREFETCH_FILES = 2
+    AUDIO_PREPARATION_BUSY_SECONDS = 3.0
     changed = Signal()
     statusChanged = Signal(str)
     _control_requested = Signal(object)
@@ -116,6 +118,14 @@ class OwnedMusicPlayer(QObject):
         self._prefetched_audio = None
         self._audio_prefetch_request = None
         self._audio_prefetch_generation = 0
+        self._dj_prefetched_audio = {}
+        self._dj_prefetch_requests = {}
+        self._dj_prefetch_failed = set()
+        self._dj_prefetch_serial = 0
+        self._dj_prefetch_timer = QTimer(self)
+        self._dj_prefetch_timer.setSingleShot(True)
+        self._dj_prefetch_timer.setInterval(150)
+        self._dj_prefetch_timer.timeout.connect(self._retry_dj_prefetch)
         self.player.positionChanged.connect(self._position_changed)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.playbackStateChanged.connect(self._state_changed)
@@ -341,8 +351,14 @@ class OwnedMusicPlayer(QObject):
     def _request_dj_overlay_audio(self, prepared=None):
         voice = self._dj_overlay_voices[self._dj_overlay_position]
         token = ("dj_stream", self._epoch, self._catalog_epoch, self._dj_generation, voice.song_id)
+        if prepared is None and not self._dj_overlay_is_preview:
+            prepared = self._take_dj_prefetched_audio(voice)
         if prepared is not None:
             self._dj_overlay_completed(("dj_audio", *token[1:]), prepared, None)
+            return
+        if not self._dj_overlay_is_preview and voice in self._dj_prefetch_requests:
+            # The already authorized future introduction now owns this
+            # foreground position. Keep its complete-file download alive.
             return
         if not self.tasks.submit(token, lambda: self._resolve_stream(voice)
                 if self._dj_overlay_request_current(token) else None):
@@ -374,7 +390,7 @@ class OwnedMusicPlayer(QObject):
             return
         if token[0] == "dj_stream" and self.stream_cache is not None:
             audio_token = ("dj_audio", *token[1:])
-            if not self.download_tasks.submit(audio_token, lambda: self.stream_cache.prepare(stream,
+            if not self.download_tasks.submit(audio_token, lambda: self._prepare_audio(stream,
                     cancelled=lambda: not self._dj_overlay_request_current(audio_token))):
                 self._fail_dj_overlay("busy")
             return
@@ -387,9 +403,11 @@ class OwnedMusicPlayer(QObject):
         self.dj_player.setSource(QUrl.fromLocalFile(str(prepared.path)) if prepared is not None else QUrl(stream.url))
         if self._dj_overlay_request_current(token):
             self._dj_state = "ready"
-            if not self._dj_overlay_is_preview and self._stream_epoch == self._epoch and self._autoplay_after_load:
+            if (not self._dj_overlay_is_preview and (self._stream_epoch == self._epoch
+                    or self._catalog_stream_is_current()) and self._autoplay_after_load):
                 self.player.play()
             self._try_start_dj_overlay()
+            self._prefetch_audio()
             self.changed.emit()
 
     def _try_start_dj_overlay(self):
@@ -699,6 +717,7 @@ class OwnedMusicPlayer(QObject):
             return True
         self._fm_generation += 1
         self._mode_epoch += 1
+        self._clear_dj_audio_prefetch(keep_introduction=True)
         generation = (self._epoch, self._catalog_epoch, self._queue_epoch, self._mode_epoch)
         if initial_dj:
             # Replace a pending first entry with the newly selected request;
@@ -790,6 +809,7 @@ class OwnedMusicPlayer(QObject):
         self._clear_dj_presentation()
         self._fm_generation += 1
         self._mode_epoch += 1
+        self._clear_dj_audio_prefetch()
         ended = False
         if (self._catalog_pending_epoch and self._catalog_pending_kind
                 in {"fm", "dj", "fm_continue", "fm_skip_continue"}):
@@ -1020,6 +1040,7 @@ class OwnedMusicPlayer(QObject):
         self._fm_advance_pending = False
         self._fm_skip_voice_pending = False
         self._clear_audio_prefetch()
+        self._clear_dj_audio_prefetch(keep_introduction=True)
         epoch = self._catalog_epoch
         # A previous stream or Qt state must not confirm a new catalog opening.
         self._stream_epoch = 0
@@ -1201,6 +1222,11 @@ class OwnedMusicPlayer(QObject):
                 self._dj_next_title = ""
         self._set_status("loading_stream")
         catalog_epoch = self._catalog_epoch
+        # DJ/catalog lookahead follows the chosen song immediately, including
+        # paused/repeat-one navigation, rather than waiting for its decoder.
+        if self.personal_dj_enabled and self._fm_source == "netease" and self._fm_kind == "dj":
+            self._prefetch_fm()
+            self._prefetch_audio()
         if prefetched is not None:
             self._audio_completed(("audio", epoch, catalog_epoch), prefetched, None)
             return True
@@ -1222,6 +1248,9 @@ class OwnedMusicPlayer(QObject):
         return accepted
 
     def _completed(self, token, result, error):
+        if token[0] == "dj_prefetch":
+            self._dj_prefetch_completed(token, result, error)
+            return
         if token[0] in {"dj_stream", "dj_audio"}:
             self._dj_overlay_completed(token, result, error)
             return
@@ -1311,7 +1340,7 @@ class OwnedMusicPlayer(QObject):
             if self.stream_cache is not None:
                 catalog_epoch = self._catalog_epoch
                 accepted = self.download_tasks.submit(("audio", epoch, catalog_epoch),
-                    lambda: self.stream_cache.prepare(result,
+                    lambda: self._prepare_audio(result,
                         cancelled=lambda: not self._audio_request_is_current(epoch, catalog_epoch)))
                 if not accepted:
                     self._audio_completed(("audio", epoch, catalog_epoch), None, "busy")
@@ -1441,8 +1470,24 @@ class OwnedMusicPlayer(QObject):
 
     def _release_unused_audio(self, prepared):
         if (self.stream_cache is not None and all(owned is None or owned.lease != prepared.lease
-                for owned in (self._prepared_audio, self._prefetched_audio, self._dj_prepared_audio))):
+                for owned in (self._prepared_audio, self._prefetched_audio, self._dj_prepared_audio,
+                    *self._dj_prefetched_audio.values()))):
             self.stream_cache.release(prepared)
+
+    def _prepare_audio(self, stream, *, cancelled):
+        # An obsolete HTTP reader can take its bounded I/O timeout to notice
+        # cancellation. Do not turn its temporary cache slot into a permanent
+        # failure for a newer explicit song choice.
+        deadline = time.monotonic() + self.AUDIO_PREPARATION_BUSY_SECONDS
+        while True:
+            if cancelled():
+                raise StreamDownloadError("cancelled")
+            try:
+                return self.stream_cache.prepare(stream, cancelled=cancelled)
+            except StreamDownloadError as error:
+                if error.code != "busy" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.05)
 
     def _start_stream_audio(self, result, source):
         epoch = self._epoch
@@ -1524,6 +1569,9 @@ class OwnedMusicPlayer(QObject):
         return None
 
     def _prefetch_audio(self):
+        if self.personal_dj_enabled and self._fm_source == "netease" and self._fm_kind == "dj":
+            self._prefetch_dj_audio()
+            return
         if (self.stream_cache is None or self._closed or self.track is None
                 or self.playback_mode == "repeat_one" and self.queue[self.index].media_kind != "dj_voice"
                 or self._prepared_audio is None
@@ -1558,6 +1606,134 @@ class OwnedMusicPlayer(QObject):
             self._audio_prefetch_request = None
             if song.media_kind == "dj_voice" and not self._dj_overlay_voices:
                 self._set_dj_presentation("failed", upcoming[0])
+
+    def _dj_audio_window(self):
+        if (self._closed or self.stream_cache is None or not self.personal_dj_enabled
+                or self._fm_source != "netease" or self._fm_kind != "dj"
+                or not 0 <= self.index < len(self.queue)):
+            return ()
+        foreground, voices, remaining, upcoming = (), [], (), ()
+        if self._dj_overlay_voices and not self._dj_overlay_is_preview:
+            current = self._dj_overlay_voices[self._dj_overlay_position]
+            if not self._dj_source_ready and current in self._dj_prefetch_requests:
+                foreground = (current,)
+            remaining = self._dj_overlay_voices[self._dj_overlay_position + 1:]
+        # Preserve the service association. A song-only recommendation has no
+        # fabricated speech; the next genuine introduction can still warm up.
+        for target in self._upcoming_indices(include_voice=False):
+            start = self._intro_start_for_song(target)
+            if start < target:
+                upcoming = self.queue[start:target]
+                break
+        # Keep the following song's first real introduction warm even during
+        # a long multipart current speech. Spare slots continue each sequence.
+        voices.extend(remaining[:1])
+        voices.extend(upcoming[:1])
+        voices.extend(remaining[1:])
+        voices.extend(upcoming[1:])
+        return (*foreground, *tuple(dict.fromkeys(voices))[:self.DJ_PREFETCH_FILES])
+
+    def _clear_dj_audio_prefetch(self, *, keep_introduction=False):
+        self._dj_prefetch_timer.stop()
+        retained = (set(self._dj_overlay_voices[self._dj_overlay_position:])
+            if keep_introduction and not self._dj_overlay_is_preview else set())
+        for voice in tuple(self._dj_prefetch_requests):
+            if voice not in retained:
+                del self._dj_prefetch_requests[voice]
+        self._dj_prefetch_failed.clear()
+        for voice in tuple(self._dj_prefetched_audio):
+            if voice not in retained:
+                self._release_unused_audio(self._dj_prefetched_audio.pop(voice))
+
+    def _retry_dj_prefetch(self):
+        self._prefetch_fm()
+        self._prefetch_audio()
+
+    def _take_dj_prefetched_audio(self, voice):
+        prepared = self._dj_prefetched_audio.pop(voice, None)
+        if prepared is not None and prepared.stream.expires_at > 0 and time.time() >= prepared.stream.expires_at:
+            self._release_unused_audio(prepared)
+            return None
+        return prepared
+
+    def _prefetch_dj_audio(self):
+        desired = self._dj_audio_window()
+        wanted = set(desired)
+        for voice in tuple(self._dj_prefetch_requests):
+            if voice not in wanted:
+                del self._dj_prefetch_requests[voice]
+        for voice in tuple(self._dj_prefetched_audio):
+            if voice not in wanted:
+                self._release_unused_audio(self._dj_prefetched_audio.pop(voice))
+        self._dj_prefetch_failed.intersection_update(wanted)
+        if not desired:
+            return
+        # One background download leaves a worker/cache slot for foreground
+        # audio. Preparation has no dependence on play/pause or repeat mode.
+        current = (self._dj_overlay_voices[self._dj_overlay_position]
+            if self._dj_overlay_voices and not self._dj_overlay_is_preview and not self._dj_source_ready else None)
+        if any(voice != current for voice in self._dj_prefetch_requests):
+            return
+        missing = next((voice for voice in desired if voice not in self._dj_prefetched_audio
+            and voice not in self._dj_prefetch_requests and voice not in self._dj_prefetch_failed), None)
+        if missing is None:
+            return
+        self._dj_prefetch_serial += 1
+        token = ("dj_prefetch", self._dj_prefetch_serial, self._queue_epoch,
+            self._catalog_epoch, self._fm_generation)
+        self._dj_prefetch_requests[missing] = token
+        target = next((i for i, voice in enumerate(self.queue) if voice == missing), None)
+        if target is not None and not self._dj_overlay_voices:
+            self._set_dj_presentation("loading", target)
+        if self._closed or self._dj_prefetch_requests.get(missing) != token:
+            return
+
+        def prepare():
+            cancelled = lambda: self._closed or self._dj_prefetch_requests.get(missing) != token
+            if cancelled():
+                return None
+            return self._prepare_audio(self._resolve_stream(missing), cancelled=cancelled)
+
+        if not self.download_tasks.submit(token, prepare):
+            if not self._closed and self._dj_prefetch_requests.get(missing) == token:
+                del self._dj_prefetch_requests[missing]
+                self._dj_prefetch_timer.start()
+
+    def _dj_prefetch_completed(self, token, result, error):
+        voice = next((voice for voice, pending in self._dj_prefetch_requests.items() if pending == token), None)
+        prepared = result if isinstance(result, PreparedAudio) else None
+        if voice is None or self._closed:
+            if prepared is not None:
+                self._release_unused_audio(prepared)
+            return
+        del self._dj_prefetch_requests[voice]
+        if prepared is not None and (error or prepared.stream != voice.direct_stream):
+            self._release_unused_audio(prepared)
+            prepared, error = None, error or "invalid_response"
+        if prepared is not None and prepared.stream.expires_at > 0 and time.time() >= prepared.stream.expires_at:
+            self._release_unused_audio(prepared)
+            prepared, error = None, "expired"
+        current = (self._dj_overlay_voices[self._dj_overlay_position]
+            if self._dj_overlay_voices and not self._dj_overlay_is_preview else None)
+        if current == voice and not self._dj_source_ready:
+            self._dj_overlay_completed(("dj_audio", self._epoch, self._catalog_epoch,
+                self._dj_generation, voice.song_id), prepared, error)
+        elif prepared is not None and voice in self._dj_audio_window():
+            self._dj_prefetched_audio[voice] = prepared
+            target = next((i for i, song in enumerate(self.queue) if song == voice), None)
+            if target is not None and not self._dj_overlay_voices:
+                self._set_dj_presentation("ready", target)
+        else:
+            if prepared is not None:
+                self._release_unused_audio(prepared)
+            if error == "busy":
+                self._dj_prefetch_timer.start()
+                return
+            self._dj_prefetch_failed.add(voice)
+            target = next((i for i, song in enumerate(self.queue) if song == voice), None)
+            if target is not None and not self._dj_overlay_voices:
+                self._set_dj_presentation("failed", target)
+        self._prefetch_dj_audio()
 
     def _apply_lyrics_match(self, match):
         if match is None or not match.lyrics:
@@ -1633,6 +1809,7 @@ class OwnedMusicPlayer(QObject):
 
     def _reset_queue_cache(self):
         self._clear_audio_prefetch()
+        self._clear_dj_audio_prefetch()
         self._queue_epoch += 1
         self._art_cache.clear()
         self._art_window.clear()
@@ -1738,9 +1915,13 @@ class OwnedMusicPlayer(QObject):
         return (content, primary, companion) if not self._closed and epoch == self._queue_epoch and key in self._art_window else None
 
     def _prefetch_fm(self):
-        if (not self._fm_source or self._fm_prefetch_pending or self._closed
-                or self.playback_mode == "repeat_one" and self.queue[self.index].media_kind != "dj_voice"
-                or len(self.queue) - self.index - 1 >= self.ARTWORK_NEIGHBORS):
+        if not self._fm_source or self._fm_prefetch_pending or self._closed or not self.queue:
+            return
+        dj = self.personal_dj_enabled and self._fm_source == "netease" and self._fm_kind == "dj"
+        future_count = (len(self._upcoming_indices(include_voice=False)) if dj
+            else len(self.queue) - self.index - 1)
+        if (not dj and self.playback_mode == "repeat_one" and self.queue[self.index].media_kind != "dj_voice"
+                or future_count >= self.ARTWORK_NEIGHBORS):
             return
         attempt = (self._queue_epoch, self.queue[-1].song_id)
         if attempt == self._fm_prefetch_attempt:
@@ -1754,6 +1935,9 @@ class OwnedMusicPlayer(QObject):
                 lambda: fetch() if not self._closed and epoch == self._queue_epoch
                 and catalog_epoch == self._catalog_epoch and generation == self._fm_generation else ()):
             self._fm_prefetch_pending = False
+            if dj:
+                self._fm_prefetch_attempt = None
+                self._dj_prefetch_timer.start()
 
     def _fm_prefetch_completed(self, epoch, extra, result, error):
         catalog_epoch, source, generation = extra
@@ -1777,6 +1961,8 @@ class OwnedMusicPlayer(QObject):
             self._apply_cached_artwork()
             self._pump_artwork()
             self._prefetch_audio()
+            if self._fm_kind == "dj":
+                self._prefetch_fm()
         if self._fm_advance_pending:
             self._fm_advance_pending = False
             if self.index + 1 < len(self.queue):

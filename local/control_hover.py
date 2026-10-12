@@ -113,6 +113,7 @@ class _Control:
     menu_fired: bool = False
     max_scale: float = HOVER_SCALE
     enabled_when: object = None
+    bounds_provider: object = None
     image: QImage | None = None
     image_key: tuple | None = None
 
@@ -164,6 +165,8 @@ class WidgetHoverGroup(QObject):
         self.controls: list[_Control] = []
         self.active: _Control | None = None
         self.pressed: _Control | None = None
+        self.pressed_widget = None
+        self.pressed_visual = None
         self._forwarding = False
         self._last_tick = time.monotonic()
         self._dirty = QRectF()
@@ -209,11 +212,28 @@ class WidgetHoverGroup(QObject):
         return QRectF(record.widget().geometry())
 
     def visual_rect(self, record, now=None):
+        if record is self.pressed and self.pressed_visual is not None:
+            return QRectF(self.pressed_visual)
         base = self._base(record)
         scale = 1. + (record.max_scale - 1.) * record.motion.value(time.monotonic() if now is None else now)
         center = base.center() + record.offset
-        return QRectF(center.x() - base.width() * scale / 2., center.y() - base.height() * scale / 2.,
-                      base.width() * scale, base.height() * scale)
+        bounds = self._bounds(record)
+        if bounds is not None:
+            scale = min(scale, bounds.width() / max(1., base.width()),
+                        bounds.height() / max(1., base.height()))
+        visual = QRectF(center.x() - base.width() * scale / 2., center.y() - base.height() * scale / 2.,
+                        base.width() * scale, base.height() * scale)
+        if bounds is not None:
+            visual.moveLeft(max(bounds.left(), min(visual.left(), bounds.right() - visual.width())))
+            visual.moveTop(max(bounds.top(), min(visual.top(), bounds.bottom() - visual.height())))
+        return visual
+
+    def _bounds(self, record):
+        """Optional host-local bounds share the visible transform and hit map."""
+        if record.bounds_provider is None:
+            return None
+        bounds = QRectF(record.bounds_provider())
+        return bounds if not bounds.isEmpty() else None
 
     def _moving(self, record, now):
         return (record.motion.value(now) > .00001 or
@@ -226,6 +246,9 @@ class WidgetHoverGroup(QObject):
             candidates.remove(self.active)
             candidates.append(self.active)
         for item in reversed(candidates):
+            bounds = self._bounds(item)
+            if bounds is not None and not bounds.contains(point):
+                continue
             # Keep the original target usable throughout the visual movement.
             if self.visual_rect(item).contains(point) or self._base(item).contains(point):
                 return item
@@ -326,7 +349,12 @@ class WidgetHoverGroup(QObject):
             for record in self.controls:
                 if not self._valid(record) or not self._moving(record, now):
                     continue
+                painter.save()
+                bounds = self._bounds(record)
+                if bounds is not None:
+                    painter.setClipRect(bounds.translated(origin), Qt.ClipOperation.IntersectClip)
                 painter.drawImage(self.visual_rect(record, now).translated(origin), self._control_image(record))
+                painter.restore()
 
     def _control_image(self, record):
         widget = record.widget()
@@ -351,8 +379,10 @@ class WidgetHoverGroup(QObject):
         record = self.pressed or self._at(event.globalPosition())
         if record is not None and not self._valid(record):
             self.pressed = record = None
+            self.pressed_widget = None
+            self.pressed_visual = None
         if kind == QEvent.Type.MouseMove:
-            self._set_active(self._at(event.globalPosition()), time.monotonic())
+            self._set_active(self.pressed or self._at(event.globalPosition()), time.monotonic())
         if record is None:
             return False
         widget = record.widget()
@@ -366,7 +396,8 @@ class WidgetHoverGroup(QObject):
         else:
             scale = visual.width() / max(1., base.width())
             local = (local_host - visual.topLeft()) / scale
-        destination = widget.childAt(local.toPoint()) or widget
+        held = self.pressed_widget() if self.pressed_widget is not None else None
+        destination = held if held is not None and isValid(held) else widget.childAt(local.toPoint()) or widget
         if destination.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents):
             destination = widget
         if destination is not widget:
@@ -377,7 +408,9 @@ class WidgetHoverGroup(QObject):
         else:
             mapped = QMouseEvent(kind, local, event.globalPosition(), event.button(), event.buttons(), event.modifiers())
         if kind == QEvent.Type.MouseButtonPress:
+            self.pressed_visual = QRectF(visual)
             self.pressed = record
+            self.pressed_widget = weakref.ref(destination)
         self._forwarding = True
         try:
             QApplication.sendEvent(destination, mapped)
@@ -385,6 +418,8 @@ class WidgetHoverGroup(QObject):
             self._forwarding = False
             if kind == QEvent.Type.MouseButtonRelease:
                 self.pressed = None
+                self.pressed_widget = None
+                self.pressed_visual = None
         event.setAccepted(mapped.isAccepted())
         return True
 
@@ -420,10 +455,14 @@ class WidgetHoverGroup(QObject):
                     self._set_active(None, time.monotonic())
                 if record is self.pressed:
                     self.pressed = None
+                    self.pressed_widget = None
+                    self.pressed_visual = None
             if watched is self.host:
                 self.timer.stop()
                 self.overlay.hide()
                 self.active = self.pressed = None
+                self.pressed_widget = None
+                self.pressed_visual = None
         return False
 
 
@@ -434,6 +473,7 @@ class _HoverRegistration(QObject):
         self.menu_callback = None
         self.max_scale = HOVER_SCALE
         self.enabled_when = None
+        self.bounds_provider = None
         # Explicit offscreen callers request original native pixels. The C++
         # screen compositor still goes through eventFilter; these two existing
         # Qt APIs keep their original overloads and do not capture our overlay.
@@ -477,6 +517,7 @@ class _HoverRegistration(QObject):
         self.record.menu_callback = self.menu_callback
         self.record.max_scale = self.max_scale
         self.record.enabled_when = self.enabled_when
+        self.record.bounds_provider = self.bounds_provider
 
     def eventFilter(self, watched, event):
         if event.type() in {QEvent.Type.ParentChange, QEvent.Type.Show}:
@@ -484,11 +525,16 @@ class _HoverRegistration(QObject):
         return False
 
 
-def install_control_hover(widget: QWidget, *, menu_callback=None, max_scale: float | None = None, enabled_when=None):
+def install_control_hover(widget: QWidget, *, menu_callback=None, max_scale: float | None = None,
+                          enabled_when=None, bounds_provider=None):
     """Register an existing control; repeated installation remains harmless."""
     registration = getattr(widget, "_control_hover_registration", None)
     if registration is None:
         registration = widget._control_hover_registration = _HoverRegistration(widget)
+    if bounds_provider is not None:
+        registration.bounds_provider = bounds_provider
+        if registration.record is not None:
+            registration.record.bounds_provider = bounds_provider
     if menu_callback is not None:
         registration.menu_callback = menu_callback
         if registration.record is not None:
