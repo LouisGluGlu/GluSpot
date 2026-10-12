@@ -95,6 +95,8 @@ class PlaybackEntryController(QObject):
         self._accounts_ready = False
         generation = self._route_generation
         def accounts():
+            if self._closed or generation != self._route_generation:
+                return None
             # DPAPI/disk work remains off the GUI thread. This checks persisted
             # account records without waiting for a live internet validation.
             return tuple(source.source_id for source in self.service.list_sources()
@@ -149,7 +151,8 @@ class PlaybackEntryController(QObject):
         self.window.activateWindow()
         generation = self._generation
         self._select_after_sources = (source_id, enter_saved)
-        if not self.tasks.submit(("sources", generation), self.service.list_sources):
+        if not self.tasks.submit(("sources", generation), lambda: self.service.list_sources()
+                if not self._closed and generation == self._generation else None):
             self.window.set_sources(())
 
     def select_source(self, source_id):
@@ -161,8 +164,17 @@ class PlaybackEntryController(QObject):
         self._cancel_login()
         generation = self._generation
         self.window.set_login_snapshot(LoginSnapshot("", source_id, "loading", message="正在读取账号…"))
-        if not self.tasks.submit(("account", generation, source_id),
-                lambda: self.service.account_status(source_id, refresh=True)):
+        def account():
+            if self._closed or generation != self._generation:
+                return None
+            # A card verified in this session is already the provider's source
+            # of truth. Do not repeat the live login-status request on every
+            # return from the library; logged-out/startup records still validate.
+            cached = self.service.account_status(source_id)
+            if cached.logged_in or self._closed or generation != self._generation:
+                return cached
+            return self.service.account_status(source_id, refresh=True)
+        if not self.tasks.submit(("account", generation, source_id), account):
             self.window.set_login_snapshot(LoginSnapshot("", source_id, "error", message="服务繁忙，请稍后重试"))
 
     def enter_account(self, source_id):
@@ -180,15 +192,18 @@ class PlaybackEntryController(QObject):
         self._attempt_source = source_id
         generation = self._generation
         self.window.set_login_snapshot(LoginSnapshot("", source_id, "starting", message="正在获取登录二维码…"))
-        if not self.tasks.submit(("begin", generation, source_id), lambda: self.service.begin_login(source_id)):
+        if not self.tasks.submit(("begin", generation, source_id), lambda: self.service.begin_login(source_id)
+                if not self._closed and generation == self._generation else None):
             self.window.set_login_snapshot(LoginSnapshot("", source_id, "error", message="服务繁忙，请稍后刷新"))
 
     def _poll_login(self):
         if not self._session or self._poll_pending or self._closed:
             return
         session = self._session
-        self._poll_pending = self.tasks.submit(("poll", self._generation, self.window.selected_source),
-                                               lambda: self.service.poll_login(session))
+        generation = self._generation
+        self._poll_pending = self.tasks.submit(("poll", generation, self.window.selected_source),
+            lambda: self.service.poll_login(session)
+            if not self._closed and generation == self._generation and session == self._session else None)
 
     def _cancel_login(self):
         self._generation += 1
@@ -223,6 +238,14 @@ class PlaybackEntryController(QObject):
         if kind == "sources":
             self._sources = result or ()
             self.window.set_sources(self._sources)
+            if self.window.isVisible() and self.window.page == "sources":
+                sources = tuple(source.source_id for source in self._sources if source.available)
+                def prepare():
+                    for source_id in sources:
+                        if self._closed or generation != self._generation:
+                            break
+                        self.service.prepare_login_runtime(source_id)
+                self.tasks.submit(("prepare", generation), prepare)
             source, enter_saved = getattr(self, "_select_after_sources", ("", False))
             self._select_after_sources = ("", False)
             if source in {s.source_id for s in self._sources if s.available}:

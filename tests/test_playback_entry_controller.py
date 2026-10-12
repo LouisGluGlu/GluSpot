@@ -188,10 +188,15 @@ class FakeService:
         self.cancelled = []
         self.invalidated_sessions = []
         self.invalidated_sources = []
+        self.prepared = []
 
     def list_sources(self):
         self.calls.append(("sources", threading.get_ident()))
         return self.sources
+
+    def prepare_login_runtime(self, source):
+        self.prepared.append(source)
+        return True
 
     def has_login_record(self, source):
         self.calls.append(("record", source, threading.get_ident()))
@@ -346,6 +351,29 @@ class PlaybackEntryControllerTests(unittest.TestCase):
         self.window.choose_source("qishui")
         self.assertEqual(len(self.tasks.jobs), count)
 
+    def test_visible_source_picker_prepares_supported_sources_without_qr_request(self):
+        self.make_controller()
+        self.show_sources()
+        self.assertEqual(self.service.prepared, [])
+        self.tasks.run(self.tasks.latest("prepare"))
+        self.assertEqual(self.service.prepared, ["netease", "qq"])
+        self.assertFalse(any(call[0] == "begin" for call in self.service.calls))
+
+    def test_hidden_source_picker_does_not_prepare_login_runtime(self):
+        self.make_controller()
+        self.controller.show_login()
+        self.window.hide()
+        self.tasks.run(self.tasks.latest("sources"))
+        self.assertFalse(any(job[0][0] == "prepare" for job in self.tasks.jobs))
+
+    def test_cancelled_queued_preparation_does_not_launch_login_children(self):
+        self.make_controller()
+        self.show_sources()
+        old = self.tasks.latest("prepare")
+        self.window.backRequested.emit()
+        self.tasks.run(old)
+        self.assertEqual(self.service.prepared, [])
+
     def test_cancel_clears_qr_polling_and_cancels_session_asynchronously(self):
         self.make_controller()
         self.show_sources()
@@ -435,6 +463,60 @@ class PlaybackEntryControllerTests(unittest.TestCase):
         self.window.loginAccepted.emit("qq")
         self.assertEqual(entered, ["qq"])
         self.assertEqual(self.island.shown, 0)
+
+    def test_returning_to_verified_account_reuses_snapshot_without_network_refresh(self):
+        self.make_controller(saved=("qq",))
+        self.controller.login_callback = lambda source: None
+        self.show_sources()
+        with patch.object(self.service, "account_status", wraps=self.service.account_status) as status:
+            self.window.choose_source("qq")
+            self.tasks.run(self.tasks.latest("account"))
+        status.assert_called_once_with("qq")
+        self.assertTrue(self.window.account.logged_in)
+
+    def test_unverified_startup_record_still_requires_live_validation(self):
+        self.make_controller()
+        self.controller.login_callback = lambda source: None
+        self.show_sources()
+        with patch.object(self.service, "account_status", side_effect=[
+                AccountSnapshot("qq"), AccountSnapshot("qq", True, "verified-user")]) as status:
+            self.window.choose_source("qq")
+            self.tasks.run(self.tasks.latest("account"))
+        self.assertEqual(status.call_args_list, [unittest.mock.call("qq"), unittest.mock.call("qq", refresh=True)])
+        self.assertTrue(self.window.account.logged_in)
+
+    def test_canceled_queued_account_does_not_launch_old_network_validation(self):
+        self.make_controller()
+        self.controller.login_callback = lambda source: None
+        self.show_sources()
+        self.window.choose_source("netease")
+        old = self.tasks.latest("account")
+        self.window.choose_source("qq")
+        before = len(self.service.calls)
+        self.tasks.run(old)
+        self.assertEqual(len(self.service.calls), before)
+
+    def test_canceled_queued_qr_does_not_start_old_source_request(self):
+        self.make_controller()
+        self.show_sources()
+        self.window.choose_source("netease")
+        old = self.tasks.latest("begin")
+        self.window.choose_source("qq")
+        before = len(self.service.calls)
+        self.tasks.run(old)
+        self.assertEqual(len(self.service.calls), before)
+
+    def test_canceled_queued_poll_does_not_touch_previous_session(self):
+        self.make_controller()
+        self.show_sources()
+        self.start_waiting()
+        self.controller._poll_login()
+        old = self.tasks.latest("poll")
+        self.window.backRequested.emit()
+        before = len(self.service.calls)
+        self.tasks.run(old)
+        self.assertEqual(len(self.service.calls), before)
+        self.assertFalse(self.controller._poll_pending)
 
     def test_signed_out_account_starts_qr_after_worker_validation(self):
         self.make_controller()

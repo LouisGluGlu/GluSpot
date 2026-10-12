@@ -176,6 +176,8 @@ class MusicLibraryControllerTests(unittest.TestCase):
     def open(self, source="netease"):
         self.controller.open_source(source)
         self.tasks.run(self.tasks.latest("open"))
+        if self.controller._catalog_pending:
+            self.tasks.run(self.tasks.latest("initial_catalog"))
 
     def search(self, query):
         blocked = self.window.search.blockSignals(True)
@@ -196,6 +198,51 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.assertEqual(self.entry.calls, [("login", "qq")])
         self.assertFalse(self.window.isVisible())
         self.assertFalse(any(call[0] == "playlists" for call in self.service.calls))
+
+    def test_account_avatar_appears_before_the_initial_catalog_request_runs(self):
+        self.service.accounts["qq"] = replace(self.service.accounts["qq"], avatar_url="https://example.test/avatar.png")
+        self.controller.open_source("qq")
+        self.tasks.run(self.tasks.latest("open"))
+        self.assertTrue(self.window._account.logged_in)
+        self.assertEqual(self.window._account.avatar_url, "https://example.test/avatar.png")
+        self.assertEqual(self.service.calls, [("account", "qq", False)])
+        self.assertTrue(self.controller._catalog_pending)
+        self.tasks.run(self.tasks.latest("initial_catalog"))
+        self.assertFalse(self.window._loading)
+
+    def test_initial_catalog_retains_current_search_and_is_available_on_return(self):
+        self.service.pages["qq", 0] = CatalogPage((OnlinePlaylist("qq", "fixture", "fixture"),), 1, False)
+        self.controller.open_source("qq")
+        self.tasks.run(self.tasks.latest("open"))
+        catalog = self.tasks.latest("initial_catalog")
+        self.search("query")
+        self.service.search_pages["qq", "query", "songs", 0] = CatalogPage((OnlineSong("qq", "song", "song"),), 1, False)
+        self.tasks.run(self.tasks.latest("search"))
+        self.tasks.run(catalog)
+        self.assertEqual([row.kind for row in self.window.collections], ["song"])
+        self.window.search.clear()
+        self.assertEqual([row.playlist_id for row in self.window.collections], ["fixture"])
+
+    def test_catalog_failure_retains_profile_without_claiming_unsupported_recommendations(self):
+        self.controller.open_source("qq")
+        self.tasks.run(self.tasks.latest("open"))
+        token, _ = self.tasks.latest("initial_catalog")
+        self.tasks.completed.emit(token, None, "synthetic-private-error")
+        self.assertTrue(self.window._account.logged_in)
+        self.assertFalse(self.window._loading)
+        self.assertIn("歌单", self.window._error)
+        self.assertNotIn("推荐", self.window._error)
+        self.assertNotIn("private", self.window._error)
+
+    def test_initial_catalog_source_switch_action_and_reply_are_fenced(self):
+        self.controller.open_source("netease")
+        self.tasks.run(self.tasks.latest("open"))
+        token, action = self.tasks.latest("initial_catalog")
+        self.controller.open_source("qq")
+        self.assertIsNone(action())
+        self.tasks.completed.emit(token, self.service.pages["netease", 0], None)
+        self.assertFalse(self.window._account.logged_in)
+        self.assertEqual(self.window.collections, ())
 
     def test_recommendation_covers_arrive_without_blocking_catalog_or_resetting_search(self):
         self.open()
@@ -648,12 +695,28 @@ class EntryLibraryRoutingTests(unittest.TestCase):
         self.window.deleteLater()
         self.app.processEvents()
 
-    def test_saved_source_auto_enter_uses_account_validation_and_callback(self):
+    def test_saved_source_auto_enter_reuses_current_verified_account_and_callback(self):
         self.controller.show_login("qq", enter_saved=True)
         self.tasks.run(self.tasks.latest("sources"))
         self.tasks.run(self.tasks.latest("account"))
         self.assertEqual(self.callbacks, ["qq"])
         self.assertFalse(self.window.isVisible())
+        self.assertIn(("account", "qq", False), self.service.calls)
+        self.assertNotIn(("account", "qq", True), self.service.calls)
+
+    def test_saved_source_with_unverified_snapshot_requires_live_account_validation(self):
+        verified = self.service.accounts["qq"]
+        self.service.accounts["qq"] = AccountSnapshot("qq")
+        original = self.service.account_status
+        def status(source, refresh=False):
+            if refresh:
+                self.service.accounts[source] = verified
+            return original(source, refresh)
+        self.service.account_status = status
+        self.controller.show_login("qq", enter_saved=True)
+        self.tasks.run(self.tasks.latest("sources"))
+        self.tasks.run(self.tasks.latest("account"))
+        self.assertEqual(self.callbacks, ["qq"])
         self.assertIn(("account", "qq", True), self.service.calls)
 
     def test_source_switch_ignores_old_account_and_avatar_reply(self):

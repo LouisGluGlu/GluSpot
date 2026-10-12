@@ -121,6 +121,28 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn('setObjectName("MacContentScroll")', source)
         self.assertIn('setObjectName("MacCard")', source)
 
+    def test_settings_controls_and_sidebar_keep_native_hover_geometry(self):
+        from local.settings_window import SettingsWindow
+        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
+        try:
+            self.assertTrue(window.property("controlHoverDisabled"))
+            self.assertIsNone(getattr(window.nav, "_control_hover_delegate", None))
+            for control in window.findChildren(QWidget):
+                registration = getattr(control, "_control_hover_registration", None)
+                if registration is not None and registration.group is not None:
+                    self.assertFalse(registration.group._valid(registration.record))
+            toggle, body = window._detail_panels[0]
+            self.assertFalse(toggle.isChecked())
+            toggle.click()
+            self.assertTrue(toggle.isChecked())
+            self.assertFalse(body.isHidden())
+            toggle.click()
+            self.assertTrue(body.isHidden())
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
+
     def test_settings_sidebar_uses_asset_icons(self):
         from local.settings_window import SettingsWindow
 

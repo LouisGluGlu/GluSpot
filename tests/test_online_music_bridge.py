@@ -61,10 +61,15 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         # Production close intentionally reaps off-thread for GUI shutdown.
         # Windows retains a child's cwd until termination; a test must wait
         # before TemporaryDirectory recursively removes that isolated cwd.
-        process = self.backend._process
+        processes = [self.backend._process]
+        processes.extend(backend._process for backend in self.backend._authentication_backends.values())
         self.backend.close()
-        if process is not None:
-            process.wait(timeout=3)
+        for process in processes:
+            if process is not None:
+                process.wait(timeout=3)
+
+    def authentication_backend(self, source="netease"):
+        return self.backend._authentication_backends[source]
 
     def script(self, body):
         self.backend.bridge_path.write_text(body, encoding="utf-8")
@@ -117,7 +122,7 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         response = self.backend.request("netease", "account_status", {}, secret)
         self.assertEqual(response["credential"], secret)
         self.assertTrue(response["data"]["hasCredential"])
-        self.assertNotIn("synthetic-secret", repr(self.backend._process.args))
+        self.assertNotIn("synthetic-secret", repr(self.authentication_backend()._process.args))
 
     def test_close_interrupts_pending_child_without_request_lock_wait(self):
         self.script("process.stdin.resume();setInterval(()=>{},1000);")
@@ -134,9 +139,10 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         thread.start()
         self.assertTrue(started.wait(1))
         deadline = time.monotonic() + 2
-        while self.backend._process is None and time.monotonic() < deadline:
+        while ("netease" not in self.backend._authentication_backends
+                or self.authentication_backend()._process is None) and time.monotonic() < deadline:
             time.sleep(.005)
-        process = self.backend._process
+        process = self.authentication_backend()._process
         before = time.monotonic()
         self.backend.close()
         self.assertLess(time.monotonic() - before, .15)
@@ -158,7 +164,256 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         with self.assertRaises(OnlineMusicError) as raised:
             self.backend.request("netease", "begin_login", {})
         self.assertEqual(raised.exception.code, "timeout")
+        self.assertIsNone(self.authentication_backend()._process)
+
+    def test_catalog_network_wait_does_not_delay_login_or_stop_healthy_catalog(self):
+        self.script(r'''const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin});
+          let sequence=Promise.resolve();rl.on('line',line=>{sequence=sequence.then(async()=>{
+            const r=JSON.parse(line);if(r.operation==='lyrics'){
+              fs.writeFileSync(r.params.marker,'started');await new Promise(resolve=>setTimeout(resolve,1200));
+            }
+            process.stdout.write(JSON.stringify({id:r.id,ok:true,data:{operation:r.operation}})+'\n');
+          });});''')
+        self.backend.timeout_seconds = 3
+        marker, results = self.root / "catalog-started", []
+        worker = threading.Thread(target=lambda: results.append(
+            self.backend.request("netease", "lyrics", {"marker": str(marker)})))
+        worker.start()
+        self.addCleanup(worker.join, 3)
+        deadline = time.monotonic() + 2
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(marker.exists())
+        process = self.backend._process
+        response = self.backend.request("netease", "begin_login", {})
+        self.assertEqual(response["data"]["operation"], "begin_login")
+        self.assertTrue(worker.is_alive(), "login waited for the unrelated catalog response")
+        self.assertIs(self.backend._process, process)
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results[0]["data"]["operation"], "lyrics")
+        self.assertEqual(self.backend.request("netease", "stream_url", {})["data"]["operation"], "stream_url")
+        self.assertIs(self.backend._process, process)
+
+    def test_other_platform_login_does_not_wait_for_abandoned_source_request(self):
+        manifest = self.modules / "@yakult-green-tea/qq-music-api/package.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"version":"3.1.4"}')
+        self.script(r'''const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin});
+          let sequence=Promise.resolve();rl.on('line',line=>{sequence=sequence.then(async()=>{
+            const r=JSON.parse(line);if(r.params.marker){
+              fs.writeFileSync(r.params.marker,'started');await new Promise(resolve=>setTimeout(resolve,1200));
+            }
+            process.stdout.write(JSON.stringify({id:r.id,ok:true,data:{source:r.source}})+'\n');
+          });});''')
+        self.backend.timeout_seconds = 3
+        marker, results = self.root / "login-started", []
+        worker = threading.Thread(target=lambda: results.append(
+            self.backend.request("netease", "begin_login", {"marker": str(marker)})))
+        worker.start()
+        self.addCleanup(worker.join, 3)
+        deadline = time.monotonic() + 2
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(marker.exists())
+        response = self.backend.request("qq", "begin_login", {})
+        self.assertEqual(response["data"]["source"], "qq")
+        self.assertTrue(worker.is_alive(), "source switching waited for the old QR request")
+        worker.join(3)
+        self.assertEqual(set(self.backend._authentication_backends), {"netease", "qq"})
+        self.assertTrue(all(backend._authentication_lane for backend in self.backend._authentication_backends.values()))
+        self.assertTrue(all(not backend._authentication_backends for backend in self.backend._authentication_backends.values()))
         self.assertIsNone(self.backend._process)
+
+    def test_authentication_timeout_only_restarts_its_own_child(self):
+        self.script(r'''const rl=require('readline').createInterface({input:process.stdin});
+          rl.on('line',line=>{const r=JSON.parse(line);if(r.operation==='begin_login')return;
+            process.stdout.write(JSON.stringify({id:r.id,ok:true,data:{}})+'\n');});''')
+        self.backend.request("netease", "stream_url", {})
+        process = self.backend._process
+        with self.assertRaises(OnlineMusicError) as raised:
+            self.backend.request("netease", "begin_login", {})
+        self.assertEqual(raised.exception.code, "timeout")
+        self.assertIsNone(self.authentication_backend()._process)
+        self.assertIs(self.backend._process, process)
+        self.backend.request("netease", "stream_url", {})
+        self.assertIs(self.backend._process, process)
+
+    def test_closed_backend_cannot_register_new_authentication_child(self):
+        self.script("")
+        self.backend.close()
+        with self.assertRaises(OnlineMusicError) as raised:
+            self.backend.request("netease", "begin_login", {})
+        self.assertEqual(raised.exception.code, "closed")
+        self.assertFalse(self.backend._authentication_backends)
+
+    def test_close_interrupts_every_pending_transport_and_reaps_children(self):
+        manifest = self.modules / "@yakult-green-tea/qq-music-api/package.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{"version":"3.1.4"}')
+        self.script("process.stdin.resume();setInterval(()=>{},1000);")
+        self.backend.timeout_seconds = 18
+        failures = []
+        def request(source, operation):
+            try:
+                self.backend.request(source, operation, {})
+            except OnlineMusicError as error:
+                failures.append(error.code)
+        workers = [threading.Thread(target=request, args=args) for args in (
+            ("netease", "lyrics"), ("netease", "begin_login"), ("qq", "begin_login"))]
+        for worker in workers:
+            worker.start()
+            self.addCleanup(worker.join, 3)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            processes = [self.backend._process]
+            processes.extend(lane._process for lane in self.backend._authentication_backends.values())
+            if len(processes) == 3 and all(process is not None for process in processes):
+                break
+            time.sleep(.005)
+        self.assertEqual(len(processes), 3)
+        self.assertTrue(all(process is not None for process in processes))
+        before = time.monotonic()
+        self.backend.close()
+        self.assertLess(time.monotonic() - before, .15)
+        for worker in workers:
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, ["runtime"] * 3)
+        for process in processes:
+            process.wait(timeout=3)
+            self.assertIsNotNone(process.poll())
+        self.assertTrue(all(lane._closed for lane in self.backend._authentication_backends.values()))
+
+    def test_preparation_only_loads_verified_modules_without_account_qr_or_network_calls(self):
+        no_call = "module.exports=()=>{throw new Error('offline preparation called a network or QR function')};"
+        self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
+            "util/request.js": no_call,
+            "module/login_qr_key.js": no_call,
+            "module/login_qr_create.js": no_call,
+        })
+        self.write_modules("kugoumusicapi", "1.6.0", {
+            "util/index.js": "exports.calculateMid=()=>{throw new Error('device construction during preparation')};",
+            "util/request.js": "exports.createRequest=()=>{throw new Error('network call during preparation')};",
+            "module/register_dev.js": no_call,
+            "module/login_qr_key.js": no_call,
+            "module/login_qr_create.js": no_call,
+        })
+        self.write_modules("@yakult-green-tea/qq-music-api", "3.1.4", {
+            "dist/src/services/auth/qrLogin.node.js": "exports.createNodeQrLoginService=()=>{throw new Error('account construction during preparation')};",
+        })
+        for source in ("netease", "kugou", "qq"):
+            response = self.backend.request(source, "prepare_login", {}, {"fixture": "must-not-be-consumed"})
+            self.assertEqual(response["data"], {"ready": True})
+            self.assertIsNone(response["credential"])
+        self.assertEqual(len(self.backend._authentication_backends), 3)
+        self.assertIsNone(self.backend._process)
+
+    def test_constructor_and_availability_do_not_start_login_children(self):
+        self.script("")
+        self.assertTrue(self.backend.available("netease")[0])
+        self.assertFalse(self.backend._authentication_backends)
+        self.assertIsNone(self.backend._process)
+
+    def test_prepare_is_async_idempotent_and_keeps_login_on_prepared_lane(self):
+        marker = self.root / "prepared"
+        self.script(r'''const fs=require('fs');let prepared=0;
+          const rl=require('readline').createInterface({input:process.stdin});rl.on('line',line=>{
+            const r=JSON.parse(line);if(r.operation==='prepare_login'){
+              prepared++;fs.writeFileSync(require('path').join(__dirname,'prepared'),'done');
+            }
+            process.stdout.write(JSON.stringify({id:r.id,ok:true,data:{prepared}})+'\n');
+          });''')
+        self.assertTrue(self.backend.prepare_login("netease"))
+        deadline = time.monotonic() + 2
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(.005)
+        self.assertTrue(marker.exists())
+        process = self.authentication_backend()._process
+        self.assertTrue(self.backend.prepare_login("netease"))
+        self.assertEqual(self.backend.request("netease", "begin_login", {})["data"]["prepared"], 1)
+        self.assertIs(self.authentication_backend()._process, process)
+        self.assertFalse(self.backend.prepare_login("qishui"))
+        self.backend.close()
+        process.wait(timeout=3)
+        self.assertFalse(self.backend.prepare_login("netease"))
+
+    def test_unused_preparation_expires_on_daemon_timer_without_starting_catalog(self):
+        self.script("")
+        self.backend._prepared_idle_seconds = .025
+        lane = self.backend._authentication_backend("netease")
+        with patch.object(lane, "request", return_value={"data": {"ready": True}}):
+            self.assertTrue(self.backend.prepare_login("netease"))
+            timer = lane._prepare_retirement_timer
+            self.assertTrue(timer.daemon)
+            deadline = time.monotonic() + 1
+            while ("netease" in self.backend._authentication_backends or not lane._closed) and time.monotonic() < deadline:
+                time.sleep(.005)
+        self.assertNotIn("netease", self.backend._authentication_backends)
+        self.assertTrue(lane._closed)
+        self.assertIsNone(self.backend._process)
+
+    def test_real_authentication_claims_lane_before_waiting_for_its_lock(self):
+        self.script(r'''const rl=require('readline').createInterface({input:process.stdin});
+          rl.on('line',line=>{const r=JSON.parse(line);process.stdout.write(JSON.stringify({id:r.id,ok:true,data:{}})+'\n');});''')
+        lane = self.backend._authentication_backend("netease")
+        results = []
+        with lane._lock:
+            worker = threading.Thread(target=lambda: results.append(
+                self.backend.request("netease", "begin_login", {})))
+            worker.start()
+            self.addCleanup(worker.join, 3)
+            deadline = time.monotonic() + 1
+            while not lane._authentication_used and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertTrue(lane._authentication_used)
+            self.backend._retire_prepared_authentication_backend("netease", lane)
+            self.assertIs(self.authentication_backend(), lane)
+            self.assertFalse(lane._closed)
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(results), 1)
+
+    def test_old_retirement_callback_cannot_close_a_newly_registered_lane(self):
+        self.script("")
+        old = self.backend._authentication_backend("netease")
+        self.backend._retire_prepared_authentication_backend("netease", old)
+        self.assertTrue(old._closed)
+        new = self.backend._authentication_backend("netease", used=True)
+        self.backend._retire_prepared_authentication_backend("netease", old)
+        self.assertIs(self.authentication_backend(), new)
+        self.assertFalse(new._closed)
+
+    def test_retirement_reaps_a_real_prepared_only_child(self):
+        self.script(r'''const rl=require('readline').createInterface({input:process.stdin});
+          rl.on('line',line=>{const r=JSON.parse(line);process.stdout.write(JSON.stringify({id:r.id,ok:true,data:{ready:true}})+'\n');});''')
+        self.assertTrue(self.backend.prepare_login("netease"))
+        self.backend.request("netease", "prepare_login", {})
+        lane, process = self.authentication_backend(), self.authentication_backend()._process
+        self.assertFalse(lane._authentication_used)
+        retire = threading.Thread(target=self.backend._retire_prepared_authentication_backend,
+            args=("netease", lane), daemon=True)
+        retire.start()
+        retire.join(1)
+        self.assertFalse(retire.is_alive())
+        self.assertNotIn("netease", self.backend._authentication_backends)
+        self.assertTrue(lane._closed)
+        process.wait(timeout=3)
+        self.assertIsNotNone(process.poll())
+        self.assertIsNone(self.backend._process)
+
+    def test_close_cancels_preparation_timer_and_closed_callback_is_harmless(self):
+        self.script("")
+        lane = self.backend._authentication_backend("netease")
+        with patch.object(lane, "request", return_value={"data": {"ready": True}}):
+            self.assertTrue(self.backend.prepare_login("netease"))
+        timer = lane._prepare_retirement_timer
+        self.backend.close()
+        self.assertTrue(timer.finished.is_set())
+        self.assertTrue(lane._closed)
+        self.backend._retire_prepared_authentication_backend("netease", lane)
+        self.assertFalse(self.backend.prepare_login("netease"))
+        self.assertIs(self.authentication_backend(), lane)
 
     def test_inherited_account_material_is_removed(self):
         self.script(r'''const rl=require('readline').createInterface({input:process.stdin});rl.on('line',line=>{const r=JSON.parse(line);process.stdout.write(JSON.stringify({id:r.id,ok:true,data:{unsafe:Object.keys(process.env).some(k=>/COOKIE|TOKEN|SECRET/i.test(k))}})+'\n');});''')

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
@@ -43,8 +44,9 @@ def paint_personal_dj_icon(
     painter: QPainter, rect: QRectF, color: QColor, *, bands=None,
     elapsed: float = 0.0, neutral: QColor | None = None,
     max_lightening: float = .60,
+    backdrop: QColor | Callable[[QRectF], QColor] | None = None,
 ):
-    """Keep theme hue in the center, with lighter rings towards both sides."""
+    """Keep page tones, or blend island side light into its actual backdrop."""
     values = (bands.low, bands.mid, bands.high) if bands is not None else (0.0, 0.0, 0.0)
     levels = tuple(max(0.0, min(1.0, float(level) * 4.0)) for level in values)
     neutral = QColor(neutral or QColor(245, 246, 248))
@@ -59,16 +61,30 @@ def paint_personal_dj_icon(
         ellipse = QRectF(rect.left() + rect.width() * x - width / 2,
                          rect.center().y() - height / 2, width, height)
         painter.setOpacity(parent_opacity * opacity)
-        ink = personal_dj_ring_color(color, x, neutral=neutral, max_lightening=max_lightening)
+        # Only island callers supply their background. Their left rim keeps
+        # the cover characteristic instead of gaining positional white tint.
+        ink = (QColor(color) if backdrop is not None else
+               personal_dj_ring_color(color, x, neutral=neutral, max_lightening=max_lightening))
+        background = QColor(backdrop(ellipse) if callable(backdrop) else backdrop) if backdrop is not None else None
+        if background is not None and not background.isValid():
+            background = None
         pen_width = max(.85, rect.width() * .037)
         def side_light(alpha: int):
             gradient = QLinearGradient(QPointF(ellipse.left(), ellipse.center().y()),
                                        QPointF(ellipse.right(), ellipse.center().y()))
-            for stop, shade, opacity_fraction in ((0.0, 100, 1.0), (.3, 108, .95),
-                                                  (.55, 155, .68), (1.0, 240, .30)):
-                tone = ink.darker(shade)
-                tone.setAlpha(round(alpha * opacity_fraction))
-                gradient.setColorAt(stop, tone)
+            if background is not None:
+                for stop, blend, opacity_fraction in ((0.0, 0.0, 1.0), (.28, .12, .95),
+                                                      (.58, .58, .68), (1.0, 1.0, .30)):
+                    tone = QColor(*(round(a + (b - a) * blend)
+                        for a, b in zip(ink.getRgb()[:3], background.getRgb()[:3])))
+                    tone.setAlpha(round(alpha * opacity_fraction))
+                    gradient.setColorAt(stop, tone)
+            else:
+                for stop, shade, opacity_fraction in ((0.0, 100, 1.0), (.3, 108, .95),
+                                                      (.55, 155, .68), (1.0, 240, .30)):
+                    tone = ink.darker(shade)
+                    tone.setAlpha(round(alpha * opacity_fraction))
+                    gradient.setColorAt(stop, tone)
             return QBrush(gradient)
         if identity == 4:
             for multiplier, alpha in ((3.8, 24), (2.2, 48)):

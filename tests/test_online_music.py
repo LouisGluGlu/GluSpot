@@ -223,6 +223,55 @@ class OnlineMusicServiceTests(unittest.TestCase):
         self.assertEqual(tracks.next_offset, 201)
         self.assertTrue(self.service.stream_url("qq", "track-mid").playable)
 
+    def test_qq_actual_created_playlist_shape_retains_name_cover_and_song_count(self):
+        self.login("qq")
+        self.backend.catalog["playlists"] = {"total": 3, "bFinish": True, "v_playlist": [
+            {"tid": "101", "dirId": 201, "dirName": "liked fixture", "songNum": 12,
+             "bigpicUrl": "https://example.org/created.png"},
+            {"tid": "102", "dirId": 9, "dirName": "created fixture", "songNum": "7",
+             "picUrl": "//example.org/second.png"},
+            {"dissid": "103", "name": "favorite fixture", "songnum": 4,
+             "coverUrl": "https://example.org/favorite.png"},
+        ]}
+        first = self.service.playlists("qq", limit=2)
+        self.assertEqual([p.title for p in first.items], ["liked fixture", "created fixture"])
+        self.assertEqual([p.track_count for p in first.items], [12, 7])
+        self.assertEqual(first.items[1].artwork_url, "https://example.org/second.png")
+        self.assertEqual((first.next_offset, first.total, first.has_more), (2, 3, True))
+        last = self.service.playlists("qq", limit=1, offset=2)
+        self.assertEqual(last.items[0].artwork_url, "https://example.org/favorite.png")
+        self.assertEqual((last.next_offset, last.total, last.has_more), (3, 3, False))
+
+    def test_kugou_mixed_library_keeps_playlist_identity_and_consumes_album_rows(self):
+        self.login("kugou")
+        self.backend.catalog["playlists"] = {"status": 1, "data": {"list_count": 5, "info": [
+            {"source": 1, "global_collection_id": "created", "name": "created fixture",
+             "sizable_cover": "https://example.org/{size}/created.png", "m_count": 9},
+            {"source": 2, "global_collection_id": "album", "name": "album fixture", "musiclib_id": 7},
+            {"source": "1", "global_collection_id": "favorite", "name": "favorite fixture",
+             "pic": "//example.org/{size}/favorite.png", "music_num": 3},
+        ]}}
+        first = self.service.playlists("kugou", limit=3)
+        self.assertEqual([p.playlist_id for p in first.items], ["created", "favorite"])
+        self.assertEqual([p.track_count for p in first.items], [9, 3])
+        self.assertEqual(first.items[0].artwork_url, "https://example.org/500/created.png")
+        self.assertEqual(first.items[1].artwork_url, "https://example.org/500/favorite.png")
+        self.assertEqual((first.next_offset, first.total, first.has_more), (3, 5, True))
+        self.backend.catalog["playlists"] = {"status": 1, "data": {"list_count": 5, "info": []}}
+        empty = self.service.playlists("kugou", limit=3, offset=3)
+        self.assertFalse(empty.has_more, "a stale total must not create endless empty pages")
+
+    def test_platform_artwork_templates_do_not_weaken_stream_url_validation(self):
+        account = self.service._account("kugou", {"logged_in": True, "user_id": "42",
+            "nickname": "fixture", "avatar_url": "//example.org/{size}/avatar.png"})
+        self.assertEqual(account.avatar_url, "https://example.org/500/avatar.png")
+        self.assertEqual(self.service._artwork_url("//user:password@example.org/avatar.png"), "")
+        self.assertEqual(self.service._http_url("//example.org/song.mp3"), "")
+        song = self.service._song("kugou", {"FileHash": "fixture-hash", "SongName": "fixture",
+            "album_info": {"name": "fixture album", "sizable_cover": "https://example.org/{size}/album.png"}})
+        self.assertEqual(song.artwork_url, "https://example.org/500/album.png")
+        self.assertEqual(song.album, "fixture album")
+
     def test_qq_window_limit_matches_backend_and_fallback_slices_once(self):
         self.login("qq")
         songs = [{"mid": f"mid-{i}", "name": f"track-{i}"} for i in range(100)]

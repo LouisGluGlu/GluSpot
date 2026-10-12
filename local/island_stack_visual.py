@@ -13675,6 +13675,33 @@ class IslandStackVisual(QWidget):
             expanded_layout_style=self._normalize_music_expanded_layout_style(getattr(self, "music_expanded_layout_style", "standard")),
             lyric_color_fill_paints_background=self._active_lyric_color_fill_paints_background(ambience_style),
         )
+        dj_outro = expanded and self._personal_dj_island_outro_progress() < 1.0
+        if dj_speaking or dj_outro:
+            # Reuse the existing bounded shell buffer and draw that very
+            # background once. Ring side light samples this frame, including
+            # sea-level motion; it never reads the desktop or a stale cover.
+            self._paint_audio_device_background(painter, rect, radius, plan, expanded=expanded)
+            self._island_dj_background_ready = True
+            try:
+                if dj_speaking:
+                    self._paint_personal_dj_island(painter, rect)
+                else:
+                    if getattr(self, "_island_button_ripples", ()):
+                        self._paint_island_button_ripples(
+                            painter,
+                            float(getattr(self, "_island_glow_paint_now", 0.0) or time.monotonic()),
+                            owner_key="music",
+                            shell_rect=rect,
+                            shell_path=self._music_reactive_overlay_clip_path(rect, radius, expanded, plan.ambience_style),
+                        )
+                    self._paint_music_expanded(painter, rect)
+                for step in plan.steps:
+                    if step in {"border", "yaoguang_compact_frame_overlay"}:
+                        self._execute_music_surface_paint_step(step, painter, rect, radius, expanded, plan.ambience_style)
+            finally:
+                self._island_dj_background_ready = False
+                self._record_visual_paint_section("music.total", total_started_at)
+            return
         if not dj_speaking and not expanded and self._audio_device_pose() is not None:
             # Render the same background once, without content. Sampling this
             # raster includes album/white-bridge transitions and never reads
@@ -13875,6 +13902,7 @@ class IslandStackVisual(QWidget):
         paint_personal_dj_icon(painter, icon,
             ink, neutral=QColor(242, 242, 245), bands=getattr(self, "_island_dj_frame", None),
             max_lightening=float(getattr(self, "_island_dj_lightening", .60)),
+            backdrop=lambda ring: self._personal_dj_island_backdrop(ring, surface_rect=rect),
             elapsed=max(0., time.monotonic() - getattr(self, "_island_dj_started", 0.)))
         status_text = {"failed": "播报加载失败", "ready": "播报已准备好"}.get(status, "播报加载中")
         if status and not compact_status:
@@ -13918,14 +13946,39 @@ class IslandStackVisual(QWidget):
             painter.drawText(artist_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, artist)
         painter.restore()
 
+    def _personal_dj_island_backdrop(self, ring: QRectF | None = None, *, surface_rect: QRectF | None = None) -> QColor:
+        if self._finder_bar_active() and not getattr(self, "expanded", False):
+            if (ring is not None and surface_rect is not None and surface_rect.width() > 0
+                    and getattr(self, "finder_bar_style", "transparent") == "fade"):
+                position = (ring.right() - surface_rect.left()) / surface_rect.width()
+                opacity = max(0., min(1., position / .18, (1. - position) / .18)) * 222. / 255.
+                return self._mix_color(self._finder_bar_backdrop(), self._solid_album_surface_palette().primary, opacity)
+            return self._finder_bar_effective_backdrop()
+        if ring is not None and bool(getattr(self, "_island_dj_background_ready", False)):
+            image = getattr(self, "_audio_device_background_image", None)
+            bounds = getattr(self, "_audio_device_background_rect", QRectF())
+            if image is not None and not image.isNull() and not bounds.isEmpty():
+                dpr = image.devicePixelRatioF()
+                samples = []
+                for fy in (.35, .50, .65):
+                    x = min(image.width() - 1, max(0, round((ring.right() - bounds.left()) * dpr)))
+                    y = min(image.height() - 1, max(0, round((ring.top() + ring.height() * fy - bounds.top()) * dpr)))
+                    sample = image.pixelColor(x, y)
+                    if sample.alpha() > 0:
+                        samples.append(sample)
+                if samples:
+                    return QColor(*(round(sum(sample.getRgb()[channel] for sample in samples) / len(samples))
+                        for channel in range(3)))
+        palette = self._solid_album_surface_palette()
+        style = self._effective_music_ambience_style()
+        return (solid_album_background_color(palette) if style == "solid_album"
+            else QColor(255, 255, 255) if style == "pure_white"
+            else QColor(0, 0, 0) if style == "pure_black" else QColor(28, 28, 30))
+
     def _personal_dj_island_color(self) -> QColor:
         """Use the shared characteristic role, never invalid gray lyric fill."""
         palette = self._solid_album_surface_palette()
-        style = self._effective_music_ambience_style()
-        backdrop = (solid_album_background_color(palette) if style == "solid_album"
-            else QColor(255, 255, 255) if style == "pure_white" else QColor(28, 28, 30))
-        if self._finder_bar_active() and not getattr(self, "expanded", False):
-            backdrop = self._finder_bar_effective_backdrop()
+        backdrop = self._personal_dj_island_backdrop()
         key = (palette.characteristic.rgba(), palette.primary.rgba(), backdrop.rgba())
         if key != getattr(self, "_island_dj_color_key", None):
             self._island_dj_color_key = key
@@ -15247,7 +15300,7 @@ class IslandStackVisual(QWidget):
         painter.drawImage(rect.topLeft(), image)
         painter.restore()
 
-    def _paint_audio_device_background(self, painter, rect, radius, plan):
+    def _paint_audio_device_background(self, painter, rect, radius, plan, *, expanded=False):
         dpr = max(1.0, float(painter.device().devicePixelRatioF()))
         size = (max(1, math.ceil(rect.width() * dpr)), max(1, math.ceil(rect.height() * dpr)))
         image = getattr(self, "_audio_device_background_image", None)
@@ -15260,7 +15313,7 @@ class IslandStackVisual(QWidget):
             background.translate(-rect.left(), -rect.top())
             for step in plan.steps:
                 if step not in {"compact_content", "expanded_content", "border", "yaoguang_compact_frame_overlay"}:
-                    self._execute_music_surface_paint_step(step, background, rect, radius, False, plan.ambience_style)
+                    self._execute_music_surface_paint_step(step, background, rect, radius, expanded, plan.ambience_style)
         self._audio_device_background_image = image
         self._audio_device_background_rect = QRectF(rect)
         painter.drawImage(rect.topLeft(), image)
@@ -16080,6 +16133,7 @@ class IslandStackVisual(QWidget):
             self._paint_interactive_music_cover(painter, moving_cover, self._u(17))
             painter.setOpacity(opacity * (1.0 - progress))
             paint_personal_dj_icon(painter, moving_cover, self._personal_dj_island_color(),
+                backdrop=lambda ring: self._personal_dj_island_backdrop(ring, surface_rect=rect),
                 neutral=QColor(242, 242, 245), elapsed=max(0., time.monotonic()
                     - float(getattr(self, "_island_dj_started", 0.0))),
                 max_lightening=float(getattr(self, "_island_dj_lightening", .60)))

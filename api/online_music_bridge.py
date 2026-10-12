@@ -17,8 +17,10 @@ from api.online_music import OnlineMusicError
 class NodeOnlineMusicBackend:
     _packages = {"netease": "@neteasecloudmusicapienhanced/api", "qq": "@yakult-green-tea/qq-music-api", "kugou": "kugoumusicapi"}
     _max_line_bytes = 8 * 1024 * 1024
+    _authentication_operations = frozenset({"begin_login", "poll_login", "cancel_login", "account_status", "logout", "prepare_login"})
+    _prepared_idle_seconds = 60.0
 
-    def __init__(self, node_path: str | Path | None = None, module_root: str | Path | None = None, timeout_seconds: float = 18.0):
+    def __init__(self, node_path: str | Path | None = None, module_root: str | Path | None = None, timeout_seconds: float = 18.0, *, _authentication_lane: bool = False):
         project_root = Path(__file__).resolve().parent.parent
         bundled = Path(getattr(sys, "_MEIPASS", project_root)) / "online_music"
         self.bridge_path = bundled / "bridge.cjs" if (bundled / "bridge.cjs").is_file() else project_root / "native" / "online_music" / "bridge.cjs"
@@ -32,6 +34,12 @@ class NodeOnlineMusicBackend:
         self._responses: queue.Queue = queue.Queue(maxsize=16)
         self._serial = 0
         self._closed = False
+        self._authentication_lane = _authentication_lane
+        self._authentication_lock = threading.Lock()
+        self._authentication_backends: dict[str, NodeOnlineMusicBackend] = {}
+        self._prepare_started = False
+        self._authentication_used = False
+        self._prepare_retirement_timer: threading.Timer | None = None
 
     def available(self, source_id: str) -> tuple[bool, str]:
         if source_id == "qishui":
@@ -101,10 +109,73 @@ class NodeOnlineMusicBackend:
         threading.Thread(target=self._reader, args=(process, self._responses), daemon=True, name="GluSpot-online-music-reader").start()
         return process
 
+    def _authentication_backend(self, source_id: str, *, used: bool = False) -> NodeOnlineMusicBackend:
+        with self._authentication_lock:
+            if self._closed:
+                raise OnlineMusicError("closed", source_id, "在线音乐服务已关闭")
+            backend = self._authentication_backends.get(source_id)
+            if backend is None:
+                backend = NodeOnlineMusicBackend(self.node_path, self.module_root,
+                    self.timeout_seconds, _authentication_lane=True)
+                backend.bridge_path = self.bridge_path
+                self._authentication_backends[source_id] = backend
+            if used:
+                # Claim the lane before a real request can wait for its network
+                # lock. Retirement must never interrupt a QR/account/session.
+                backend._authentication_used = True
+            return backend
+
+    def _retire_prepared_authentication_backend(self, source_id: str, backend: NodeOnlineMusicBackend) -> None:
+        with self._authentication_lock:
+            if (self._closed or self._authentication_backends.get(source_id) is not backend
+                    or backend._authentication_used):
+                return
+            del self._authentication_backends[source_id]
+        # Only the daemon retirement callback owns this close; it never runs on
+        # Qt's thread and cannot race a newly registered replacement lane.
+        backend.close()
+
+    def prepare_login(self, source_id: str) -> bool:
+        """Preload verified modules off-thread, without credentials, QR or network."""
+        if self._authentication_lane or not self.available(source_id)[0]:
+            return False
+        try:
+            backend = self._authentication_backend(source_id)
+        except OnlineMusicError:
+            return False
+        with backend._authentication_lock:
+            if backend._closed:
+                return False
+            if backend._prepare_started:
+                return True
+            backend._prepare_started = True
+            timer = threading.Timer(self._prepared_idle_seconds,
+                self._retire_prepared_authentication_backend, args=(source_id, backend))
+            timer.daemon = True
+            backend._prepare_retirement_timer = timer
+        def prepare():
+            try:
+                backend.request(source_id, "prepare_login", {})
+            except OnlineMusicError:
+                # The deliberate login remains the source of user-facing errors
+                # and can restart a failed warm-up using the same transport.
+                pass
+        threading.Thread(target=prepare, daemon=True, name=f"GluSpot-login-prepare-{source_id}").start()
+        timer.start()
+        return True
+
     def request(self, source_id: str, operation: str, params: dict[str, Any], credential: dict[str, Any] | None = None) -> dict[str, Any]:
         ready, reason = self.available(source_id)
         if not ready:
             raise OnlineMusicError("unavailable", source_id, reason)
+        if not self._authentication_lane and operation in self._authentication_operations:
+            # Catalog/lyrics/DJ calls can occupy the sequential bridge for up to
+            # its network deadline. Authentication uses at most one lazy child
+            # per supported platform, so neither catalog I/O nor another source's
+            # abandoned QR request holds the currently selected login behind it.
+            # Each child keeps the existing bounded protocol and serial state.
+            return self._authentication_backend(source_id, used=operation != "prepare_login").request(
+                source_id, operation, params, credential)
         with self._lock:
             process = self._start()
             self._serial += 1
@@ -163,5 +234,13 @@ class NodeOnlineMusicBackend:
         threading.Thread(target=reap, daemon=True, name="GluSpot-online-music-reaper").start()
 
     def close(self) -> None:
-        self._closed = True
+        # This short lock only guards child registration, never a network wait.
+        with self._authentication_lock:
+            self._closed = True
+            authentication_backends = tuple(self._authentication_backends.values())
+            timer = self._prepare_retirement_timer
+        if timer is not None:
+            timer.cancel()
+        for backend in authentication_backends:
+            backend.close()
         self._stop_process()
