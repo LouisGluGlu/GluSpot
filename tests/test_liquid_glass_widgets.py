@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 from api.audio_routes import AudioRouteDevice
 from local.audio_output_panel import _OutputRow
 from local.ios_widgets import IosSwitch
-from local.liquid_glass import GlassPushButton, clear_glass_cache, widget_glass_backdrop
+from local.liquid_glass import GLASS_FACE_OPACITY, GlassPushButton, clear_glass_cache, paint_liquid_glass, widget_glass_backdrop
 from local.mac_style import MacTrafficButton
 from local.music_surface_palette import relative_luminance
 from local.music_library_window import _CollectionCover, _LibraryActionButton, _ModeButton
@@ -88,7 +88,22 @@ class LiquidGlassWidgetTests(unittest.TestCase):
         self.assertGreaterEqual(min(text_x), 23)
         self.assertLess(min(text_x), 35)
 
-    def test_custom_faces_react_to_the_real_cached_background_without_changing_actions(self):
+    def test_standard_qss_face_keeps_original_pigment_and_transparent_center(self):
+        button = GlassPushButton("", self.owner)
+        button.resize(120, 44)
+        button.setProperty("glassRadius", 12.)
+        button.setStyleSheet("QPushButton { border: none; background: #a2294f; border-radius: 12px; }")
+        face = self.render(button).pixelColor(60, 22)
+        self.assertAlmostEqual(face.red(), 162, delta=1)
+        self.assertAlmostEqual(face.green(), 41, delta=1)
+        self.assertAlmostEqual(face.blue(), 79, delta=1)
+        self.assertAlmostEqual(face.alpha(), 255 * GLASS_FACE_OPACITY, delta=1)
+        button.setStyleSheet("QPushButton { border: none; background: transparent; border-radius: 12px; }")
+        for color in (QColor("red"), QColor("blue")):
+            self.owner._background_cache.fill(color)
+            self.assertEqual(self.render(button).pixelColor(60, 22).alpha(), 0)
+
+    def test_custom_faces_keep_their_original_identity_without_full_backdrop_replacement(self):
         controls = (
             EntryNavigationButton("back", "返回", self.owner),
             PlaybackModeButton("程序内播放", self.owner),
@@ -107,7 +122,7 @@ class LiquidGlassWidgetTests(unittest.TestCase):
                 self.owner._background_cache.fill(QColor("#347b9d"))
                 clear_glass_cache()
                 cool = self.render(control)
-                self.assertNotEqual(bytes(warm.constBits()), bytes(cool.constBits()))
+                self.assertEqual(bytes(warm.constBits()), bytes(cool.constBits()))
                 spy = QSignalSpy(control.clicked)
                 control.click()
                 self.assertEqual(spy.count(), 1)
@@ -125,6 +140,29 @@ class LiquidGlassWidgetTests(unittest.TestCase):
         button.setChecked(False)
         self.assertEqual(button._progress, 0)
 
+    def test_source_selection_retains_the_original_dark_face_and_source_rim(self):
+        button = MusicSourceButton(ENTRY_SOURCES[2], self.owner)
+        button.resize(132, 100)
+        button.setChecked(True)
+        with patch("local.playback_entry_window.paint_liquid_glass", wraps=paint_liquid_glass) as material:
+            image = self.render(button)
+        self.assertEqual(material.call_args.kwargs["base_color"], QColor("#2b2d33"))
+        self.assertEqual(material.call_args.kwargs["border_color"], QColor(ENTRY_SOURCES[2].color))
+        self.assertLess(image.pixelColor(20, 40).lightness(), 80)
+        button.setChecked(False)
+        with patch("local.playback_entry_window.paint_liquid_glass", wraps=paint_liquid_glass) as material:
+            self.render(button)
+        self.assertEqual(material.call_args.kwargs["base_color"], QColor("#202227"))
+
+    def test_device_unselected_face_has_no_added_fill_template(self):
+        row = _OutputRow(AudioRouteDevice("idle", "空闲设备"), self.owner)
+        row.resize(330, 56)
+        row.state, row.progress = "available", 0
+        with patch.object(row, "underMouse", return_value=False), patch.object(row, "hasFocus", return_value=False), \
+                patch("local.audio_output_panel.paint_liquid_glass", wraps=paint_liquid_glass) as material:
+            self.render(row)
+        self.assertEqual(material.call_args.kwargs["base_color"].alpha(), 0)
+
     def test_actual_artwork_is_preserved_and_only_placeholder_gets_glass(self):
         cover = _CollectionCover("netease", "fm", self.owner)
         cover.resize(120, 120)
@@ -140,7 +178,7 @@ class LiquidGlassWidgetTests(unittest.TestCase):
         with patch("local.music_library_window.paint_liquid_glass") as material:
             self.render(cover)
         material.assert_called_once()
-        self.assertIs(material.call_args.kwargs["backdrop"], self.owner._background_cache)
+        self.assertLess(material.call_args.kwargs["base_color"].lightness(), 70)
 
     def test_settings_theme_and_dynamic_search_buttons_keep_foreground_contrast(self):
         island, settings = FakeIslandWidget(), FakeSettingsManager()
@@ -159,12 +197,16 @@ class LiquidGlassWidgetTests(unittest.TestCase):
                         expected = not dark and button.objectName() not in {"Primary", "Danger"}
                         self.assertEqual(button.property("glassLight"), expected, button.objectName())
                         if button.objectName() == "DetailToggle":
-                            self.assertFalse(button.property("glassActive"))
+                            self.assertEqual(button.property("glassRadius"), 7)
+                        else:
+                            self.assertEqual(button.property("glassRadius"), 5)
             swatch = ColorButton("#a2294f", lambda: None, self.owner)
-            self.assertEqual(swatch.property("glassTint"), QColor("#a2294f"))
+            self.assertEqual(swatch.color(), "#A2294F")
             swatch.set_color("#3f94c6")
-            self.assertEqual(swatch.property("glassTint"), QColor("#3f94c6"))
-            self.assertEqual(self.render(swatch).pixelColor(17, 17), QColor("#3f94c6"))
+            self.assertEqual(swatch.color(), "#3F94C6")
+            image = self.render(swatch)
+            self.assertEqual(image.pixelColor(17, 17), image.pixelColor(17, 9))
+            self.assertIsNone(swatch.property("glassTint"))
         finally:
             window.close()
             island.close()

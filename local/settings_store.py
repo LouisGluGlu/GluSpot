@@ -4,6 +4,7 @@ import copy
 import json
 import math
 import os
+import re
 import shutil
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -156,6 +157,7 @@ DEFAULT_SETTINGS = {
     "v2_owned_playback_enabled": True,
     "v2_owned_playback_mode": "sequential",
     "v2_personal_dj_enabled": False,
+    "v2_personal_dj_voice_key": "",
     "v2_system_capture_enabled": False,
     "v2_startup_mode": "none",
     "v2_custom_icon_path": "",
@@ -418,6 +420,10 @@ class SettingsManager(QObject):
             if self._settings.get("v2_owned_playback_mode") not in ("sequential", "shuffle", "repeat_one"):
                 self._settings["v2_owned_playback_mode"] = "sequential"
                 migrated = True
+            voice = self._settings.get("v2_personal_dj_voice_key", "")
+            if not isinstance(voice, str) or voice and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", voice) is None:
+                self._settings["v2_personal_dj_voice_key"] = ""
+                migrated = True
             original_style = self._settings.get("v2_music_ambience_style")
             for key in ("v2_music_ambience_style", "v2_music_background_follow_previous_style"):
                 raw = self._settings.get(key, "")
@@ -487,6 +493,8 @@ class SettingsManager(QObject):
         if key in _REMOVED_VISUAL_SETTING_KEYS or key in FIXED_DEFAULT_SETTING_KEYS:
             return
         if key == "v2_personal_dj_enabled" and not isinstance(value, bool):
+            return
+        if key == "v2_personal_dj_voice_key" and (not isinstance(value, str) or value and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is None):
             return
         if key == "v2_owned_playback_mode" and value not in ("sequential", "shuffle", "repeat_one"):
             value = "sequential"

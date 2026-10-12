@@ -1933,7 +1933,12 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         offsets = tuple(10.0 if index == 0 else -10.0 for index in range(layout.lineCount()))
         color = QColor(240, 110, 96)
         origin = QPointF(25.0, 35.0)
-        actual = QImage(420, 300, QImage.Format.Format_ARGB32_Premultiplied)
+        dpr = max(1.0, self.window.devicePixelRatioF())
+        actual = QImage(
+            math.ceil(420 * dpr), math.ceil(300 * dpr),
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        actual.setDevicePixelRatio(dpr)
         actual.fill(Qt.GlobalColor.transparent)
         with QPainter(actual) as painter:
             self.window._draw_sprung_cached_wrapped_layout(
@@ -1941,8 +1946,13 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 color, offsets, blur_level=2,
             )
         expected = QImage(actual.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        expected.setDevicePixelRatio(dpr)
         expected.fill(Qt.GlobalColor.transparent)
-        source, padding = self.window._lyric_raster(text, font, 185.0, height, layout, color)
+        source, padding = self.window._lyric_raster(
+            text, font, 185.0, height, layout, color,
+            # The spring renderer uses the existing blur-resolution cap.
+            dpr_cap=self.window.BLURRED_LYRIC_DPR_CAP,
+        )
         with QPainter(expected) as painter:
             for index, offset in enumerate(offsets):
                 isolated, bleed = self.window._blurred_visual_line(
@@ -4569,7 +4579,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                     6,
                 )
 
-    def test_transport_has_large_hit_slots_and_separate_glass_faces(self):
+    def test_transport_has_three_large_slots_without_a_visible_backplate(self):
         self.owner.track_title = "Attention"
         self.owner.artist = "Charlie Puth"
         self.owner.album_color = QColor(204, 50, 54)
@@ -4646,10 +4656,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         playing, _ = paint(playing=True)
         paused, _ = paint(playing=False)
         middle = self.window._media_button_rects["toggle_play_pause"].center()
-        self.assertNotEqual(playing.pixelColor(round(middle.x()), round(middle.y())), background)
+        self.assertEqual(playing.pixelColor(round(middle.x()), round(middle.y())), background)
         self.assertNotEqual(paused.pixelColor(round(middle.x()), round(middle.y())), background)
-        self.assertNotEqual(playing.pixelColor(round(middle.x()), round(middle.y())),
-                            paused.pixelColor(round(middle.x()), round(middle.y())))
 
     def test_fullscreen_skip_feedback_expands_circular_light_from_cover_and_scales_only_icon(self):
         self.window.resize(1190, 666)

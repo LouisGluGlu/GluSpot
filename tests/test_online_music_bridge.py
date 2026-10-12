@@ -15,18 +15,32 @@ from api.online_music_bridge import NodeOnlineMusicBackend
 
 
 class OnlineMusicBridgeTests(unittest.TestCase):
-    def test_personal_dj_calls_pinned_module_without_guessed_persona_or_location(self):
+    def test_personal_dj_uses_verified_catalog_and_request_voice_profile_without_mutating_credentials(self):
         self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
-            "module/aidj_content_rcmd.js": r'''module.exports=async q=>({body:{code:200,
-                authorized:q.cookie.MUSIC_U==='synthetic',
-                noPersonaOrLocation:!('latitude' in q)&&!('voiceId' in q)&&!('timbreKey' in q),
-                data:{aiDjResources:[{type:'audio'},{type:'song'}]}}});''',
-            "util/request.js": "module.exports=async()=>({body:{}});",
+            "util/option.js": "module.exports=q=>q;",
+            "util/request.js": r'''module.exports=async (url,data,q)=>({body:{code:200,url,
+                authorized:q.cookie.MUSIC_U==='synthetic', profile:[q.cookie.os,q.cookie.appver,q.cookie.versioncode],
+                domain:q.domain,timeout:q.timeout,randomCNIP:q.randomCNIP,params:data},cookie:[]});''',
         })
-        body = self.backend.request("netease", "personal_dj", {}, {"cookie": {"MUSIC_U": "synthetic"}})["data"]
+        credential = {"cookie": {"MUSIC_U": "synthetic", "os": "pc", "appver": "original"}}
+        response = self.backend.request("netease", "personal_dj", {"timbre_key": "fixture-voice"}, credential)
+        body = response["data"]
         self.assertTrue(body["authorized"])
-        self.assertTrue(body["noPersonaOrLocation"])
-        self.assertEqual([r["type"] for r in body["data"]["aiDjResources"]], ["audio", "song"])
+        self.assertEqual(body["url"], "/api/aidj/content/rcmd/info")
+        self.assertEqual(body["profile"], ["android", "9.6.05", "9006005"])
+        self.assertEqual(body["domain"], "https://interface3.music.163.com")
+        self.assertEqual(body["timeout"], 12000)
+        self.assertFalse(body["randomCNIP"])
+        self.assertEqual(body["params"]["timbreKey"], "fixture-voice")
+        ext = json.loads(body["params"]["extInfo"])
+        self.assertTrue(ext["manualedTimbre"])
+        self.assertNotIn("lbsInfoList", ext)
+        self.assertEqual(response["credential"], credential)
+        catalog = self.backend.request("netease", "personal_dj_voices", {}, credential)["data"]
+        self.assertEqual(catalog["url"], "/api/aidj/audio/timbre/get")
+        self.assertEqual(catalog["params"], {})
+        with self.assertRaises(OnlineMusicError):
+            self.backend.request("netease", "personal_dj", {"timbre_key": "../arbitrary"}, credential)
 
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()

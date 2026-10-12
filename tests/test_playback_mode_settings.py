@@ -100,6 +100,23 @@ class PlaybackModePersistenceTests(unittest.TestCase):
                     finally:
                         manager.save_now()
 
+    def test_dj_voice_key_persists_and_invalid_data_cannot_become_request_input(self):
+        for saved in ("M792-NP", "", None, 12, "voice?cookie=secret", "a" * 129):
+            with self.subTest(saved=saved), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "settings.json"
+                path.write_text(json.dumps({"v2_personal_dj_voice_key": saved}), encoding="utf-8")
+                with patch("local.settings_store.SETTINGS_FILE", str(path)), \
+                        patch("local.settings_store.APP_DATA_DIR", directory), \
+                        patch("local.settings_store.legacy_app_data_dirs", return_value=()):
+                    manager = SettingsManager()
+                    expected = saved if saved in ("M792-NP", "") else ""
+                    self.assertEqual(manager.get("v2_personal_dj_voice_key"), expected)
+                    manager.set("v2_personal_dj_voice_key", "F793-C2")
+                    manager.set("v2_personal_dj_voice_key", "invalid space")
+                    self.assertEqual(manager.get("v2_personal_dj_voice_key"), "F793-C2")
+                    manager.save_now()
+                    self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["v2_personal_dj_voice_key"], "F793-C2")
+
     def test_song_mode_persists_and_invalid_values_return_to_sequence(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"

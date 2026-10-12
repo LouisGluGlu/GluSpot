@@ -171,14 +171,12 @@ def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPos
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     capsule = connection_capsule_rect(circle, pose, font, available_left)
     p = pose.capsule
-    # Blend the pale circular face into the darker caption material without
-    # a theme snap halfway through the existing capsule motion. Text/glyphs
-    # remain sharp and follow their original independent transforms below.
-    for light, weight in ((True, 1 - p), (False, p)):
-        if weight > 0:
-            paint_liquid_glass(painter, capsule, radius=circle.height() / 2,
-                               light=light, backdrop=backdrop,
-                               backdrop_rect=backdrop_rect, opacity=weight)
+    # Preserve the original continuous pale-circle -> dark-caption face and
+    # stroke. Its glass edge follows the existing capsule, never a new plate.
+    face = QColor(round(248 - 193 * p), round(249 - 193 * p), round(250 - 193 * p), 245)
+    stroke = QColor(round(168 - 93 * p), round(170 - 94 * p), round(172 - 95 * p))
+    paint_liquid_glass(painter, capsule, radius=circle.height() / 2,
+                       base_color=face, border_color=stroke)
     shape = QPainterPath()
     shape.addRoundedRect(capsule.adjusted(1, 1, -1, -1), circle.height() / 2, circle.height() / 2)
     painter.setClipPath(shape)

@@ -916,7 +916,11 @@ class AudioOutputSurfaceTests(unittest.TestCase):
         self.owner.data_provider._owned_active = lambda: True
         self.window._fullscreen = False
         self.window._sync_window_control_rects()
-        self.window.toggle_presentation_mode()
+        # A 200% desktop can have the same logical bounds as this test's
+        # window. Supply a distinct target so this actually tests a handoff.
+        target = self.window.geometry().adjusted(-20, -20, 20, 20)
+        with patch.object(self.window, "_fullscreen_geometry", return_value=target):
+            self.window.toggle_presentation_mode()
         self.assertIsNotNone(self.window._pending_fullscreen)
         point = self.window._transition_control_rects()["library"].center()
         event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton, position=lambda: point,

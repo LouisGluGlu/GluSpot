@@ -297,6 +297,26 @@ class PlaybackSourceProvider:
             persist("v2_personal_dj_enabled", enabled)
         return True
 
+    def list_personal_dj_voices(self):
+        """Real account directory; call from an existing background task."""
+        return self.owned.service.personal_dj_voices("netease")
+
+    def get_owned_personal_dj_voice_key(self):
+        return self.owned.personal_dj_voice_key
+
+    def set_owned_personal_dj_voice(self, timbre_key):
+        if not bool(self.settings_getter("v2_owned_playback_enabled", True)):
+            return False
+        if not self.owned.set_personal_dj_voice(timbre_key):
+            return False
+        persist = self.settings_setter
+        if callable(persist):
+            persist("v2_personal_dj_voice_key", timbre_key)
+        return True
+
+    def preview_owned_personal_dj_voice(self, timbre_key):
+        return bool(self.settings_getter("v2_owned_playback_enabled", True)) and self.owned.preview_personal_dj_voice(timbre_key)
+
     def set_owned_playback_mode(self, mode):
         if not self._owned_active() or mode not in self.get_owned_playback_modes():
             return False

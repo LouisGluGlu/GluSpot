@@ -491,13 +491,14 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         for target in (start, finish):
             image = self._native_image(self.panel)
             with QPainter(image) as painter:
+                painter.drawImage(QRectF(self.panel.rect()), self.panel._material)
                 self.panel._paint_morph_row(painter, row, target)
             point = QPointF(target.left() + target.width() * .8, target.center().y())
             dpr = image.devicePixelRatio()
             rendered.append(image.pixelColor(round(point.x() * dpr), round(point.y() * dpr)))
         warm, cool = rendered
-        self.assertGreater(warm.red(), warm.blue() + 25)
-        self.assertGreater(cool.blue(), cool.red() + 25)
+        self.assertEqual(warm, QColor("#cf4820"))
+        self.assertEqual(cool, QColor("#2048cf"))
         self.assertEqual(row.geometry(), geometry)
         self.assertEqual(self.provider.calls, [])
 
@@ -509,12 +510,19 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
             pose = SimpleNamespace(first_rect=first, horizontal=0, row_unfold=0,
                                    shell_rect=QRectF(self.panel.rect()))
             with QPainter(image) as painter, patch("local.audio_output_panel.paint_audio_output_status"):
+                painter.drawImage(QRectF(self.panel.rect()), self.panel._material)
                 self.panel._paint_unfolding_rows(painter, pose)
             dpr = image.devicePixelRatio()
             colors.append(image.pixelColor(round(first.center().x() * dpr), round(first.center().y() * dpr)))
         warm, cool = colors
-        self.assertGreater(warm.red(), warm.blue() + 3)
-        self.assertGreater(cool.blue(), cool.red() + 3)
+        # The original white source face stays white at either position. A
+        # small opacity allows existing color below it; it has no new lens fill.
+        self.assertGreater(warm.red(), warm.blue())
+        self.assertGreater(cool.blue(), cool.red())
+        from local.liquid_glass import GLASS_FACE_OPACITY
+        original_floor = round(min(self.panel._selected_fill.getRgb()[:3]) * GLASS_FACE_OPACITY)
+        self.assertGreaterEqual(min(warm.getRgb()[:3]), original_floor)
+        self.assertGreaterEqual(min(cool.getRgb()[:3]), original_floor)
         self.assertEqual(self.provider.calls, [])
 
     def test_reversal_restores_first_capsule_before_returning_source_circle(self):

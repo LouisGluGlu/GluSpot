@@ -289,6 +289,7 @@ class LocalIslandApp:
         self.owned_player = OwnedMusicPlayer(self.online_music, self.system_provider.lyrics_store, self.app)
         self.owned_player.set_playback_mode(self.settings.get("v2_owned_playback_mode", "sequential"))
         self.owned_player.set_personal_dj_enabled(self.settings.get("v2_personal_dj_enabled", False))
+        self.owned_player.restore_personal_dj_voice(self.settings.get("v2_personal_dj_voice_key", ""))
         self.data_provider = PlaybackSourceProvider(self.system_provider, self.owned_player, self._runtime_setting)
         self.data_provider.settings_setter = self.settings.set
         self.app.aboutToQuit.connect(self.data_provider.close_audio_outputs)
@@ -312,6 +313,11 @@ class LocalIslandApp:
         self.window._music_library_back_callback = self.music_library.return_from_music_surface
         self.playback_entry.login_callback = self.music_library.open_source
         self.settings_window.online_music_login_callback = self.playback_entry.show_login
+        from local.personal_dj_voice_window import PersonalDjVoiceWindow
+        self.personal_dj_voices = PersonalDjVoiceWindow(self.data_provider, self.settings_window)
+        self.settings_window.personal_dj_voice_callback = self._show_personal_dj_voices
+        self.window._personal_dj_voice_hover_callback = self._show_personal_dj_hover
+        self.app.aboutToQuit.connect(self.personal_dj_voices.tasks.close)
         self.settings.setting_changed.connect(self._playback_mode_changed)
         self.app.aboutToQuit.connect(self.playback_entry.close)
         self.app.aboutToQuit.connect(self.music_library.close)
@@ -342,6 +348,9 @@ class LocalIslandApp:
         track = self.owned_player.track if active else None
         key = (active, str(getattr(track, "track_id", "") or ""),
                bool(getattr(track, "is_playing", False)))
+        sync_dj = getattr(self.window, "_sync_personal_dj_island", None)
+        if callable(sync_dj) and sync_dj(time.monotonic()):
+            self.window.update()
         if key == self._owned_surface_key:
             return
         self._owned_surface_key = key
@@ -365,6 +374,20 @@ class LocalIslandApp:
             self.system_provider.stop_audio_cast()
         if key == "v2_system_capture_enabled" and value is True:
             self.system_provider.start_audio_outputs()
+
+    def _show_personal_dj_voices(self):
+        self.personal_dj_voices.show()
+        self.personal_dj_voices.raise_()
+        self.personal_dj_voices.activateWindow()
+
+    def _show_personal_dj_hover(self, surface, visible):
+        from local.personal_dj_voice_popover import PersonalDjVoicePopover
+        popover = getattr(surface, "_dj_voice_selector_widget", None)
+        if popover is None and visible:
+            popover = PersonalDjVoicePopover(self.data_provider, surface)
+            surface._dj_voice_selector_widget = popover
+            self.app.aboutToQuit.connect(popover.tasks.close)
+        return popover.present(visible) if popover is not None else None
 
     def _music_ambience_values_for_style(self, style: str) -> dict[str, float | int]:
         if style not in DEFAULT_MUSIC_AMBIENCE_VALUES:

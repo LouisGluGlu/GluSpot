@@ -19,7 +19,34 @@ Solid island background remain authoritative. Gray ordering, photographic
 shadows, moderate pigments and existing single-hue layers retain their mappings.
 The renderer still owns one raster bounded to 256 pixels and its existing clock.
 
-## Shared optical button material
+## October 12 correction: original faces with a glass rim
+
+The latest correction follows the user's explicit direction: keep original
+button shapes and state colors, reduce their own opacity slightly, and add a
+fine glass boundary. It supersedes the sampled backing described below.
+The helper draws the supplied original RGB with alpha multiplied by .80, then
+two narrow inset edge highlights. There is no scene sample, extra plate, tint
+wash or broad center bloom. Fully transparent originals keep their empty center.
+
+Song transport regains its original 44px glyphs without added circular plates.
+Standard actions use their original Qt/QSS bevel, radius and states; labels and
+icons stay sharp. Platform cards retain dark faces and source-colored rims.
+Color selectors retain their original full swatch. Real cover pixels are unchanged.
+Selected device rows preserve actual volume-fill proportions; unselected rows
+retain transparent faces. Connection feedback uses one continuously interpolated
+original pale-to-dark face. Tiny switch captions use readable dark ink over
+the restored green track. Caption contrast remains tested at 4.5 or above.
+
+The sampled lens, material/geometry caches and album-frame freeze are removed.
+Owners no longer compute discarded background regions every frame. Existing
+blur/prewarm/hide animation, translation cutouts, first-run reading sweep,
+DJ frequency outlines, focus/disabled feedback and device actions remain.
+The pure-pigment background and 2-second ring timing are unchanged. No browser
+dependency or scene capture is added by the material; this is a native edge treatment, not a
+claim of full optical refraction. See the
+[fresh live-page and pinned source evidence](liquid-glass-references.md).
+
+## Historical optical backing, superseded by the correction above
 
 `local/liquid_glass.py` supplies an original native Qt material over existing
 button geometry. Song-page controls, DJ backing, first-run choices, login,
@@ -60,9 +87,22 @@ current horizontal position: the center receives the song's characteristic
 color, fading continuously towards lighter versions on both sides. Hollow
 outlines, left-bright/right-dark lighting, the single traveling halo, actual
 PCM frequency response and the independent loading/success/failure outlines
-remain. Speech still shows the introduced song's cover and paused lyrics first.
+remain. The latest speech-over-music follow-up shows the introduced song's
+cover and lyrics immediately, plays music at 20% gain beneath the DJ, and keeps
+only the cover visually small. Music gain returns over one second after speech;
+see [current behavior and verification](dj-voices-hover-and-ducking.md).
 
 ## Verification
+
+The current rim/hover correction passed **4212 final Python tests in 246.139
+seconds**, without skips or Qt callback tracebacks. Final control/lifetime
+checks passed 97 tests at each DPR 1/2, plus a consecutive DPR 1 repeat; native
+previews preserve original faces and fine rims. Compilation, dependency and
+Node syntax checks passed. Current DJ, hover, playback and verification details
+are in [the current handoff](dj-voices-hover-and-ducking.md).
+
+The 4078-test result below is historical evidence for the preceding
+optical-backing version.
 
 The final frozen source passed **4078 Python tests in 211.312 seconds**, with no
 skips, using `.venv/Scripts/python.exe -X utf8 -X faulthandler -m unittest discover
