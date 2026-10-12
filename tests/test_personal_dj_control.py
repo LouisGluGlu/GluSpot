@@ -158,6 +158,82 @@ class PersonalDjControlTests(unittest.TestCase):
         self.assertIsNone(self.window._owned_personal_dj_enabled)
         self.assertFalse(self.window._toggle_personal_dj())
 
+    def _dj_pointer_event(self, position):
+        return SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton,
+            position=lambda: position,
+            globalPosition=lambda: QPointF(self.window.mapToGlobal(position.toPoint())),
+            accept=lambda: None)
+
+    def _click_dj(self, now, *, caption=False):
+        with patch("local.music_surface_window.time.monotonic", return_value=now):
+            self.window._reset_control_idle(now)
+            self.window._sync_owned_playback_mode()
+            self.window._sync_window_control_rects()
+            icon, label = self.window._personal_dj_geometry(QRectF(self.window.rect()), now)
+            position = (label if caption else icon).center()
+            event = self._dj_pointer_event(position)
+            self.window.mousePressEvent(event)
+            self.window.mouseReleaseEvent(event)
+
+    def test_enabled_compact_click_only_expands_then_expanded_icon_can_disable(self):
+        self.enabled = True
+        self.owner._personal_dj_voice_hover_callback = Mock()
+        setter = Mock(side_effect=self.set_enabled)
+        self.provider.set_owned_personal_dj_enabled = setter
+        self._click_dj(100.)
+        self.assertTrue(self.enabled)
+        self.assertTrue(self.window._dj_voice_selector_active)
+        setter.assert_not_called()
+        self.owner._personal_dj_voice_hover_callback.assert_called_with(self.window, True)
+        self._click_dj(100.1)  # Still expanding; this must not toggle.
+        setter.assert_not_called()
+        self._click_dj(100.7)
+        setter.assert_called_once_with(False)
+        self.assertFalse(self.enabled)
+        self.assertTrue(self.window._dj_voice_selector_active)
+
+    def test_disabled_compact_click_enables_and_expands_in_one_action(self):
+        self.owner._personal_dj_voice_hover_callback = Mock()
+        setter = Mock(side_effect=self.set_enabled)
+        self.provider.set_owned_personal_dj_enabled = setter
+        self._click_dj(100.)
+        setter.assert_called_once_with(True)
+        self.assertTrue(self.enabled)
+        self.assertTrue(self.window._dj_voice_selector_active)
+
+    def test_expanded_caption_is_never_a_dj_toggle(self):
+        self.owner._personal_dj_voice_hover_callback = Mock()
+        setter = Mock(side_effect=self.set_enabled)
+        self.provider.set_owned_personal_dj_enabled = setter
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.enabled = enabled
+                with patch("local.music_surface_window.time.monotonic", return_value=100.):
+                    self.window._sync_owned_playback_mode()
+                    self.window._open_dj_voice_selector(100.)
+                self._click_dj(100.7, caption=True)
+                setter.assert_not_called()
+                self.assertEqual(self.enabled, enabled)
+
+    def test_compact_press_cannot_become_toggle_when_hover_expands_before_release(self):
+        self.enabled = True
+        self.owner._personal_dj_voice_hover_callback = Mock()
+        setter = Mock(side_effect=self.set_enabled)
+        self.provider.set_owned_personal_dj_enabled = setter
+        with patch("local.music_surface_window.time.monotonic", return_value=100.):
+            self.window._reset_control_idle(100.)
+            self.window._sync_owned_playback_mode()
+            self.window._sync_window_control_rects()
+            icon, _ = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.)
+            self.window.mousePressEvent(self._dj_pointer_event(icon.center()))
+            self.window._open_dj_voice_selector(100.)
+        with patch("local.music_surface_window.time.monotonic", return_value=100.7):
+            self.window._sync_window_control_rects()
+            icon, _ = self.window._personal_dj_geometry(QRectF(self.window.rect()), 100.7)
+            self.window.mouseReleaseEvent(self._dj_pointer_event(icon.center()))
+        setter.assert_not_called()
+        self.assertTrue(self.enabled)
+
     def test_voice_pops_only_dj_control_then_follows_shared_idle(self):
         self.enabled = True
         self.window._reset_control_idle(100)

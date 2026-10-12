@@ -86,68 +86,200 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         image.fill(Qt.GlobalColor.transparent)
         return image
 
-    def test_selected_whole_row_requires_half_second_then_adjusts_only_its_volume(self):
+    def test_wheel_over_selected_name_and_slider_always_scrolls_without_volume_change(self):
+        self._add_list(9)
         row = self.panel._rows["local"]
-        point = QPoint(75, 25)
-        self.assertTrue(row.volume_hit(QPointF(point)))
-        self._move(row, point, 101.0)
-        self._wheel(row, point, 101.49)
-        self.assertEqual(self.provider.calls, [])
-        self._wheel(row, point, 101.51)
-        self.assertEqual(self.provider.calls, [("volume", "local", .52)])
+        for widget, point in ((row, QPoint(75, 25)),
+                              (row.volume_slider, row.volume_slider.rect().center())):
+            with self.subTest(widget=widget):
+                bar = self.panel.scroll.verticalScrollBar()
+                bar.setValue(0)
+                self._move(widget, point, 101.)
+                self._wheel(widget, point, 102., angle=-120)
+                self.assertGreater(bar.value(), 0)
+                self.assertEqual(self.provider.calls, [])
 
-    def test_grey_half_can_adjust_volume_but_other_devices_keep_scrolling(self):
+    def test_real_slider_drag_isolated_from_name_mute_and_route_selection(self):
         row = self.panel._rows["local"]
-        point = QPoint(row.width() - 20, 25)
-        self.assertTrue(row.volume_hit(QPointF(point)))
-        self._move(row, point, 101.0)
-        self._wheel(row, point, 110.0)
-        self.assertEqual(self.provider.calls, [("volume", "local", .52)])
-        self.provider.calls.clear()
-        other = self.panel._rows["bluetooth"]
-        self.assertTrue(other.volume_slider.isHidden())
-        self._move(other, QPoint(75, 25), 111.0)
-        self._wheel(other, QPoint(75, 25), 115.0)
-        self.assertEqual(self.provider.calls, [])
+        slider = row.volume_slider
+        self.assertFalse(slider.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+        self.assertTrue(row.volume_hit(QPointF(slider.geometry().center())))
+        self.assertFalse(row.volume_hit(QPointF(75, 25)))
+        QTest.mousePress(slider, Qt.MouseButton.LeftButton, pos=QPoint(8, 12))
+        QTest.mouseMove(slider, QPoint(slider.width() - 8, 12))
+        QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=QPoint(slider.width() - 8, 12))
+        self.assertEqual(slider.value(), 100)
+        self.assertFalse(slider.isSliderDown())
+        self.assertTrue(self.provider.calls)
+        self.assertTrue(all(call[0] == "volume" and call[1] == "local" for call in self.provider.calls))
+        self.assertEqual(row.device.volume, .5)
 
-    def test_crossing_fill_boundary_keeps_dwell_but_leaving_resets_it(self):
+    def _settle_row_hover(self, row):
+        group = row._control_hover_registration.group
+        record = row._control_hover_registration.record
+        with patch("local.control_hover.time.monotonic", return_value=100.):
+            group._set_active(record, 100.)
+        for index in range(60):
+            with patch("local.control_hover.time.monotonic", return_value=100. + (index + 1) / 60):
+                group._tick()
+        return group, record
+
+    def test_hover_and_neighbor_pixels_stay_inside_viewport_and_popup(self):
+        first = self.panel._rows["local"]
+        group, record = self._settle_row_hover(first)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            self.assertGreater(group.visual_rect(record).width(), first.width())
+            for row in self.panel._rows.values():
+                item = row._control_hover_registration.record
+                self.assertTrue(row._hover_bounds().contains(group.visual_rect(item)))
+            frame = self._native_image(group.overlay)
+            group.overlay.render(frame)
+        viewport = self.panel.scroll.viewport()
+        clip = QRectF(viewport.mapTo(group.overlay.parentWidget(), QPoint()), viewport.size())
+        dpr = frame.devicePixelRatio()
+        for y in range(frame.height()):
+            for x in range(frame.width()):
+                if not clip.contains(QPointF((x + .5) / dpr, (y + .5) / dpr)):
+                    self.assertEqual(frame.pixelColor(x, y).alpha(), 0, (x, y, clip))
+        self.assertLessEqual(self.panel.y() + self.panel.height(), self.owner.height() - 12)
+
+    def test_partial_row_keeps_native_size_and_cannot_hover_outside_viewport(self):
+        self._add_list(9)
         row = self.panel._rows["local"]
-        white, grey = QPoint(75, 25), QPoint(row.width() - 20, 25)
-        self._move(row, white, 101.0)
-        self._move(row, grey, 101.3)
-        self._move(row, white, 101.4)
-        self._wheel(row, white, 101.51)
-        self.assertEqual(self.provider.calls, [("volume", "local", .52)])
-        self.provider.calls.clear()
-        self.app.sendEvent(row, QEvent(QEvent.Type.Leave))
-        self._move(row, white, 103.0)
-        self._wheel(row, white, 103.49)
-        self.assertEqual(self.provider.calls, [])
-        self._wheel(row, white, 103.51)
-        self.assertEqual(self.provider.calls, [("volume", "local", .54)])
+        group, record = self._settle_row_hover(row)
+        self.panel.scroll.verticalScrollBar().setValue(20)
+        self.app.processEvents()
+        self.assertFalse(row._hover_motion_allowed())
+        with patch("local.control_hover.time.monotonic", return_value=101.1):
+            group._tick()
+        self.assertEqual(record.motion.value(101.1), 0)
+        self.assertEqual(row.width(), row.geometry().width())
+        viewport = self.panel.scroll.viewport()
+        outside = viewport.mapToGlobal(QPoint(10, -5))
+        self.assertIsNone(group._at(QPointF(outside)))
 
-    def test_zero_active_volume_can_wheel_restore_but_unknown_and_unselected_cannot(self):
+    def test_grown_slider_freezes_pose_and_keeps_child_capture_outside_popup(self):
+        row = self.panel._rows["local"]
+        group, record = self._settle_row_hover(row)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            pose = group.visual_rect(record)
+            scale = pose.width() / row.width()
+            start = pose.topLeft() + QPointF(row.volume_slider.geometry().center()) * scale
+            global_start = self.panel.rows_widget.mapToGlobal(start.toPoint())
+            local = row.mapFromGlobal(global_start)
+            QTest.mousePress(row, Qt.MouseButton.LeftButton, pos=local)
+        self.assertTrue(row.volume_slider.isSliderDown())
+        self.assertIs(group.pressed_widget(), row.volume_slider)
+        self.assertEqual(group.visual_rect(record, 102.), pose)
+        far = self.panel.mapToGlobal(QPoint(self.panel.width() + 80, self.panel.height() + 30))
+        local = row.mapFromGlobal(far)
+        QTest.mouseMove(row, local)
+        QTest.mouseRelease(row, Qt.MouseButton.LeftButton, pos=local)
+        self.assertEqual(row.volume_slider.value(), 100)
+        self.assertFalse(row.volume_slider.isSliderDown())
+        self.assertIsNone(group.pressed)
+        self.assertTrue(all(call[0] == "volume" for call in self.provider.calls))
+
+    def test_actual_drag_defers_poll_reorder_and_releases_without_route_action(self):
+        row = self.panel._rows["local"]
+        group, record = self._settle_row_hover(row)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            QTest.mousePress(row.volume_slider, Qt.MouseButton.LeftButton,
+                             pos=row.volume_slider.rect().center())
+        held = group.visual_rect(record)
+        order, geometry = self.panel._device_order, row.geometry()
+        self.provider.snapshot = replace(self.provider.snapshot, pending_id="homepod", state="connecting")
+        self.panel.sync_snapshot()
+        self.assertEqual(self.panel._device_order, order)
+        self.assertEqual(row.geometry(), geometry)
+        self.assertEqual(group.visual_rect(record), held)
+        QTest.mouseMove(row.volume_slider, QPoint(row.volume_slider.width() - 8, 12))
+        QTest.mouseRelease(row.volume_slider, Qt.MouseButton.LeftButton,
+                           pos=QPoint(row.volume_slider.width() - 8, 12))
+        self.app.processEvents()
+        self.assertEqual(self.panel._device_order[0], "homepod")
+        self.assertFalse(row.volume_slider.isSliderDown())
+        self.assertTrue(all(call[0] == "volume" for call in self.provider.calls))
+
+    def test_dismiss_cancels_held_slider_without_late_volume_changes_on_reopen(self):
+        row = self.panel._rows["local"]
+        group, record = self._settle_row_hover(row)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            QTest.mousePress(row.volume_slider, Qt.MouseButton.LeftButton,
+                             pos=row.volume_slider.rect().center())
+        self.assertTrue(row.volume_slider.isSliderDown())
+        self.panel.dismiss(immediate=True)
+        self.assertFalse(row.volume_slider.isSliderDown())
+        self.panel.open_at(QPoint(620, 65), source_rect=QRectF(578, 11, 42, 42))
+        self.panel._animation_timer.stop()
+        self.panel._poll_timer.stop()
+        self.panel._reveal = 1
+        self.panel._apply_reveal_pose()
+        self.app.processEvents()
+        before = tuple(self.provider.calls)
+        QTest.mouseMove(row.volume_slider, QPoint(row.volume_slider.width() - 8, 12))
+        self.assertEqual(tuple(self.provider.calls), before)
+        self.assertIsNone(group.pressed)
+
+    def test_wheel_during_held_drag_freezes_list_then_release_restores_scrolling(self):
+        self._add_list(9)
+        row = self.panel._rows["local"]
+        group, record = self._settle_row_hover(row)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            QTest.mousePress(row.volume_slider, Qt.MouseButton.LeftButton,
+                             pos=row.volume_slider.rect().center())
+        bar = self.panel.scroll.verticalScrollBar()
+        before, pose = bar.value(), group.visual_rect(record)
+        self._wheel(row, QPoint(75, 25), 102., angle=-120)
+        self.assertEqual(bar.value(), before)
+        self.assertEqual(group.visual_rect(record), pose)
+        QTest.mouseRelease(row.volume_slider, Qt.MouseButton.LeftButton,
+                           pos=QPoint(row.volume_slider.width() - 8, 12))
+        self.assertFalse(row.volume_slider.isSliderDown())
+        self._wheel(row, QPoint(75, 25), 103., angle=-120)
+        self.assertGreater(bar.value(), before)
+        self.assertTrue(all(call[0] == "volume" for call in self.provider.calls))
+
+    def test_owned_instruction_footer_is_hidden_but_errors_remain_visible(self):
+        self.provider.snapshot = replace(self.provider.snapshot, capture_scope="owned-player",
+            status_message="选择程序内音乐的播放设备")
+        self.panel.sync_snapshot()
+        self.assertTrue(self.panel.status_label.isHidden())
+        self.provider.snapshot = replace(self.provider.snapshot, state="error", status_message="设备连接失败")
+        self.panel.sync_snapshot()
+        self.assertFalse(self.panel.status_label.isHidden())
+        self.assertEqual(self.panel.status_label.text(), "设备连接失败")
+
+    def test_empty_rebuild_hides_departed_native_rows_before_deferred_delete(self):
+        old = tuple(self.panel._rows.values())
+        group, record = self._settle_row_hover(old[0])
+        self.provider.snapshot = replace(self.provider.snapshot, devices=(), active_id="")
+        self.panel.sync_snapshot()
+        self.assertEqual(self.panel._rows, {})
+        self.assertTrue(self.panel.empty_label.isVisible())
+        self.assertTrue(all(row.isHidden() for row in old))
+        self.assertFalse(group._valid(record))
+        self.provider.snapshot = replace(self.provider.snapshot, devices=self.provider.devices, active_id="local")
+        self.panel.sync_snapshot()
+        self.assertTrue(all(row.isHidden() for row in old))
+        self.assertTrue(all(row.isVisible() for row in self.panel._rows.values()))
+
+    def test_zero_volume_has_visible_drag_track_but_unknown_volume_stays_uneditable(self):
         self.provider.snapshot = replace(self.provider.snapshot, devices=tuple(
-            replace(device, volume=0) if device.id == "local" else device
-            for device in self.provider.snapshot.devices))
+            replace(d, volume=0) if d.id == "local" else d for d in self.provider.snapshot.devices))
         self.panel.sync_snapshot()
         row = self.panel._rows["local"]
         self.assertEqual(row.volume_fill_rect().width(), 0)
-        self.assertTrue(row.volume_hit(QPointF(2, 28)))
-        point = QPoint(row.width() - 20, 25)
-        self._move(row, point, 101.0)
-        self._wheel(row, point, 101.51)
-        self.assertEqual(self.provider.calls, [("volume", "local", .02)])
+        self.assertTrue(row.volume_hit(QPointF(row.volume_slider.geometry().center())))
+        QTest.mouseClick(row.volume_slider, Qt.MouseButton.LeftButton,
+                         pos=QPoint(row.volume_slider.width() // 2, 12))
+        self.assertAlmostEqual(row.volume_slider.value(), 50, delta=1)
+        self.assertTrue(all(call[0] == "volume" for call in self.provider.calls))
         self.provider.calls.clear()
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod")
         self.panel.sync_snapshot()
-        row = self.panel._rows["homepod"]
-        self.assertEqual(row.state, "active")
-        self.assertTrue(row.volume_slider.isHidden())
-        self.assertFalse(row.volume_hit(QPointF(75, 25)))
-        self._move(row, QPoint(75, 25), 102.0)
-        self._wheel(row, QPoint(75, 25), 102.51)
-        self.assertEqual(self.provider.calls, [])
+        self.assertTrue(self.panel._rows["homepod"].volume_slider.isHidden())
+        self.assertFalse(self.panel._rows["homepod"].volume_hit(QPointF(75, 25)))
 
     def test_half_second_hover_anywhere_reveals_and_exit_clears_details(self):
         row = self.panel._rows["local"]
@@ -303,16 +435,17 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.assertFalse(row.details_visible)
         self.assertEqual(self.panel._hover_row_id, "")
 
-    def test_pixel_volume_accumulates_small_deltas_and_preserves_native_direction(self):
+    def test_pixel_list_scroll_keeps_native_direction_and_never_changes_volume(self):
+        self._add_list(9)
+        bar = self.panel.scroll.verticalScrollBar()
+        bar.setValue(30)
         row, point = self.panel._rows["local"], QPoint(75, 25)
-        self._move(row, point, 101.0)
         for now in (102.1, 102.2):
             self._wheel(row, point, now, angle=0, pixel=3)
-        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(bar.value(), 24)
         self._wheel(row, point, 102.3, angle=0, pixel=3, inverted=True)
-        self.assertEqual(self.provider.calls, [("volume", "local", .51)])
-        self._wheel(row, point, 102.4, angle=-120)
-        self.assertEqual(self.provider.calls[-1], ("volume", "local", .49))
+        self.assertEqual(bar.value(), 21)
+        self.assertEqual(self.provider.calls, [])
 
     def test_wheel_over_margin_controls_and_scroll_edges_never_reaches_lyrics(self):
         self._add_list(9)
@@ -377,13 +510,13 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
             self.assertAlmostEqual(mapped.right(), source.right(), delta=.5)
 
     def test_menu_width_follows_source_proportion_without_double_dpi_scaling(self):
-        for diameter, expected in ((35, 220), (42, 220), (50, 260), (64, 333)):
+        for diameter, expected in ((35, 280), (42, 280), (50, 310), (64, 397)):
             with self.subTest(diameter=diameter):
                 self.panel.open_at(QPoint(610, 74), source_rect=QRectF(610 - diameter, 20, diameter, diameter))
                 self.panel._animation_timer.stop()
                 self.panel._poll_timer.stop()
                 self.assertEqual(self.panel.width(), expected)
-                self.assertEqual(self.panel._rows["local"].height(), max(48, round(diameter * 1.05)))
+                self.assertEqual(self.panel._rows["local"].height(), max(64, round(diameter * 1.05)))
                 self.assertLessEqual(self.panel.x() + self.panel.width(), self.owner.width() - 12)
 
     def test_compact_chooser_clamps_to_small_views_and_retains_native_volume(self):

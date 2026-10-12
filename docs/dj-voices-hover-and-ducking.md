@@ -1,7 +1,9 @@
 # Four DJ voices, shared hover and speech presentation
 
 October 12, 2026 source follow-up for GluSpot `6.412`. This document records
-the current requested behavior and final source verification.
+the preceding requested behavior and its final source verification. The later
+[FM preparation and output interaction follow-up](fm-preload-and-output-interaction.md)
+supersedes compact DJ click behavior and device-row pointer interaction.
 Version and previously packaged EXE are unchanged.
 
 ## Real voice selection
@@ -17,8 +19,10 @@ Settings → Media → Playback Sources → Private DJ Voice remains a keyboard
 accessible entry. On the song page, hovering over the lower-right DJ icon grows
 it with a half-second decelerating curve, then opens a categorical glass slider
 below the rings, in the same position and dimensions as the speech caption.
-The four voice names select actual catalog keys. Clicking the rings still
-toggles DJ; choosing a voice never changes that toggle or restarts current music.
+The four voice names select actual catalog keys. The later click policy opens
+the selector from an enabled compact control, then permits toggling from the
+expanded rings; disabled rings enable DJ. Choosing a voice never changes that
+toggle or restarts current music.
 Left/right arrows select voices, Escape dismisses, and a two-second pointer-leave
 grace lets the pointer cross from the icon to the slider. Keyboard focus does not
 pin the selector after the pointer leaves. Worker results are fenced after

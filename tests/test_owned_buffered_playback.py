@@ -68,6 +68,8 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.folder.cleanup()
 
     def perform(self, tasks, kind):
+        if kind == "audio_prefetch" and self.owned._fm_kind == "dj":
+            kind = "dj_prefetch"
         token, action = next(job for job in reversed(tasks.jobs) if job[0][0] == kind)
         result = action()
         tasks.completed.emit(token, result, None)
@@ -175,7 +177,7 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.owned._replace_queue(songs, fm_source="netease", fm_kind="dj")
         self.perform(self.tasks, "stream")
         self.perform(self.downloads, "audio")
-        failed = next(token for token, _ in reversed(self.downloads.jobs) if token[0] == "audio_prefetch")
+        failed = next(token for token, _ in reversed(self.downloads.jobs) if token[0] == "dj_prefetch")
         source = self.qt.source()
         self.downloads.completed.emit(failed, None, "network")
         self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "failed")
@@ -225,11 +227,9 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         speaking = self.owned.get_personal_dj_presentation()
         self.assertEqual(speaking["state"], "speaking")
         self.assertEqual(speaking["next_title"], "Song 2")
+        _, prepared_second = self.perform(self.downloads, "dj_prefetch")
         self.qt.positionChanged.emit(6000)
         self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
-        self.assertEqual(self.owned.get_personal_dj_presentation()["state"], "loading")
-        self.perform(self.tasks, "dj_stream")
-        _, prepared_second = self.perform(self.downloads, "dj_audio")
         current = self.owned.get_personal_dj_presentation()
         self.assertEqual(current["state"], "speaking")
         self.assertEqual(current["next_title"], "Song 2")

@@ -225,6 +225,7 @@ class MusicSurfaceWindow(QWidget):
         self._hovered_media_command = ""
         self._pressed_media_command = ""
         self._pressed_window_button = ""
+        self._pressed_dj_toggle_ready = False
         self._pressed_lyric_index: int | None = None
         self._control_last_motion_at = time.monotonic()
         self._control_transition_started_at = self._control_last_motion_at
@@ -8466,7 +8467,34 @@ class MusicSurfaceWindow(QWidget):
             self._dj_last_damage = damage
 
     def _personal_dj_tooltip(self):
-        return "私人漫游 · 私人DJ已开启 · 点击关闭" if self._owned_personal_dj_enabled else "私人漫游 · 私人DJ已关闭 · 点击开启"
+        if not self._owned_personal_dj_enabled:
+            return "私人漫游 · 私人DJ已关闭 · 点击开启"
+        if self._dj_voice_selector_active:
+            return "私人漫游 · 私人DJ已开启 · 点击光环关闭，下方选择音色"
+        return "私人漫游 · 私人DJ已开启 · 点击或悬停展开"
+
+    def _personal_dj_icon_contains(self, position, now: float) -> bool:
+        rect = QRectF(self.rect())
+        icon, _caption = self._personal_dj_geometry(rect, now)
+        icon.translate(self._personal_dj_control_shift(rect, self._personal_dj_reveal_at(now)))
+        shape = QPainterPath()
+        shape.addEllipse(icon)
+        return shape.contains(position)
+
+    def _activate_personal_dj(self, position, *, toggle_ready: bool):
+        """Compact clicks reveal choices; only an already expanded icon toggles."""
+        self._sync_owned_playback_mode()
+        if self._owned_personal_dj_enabled is None:
+            return
+        now = time.monotonic()
+        icon_hit = self._personal_dj_icon_contains(position, now)
+        if self._owned_personal_dj_enabled is False and icon_hit:
+            self._toggle_personal_dj()
+        elif (toggle_ready and self._dj_voice_selector_active
+                and icon_hit):
+            self._toggle_personal_dj()
+        self._open_dj_voice_selector(now)
+        self.setToolTip(self._personal_dj_tooltip())
 
     def _toggle_personal_dj(self):
         self._sync_owned_playback_mode()
@@ -9339,6 +9367,7 @@ class MusicSurfaceWindow(QWidget):
         return edges
 
     def mousePressEvent(self, event):
+        self._pressed_dj_toggle_ready = False
         if self._audio_output_panel is not None and self._audio_output_panel.isVisible():
             output_button = self._button_rects.get("audio_output", QRectF())
             if not output_button.contains(event.position()):
@@ -9364,6 +9393,12 @@ class MusicSurfaceWindow(QWidget):
         self._drag_geometry = QRect(self.geometry())
         self._pressed_window_button = next((key for key, rect in self._button_rects.items()
                                             if self._window_button_clickable(key, controls_clickable) and self._window_control_contains(key, rect, event.position())), "")
+        if self._pressed_window_button == "personal_dj":
+            self._resize_edges = set()
+            now = time.monotonic()
+            self._pressed_dj_toggle_ready = (self._dj_voice_selector_active
+                and self._dj_voice_selector_motion.value(now) >= .999
+                and self._personal_dj_icon_contains(event.position(), now))
         if self._pressed_window_button == "library":
             self._resize_edges = set()
         self._pressed_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_clickable else ""
@@ -9502,7 +9537,7 @@ class MusicSurfaceWindow(QWidget):
             elif pressed_window_button == "playback_mode" and release_window_button == "playback_mode":
                 self._cycle_owned_playback_mode()
             elif pressed_window_button == "personal_dj" and release_window_button == "personal_dj":
-                self._toggle_personal_dj()
+                self._activate_personal_dj(event.position(), toggle_ready=self._pressed_dj_toggle_ready)
             elif pressed_window_button == "audio_output" and release_window_button == "audio_output":
                 self._toggle_audio_output_panel()
             elif pressed_lyric_index is not None and release_lyric_index == pressed_lyric_index:
@@ -9514,6 +9549,7 @@ class MusicSurfaceWindow(QWidget):
         self._resize_edges = set()
         self._pressed_media_command = ""
         self._pressed_window_button = ""
+        self._pressed_dj_toggle_ready = False
         self._pressed_lyric_index = None
         if self._pending_fullscreen is None and not self._island_returning and not self._fullscreen and self.geometry().isValid():
             self._normal_geometry = QRect(self.geometry())
