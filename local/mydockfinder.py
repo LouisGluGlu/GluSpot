@@ -459,6 +459,9 @@ def read_finder_material(
     force_screen_sample: bool = False,
     include_center: bool = True,
     screen=None,
+    exclude_rects=(),
+    trusted_bar_height: float | None = None,
+    include_texture: bool = True,
 ) -> FinderGlassMaterial:
     presence = detect_mydockfinder(root)
     material = FinderGlassMaterial(
@@ -508,6 +511,9 @@ def read_finder_material(
         include_center=include_center,
         opacity_percent=material.finder_opacity,
         screen=screen,
+        exclude_rects=exclude_rects,
+        trusted_bar_height=trusted_bar_height,
+        include_texture=include_texture,
     )
     if sampled:
         material.top_color = sampled.top_color
@@ -556,59 +562,90 @@ def sample_live_finder_bar(
     include_center: bool = True,
     opacity_percent: int | None = None,
     screen=None,
+    exclude_rects=(),
+    trusted_bar_height: float | None = None,
+    include_texture: bool = True,
 ) -> FinderBarSample | None:
     screen = screen if screen is not None else QGuiApplication.primaryScreen()
     if not screen:
         return None
 
     geo = screen.geometry()
-    capture_height = max(48, min(104, int(max(22.0, bar_height) * 3.0)))
+    known_height = _trusted_finder_bar_height(trusted_bar_height)
+    capture_bar_height = known_height if known_height is not None else bar_height
+    color_only_bar = known_height is not None and not include_texture
+    capture_height = round(known_height) if color_only_bar else max(48, min(104, int(max(22.0, capture_bar_height) * 3.0)))
     width = max(160, min(420, int(geo.width() * 0.18)))
-    full_bar_image = None
-    if include_center:
-        full_pixmap = screen.grabWindow(0, 0, 0, geo.width(), capture_height)
-        if not full_pixmap.isNull():
-            image = _logical_finder_capture_image(full_pixmap)
-            if not image.isNull():
-                full_bar_image = image
+    width = min(width, geo.width())
+    # Exclusions are global logical rectangles, just like QWidget geometry.
+    # Screen captures are composited, so even an opaque island can otherwise
+    # sample its own pigment and feed it back into Finder text/material.
+    blocked = _finder_capture_exclusions(geo, capture_height, exclude_rects)
     ratios = (0.04, 0.41, 0.78) if include_center else (0.04, 0.78)
-    images = []
+    spans = []
     for left_ratio in ratios:
         # Qt's grabWindow(0) offsets are local to this QScreen, in logical
         # pixels. Adding its virtual-desktop origin samples the wrong screen.
         left = int((geo.width() - width) * left_ratio)
         left = max(0, min(left, geo.width() - width))
-        pixmap = screen.grabWindow(0, left, 0, width, capture_height)
+        spans.extend((start, stop) for start, stop in _finder_uncovered_spans(left, left + width, blocked) if stop - start >= 16)
+    if not spans:
+        return None
+    full_bar_image = None
+    if include_texture and include_center and not blocked:
+        full_pixmap = screen.grabWindow(0, 0, 0, geo.width(), capture_height)
+        if not full_pixmap.isNull():
+            image = _logical_finder_capture_image(full_pixmap)
+            if not image.isNull():
+                full_bar_image = image
+    images = []
+    if color_only_bar:
+        # One thin capture avoids several blocking desktop reads and keeps all
+        # three strips in the same frame. Only safe spans reach the estimator;
+        # excluded GluSpot pixels are never sampled or made into a texture.
+        pixmap = screen.grabWindow(0, 0, 0, geo.width(), capture_height)
         if pixmap.isNull():
-            continue
-        image = _logical_finder_capture_image(pixmap)
-        if image.isNull():
-            continue
-        images.append(image)
+            return None
+        bar_image = _logical_finder_capture_image(pixmap)
+        if bar_image.isNull():
+            return None
+        images = [bar_image.copy(start, 0, stop - start, capture_height) for start, stop in spans]
+    else:
+        for start, stop in spans:
+            pixmap = screen.grabWindow(0, start, 0, stop - start, capture_height)
+            if pixmap.isNull():
+                continue
+            image = _logical_finder_capture_image(pixmap)
+            if image.isNull():
+                continue
+            images.append(image)
     if not images:
         return None
 
-    detected_height = _detect_bar_height(images, bar_height)
+    # A trusted HWND already supplies the owner's logical top-bar bounds.
+    # Pixel edges underneath that bar can belong to the maximized window and
+    # must not invent a taller bar or an extra outline.
+    detected_height = min(capture_height, round(known_height)) if known_height is not None else _detect_bar_height(images, bar_height)
     top = _average_colors([_average_strip(image, 0.05, 0.30, detected_height) for image in images])
     mid = _average_colors([_average_strip(image, 0.35, 0.62, detected_height) for image in images])
     bottom = _average_colors([_average_strip(image, 0.68, 0.95, detected_height) for image in images])
     if not top or not mid or not bottom:
         return None
-    if max(_saturation(top), _saturation(mid), _saturation(bottom)) > 0.62:
+    if any(_saturation(color) > 0.62 and max(color.red(), color.green(), color.blue()) > 40 for color in (top, mid, bottom)):
         return None
 
     if opacity_percent is not None:
         base_alpha = max(72, min(210, int(255 * max(0, min(100, opacity_percent)) / 100)))
     else:
         base_alpha = max(102, min(174, 100 + blur_value * 4))
-    edge = _infer_edge(images, detected_height)
+    edge = {"border_alpha": 0, "border_width": 0.0, "has_border": False} if known_height is not None else _infer_edge(images, detected_height)
     highlight_alpha = max(38, min(128, int(46 + max(0.0, _luminance(top) - _luminance(mid)) * 2.8 + blur_value * 2.2)))
     shadow_alpha = max(24, min(90, int(28 + max(0.0, _luminance(mid) - _luminance(bottom)) * 2.3 + blur_value * 1.3)))
 
     top_color = QColor(top.red(), top.green(), top.blue(), max(72, base_alpha - 28))
     mid_color = QColor(mid.red(), mid.green(), mid.blue(), base_alpha)
     bottom_color = QColor(bottom.red(), bottom.green(), bottom.blue(), min(188, base_alpha + 8))
-    texture = _make_material_texture([full_bar_image] if full_bar_image else images, int(detected_height), mid_color, bottom_color)
+    texture = _make_material_texture([full_bar_image] if full_bar_image else images, int(detected_height), mid_color, bottom_color) if include_texture else None
 
     return FinderBarSample(
         top_color=top_color,
@@ -626,6 +663,49 @@ def sample_live_finder_bar(
         texture_screen_top=0,
         texture_is_full_screen=False,
     )
+
+
+def _trusted_finder_bar_height(value) -> float | None:
+    try:
+        height = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return height if math.isfinite(height) and 1.0 <= height <= 104.0 else None
+
+
+def _finder_capture_exclusions(geo, capture_height: int, rectangles) -> list[tuple[int, int]]:
+    blocked: list[tuple[int, int]] = []
+    for rect in rectangles or ():
+        try:
+            left, top = float(rect.x()) - geo.x(), float(rect.y()) - geo.y()
+            right, bottom = left + float(rect.width()), top + float(rect.height())
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
+        if not all(math.isfinite(value) for value in (left, top, right, bottom)):
+            continue
+        if right <= left or bottom <= top or top >= capture_height or bottom <= 0:
+            continue
+        # One logical pixel covers antialiasing at the widget boundary.
+        start, stop = max(0, math.floor(left) - 1), min(geo.width(), math.ceil(right) + 1)
+        if stop > start:
+            blocked.append((start, stop))
+    return sorted(blocked)
+
+
+def _finder_uncovered_spans(left: int, right: int, blocked) -> list[tuple[int, int]]:
+    spans = [(left, right)]
+    for start, stop in blocked:
+        remaining = []
+        for a, b in spans:
+            if stop <= a or start >= b:
+                remaining.append((a, b))
+            else:
+                if start > a:
+                    remaining.append((a, start))
+                if stop < b:
+                    remaining.append((stop, b))
+        spans = remaining
+    return spans
 
 
 def _logical_finder_capture_image(pixmap) -> QImage:
@@ -830,25 +910,28 @@ def _average_row(image: QImage, y: int) -> QColor | None:
 
 
 def _average_area(image: QImage, y0: int, y1: int) -> QColor | None:
-    red = green = blue = count = 0
-    all_red = all_green = all_blue = all_count = 0
+    pixels: list[QColor] = []
     for y in range(y0, y1, 2):
         for x in range(0, image.width(), 5):
             pixel = image.pixelColor(x, y)
-            all_red += pixel.red()
-            all_green += pixel.green()
-            all_blue += pixel.blue()
-            all_count += 1
-            if _looks_like_material_pixel(pixel):
-                red += pixel.red()
-                green += pixel.green()
-                blue += pixel.blue()
-                count += 1
-    if count < max(6, all_count * 0.06):
-        red, green, blue, count = all_red, all_green, all_blue, all_count
-    if not count:
+            if pixel.alpha() > 0:
+                pixels.append(pixel)
+    if not pixels:
         return None
-    return QColor(red // count, green // count, blue // count)
+    # Finder can turn almost black or white when a window maximizes. A fixed
+    # HSV value band excluded those actual backgrounds and promoted foreground
+    # letters/icons instead. The central background cluster includes both
+    # extremes, while the bounded distance rejects sparse foreground details.
+    middle = len(pixels) // 2
+    center = QColor(
+        sorted(pixel.red() for pixel in pixels)[middle],
+        sorted(pixel.green() for pixel in pixels)[middle],
+        sorted(pixel.blue() for pixel in pixels)[middle],
+    )
+    distances = sorted(_color_distance(pixel, center) for pixel in pixels)
+    radius = max(18.0, min(48.0, distances[min(len(distances) - 1, int(len(distances) * 0.75))] * 1.5))
+    background = [pixel for pixel in pixels if _color_distance(pixel, center) <= radius]
+    return _average_colors(background) or center
 
 
 def _average_colors(colors: list[QColor | None]) -> QColor | None:
@@ -893,13 +976,6 @@ def _first_value(mapping, keys: tuple[str, ...]):
 def _saturation(color: QColor) -> float:
     _hue, saturation, _value, _alpha = color.getHsvF()
     return 0.0 if saturation < 0 else saturation
-
-
-def _looks_like_material_pixel(color: QColor) -> bool:
-    _hue, saturation, value, _alpha = color.getHsvF()
-    if saturation < 0:
-        saturation = 0.0
-    return saturation <= 0.62 and 0.16 <= value <= 0.94
 
 
 def _luminance(color: QColor) -> float:
