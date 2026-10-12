@@ -96,13 +96,17 @@ class IslandDjSideLightTests(unittest.TestCase):
         visual.finder_material = Mock(mid_color=QColor("#dde1e7"))
         visual.finder_bar_style = "fade"
         surface = QRectF(40, 0, 500, 24)
-        edge = visual._personal_dj_island_backdrop(QRectF(40, 0, 45, 24), surface_rect=surface)
+        start, end = visual._finder_bar_fade_positions(surface)
+        half_ramp = surface.left() + surface.width() * (start + end) / 2.
+        edge = visual._personal_dj_island_backdrop(QRectF(40, 0, half_ramp - 40, 24), surface_rect=surface)
         center = visual._personal_dj_island_backdrop(QRectF(270, 0, 20, 24), surface_rect=surface)
         base = visual._finder_bar_backdrop()
         def distance(color):
             return sum(abs(a - b) for a, b in zip(color.getRgb()[:3], base.getRgb()[:3]))
         self.assertLess(distance(edge), distance(center) * .51)
         self.assertGreater(distance(edge), distance(center) * .49)
+        cover_lane = visual._personal_dj_island_backdrop(QRectF(40, 0, 26, 24), surface_rect=surface)
+        self.assertEqual(cover_lane, base)
 
     def test_speech_background_is_painted_once_and_same_frame_ring_source_is_reused(self):
         visual = self.visual()

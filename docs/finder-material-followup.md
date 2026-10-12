@@ -1,0 +1,39 @@
+# Finder Bar material and compact DJ follow-up
+
+This follow-up addresses the supplied October 12 Finder Bar captures while keeping GluSpot at **6.412**. The source entry point remains `local/main.py`; the existing packaged EXE is unchanged.
+
+## Requested and confirmed behavior
+
+- A visible, genuinely enabled MyFinder top bar can change color when another window is maximized. Its current observed material must update Finder text contrast and DJ lighting without detaching Finder placement or hiding playback.
+- Transparent Finder presentation takes the left rim's tone from the observed Finder background, with the existing contrast correction so gray-on-gray does not disappear. The two colored Finder styles retain the song's characteristic color on the left and blend toward the current displayed Finder background on the right. The source-color distinction was explicitly confirmed by the user.
+- Compact Finder narration displays one metadata row in the form `song title - artist`. Genuine narration completion remains compact in Finder Bar; the two-second expanded handoff remains the established behavior of the larger island placements.
+- The fading-strip style reserves an unmodified cover lane on the left, followed by a 24-logical-pixel color ramp before the text. Cover pixels remain unchanged.
+- Material, background and compact/expanded visual changes should settle smoothly.
+- Expanded Finder material must avoid the striped gray surround shown in the supplied capture. The user previously rejected inferred border detection; this repair must not reintroduce it.
+
+## Investigated cause
+
+The preceding `_paint_myfinder_group_frame` draws the sampled `texture_image` across the entire expanded cradle. The generated texture has only 128 columns and up to 64 rows; `_make_material_texture` derives its rows from the final 18% of the sampled Finder strip and keeps them opaque. Stretching those small row differences to the expanded island height produces broad horizontal bands rather than reproducing live glass. An additional eight-pixel `join_wash` can emphasize the top ridge. The surrounding shape is a separate rendering layer, so these bands remain visible outside the album-color music surface.
+
+The preceding paint path already fixes `effective_border_width` to zero and does not draw an inferred Finder border. Its screenshot-based sampler nevertheless still calls `_detect_bar_height` and `_infer_edge`. A real Finder HWND already supplies trusted bar bounds, so new live sampling can use those bounds instead of interpreting a nearby application edge as the Finder's bottom edge.
+
+## Implementation
+
+Visible Finder material refresh is bounded to once per 250 ms on the existing follow tick. It samples the uniquely matched screen and uses the actual native bar's mapped logical height, bypassing screenshot edge/outline inference. One thin screenshot supplies the safe sampling patches from the same frame; it does not regenerate the old texture. Hidden bars are not sampled. Sparse text is rejected by a robust background estimate that retains genuine near-black and near-white material. Current painted content, incoming targets and the expanded shell are excluded in global logical coordinates before color estimation; the full-width transparent Qt window is not mistaken for occupied content. Unreadable samples retain the last trustworthy material rather than reverting to a bright fallback.
+
+The expanded surround uses one opaque sampled interior tone. Since screen colors are already composited, neither a second wallpaper blend nor a vertically stretched texture is applied. Existing mask, hover and drag geometry remain intact. Its color changes over 450 ms with continuous retargeting; repeated observations of the same target do not restart the transition. Unbacked text responds immediately to the actual newly observed bar color rather than waiting for our shell animation.
+
+Compact DJ metadata uses the same fitted text channel as the Finder lyrics, in one `title - artist` row. Real preparation and failure remain visible as small status captions. Narration and the ordinary cover/lyrics crossfade over 420 ms, with eased width changes and a retained display-only caption during exit. Actual speaking/FFT, completion and audio gain authority remain with the existing provider. Completed Finder speech never creates the automatic expanded handoff; the larger placements keep their established handoff.
+
+The fading style keeps artwork in its own clear left lane and starts text after the color ramp. Painting and ring backdrop sampling use the same gradient positions. The transparent style uses a readable Finder-derived rim tone; colored styles continue to use the shared characteristic song color.
+
+## Verification and limits
+
+- All **4,492** final Python tests passed in **310.221 seconds**, with no skipped tests, errors or Qt callback tracebacks. The command was `.venv/Scripts/python.exe -X faulthandler -m unittest discover tests -v`; evidence is retained in ignored `logs/finder-material-final-full-python.log`.
+- The final related command passed **902 tests at each DPR**: 8.349 seconds at DPR 1 and 6.301 seconds at DPR 2. It covers the material, new compact DJ, actual Finder surface, existing island completion/side-light, detection and broad island tests. Logs are `logs/finder-material-related-final.log` and `logs/finder-material-related-dpr2-final.log`.
+- New regressions cover black/white material with text, same-frame color equivalence, trusted height without edge inference, excluded/entirely covered bars, negative screen origins, fractional and doubled DPR, actual painted footprint rather than the whole transparent window, failed-sample retention, continuous retargeting and repeated-target deadlines. A deliberately striped texture cannot reappear in the expanded shell. Separate DJ tests cover single-row metadata at 20/24/30/40 pixels, bounded long titles, real status captions, completion without Finder expansion, preserved user expansion, fade reversal, hidden/track/mode cancellation, width interpolation and immediate FFT cleanup.
+- Normally constructed native widgets with synthetic V2 media data rendered **264 frames and 783 checks** across DPR 1/2. The three styles, three heights, light/dark tones, speech/loading/failure, nine-frame real-completion handoffs and six-frame expanded material changes were exercised. Final captures were visually inspected. The ignored script is `logs/preview_finder_material_followup.py`, with results under `.runtime/finder-material-followup/dpr1` and `dpr2`.
+- Read-only real-window inspection found the enabled **24-logical-pixel** Finder bar on the current machine. Eight final samples consistently returned `#a4a8a9`. Median refresh cost was **17.54 ms**, maximum **19.01 ms** in this small observation; the initial integrated path still generated the old texture and took about 76 ms. Profiling identified redundant texture generation and repeated desktop reads, leading to the single thin capture. These are local observations, not a general performance guarantee.
+- Python compilation and `git diff --check` passed. Source/provider boundaries, media clocks, ducking, saved settings schema, packaging/version files and physical-device configuration remain unchanged.
+
+Real maximized-window/theme changes, physical multi-monitor configurations and extended listening still require interactive QA. The real-window check did not manipulate other windows or change MyDockFinder configuration; synthetic color changes demonstrate the update mechanism but do not alone prove every theme's physical behavior. Generated captures and logs remain ignored. Product version stays **6.412** and the existing EXE has not been repackaged; restart this checkout's `launch.bat` to load the source changes.

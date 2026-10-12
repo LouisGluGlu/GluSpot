@@ -2498,6 +2498,11 @@ class IslandStackVisual(QWidget):
         return any(self._animation_dict_active(animation, now, 0.22) for animation in animations.values())
 
     def _active_visual_animation_plan(self, now: float):
+        if (self._finder_bar_active() and (
+                now < float(getattr(self, "_finder_material_transition_until", 0.))
+                or self._finder_dj_render_active())):
+            from local.island_presentation import ActiveVisualAnimationPlan
+            return ActiveVisualAnimationPlan(True, "finder_material_or_dj")
         if (self._personal_dj_island_presenting()
                 or now < float(getattr(self, "_island_dj_outro_until", 0.0))):
             from local.island_presentation import ActiveVisualAnimationPlan
@@ -5778,16 +5783,57 @@ class IslandStackVisual(QWidget):
         match = finder_bar_screen_mapping(snapshot, QGuiApplication.screens())
         return match[0] if match else None
 
-    def _refresh_finder_bar_material(self):
+    def _finder_material_sample_exclusions(self):
+        """Exclude painted content, not the full-width transparent Qt window."""
+        if not self.isVisible():
+            return ()
+        bounds = [QRectF(motion.rect) for motion in getattr(self, "motions", {}).values()
+            if getattr(motion, "opacity", 0.) > .01]
+        # Include incoming targets before their first painted frame, too.
+        bounds.extend(QRectF(visual.rect) for visual in self._build_visuals())
+        shell = getattr(self, "group_frame_mask_path", None)
+        if shell is not None and not shell.isEmpty():
+            bounds.append(shell.boundingRect())
+        origin = self.mapToGlobal(QPoint(0, 0))
+        return tuple(rect.adjusted(-2., -2., 2., 2.).translated(origin.x(), origin.y())
+            for rect in bounds if not rect.isEmpty())
+
+    def _finder_material_display_color(self, now=None):
+        """Ease only our expanded shell; actual bar text follows actual color."""
+        target = self._finder_bar_backdrop()
+        until = float(getattr(self, "_finder_material_transition_until", 0.))
+        now = time.monotonic() if now is None else now
+        if now >= until:
+            return target
+        start = float(getattr(self, "_finder_material_transition_started", now))
+        progress = max(0., min(1., (now - start) / .45))
+        progress = progress * progress * (3. - 2. * progress)
+        return self._mix_color(getattr(self, "_finder_material_transition_from", target), target, progress)
+
+    def _refresh_finder_bar_material(self, now=None):
         screen = self._finder_bar_screen()
         if screen is None or not self.finder_bar_visible:
             return
+        now = time.monotonic() if now is None else now
         snapshot = getattr(self, "_finder_bar_snapshot", None) or {}
         runtime_path = str(snapshot.get("process_path", ""))
         root = Path(runtime_path).parent if runtime_path else self._mydockfinder_root_path()
-        self.finder_material = read_finder_material(root, force_screen_sample=True,
-            include_center=not self.isVisible(), screen=screen)
-        self.finder_material_refreshed_at = time.monotonic()
+        previous = self._finder_material_display_color(now)
+        previous_target = self._finder_bar_backdrop()
+        sampled = read_finder_material(root, force_screen_sample=True,
+            include_center=True, screen=screen, trusted_bar_height=self.finder_bar_rect.height(),
+            exclude_rects=self._finder_material_sample_exclusions(), include_texture=False)
+        self.finder_material_refreshed_at = now
+        if "screen sample" not in str(getattr(sampled, "source", "")):
+            # A fully covered/unreadable bar offers no new color evidence.
+            # Retain the last trustworthy tone instead of flashing fallback.
+            return
+        self.finder_material = sampled
+        target = self._finder_bar_backdrop()
+        if max(abs(a - b) for a, b in zip(previous_target.getRgb()[:3], target.getRgb()[:3])) > 2:
+            self._finder_material_transition_from = previous
+            self._finder_material_transition_started = now
+            self._finder_material_transition_until = now + .45
 
     def set_finder_bar_style(self, style: str, notify: bool = True):
         self.finder_bar_style = normalize_finder_bar_style(style)
@@ -5857,6 +5903,9 @@ class IslandStackVisual(QWidget):
             self.move(round(rect.left()), round(rect.top()))
         finally:
             self._restoring_position = False
+        if (probe and self.finder_bar_visible
+                and now - getattr(self, "finder_material_refreshed_at", 0.) >= .25):
+            self._refresh_finder_bar_material(now=now)
         return changed
 
     def set_mydockfinder_path(self, path: str, notify: bool = True):
@@ -13460,7 +13509,6 @@ class IslandStackVisual(QWidget):
             if main_rect:
                 bottom = max(bottom, main_rect.bottom() + self._u(15.0))
 
-        finder_bar = QRectF(0.0, 0.0, self.width(), self.finder_material.bar_height)
         glass = self.finder_material
         effective_border_width = 0.0
         pad_x = (
@@ -13519,39 +13567,11 @@ class IslandStackVisual(QWidget):
         hover_pad_x = max(self._u(10.0), side_flare * 0.36)
         self.finder_hover_rect = shell_rect.adjusted(-hover_pad_x, -self._u(7.0), hover_pad_x, self._u(12.0))
         self.finder_hover_rect.setTop(min(self.finder_hover_rect.top(), top - self._u(6.0)))
-        left_join = shell_rect.left()
-        right_join = shell_rect.right()
-
         painter.setPen(Qt.PenStyle.NoPen)
-        used_texture = False
-        if glass.texture_image and not glass.texture_image.isNull():
-            painter.save()
-            painter.setClipPath(shell)
-            target = QRectF(shell_rect)
-            painter.drawImage(target, glass.texture_image, self._finder_texture_source_rect(target, glass.texture_image))
-            painter.restore()
-            used_texture = True
-        else:
-            material = QLinearGradient(finder_bar.left(), finder_bottom, finder_bar.right(), cradle.bottom())
-            material.setColorAt(0.00, glass.bottom_color)
-            material.setColorAt(0.12, glass.bottom_color)
-            material.setColorAt(0.42, glass.bottom_color)
-            material.setColorAt(1.00, glass.mid_color)
-            painter.fillPath(shell, material)
-
-        if not used_texture:
-            shade = QLinearGradient(0, finder_bottom, 0, cradle.bottom())
-            shade.setColorAt(0.00, QColor(255, 255, 255, 0))
-            shade.setColorAt(0.34, QColor(255, 255, 255, 0))
-            shade.setColorAt(0.72, QColor(0, 0, 0, max(0, int(glass.shadow_alpha * 0.10))))
-            shade.setColorAt(1.00, QColor(0, 0, 0, max(8, int(glass.shadow_alpha * 0.28))))
-            painter.fillPath(shell, shade)
-
-        join_wash = QLinearGradient(0, finder_bottom, 0, finder_bottom + self._u(8.0))
-        join_wash.setColorAt(0.00, QColor(glass.bottom_color.red(), glass.bottom_color.green(), glass.bottom_color.blue(), 0))
-        join_wash.setColorAt(0.45, QColor(glass.bottom_color.red(), glass.bottom_color.green(), glass.bottom_color.blue(), max(10, int(glass.bottom_color.alpha() * 0.18))))
-        join_wash.setColorAt(1.00, QColor(glass.bottom_color.red(), glass.bottom_color.green(), glass.bottom_color.blue(), 0))
-        painter.fillPath(shell, join_wash)
+        # Finder samples are already composited. Stretching their tiny row
+        # texture magnifies text/edge bands; alpha would apply wallpaper twice.
+        # Preserve the existing shell/hit geometry with one clean interior tone.
+        painter.fillPath(shell, self._finder_material_display_color())
 
     def _dot_tray_rect(self, dot_rects: list[QRectF]) -> QRectF | None:
         if not dot_rects:
@@ -13737,14 +13757,50 @@ class IslandStackVisual(QWidget):
     def _finder_bar_music_size(self):
         height = self.finder_bar_rect.height()
         side = max(1., height - 4.)
-        if self._personal_dj_island_presenting():
-            text = getattr(self, "_island_dj_title", "") or self.track_title
+        normal_text = self._compact_music_measurement_text() or self.track_title
+        dj_presenting = self._finder_dj_render_active()
+        if dj_presenting:
+            text = (getattr(self, "_island_dj_title", "")
+                or getattr(self, "_finder_dj_retained_title", "") or self.track_title)
+            artist = str(getattr(self, "_island_dj_artist", "")
+                or getattr(self, "_finder_dj_retained_artist", "") or getattr(self, "artist", "") or "")
+            if artist:
+                text = f"{text} - {artist}"
         else:
-            text = self._compact_music_measurement_text() or self.track_title
+            text = normal_text
         size = self._fit_island_lyric_row_size(text, 18, True, max(1., height - 2.))
         metric = QFontMetrics(self._wave_stream_font(size, QFont.Weight.Bold, shrink=False))
-        width = min(self.finder_bar_rect.width(), max(self._u(180), min(self._u(700), metric.horizontalAdvance(text)) + side + self._u(30)))
+        fade_space = self._u(24) if getattr(self, "finder_bar_style", "transparent") == "fade" else 0.
+        padding = self._u(40 if dj_presenting else 30) + fade_space
+        status = str(getattr(self, "_island_dj_status", "")
+            or getattr(self, "_finder_dj_retained_status", "")) if dj_presenting else ""
+        if status:
+            caption = {"failed": "失败", "ready": "已就绪"}.get(status, "加载中")
+            padding += QFontMetrics(self._font(11, QFont.Weight.Medium, shrink=False)).horizontalAdvance(caption) + self._u(12)
+        width = max(self._u(180), min(self._u(700), metric.horizontalAdvance(text)) + side + padding)
+        if dj_presenting:
+            normal_size = self._fit_island_lyric_row_size(normal_text, 18, True, max(1., height - 2.))
+            normal_metric = QFontMetrics(self._wave_stream_font(normal_size, QFont.Weight.Bold, shrink=False))
+            normal_width = max(self._u(180), min(self._u(700), normal_metric.horizontalAdvance(normal_text)) + side + self._u(30) + fade_space)
+            # Retargeting the shell sees the same eased reveal as its content.
+            # An EOF cannot immediately snap the DJ-width row to lyric width.
+            width = normal_width + (width - normal_width) * self._finder_dj_reveal_progress()
+        width = min(self.finder_bar_rect.width(), width)
         return width, height
+
+    def _finder_dj_reveal_progress(self, now: float | None = None) -> float:
+        """Finder-only content crossfade; never authority for speech or gain."""
+        if not hasattr(self, "_finder_dj_reveal_target"):
+            return 1.0 if self._personal_dj_island_presenting() else 0.0
+        now = time.monotonic() if now is None else now
+        start = float(getattr(self, "_finder_dj_reveal_from", 0.0))
+        target = float(getattr(self, "_finder_dj_reveal_target", 0.0))
+        elapsed = max(0.0, min(1.0, (now - float(getattr(self, "_finder_dj_reveal_at", now))) / .42))
+        eased = elapsed * elapsed * (3.0 - 2.0 * elapsed)
+        return start + (target - start) * eased
+
+    def _finder_dj_render_active(self) -> bool:
+        return self._personal_dj_island_presenting() or self._finder_dj_reveal_progress() > 0.0
 
     def _finder_bar_backdrop(self):
         color = QColor(getattr(self.finder_material, "mid_color", QColor(190, 190, 190)))
@@ -13763,6 +13819,19 @@ class IslandStackVisual(QWidget):
             background = self._mix_color(background, pigment, .87)
         return background
 
+    def _finder_bar_fade_positions(self, rect: QRectF):
+        # Reserve real logical space for unmodified artwork, followed by a
+        # short smooth ramp. Percentage-only ramps previously tinted its edge.
+        lane = self._u(8) + max(1., rect.height() - 4.) + self._u(4)
+        start = min(.32, lane / max(1., rect.width()))
+        end = min(.58, start + self._u(24) / max(1., rect.width()))
+        return start, end
+
+    def _finder_bar_fade_opacity(self, rect: QRectF, x: float):
+        start, end = self._finder_bar_fade_positions(rect)
+        position = (x - rect.left()) / max(1., rect.width())
+        return max(0., min(1., (position - start) / max(.001, end - start), (1. - position) / .18)) * 222. / 255.
+
     def _paint_finder_bar_music(self, painter: QPainter, rect: QRectF):
         """Single-row cover and the existing timed reading, inside MyFinder."""
         painter.save()
@@ -13776,25 +13845,39 @@ class IslandStackVisual(QWidget):
                 gradient = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.top())
                 edge = QColor(color)
                 edge.setAlpha(0)
+                start, end = self._finder_bar_fade_positions(rect)
                 gradient.setColorAt(0., edge)
-                gradient.setColorAt(.18, color)
+                gradient.setColorAt(start, edge)
+                gradient.setColorAt(end, color)
                 gradient.setColorAt(.82, color)
                 gradient.setColorAt(1., edge)
                 painter.fillRect(rect, gradient)
             else:
                 painter.fillPath(self._rounded_path(rect.adjusted(0., 1., 0., -1.), min(self._u(7), rect.height() / 3)), color)
-        if self._personal_dj_island_presenting():
-            self.music_cover_rect = QRectF()
-            self._paint_personal_dj_island(painter, rect)
-        else:
+        dj_progress = self._finder_dj_reveal_progress()
+        original_opacity = painter.opacity()
+        self.music_cover_rect = QRectF()
+        if dj_progress < 1.:
+            painter.save()
+            painter.setOpacity(original_opacity * (1. - dj_progress))
             inset = min(2., rect.height() * .10)
             side = max(1., rect.height() - inset * 2.)
             cover = QRectF(rect.left() + self._u(8), rect.center().y() - side / 2., side, side)
-            self.music_cover_rect = QRectF(cover)
+            if dj_progress < .5:
+                self.music_cover_rect = QRectF(cover)
             self._paint_interactive_music_cover(painter, cover, min(self._u(4), side * .18))
-            lyrics = QRectF(cover.right() + self._u(7), rect.top() + 1.,
-                max(1., rect.right() - cover.right() - self._u(15)), max(1., rect.height() - 2.))
+            lyric_left = cover.right() + self._u(7)
+            if style == "fade":
+                lyric_left = max(lyric_left, rect.left() + rect.width() * self._finder_bar_fade_positions(rect)[1] + self._u(4))
+            lyrics = QRectF(lyric_left, rect.top() + 1.,
+                max(1., rect.right() - lyric_left - self._u(8)), max(1., rect.height() - 2.))
             self._paint_compact_lyric_viewport(painter, lyrics)
+            painter.restore()
+        if dj_progress > 0.:
+            painter.save()
+            painter.setOpacity(original_opacity * dj_progress)
+            self._paint_personal_dj_island(painter, rect)
+            painter.restore()
         painter.restore()
 
     def _sync_personal_dj_island(self, now: float) -> bool:
@@ -13839,6 +13922,31 @@ class IslandStackVisual(QWidget):
             island_active = island_active and self.isVisible()
         except RuntimeError:
             island_active = False
+        finder_compact = self._finder_bar_active() and not bool(getattr(self, "expanded", False))
+        finder_target = 1.0 if finder_compact and island_active and presenting else 0.0
+        previous_target = float(getattr(self, "_finder_dj_reveal_target",
+            1.0 if self._personal_dj_island_presenting() else 0.0))
+        previous_reveal = self._finder_dj_reveal_progress(now)
+        finder_canceled = (not finder_compact or not island_active
+            or (not presenting and current_track != getattr(self, "_finder_dj_retained_track", current_track)))
+        if finder_canceled:
+            self._finder_dj_reveal_from = self._finder_dj_reveal_target = 0.0
+            self._finder_dj_reveal_at = now
+            self._finder_dj_retained_title = self._finder_dj_retained_artist = self._finder_dj_retained_status = ""
+            changed = changed or previous_reveal > 0.0 or previous_target > 0.0
+        else:
+            if finder_target != previous_target or not hasattr(self, "_finder_dj_reveal_target"):
+                self._finder_dj_reveal_from = previous_reveal
+                self._finder_dj_reveal_target = finder_target
+                self._finder_dj_reveal_at = now
+                changed = True
+            if presenting:
+                self._finder_dj_retained_title, self._finder_dj_retained_artist = title, artist
+                self._finder_dj_retained_status, self._finder_dj_retained_track = status, current_track
+                self._finder_dj_retained_started = (now if token != getattr(self, "_island_dj_token", None)
+                    else float(getattr(self, "_island_dj_started", now)))
+            elif previous_reveal <= 0.0:
+                self._finder_dj_retained_title = self._finder_dj_retained_artist = self._finder_dj_retained_status = ""
         if speaking and not snapshot.get("is_preview", False) and island_active:
             self._island_dj_observed_track = current_track
         if completion > seen:
@@ -13849,7 +13957,8 @@ class IslandStackVisual(QWidget):
             fresh = isinstance(completed_at, (int, float)) and 0.0 <= now - completed_at <= .5
             if (fresh and island_active and not speaking and not snapshot.get("is_preview", False)
                     and current_track and snapshot.get("completed_track_id") == current_track
-                    and getattr(self, "_island_dj_observed_track", "") == current_track):
+                    and getattr(self, "_island_dj_observed_track", "") == current_track
+                    and not self._finder_bar_active()):
                 self._island_dj_outro_started = now
                 self._island_dj_outro_until = now + .32 + 2.0
                 self._island_dj_outro_track = current_track
@@ -13859,7 +13968,7 @@ class IslandStackVisual(QWidget):
                 changed = True
         until = float(getattr(self, "_island_dj_outro_until", 0.0))
         if until:
-            canceled = (presenting or not island_active or completion == 0
+            canceled = (presenting or not island_active or self._finder_bar_active() or completion == 0
                 or current_track != getattr(self, "_island_dj_outro_track", ""))
             if canceled or now >= until:
                 self._island_dj_outro_until = 0.0
@@ -13889,22 +13998,66 @@ class IslandStackVisual(QWidget):
     def _paint_personal_dj_island(self, painter: QPainter, rect: QRectF):
         """Large independent hollow rings and title on the existing ambience."""
         painter.save()
-        path = self._music_reactive_overlay_clip_path(rect, self._music_shell_radius(rect, False), False,
-            self._effective_music_ambience_style())
-        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        finder_compact = self._finder_bar_active() and not getattr(self, "expanded", False)
+        if finder_compact:
+            # The real bar owns this short rectangular row. A free-island
+            # capsule clip would cut its outer ring light and text ascenders.
+            painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
+        else:
+            path = self._music_reactive_overlay_clip_path(rect, self._music_shell_radius(rect, False), False,
+                self._effective_music_ambience_style())
+            painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
         self.music_button_rects = {}
-        status = str(getattr(self, "_island_dj_status", ""))
-        compact_status = bool(status) and rect.height() < self._u(72)
+        status = str(getattr(self, "_island_dj_status", "")
+            or (getattr(self, "_finder_dj_retained_status", "") if finder_compact else ""))
+        compact_status = bool(status) and (finder_compact or rect.height() < self._u(72))
         icon_area = rect.adjusted(0., 0., 0., -self._u(20)) if status and not compact_status else rect
         side = min(icon_area.height() * .90, self._u(100))
         icon = QRectF(rect.left() + self._u(13), icon_area.center().y() - side / 2, side, side)
         ink = self._personal_dj_island_color()
+        started = (getattr(self, "_finder_dj_retained_started", getattr(self, "_island_dj_started", 0.))
+            if finder_compact and not self._personal_dj_island_presenting()
+            else getattr(self, "_island_dj_started", 0.))
         paint_personal_dj_icon(painter, icon,
             ink, neutral=QColor(242, 242, 245), bands=getattr(self, "_island_dj_frame", None),
             max_lightening=float(getattr(self, "_island_dj_lightening", .60)),
             backdrop=lambda ring: self._personal_dj_island_backdrop(ring, surface_rect=rect),
-            elapsed=max(0., time.monotonic() - getattr(self, "_island_dj_started", 0.)))
+            elapsed=max(0., time.monotonic() - started))
         status_text = {"failed": "播报加载失败", "ready": "播报已准备好"}.get(status, "播报加载中")
+        if finder_compact:
+            # One line at the same fitted size as timed Finder lyrics. This
+            # bar has no vertical room for the top/free title-and-artist stack.
+            artist = str(getattr(self, "_island_dj_artist", "")
+                or getattr(self, "_finder_dj_retained_artist", "") or getattr(self, "artist", "") or "")
+            title = str(getattr(self, "_island_dj_title", "")
+                or getattr(self, "_finder_dj_retained_title", "") or getattr(self, "track_title", "") or "")
+            label = f"{title} - {artist}" if artist else title
+            title_left = icon.right() + self._u(10)
+            if getattr(self, "finder_bar_style", "transparent") == "fade":
+                title_left = max(title_left, rect.left() + rect.width() * self._finder_bar_fade_positions(rect)[1] + self._u(4))
+            title_rect = QRectF(title_left, rect.top() + 1.,
+                max(0., rect.right() - title_left - self._u(13)), max(1., rect.height() - 2.))
+            if status:
+                # Keep genuine preparation/failure evidence visible without
+                # squeezing the song metadata into two tiny rows.
+                from local.personal_dj_icon import personal_dj_status_color
+                status_font = self._font(11, QFont.Weight.Medium, shrink=False)
+                caption = {"failed": "失败", "ready": "已就绪"}.get(status, "加载中")
+                status_width = float(QFontMetrics(status_font).horizontalAdvance(caption)) + self._u(4)
+                status_rect = QRectF(max(title_rect.left(), title_rect.right() - status_width),
+                    title_rect.top(), min(title_rect.width(), status_width), title_rect.height())
+                title_rect.setRight(max(title_rect.left(), status_rect.left() - self._u(8)))
+                painter.setFont(status_font)
+                painter.setPen(personal_dj_status_color(status) or self._music_meta_text_color(190))
+                painter.drawText(status_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, caption)
+            size = self._fit_island_lyric_row_size(label, 18, True, title_rect.height())
+            font = self._wave_stream_font(size, QFont.Weight.Bold, shrink=False)
+            painter.setFont(font)
+            painter.setPen(self._music_lyric_text_color())
+            label = QFontMetrics(font).elidedText(label, Qt.TextElideMode.ElideRight, max(1, int(title_rect.width())))
+            painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
+            painter.restore()
+            return
         if status and not compact_status:
             # Loading/fault evidence is independent of idle controls, and is
             # never represented as measured speech or a completed intro.
@@ -13920,8 +14073,6 @@ class IslandStackVisual(QWidget):
             title_rect.setTop(rect.center().y() - block_height / 2)
             title_rect.setHeight(block_height * .58)
         font = self._font(min(22., max(12., rect.height() / self.VISUAL_SCALE * .32)), QFont.Weight.DemiBold)
-        if self._finder_bar_active() and not getattr(self, "expanded", False):
-            font = self._font(min(14., max(7., title_rect.height() / self._u(1) * .52)), QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(self._music_lyric_text_color())
         title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
@@ -13950,8 +14101,7 @@ class IslandStackVisual(QWidget):
         if self._finder_bar_active() and not getattr(self, "expanded", False):
             if (ring is not None and surface_rect is not None and surface_rect.width() > 0
                     and getattr(self, "finder_bar_style", "transparent") == "fade"):
-                position = (ring.right() - surface_rect.left()) / surface_rect.width()
-                opacity = max(0., min(1., position / .18, (1. - position) / .18)) * 222. / 255.
+                opacity = self._finder_bar_fade_opacity(surface_rect, ring.right())
                 return self._mix_color(self._finder_bar_backdrop(), self._solid_album_surface_palette().primary, opacity)
             return self._finder_bar_effective_backdrop()
         if ring is not None and bool(getattr(self, "_island_dj_background_ready", False)):
@@ -13979,11 +14129,17 @@ class IslandStackVisual(QWidget):
         """Use the shared characteristic role, never invalid gray lyric fill."""
         palette = self._solid_album_surface_palette()
         backdrop = self._personal_dj_island_backdrop()
-        key = (palette.characteristic.rgba(), palette.primary.rgba(), backdrop.rgba())
+        transparent_finder = (self._finder_bar_active() and not getattr(self, "expanded", False)
+            and getattr(self, "finder_bar_style", "transparent") == "transparent")
+        # The unbacked row takes its left-rim hue from Finder itself. Retain
+        # existing contrast protection so equal gray tones do not vanish.
+        characteristic = backdrop if transparent_finder else palette.characteristic
+        primary = backdrop if transparent_finder else palette.primary
+        key = (characteristic.rgba(), primary.rgba(), backdrop.rgba())
         if key != getattr(self, "_island_dj_color_key", None):
             self._island_dj_color_key = key
-            self._island_dj_color = future_lyric_color(palette.characteristic, backdrop,
-                use_light=relative_luminance(backdrop) < .11, primary=palette.primary)
+            self._island_dj_color = future_lyric_color(characteristic, backdrop,
+                use_light=relative_luminance(backdrop) < .11, primary=primary)
             self._island_dj_lightening = personal_dj_lightening_limit(self._island_dj_color, backdrop)
         return QColor(self._island_dj_color)
 

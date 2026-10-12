@@ -2,6 +2,8 @@
 
 This October 12 follow-up implements the requested MyFinder top-bar presentation within the existing V2 island. Product version remains **6.412**. The existing packaged EXE is unchanged; restart this branch's `launch.bat` to load the source changes.
 
+The subsequent [material and compact DJ follow-up](finder-material-followup.md) uses trusted HWND height directly, excludes GluSpot's painted pixels, refreshes visible colors at a bounded 250 ms cadence and removes the striped expanded texture. It supersedes the screenshot edge/outline inference described below for the live Finder Bar path. Completed Finder narration stays compact.
+
 ## Public modes
 
 | Public name | Internal value | Placement |
