@@ -20,6 +20,7 @@ from api.online_music import make_online_music_service
 from local.owned_music_player import OwnedMusicPlayer
 from local.playback_entry_controller import PlaybackEntryController
 from local.music_library_controller import MusicLibraryController
+from local.mydockfinder import read_live_finder_bars
 from local.branding import APP_NAME, local_app_data_dir, resolve_icon_paths
 from local.island_stack_visual import IslandStackVisual
 from local.settings_store import (
@@ -148,7 +149,7 @@ def _mydockfinder_process_running(configured_path: str, listener_process_names=N
     return bool(_mydockfinder_process_diagnostics(configured_path, listener_process_names=listener_process_names).get("running"))
 
 
-def _mydockfinder_process_diagnostics(configured_path: str, listener_process_names=None) -> dict[str, object]:
+def _mydockfinder_process_diagnostics(configured_path: str, listener_process_names=None, *, previous_bars=()) -> dict[str, object]:
     configured = _normalized_executable_path(configured_path)
     configured_name = configured.rsplit("\\", 1)[-1].casefold() if configured else ""
     configured_is_exe = configured_name.endswith(".exe")
@@ -167,30 +168,45 @@ def _mydockfinder_process_diagnostics(configured_path: str, listener_process_nam
         "matched_name": "",
         "matched_path": "",
         "reason": "No matching MyDockFinder process found",
+        "finder_bars": [],
+        "finder_enabled": False,
     }
+
+    trusted_runtimes: list[tuple[str, str, str]] = []
     configured_mentions_mydockfinder = "mydockfinder" in configured_root or configured_name in MYDOCKFINDER_PROCESS_NAMES
     for exe_name, exe_path in snapshots:
         name = str(exe_name or "").casefold()
         path = _normalized_executable_path(exe_path)
+        reason = ""
         if configured:
             if path and path == configured:
-                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched configured executable path")
-                return diagnostics
-            if path and configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in names:
-                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched MyDockFinder runtime process inside configured folder")
-                return diagnostics
-            if path and not configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in names:
-                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched process inside configured folder")
-                return diagnostics
-            if not path and configured_name and name == configured_name:
-                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched configured process name without path access")
-                return diagnostics
-            if not path and configured_mentions_mydockfinder and name in listener_names:
-                diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched MyDockFinder process name without path access")
-                return diagnostics
+                reason = "Matched configured executable path"
+            elif path and configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in names:
+                reason = "Matched MyDockFinder runtime process inside configured folder"
+            elif path and not configured_is_exe and configured_root and path.startswith(configured_root + "\\") and name in names:
+                reason = "Matched process inside configured folder"
+            elif not path and configured_name and name == configured_name:
+                reason = "Matched configured process name without path access"
+            elif not path and configured_mentions_mydockfinder and name in listener_names:
+                reason = "Matched MyDockFinder process name without path access"
         elif name in names:
-            diagnostics.update(running=True, matched_name=exe_name, matched_path=exe_path, reason="Matched known MyDockFinder process name")
-            return diagnostics
+            reason = "Matched known MyDockFinder process name"
+        if reason:
+            trusted_runtimes.append((exe_name, exe_path, reason))
+    if trusted_runtimes:
+        first_name, first_path, first_reason = trusted_runtimes[0]
+        diagnostics.update(running=True, matched_name=first_name, matched_path=first_path, reason=first_reason)
+        bars: dict[int, dict[str, object]] = {}
+        seen_runtimes: set[tuple[str, str]] = set()
+        for exe_name, exe_path, _reason in trusted_runtimes:
+            runtime_key = (str(exe_name).casefold(), _normalized_executable_path(exe_path))
+            if runtime_key in seen_runtimes:
+                continue
+            seen_runtimes.add(runtime_key)
+            for bar in read_live_finder_bars(matched_name=exe_name, matched_path=exe_path, previous_bars=previous_bars):
+                bars[int(bar["hwnd"])] = bar
+        diagnostics["finder_bars"] = list(bars.values())
+        diagnostics["finder_enabled"] = any(bool(bar.get("enabled")) for bar in bars.values())
     return diagnostics
 
 
@@ -432,6 +448,10 @@ class LocalIslandApp:
         self.window.music_auto_detect = bool(saved_setting("v2_music_auto_detect", False))
         self.window.persistent_plugin = False
         self.window.set_super_topmost(bool(saved_setting("v2_super_topmost", True)), notify=False)
+        if hasattr(self.window, "set_finder_bar_style"):
+            self.window.set_finder_bar_style(self.settings.get("v2_finder_bar_style", "transparent"), notify=False)
+        if hasattr(self.window, "set_finder_bar_center_ratio"):
+            self.window.set_finder_bar_center_ratio(self.settings.get("v2_finder_bar_center_ratio", 0.5), notify=False)
         mydockfinder_path = str(saved_setting("v2_mydockfinder_path", "") or "")
         self.window.set_mydockfinder_path(mydockfinder_path, notify=False)
         mydockfinder_listener_process_names = self._mydockfinder_listener_process_names_setting()
@@ -560,6 +580,10 @@ class LocalIslandApp:
         position_preset = str(saved_setting("v2_position_preset", "last") or "last")
         self.window.apply_position_preset(position_preset, notify=False)
         self.window._set_plugin_focus(min(self.window.plugin_focus_target, max(0, self.window.enabled_plugin_count - 1)), immediate=True)
+        # The general placement preset may recenter the standalone surface.
+        # Attach only after every saved setting has finished applying.
+        if hasattr(self.window, "set_finder_bar_presence"):
+            self.window.set_finder_bar_presence(mydockfinder_diagnostics.get("finder_bars", []), notify=False)
 
     def _save_visual_state(self, state: dict[str, object]):
         for key, value in state.items():
@@ -585,17 +609,20 @@ class LocalIslandApp:
                 self.window.set_mydockfinder_listener_process_names(listener_process_names, notify=False)
             else:
                 self.window.mydockfinder_listener_process_names = listener_process_names
-        diagnostics = _mydockfinder_process_diagnostics(path, listener_process_names=listener_process_names)
+        previous_diagnostics = getattr(self.window, "mydockfinder_diagnostics", {}) or {}
+        previous_bars = previous_diagnostics.get("finder_bars", ()) if isinstance(previous_diagnostics, dict) else ()
+        diagnostics = _mydockfinder_process_diagnostics(path, listener_process_names=listener_process_names, previous_bars=previous_bars)
         if hasattr(self.window, "set_mydockfinder_diagnostics"):
             self.window.set_mydockfinder_diagnostics(diagnostics, notify=False)
         else:
             self.window.mydockfinder_diagnostics = diagnostics
         running = bool(diagnostics.get("running"))
-        if bool(getattr(self.window, "mydockfinder_running", False)) == running:
-            if hasattr(self, "settings_window"):
-                self.settings_window.sync_from_widget()
-            return
-        self.window.set_mydockfinder_running(running, notify=True)
+        if bool(getattr(self.window, "mydockfinder_running", False)) != running:
+            self.window.set_mydockfinder_running(running, notify=True)
+        if hasattr(self.window, "set_finder_bar_presence"):
+            self.window.set_finder_bar_presence(diagnostics.get("finder_bars", []), notify=False)
+        if hasattr(self, "settings_window"):
+            self.settings_window.sync_from_widget()
 
     def _setup_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():

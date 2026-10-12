@@ -56,11 +56,14 @@ from local.settings_store import (
     MUSIC_READING_LIFT_DEFAULT_LEVEL,
     MUSIC_READING_STRATEGY_DEFAULT,
     MYDOCKFINDER_LISTEN_PROCESS_CHOICES,
+    PLACEMENT_MODE_LABELS,
     normalize_music_reading_gradient_steps,
     normalize_music_reading_lift_level,
     normalize_music_reading_strategy,
     normalize_music_ambience_style,
     normalize_mydockfinder_listener_process_names,
+    normalize_finder_bar_style,
+    placement_mode_label,
 )
 from local.startup import StartupManager, build_startup_command, normalize_startup_mode
 from local.ui_theme import (
@@ -746,12 +749,12 @@ class SettingsWindow(QDialog):
         ("透视", "perspective_dim"),
     )
 
-    LOCATION_MODES = (
-        ("Finder", "finder"),
-        ("Top", "top"),
-        ("Free", "free"),
-        ("Tasker", "tasker"),
-        ("Stick", "stick"),
+    LOCATION_MODES = tuple((label, mode) for mode, label in PLACEMENT_MODE_LABELS.items())
+
+    FINDER_BAR_STYLES = (
+        ("无背景 · 封面与歌词", "transparent"),
+        ("圆角底色", "capsule"),
+        ("左右渐隐色条", "fade"),
     )
 
     TOP_NOTCH_HEIGHT_MODES = (
@@ -1958,21 +1961,62 @@ class SettingsWindow(QDialog):
         style_combo_popup(combo, self._theme())
 
     def _location_mode_items(self) -> list[tuple[str, str]]:
-        mydockfinder_available = bool(
-            getattr(self.island_widget, "_mydockfinder_available", lambda: bool(getattr(self.island_widget, "mydockfinder_running", False)))()
-        )
-        if mydockfinder_available:
-            return [("Free", "free"), ("Finder", "finder")]
-        items = [("Top", "top"), ("Free", "free"), ("Tasker", "tasker")]
-        current = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "top")) or "top")
-        if current == "stick":
-            items.append(("Stick", "stick"))
-        return items
+        available = getattr(self.island_widget, "available_location_modes", None)
+        if callable(available):
+            modes = available()
+        elif bool(getattr(self.island_widget, "mydockfinder_running", False)):
+            modes = ["finder", "free"] if self._finder_bar_presence()[0] else ["free"]
+        else:
+            modes = ["top", "free", "tasker"]
+        return [(placement_mode_label(mode), mode) for mode in modes if mode in PLACEMENT_MODE_LABELS]
 
     def _location_mode_label(self) -> str:
         current = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "top")) or "top")
-        labels = {value: label for label, value in self.LOCATION_MODES}
-        return labels.get(current, "Free")
+        return placement_mode_label(current)
+
+    def _finder_bar_presence(self) -> tuple[bool, bool]:
+        diagnostics = getattr(self.island_widget, "mydockfinder_diagnostics", {}) or {}
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        bars = diagnostics.get("finder_bars") or []
+        if not isinstance(bars, (list, tuple)):
+            bars = []
+        enabled = bool(getattr(self.island_widget, "mydockfinder_running", False)) and bool(
+            getattr(self.island_widget, "finder_bar_enabled", diagnostics.get("finder_enabled", False))
+        )
+        visible = enabled and bool(getattr(self.island_widget, "finder_bar_visible", any(
+            isinstance(bar, dict) and bar.get("enabled") and bar.get("visible")
+            and not bar.get("cloaked") and not bar.get("minimized")
+            for bar in bars
+        )))
+        return enabled, visible
+
+    def _finder_bar_status_text(self) -> str:
+        if not bool(getattr(self.island_widget, "mydockfinder_running", False)):
+            return "MyDockFinder 未运行。可使用 Top Island、Free 或 Tasker Bar。"
+        enabled, visible = self._finder_bar_presence()
+        if not enabled:
+            return "Dock 已运行，尚未检测到已开启的 MyFinder 顶栏。当前仅可使用 Free。"
+        if visible:
+            return "MyFinder 顶栏已开启并显示。Finder Bar 随顶栏显示，播放区域可左右拖动。"
+        return "MyFinder 顶栏已开启，当前自动隐藏。Finder Bar 随顶栏隐藏与显示。"
+
+    def _refresh_placement_mode_options(self):
+        combo = getattr(self, "placement_mode", None)
+        if not isinstance(combo, QComboBox):
+            return
+        current = str(getattr(self.island_widget, "location_mode", "top") or "top")
+        if current == "stick":
+            current = "free"
+        items = self._location_mode_items()
+        combo.blockSignals(True)
+        if items != [(combo.itemText(index), combo.itemData(index)) for index in range(combo.count())]:
+            combo.clear()
+            for label, mode in items:
+                combo.addItem(label, mode)
+        self._set_combo_data(combo, current if current in {mode for _label, mode in items} else "free")
+        combo.blockSignals(False)
+        self._style_combo_popup(combo)
 
     def _mydockfinder_listener_process_names_setting(self) -> tuple[str, ...]:
         raw = getattr(self.island_widget, "mydockfinder_listener_process_names", None)
@@ -2142,6 +2186,12 @@ class SettingsWindow(QDialog):
         self.mydockfinder_status_label.setObjectName("Muted")
         self.mydockfinder_status_label.setWordWrap(True)
         self._indicator_row(c, "检测状态", self.mydockfinder_status_indicator, self.mydockfinder_status_label)
+        finder_enabled, finder_visible = self._finder_bar_presence()
+        self.myfinder_status_indicator = self._status_indicator(finder_enabled, "已显示" if finder_visible else "已隐藏" if finder_enabled else "未开启")
+        self.myfinder_status_label = QLabel(self._finder_bar_status_text())
+        self.myfinder_status_label.setObjectName("Muted")
+        self.myfinder_status_label.setWordWrap(True)
+        self._indicator_row(c, "MyFinder 顶栏", self.myfinder_status_indicator, self.myfinder_status_label)
         self.mydockfinder_path_input = QLineEdit(str(getattr(self.island_widget, "mydockfinder_path", self._setting_value("v2_mydockfinder_path", "")) or ""))
         self.mydockfinder_path_input.setPlaceholderText(r"C:\Program Files\MyDockFinder\MyDockFinder.exe")
         self.mydockfinder_path_input.editingFinished.connect(self._set_mydockfinder_path)
@@ -2152,6 +2202,21 @@ class SettingsWindow(QDialog):
         _panel, listener_layout, self.mydockfinder_listener_detail_toggle = self._detail_panel(c, "MyDockFinder 监听进程")
         self.mydockfinder_listener_detail_body = self._detail_panels[-1][1]
         listener_layout.addWidget(self._mydockfinder_process_checklist())
+        self.placement_mode = self._combo(
+            self._location_mode_items(), str(getattr(self.island_widget, "location_mode", "top") or "top"),
+            self._set_placement_mode,
+        )
+        self._row(c, "显示位置", self.placement_mode)
+        self.finder_bar_style = self._combo(
+            list(self.FINDER_BAR_STYLES), normalize_finder_bar_style(getattr(
+                self.island_widget, "finder_bar_style", self._setting_value("v2_finder_bar_style", "transparent"),
+            )), self._set_finder_bar_style,
+        )
+        self._row(c, "Finder Bar 样式", self.finder_bar_style)
+        self.finder_bar_hint = QLabel("Finder Bar 在 MyFinder 顶栏内展示封面与歌词，可直接左右拖动；样式与拖动位置单独保存。Tasker Bar 占位 Windows 任务栏，Top Island 固定顶部，Free 在屏幕中自由浮动。")
+        self.finder_bar_hint.setObjectName("Muted")
+        self.finder_bar_hint.setWordWrap(True)
+        c.addWidget(self.finder_bar_hint)
         self._update_taskbar_controls()
 
         c = self._card(layout).layout()
@@ -2533,6 +2598,9 @@ class SettingsWindow(QDialog):
         for control, value in (
             (self.theme_mode, str(self._setting_value("v2_theme_mode", "system") or "system")),
             (self.startup_mode, normalize_startup_mode(str(self._setting_value("v2_startup_mode", "none") or "none"))),
+            (self.finder_bar_style, normalize_finder_bar_style(getattr(
+                self.island_widget, "finder_bar_style", self._setting_value("v2_finder_bar_style", "transparent"),
+            ))),
             (self.animation_speed, float(getattr(self.island_widget, "animation_speed", 1.0))),
             (self.music_ambience_style, self._current_music_ambience_style()),
             (self.lyric_flow_style, str(getattr(self.island_widget, "lyric_flow_style", self._setting_value("v2_lyric_flow_style", "wave_stream")))),
@@ -2573,6 +2641,8 @@ class SettingsWindow(QDialog):
             self._set_slider_value(control, value)
             self._update_slider_value_label(control, control.value())
         self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
+        self.myfinder_status_label.setText(self._finder_bar_status_text())
+        self._refresh_placement_mode_options()
         self._sync_mydockfinder_process_checkboxes()
         self._update_taskbar_controls()
         self._update_music_app_profile_controls()
@@ -3162,6 +3232,32 @@ class SettingsWindow(QDialog):
         self._update_lyric_flow_controls()
         self._touch()
 
+    def _set_placement_mode(self, _index: int = -1):
+        mode = str(self.placement_mode.currentData() or "free")
+        if mode not in {value for _label, value in self._location_mode_items()}:
+            self._refresh_placement_mode_options()
+            return
+        setter = getattr(self.island_widget, "set_location_mode", None)
+        if callable(setter):
+            setter(mode, notify=False)
+        else:
+            self.island_widget.location_mode = mode
+            self.island_widget.finder_mode = mode == "finder"
+        self._refresh_placement_mode_options()
+        self._update_taskbar_controls()
+        self._update_lyric_flow_controls()
+        self._touch()
+
+    def _set_finder_bar_style(self, _index: int = -1):
+        style = normalize_finder_bar_style(self.finder_bar_style.currentData())
+        setter = getattr(self.island_widget, "set_finder_bar_style", None)
+        if callable(setter):
+            setter(style, notify=False)
+        else:
+            self.island_widget.finder_bar_style = style
+        self._save("v2_finder_bar_style", style)
+        self._touch()
+
     def _set_top_notch_height_mode(self, _index: int = -1):
         if not isinstance(getattr(self, "top_notch_height_mode", None), QComboBox):
             return
@@ -3275,6 +3371,12 @@ class SettingsWindow(QDialog):
                 self.mydockfinder_status_indicator,
                 mydockfinder_running,
                 "已检测" if mydockfinder_running else "未检测",
+            )
+        if hasattr(self, "myfinder_status_indicator"):
+            enabled, visible = self._finder_bar_presence()
+            self._set_status_indicator(
+                self.myfinder_status_indicator, enabled,
+                "已显示" if visible else "已隐藏" if enabled else "未开启",
             )
         if hasattr(self, "location_mode") and not isinstance(self.location_mode, QComboBox):
             self.location_mode.setText(self._location_mode_label())

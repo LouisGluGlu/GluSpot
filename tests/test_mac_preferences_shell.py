@@ -685,7 +685,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertEqual(set(DEFAULT_SETTINGS["v2_music_ambience_values"]), {"sea_level", "solid_album", "system"})
         self.assertEqual(DEFAULT_SETTINGS["v2_enabled_plugins"], [])
         self.assertIn("v2_mydockfinder_path", DEFAULT_SETTINGS)
-        self.assertEqual(DEFAULT_SETTINGS["v2_mydockfinder_listener_process_names"], ["dock.exe"])
+        self.assertEqual(DEFAULT_SETTINGS["v2_mydockfinder_listener_process_names"], ["dock.exe", "dock_64.exe"])
         self.assertIn("v2_last_window_position", DEFAULT_SETTINGS)
         self.assertIn("v2_custom_icon_path", DEFAULT_SETTINGS)
         self.assertEqual(DEFAULT_SETTINGS["v2_custom_icon_path"], "")
@@ -1265,6 +1265,143 @@ class MacPreferencesShellTests(unittest.TestCase):
 
         switch.setEnabled(True)
         self.assertEqual(switch.minimumHeight(), switch.CONTROL_HEIGHT)
+
+    def test_finder_controls_use_media_page_without_restoring_retired_position_controls(self):
+        from local.settings_window import SettingsWindow
+
+        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
+        try:
+            media = window._settings_pages[1]["page"]
+            self.assertTrue(media.isAncestorOf(window.placement_mode))
+            self.assertTrue(media.isAncestorOf(window.finder_bar_style))
+            self.assertEqual(window.finder_bar_style.currentData(), "transparent")
+            self.assertEqual({window.finder_bar_style.itemData(i) for i in range(window.finder_bar_style.count())},
+                             {"transparent", "capsule", "fade"})
+            self.assertFalse(hasattr(window, "location_mode"))
+            self.assertFalse(hasattr(window, "position_preset"))
+            indexed = " ".join(" ".join(entry["terms"]) for entry in window._settings_search_entries)
+            self.assertIn("Finder Bar 样式", indexed)
+            self.assertIn("显示位置", indexed)
+        finally:
+            window.close()
+
+    def test_finder_style_selection_updates_runtime_and_its_own_saved_key(self):
+        from local.settings_window import SettingsWindow
+
+        island, settings = FakeIslandWidget(), FakeSettingsManager()
+        calls = []
+
+        def set_style(style, notify=True):
+            calls.append((style, notify))
+            island.finder_bar_style = style
+
+        island.set_finder_bar_style = set_style
+        window = SettingsWindow(island, settings)
+        try:
+            for style in ("capsule", "fade", "transparent"):
+                window.finder_bar_style.setCurrentIndex(window.finder_bar_style.findData(style))
+                self.assertEqual(island.finder_bar_style, style)
+                self.assertEqual(settings.get("v2_finder_bar_style"), style)
+            self.assertEqual(calls, [(style, False) for style in ("capsule", "fade", "transparent")])
+            self.assertEqual(settings.get("v2_location_mode"), "top")
+            self.assertEqual(settings.get("v2_music_island_style"), "standard")
+        finally:
+            window.close()
+
+    def test_placement_choices_follow_dock_and_real_finder_bar_presence(self):
+        from local.settings_window import SettingsWindow
+
+        island = FakeIslandWidget()
+        window = SettingsWindow(island, FakeSettingsManager())
+        try:
+            def choices():
+                return [(window.placement_mode.itemText(i), window.placement_mode.itemData(i))
+                        for i in range(window.placement_mode.count())]
+
+            self.assertEqual(choices(), [("Top Island", "top"), ("Free", "free"), ("Tasker Bar", "tasker")])
+            island.mydockfinder_running = True
+            island.finder_bar_enabled = False
+            island.finder_bar_visible = False
+            window.sync_from_widget()
+            self.assertEqual(choices(), [("Free", "free")])
+            self.assertIn("当前仅可使用 Free", window.myfinder_status_label.text())
+            island.finder_bar_enabled = True
+            island.finder_bar_visible = True
+            island.location_mode = "finder"
+            window.sync_from_widget()
+            self.assertEqual(choices(), [("Finder Bar", "finder"), ("Free", "free")])
+            self.assertEqual(window.placement_mode.currentData(), "finder")
+            self.assertIn("并显示", window.myfinder_status_label.text())
+            island.finder_bar_visible = False
+            window.sync_from_widget()
+            self.assertEqual(choices(), [("Finder Bar", "finder"), ("Free", "free")])
+            self.assertIn("自动隐藏", window.myfinder_status_label.text())
+            self.assertTrue(window.myfinder_status_indicator._active)
+        finally:
+            window.close()
+
+    def test_placement_choices_reuse_runtime_available_modes_and_do_not_save_global_position(self):
+        from local.settings_window import SettingsWindow
+
+        island, settings = FakeIslandWidget(), FakeSettingsManager()
+        calls = []
+        island.available_location_modes = lambda: ["top", "free", "tasker"]
+
+        def set_location(mode, notify=True):
+            calls.append((mode, notify))
+            island.location_mode = mode
+
+        island.set_location_mode = set_location
+        window = SettingsWindow(island, settings)
+        try:
+            window.placement_mode.setCurrentIndex(window.placement_mode.findData("tasker"))
+            self.assertEqual(calls, [("tasker", False)])
+            self.assertEqual(island.location_mode, "tasker")
+            self.assertEqual(settings.get("v2_location_mode"), "top")
+            island.available_location_modes = lambda: ["free", "finder"]
+            island.mydockfinder_running = True
+            island.finder_bar_enabled = True
+            island.finder_bar_visible = False
+            island.location_mode = "free"
+            window.sync_from_widget()
+            self.assertEqual([window.placement_mode.itemData(i) for i in range(window.placement_mode.count())],
+                             ["free", "finder"])
+            self.assertEqual(calls, [("tasker", False)])
+        finally:
+            window.close()
+
+    def test_finder_status_prefers_runtime_presence_and_handles_malformed_diagnostics(self):
+        from local.settings_window import SettingsWindow
+
+        island = FakeIslandWidget()
+        island.mydockfinder_running = True
+        island.mydockfinder_diagnostics = {"finder_enabled": True, "finder_bars": 42}
+        window = SettingsWindow(island, FakeSettingsManager())
+        try:
+            self.assertIn("自动隐藏", window.myfinder_status_label.text())
+            island.finder_bar_enabled = False
+            island.finder_bar_visible = True
+            window.sync_from_widget()
+            self.assertIn("尚未检测", window.myfinder_status_label.text())
+            self.assertFalse(window.myfinder_status_indicator._active)
+            self.assertEqual([window.placement_mode.itemData(i) for i in range(window.placement_mode.count())], ["free"])
+        finally:
+            window.close()
+
+    def test_internal_stick_placement_uses_free_public_name(self):
+        from local.settings_window import SettingsWindow
+
+        island = FakeIslandWidget()
+        island.location_mode = "stick"
+        window = SettingsWindow(island, FakeSettingsManager())
+        try:
+            window.sync_from_widget()
+            self.assertEqual(window.placement_mode.currentData(), "free")
+            self.assertEqual(window._location_mode_label(), "Free")
+            self.assertEqual(island.location_mode, "stick")
+            self.assertNotIn("stick", [window.placement_mode.itemData(i) for i in range(window.placement_mode.count())])
+        finally:
+            window.close()
 
     def test_retired_settings_have_no_widgets_or_search_results(self):
         from local.settings_window import SettingsWindow

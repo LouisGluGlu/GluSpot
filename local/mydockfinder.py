@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import sys
 from io import StringIO
@@ -8,6 +9,7 @@ from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage
 
 
@@ -22,6 +24,385 @@ MYDOCKFINDER_PROCESS_NAMES = {
     "dockmod64.exe",
 }
 MYDOCKFINDER_WINDOW_TOKENS = ("mydockfinder", "myfinder", "mydock")
+FINDER_BAR_WINDOW_CLASS = "MyFinderApp"
+
+
+def _normalized_runtime_path(value: str) -> str:
+    return str(value or "").strip().strip('"').replace("/", "\\").casefold()
+
+
+def _rect_edges(value) -> tuple[float, float, float, float] | None:
+    try:
+        if len(value) != 4:
+            return None
+        result = tuple(float(part) for part in value)
+        if not all(math.isfinite(part) for part in result):
+            return None
+        if result[2] <= result[0] or result[3] <= result[1]:
+            return None
+        return result
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _read_finder_enabled_for_runtime(process_path: str) -> bool | None:
+    """The installed runtime's explicit flag supplements, never creates, a bar."""
+    if not str(process_path or "").strip():
+        return None
+    try:
+        runtime = Path(str(process_path).strip().strip('"'))
+        config_file = runtime.parent / "config.ini"
+        if not config_file.is_file() or config_file.stat().st_size > 1024 * 1024:
+            return None
+        parser = ConfigParser(interpolation=None)
+        parser.read_file(StringIO(_read_text(config_file)))
+        value = parser.get("dockfinder", "myfinder", fallback="").strip()
+        return True if value == "1" else False if value == "0" else None
+    except (OSError, ValueError, KeyError, UnicodeError):
+        return None
+    except Exception:
+        # Third-party configuration may be incomplete while its owner saves it.
+        return None
+
+
+def _finder_bar_near_monitor_top(rect, monitor_rect) -> bool:
+    bar = _rect_edges(rect)
+    monitor = _rect_edges(monitor_rect)
+    if bar is None or monitor is None:
+        return False
+    left, top, right, bottom = bar
+    ml, mt, mr, _mb = monitor
+    height = bottom - top
+    # A real auto-hidden top bar may be just above its monitor. Management and
+    # capture windows at -32000, or an unrelated lower window, cannot qualify.
+    return (
+        right > ml and left < mr
+        and right - left >= height
+        and top <= mt + height
+        and bottom >= mt - 1.0
+    )
+
+
+def _finder_bar_identity(snapshot) -> tuple[int, int, str] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    try:
+        hwnd, pid = int(snapshot.get("hwnd", 0)), int(snapshot.get("pid", 0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return (hwnd, pid, _normalized_runtime_path(snapshot.get("process_path", ""))) if hwnd > 0 and pid > 0 else None
+
+
+def _finder_bar_presentation_snapshot(row, config_enabled, previous=None) -> dict[str, object] | None:
+    identity = _finder_bar_identity(row)
+    if identity is None or not str(row.get("monitor_name", "")):
+        return None
+    prior = previous if _finder_bar_identity(previous) == identity else None
+    if (
+        prior and not _finder_bar_near_monitor_top(row.get("physical_rect"), row.get("physical_monitor_rect"))
+        and _finder_bar_near_monitor_top(row.get("physical_rect"), prior.get("physical_monitor_rect"))
+    ):
+        # On vertically stacked monitors an auto-hidden lower-screen bar can
+        # physically enter the upper screen; nearest-monitor lookup alone then
+        # loses its owner. Preserve only this same HWND/process's known owner.
+        row = {**row, "monitor_name": prior.get("monitor_name", ""), "physical_monitor_rect": prior.get("physical_monitor_rect")}
+    if not _finder_bar_near_monitor_top(row.get("physical_rect"), row.get("physical_monitor_rect")):
+        return None
+    bar = _rect_edges(row["physical_rect"])
+    monitor = _rect_edges(row["physical_monitor_rect"])
+    resting = _rect_edges(prior.get("physical_resting_rect")) if prior else None
+    if prior and str(prior.get("monitor_name", "")).casefold() != str(row["monitor_name"]).casefold():
+        resting = None
+    full_height = resting[3] - resting[1] if resting else 0.0
+    height = bar[3] - bar[1]
+    cloaked = bool(row.get("cloaked"))
+    minimized = bool(row.get("minimized"))
+    full_shape = height > 2.0 and height >= full_height - 1.0
+    at_top = monitor[1] - 1.0 <= bar[1] <= monitor[1] + 1.0
+    visible = bool(row.get("visible")) and full_shape and at_top and not cloaked and not minimized
+    if full_shape and not cloaked and not minimized:
+        resting = (bar[0], monitor[1], bar[2], monitor[1] + height)
+    elif resting:
+        resting = (bar[0], monitor[1], bar[2], monitor[1] + full_height)
+    enabled = (
+        not cloaked and not minimized and config_enabled is not False
+        and (config_enabled is True or visible or bool(prior and prior.get("enabled")))
+    )
+    snapshot = dict(row)
+    snapshot.update(class_name=FINDER_BAR_WINDOW_CLASS, enabled=enabled, visible=visible and enabled, config_enabled=config_enabled)
+    if resting is not None:
+        snapshot["physical_resting_rect"] = list(resting)
+    return snapshot
+
+
+def read_live_finder_bars(
+    *,
+    matched_name: str,
+    matched_path: str = "",
+    previous_bars=(),
+) -> list[dict[str, object]]:
+    """Read actual Finder HWNDs owned by the app listener's trusted runtime.
+
+    All coordinates remain native physical pixels. No QApplication, screenshot,
+    installed-file presence check, or external setting mutation is involved.
+    Hidden bars need an explicit enabled flag or the same previously visible
+    HWND/process identity; an installed config alone can never create a bar.
+    """
+    name = str(matched_name or "").strip().casefold()
+    path = _normalized_runtime_path(matched_path)
+    if not name:
+        return []
+    previous = {_finder_bar_identity(item): item for item in (previous_bars or ()) if _finder_bar_identity(item) is not None}
+    bars: list[dict[str, object]] = []
+    for row in _native_finder_bar_window_snapshots(name, path):
+        runtime_name = str(row.get("process_name", "")).casefold()
+        runtime_path = _normalized_runtime_path(row.get("process_path", ""))
+        if runtime_name != name or (path and runtime_path != path):
+            continue
+        if str(row.get("class_name", "")).casefold() != FINDER_BAR_WINDOW_CLASS.casefold():
+            continue
+        config_enabled = _read_finder_enabled_for_runtime(str(row.get("process_path", "")))
+        snapshot = _finder_bar_presentation_snapshot(row, config_enabled, previous.get(_finder_bar_identity(row)))
+        if snapshot is not None:
+            bars.append(snapshot)
+    return bars
+
+
+def refresh_live_finder_bar(snapshot: dict[str, object]) -> dict[str, object] | None:
+    """Refresh a trusted cached HWND without enumerating processes or files."""
+    identity = _finder_bar_identity(snapshot)
+    if identity is None or not bool(snapshot.get("enabled")):
+        return None
+    rows = _native_finder_bar_window_snapshots(
+        str(snapshot.get("process_name", "")).casefold(), identity[2], _cached_snapshot=snapshot,
+    )
+    if not rows:
+        return None
+    return _finder_bar_presentation_snapshot(rows[0], snapshot.get("config_enabled"), snapshot)
+
+
+def finder_bar_logical_rect(
+    snapshot: dict[str, object],
+    *,
+    screen_name: str,
+    screen_rect,
+    device_pixel_ratio: float,
+    allow_geometry_fallback: bool = False,
+) -> tuple[float, float, float, float] | None:
+    """Map physical bar bounds into the matching QScreen's logical geometry.
+
+    Windows/Qt retain monitor origins while scaling sizes. Dividing the whole
+    global rectangle would move negative-origin and mixed-DPI displays.
+    """
+    if not isinstance(snapshot, dict) or not bool(snapshot.get("enabled")):
+        return None
+    native_name = str(snapshot.get("monitor_name", "")).casefold()
+    qt_name = str(screen_name or "").casefold()
+    if not native_name or (native_name != qt_name and not allow_geometry_fallback):
+        return None
+    bar = _rect_edges(snapshot.get("physical_resting_rect", snapshot.get("physical_rect")))
+    monitor = _rect_edges(snapshot.get("physical_monitor_rect"))
+    try:
+        sx, sy, sw, sh = (float(part) for part in screen_rect)
+        dpr = float(device_pixel_ratio)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if bar is None or monitor is None or not all(math.isfinite(part) for part in (sx, sy, sw, sh, dpr)):
+        return None
+    if sw <= 0.0 or sh <= 0.0 or dpr <= 0.0 or not _finder_bar_near_monitor_top(bar, monitor):
+        return None
+    # QScreen::name() may be a friendly monitor name in Qt 6.12. Even a
+    # matching native-looking name is not enough after display reconfiguration:
+    # verify the preserved origin and physical size of this exact screen.
+    expected_monitor = (sx, sy, sx + sw * dpr, sy + sh * dpr)
+    if any(abs(actual - expected) > 2.0 for actual, expected in zip(monitor, expected_monitor)):
+        return None
+    # Limit horizontal bounds to this monitor; the un-clipped vertical position
+    # is needed to follow the Finder owner's real auto-hide motion.
+    left, right = max(bar[0], monitor[0]), min(bar[2], monitor[2])
+    return (
+        sx + (left - monitor[0]) / dpr,
+        sy + (bar[1] - monitor[1]) / dpr,
+        (right - left) / dpr,
+        (bar[3] - bar[1]) / dpr,
+    )
+
+
+def finder_bar_screen_mapping(snapshot: dict[str, object], screens) -> tuple[object, tuple[float, float, float, float]] | None:
+    """Select one screen using native bounds, including friendly-name screens.
+
+    Geometry fallback is safe only when the full current screen inventory has
+    one match. It never chooses the primary/nearest screen or resolves a cloned
+    or overlapping-screen ambiguity by iteration order.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    candidates: list[tuple[object, tuple[float, float, float, float]]] = []
+    seen: set[int] = set()
+    for screen in screens or ():
+        if id(screen) in seen:
+            continue
+        seen.add(id(screen))
+        try:
+            geometry = screen.geometry()
+            mapped = finder_bar_logical_rect(
+                snapshot,
+                screen_name=screen.name(),
+                screen_rect=(geometry.x(), geometry.y(), geometry.width(), geometry.height()),
+                device_pixel_ratio=screen.devicePixelRatio(),
+                allow_geometry_fallback=True,
+            )
+        except (AttributeError, TypeError, ValueError, RuntimeError, OverflowError):
+            continue
+        if mapped is not None:
+            candidates.append((screen, mapped))
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _native_finder_bar_window_snapshots(matched_name: str, matched_path: str, *, _cached_snapshot=None) -> list[dict[str, object]]:
+    if sys.platform != "win32":
+        return []
+    from ctypes import wintypes as w
+
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        try:
+            dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+            dwmapi.DwmGetWindowAttribute.argtypes = [w.HWND, w.DWORD, ctypes.c_void_p, w.DWORD]
+            dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+        except (OSError, AttributeError):
+            dwmapi = None
+
+        class ProcessEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", w.DWORD), ("cntUsage", w.DWORD), ("th32ProcessID", w.DWORD),
+                ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", w.DWORD),
+                ("cntThreads", w.DWORD), ("th32ParentProcessID", w.DWORD),
+                ("pcPriClassBase", w.LONG), ("dwFlags", w.DWORD), ("szExeFile", w.WCHAR * 260),
+            ]
+
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [("cbSize", w.DWORD), ("rcMonitor", w.RECT), ("rcWork", w.RECT), ("dwFlags", w.DWORD), ("szDevice", w.WCHAR * 32)]
+
+        enum_type = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
+        user32.EnumWindows.argtypes = [enum_type, w.LPARAM]
+        user32.EnumWindows.restype = w.BOOL
+        user32.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
+        user32.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
+        user32.GetWindowRect.argtypes = [w.HWND, ctypes.POINTER(w.RECT)]
+        user32.GetWindowRect.restype = w.BOOL
+        user32.IsWindowVisible.argtypes = [w.HWND]
+        user32.IsWindowVisible.restype = w.BOOL
+        user32.IsIconic.argtypes = [w.HWND]
+        user32.IsIconic.restype = w.BOOL
+        user32.MonitorFromWindow.argtypes = [w.HWND, w.DWORD]
+        user32.MonitorFromWindow.restype = w.HMONITOR
+        user32.GetMonitorInfoW.argtypes = [w.HMONITOR, ctypes.POINTER(MonitorInfo)]
+        user32.GetMonitorInfoW.restype = w.BOOL
+        kernel32.CreateToolhelp32Snapshot.argtypes = [w.DWORD, w.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = w.HANDLE
+        kernel32.Process32FirstW.argtypes = [w.HANDLE, ctypes.POINTER(ProcessEntry)]
+        kernel32.Process32FirstW.restype = w.BOOL
+        kernel32.Process32NextW.argtypes = [w.HANDLE, ctypes.POINTER(ProcessEntry)]
+        kernel32.Process32NextW.restype = w.BOOL
+        kernel32.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+        kernel32.OpenProcess.restype = w.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD)]
+        kernel32.QueryFullProcessImageNameW.restype = w.BOOL
+        kernel32.CloseHandle.argtypes = [w.HANDLE]
+
+        identities: dict[int, tuple[str, str]] = {}
+        if _cached_snapshot is not None:
+            identity = _finder_bar_identity(_cached_snapshot)
+            if identity is None:
+                return []
+            identities[identity[1]] = (str(_cached_snapshot.get("process_name", "")), str(_cached_snapshot.get("process_path", "")))
+        else:
+            process_snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+            if process_snapshot == ctypes.c_void_p(-1).value:
+                return []
+            try:
+                entry = ProcessEntry()
+                entry.dwSize = ctypes.sizeof(entry)
+                more = kernel32.Process32FirstW(process_snapshot, ctypes.byref(entry))
+                while more:
+                    name = str(entry.szExeFile or "")
+                    if name.casefold() == matched_name:
+                        path = ""
+                        handle = kernel32.OpenProcess(0x1000, False, entry.th32ProcessID)
+                        if handle:
+                            try:
+                                size = w.DWORD(32768)
+                                buffer = ctypes.create_unicode_buffer(size.value)
+                                if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                                    path = buffer.value
+                            finally:
+                                kernel32.CloseHandle(handle)
+                        if not matched_path or _normalized_runtime_path(path) == matched_path:
+                            identities[int(entry.th32ProcessID)] = (name, path)
+                    more = kernel32.Process32NextW(process_snapshot, ctypes.byref(entry))
+            finally:
+                kernel32.CloseHandle(process_snapshot)
+        if not identities:
+            return []
+
+        results: list[dict[str, object]] = []
+
+        def collect(hwnd, _lparam):
+            pid = w.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) not in identities:
+                return True
+            class_buffer = ctypes.create_unicode_buffer(128)
+            user32.GetClassNameW(hwnd, class_buffer, len(class_buffer))
+            if class_buffer.value.casefold() != FINDER_BAR_WINDOW_CLASS.casefold():
+                return True
+            rect = w.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return True
+            monitor = user32.MonitorFromWindow(hwnd, 2)  # nearest, including hidden top bars
+            info = MonitorInfo()
+            info.cbSize = ctypes.sizeof(info)
+            if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                return True
+            cloaked = w.DWORD()
+            if dwmapi is not None:
+                if dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) != 0:
+                    cloaked.value = 0
+            name, path = identities[int(pid.value)]
+            results.append({
+                "hwnd": int(hwnd), "pid": int(pid.value), "class_name": class_buffer.value,
+                "process_name": name, "process_path": path,
+                "visible": bool(user32.IsWindowVisible(hwnd)), "cloaked": bool(cloaked.value),
+                "minimized": bool(user32.IsIconic(hwnd)),
+                "physical_rect": [rect.left, rect.top, rect.right, rect.bottom],
+                "monitor_name": str(info.szDevice),
+                "physical_monitor_rect": [info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right, info.rcMonitor.bottom],
+            })
+            return True
+
+        previous_dpi_context = None
+        set_dpi_context = getattr(user32, "SetThreadDpiAwarenessContext", None)
+        if set_dpi_context is None:
+            return []  # Do not label DPI-virtualized coordinates as physical.
+        set_dpi_context.argtypes = [ctypes.c_void_p]
+        set_dpi_context.restype = ctypes.c_void_p
+        try:
+            previous_dpi_context = set_dpi_context(ctypes.c_void_p(-4))
+            if not previous_dpi_context:
+                return []
+            if _cached_snapshot is not None:
+                collect(int(_cached_snapshot["hwnd"]), 0)
+            else:
+                callback = enum_type(collect)
+                user32.EnumWindows(callback, 0)
+        finally:
+            if previous_dpi_context:
+                set_dpi_context(previous_dpi_context)
+        return results
+    except Exception:
+        return []
 
 
 @dataclass
@@ -77,6 +458,7 @@ def read_finder_material(
     *,
     force_screen_sample: bool = False,
     include_center: bool = True,
+    screen=None,
 ) -> FinderGlassMaterial:
     presence = detect_mydockfinder(root)
     material = FinderGlassMaterial(
@@ -125,6 +507,7 @@ def read_finder_material(
         material.blur_value,
         include_center=include_center,
         opacity_percent=material.finder_opacity,
+        screen=screen,
     )
     if sampled:
         material.top_color = sampled.top_color
@@ -172,8 +555,9 @@ def sample_live_finder_bar(
     *,
     include_center: bool = True,
     opacity_percent: int | None = None,
+    screen=None,
 ) -> FinderBarSample | None:
-    screen = QGuiApplication.primaryScreen()
+    screen = screen if screen is not None else QGuiApplication.primaryScreen()
     if not screen:
         return None
 
@@ -182,20 +566,22 @@ def sample_live_finder_bar(
     width = max(160, min(420, int(geo.width() * 0.18)))
     full_bar_image = None
     if include_center:
-        full_pixmap = screen.grabWindow(0, geo.left(), geo.top(), geo.width(), capture_height)
+        full_pixmap = screen.grabWindow(0, 0, 0, geo.width(), capture_height)
         if not full_pixmap.isNull():
-            image = full_pixmap.toImage()
+            image = _logical_finder_capture_image(full_pixmap)
             if not image.isNull():
                 full_bar_image = image
     ratios = (0.04, 0.41, 0.78) if include_center else (0.04, 0.78)
     images = []
     for left_ratio in ratios:
-        left = geo.left() + int((geo.width() - width) * left_ratio)
-        left = max(geo.left(), min(left, geo.right() - width + 1))
-        pixmap = screen.grabWindow(0, left, geo.top(), width, capture_height)
+        # Qt's grabWindow(0) offsets are local to this QScreen, in logical
+        # pixels. Adding its virtual-desktop origin samples the wrong screen.
+        left = int((geo.width() - width) * left_ratio)
+        left = max(0, min(left, geo.width() - width))
+        pixmap = screen.grabWindow(0, left, 0, width, capture_height)
         if pixmap.isNull():
             continue
-        image = pixmap.toImage()
+        image = _logical_finder_capture_image(pixmap)
         if image.isNull():
             continue
         images.append(image)
@@ -240,6 +626,21 @@ def sample_live_finder_bar(
         texture_screen_top=0,
         texture_is_full_screen=False,
     )
+
+
+def _logical_finder_capture_image(pixmap) -> QImage:
+    image = pixmap.toImage()
+    if image.isNull():
+        return image
+    # grabWindow accepts logical coordinates but returns native-size pixels.
+    # All bar-edge/color heuristics below operate in logical units.
+    dpr = image.devicePixelRatio()
+    if math.isfinite(dpr) and dpr > 0.0 and abs(dpr - 1.0) > 0.001:
+        image = image.scaled(max(1, round(image.width() / dpr)),
+            max(1, round(image.height() / dpr)),
+            Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    image.setDevicePixelRatio(1.0)
+    return image
 
 
 def _known_roots(root: Path) -> list[Path]:

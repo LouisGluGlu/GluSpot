@@ -17,6 +17,29 @@ from local.diagnostics_presentation import (
 
 
 class DiagnosticsPresentationTests(unittest.TestCase):
+    def test_visual_context_uses_four_public_placement_names(self):
+        for mode, label in (("tasker", "Tasker Bar"), ("top", "Top Island"), ("free", "Free"),
+                            ("finder", "Finder Bar"), ("stick", "Free")):
+            with self.subTest(mode=mode):
+                self.assertIn(f"紧凑/{label}", format_visual_runtime_context({"location_mode": mode}))
+
+    def test_finder_diagnostics_distinguish_dock_process_from_visible_top_bar(self):
+        values = format_settings_diagnostics({"mydockfinder_running": True,
+                                              "mydockfinder_diagnostics": {"finder_enabled": False}})
+        self.assertEqual(values["mydockfinder_running"], "开启")
+        self.assertIn("尚未检测", values["finder_bar_state"])
+        diagnostics = {"finder_enabled": True, "finder_bars": [{"enabled": True, "visible": True}]}
+        self.assertEqual(format_settings_diagnostics({"mydockfinder_running": True,
+                                                     "mydockfinder_diagnostics": diagnostics})["finder_bar_state"], "已开启 · 已显示")
+        self.assertEqual(format_settings_diagnostics({"mydockfinder_running": True, "finder_bar_visible": False,
+                                                     "mydockfinder_diagnostics": diagnostics})["finder_bar_state"], "已开启 · 自动隐藏")
+        self.assertIn("尚未检测", format_settings_diagnostics({"mydockfinder_running": True,
+                                                              "finder_bar_enabled": False,
+                                                              "mydockfinder_diagnostics": diagnostics})["finder_bar_state"])
+        self.assertEqual(format_settings_diagnostics({"mydockfinder_running": True,
+                                                     "mydockfinder_diagnostics": {"finder_enabled": True, "finder_bars": 42}})["finder_bar_state"],
+                         "已开启 · 自动隐藏")
+
     def test_field_rows_include_runtime_visual_and_lyric_diagnostics(self):
         keys = {key for key, _title in DIAGNOSTIC_FIELD_ROWS}
 
@@ -142,7 +165,7 @@ class DiagnosticsPresentationTests(unittest.TestCase):
         self.assertIn("bands 0.90/0.50/0.20", values["music_reactive_input"])
         self.assertIn("sea_level", values["visual_runtime_context"])
         self.assertIn("歌词 ember_fade", values["visual_runtime_context"])
-        self.assertIn("展开/Tasker紧凑", values["visual_runtime_context"])
+        self.assertIn("展开/Tasker Bar紧凑", values["visual_runtime_context"])
         self.assertIn("律动开 72", values["visual_runtime_context"])
         self.assertIn("证据可用", values["diagnostics_evidence"])
         self.assertIn("5 samples/4.0s", values["diagnostics_evidence"])
@@ -186,7 +209,7 @@ class DiagnosticsPresentationTests(unittest.TestCase):
 
         self.assertIn("yaoguang", text)
         self.assertIn("请求 pure_white", text)
-        self.assertIn("紧凑/free", text)
+        self.assertIn("紧凑/Free", text)
         self.assertIn("律动关 55", text)
         self.assertIn("FPS 60/歌词 30", text)
 

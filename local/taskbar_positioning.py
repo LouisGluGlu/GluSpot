@@ -825,9 +825,9 @@ def taskbar_stack_direction_for_rect(taskbar_rect: QRectF, screen_geometry) -> i
     return 1
 
 
-def available_location_modes_for_state(*, mydockfinder_available: bool) -> list[str]:
+def available_location_modes_for_state(*, mydockfinder_available: bool, finder_bar_available: bool | None = None) -> list[str]:
     if bool(mydockfinder_available):
-        return ["free", "finder"]
+        return ["free", "finder"] if finder_bar_available is not False else ["free"]
     return ["top", "free", "tasker"]
 
 
@@ -836,6 +836,7 @@ def canonical_location_mode(
     *,
     mydockfinder_available: bool,
     taskbar_auto_hide_mode: str = "auto",
+    finder_bar_available: bool | None = None,
 ) -> str:
     value = str(mode or "free").strip().lower()
     legacy = {
@@ -848,7 +849,7 @@ def canonical_location_mode(
     value = legacy.get(value, value)
     if value not in {"finder", "free", "top", "tasker", "stick"}:
         value = "top"
-    if value == "finder" and not bool(mydockfinder_available):
+    if value == "finder" and (not bool(mydockfinder_available) or finder_bar_available is False):
         value = "free"
     if value in {"top", "tasker", "stick"} and bool(mydockfinder_available):
         value = "free"
