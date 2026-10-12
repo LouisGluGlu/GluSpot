@@ -248,20 +248,23 @@ class LiquidGlassWidgetTests(unittest.TestCase):
                                           (min(luminance, backdrop_luminance) + .05))
                     self.assertGreaterEqual(max(ratios), 4.5)
 
-    def test_device_glass_retains_actual_volume_boundary_and_mute_restore_actions(self):
+    def test_device_glass_keeps_uniform_face_and_actual_volume_mute_restore_actions(self):
         device = AudioRouteDevice("local", "本地音频", volume=.25)
         row = _OutputRow(device, self.owner)
         row.resize(330, 56)
         row.state, row.progress = "active", 1
         row.set_device(device)
         at_quarter = self.render(row)
-        self.assertAlmostEqual(row.volume_fill_rect().width() / 328, .25)
+        self.assertEqual(row.volume_text, "25%")
+        self.assertEqual(row.volume_slider.value(), 25)
         row.set_device(replace(device, volume=.75))
         at_three_quarters = self.render(row)
-        self.assertAlmostEqual(row.volume_fill_rect().width() / 328, .75)
-        self.assertGreater(at_three_quarters.pixelColor(164, 5).lightness(), at_quarter.pixelColor(164, 5).lightness())
+        self.assertEqual(row.volume_text, "75%")
+        self.assertEqual(row.volume_slider.value(), 75)
+        self.assertEqual(at_three_quarters.pixelColor(164, 5), at_quarter.pixelColor(164, 5))
         row.set_device(replace(device, volume=.75, volume_muted=True))
-        self.assertEqual(row.volume_fill_rect().width(), 0)
+        self.assertEqual(row.volume_text, "0%")
+        self.assertEqual(row.volume_slider.value(), 0)
         self.assertEqual(row.displayed_volume, 0)
         muted = QSignalSpy(row.mute_requested)
         solo = QSignalSpy(row.solo_requested)

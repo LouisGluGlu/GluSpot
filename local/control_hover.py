@@ -384,13 +384,19 @@ class WidgetHoverGroup(QObject):
         record.image, record.image_key = image, key
         return image
 
+    def cancel_pointer_capture(self):
+        """Drop a held pointer when the host changes its action ownership."""
+        self.pressed = None
+        self.pressed_widget = None
+        self.pressed_visual = None
+        self._repaint()
+
     def _route_pointer(self, watched, event):
         kind = event.type()
         record = self.pressed or self._at(event.globalPosition())
         if record is not None and not self._valid(record):
-            self.pressed = record = None
-            self.pressed_widget = None
-            self.pressed_visual = None
+            self.cancel_pointer_capture()
+            record = None
         if kind == QEvent.Type.MouseMove:
             self._set_active(self.pressed or self._at(event.globalPosition()), time.monotonic())
         if record is None:
@@ -427,9 +433,7 @@ class WidgetHoverGroup(QObject):
         finally:
             self._forwarding = False
             if kind == QEvent.Type.MouseButtonRelease:
-                self.pressed = None
-                self.pressed_widget = None
-                self.pressed_visual = None
+                self.cancel_pointer_capture()
         event.setAccepted(mapped.isAccepted())
         return True
 
@@ -466,15 +470,12 @@ class WidgetHoverGroup(QObject):
                 if record is self.active:
                     self._set_active(None, time.monotonic())
                 if record is self.pressed:
-                    self.pressed = None
-                    self.pressed_widget = None
-                    self.pressed_visual = None
+                    self.cancel_pointer_capture()
             if watched is self.host:
                 self.timer.stop()
                 self.overlay.hide()
-                self.active = self.pressed = None
-                self.pressed_widget = None
-                self.pressed_visual = None
+                self.active = None
+                self.cancel_pointer_capture()
         return False
 
 

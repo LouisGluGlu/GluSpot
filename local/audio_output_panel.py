@@ -71,13 +71,13 @@ class _VolumeSlider(NoWheelSlider):
         start, end = QPointF(8, self.height() / 2), QPointF(self.width() - 8, self.height() / 2)
         fraction = (self.value() - self.minimum()) / max(1, self.maximum() - self.minimum())
         thumb = QPointF(start.x() + (end.x() - start.x()) * fraction, start.y())
-        painter.setPen(QPen(self.track, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setPen(QPen(self.track, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawLine(start, end)
-        painter.setPen(QPen(self.fill, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setPen(QPen(self.fill, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.drawLine(start, thumb)
-        painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
-        painter.setBrush(self.fill)
-        painter.drawEllipse(thumb, 4.5, 4.5)
+        painter.setPen(QPen(self.fill, 1))
+        painter.setBrush(QColor(246, 246, 248))
+        painter.drawEllipse(thumb, 6, 6)
         if self.hasFocus():
             painter.setPen(QPen(self.fill, 1, Qt.PenStyle.DotLine))
             painter.drawLine(8, self.height() - 3, self.width() - 8, self.height() - 3)
@@ -92,12 +92,18 @@ class _RowActionButton(QAbstractButton):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def paintEvent(self, event):
-        if self.hasFocus():
-            with QPainter(self) as painter:
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                painter.setPen(QPen(self.parentWidget().accent, 1, Qt.PenStyle.DotLine))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(QRectF(self.rect()).adjusted(3, 3, -3, -3), 8, 8)
+        # The shared row painter owns feedback in both native and morph poses.
+        pass
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() in {QEvent.Type.Enter, QEvent.Type.Leave, QEvent.Type.FocusIn,
+                            QEvent.Type.FocusOut, QEvent.Type.MouseButtonPress,
+                            QEvent.Type.MouseButtonRelease}:
+            parent = self.parentWidget()
+            if parent is not None:
+                parent.update()
+        return result
 
 
 def _paint_volume_symbol(painter, rect, color, *, silent=False, unknown=False):
@@ -143,14 +149,14 @@ class _OutputRow(QAbstractButton):
         self.progress = self.elapsed = 0.0
         self.ink, self.muted = QColor(245, 245, 245), QColor(180, 180, 185)
         self.accent = QColor(self.ink)
-        self.hover_fill, self.selected_fill = QColor(255, 255, 255, 14), QColor(245, 245, 247)
-        self.track_fill = QColor(125, 125, 130)
         self.label_font = QFont("Segoe UI", 10)
         self._row_height = 56
         self.delay_text = ""
         self.grouped = False
         self._requested_volume: float | None = None
         self._request_until = 0.0
+        self.volume_feedback = ""
+        self._feedback_until = 0.0
         self.details_visible = False
         self.details_progress = 0.0
         self._pointer_action = ""
@@ -230,8 +236,7 @@ class _OutputRow(QAbstractButton):
 
     @property
     def name_font_size(self):
-        normal = max(13, round(14 * self.height() / 56))
-        return normal + (12 - normal) * self.details_progress
+        return 14 - 2 * self.details_progress
 
     @property
     def displayed_volume(self):
@@ -241,9 +246,33 @@ class _OutputRow(QAbstractButton):
         return 0 if self.device.volume_muted else round(max(0.0, min(1.0, value)) * 100)
 
     def _volume_changed(self, value):
+        self.volume_feedback = ""
         self._requested_volume = value / 100.0
         self._request_until = time.monotonic() + 2.0
+        self.update()
         self.volume_requested.emit(self.device.id, self._requested_volume)
+
+    @property
+    def volume_pending(self):
+        return self._requested_volume is not None
+
+    @property
+    def volume_text(self):
+        if self.volume_pending:
+            return f"目标 {round(self._requested_volume * 100)}%"
+        value = self.displayed_volume
+        return "—" if value is None else f"{value}%"
+
+    def cancel_volume_intent(self):
+        self._requested_volume = None
+        self.volume_feedback = ""
+        blocked = self.volume_slider.blockSignals(True)
+        self.volume_slider.setSliderDown(False)
+        self.volume_slider.blockSignals(blocked)
+        self.setDown(False)
+        self.solo_button.setDown(False)
+        self.join_button.setDown(False)
+        self._pointer_action = ""
 
     def set_device(self, device):
         self.device = device
@@ -281,17 +310,26 @@ class _OutputRow(QAbstractButton):
         if not known:
             self._requested_volume = None
         elif not self.volume_slider.isSliderDown():
-            if (self._requested_volume is not None and
-                    (abs(device.volume - self._requested_volume) <= .005 or time.monotonic() >= self._request_until)):
-                self._requested_volume = None
+            if self._requested_volume is not None:
+                audible = 0.0 if device.volume_muted else device.volume
+                confirmed = abs(audible - self._requested_volume) <= .005
+                if confirmed or time.monotonic() >= self._request_until:
+                    self._requested_volume = None
+                    self.volume_feedback = "" if confirmed else "未确认"
+                    self._feedback_until = time.monotonic() + 2.0
             if self._requested_volume is None:
                 self.volume_slider.blockSignals(True)
                 self.volume_slider.setValue(self.displayed_volume)
                 self.volume_slider.blockSignals(False)
+        if self.volume_feedback and time.monotonic() >= self._feedback_until:
+            self.volume_feedback = ""
+        self.update()
         self._layout_volume()
 
     @property
     def subtitle(self):
+        if self.device.route_state in {"error", "failed"}:
+            return "连接失败"
         if self.state == "pending":
             return "正在连接…"
         if self.state == "active":
@@ -305,21 +343,15 @@ class _OutputRow(QAbstractButton):
         return "蓝牙音频" if self.device.is_bluetooth else "本地音频"
 
     def _layout_volume(self):
-        self.volume_slider.setGeometry(52, max(26, self.height() - 28),
-                                       max(1, self.width() - 66), 24)
+        self.volume_slider.setGeometry(52, max(26, self.height() - 29),
+                                       max(1, self.width() - 66), 26)
         self.solo_button.setGeometry(1, 1, 47, max(1, self.height() - 2))
         self.join_button.setGeometry(max(0, self.width() - 44), 1, 43, max(1, self.height() - 2))
 
     def set_row_height(self, height):
-        self._row_height = max(64 if self.state == "active" or self.volume_slider.isSliderDown() else 48, round(height))
+        self._row_height = 72 if self.state == "active" or self.volume_slider.isSliderDown() else 56
         self.setFixedHeight(self._row_height)
         self._layout_volume()
-
-    def volume_fill_rect(self):
-        """Displayed volume fill; a muted endpoint has no audible white fill."""
-        bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        fraction = 0 if self.device.volume_muted else self.volume_slider.value() / 100.0
-        return QRectF(bounds.left(), bounds.top(), bounds.width() * fraction, bounds.height())
 
     def volume_hit(self, position):
         if self.state != "active" or not self.volume_slider.isEnabled() or self.volume_slider.isHidden():
@@ -342,11 +374,8 @@ class _OutputRow(QAbstractButton):
         self.volume_slider.update()
 
     def sync_volume_style(self):
-        # Slider colors use the same selected-pose progression as the capsule.
-        target = QColor(103, 103, 109)
-        self.volume_slider.fill = QColor(*(round(a * (1 - self.progress) + b * self.progress)
-                                         for a, b in zip(self.muted.getRgb()[:3], target.getRgb()[:3])))
-        self.volume_slider.track = QColor(196, 196, 202) if self.progress > .5 else QColor(self.muted.red(), self.muted.green(), self.muted.blue(), 55)
+        self.volume_slider.fill = QColor(self.ink)
+        self.volume_slider.track = QColor(self.muted.red(), self.muted.green(), self.muted.blue(), 65)
 
     def paintEvent(self, event):
         with QPainter(self) as painter:
@@ -356,97 +385,82 @@ class _OutputRow(QAbstractButton):
         """Draw cached row state on its widget or the unfolding chooser."""
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        capsule = QPainterPath()
-        capsule.addRoundedRect(bounds, 27, 27)
-        track = QColor(self.track_fill)
-        track.setAlpha(round(255 * self.progress))
-        paint_liquid_glass(painter, bounds, radius=27, base_color=track,
-                          light=self.ink.lightness() < 128, hovered=self.underMouse(),
-                          pressed=self.isDown(), opacity=1.0 if self.isEnabled() else .48)
-        if not self.volume_slider.isHidden():
-            painter.save()
-            painter.setClipRect(self.volume_fill_rect(), Qt.ClipOperation.IntersectClip)
-            paint_liquid_glass(painter, bounds, radius=27, base_color=self.selected_fill,
-                              light=True, active=True, hovered=self.underMouse(), pressed=self.isDown(),
-                              opacity=self.progress)
-            painter.restore()
+        light = self.ink.lightness() < 128
+        face = QColor(0, 0, 0, round(14 * self.progress)) if light else QColor(255, 255, 255, round(29 * self.progress))
+        paint_liquid_glass(painter, bounds, radius=18, base_color=face,
+                          light=light, active=self.progress > .5,
+                          hovered=self.underMouse(), pressed=self.isDown(),
+                          opacity=1.0 if self.isEnabled() else .48)
         if self.hasFocus():
-            painter.setPen(QPen(self.accent, 1))
+            painter.setPen(QPen(self.accent, 1.3))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(capsule)
-        if self.progress < .1 and (self.underMouse() or self.hasFocus()):
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self.hover_fill)
-            painter.drawRoundedRect(bounds, 30, 30)
-        ink = QColor(self.ink if self.progress > .5 else self.muted)
+            painter.drawRoundedRect(bounds.adjusted(1, 1, -1, -1), 17, 17)
+        ink = QColor(self.ink)
+        if not self.isEnabled():
+            ink.setAlpha(130)
+        active = self.state == "active"
+        icon = QRectF(11, 9 if active else (self.height() - 30) / 2, 30, 30)
+        action_face = icon.adjusted(-5, -5, 5, 5)
+        self._paint_action_feedback(painter, self.solo_button, action_face)
         arrival = 1 - math.exp(-self.elapsed * 12)
         painter.save()
-        icon = QRectF(11, (self.height() - 30) / 2, 30, 30)
         painter.translate(icon.center())
         painter.scale(.84 + .16 * arrival, .84 + .16 * arrival)
         painter.translate(-icon.center())
-        # Draw once over the track and once over the white volume portion,
-        # so the exact same glyph stays legible as the volume boundary moves.
         paint_audio_output_icon(painter, icon, self.device.kind, ink)
-        if not self.volume_slider.isHidden():
-            painter.setClipRect(self.volume_fill_rect(), Qt.ClipOperation.IntersectClip)
-            paint_audio_output_icon(painter, icon, self.device.kind, QColor(40, 40, 44))
         painter.restore()
         font = QFont(self.label_font)
-        normal_size = max(13, round(14 * self.height() / 56))
-        font.setPixelSize(normal_size)
-        font.setWeight(QFont.Weight.DemiBold)
+        font.setPixelSize(14)
+        font.setWeight(QFont.Weight.DemiBold if active else QFont.Weight.Medium)
         painter.setFont(font)
         painter.setPen(ink)
-        detail = bool(self.delay_text or self.state == "pending")
-        right_space = 57 if self.state == "active" else 47 if self.state == "available" else 12
-        name_rect = QRectF(52, 7 if self.state == "active" else (self.height() - 34) / 2 if detail else (self.height() - 25) / 2,
-                           max(1, self.width() - 52 - right_space), 18 if detail else 25)
-        name_scale = self.name_font_size / normal_size
+        value_font = QFont(font)
+        value_font.setPixelSize(12)
+        value_font.setWeight(QFont.Weight.DemiBold)
+        value_width = max(50, math.ceil(QFontMetricsF(value_font).horizontalAdvance(self.volume_text)) + 3)
+        right_space = value_width + 41 if active else 46 if self.state == "available" else 32
+        name_rect = QRectF(52, 7 if active else 9,
+                           max(1, self.width() - 52 - right_space), 21)
+        name_scale = self.name_font_size / 14
+        # Elision uses the original font width throughout growth, so the
+        # visible string does not repeatedly change while it is being scaled.
         name = QFontMetricsF(font).elidedText(str(self.device.name), Qt.TextElideMode.ElideRight,
-                                           name_rect.width() / name_scale)
+                                           name_rect.width())
         self._paint_name(painter, name_rect, name, name_scale)
-        if not self.volume_slider.isHidden():
-            painter.save()
-            painter.setClipRect(self.volume_fill_rect())
-            painter.setPen(QColor(40, 40, 44))
-            self._paint_name(painter, name_rect, name, name_scale)
-            painter.restore()
-        font.setPixelSize(10)
+        font.setPixelSize(11)
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
-        if self.delay_text:
-            # Keep compensation diagnostics out of the drag track.
-            detail = QRectF(52, 25 if self.state == "active" else (self.height() - 34) / 2 + 18,
-                            name_rect.width(), 12)
+        status = self.subtitle
+        if active and self.device.volume_muted:
+            status += " · 已静音"
+        if self.volume_pending:
+            status += " · 调整中"
+        elif self.volume_feedback:
+            status += " · " + self.volume_feedback
+        error = self.device.route_state in {"error", "failed"} or bool(self.volume_feedback)
+        secondary = QColor("#a22d2d" if light else "#ffb9b3") if error else QColor(self.muted)
+        painter.setPen(secondary)
+        status_rect = QRectF(52, 29 if active else 30, max(1, self.width() - 65), 14)
+        painter.drawText(status_rect, Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetricsF(font).elidedText(status, Qt.TextElideMode.ElideRight, status_rect.width()))
+        if active:
+            # A reserved value area keeps the target and confirmed readback
+            # comprehensible without dividing the device's name or material.
+            reveal = max(self.details_progress, float(self.volume_pending))
+            glyph = QRectF(self.width() - 35 - value_width + 7 * (1 - reveal), 9, 16, 16)
+            painter.save()
+            painter.setOpacity(painter.opacity() * reveal)
+            _paint_volume_symbol(painter, glyph, ink, silent=self.displayed_volume == 0,
+                                 unknown=self.displayed_volume is None)
+            painter.restore()
+            amount = QRectF(self.width() - 14 - value_width, 7, value_width, 21)
+            painter.setFont(value_font)
             painter.setPen(ink)
-            painter.drawText(detail, Qt.AlignmentFlag.AlignVCenter, self.delay_text)
-            if not self.volume_slider.isHidden():
-                painter.save()
-                painter.setClipRect(self.volume_fill_rect())
-                painter.setPen(QColor(40, 40, 44))
-                painter.drawText(detail, Qt.AlignmentFlag.AlignVCenter, self.delay_text)
-                painter.restore()
-        if self.state == "active":
-            volume = self.displayed_volume
-            glyph = QRectF(self.width() - 56, 8, 18, 18)
-            amount = QRectF(self.width() - 35, 6, 25, 23)
-            font.setPixelSize(12)
-            font.setWeight(QFont.Weight.DemiBold)
-            painter.setFont(font)
-            for color, clipped in ((ink, False), (QColor(40, 40, 44), True)):
-                painter.save()
-                if clipped:
-                    painter.setClipRect(self.volume_fill_rect(), Qt.ClipOperation.IntersectClip)
-                _paint_volume_symbol(painter, glyph, color, silent=volume == 0, unknown=volume is None)
-                painter.setPen(color)
-                painter.drawText(amount, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-                                 "—" if volume is None else str(volume))
-                painter.restore()
+            painter.drawText(amount, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                             self.volume_text)
         elif self.state == "available":
-            # Paint in the row as well as the morph so both poses share the
-            # exact same pixels. The child supplies the accessible hit target.
-            plus = QRectF(self.width() - 34, (self.height() - 18) / 2, 18, 18)
+            plus = QRectF(self.width() - 34, (self.height() - 20) / 2, 20, 20)
+            self._paint_action_feedback(painter, self.join_button, plus.adjusted(-8, -8, 8, 8))
             color = QColor(0, 157, 205) if self.isEnabled() else QColor(self.muted)
             painter.setPen(QPen(color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -457,13 +471,24 @@ class _OutputRow(QAbstractButton):
                              QPointF(plus.center().x(), plus.center().y() + 4))
         if self.state == "pending":
             painter.setPen(QPen(ink, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            painter.drawArc(QRectF(self.width() - 25, (self.height() - 12) / 2, 12, 12),
+            painter.drawArc(QRectF(self.width() - 28, (self.height() - 14) / 2, 14, 14),
                             int(-self.elapsed * 280 * 16), 250 * 16)
         if include_volume and not self.volume_slider.isHidden():
             painter.save()
             painter.translate(self.volume_slider.pos())
             self.volume_slider.paint_contents(painter)
             painter.restore()
+
+    def _paint_action_feedback(self, painter, button, rect):
+        if button.isHidden() or not (button.underMouse() or button.hasFocus() or button.isDown()):
+            return
+        painter.save()
+        tint = QColor(self.ink)
+        tint.setAlpha(30 if button.isDown() else 15)
+        painter.setBrush(tint)
+        painter.setPen(QPen(self.accent, 1.2) if button.hasFocus() else Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, 12, 12)
+        painter.restore()
 
     @staticmethod
     def _paint_name(painter, rect, text, scale):
@@ -492,6 +517,8 @@ class AudioOutputPanel(QWidget):
         super().__init__(parent)
         self.provider = provider
         self._snapshot: AudioRouteSnapshot | None = None
+        self._interaction_owner = None
+        self._discard_pointer_until_release = False
         self._rows: dict[str, _OutputRow] = {}
         self._device_order = ()
         self._anchor = QPoint()
@@ -519,7 +546,7 @@ class AudioOutputPanel(QWidget):
         self._background = QColor(35, 35, 38)
         self._ink, self._muted = QColor(245, 245, 247), QColor(195, 195, 200)
         self._accent = QColor(self._ink)
-        self._hover_fill, self._selected_fill = QColor(255, 255, 255, 14), QColor(245, 245, 247)
+        self._selected_fill = QColor(245, 245, 247)
         self._label_font = QFont()
         self._label_font.setFamilies(["Segoe UI", "Microsoft YaHei UI"])
         self._label_font.setPixelSize(13)
@@ -563,7 +590,7 @@ class AudioOutputPanel(QWidget):
         self.rows_widget = QWidget()
         self.rows_layout = QVBoxLayout(self.rows_widget)
         self.rows_layout.setContentsMargins(6, 6, 6, 6)
-        self.rows_layout.setSpacing(9)
+        self.rows_layout.setSpacing(7)
         self.scroll.setWidget(self.rows_widget)
         layout.addWidget(self.scroll, 1)
         layout.addWidget(self.status_label)
@@ -628,7 +655,7 @@ class AudioOutputPanel(QWidget):
         for row in self._rows.values():
             position = control_local_position(row, global_position)
             capsule = QPainterPath()
-            capsule.addRoundedRect(QRectF(row.rect()).adjusted(1, 1, -1, -1), 27, 27)
+            capsule.addRoundedRect(QRectF(row.rect()).adjusted(1, 1, -1, -1), 18, 18)
             if row.isEnabled() and capsule.contains(position):
                 return row
         return None
@@ -668,6 +695,18 @@ class AudioOutputPanel(QWidget):
 
     def eventFilter(self, watched, event):
         kind = event.type()
+        if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._discard_pointer_until_release = False
+        elif self._discard_pointer_until_release and kind in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease}:
+            if kind == QEvent.Type.MouseMove and not event.buttons() & Qt.MouseButton.LeftButton:
+                self._discard_pointer_until_release = False
+            else:
+                if kind == QEvent.Type.MouseButtonRelease:
+                    self._discard_pointer_until_release = False
+                # QAbstractButton can re-arm on a held move even after setDown
+                # was cleared. Consume the canceled sequence through release.
+                event.accept()
+                return True
         if (kind in {QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease}
                 and self.isVisible() and not self._native_content_ready()):
             # The native rows still have their final layout for accessibility
@@ -758,7 +797,6 @@ class AudioOutputPanel(QWidget):
         self._ink = QColor(30, 30, 34) if light else QColor(246, 246, 248)
         self._muted = QColor(89, 89, 96) if light else QColor(190, 190, 198)
         self._accent = QColor(self._ink)
-        self._hover_fill = QColor(0, 0, 0, 10) if light else QColor(255, 255, 255, 14)
         self.setFont(font)
         title_font = QFont(font)
         title_font.setPixelSize(14)
@@ -792,8 +830,7 @@ class AudioOutputPanel(QWidget):
     def _style_row(self, row):
         row.set_row_height(self._row_height)
         row.ink, row.muted, row.accent = self._ink, self._muted, self._accent
-        row.hover_fill, row.selected_fill, row.label_font = self._hover_fill, self._selected_fill, self._label_font
-        row.track_fill = QColor(155, 155, 161) if relative_luminance(self._background) > .45 else QColor(123, 123, 128)
+        row.label_font = self._label_font
         row.sync_volume_style()
 
     def _capture_material(self, force=False):
@@ -974,11 +1011,11 @@ class AudioOutputPanel(QWidget):
         # remaining a separate button above a downward-floating popup.
         self._source_rect = QRectF(source_rect) if source_rect is not None else QRectF(
             anchor.x() - 42, max(12, anchor.y() - 42), 42, 42)
-        # Logical Qt sizes already follow display DPI. Match the source
-        # control's proportion without double-scaling by devicePixelRatio.
-        desired_width = max(280, round(self._source_rect.height() * 6.2))
+        # Qt logical pixels already follow DPI. The source circle only owns
+        # the entry morph; device typography/layout stays stable in all modes.
+        desired_width = 360
         width = min(desired_width, max(80, parent.width() - 24)) if parent else desired_width
-        self._row_height = max(48, round(self._source_rect.height() * 1.05))
+        self._row_height = 56
         right, top = self._source_rect.right(), self._source_rect.top()
         x = max(12, min(right - width, parent.width() - width - 12)) if parent else right - width
         y = max(0, min(top, parent.height() - 80)) if parent else top
@@ -1058,12 +1095,12 @@ class AudioOutputPanel(QWidget):
         self._clear_row_hover()
         for row in self._rows.values():
             row.set_details_visible(False, immediate=True)
-            slider = row.volume_slider
-            blocked = slider.blockSignals(True)
-            slider.setSliderDown(False)
-            slider.blockSignals(blocked)
-            row.setDown(False)
-            row._pointer_action = ""
+            row.cancel_volume_intent()
+        self.stop_button.setDown(False)
+        group = getattr(self.rows_widget, "_control_hover_group", None)
+        if group is not None:
+            group.cancel_pointer_capture()
+        self._discard_pointer_until_release = False
         self._edge_offset = self._edge_velocity = 0.0
         self.clearMask()
         super().hideEvent(event)
@@ -1090,7 +1127,23 @@ class AudioOutputPanel(QWidget):
             self._action_error = "暂时无法刷新设备，请稍后重试。"
         self.sync_snapshot()
 
+    def _route_action_current(self):
+        # A source can change between polls and the next held-pointer event.
+        # Published state is a cheap read; never send that old action first.
+        try:
+            snapshot = self.provider.get_audio_route_snapshot()
+        except Exception:
+            self.sync_snapshot()
+            return False
+        owner = (snapshot.capture_scope, snapshot.music_source_app_id, snapshot.group_id)
+        if self._interaction_owner is not None and owner != self._interaction_owner:
+            self.sync_snapshot()
+            return False
+        return True
+
     def _select(self, device_id: str):
+        if not self._route_action_current():
+            return
         self._action_error = ""
         try:
             if not self.provider.select_audio_output(device_id):
@@ -1100,6 +1153,8 @@ class AudioOutputPanel(QWidget):
         self.sync_snapshot()
 
     def _join(self, device_id: str):
+        if not self._route_action_current():
+            return
         self._action_error = ""
         try:
             join = getattr(self.provider, "toggle_audio_output", None)
@@ -1110,6 +1165,8 @@ class AudioOutputPanel(QWidget):
         self.sync_snapshot()
 
     def _toggle_mute(self, device_id: str):
+        if not self._route_action_current():
+            return
         self._action_error = ""
         try:
             accepted = self.provider.toggle_audio_output_mute(device_id)
@@ -1120,6 +1177,8 @@ class AudioOutputPanel(QWidget):
         self.sync_snapshot()
 
     def _volume_changed(self, device_id: str, volume: float):
+        if not self._route_action_current():
+            return
         self._action_error = ""
         try:
             accepted = self.provider.set_audio_output_volume(device_id, volume)
@@ -1131,9 +1190,13 @@ class AudioOutputPanel(QWidget):
             if row:
                 row._requested_volume = None
                 row.volume_slider.setSliderDown(False)
+                row.volume_feedback = "未确认"
+                row._feedback_until = time.monotonic() + 2.0
         self.sync_snapshot()
 
     def _stop(self):
+        if not self._route_action_current():
+            return
         self._action_error = ""
         try:
             self.provider.stop_audio_cast()
@@ -1194,6 +1257,24 @@ class AudioOutputPanel(QWidget):
             self._fit_to_content()
             return
         self._snapshot = snapshot
+        owner = (snapshot.capture_scope, snapshot.music_source_app_id, snapshot.group_id)
+        if self._interaction_owner is not None and owner != self._interaction_owner:
+            # Endpoint IDs can be reused by another controller or renderer.
+            # Retire the old gesture before its coordinates/actions are reused.
+            self._clear_row_hover()
+            group = getattr(self.rows_widget, "_control_hover_group", None)
+            held = bool(group is not None and group.pressed is not None) or self.stop_button.isDown()
+            held |= any(row.isDown() or row.solo_button.isDown() or row.join_button.isDown()
+                        or row.volume_slider.isSliderDown() for row in self._rows.values())
+            self._discard_pointer_until_release |= held
+            if group is not None:
+                group.cancel_pointer_capture()
+            self.stop_button.setDown(False)
+            for row in self._rows.values():
+                row.cancel_volume_intent()
+            self._action_error = ""
+            self._ui_key = None
+        self._interaction_owner = owner
         confirmed, pending_ids = self._route_members(snapshot)
         self._source_kinds = tuple(device.kind for device in snapshot.devices if device.id in confirmed)
         desired = confirmed | pending_ids if snapshot.state == "reconfiguring" else pending_ids or confirmed
@@ -1213,13 +1294,14 @@ class AudioOutputPanel(QWidget):
             # Even an unchanged provider snapshot must retire a volume request
             # that did not receive readback; no route action is issued here.
             for row in self._rows.values():
-                if row._requested_volume is not None:
+                if row._requested_volume is not None or row.volume_feedback:
                     row.set_device(row.device)
             self._maintain_visible_state(snapshot)
             return
         self._ui_key = ui_key
-        grouped = (snapshot.capture_scope == "music_process_tree" if snapshot.capture_scope else
-                   len(desired) > 1)
+        grouped = (snapshot.capture_scope == "music_process_tree" or
+                   snapshot.capture_scope == "owned-player" and len(desired) > 1
+                   if snapshot.capture_scope else len(desired) > 1)
         casting = any(d.transport == "airplay" and d.id in desired for d in snapshot.devices)
         self.title_label.setText(f"同步播放 · {len(desired)} 个设备" if grouped else
                                  "单设备投放" if casting else "音频输出")
@@ -1282,9 +1364,11 @@ class AudioOutputPanel(QWidget):
             self._style_row(row)
             action = "点击图标独占播放，点击名称切换静音，拖动下方滑块调整音量，滚轮滚动列表" if selected else "点击名称独占播放，点击加号加入同步播放，滚轮滚动列表"
             row.setAccessibleDescription(row.subtitle + "，" + scope + "，" + action + (f"，自动歌词补偿 {snapshot.cast_latency_seconds:.2f} 秒" if row.delay_text else ""))
-            row.setToolTip(f"{device.name} · {scope}" + (" · 音量暂不可用" if device.volume is None else ""))
+            row.setToolTip(f"{device.name} · {scope} · {action}" + (" · 音量暂不可用" if device.volume is None else ""))
             if row.delay_text:
-                row.setToolTip(f"{device.name} · {scope} · 自动歌词补偿 {snapshot.cast_latency_seconds:.2f} 秒（根据投放缓冲估计）")
+                row.setToolTip(row.toolTip() + f" · 自动歌词补偿 {snapshot.cast_latency_seconds:.2f} 秒（根据投放缓冲估计）")
+            if device.route_message:
+                row.setToolTip(row.toolTip() + " · " + device.route_message)
             row.update()
         self.empty_label.setText("使用系统默认输出" if owned else "暂无可用输出设备")
         self.empty_label.setVisible(not order)
@@ -1297,6 +1381,9 @@ class AudioOutputPanel(QWidget):
         if not self._action_error and ((snapshot.state == "casting" and message.startswith(("正在投放到", "正在同步播放到")))
                                       or message.startswith(("已调整 ", "已选择 "))):
             message = ""
+        if not self._action_error and snapshot.state in {"ready", "casting", "streaming"} and message in {
+                "程序内同步播放已停止", "同步播放", "已停止投放", "已停止同步播放"}:
+            message = ""
         self.status_label.setText(message)
         self.status_label.setToolTip(message)
         self.status_label.setAccessibleDescription(message)
@@ -1307,7 +1394,7 @@ class AudioOutputPanel(QWidget):
         self.stop_button.setText("停止同步播放" if grouped else "停止投放")
         # A music-only group owns its capture/render lifecycle even when all
         # members are Windows outputs. It must remain explicitly stoppable.
-        stoppable = casting or grouped
+        stoppable = casting or grouped or owned and bool(snapshot.group_id)
         self.stop_button.setEnabled(stoppable)
         self.stop_button.setVisible(stoppable)
         self._fit_to_content()

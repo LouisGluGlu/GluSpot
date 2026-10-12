@@ -216,13 +216,20 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 self.assertTrue(all(suppressed.pixelColor(x, y).alpha() == 0
                     for y in range(suppressed.height()) for x in range(suppressed.width())))
                 # The same source slot now becomes the chooser, whose first
-                # selected row owns the pale volume capsule. No second blue
+                # selected row owns the uniform device surface. No second blue
                 # button remains above it, and adjacent controls stay drawn.
                 self.assertAlmostEqual(panel.y(), output.top(), delta=1)
                 self.assertAlmostEqual(panel.x() + panel.width(), output.right(), delta=1)
                 row = panel._rows["local"]
-                white = row.mapTo(self.window, QPoint(8, row.height() // 2))
-                self.assertGreater(open_page.pixelColor(white).lightness(), 200)
+                native_panel = QImage(panel.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                native_panel.fill(Qt.GlobalColor.transparent)
+                panel.render(native_panel)
+                row_face = QPoint(row.width() // 2, row.height() - 7)
+                actual = open_page.pixelColor(row.mapTo(self.window, row_face))
+                expected = native_panel.pixelColor(row.mapTo(panel, row_face))
+                self.assertEqual(actual, expected)
+                self.assertTrue(row.isChecked())
+                self.assertTrue(row.volume_slider.isVisible())
                 self.assertGreater(closed_face.pixelColor(closed_face.width() // 2, 3).lightness(), 200)
                 self.assertGreater(sum(controls.pixelColor(x, y).alpha() > 0
                     for y in range(round(translation.top()), round(translation.bottom()))
