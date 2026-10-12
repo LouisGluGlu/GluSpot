@@ -204,13 +204,14 @@ from local.music_surface_palette import (
     MusicSurfacePalette,
     artwork_surface_palette,
     cached_artwork_surface_palette,
+    future_lyric_color,
     relative_luminance,
     solid_album_background_color,
     solid_album_ink_color,
 )
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_mode_controls import ArtworkHoverMotion, paint_presentation_glyph
-from local.personal_dj_icon import paint_personal_dj_icon
+from local.personal_dj_icon import paint_personal_dj_icon, personal_dj_lightening_limit
 from local.mydockfinder import FinderGlassMaterial, read_finder_material
 from local.plugin_presentation import (
     active_plugin_alerts as presentation_active_plugin_alerts,
@@ -1293,6 +1294,11 @@ class IslandStackVisual(QWidget):
         self._audio_device_motion = None
         self._audio_device_event_serial = 0
         self._music_surface_active = False
+        self._island_dj_completion_seen = 0
+        self._island_dj_observed_track = ""
+        self._island_dj_outro_started = 0.0
+        self._island_dj_outro_until = 0.0
+        self._island_dj_outro_track = ""
         self._island_visible_before_music_surface = True
         self._music_windowed_preference = False
         self.music_surface_reading_lift_level = MUSIC_READING_LIFT_DEFAULT_LEVEL
@@ -2482,7 +2488,8 @@ class IslandStackVisual(QWidget):
         return any(self._animation_dict_active(animation, now, 0.22) for animation in animations.values())
 
     def _active_visual_animation_plan(self, now: float):
-        if bool(getattr(self, "_island_dj_speaking", False)):
+        if (self._personal_dj_island_presenting()
+                or now < float(getattr(self, "_island_dj_outro_until", 0.0))):
             from local.island_presentation import ActiveVisualAnimationPlan
             return ActiveVisualAnimationPlan(True, "personal_dj")
         if bool(getattr(self, "_island_music_control_hover_animating", False)):
@@ -2896,6 +2903,8 @@ class IslandStackVisual(QWidget):
         return changed
 
     def _hover_auto_activation_due(self, now: float) -> bool:
+        if now < float(getattr(self, "_island_dj_outro_until", 0.0)):
+            return False
         hovered_key = getattr(self, "hovered_key", "")
         if not presentation_hover_auto_activation_candidate(
             hovered_key=hovered_key,
@@ -2917,6 +2926,8 @@ class IslandStackVisual(QWidget):
         )
 
     def _left_stack_collapse_due(self, now: float) -> bool:
+        if now < float(getattr(self, "_island_dj_outro_until", 0.0)):
+            return False
         return presentation_left_stack_collapse_due(
             expanded=getattr(self, "expanded", False),
             left_stack_at=getattr(self, "left_stack_at", 0.0),
@@ -4932,6 +4943,13 @@ class IslandStackVisual(QWidget):
             self_hwnd = int(self.winId()) if self.winId() else 0
             if self_hwnd and hwnd == self_hwnd:
                 return False, ""
+            music_surface = getattr(self, "music_fullscreen_overlay", None)
+            if music_surface is not None and music_surface.isVisible() and hwnd == int(music_surface.winId()):
+                # Our own fullscreen/maximized song page owns the handoff,
+                # not an external scene suppression. Classifying it as an
+                # external fullscreen app would collapse the hidden island
+                # and replay a separate scale-in when the page returns.
+                return False, ""
 
             rect = wintypes.RECT()
             if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -5398,6 +5416,8 @@ class IslandStackVisual(QWidget):
 
     def _set_expanded(self, expanded: bool):
         expanded = bool(expanded)
+        if not expanded:
+            self._island_dj_outro_until = 0.0
         if self.expanded == expanded:
             if not expanded:
                 self.plugin_panel_open = False
@@ -7946,9 +7966,31 @@ class IslandStackVisual(QWidget):
                 pass
         self._music_surface_active = False
         if bool(getattr(self, "_island_visible_before_music_surface", True)):
+            self._settle_island_return_motion(time.monotonic())
             self.show()
             self.raise_()
             self.activateWindow()
+
+    def _settle_island_return_motion(self, now: float):
+        """Present the destination already reached by the song-page morph."""
+        self.hovered_key = ""
+        self.hover_armed_key = ""
+        self.hover_started_at = 0.0
+        self.hover_bounce_until = 0.0
+        self.stack_bounce_until = 0.0
+        self.left_stack_at = 0.0
+        self.pointer_pos = QPointF(-1.0, -1.0)
+        self.last_frame_at = float(now)
+        # The hidden QWidget does not paint, so its shell retains the old
+        # dimensions and velocity even though the lyric row has advanced.
+        # Compact ink is fitted to the live shell height; resuming that old
+        # spring after the return morph turns overshoot into repeated integer
+        # font-size jumps. Settle the destination once without resetting any
+        # reading, source-clock or logical-line motion.
+        self._sync_timed_lyrics(float(now))
+        for visual in self._build_visuals():
+            if visual.z_index == 10:
+                self._apply_motion_snap_to_target(visual.key, visual.rect, 1.0)
 
     def _close_music_fullscreen(self):
         overlay = getattr(self, "music_fullscreen_overlay", None)
@@ -7959,6 +8001,8 @@ class IslandStackVisual(QWidget):
             self._restore_island_from_music_surface()
 
     def _activate_key(self, key: str):
+        # Explicit interaction takes ownership of the presentation immediately.
+        self._island_dj_outro_until = 0.0
         if key.startswith("music:"):
             command = key.split(":", 1)[1]
             if command == "open_surface":
@@ -9783,7 +9827,7 @@ class IslandStackVisual(QWidget):
         )
 
     def _music_target_width(self, expanded: bool | None = None) -> float:
-        if getattr(self, "_island_dj_speaking", False):
+        if self._personal_dj_island_presenting():
             font = self._font(20, QFont.Weight.DemiBold)
             title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
             return min(self._u(760), max(self._u(380), QFontMetrics(font).horizontalAdvance(title) + self._u(152)))
@@ -11641,7 +11685,7 @@ class IslandStackVisual(QWidget):
         return max(self._u(74.0), width), self._u(40.0)
 
     def _compact_music_content_height_raw(self) -> float:
-        if bool(getattr(self, "_island_dj_speaking", False)):
+        if self._personal_dj_island_presenting():
             return 112.0
         if self._should_paint_album_island():
             return self._album_island_compact_music_height()
@@ -11672,7 +11716,7 @@ class IslandStackVisual(QWidget):
         return height
 
     def _notch_music_needs_content_height(self) -> bool:
-        if bool(getattr(self, "_island_dj_speaking", False)):
+        if self._personal_dj_island_presenting():
             return True
         if self._should_paint_album_island():
             return True
@@ -11712,7 +11756,7 @@ class IslandStackVisual(QWidget):
 
     def _base_main_size_for_kind(self, main_kind: IslandKind, stack_w: float) -> tuple[float, float]:
         taskbar_compact = self._taskbar_compact_active()
-        if main_kind == IslandKind.MUSIC and bool(getattr(self, "_island_dj_speaking", False)) and not taskbar_compact:
+        if main_kind == IslandKind.MUSIC and self._personal_dj_island_presenting() and not taskbar_compact:
             # The existing SpringRect grows the island itself; DJ never adds
             # a nested card. Tasker retains its physical taskbar bounds.
             return stack_w, self._u(112.0)
@@ -12330,7 +12374,7 @@ class IslandStackVisual(QWidget):
     def _music_enabled_for_stack(self) -> bool:
         if not bool(getattr(self, "music_playing", False)):
             return False
-        if bool(getattr(self, "_island_dj_speaking", False)):
+        if self._personal_dj_island_presenting():
             return True
         if not bool(getattr(self, "music_auto_detect", False)):
             return True
@@ -13444,7 +13488,7 @@ class IslandStackVisual(QWidget):
 
     def _paint_music(self, painter: QPainter, rect: QRectF, expanded: bool):
         total_started_at = time.perf_counter()
-        dj_speaking = bool(getattr(self, "_island_dj_speaking", False))
+        dj_speaking = self._personal_dj_island_presenting()
         if dj_speaking:
             # Reuse the actual island ambience and shell, including top-notch
             # fusion, rather than drawing a second rectangle over them.
@@ -13497,9 +13541,16 @@ class IslandStackVisual(QWidget):
         try:
             state = getter() if callable(getter) else None
             speaking = isinstance(state, dict) and state.get("speaking") is True
-            title = str(state.get("next_title", "")) if speaking else ""
-            token = state.get("token") if speaking else None
+            pending = isinstance(state, dict) and state.get("introduction_pending") is True
+            failed = isinstance(state, dict) and state.get("introduction_failed") is True
+            pending = pending and not state.get("is_preview", False)
+            failed = failed and not state.get("is_preview", False)
+            presenting = speaking or pending or failed
+            title = str(state.get("next_title", "")) if presenting else ""
+            token = state.get("token") if presenting else None
         except Exception:
+            state = None
+            pending = failed = presenting = False
             speaking, title, token = False, "", None
         try:
             frame = frame_getter() if speaking and callable(frame_getter) else None
@@ -13507,13 +13558,69 @@ class IslandStackVisual(QWidget):
             # FFT is optional presentation data, never authority for whether
             # the independent DJ decoder is currently speaking.
             frame = None
-        changed = (speaking, title, token) != (getattr(self, "_island_dj_speaking", False),
-            getattr(self, "_island_dj_title", ""), getattr(self, "_island_dj_token", None))
+        artist = str(getattr(self, "artist", "") or "") if presenting else ""
+        status = ("failed" if failed else str(state.get("state", "loading"))
+            if pending and not speaking else "")
+        changed = (speaking, title, token, artist, status) != (getattr(self, "_island_dj_speaking", False),
+            getattr(self, "_island_dj_title", ""), getattr(self, "_island_dj_token", None),
+            getattr(self, "_island_dj_artist", ""), getattr(self, "_island_dj_status", ""))
+        snapshot = state if isinstance(state, dict) else {}
+        completion = snapshot.get("completion_id", 0)
+        completion = completion if isinstance(completion, int) else 0
+        seen = int(getattr(self, "_island_dj_completion_seen", 0))
+        current_track = str(getattr(self, "media_track_id", "") or "")
+        island_active = (not bool(getattr(self, "_music_surface_active", False))
+            and not bool(getattr(self, "scene_suppressed", False)))
+        try:
+            island_active = island_active and self.isVisible()
+        except RuntimeError:
+            island_active = False
+        if speaking and not snapshot.get("is_preview", False) and island_active:
+            self._island_dj_observed_track = current_track
+        if completion > seen:
+            # Consume completions even while hidden. A later mode return must
+            # not replay an old narration's expansion.
+            self._island_dj_completion_seen = completion
+            completed_at = snapshot.get("completed_at", 0.0)
+            fresh = isinstance(completed_at, (int, float)) and 0.0 <= now - completed_at <= .5
+            if (fresh and island_active and not speaking and not snapshot.get("is_preview", False)
+                    and current_track and snapshot.get("completed_track_id") == current_track
+                    and getattr(self, "_island_dj_observed_track", "") == current_track):
+                self._island_dj_outro_started = now
+                self._island_dj_outro_until = now + .32 + 2.0
+                self._island_dj_outro_track = current_track
+                self.left_stack_at = 0.0
+                self.hover_armed_key = ""
+                self._set_expanded(True)
+                changed = True
+        until = float(getattr(self, "_island_dj_outro_until", 0.0))
+        if until:
+            canceled = (presenting or not island_active or completion == 0
+                or current_track != getattr(self, "_island_dj_outro_track", ""))
+            if canceled or now >= until:
+                self._island_dj_outro_until = 0.0
+                # A new narration owns the shell; hidden surfaces should not
+                # keep the preceding automatic expansion when they return.
+                self._set_expanded(False)
+                changed = True
         if token != getattr(self, "_island_dj_token", None):
             self._island_dj_started = now
         self._island_dj_speaking, self._island_dj_title = speaking, title
+        self._island_dj_artist = artist
+        self._island_dj_status = status
         self._island_dj_token, self._island_dj_frame = token, frame
         return changed
+
+    def _personal_dj_island_presenting(self) -> bool:
+        return bool(getattr(self, "_island_dj_speaking", False)
+            or getattr(self, "_island_dj_status", ""))
+
+    def _personal_dj_island_outro_progress(self) -> float:
+        if not float(getattr(self, "_island_dj_outro_until", 0.0)):
+            return 1.0
+        elapsed = (time.monotonic() - float(getattr(self, "_island_dj_outro_started", 0.0))) / .32
+        progress = max(0.0, min(1.0, elapsed))
+        return progress * progress * (3.0 - 2.0 * progress)
 
     def _paint_personal_dj_island(self, painter: QPainter, rect: QRectF):
         """Large independent hollow rings and title on the existing ambience."""
@@ -13522,21 +13629,69 @@ class IslandStackVisual(QWidget):
             self._effective_music_ambience_style())
         painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
         self.music_button_rects = {}
-        side = min(rect.height() * .90, self._u(100))
-        icon = QRectF(rect.left() + self._u(13), rect.center().y() - side / 2, side, side)
-        ink = self._wave_fill_color()
+        status = str(getattr(self, "_island_dj_status", ""))
+        compact_status = bool(status) and rect.height() < self._u(72)
+        icon_area = rect.adjusted(0., 0., 0., -self._u(20)) if status and not compact_status else rect
+        side = min(icon_area.height() * .90, self._u(100))
+        icon = QRectF(rect.left() + self._u(13), icon_area.center().y() - side / 2, side, side)
+        ink = self._personal_dj_island_color()
         paint_personal_dj_icon(painter, icon,
             ink, neutral=QColor(242, 242, 245), bands=getattr(self, "_island_dj_frame", None),
+            max_lightening=float(getattr(self, "_island_dj_lightening", .60)),
             elapsed=max(0., time.monotonic() - getattr(self, "_island_dj_started", 0.)))
+        status_text = {"failed": "播报加载失败", "ready": "播报已准备好"}.get(status, "播报加载中")
+        if status and not compact_status:
+            # Loading/fault evidence is independent of idle controls, and is
+            # never represented as measured speech or a completed intro.
+            painter.setFont(self._font(8, QFont.Weight.Medium))
+            painter.setPen(self._music_meta_text_color(190))
+            painter.drawText(QRectF(icon.left(), rect.bottom() - self._u(19), icon.width(), self._u(15)),
+                Qt.AlignmentFlag.AlignCenter, status_text)
         title_rect = QRectF(icon.right() + self._u(16), rect.top(),
                             max(0., rect.right() - icon.right() - self._u(32)), rect.height())
+        artist = str(getattr(self, "_island_dj_artist", "") or getattr(self, "artist", "") or "")
+        if artist or compact_status:
+            block_height = min(rect.height() - self._u(4), self._u(64))
+            title_rect.setTop(rect.center().y() - block_height / 2)
+            title_rect.setHeight(block_height * .58)
         font = self._font(min(22., max(12., rect.height() / self.VISUAL_SCALE * .32)), QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(self._music_lyric_text_color())
         title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
         title = QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, max(1, int(title_rect.width())))
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, title)
+        if artist or compact_status:
+            gap = min(self._u(4), block_height * .05)
+            artist_rect = QRectF(title_rect.left(), title_rect.bottom() + gap,
+                title_rect.width(), block_height - title_rect.height() - gap)
+            artist_size = min(11., max(7., artist_rect.height() / self._u(1) * .52))
+            artist_font = self._font(artist_size, QFont.Weight.Medium)
+            painter.setFont(artist_font)
+            painter.setPen(self._music_meta_text_color(176))
+            if compact_status:
+                # A taskbar-height shell cannot fit a full caption beneath its
+                # rings. Reserve actual text width beside the artist instead.
+                status_width = min(artist_rect.width(), float(QFontMetrics(artist_font).horizontalAdvance(status_text)) + self._u(2))
+                status_rect = QRectF(artist_rect.right() - status_width, artist_rect.top(), status_width, artist_rect.height())
+                painter.drawText(status_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, status_text)
+                artist_rect.setRight(max(artist_rect.left(), status_rect.left() - self._u(8)))
+            artist = QFontMetrics(artist_font).elidedText(artist, Qt.TextElideMode.ElideRight, max(1, int(artist_rect.width())))
+            painter.drawText(artist_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, artist)
         painter.restore()
+
+    def _personal_dj_island_color(self) -> QColor:
+        """Use the shared characteristic role, never invalid gray lyric fill."""
+        palette = self._solid_album_surface_palette()
+        style = self._effective_music_ambience_style()
+        backdrop = (solid_album_background_color(palette) if style == "solid_album"
+            else QColor(255, 255, 255) if style == "pure_white" else QColor(28, 28, 30))
+        key = (palette.characteristic.rgba(), palette.primary.rgba(), backdrop.rgba())
+        if key != getattr(self, "_island_dj_color_key", None):
+            self._island_dj_color_key = key
+            self._island_dj_color = future_lyric_color(palette.characteristic, backdrop,
+                use_light=relative_luminance(backdrop) < .11, primary=palette.primary)
+            self._island_dj_lightening = personal_dj_lightening_limit(self._island_dj_color, backdrop)
+        return QColor(self._island_dj_color)
 
     def _execute_music_surface_paint_step(
         self,
@@ -15666,13 +15821,70 @@ class IslandStackVisual(QWidget):
         margin = self._u(16)
         cover_size = self._u(58)
         cover = QRectF(rect.left() + margin, rect.top() + self._u(14), cover_size, cover_size)
-        self.music_cover_rect = QRectF(cover)
-        self._paint_interactive_music_cover(painter, cover, self._u(17))
-
         controls_w = self._u(132)
         info = QRectF(cover.right() + self._u(15), cover.top() + self._u(2), rect.right() - cover.right() - controls_w - self._u(48), self._u(68))
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)), self.track_title, 13, self._music_meta_text_color(240), True)
-        self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, self._music_meta_text_color(135), False)
+        progress = self._personal_dj_island_outro_progress()
+        if progress < 1.0:
+            # Move the same rings/title into the established cover/title slots;
+            # the shell and ambience keep their existing physical animation.
+            side = min(rect.height() * .90, self._u(100))
+            origin = QRectF(rect.left() + self._u(13), rect.center().y() - side / 2, side, side)
+            moving_cover = QRectF(*(a + (b - a) * progress for a, b in zip(
+                (origin.x(), origin.y(), origin.width(), origin.height()),
+                (cover.x(), cover.y(), cover.width(), cover.height()))))
+            self.music_cover_rect = QRectF(moving_cover)
+            painter.save()
+            opacity = painter.opacity()
+            painter.setOpacity(opacity * progress)
+            self._paint_interactive_music_cover(painter, moving_cover, self._u(17))
+            painter.setOpacity(opacity * (1.0 - progress))
+            paint_personal_dj_icon(painter, moving_cover, self._personal_dj_island_color(),
+                neutral=QColor(242, 242, 245), elapsed=max(0., time.monotonic()
+                    - float(getattr(self, "_island_dj_started", 0.0))),
+                max_lightening=float(getattr(self, "_island_dj_lightening", .60)))
+            painter.restore()
+            origin_title = QRectF(origin.right() + self._u(16), rect.top(),
+                max(0., rect.right() - origin.right() - self._u(32)), rect.height())
+            if getattr(self, "artist", ""):
+                block_height = min(rect.height() - self._u(4), self._u(64))
+                origin_title.setTop(rect.center().y() - block_height / 2)
+                origin_title.setHeight(block_height * .58)
+            title_target = QRectF(info.left(), info.top(), info.width(), self._u(34))
+            moving_title = QRectF(*(a + (b - a) * progress for a, b in zip(
+                (origin_title.x(), origin_title.y(), origin_title.width(), origin_title.height()),
+                (title_target.x(), title_target.y(), title_target.width(), title_target.height()))))
+            initial_size = min(22., max(12., rect.height() / self.VISUAL_SCALE * .32))
+            font = self._font(initial_size + (13. - initial_size) * progress, QFont.Weight.DemiBold)
+            metrics = QFontMetrics(font)
+            title = metrics.elidedText(self.track_title, Qt.TextElideMode.ElideRight, max(1, int(moving_title.width())))
+            inset = max(0., moving_title.width() - metrics.horizontalAdvance(title)) * .5 * (1. - progress)
+            painter.setFont(font)
+            painter.setPen(self._music_meta_text_color(240))
+            painter.drawText(moving_title.adjusted(inset, 0., 0., 0.),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, title)
+            if self.artist:
+                gap = min(self._u(4), block_height * .05)
+                origin_artist = QRectF(origin_title.left(), origin_title.bottom() + gap,
+                    origin_title.width(), block_height - origin_title.height() - gap)
+                target_artist = QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24))
+                moving_artist = QRectF(*(a + (b - a) * progress for a, b in zip(
+                    (origin_artist.x(), origin_artist.y(), origin_artist.width(), origin_artist.height()),
+                    (target_artist.x(), target_artist.y(), target_artist.width(), target_artist.height()))))
+                artist_font = self._font(11. - 2. * progress, QFont.Weight.Medium)
+                artist_metrics = QFontMetrics(artist_font)
+                artist = artist_metrics.elidedText(self.artist, Qt.TextElideMode.ElideRight, max(1, int(moving_artist.width())))
+                inset = max(0., moving_artist.width() - artist_metrics.horizontalAdvance(artist)) * .5 * (1. - progress)
+                painter.setFont(artist_font)
+                painter.setPen(self._music_meta_text_color(round(176 - 41 * progress)))
+                painter.drawText(moving_artist.adjusted(inset, 0., 0., 0.),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, artist)
+        else:
+            self.music_cover_rect = QRectF(cover)
+            self._paint_interactive_music_cover(painter, cover, self._u(17))
+            self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)), self.track_title, 13, self._music_meta_text_color(240), True)
+            self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, self._music_meta_text_color(135), False)
+        painter.save()
+        painter.setOpacity(painter.opacity() * progress)
 
         controls_x = rect.right() - margin - controls_w
         commands = ["music:previous", "music:toggle_play_pause", "music:next"]
@@ -15685,6 +15897,7 @@ class IslandStackVisual(QWidget):
 
         viewport = QRectF(rect.left() + self._u(22), cover.bottom() + self._u(10), rect.width() - self._u(44), rect.bottom() - cover.bottom() - self._u(28))
         self._paint_lyric_viewport(painter, viewport)
+        painter.restore()
 
     def _paint_music_expanded_dual_panel(self, painter: QPainter, rect: QRectF):
         lyric_panel, info_panel = self._dual_panel_music_rects(rect)

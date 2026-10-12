@@ -348,19 +348,22 @@ class LocalIslandApp:
         track = self.owned_player.track if active else None
         key = (active, str(getattr(track, "track_id", "") or ""),
                bool(getattr(track, "is_playing", False)))
+        now = time.monotonic()
+        # The DJ title, artist and completion belong to this source snapshot.
+        # Publish a changed song before its synchronous speaking/EOF signal
+        # can observe the previous owner metadata.
+        if key != self._owned_surface_key:
+            self._owned_surface_key = key
+            self.window.last_media_refresh_at = 0.0
+            if self.window._refresh_media_data(now):
+                self.window.update()
+                surface = getattr(self.window, "music_fullscreen_overlay", None)
+                if surface is not None and surface.isVisible():
+                    surface._finish_stale_track_transition()
+                    surface.update()
         sync_dj = getattr(self.window, "_sync_personal_dj_island", None)
-        if callable(sync_dj) and sync_dj(time.monotonic()):
+        if callable(sync_dj) and sync_dj(now):
             self.window.update()
-        if key == self._owned_surface_key:
-            return
-        self._owned_surface_key = key
-        self.window.last_media_refresh_at = 0.0
-        if self.window._refresh_media_data(time.monotonic()):
-            self.window.update()
-            surface = getattr(self.window, "music_fullscreen_overlay", None)
-            if surface is not None and surface.isVisible():
-                surface._finish_stale_track_transition()
-                surface.update()
 
     def _playback_mode_changed(self, key, value):
         if key == "v2_owned_playback_mode":

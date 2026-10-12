@@ -82,7 +82,7 @@ from local.audio_output_motion import OutputConnectionMotion, connection_capsule
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
 from local.music_source_icons import paint_music_source_icon
-from local.personal_dj_icon import paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
+from local.personal_dj_icon import DJ_RING_CYCLE_SECONDS, paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
 from local.liquid_glass import paint_liquid_glass
 from local.control_hover import HoverMotion, MENU_HOVER_DELAY_MS, advance_neighbor_spring, hover_scale, neighbor_displacement
 
@@ -135,6 +135,8 @@ class MusicSurfaceWindow(QWidget):
     FULLSCREEN_CONTROL_IDLE_SECONDS = 5.0
     WINDOWED_CONTROL_IDLE_SECONDS = 2.0
     FULLSCREEN_CONTROL_TRANSITION_SECONDS = 0.52
+    DJ_SPEECH_CONTRACTION_SECONDS = 0.32
+    DJ_OUTRO_IDLE_SECONDS = 2 * DJ_RING_CYCLE_SECONDS
     LIBRARY_EXPANSION_SECONDS = 0.36
     LOW_PERCEPTION_BLOCK_WIPE_SECONDS = 0.5
     SURFACE_FONT_FAMILIES = ("Segoe UI", "Microsoft YaHei UI")
@@ -201,6 +203,12 @@ class MusicSurfaceWindow(QWidget):
         self._dj_presentation_token = None
         self._dj_ring_started_at = time.monotonic()
         self._dj_failed_until = 0.0
+        self._dj_outro_started_at: float | None = None
+        self._dj_outro_track_id = ""
+        self._dj_completed_token = 0
+        self._dj_next_preload_state = "idle"
+        self._dj_introduction_pending = False
+        self._dj_introduction_failed = False
         self._dj_last_damage = QRect()
         self._mode_snapshot_dj_hit_path = QPainterPath()
         self._audio_output_panel: AudioOutputPanel | None = None
@@ -8350,6 +8358,9 @@ class MusicSurfaceWindow(QWidget):
         icon, caption = self._personal_dj_geometry(rect, time.monotonic(), expansion=1.0)
         padding = max(8.0, 12.0 * self._surface_scale(rect))
         damage = icon.united(caption).adjusted(-padding, -padding, padding, padding)
+        if (self._personal_dj_outro_reveal_at(time.monotonic()) > .001
+                or self._dj_introduction_pending or self._dj_introduction_failed):
+            damage = damage.united(self._personal_dj_outro_status_rect(rect, time.monotonic()))
         if self._owned_dj_speaking or self._personal_dj_activity_at(time.monotonic()) > .001:
             damage = damage.united(self._personal_dj_backdrop_rect(rect))
         # The caller also unites the previous damage, erasing the dark corner
@@ -8392,13 +8403,42 @@ class MusicSurfaceWindow(QWidget):
         return shape
 
     def _personal_dj_activity_at(self, now: float) -> float:
-        progress = max(0.0, min(1.0, (now - self._dj_activity_started_at) / .32))
+        progress = max(0.0, min(1.0, (now - self._dj_activity_started_at) / self.DJ_SPEECH_CONTRACTION_SECONDS))
         return self._dj_activity_from + (self._dj_activity_to - self._dj_activity_from) * self._control_spring_progress(progress)
+
+    def _personal_dj_outro_reveal_at(self, now: float) -> float:
+        if self._dj_outro_started_at is None or self._owned_personal_dj_enabled is not True:
+            return 0.0
+        hide_at = self._dj_outro_started_at + self.DJ_SPEECH_CONTRACTION_SECONDS + self.DJ_OUTRO_IDLE_SECONDS
+        progress = (now - hide_at) / self.FULLSCREEN_CONTROL_TRANSITION_SECONDS
+        return max(0.0, min(1.0, 1.0 - self._control_spring_progress(progress)))
+
+    def _personal_dj_outro_status_text(self) -> str:
+        return {"ready": "下一首歌播报已准备好", "loading": "下一首歌播报加载中",
+                "failed": "下一首歌播报加载失败"}.get(self._dj_next_preload_state, "等待下一首歌播报")
+
+    def _personal_dj_pending_status_text(self) -> str:
+        if self._dj_introduction_failed:
+            return "本首歌播报加载失败"
+        if self._dj_presentation_state == "ready":
+            return "本首歌播报已准备好"
+        return "本首歌播报加载中"
+
+    def _personal_dj_outro_status_rect(self, rect: QRectF, now: float) -> QRectF:
+        icon, _caption = self._personal_dj_geometry(rect, now)
+        scale = self._surface_scale(rect)
+        margin = max(10.0, 18.0 * scale)
+        height = max(22.0, 26.0 * scale)
+        width = min(max(0.0, icon.left() - margin - 10.0 * scale), 230.0 * scale)
+        return QRectF(icon.left() - 10.0 * scale - width, icon.center().y() - height / 2, width, height)
 
     def _personal_dj_reveal_at(self, now: float) -> float:
         if self._owned_personal_dj_enabled is None:
             return 0.0
-        return max(self._control_reveal_at(now), self._personal_dj_activity_at(now))
+        return max(self._control_reveal_at(now), self._personal_dj_activity_at(now),
+                   self._personal_dj_outro_reveal_at(now),
+                   float(self._owned_personal_dj_enabled is True
+                       and (self._dj_introduction_pending or self._dj_introduction_failed)))
 
     def _sync_personal_dj_state(self):
         provider = getattr(self.owner, "data_provider", None)
@@ -8420,7 +8460,47 @@ class MusicSurfaceWindow(QWidget):
         except Exception:
             enabled, speaking = None, False
             state, title, token = "idle", "", None
+            presentation = {}
         now = time.monotonic()
+        preload_state = presentation.get("next_preload_state", "idle")
+        preload_state = preload_state if isinstance(preload_state, str) and preload_state in {"idle", "loading", "ready", "failed"} else "idle"
+        preload_changed = preload_state != self._dj_next_preload_state
+        self._dj_next_preload_state = preload_state
+        introduction_pending = (enabled is True and presentation.get("introduction_pending") is True
+            and presentation.get("is_preview") is not True)
+        introduction_failed = (enabled is True and presentation.get("introduction_failed") is True
+            and presentation.get("is_preview") is not True)
+        introduction_changed = ((introduction_pending, introduction_failed)
+            != (self._dj_introduction_pending, self._dj_introduction_failed))
+        self._dj_introduction_pending = introduction_pending
+        self._dj_introduction_failed = introduction_failed
+        completion = presentation.get("completion_id", 0)
+        completion = completion if type(completion) is int and completion > 0 else 0
+        completed_track_id = presentation.get("completed_track_id", "")
+        completed_at = presentation.get("completed_at")
+        current_track_id = self._visual_track_identity()
+        previous_outro = self._dj_outro_started_at
+        new_outro = False
+        if (enabled is not True or speaking or presentation.get("is_preview") is True
+                or self._dj_outro_track_id and self._dj_outro_track_id != current_track_id
+                or not completion or self._dj_outro_started_at is not None and now >= self._dj_outro_started_at
+                    + self.DJ_SPEECH_CONTRACTION_SECONDS + self.DJ_OUTRO_IDLE_SECONDS
+                    + self.FULLSCREEN_CONTROL_TRANSITION_SECONDS):
+            self._dj_outro_started_at = None
+            self._dj_outro_track_id = ""
+        elif (completion != self._dj_completed_token and isinstance(completed_track_id, str)
+                and completed_track_id and completed_track_id == current_track_id
+                and type(completed_at) in (int, float) and math.isfinite(completed_at)
+                and 0 <= now - completed_at < self.DJ_SPEECH_CONTRACTION_SECONDS
+                    + self.DJ_OUTRO_IDLE_SECONDS + self.FULLSCREEN_CONTROL_TRANSITION_SECONDS):
+            # The provider's successful end marker excludes pause, failed
+            # speech, previews and manual navigation. Its actual clock also
+            # prevents a hidden page from replaying an old completion.
+            self._dj_completed_token = completion
+            self._dj_outro_started_at = float(completed_at)
+            self._dj_outro_track_id = completed_track_id
+            self._dj_ring_started_at = float(completed_at) + self.DJ_SPEECH_CONTRACTION_SECONDS
+            new_outro = True
         if enabled is None:
             self._close_dj_voice_selector(immediate=True)
         if not speaking and not title and self._personal_dj_activity_at(now) > .001:
@@ -8431,14 +8511,17 @@ class MusicSurfaceWindow(QWidget):
             self._dj_failed_until = now + 1.2
         elif state == "idle" and now < self._dj_failed_until and enabled is True:
             state = "failed"
-        if (enabled, speaking, state, title, token) == (self._owned_personal_dj_enabled, self._owned_dj_speaking,
-                self._dj_presentation_state, self._dj_next_title, self._dj_presentation_token):
+        if (not new_outro and previous_outro == self._dj_outro_started_at and not preload_changed and not introduction_changed
+                and (enabled, speaking, state, title, token) == (self._owned_personal_dj_enabled, self._owned_dj_speaking,
+                self._dj_presentation_state, self._dj_next_title, self._dj_presentation_token)):
             return
-        if token != self._dj_presentation_token:
+        if token != self._dj_presentation_token and self._dj_outro_started_at is None:
             self._dj_ring_started_at = now
-        self._dj_activity_from = self._personal_dj_activity_at(now)
-        self._dj_activity_to = 1.0 if speaking else 0.0
-        self._dj_activity_started_at = now
+        activity_to = 1.0 if speaking else 0.0
+        if activity_to != self._dj_activity_to:
+            self._dj_activity_from = self._personal_dj_activity_at(now)
+            self._dj_activity_to = activity_to
+            self._dj_activity_started_at = now
         self._owned_personal_dj_enabled, self._owned_dj_speaking = enabled, speaking
         self._dj_presentation_state, self._dj_next_title, self._dj_presentation_token = state, title, token
         self._dj_audio_frame = None
@@ -8545,9 +8628,11 @@ class MusicSurfaceWindow(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(icon)
             painter.restore()
-        status_color = personal_dj_status_color(self._dj_presentation_state)
+        outro_reveal = self._personal_dj_outro_reveal_at(now)
+        status_state = self._dj_next_preload_state if outro_reveal > .001 and not self._owned_dj_speaking else self._dj_presentation_state
+        status_color = personal_dj_status_color(status_state)
         if status_color is not None:
-            opacity = personal_dj_status_opacity(self._dj_presentation_state, elapsed)
+            opacity = personal_dj_status_opacity(status_state, elapsed)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             for spread, alpha in ((3.5, 23), (2.0, 45), (1.0, 230)):
                 color = QColor(status_color)
@@ -8568,6 +8653,26 @@ class MusicSurfaceWindow(QWidget):
             text_rect = caption.adjusted(12.0 * scale, 0, -12.0 * scale, 0)
             title = QFontMetricsF(font).elidedText(self._dj_next_title, Qt.TextElideMode.ElideRight, max(1, round(text_rect.width())))
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, title)
+            painter.restore()
+        waiting = (not self._owned_dj_speaking
+            and (self._dj_introduction_pending or self._dj_introduction_failed))
+        if (outro_reveal > .001 or waiting) and not self._dj_voice_selector_active:
+            painter.save()
+            status_rect = self._personal_dj_outro_status_rect(rect, now)
+            # Let the song-name capsule finish folding into the icon before
+            # replacing it with the following introduction's status.
+            appearing = 1.0 - speech_expansion
+            painter.setOpacity(reveal * (1.0 if waiting else outro_reveal) * appearing)
+            font = self._surface_font(max(10.0, 12.0 * scale), QFont.Weight.Medium)
+            painter.setFont(font)
+            status_text = self._personal_dj_pending_status_text() if waiting else self._personal_dj_outro_status_text()
+            text = QFontMetricsF(font).elidedText(status_text,
+                Qt.TextElideMode.ElideRight, max(1, round(status_rect.width())))
+            alignment = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+            painter.setPen(QColor(7, 9, 14, 140))
+            painter.drawText(status_rect.translated(0, 1), alignment, text)
+            painter.setPen(QColor(240, 242, 246, 220))
+            painter.drawText(status_rect, alignment, text)
             painter.restore()
         painter.restore()
 
