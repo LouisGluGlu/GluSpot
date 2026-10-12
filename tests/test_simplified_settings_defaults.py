@@ -80,6 +80,47 @@ class SimplifiedSettingsDefaultsTests(unittest.TestCase):
             self.assertEqual(manager.get("v2_music_ambience_values"), original["v2_music_ambience_values"])
         self.assertEqual(settings_store.DEFAULT_SETTINGS, original)
 
+    def test_finder_styles_and_drag_ratio_normalize_without_reopening_global_position_settings(self):
+        for raw, expected in (("capsule", "capsule"), (" FADE ", "fade"), ("transparent", "transparent"),
+                              ("unknown", "transparent"), (None, "transparent")):
+            with self.subTest(style=raw):
+                self.assertEqual(settings_store.normalize_finder_bar_style(raw), expected)
+        for raw, expected in ((-3, 0.0), (2, 1.0), (.23, .23), ("0.7", .7), (True, .5),
+                              (None, .5), ("invalid", .5), (float("inf"), .5), (float("nan"), .5)):
+            with self.subTest(ratio=raw):
+                self.assertEqual(settings_store.normalize_finder_bar_center_ratio(raw), expected)
+        with tempfile.TemporaryDirectory() as directory, patch.object(settings_store, "APP_DATA_DIR", directory), patch.object(settings_store, "SETTINGS_FILE", str(Path(directory) / "settings.json")):
+            manager = settings_store.SettingsManager()
+            manager.set("v2_finder_bar_style", "fade")
+            manager.set("v2_finder_bar_center_ratio", .8)
+            manager.set("v2_location_mode", "finder")
+            manager.set("v2_stack_center_ratio", .8)
+            manager.save_now()
+            loaded = settings_store.SettingsManager()
+            self.assertEqual(loaded.get("v2_finder_bar_style"), "fade")
+            self.assertEqual(loaded.get("v2_finder_bar_center_ratio"), .8)
+            self.assertEqual(loaded.get("v2_location_mode"), "top")
+            self.assertEqual(loaded.get("v2_stack_center_ratio"), settings_store.DEFAULT_SETTINGS["v2_stack_center_ratio"])
+
+    def test_invalid_finder_values_migrate_while_explicit_listener_choices_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({"v2_finder_bar_style": "retired", "v2_finder_bar_center_ratio": 4,
+                                        "v2_mydockfinder_listener_process_names": ["dock.exe"]}), encoding="utf-8")
+            with patch.object(settings_store, "APP_DATA_DIR", directory), patch.object(settings_store, "SETTINGS_FILE", str(path)):
+                manager = settings_store.SettingsManager()
+                self.assertTrue(manager._dirty)
+                self.assertEqual(manager.get("v2_finder_bar_style"), "transparent")
+                self.assertEqual(manager.get("v2_finder_bar_center_ratio"), 1.0)
+                self.assertEqual(manager.get("v2_mydockfinder_listener_process_names"), ["dock.exe"])
+                manager.set("v2_finder_bar_style", None)
+                manager.set("v2_finder_bar_center_ratio", float("nan"))
+                manager.save_now()
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["v2_finder_bar_style"], "transparent")
+                self.assertEqual(saved["v2_finder_bar_center_ratio"], .5)
+                self.assertEqual(saved["v2_mydockfinder_listener_process_names"], ["dock.exe"])
+
     def test_session_translation_reaches_lyric_parser_without_changing_next_launch_default(self):
         from api.lyrics import LocalLyricsStore
         from local.app import LocalIslandApp

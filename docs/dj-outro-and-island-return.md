@@ -104,8 +104,11 @@ or failure observable without fabricating speech or a completion animation.
   tests passed in 230.459 seconds, with no skips or Qt callback tracebacks.
   The verbose result is retained in ignored
   `logs/dj-outro-island-full-python-final.log`. The later caption correction
-  passed all 15 focused island-outro tests; the next integrated follow-up must
-  repeat the full suite after its remaining changes.
+  passed all 15 focused island-outro tests. The subsequent integrated Finder
+  follow-up passed all 4383 tests in 250.812 seconds after that correction and
+  all final placement changes, with no skips, errors or Qt callback tracebacks.
+  Final integrated evidence is retained in ignored
+  `logs/finder-bar-final-full-python.log`.
 - Native window/fullscreen preview frames cover speech end, contraction,
   compact readiness, the second idle cycle, hiding and fully hidden states at
   640 × 360, 960 × 540 and 1920 × 1080, at DPR 1/2 (36 frames).

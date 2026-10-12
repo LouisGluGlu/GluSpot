@@ -8,6 +8,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 - Product name: `GluSpot`.
 - Current test-build version: `6.412`.
+- The October 12 Finder Bar follow-up distinguishes a running Dock process from a genuinely enabled `MyFinderApp` top bar. Detecting the real enabled bar enters Finder Bar automatically; while Dock is running, only Finder Bar and Free are available, and closing the bar leaves Free. Media settings expose the four public placement names and three Finder styles, defaulting to transparent artwork and timed lyrics. Horizontal dragging saves only the Finder position ratio; a deliberate downward pull returns to Free. Finder Bar and Tasker Bar remain independent of external fullscreen/maximized/video detection and follow their own bar's real auto-hide without pausing audio. Cached native window refresh runs at most every 100 ms alongside the existing 2.5-second process/configuration poll; trusted window identity and per-monitor physical/logical mapping avoid attaching to unrelated windows. All 4383 final Python tests passed (250.812 seconds, no skips or Qt callback tracebacks), along with 1179 focused tests at each DPR 1/2, 144 Finder preview frames and 80 native Tasker auto-hide checks. Physical multi-monitor and external fullscreen listening remain unverified. See [behavior, detection, verification and limits](docs/finder-bar-modes.md). Version and existing EXE are unchanged; restart this branch's `launch.bat`.
 - The latest October 12 DJ/island follow-up gives genuine completed introductions a 0.32-second visual handoff: the island holds its normal expanded artwork/title/artist layout for 2 seconds before collapsing, while window/fullscreen DJ contracts to its icon, independently runs two 2.5-second idle cycles with truthful next-introduction status, then hides. Island narration includes the artist and uses the shared artwork characteristic color with contrast protection for black/white/gray covers. Returning from a song page settles stale shell motion, removing the reproduced repeated lyric-size oscillation. Temporary foreground DJ worker rejection now retries within a shared 3-second budget, and current introduction loading/failure stays visible independently of hidden controls. All 4305 final Python tests passed (230.459 seconds, no skips or Qt callback tracebacks), with 153 focused player/provider tests, 45 actual muted local HTTP/cache/Qt checks and DPR 1/2 island/window checks. Two authenticated automatic EOF transitions passed 34 checks; the user's live no-icon failure was not reproduced, so its cause and long-session listening remain unverified. See [behavior, verification and limits](docs/dj-outro-and-island-return.md). Version and existing EXE are unchanged; restart this branch's `launch.bat`.
 - The preceding October 12 FM/output follow-up starts genuine DJ speech preparation when a song is selected, before music readiness, and retargets it after consecutive manual Next. Pause and repeat-one keep lookahead active; recommendation reserve counts songs rather than speech parts. The bounded two-file rolling window retains promoted current speech through voice changes and pending catalog replacement. Device rows reserve hover gutters, share bounded painting/hit transforms, expose an explicit drag volume track, and leave the wheel to list scrolling. Enabled compact DJ click/hover opens voice choices; fully expanded rings toggle, and disabled rings enable DJ. All 4244 final Python tests passed (251.738 seconds, no skips or Qt callback tracebacks), with 30 actual muted cache/Qt checks, 271 focused playback tests and final DPR 1/2 device/DJ controls. See [behavior and verification](docs/fm-preload-and-output-interaction.md) and the [report-only AirPods noise-control feasibility research](docs/airpods-noise-control-research.md). Version and existing EXE are unchanged; restart this branch's `launch.bat`.
 - The preceding October 12 follow-up verifies the real NetEase catalog and selected speech for 豆花、黄俊、李源、庞舸, adds saved native voice selection and deliberate official auditions, and opens the lower-right slider after half-second hover growth with a two-second pointer-leave grace. Existing controls grow with distance-decaying elastic peer motion; original shapes/pigments remain with fine glass rims and 80% original alpha, replacing the preceding sampled backing. The introduced music plays at 20% gain beneath a separate normal-gain DJ layer and returns to its original gain smoothly over one second. Only the cover keeps the smaller paused pose; manual Next resumes paused playback. Island speech uses larger independent hollow rings and its original ambience, grows Free/top placement to 112 logical units without an extra card or ball, and updates while the song page is hidden. Horizontal lyrics follow their own row clock. All 4212 final Python tests passed (246.139 seconds, no skips or Qt callback tracebacks), alongside 101 actual muted Qt playback checks and focused DPR 1/2 controls. See [current behavior, verification and limits](docs/dj-voices-hover-and-ducking.md), [glass reference evidence](docs/liquid-glass-references.md) and [verified DJ contract](docs/personal-dj-client-contract.md). Version and existing EXE are unchanged; restart this branch's `launch.bat`.
@@ -146,37 +147,43 @@ Island speech uses larger independent hollow rings with the title and artist dir
 The settings window has four pages:
 
 - Basic: light/dark/system/scheduled theme, startup, custom app icon and shared animation/lyric frame-rate and speed controls.
-- Media: persisted program/system sources and login, optional system-player profiles, lyric offsets, the three island backgrounds and three lyric styles, music-page preload and secondary-content source/conversion. MyDockFinder path, selected listening processes and detected status are here.
+- Media: persisted program/system sources and login, optional system-player profiles, lyric offsets, the three island backgrounds and three lyric styles, music-page preload and secondary-content source/conversion. MyDockFinder path, selected listening processes, separate Dock/MyFinder status, current placement selection and three Finder Bar styles are here.
 - Full-screen lyrics: gold/low-perception reading, lift, gradient width, sparse-highlight threshold, intro cleanup and Cantonese secondary priority. These reading choices remain shared with the established music surfaces. Gold mode is indicated only by the existing gold ripple.
 - About: provider diagnostics, local project location and background cache cleanup. Cover cleanup preserves playback, settings and device state. Online lyric cleanup preserves manual lyrics and offsets.
 
-Island typography, shell/expanded layout, placement defaults, empty-bar geometry, album-cover sizes/spacing, background intensity/reactivity and bilingual/second-line-size settings are fixed to `DEFAULT_SETTINGS`. Older custom values migrate to those defaults and later visual-state exports cannot overwrite them. The song-page translation button still changes the current session; the next launch starts with its fixed default. Playback sources, saved playback mode, login records, reading choices and MyDockFinder configuration remain configurable. Settings search indexes only the surviving widgets.
+Island typography, shell/expanded layout, global placement geometry/defaults, empty-bar geometry, album-cover sizes/spacing, background intensity/reactivity and bilingual/second-line-size settings are fixed to `DEFAULT_SETTINGS`. Older custom values migrate to those defaults and later visual-state exports cannot overwrite them. Current placement can be changed through the Media selector and established drag gestures; the mode is a runtime choice and is not persisted. Finder Bar is the explicit local exception: its three styles and horizontal drag ratio have dedicated saved settings, without reopening global typography or geometry controls. The song-page translation button still changes the current session; the next launch starts with its fixed default. Playback sources, saved playback mode, login records, reading choices and MyDockFinder configuration remain configurable. Settings search indexes only the surviving widgets.
 
 Settings UI style lives mainly in `local/settings_window.py` and `local/mac_style.py`; small shared controls live in `local/no_wheel_widgets.py` and `local/ui_theme.py`.
 
 ## Placement Modes
 
-- `Free`: normal floating island.
-- `Finder`: used only when MyDockFinder is detected or explicitly available. Finder material may frame the island, but the island shell stays its own opaque V2 rendering path.
-- `Tasker`: Windows taskbar fusion. The island follows the taskbar, including taskbar auto-hide. Fullscreen detection must not make Tasker disappear.
-- `Stick`: internal auto-hide-taskbar placement. When Windows taskbar auto-hide is enabled, dragging the island to the bottom edge pins the free-style island just above the taskbar instead of entering Tasker.
+- `Tasker Bar` (`tasker`): Windows taskbar placement; follows the actual taskbar and its auto-hide.
+- `Top Island` (`top`): island pinned to the physical screen's top edge.
+- `Free` (`free`): normal floating island away from the top and bottom placement edges.
+- `Finder Bar` (`finder`): artwork and timed lyrics inside an enabled real MyFinder top bar. Its three selectable styles are a rounded color capsule, a horizontal fading color strip and transparent artwork/lyrics; transparent is the default. Horizontal dragging saves its dedicated ratio. Pulling down deliberately returns to Free.
+
+`Stick` (`stick`) remains an internal auto-hide-taskbar compatibility state, displayed as Free rather than a fifth public mode. When Windows taskbar auto-hide is enabled, the established bottom-edge gesture can place the free-style island above the taskbar.
 
 MyDockFinder and Tasker are mutually exclusive:
 
-- MyDockFinder running: allowed modes are `Free` and `Finder`.
-- MyDockFinder not running: allowed modes are `Free` and `Tasker`; `Stick` can be reached only from the auto-hide-taskbar bottom-edge drag gesture.
-- MyDockFinder detection has priority over taskbar auto-hide recognition, because Finder-style shells can hide the Windows taskbar themselves.
+- MyDockFinder running with an enabled real MyFinder bar: allowed modes are Finder Bar and Free. A newly enabled bar automatically selects Finder Bar; routine polling preserves a user's later Free selection.
+- MyDockFinder running without an enabled MyFinder bar: only Free is available. A running Dock process alone does not create a Finder Bar.
+- MyDockFinder not running: allowed public modes are Top Island, Free and Tasker Bar. Internal Stick remains reachable through the established auto-hide-taskbar gesture.
+- Dock presence blocks Windows taskbar auto-hide recognition and automatic taskbar attachment, including when Free is selected, because the Dock can hide the Windows taskbar itself.
+- Finder Bar and Tasker Bar stay visible over external fullscreen, maximized and video windows when their owner bar is visible. Their owner's real auto-hide removes rendering and input regions without changing audio, the playback clock or the selected mode.
+
+Detection uses trusted runtime paths, the actual `MyFinderApp` window class and per-monitor native bounds. Finder placement and material sampling use the matching screen's logical coordinates, including negative origins and mixed DPI. See [Finder Bar detection and limits](docs/finder-bar-modes.md).
 
 ## Tasker Rules
 
-- Tasker position is draggable across the taskbar range, including both bottom corners.
-- Tasker should not snap to center by default.
+- Tasker Bar position is draggable across the taskbar range, including both bottom corners.
+- Tasker Bar should not snap to center by default.
 - The left width handle is outside the island, appears on hover, and should hide after a short delay.
 - Tasker compact layout can shrink down to album-cover mode when the taskbar is crowded.
 - Tasker material and expanded outer frame should sample the taskbar style, not a generic wallpaper crop.
-- Tasker mode keeps island visibility separate from fullscreen, plugin alerts, and barrage.
-- With taskbar auto-hide disabled, dragging the island to the taskbar enters `Tasker`, and dragging Tasker out returns to `Free`.
-- With taskbar auto-hide enabled, the center prompt enters `Tasker`, while the bottom edge enters `Stick`.
+- Tasker Bar is not suppressed by external fullscreen/maximized/video windows. Real taskbar auto-hide controls its rendering and input only; playback continues.
+- These taskbar gestures are available only while MyDockFinder is not running. With taskbar auto-hide disabled, dragging the island to the taskbar enters Tasker Bar, and dragging it out returns to Free.
+- With taskbar auto-hide enabled and MyDockFinder absent, the center prompt enters Tasker Bar, while the bottom edge enters internal Stick.
 
 ## Retired Extras
 

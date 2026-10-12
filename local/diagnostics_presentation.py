@@ -5,6 +5,7 @@ from typing import Any
 
 from local.diagnostics_evidence import build_diagnostics_evidence_report
 from local.runtime_experiment import RuntimeExperimentPlan, build_runtime_experiment_plan
+from local.settings_store import placement_mode_label
 
 
 DIAGNOSTIC_FIELD_ROWS: tuple[tuple[str, str], ...] = (
@@ -14,7 +15,8 @@ DIAGNOSTIC_FIELD_ROWS: tuple[tuple[str, str], ...] = (
     ("player_progress_plugin_enabled", "进度插件"),
     ("player_progress_auto_detect", "插件自动识别"),
     ("music_player_adapter", "当前适配器"),
-    ("mydockfinder_running", "MyDockFinder 监听"),
+    ("mydockfinder_running", "MyDockFinder 进程"),
+    ("finder_bar_state", "MyFinder 顶栏"),
     ("mydockfinder_match", "MyDockFinder 命中"),
     ("mydockfinder_reason", "MyDockFinder 诊断"),
     ("media_session_count", "Windows 媒体会话"),
@@ -80,6 +82,22 @@ DIAGNOSTIC_FIELD_ROWS = (
 )
 
 
+def _finder_bar_state_text(data: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> str:
+    if not data.get("mydockfinder_running"):
+        return "未运行"
+    enabled = bool(data.get("finder_bar_enabled", diagnostics.get("finder_enabled", False)))
+    if not enabled:
+        return "未开启或尚未检测到"
+    bars = diagnostics.get("finder_bars") or []
+    if not isinstance(bars, (list, tuple)):
+        bars = []
+    visible = bool(data.get("finder_bar_visible", any(
+        isinstance(bar, dict) and bar.get("enabled") and bar.get("visible")
+        and not bar.get("cloaked") and not bar.get("minimized") for bar in bars
+    )))
+    return "已开启 · 已显示" if visible else "已开启 · 自动隐藏"
+
+
 def format_settings_diagnostics(
     diagnostics: Mapping[str, Any] | None,
     *,
@@ -105,6 +123,7 @@ def format_settings_diagnostics(
         "player_progress_auto_detect": _enabled_text(data.get("player_progress_auto_detect")),
         "music_player_adapter": data.get("music_player_adapter") or "-",
         "mydockfinder_running": "开启" if data.get("mydockfinder_running") else "关闭",
+        "finder_bar_state": _finder_bar_state_text(data, mydockfinder),
         "mydockfinder_match": mydockfinder.get("matched_name") or "-",
         "mydockfinder_reason": mydockfinder.get("reason") or "-",
         "media_session_count": data.get("media_session_count", 0),
@@ -229,7 +248,7 @@ def format_visual_runtime_context(context: Mapping[str, Any] | None) -> str:
     lyric = data.get("lyric_flow_style") or "-"
     location = data.get("location_mode") or "-"
     expanded = "展开" if data.get("expanded") else "紧凑"
-    taskbar = "Tasker紧凑" if data.get("taskbar_compact_active") else str(location)
+    taskbar = "Tasker Bar紧凑" if data.get("taskbar_compact_active") else placement_mode_label(location) if location != "-" else "-"
     reactive = "律动开" if data.get("reactive_background_enabled") else "律动关"
     reactive_intensity = int(_float(data.get("reactive_background_intensity", 0)))
     fps = int(_float(data.get("animation_fps", 0)))

@@ -212,7 +212,7 @@ from local.music_surface_palette import (
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_mode_controls import ArtworkHoverMotion, paint_presentation_glyph
 from local.personal_dj_icon import paint_personal_dj_icon, personal_dj_lightening_limit
-from local.mydockfinder import FinderGlassMaterial, read_finder_material
+from local.mydockfinder import FinderGlassMaterial, read_finder_material, finder_bar_screen_mapping, refresh_live_finder_bar
 from local.plugin_presentation import (
     active_plugin_alerts as presentation_active_plugin_alerts,
     adjust_alarm_editor_field as presentation_adjust_alarm_editor_field,
@@ -293,6 +293,8 @@ from local.settings_store import (
     normalize_music_reading_gradient_steps,
     normalize_music_reading_lift_level,
     normalize_music_reading_strategy,
+    normalize_finder_bar_style,
+    normalize_finder_bar_center_ratio,
 )
 from local.taskbar_positioning import (
     StandaloneAboveTaskbarTarget,
@@ -1189,8 +1191,16 @@ class IslandStackVisual(QWidget):
         if visual_data.messages or visual_data.plugins:
             visual_data = replace(visual_data, messages=(), plugins=())
         self.finder_material: FinderGlassMaterial = read_finder_material(include_center=True)
-        self.finder_mode = bool(self.finder_material.available)
+        # Installed files are not evidence that the real MyFinder bar is on.
+        self.finder_mode = False
         self.attach_to_real_finder = self.finder_mode
+        self.finder_bar_snapshots = []
+        self.finder_bar_rect = QRectF()
+        self.finder_bar_enabled = False
+        self.finder_bar_visible = False
+        self.finder_bar_style = "transparent"
+        self.finder_bar_center_ratio = .5
+        self._finder_bar_follow_checked_at = 0.
         self.setWindowTitle(APP_NAME)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -2808,6 +2818,8 @@ class IslandStackVisual(QWidget):
         )
 
     def _handle_tick_follow_refresh(self, now: float):
+        if self._finder_bar_active():
+            self._refresh_finder_bar_follow_position(now=now)
         self._refresh_top_notch_position()
         if self._tick_follow_refresh_plan(now, active=self._taskbar_compact_active()).should_refresh:
             self._refresh_taskbar_follow_position()
@@ -3196,6 +3208,8 @@ class IslandStackVisual(QWidget):
 
     def _music_lyric_text_color(self, alpha: int = 246) -> QColor:
         alpha = max(0, min(255, int(alpha)))
+        if self._finder_bar_active() and not getattr(self, "expanded", False):
+            return self._finder_bar_ink(alpha)
         if self._effective_music_ambience_style() == "solid_album":
             return solid_album_ink_color(self._solid_album_background_color(), alpha)
         if self._effective_music_ambience_style() == "pure_white":
@@ -3204,6 +3218,8 @@ class IslandStackVisual(QWidget):
 
     def _music_lyric_base_text_color(self, alpha: int = 132) -> QColor:
         alpha = max(0, min(255, int(alpha)))
+        if self._finder_bar_active() and not getattr(self, "expanded", False):
+            return self._finder_bar_ink(alpha)
         if self._effective_music_ambience_style() == "solid_album":
             return self._solid_album_unread_color(alpha)
         if self._effective_music_ambience_style() == "pure_white":
@@ -4305,6 +4321,9 @@ class IslandStackVisual(QWidget):
         self._restoring_position = True
         try:
             if getattr(self, "attach_to_real_finder", False):
+                if self._finder_bar_available():
+                    self._refresh_finder_bar_follow_position(probe=False)
+                    return
                 self.resize(geo.width(), self.height())
                 self.move(geo.left(), geo.top())
                 self._force_super_topmost()
@@ -4789,6 +4808,9 @@ class IslandStackVisual(QWidget):
             return
         self.scene_checked_at = now
         suppressed, reason = self._detect_scene_suppression()
+        if (self._taskbar_compact_active() or self._finder_bar_active()) and reason in {"fullscreen", "maximized", "video"}:
+            suppressed, reason = False, ""
+            self.scene_reason = ""
         self.last_scene_probe_reason = str(reason or "")
         plan = presentation_scene_suppression_update_plan(
             current_suppressed=getattr(self, "scene_suppressed", False),
@@ -4933,6 +4955,10 @@ class IslandStackVisual(QWidget):
             if self._barrage_preview_active():
                 return False, ""
             return True, "settings"
+        if self._finder_bar_active():
+            return (False, "") if self.finder_bar_visible else (True, "finder-hidden")
+        if self._taskbar_compact_active():
+            return (True, "taskbar-hidden") if bool(getattr(self, "taskbar_follow_last_hidden", False)) else (False, "")
         if sys.platform != "win32":
             return False, ""
         try:
@@ -5513,6 +5539,8 @@ class IslandStackVisual(QWidget):
             "v2_location_mode": str(getattr(self, "location_mode", "finder" if self.finder_mode else "free")),
             "v2_top_notch_height_mode": self._normalize_top_notch_height_mode(getattr(self, "top_notch_height_mode", "standard")),
             "v2_finder_mode": self.finder_mode,
+            "v2_finder_bar_style": str(getattr(self, "finder_bar_style", "transparent")),
+            "v2_finder_bar_center_ratio": float(getattr(self, "finder_bar_center_ratio", .5)),
             "v2_manual_mydockfinder": bool(getattr(self, "manual_finder_available", False)),
             "v2_mydockfinder_path": str(getattr(self, "mydockfinder_path", "") or ""),
             "v2_mydockfinder_listener_process_names": list(getattr(self, "mydockfinder_listener_process_names", DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES)),
@@ -5713,10 +5741,12 @@ class IslandStackVisual(QWidget):
             self.drag_detach_global_rects = {}
 
     def _reset_location_runtime_state(self, clear_surface: bool = False, clear_drag_detach: bool = True):
+        self._stop_taskbar_position_animation()
         self._reset_group_frame_state(clear_mask=True)
         self._clear_mode_interaction_state(clear_drag_detach=clear_drag_detach)
         self.taskbar_follow_last_at = 0.0
         self.taskbar_follow_last_key = ""
+        self.taskbar_follow_last_hidden = False
         self.taskbar_hidden_by_follow = False
         if clear_surface:
             self._clear_surface_transition()
@@ -5734,7 +5764,100 @@ class IslandStackVisual(QWidget):
         return path
 
     def available_location_modes(self) -> list[str]:
-        return available_location_modes_for_state(mydockfinder_available=self._mydockfinder_available())
+        return available_location_modes_for_state(mydockfinder_available=self._mydockfinder_available(),
+            finder_bar_available=self._finder_bar_available())
+
+    def _finder_bar_available(self) -> bool:
+        return bool(getattr(self, "finder_bar_enabled", False)) and not getattr(self, "finder_bar_rect", QRectF()).isEmpty()
+
+    def _finder_bar_active(self) -> bool:
+        return bool(getattr(self, "finder_mode", False)) and self._finder_bar_available()
+
+    def _finder_bar_screen(self):
+        snapshot = getattr(self, "_finder_bar_snapshot", None) or {}
+        match = finder_bar_screen_mapping(snapshot, QGuiApplication.screens())
+        return match[0] if match else None
+
+    def _refresh_finder_bar_material(self):
+        screen = self._finder_bar_screen()
+        if screen is None or not self.finder_bar_visible:
+            return
+        snapshot = getattr(self, "_finder_bar_snapshot", None) or {}
+        runtime_path = str(snapshot.get("process_path", ""))
+        root = Path(runtime_path).parent if runtime_path else self._mydockfinder_root_path()
+        self.finder_material = read_finder_material(root, force_screen_sample=True,
+            include_center=not self.isVisible(), screen=screen)
+        self.finder_material_refreshed_at = time.monotonic()
+
+    def set_finder_bar_style(self, style: str, notify: bool = True):
+        self.finder_bar_style = normalize_finder_bar_style(style)
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_finder_bar_center_ratio(self, ratio: float, notify: bool = True):
+        self.finder_bar_center_ratio = normalize_finder_bar_center_ratio(ratio)
+        if notify:
+            self._notify_settings_changed()
+        self.update()
+
+    def set_finder_bar_presence(self, bars, notify: bool = False):
+        previous = self._finder_bar_available()
+        previous_hwnd = getattr(self, "_finder_bar_hwnd", 0)
+        candidates = []
+        for snapshot in bars if isinstance(bars, (list, tuple)) else ():
+            if not isinstance(snapshot, dict) or snapshot.get("enabled") is not True:
+                continue
+            match = finder_bar_screen_mapping(snapshot, QGuiApplication.screens())
+            if match is not None:
+                candidates.append((snapshot, QRectF(*match[1])))
+        selected = next((item for item in candidates if item[0].get("hwnd") == previous_hwnd),
+            candidates[0] if candidates else None)
+        self.finder_bar_snapshots = [dict(item[0]) for item in candidates]
+        self.finder_bar_enabled = selected is not None
+        self.finder_bar_visible = bool(selected and selected[0].get("visible"))
+        self.finder_bar_rect = selected[1] if selected else QRectF()
+        self._finder_bar_snapshot = dict(selected[0]) if selected else None
+        self._finder_bar_hwnd = selected[0].get("hwnd", 0) if selected else 0
+        available = self._finder_bar_available()
+        if available and not previous:
+            self.set_location_mode("finder", notify=False)
+        elif not available and getattr(self, "finder_mode", False):
+            self.set_location_mode("free", notify=False)
+        elif self._finder_bar_active():
+            self._refresh_finder_bar_follow_position(probe=False)
+            if self.finder_bar_visible and time.monotonic() - getattr(self, "finder_material_refreshed_at", 0.) >= 2.:
+                self._refresh_finder_bar_material()
+        if notify and available != previous:
+            self._notify_settings_changed()
+        self.update()
+
+    def _refresh_finder_bar_follow_position(self, now=None, *, probe=True):
+        if not self._finder_bar_active():
+            return False
+        now = time.monotonic() if now is None else now
+        if probe and now - getattr(self, "_finder_bar_follow_checked_at", 0.) >= .10:
+            self._finder_bar_follow_checked_at = now
+            fresh = refresh_live_finder_bar(self._finder_bar_snapshot)
+            if fresh is None:
+                self.finder_bar_visible = False
+            else:
+                match = finder_bar_screen_mapping(fresh, QGuiApplication.screens())
+                if match is not None:
+                    self.finder_bar_rect = QRectF(*match[1])
+                    self.finder_bar_visible = bool(fresh.get("visible"))
+                    self._finder_bar_snapshot = fresh
+                else:
+                    self.finder_bar_visible = False
+        rect = self.finder_bar_rect
+        changed = self.pos() != QPoint(round(rect.left()), round(rect.top())) or self.width() != round(rect.width())
+        self._restoring_position = True
+        try:
+            self.resize(round(rect.width()), self.height())
+            self.move(round(rect.left()), round(rect.top()))
+        finally:
+            self._restoring_position = False
+        return changed
 
     def set_mydockfinder_path(self, path: str, notify: bool = True):
         self.mydockfinder_path = str(path or "").strip().strip('"')
@@ -5777,6 +5900,7 @@ class IslandStackVisual(QWidget):
             mode,
             mydockfinder_available=self._mydockfinder_available(),
             taskbar_auto_hide_mode=str(getattr(self, "taskbar_auto_hide_mode", "auto") or "auto"),
+            finder_bar_available=self._finder_bar_available(),
         )
 
     def _normalize_top_notch_height_mode(self, mode: str | None) -> str:
@@ -5834,8 +5958,11 @@ class IslandStackVisual(QWidget):
                 pass
         if plan.refresh_finder_material:
             try:
-                self.finder_material = read_finder_material(self._mydockfinder_root_path(), force_screen_sample=True, include_center=not self.isVisible())
-                self.finder_material_refreshed_at = time.monotonic()
+                if self._finder_bar_available():
+                    self._refresh_finder_bar_material()
+                else:
+                    self.finder_material = read_finder_material(self._mydockfinder_root_path(), force_screen_sample=True, include_center=not self.isVisible())
+                    self.finder_material_refreshed_at = time.monotonic()
                 self._center_on_screen()
                 self._force_super_topmost()
             except Exception:
@@ -7296,7 +7423,13 @@ class IslandStackVisual(QWidget):
         self._apply_taskbar_follow_target(target, animate=follow_plan.animate_follow, dock=False)
         self.taskbar_follow_last_at = now
         self.taskbar_follow_last_key = geometry_key
-        self.taskbar_follow_last_hidden = bool(target.hidden_autohide)
+        hidden = bool(target.hidden_autohide)
+        self.taskbar_follow_last_hidden = hidden
+        if hidden != previous_hidden:
+            # Auto-hide suppresses the complete expanded face and input, not
+            # just a taskbar-height translation. Media refresh keeps running.
+            self.scene_checked_at = 0.0
+            self._update_scene_state(now)
         if follow_plan.refresh_material:
             self._update_taskbar_material_for_screen(screen, target.visible_taskbar)
             self.taskbar_follow_material_last_at = now
@@ -7343,6 +7476,10 @@ class IslandStackVisual(QWidget):
         overlay.show_zones(host_rect, [hot_zone], self._u(14.0))
 
     def _set_taskbar_presence(self, inside: bool, notify: bool = True):
+        if self._mydockfinder_available():
+            self._clear_taskbar_preview_runtime()
+            self._hide_taskbar_drop_overlay()
+            return
         plan = build_taskbar_presence_plan(
             inside,
             current_location_mode=str(getattr(self, "location_mode", "free") or "free"),
@@ -8621,6 +8758,12 @@ class IslandStackVisual(QWidget):
                 self._pulse_stack()
             return True
         if plan.follow_finder:
+            if self._finder_bar_active():
+                bar = self.finder_bar_rect
+                self.set_finder_bar_center_ratio((global_pos.x() - bar.left()) / max(1., bar.width()), notify=False)
+                self._refresh_finder_bar_follow_position(probe=False)
+                self._force_super_topmost()
+                return False
             self.resize(geo.width(), self.height())
             self.move(geo.left(), geo.top())
             usable = max(1.0, float(geo.width()))
@@ -8670,13 +8813,16 @@ class IslandStackVisual(QWidget):
                 self._update_taskbar_preview_for_drag(global_pos)
 
     def _finder_attach_allowed(self) -> bool:
-        return self._mydockfinder_available()
+        return self._mydockfinder_available() and self._finder_bar_available()
 
     def _should_attach_to_finder(self, global_pos: QPoint, delta: QPoint) -> bool:
         attach_allowed = self._finder_attach_allowed()
         delta_y = float(delta.y())
         if not attach_allowed or delta_y >= 0.0:
             return False
+        if self._finder_bar_available():
+            bar = self.finder_bar_rect
+            return bool(bar.adjusted(0., -self._u(18), 0., self._u(18)).contains(QPointF(global_pos)))
         screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
         if not screen:
             return False
@@ -8705,14 +8851,18 @@ class IslandStackVisual(QWidget):
         self.taskbar_fusion_mode = "off"
         self.taskbar_preview_visible = False
         self._hide_taskbar_drop_overlay()
-        self.finder_material = read_finder_material(self._mydockfinder_root_path(), force_screen_sample=True, include_center=True)
-        self.finder_material_refreshed_at = time.monotonic()
+        self._refresh_finder_bar_material()
         self.resize(geo.width(), self.height())
         self.move(geo.left(), geo.top())
         self.saved_window_pos = None
         self.stack_center_ratio = max(0.06, min(0.94, (global_pos.x() - geo.left()) / max(1.0, float(geo.width()))))
         self._force_super_topmost()
         self._notify_settings_changed()
+
+        if self._finder_bar_available():
+            bar = self.finder_bar_rect
+            self.set_finder_bar_center_ratio((global_pos.x() - bar.left()) / max(1., bar.width()), notify=False)
+            self._refresh_finder_bar_follow_position(probe=False)
 
     def _remember_motion_global_rects(self):
         origin = self.mapToGlobal(QPoint(0, 0))
@@ -9250,6 +9400,8 @@ class IslandStackVisual(QWidget):
         )
 
     def _settle_standalone_above_taskbar(self, anchor_rect: QRectF, screen, taskbar_rect: QRectF, animate: bool = False) -> bool:
+        if self._mydockfinder_available():
+            return False
         target = self._standalone_above_taskbar_target_for_screen(anchor_rect, screen, taskbar_rect, animate=animate)
         if target is None:
             return False
@@ -9827,6 +9979,8 @@ class IslandStackVisual(QWidget):
         )
 
     def _music_target_width(self, expanded: bool | None = None) -> float:
+        if self._finder_bar_active() and not bool(self.expanded if expanded is None else expanded):
+            return self._finder_bar_music_size()[0]
         if self._personal_dj_island_presenting():
             font = self._font(20, QFont.Weight.DemiBold)
             title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
@@ -11755,6 +11909,8 @@ class IslandStackVisual(QWidget):
         return width, height
 
     def _base_main_size_for_kind(self, main_kind: IslandKind, stack_w: float) -> tuple[float, float]:
+        if self._finder_bar_active() and not bool(getattr(self, "expanded", False)):
+            return (min(stack_w, self.finder_bar_rect.width()), self.finder_bar_rect.height())
         taskbar_compact = self._taskbar_compact_active()
         if main_kind == IslandKind.MUSIC and self._personal_dj_island_presenting() and not taskbar_compact:
             # The existing SpringRect grows the island itself; DJ never adds
@@ -11939,9 +12095,14 @@ class IslandStackVisual(QWidget):
     def _finder_stack_top_y(self) -> float:
         if not self.finder_mode:
             return self._u(72.0)
+        if self._finder_bar_active():
+            return self.finder_bar_rect.height() + self._u(4) if self.expanded else 0.
         return self._finder_content_gap()
 
     def _stack_center_x(self, content_width: float) -> float:
+        if self._finder_bar_active():
+            margin = min(self.width() / 2., content_width / 2. + self._u(4))
+            return max(margin, min(self.width() - margin, self.width() * self.finder_bar_center_ratio))
         return standalone_stack_center_x(
             finder_mode=bool(getattr(self, "finder_mode", False)),
             window_width=float(self.width()),
@@ -11953,6 +12114,8 @@ class IslandStackVisual(QWidget):
     def _build_visuals(self) -> list[StackVisual]:
         now = time.monotonic()
         main_kind = self._main_kind()
+        if self._finder_bar_active() and not self.expanded and main_kind != IslandKind.MUSIC:
+            return []
         screen_geo = self._current_screen_geometry()
         target_stack_w = self._stack_target_width(main_kind)
         stack_w = target_stack_w
@@ -13226,6 +13389,14 @@ class IslandStackVisual(QWidget):
         self._paint_taskbar_material_frame(painter, frame)
 
     def _paint_myfinder_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
+        if self._finder_bar_active() and not self.expanded:
+            self.group_frame_motion = None
+            self.group_frame_mode_key = ""
+            self.group_frame_target_rect = QRectF()
+            self.group_frame_target_mode_key = ""
+            self.group_frame_mask_path = None
+            self.finder_hover_rect = QRectF()
+            return
         if not self.finder_mode:
             if self._taskbar_compact_active() and not bool(getattr(self, "expanded", False)):
                 self._paint_taskbar_notification_frame(painter, items, dt)
@@ -13487,6 +13658,9 @@ class IslandStackVisual(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_music(self, painter: QPainter, rect: QRectF, expanded: bool):
+        if self._finder_bar_active() and not expanded:
+            self._paint_finder_bar_music(painter, rect)
+            return
         total_started_at = time.perf_counter()
         dj_speaking = self._personal_dj_island_presenting()
         if dj_speaking:
@@ -13532,6 +13706,69 @@ class IslandStackVisual(QWidget):
                     self._record_visual_paint_section(f"music.{step}", step_started_at)
         finally:
             self._record_visual_paint_section("music.total", total_started_at)
+
+    def _finder_bar_music_size(self):
+        height = self.finder_bar_rect.height()
+        side = max(1., height - 4.)
+        if self._personal_dj_island_presenting():
+            text = getattr(self, "_island_dj_title", "") or self.track_title
+        else:
+            text = self._compact_music_measurement_text() or self.track_title
+        size = self._fit_island_lyric_row_size(text, 18, True, max(1., height - 2.))
+        metric = QFontMetrics(self._wave_stream_font(size, QFont.Weight.Bold, shrink=False))
+        width = min(self.finder_bar_rect.width(), max(self._u(180), min(self._u(700), metric.horizontalAdvance(text)) + side + self._u(30)))
+        return width, height
+
+    def _finder_bar_backdrop(self):
+        color = QColor(getattr(self.finder_material, "mid_color", QColor(190, 190, 190)))
+        if not color.isValid():
+            color = QColor(190, 190, 190)
+        color.setAlpha(255)
+        return color
+
+    def _finder_bar_ink(self, alpha=246):
+        return solid_album_ink_color(self._finder_bar_effective_backdrop(), alpha)
+
+    def _finder_bar_effective_backdrop(self):
+        background = self._finder_bar_backdrop()
+        if getattr(self, "finder_bar_style", "transparent") != "transparent":
+            pigment = QColor(self._solid_album_surface_palette().primary)
+            background = self._mix_color(background, pigment, .87)
+        return background
+
+    def _paint_finder_bar_music(self, painter: QPainter, rect: QRectF):
+        """Single-row cover and the existing timed reading, inside MyFinder."""
+        painter.save()
+        painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
+        self.music_button_rects = {}
+        style = getattr(self, "finder_bar_style", "transparent")
+        if style != "transparent":
+            color = QColor(self._solid_album_surface_palette().primary)
+            color.setAlpha(222)
+            if style == "fade":
+                gradient = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.top())
+                edge = QColor(color)
+                edge.setAlpha(0)
+                gradient.setColorAt(0., edge)
+                gradient.setColorAt(.18, color)
+                gradient.setColorAt(.82, color)
+                gradient.setColorAt(1., edge)
+                painter.fillRect(rect, gradient)
+            else:
+                painter.fillPath(self._rounded_path(rect.adjusted(0., 1., 0., -1.), min(self._u(7), rect.height() / 3)), color)
+        if self._personal_dj_island_presenting():
+            self.music_cover_rect = QRectF()
+            self._paint_personal_dj_island(painter, rect)
+        else:
+            inset = min(2., rect.height() * .10)
+            side = max(1., rect.height() - inset * 2.)
+            cover = QRectF(rect.left() + self._u(8), rect.center().y() - side / 2., side, side)
+            self.music_cover_rect = QRectF(cover)
+            self._paint_interactive_music_cover(painter, cover, min(self._u(4), side * .18))
+            lyrics = QRectF(cover.right() + self._u(7), rect.top() + 1.,
+                max(1., rect.right() - cover.right() - self._u(15)), max(1., rect.height() - 2.))
+            self._paint_compact_lyric_viewport(painter, lyrics)
+        painter.restore()
 
     def _sync_personal_dj_island(self, now: float) -> bool:
         """Read immutable provider state on the existing tick, never during paint."""
@@ -13655,6 +13892,8 @@ class IslandStackVisual(QWidget):
             title_rect.setTop(rect.center().y() - block_height / 2)
             title_rect.setHeight(block_height * .58)
         font = self._font(min(22., max(12., rect.height() / self.VISUAL_SCALE * .32)), QFont.Weight.DemiBold)
+        if self._finder_bar_active() and not getattr(self, "expanded", False):
+            font = self._font(min(14., max(7., title_rect.height() / self._u(1) * .52)), QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.setPen(self._music_lyric_text_color())
         title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
@@ -13685,6 +13924,8 @@ class IslandStackVisual(QWidget):
         style = self._effective_music_ambience_style()
         backdrop = (solid_album_background_color(palette) if style == "solid_album"
             else QColor(255, 255, 255) if style == "pure_white" else QColor(28, 28, 30))
+        if self._finder_bar_active() and not getattr(self, "expanded", False):
+            backdrop = self._finder_bar_effective_backdrop()
         key = (palette.characteristic.rgba(), palette.primary.rgba(), backdrop.rgba())
         if key != getattr(self, "_island_dj_color_key", None):
             self._island_dj_color_key = key

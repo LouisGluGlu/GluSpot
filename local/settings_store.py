@@ -135,7 +135,34 @@ MYDOCKFINDER_LISTEN_PROCESS_CHOICES = (
     ("mydock.exe", "Mydock.exe"),
 )
 
-DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES = ("dock.exe",)
+DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES = ("dock.exe", "dock_64.exe")
+
+PLACEMENT_MODE_LABELS = {
+    "tasker": "Tasker Bar",
+    "top": "Top Island",
+    "free": "Free",
+    "finder": "Finder Bar",
+}
+
+
+def placement_mode_label(mode) -> str:
+    """Keep internal auto-hide placement within the four public modes."""
+    return PLACEMENT_MODE_LABELS.get(str(mode or "free"), "Free")
+
+
+def normalize_finder_bar_style(value) -> str:
+    style = str(value or "transparent").strip().lower()
+    return style if style in {"capsule", "fade", "transparent"} else "transparent"
+
+
+def normalize_finder_bar_center_ratio(value) -> float:
+    try:
+        if isinstance(value, bool):
+            return 0.5
+        ratio = float(value)
+        return max(0.0, min(1.0, ratio)) if math.isfinite(ratio) else 0.5
+    except (TypeError, ValueError, OverflowError):
+        return 0.5
 
 
 def normalize_mydockfinder_listener_process_names(listener_process_names=None) -> tuple[str, ...]:
@@ -171,6 +198,8 @@ DEFAULT_SETTINGS = {
     "v2_manual_mydockfinder": False,
     "v2_mydockfinder_path": "",
     "v2_mydockfinder_listener_process_names": list(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES),
+    "v2_finder_bar_style": "transparent",
+    "v2_finder_bar_center_ratio": 0.5,
     "v2_taskbar_corner_style": "win11",
     "v2_taskbar_auto_hide_mode": "auto",
     "v2_taskbar_left_handle_color": "#8E8E93",
@@ -424,6 +453,14 @@ class SettingsManager(QObject):
             if not isinstance(voice, str) or voice and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", voice) is None:
                 self._settings["v2_personal_dj_voice_key"] = ""
                 migrated = True
+            for key, normalize in (
+                ("v2_finder_bar_style", normalize_finder_bar_style),
+                ("v2_finder_bar_center_ratio", normalize_finder_bar_center_ratio),
+            ):
+                raw = self._settings.get(key)
+                value = normalize(raw)
+                migrated = migrated or raw != value
+                self._settings[key] = value
             original_style = self._settings.get("v2_music_ambience_style")
             for key in ("v2_music_ambience_style", "v2_music_background_follow_previous_style"):
                 raw = self._settings.get(key, "")
@@ -498,6 +535,10 @@ class SettingsManager(QObject):
             return
         if key == "v2_owned_playback_mode" and value not in ("sequential", "shuffle", "repeat_one"):
             value = "sequential"
+        if key == "v2_finder_bar_style":
+            value = normalize_finder_bar_style(value)
+        if key == "v2_finder_bar_center_ratio":
+            value = normalize_finder_bar_center_ratio(value)
         if key in {"v2_music_ambience_style", "v2_music_background_follow_previous_style"}:
             value = normalize_music_ambience_style(value) if value or key == "v2_music_ambience_style" else ""
         if key == "v2_music_ambience_values":

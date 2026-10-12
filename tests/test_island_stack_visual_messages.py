@@ -4267,7 +4267,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.set_mydockfinder_running(True, notify=False)
 
         self.assertEqual(visual.location_mode, "free")
-        self.assertEqual(visual.available_location_modes(), ["free", "finder"])
+        self.assertEqual(visual.available_location_modes(), ["free"])
 
         visual.set_mydockfinder_running(False, notify=False)
 
@@ -4312,7 +4312,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.taskbar_above_follow_active)
         self.assertEqual(refresh_calls, ["refresh"])
 
-    def test_mydockfinder_listener_result_does_not_clear_manual_finder_availability(self):
+    def test_manual_legacy_finder_flag_cannot_replace_a_real_bar(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "finder"
         visual.finder_mode = True
@@ -4330,8 +4330,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertTrue(visual.manual_finder_available)
         self.assertFalse(visual.mydockfinder_running)
-        self.assertEqual(visual.location_mode, "finder")
-        self.assertEqual(visual.available_location_modes(), ["free", "finder"])
+        self.assertEqual(visual.location_mode, "free")
+        self.assertEqual(visual.available_location_modes(), ["free"])
 
     def test_last_position_snapshot_does_not_store_mode(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -5047,6 +5047,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
                 return QRect(0, 0, 1920, 1080)
 
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Geometry-only fixture has no QWidget; native suppression is covered separately.
+        visual._update_scene_state = lambda _now: None
         visual.location_mode = "tasker"
         visual.taskbar_position_ratio = 0.5
         visual.taskbar_manual_width = 0.0
@@ -5195,6 +5197,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
                 return QRect(0, 0, 1920, 1080)
 
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Geometry-only fixture has no QWidget; native suppression is covered separately.
+        visual._update_scene_state = lambda _now: None
         visual.location_mode = "tasker"
         visual.taskbar_position_ratio = 0.5
         visual.taskbar_manual_width = 0.0
@@ -6071,6 +6075,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertFalse(visual._finder_attach_allowed())
 
         visual.manual_finder_available = True
+        self.assertFalse(visual._finder_attach_allowed())
+        visual.finder_bar_enabled = True
+        visual.finder_bar_rect = QRectF(0, 0, 1920, 24)
         self.assertTrue(visual._finder_attach_allowed())
 
     def test_taskbar_left_handle_stays_visible_for_three_seconds_after_hover(self):
@@ -6539,6 +6546,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
                 return QRect(0, 0, 1920, 1080)
 
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Geometry-only fixture has no QWidget; native suppression is covered separately.
+        visual._update_scene_state = lambda _now: None
         visual.location_mode = "tasker"
         visual.finder_mode = False
         visual.expanded = False
