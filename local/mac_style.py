@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton
+from functools import lru_cache
+import math
 
+from PySide6.QtCore import QEasingCurve, QEvent, QRectF, QSignalBlocker, Qt, QVariantAnimation
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QRegion
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import QFrame, QPushButton
+
+from local.branding import ROOT_DIR
 from local.ui_theme import app_dark_mode
-from local.liquid_glass import paint_liquid_glass
-from local.control_hover import install_control_hover
 
 
 def mac_preferences_theme(dark: bool | None = None) -> dict[str, str]:
@@ -78,6 +81,49 @@ def mac_sidebar_icon_colors() -> tuple[str, ...]:
     )
 
 
+_WINDOW_ICON_KEYS = {
+    "MacTrafficRed": "close",
+    "MacTrafficYellow": "minimize",
+    "MacTrafficGreen": "maximize",
+}
+
+
+@lru_cache(maxsize=3)
+def _window_icon_renderer(key: str):
+    renderer = QSvgRenderer(str(ROOT_DIR / "assets" / "window_controls" / f"{key}.svg"))
+    return renderer if renderer.isValid() else None
+
+
+@lru_cache(maxsize=96)
+def _window_icon_mask(key: str, side: int) -> QImage:
+    image = QImage(side, side, QImage.Format.Format_RGBA8888_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    renderer = _window_icon_renderer(key)
+    if renderer is not None:
+        view = renderer.viewBoxF()
+        scale = side / max(1., view.width(), view.height())
+        target = QRectF((side - view.width() * scale) / 2., (side - view.height() * scale) / 2.,
+            view.width() * scale, view.height() * scale)
+        with QPainter(image) as painter:
+            renderer.render(painter, target)
+    return image
+
+
+@lru_cache(maxsize=3)
+def _window_icon_coverage(key: str) -> float:
+    """Alpha-weighted occupied area of the actual SVG, including its holes."""
+    image = _window_icon_mask(key, 256)
+    alpha = image.constBits()[3::4]
+    return sum(alpha) / (255. * image.width() * image.height())
+
+
+def _window_icon_tint(key: str, background: QColor) -> QColor:
+    # Large shapes carry more ink, so they need less darkening than sparse
+    # strokes. Keep the button's hue instead of the SVG's supplied white/gray.
+    retained_brightness = .38 + .25 * _window_icon_coverage(key)
+    return background.darker(round(100. / retained_brightness))
+
+
 class MacTrafficButton(QPushButton):
     COLORS = {
         "MacTrafficRed": "#ff5f57",
@@ -89,13 +135,18 @@ class MacTrafficButton(QPushButton):
         super().__init__(parent)
         self._symbol = symbol
         self._hovered = False
+        self._reveal = None
+        self._icon_key = _WINDOW_ICON_KEYS.get(object_name, "close")
         self._color = QColor(self.COLORS.get(object_name, "#8e8e93"))
         self.setObjectName(object_name)
         self.setToolTip(tooltip)
-        self.setFixedSize(10, 10)
+        self.setFixedSize(20, 20)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(tooltip)
+        # Keep the previous window-control focus contract. Settings initially
+        # focuses its search field; mouse clicks must not latch hover growth.
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        install_control_hover(self)
+        self.setAutoDefault(False)
 
     def enterEvent(self, event):
         self._hovered = True
@@ -110,21 +161,27 @@ class MacTrafficButton(QPushButton):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        paint_liquid_glass(painter, rect, radius=rect.height() / 2, base_color=self._color,
-                          border_color=QColor(0, 0, 0, 36),
-                          light=True, hovered=self._hovered, pressed=self.isDown(), active=True)
-
-        highlight = QColor(255, 255, 255, 72 if self._hovered else 48)
+        rect = QRectF(self.rect()).adjusted(.6, .6, -.6, -.6)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(highlight)
-        painter.drawEllipse(QRectF(rect.left() + 2.0, rect.top() + 1.6, 3.2, 2.4))
-
-        if self._hovered:
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            painter.setPen(QColor(70, 50, 46, 210))
-            painter.setFont(QFont("Segoe UI Symbol", 6, QFont.Weight.Bold))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._symbol)
+        background = self._color.darker(112) if self.isDown() else QColor(self._color)
+        painter.setBrush(background)
+        painter.drawEllipse(rect)
+        reveal = self._reveal if self._reveal is not None else float(self._hovered or self.hasFocus())
+        if reveal > 0.:
+            side = rect.width() * .53
+            icon_rect = QRectF(rect.center().x() - side / 2., rect.center().y() - side / 2., side, side)
+            image = _window_icon_mask(self._icon_key, min(96, max(1, math.ceil(side * self.devicePixelRatioF())))).copy()
+            with QPainter(image) as ink:
+                ink.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+                ink.fillRect(image.rect(), _window_icon_tint(self._icon_key, background))
+            painter.setOpacity(reveal)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawImage(icon_rect, image)
+        if self.hasFocus():
+            painter.setOpacity(1.)
+            painter.setPen(QPen(_window_icon_tint(self._icon_key, background), 1.))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(rect.adjusted(1.5, 1.5, -1.5, -1.5))
         painter.end()
 
 
@@ -133,24 +190,95 @@ class MacTrafficCapsule(QFrame):
         super().__init__(parent)
         self.setObjectName("MacTrafficCapsule")
         self.setProperty("legacyObjectName", "MacTrafficLights")
-        self.setFixedSize(48, 18)
+        # Reserve the expanded footprint. Growing this capsule never moves
+        # the settings search/nav, and uses no elastic peer displacement.
+        self.setFixedSize(116, 40)
+        self._progress = 0.
+        self._hovered = False
+        self.buttons = []
+        self._animation = QVariantAnimation(self)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._animation.valueChanged.connect(self._set_progress)
+        self._set_progress(0.)
+
+    def _capsule_rect(self):
+        width, height = 86. + 30. * self._progress, 32. + 6. * self._progress
+        return QRectF((self.width() - width) / 2., (self.height() - height) / 2., width, height)
+
+    def _set_progress(self, value):
+        self._progress = max(0., min(1., float(value)))
+        rect = self._capsule_rect()
+        side = round(20. + 4. * self._progress)
+        inset = 6. + 3. * self._progress
+        first = rect.left() + inset + side / 2.
+        last = rect.right() - inset - side / 2.
+        for index, button in enumerate(self.buttons):
+            center = first + (last - first) * index / 2.
+            button.setFixedSize(side, side)
+            button.move(round(center - side / 2.), round(rect.center().y() - side / 2.))
+            button._reveal = self._progress
+            button.update()
+        path = QPainterPath()
+        # Integer regions are hit masks, not antialiased paint clips. Leave a
+        # one-pixel fringe so the rounded stroke retains its edge coverage.
+        hit_rect = rect.adjusted(-1., -1., 1., 1.)
+        path.addRoundedRect(hit_rect, hit_rect.height() / 2., hit_rect.height() / 2.)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+        self.update()
+
+    def _set_expanded(self, expanded):
+        target = float(bool(expanded))
+        progress = self._progress
+        if abs(target - progress) < .001:
+            self._animation.stop()
+            self._set_progress(target)
+            return
+        # Qt recalculates the current value when duration/endpoints change.
+        # Retarget from the displayed pose without painting those intermediate
+        # configurations at the previous animation's elapsed time.
+        with QSignalBlocker(self._animation):
+            self._animation.stop()
+            self._animation.setDuration(max(1, round(220. * abs(target - progress))))
+            self._animation.setStartValue(progress)
+            self._animation.setEndValue(target)
+            self._animation.setCurrentTime(0)
+        self._animation.start()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self._set_expanded(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._set_expanded(any(button.hasFocus() for button in self.buttons))
+        super().leaveEvent(event)
+
+    def eventFilter(self, watched, event):
+        if event.type() in {QEvent.Type.FocusIn, QEvent.Type.FocusOut}:
+            self._set_expanded(self._hovered or event.type() == QEvent.Type.FocusIn
+                or any(button is not watched and button.hasFocus() for button in self.buttons))
+        return super().eventFilter(watched, event)
+
+    def hideEvent(self, event):
+        self._hovered = False
+        self._animation.stop()
+        self._set_progress(0.)
+        super().hideEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.setPen(QColor(255, 255, 255, 72))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect, 10, 10)
+        rect = self._capsule_rect().adjusted(1.4, 1.4, -1.4, -1.4)
+        dark = app_dark_mode()
+        painter.setPen(QPen(QColor("#737378" if dark else "#bfc0c3"), 2.8))
+        painter.setBrush(QColor(255, 255, 255, 12 if dark else 90))
+        painter.drawRoundedRect(rect, rect.height() / 2., rect.height() / 2.)
         painter.end()
-        super().paintEvent(event)
 
 
 def mac_traffic_lights(window=None) -> QFrame:
     traffic = MacTrafficCapsule()
-    layout = QHBoxLayout(traffic)
-    layout.setContentsMargins(5, 4, 5, 4)
-    layout.setSpacing(4)
     controls = (
         ("MacTrafficRed", "关闭", "×", lambda: window.close() if window is not None else None),
         ("MacTrafficYellow", "最小化", "−", lambda: window.showMinimized() if window is not None else None),
@@ -168,9 +296,11 @@ def mac_traffic_lights(window=None) -> QFrame:
         ),
     )
     for name, tooltip, symbol, callback in controls:
-        button = MacTrafficButton(name, tooltip, symbol)
+        button = MacTrafficButton(name, tooltip, symbol, traffic)
         button.clicked.connect(callback)
-        layout.addWidget(button)
+        button.installEventFilter(traffic)
+        traffic.buttons.append(button)
+    traffic._set_progress(0.)
     return traffic
 
 
@@ -226,11 +356,6 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             border: 0;
         }}
         QPushButton#MacTrafficRed, QPushButton#MacTrafficYellow, QPushButton#MacTrafficGreen {{
-            min-width: 10px;
-            max-width: 10px;
-            min-height: 10px;
-            max-height: 10px;
-            border-radius: 5px;
             background: transparent;
             border: 0;
             padding: 0;
