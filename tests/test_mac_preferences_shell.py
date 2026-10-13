@@ -845,27 +845,32 @@ class MacPreferencesShellTests(unittest.TestCase):
             window.close()
 
     def test_settings_traffic_lights_show_hover_symbols(self):
-        style = self._source("local/mac_style.py")
+        from local.mac_style import MacTrafficCapsule
+        from local.settings_window import SettingsWindow
 
-        self.assertIn("_symbol", style)
-        self.assertIn("enterEvent", style)
-        self.assertIn("leaveEvent", style)
-        self.assertIn("drawText", style)
-        self.assertIn('"×"', style)
-        self.assertIn('"−"', style)
-        self.assertIn('"□"', style)
+        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
+        try:
+            traffic = window.findChild(MacTrafficCapsule)
+            self.assertEqual([button._icon_key for button in traffic.buttons], ["close", "minimize", "maximize"])
+            traffic._set_progress(1.)
+            self.assertTrue(all(button._reveal == 1. for button in traffic.buttons))
+        finally:
+            window.close()
 
     def test_settings_traffic_lights_use_capsule_backplate(self):
-        style = self._source("local/mac_style.py")
+        from local.mac_style import MacTrafficCapsule, mac_traffic_lights
 
-        self.assertIn("MacTrafficCapsule", style)
-        self.assertIn("setFixedSize(10, 10)", style)
-        self.assertIn("setFixedSize(48, 18)", style)
-        self.assertIn("drawRoundedRect", style)
-        self.assertIn("paint_liquid_glass", style)
-        self.assertIn("layout.setContentsMargins(5, 4, 5, 4)", style)
-        self.assertIn("layout.setSpacing(4)", style)
-        self.assertNotIn("QLinearGradient", style)
+        traffic = mac_traffic_lights()
+        try:
+            self.assertIsInstance(traffic, MacTrafficCapsule)
+            reserved = traffic.size()
+            compact = traffic._capsule_rect()
+            traffic._set_progress(1.)
+            self.assertEqual(traffic.size(), reserved)
+            self.assertGreater(traffic._capsule_rect().width(), compact.width())
+            self.assertTrue(all(traffic.rect().contains(button.geometry()) for button in traffic.buttons))
+        finally:
+            traffic.close()
 
     def test_settings_status_indicators_are_lamp_dots(self):
         source = self._source("local/settings_window.py")
