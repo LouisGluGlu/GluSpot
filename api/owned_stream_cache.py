@@ -81,7 +81,9 @@ class OwnedStreamCache:
     _FILE_NAME = re.compile(r"[0-9a-f]{32}\.(?:part|audio)\Z")
 
     def __init__(self, root=None, *, opener=None, clock=time.monotonic, wall_clock=time.time):
-        base = Path(root) if root is not None else Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "GluSpot" / "audio-cache"
+        from local.branding import is_packaged_app, local_app_data_dir
+        state_root = Path(local_app_data_dir()) if is_packaged_app() else Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "GluSpot"
+        base = Path(root) if root is not None else state_root / "audio-cache"
         self.root = base.absolute()
         self._session = self.root / ("audio-" + secrets.token_hex(16))
         self._opener = opener or build_opener(_SafeRedirect())

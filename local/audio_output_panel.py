@@ -18,7 +18,9 @@ from local.audio_output_panel_pose import output_panel_pose
 from local.music_lyric_motion import MotionSimulationClock
 from local.music_surface_palette import relative_luminance
 from local.no_wheel_widgets import NoWheelSlider
-from local.liquid_glass import GlassPushButton, paint_liquid_glass
+from local.liquid_glass import (GlassPushButton, glass_material_tint, paint_liquid_glass,
+                                widget_glass_backdrop, widget_glass_level, glass_blur_scale)
+from local.ui_theme import app_dark_mode
 from local.control_hover import control_local_position, install_control_hover
 
 
@@ -30,8 +32,10 @@ class _VolumeSlider(NoWheelSlider):
         self.setRange(0, 100)
         self.setSingleStep(2)
         self.setPageStep(10)
-        self.fill, self.track = QColor(170, 170, 175), QColor(255, 255, 255, 35)
+        self.fill = QColor('#0a84ff')
+        self.ink, self.track = QColor(170, 170, 175), QColor(255, 255, 255, 35)
         self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
     def _set_pointer_value(self, position):
         span = max(1., self.width() - 16.)
@@ -71,15 +75,32 @@ class _VolumeSlider(NoWheelSlider):
         start, end = QPointF(8, self.height() / 2), QPointF(self.width() - 8, self.height() / 2)
         fraction = (self.value() - self.minimum()) / max(1, self.maximum() - self.minimum())
         thumb = QPointF(start.x() + (end.x() - start.x()) * fraction, start.y())
-        painter.setPen(QPen(self.track, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawLine(start, end)
-        painter.setPen(QPen(self.fill, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        painter.drawLine(start, thumb)
-        painter.setPen(QPen(self.fill, 1))
-        painter.setBrush(QColor(246, 246, 248))
-        painter.drawEllipse(thumb, 6, 6)
+        # Keep the same scrub range; the short capsule is a scene lens rather
+        # than an opaque white bead. Morph rows call this same painter.
+        level = widget_glass_level(self)
+        track = QRectF(start.x(), start.y() - 3, end.x() - start.x(), 6)
+        image, source = widget_glass_backdrop(self, track)
+        paint_liquid_glass(painter, track, radius=3, base_color=self.track,
+                           face_opacity=level / 100., refractive=True,
+                           light=self.ink.lightness() < 128, material_level=level,
+                           backdrop=image, backdrop_rect=source, hovered=self.underMouse(),
+                           cache_token=(id(self), "track"))
+        # Actual gain keeps the existing Mac blue independently of the scene,
+        # ink and glass strength; only the track and thumb refract the scene.
+        if fraction > 0:
+            painter.setPen(QPen(self.fill, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawLine(start, thumb)
+        capsule = QRectF(thumb.x() - 7.5, thumb.y() - 5.5, 15, 11)
+        image, source = widget_glass_backdrop(self, capsule)
+        pigment = QColor(self.ink)
+        pigment.setAlpha(round(25 + level * .4))
+        paint_liquid_glass(painter, capsule, radius=5.5, base_color=pigment,
+                           light=self.ink.lightness() < 128, material_level=level,
+                           refractive=True, backdrop=image, backdrop_rect=source,
+                           hovered=self.underMouse(), pressed=self.isSliderDown(),
+                           cache_token=(id(self), "thumb"))
         if self.hasFocus():
-            painter.setPen(QPen(self.fill, 1, Qt.PenStyle.DotLine))
+            painter.setPen(QPen(self.ink, 1, Qt.PenStyle.DotLine))
             painter.drawLine(8, self.height() - 3, self.width() - 8, self.height() - 3)
 
 
@@ -149,6 +170,7 @@ class _OutputRow(QAbstractButton):
         self.progress = self.elapsed = 0.0
         self.ink, self.muted = QColor(245, 245, 245), QColor(180, 180, 185)
         self.accent = QColor(self.ink)
+        self.selected_fill = QColor(245, 245, 247)
         self.label_font = QFont("Segoe UI", 10)
         self._row_height = 56
         self.delay_text = ""
@@ -160,10 +182,12 @@ class _OutputRow(QAbstractButton):
         self.details_visible = False
         self.details_progress = 0.0
         self._pointer_action = ""
+        self._device_icon_action = ""
         self.volume_slider = _VolumeSlider(self)
         self.volume_slider.valueChanged.connect(self._volume_changed)
         self.solo_button = _RowActionButton(self)
-        self.solo_button.clicked.connect(lambda: self.solo_requested.emit(self.device.id))
+        self.solo_button.pressed.connect(self._remember_device_icon_action)
+        self.solo_button.clicked.connect(self._activate_device_icon)
         self.join_button = _RowActionButton(self)
         self.join_button.clicked.connect(lambda: self.join_requested.emit(self.device.id))
         self.clicked.connect(self._activate)
@@ -203,7 +227,20 @@ class _OutputRow(QAbstractButton):
 
     def _activate(self):
         action = self._pointer_action or ("mute" if self.state == "active" else "solo")
-        signal = self.mute_requested if action == "mute" else self.join_requested if action == "join" else self.solo_requested
+        if (action == "remove" and self.state != "active"
+                or action == "join" and self.state != "available"):
+            return
+        signal = self.mute_requested if action == "mute" else self.join_requested if action in {"join", "remove"} else self.solo_requested
+        signal.emit(self.device.id)
+
+    def _remember_device_icon_action(self):
+        self._device_icon_action = "remove" if self.state == "active" and self.grouped else "solo"
+
+    def _activate_device_icon(self):
+        action, self._device_icon_action = self._device_icon_action, ""
+        if self.state != "active":
+            return
+        signal = self.join_requested if action == "remove" else self.solo_requested
         signal.emit(self.device.id)
 
     def mousePressEvent(self, event):
@@ -211,7 +248,8 @@ class _OutputRow(QAbstractButton):
             if self.state == "available" and self.join_button.geometry().contains(event.position().toPoint()):
                 self._pointer_action = "join"
             else:
-                self._pointer_action = ("solo" if event.position().x() < 52 or self.state != "active"
+                self._pointer_action = ("remove" if self.state == "active" and self.grouped and event.position().x() < 52
+                                        else "solo" if event.position().x() < 52 or self.state != "active"
                                         else "mute")
         super().mousePressEvent(event)
 
@@ -236,7 +274,7 @@ class _OutputRow(QAbstractButton):
 
     @property
     def name_font_size(self):
-        return 14 - 2 * self.details_progress
+        return 14 if self.property("fixedDetailsTypography") else 14 - 2 * self.details_progress
 
     @property
     def displayed_volume(self):
@@ -273,6 +311,7 @@ class _OutputRow(QAbstractButton):
         self.solo_button.setDown(False)
         self.join_button.setDown(False)
         self._pointer_action = ""
+        self._device_icon_action = ""
 
     def set_device(self, device):
         self.device = device
@@ -298,8 +337,8 @@ class _OutputRow(QAbstractButton):
             self.setFocus(Qt.FocusReason.OtherFocusReason)
         self.solo_button.setVisible(self.state == "active")
         self.solo_button.setEnabled(usable)
-        self.solo_button.setAccessibleName(f"仅播放到{device.name}")
-        self.solo_button.setToolTip("仅使用此设备播放")
+        self.solo_button.setAccessibleName(f"将{device.name}移出同步播放" if self.grouped else f"仅播放到{device.name}")
+        self.solo_button.setToolTip("移出同步播放" if self.grouped else "仅使用此设备播放")
         self.join_button.setVisible(self.state == "available")
         self.join_button.setEnabled(usable)
         self.join_button.setAccessibleName(f"加入{device.name}同步播放")
@@ -343,9 +382,12 @@ class _OutputRow(QAbstractButton):
         return "蓝牙音频" if self.device.is_bluetooth else "本地音频"
 
     def _layout_volume(self):
-        self.volume_slider.setGeometry(52, max(26, self.height() - 29),
-                                       max(1, self.width() - 66), 26)
-        self.solo_button.setGeometry(1, 1, 47, max(1, self.height() - 2))
+        # The slider reserves eight pixels for its thumb at each end. Align
+        # its painted track with the name/status column and the value's right
+        # edge, rather than aligning the invisible widget margin with text.
+        self.volume_slider.setGeometry(44, max(26, self.height() - 29),
+                                       max(1, self.width() - 50), 26)
+        self.solo_button.setGeometry(1, 1, 47, min(42, max(1, self.height() - 2)))
         self.join_button.setGeometry(max(0, self.width() - 44), 1, 43, max(1, self.height() - 2))
 
     def set_row_height(self, height):
@@ -374,7 +416,7 @@ class _OutputRow(QAbstractButton):
         self.volume_slider.update()
 
     def sync_volume_style(self):
-        self.volume_slider.fill = QColor(self.ink)
+        self.volume_slider.ink = QColor(self.ink)
         self.volume_slider.track = QColor(self.muted.red(), self.muted.green(), self.muted.blue(), 65)
 
     def paintEvent(self, event):
@@ -387,8 +429,25 @@ class _OutputRow(QAbstractButton):
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         light = self.ink.lightness() < 128
         face = QColor(0, 0, 0, round(14 * self.progress)) if light else QColor(255, 255, 255, round(29 * self.progress))
+        refractive = bool(self.property("glassRefractive"))
+        selected = self.state == "active"
+        if selected:
+            # Confirmed members keep one pale face and black content, even
+            # while the popup's scene/ink or unfolding pose is changing.
+            refractive = False
+            face = self.selected_fill.lighter(104) if self.underMouse() else QColor(self.selected_fill)
+        elif self.property("sharedPanelGlass"):
+            # The parent already owns one blurred scene and theme veil. A row
+            # adds only its state pigment/rim, never a second grey glass layer.
+            refractive = False
+            face = QColor(self.ink)
+            face.setAlpha(round(10 * self.progress) + (9 if self.isDown() else 5 if self.underMouse() else 0))
+        backdrop, sample = widget_glass_backdrop(self, bounds) if refractive else (None, None)
         paint_liquid_glass(painter, bounds, radius=18, base_color=face,
+                          material_level=widget_glass_level(self),
+                          face_opacity=1. if selected else min(1., .8 * widget_glass_level(self) / 50.),
                           light=light, active=self.progress > .5,
+                          refractive=refractive, backdrop=backdrop, backdrop_rect=sample, cache_token=id(self),
                           hovered=self.underMouse(), pressed=self.isDown(),
                           opacity=1.0 if self.isEnabled() else .48)
         if self.hasFocus():
@@ -417,7 +476,7 @@ class _OutputRow(QAbstractButton):
         value_font = QFont(font)
         value_font.setPixelSize(12)
         value_font.setWeight(QFont.Weight.DemiBold)
-        value_width = max(50, math.ceil(QFontMetricsF(value_font).horizontalAdvance(self.volume_text)) + 3)
+        value_width = max(28, math.ceil(QFontMetricsF(value_font).horizontalAdvance(self.volume_text)) + 3)
         right_space = value_width + 41 if active else 46 if self.state == "available" else 32
         name_rect = QRectF(52, 7 if active else 9,
                            max(1, self.width() - 52 - right_space), 21)
@@ -515,6 +574,11 @@ class AudioOutputPanel(QWidget):
 
     def __init__(self, provider, parent=None):
         super().__init__(parent)
+        self._song_page = callable(getattr(parent, "_paint_surface_glass", None))
+        self._theme_light = False
+        if self._song_page:
+            # Opt out before native buttons/rows register their hover helpers.
+            self.setProperty("controlHoverDisabled", True)
         self.provider = provider
         self._snapshot: AudioRouteSnapshot | None = None
         self._interaction_owner = None
@@ -671,12 +735,18 @@ class AudioOutputPanel(QWidget):
         self._hover_row_id = self._hover_volume_id = ""
 
     def _reveal_hover_details(self):
+        if self._song_page:
+            return
         if (self.isVisible() and self._native_content_ready()
                 and (row := self._rows.get(self._hover_row_id)) and row.isEnabled()
                 and row.state == "active"):
             row.set_details_visible(True)
 
     def _update_volume_hover(self, global_position, now):
+        if self._song_page:
+            self._hover_detail_timer.stop()
+            self._hover_row_id = self._hover_volume_id = ""
+            return self._volume_row_at(global_position)
         hovered = self._row_at(global_position)
         hovered_id = hovered.device.id if hovered else ""
         if hovered_id != self._hover_row_id:
@@ -695,6 +765,11 @@ class AudioOutputPanel(QWidget):
 
     def eventFilter(self, watched, event):
         kind = event.type()
+        if (self._song_page and kind in {QEvent.Type.MouseButtonPress, QEvent.Type.FocusIn}
+                and self._native_content_ready()):
+            row = watched.parentWidget() if isinstance(watched, _VolumeSlider) else None
+            if isinstance(row, _OutputRow):
+                row.set_details_visible(True)
         if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self._discard_pointer_until_release = False
         elif self._discard_pointer_until_release and kind in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease}:
@@ -716,10 +791,12 @@ class AudioOutputPanel(QWidget):
         if kind in {QEvent.Type.MouseMove, QEvent.Type.Enter} and hasattr(event, "globalPosition"):
             self._update_volume_hover(event.globalPosition(), time.monotonic())
         elif kind == QEvent.Type.Leave:
-            # Time spent outside the row cannot arm its volume control.
-            # Moving between the row and its join target keeps one dwell.
+            # Native boundaries can change while the same moving capsule
+            # still contains the pointer. Its mapped row owns the dwell.
             if watched is self or watched is self.scroll.viewport() or isinstance(watched, _OutputRow):
-                self._clear_row_hover()
+                hovered = self._row_at(QPointF(QCursor.pos()))
+                if hovered is None or hovered.device.id != self._hover_row_id:
+                    self._clear_row_hover()
         elif kind == QEvent.Type.Wheel and self.isVisible():
             self._handle_wheel(event)
             return True
@@ -784,18 +861,42 @@ class AudioOutputPanel(QWidget):
         sample = getattr(parent, "_background_sample_colors", None)
         colors = sample(QRectF(self.geometry())) if callable(sample) else (QColor(30, 30, 32),)
         backdrop = QColor(*(round(sum(color.getRgb()[i] for color in colors) / len(colors)) for i in range(3)))
-        light = relative_luminance(backdrop) > .45
+        light = (not app_dark_mode(getattr(getattr(parent, "owner", None), "settings_getter", None))
+                 if self._song_page else relative_luminance(backdrop) > .45)
+        self._theme_light = light
+        self._glass_level = widget_glass_level(self) if self._song_page else 50
         target = QColor(248, 248, 250) if light else QColor(43, 43, 46)
-        background = QColor(*(round(a * .22 + b * .78) for a, b in zip(backdrop.getRgb()[:3], target.getRgb()[:3])))
+        if self._song_page:
+            veil = glass_material_tint(light=light, material_level=self._glass_level)
+            background = QColor(*(round(a * (1. - veil.alphaF()) + b * veil.alphaF())
+                for a, b in zip(backdrop.getRgb()[:3], veil.getRgb()[:3])))
+        else:
+            background = QColor(*(round(a * .22 + b * .78) for a, b in zip(backdrop.getRgb()[:3], target.getRgb()[:3])))
         factory = getattr(parent, "_surface_font", None)
         font = factory(13, QFont.Weight.Normal) if callable(factory) else self._label_font
-        key = (background.rgba(), light, font.toString())
+        scene_ink = getattr(parent, "_scene_control_ink", None)
+        shared_ink = scene_ink() if self._song_page and callable(scene_ink) else None
+        key = (background.rgba(), light, font.toString(), shared_ink.rgba() if shared_ink is not None else None, self._glass_level)
         if key == self._style_key:
             return
         self._style_key = key
         self._background, self._label_font = background, QFont(font)
-        self._ink = QColor(30, 30, 34) if light else QColor(246, 246, 248)
-        self._muted = QColor(89, 89, 96) if light else QColor(190, 190, 198)
+        if self._song_page:
+            def contrast(ink):
+                first, second = relative_luminance(ink), relative_luminance(background)
+                return (max(first, second) + .05) / (min(first, second) + .05)
+            self._ink = (QColor(shared_ink) if shared_ink is not None else
+                         max((QColor(25, 28, 34), QColor(250, 251, 253)), key=contrast))
+            self._muted = QColor(self._ink)
+            for fraction in (() if shared_ink is not None else (.18, .12, .06)):
+                candidate = QColor(*(round(a * (1. - fraction) + b * fraction)
+                    for a, b in zip(self._ink.getRgb()[:3], background.getRgb()[:3])))
+                if contrast(candidate) >= 4.5:
+                    self._muted = candidate
+                    break
+        else:
+            self._ink = QColor(30, 30, 34) if light else QColor(246, 246, 248)
+            self._muted = QColor(89, 89, 96) if light else QColor(190, 190, 198)
         self._accent = QColor(self._ink)
         self.setFont(font)
         title_font = QFont(font)
@@ -822,14 +923,23 @@ class AudioOutputPanel(QWidget):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
         for button in (self.refresh_button, self.add_button, self.close_button, self.stop_button):
-            button.setGlassLight(light)
+            button.setProperty("glassMaterialLevel", self._glass_level)
+            button.setGlassLight(self._ink.lightness() < 128)
+            button.setProperty("glassRefractive", False if self._song_page else callable(getattr(parent, "_paint_surface_glass", None)))
             button.setProperty("glassRadius", 14.0)
         for row in self._rows.values():
             self._style_row(row)
 
     def _style_row(self, row):
+        row.setProperty("glassRefractive", False if self._song_page else callable(getattr(self.parentWidget(), "_paint_surface_glass", None)))
+        row.setProperty("sharedPanelGlass", self._song_page)
+        row.setProperty("fixedDetailsTypography", self._song_page)
         row.set_row_height(self._row_height)
-        row.ink, row.muted, row.accent = self._ink, self._muted, self._accent
+        if row.state == "active":
+            row.ink, row.muted, row.accent = QColor('black'), QColor('black'), QColor('black')
+        else:
+            row.ink, row.muted, row.accent = self._ink, self._muted, self._accent
+        row.selected_fill = QColor(self._selected_fill)
         row.label_font = self._label_font
         row.sync_volume_style()
 
@@ -877,9 +987,16 @@ class AudioOutputPanel(QWidget):
                 # Omitting DrawChildren prevents recursive popup capture.
                 parent.render(painter, QPoint(), QRegion(region), QWidget.RenderFlag.DrawWindowBackground)
         bitmap = Image.frombytes("RGBA", (source.width(), source.height()), bytes(source.constBits()), "raw", "RGBA", source.bytesPerLine())
-        bitmap = ImageEnhance.Color(bitmap).enhance(.35).filter(ImageFilter.GaussianBlur(9))
-        light = relative_luminance(self._background) > .45
-        veil = (248, 248, 250, 188) if light else (43, 43, 46, 176)
+        if self._song_page:
+            # Keep actual album pigments. The old desaturation plus 70% grey
+            # veil made even green/blue scenes look like an opaque grey card.
+            bitmap = bitmap.filter(ImageFilter.GaussianBlur(7 * glass_blur_scale(self._glass_level)))
+            tint = glass_material_tint(light=self._theme_light, material_level=self._glass_level)
+            veil = tint.getRgb()
+        else:
+            bitmap = ImageEnhance.Color(bitmap).enhance(.35).filter(ImageFilter.GaussianBlur(9))
+            light = relative_luminance(self._background) > .45
+            veil = (248, 248, 250, 188) if light else (43, 43, 46, 176)
         bitmap = Image.alpha_composite(bitmap, Image.new("RGBA", bitmap.size, veil))
         blurred = QImage(bitmap.tobytes(), bitmap.width, bitmap.height, bitmap.width * 4, QImage.Format.Format_RGBA8888).copy()
         offset = geometry.topLeft() - region.topLeft()
@@ -946,11 +1063,14 @@ class AudioOutputPanel(QWidget):
             painter.save()
             painter.setOpacity(1 - row_blend)
             paint_liquid_glass(painter, first, radius=first.height() / 2,
-                              base_color=self._selected_fill, light=True, active=True)
+                              base_color=None if self._song_page else self._selected_fill,
+                              light=self._theme_light if self._song_page else True, active=True,
+                              material_level=self._glass_level if self._song_page else 50)
             diameter = min(first.height(), self._source_rect.height())
             target = QRectF(first.left() + (first.width() - diameter) * (1 - pose.horizontal) / 2,
                             first.center().y() - diameter / 2, diameter, diameter)
-            paint_audio_output_status(painter, target, self._source_kinds, QColor(40, 40, 44))
+            paint_audio_output_status(painter, target, self._source_kinds,
+                                      self._ink if self._song_page else QColor(40, 40, 44))
             painter.restore()
 
     def paintEvent(self, event):
@@ -959,15 +1079,28 @@ class AudioOutputPanel(QWidget):
             pose = self.render_pose
             shape = self._pose_path()
             painter.setClipPath(shape)
-            painter.fillRect(pose.shell_rect, self._background)
+            if not self._song_page or self._material.isNull():
+                fallback = QColor(self._background)
+                if self._song_page:
+                    fallback.setAlpha(round(72 * self._glass_level / 50.))
+                painter.fillRect(pose.shell_rect, fallback)
             if not self._material.isNull():
+                painter.save()
+                if self._song_page:
+                    painter.setOpacity(.88 * self._glass_level / 50. if self._glass_level <= 50
+                                       else .88 + .10 * (self._glass_level - 50) / 50.)
                 painter.drawImage(QRectF(self.rect()), self._material)
+                painter.restore()
             if self._scroll_opacity.opacity() < 1:
                 self._paint_unfolding_rows(painter, pose)
             painter.setClipping(False)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(255, 255, 255, 65), 1))
-            painter.drawPath(shape)
+            if self._song_page:
+                paint_liquid_glass(painter, pose.shell_rect, radius=pose.radius,
+                                   light=self._theme_light)
+            else:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(255, 255, 255, 65), 1))
+                painter.drawPath(shape)
 
     def _fit_to_content(self):
         visible = [self.rows_layout.itemAt(i) for i in range(self.rows_layout.count())
@@ -1000,7 +1133,8 @@ class AudioOutputPanel(QWidget):
                 controls.append(row.volume_slider)
             elif not row.join_button.isHidden():
                 controls.append(row.join_button)
-        controls.append(self.stop_button)
+        if not self.stop_button.isHidden() and self.stop_button.isEnabled():
+            controls.append(self.stop_button)
         for previous, current in zip(controls, controls[1:]):
             QWidget.setTabOrder(previous, current)
 
@@ -1127,7 +1261,7 @@ class AudioOutputPanel(QWidget):
             self._action_error = "暂时无法刷新设备，请稍后重试。"
         self.sync_snapshot()
 
-    def _route_action_current(self):
+    def _route_action_current(self, *, toggle_device_id=None):
         # A source can change between polls and the next held-pointer event.
         # Published state is a cheap read; never send that old action first.
         try:
@@ -1139,6 +1273,14 @@ class AudioOutputPanel(QWidget):
         if self._interaction_owner is not None and owner != self._interaction_owner:
             self.sync_snapshot()
             return False
+        if toggle_device_id is not None and self._snapshot is not None:
+            old_members, old_pending = self._route_members(self._snapshot)
+            members, pending = self._route_members(snapshot)
+            if (toggle_device_id in old_members | old_pending) != (toggle_device_id in members | pending):
+                # A delayed removal must not re-add a member that another
+                # confirmed update already removed (or reverse a new join).
+                self.sync_snapshot()
+                return False
         return True
 
     def _select(self, device_id: str):
@@ -1153,15 +1295,18 @@ class AudioOutputPanel(QWidget):
         self.sync_snapshot()
 
     def _join(self, device_id: str):
-        if not self._route_action_current():
+        if not self._route_action_current(toggle_device_id=device_id):
             return
         self._action_error = ""
+        row = self._rows.get(device_id)
+        removing = bool(row is not None and row.state == "active")
+        error = "暂时无法将此设备移出同步播放。" if removing else "暂时无法将此设备加入同步播放。"
         try:
             join = getattr(self.provider, "toggle_audio_output", None)
             if not callable(join) or not join(device_id):
-                self._action_error = "暂时无法将此设备加入同步播放。"
+                self._action_error = error
         except Exception:
-            self._action_error = "暂时无法将此设备加入同步播放。"
+            self._action_error = error
         self.sync_snapshot()
 
     def _toggle_mute(self, device_id: str):
@@ -1362,7 +1507,9 @@ class AudioOutputPanel(QWidget):
             row.delay_text = f"+{snapshot.cast_latency_seconds:.2f}s" if row.state == "active" and device.transport == "airplay" else ""
             row.set_device(device)
             self._style_row(row)
-            action = "点击图标独占播放，点击名称切换静音，拖动下方滑块调整音量，滚轮滚动列表" if selected else "点击名称独占播放，点击加号加入同步播放，滚轮滚动列表"
+            action = (("点击图标移出同步播放" if grouped else "点击图标独占播放")
+                      + "，点击名称切换静音，拖动下方滑块调整音量，滚轮滚动列表" if selected else
+                      "点击名称独占播放，点击加号加入同步播放，滚轮滚动列表")
             row.setAccessibleDescription(row.subtitle + "，" + scope + "，" + action + (f"，自动歌词补偿 {snapshot.cast_latency_seconds:.2f} 秒" if row.delay_text else ""))
             row.setToolTip(f"{device.name} · {scope} · {action}" + (" · 音量暂不可用" if device.volume is None else ""))
             if row.delay_text:
@@ -1391,10 +1538,10 @@ class AudioOutputPanel(QWidget):
         error = bool(self._action_error or snapshot.state in {"error", "failed"})
         error_color = "#a22d2d" if relative_luminance(self._background) > .45 else "#ffb9b3"
         self.status_label.setStyleSheet(f"color: {error_color if error else self._muted.name()};")
-        self.stop_button.setText("停止同步播放" if grouped else "停止投放")
-        # A music-only group owns its capture/render lifecycle even when all
-        # members are Windows outputs. It must remain explicitly stoppable.
-        stoppable = casting or grouped or owned and bool(snapshot.group_id)
+        self.stop_button.setText("停止投放")
+        # Group membership is edited at each selected device icon. Retain the
+        # existing stop action only for a single AirPlay casting destination.
+        stoppable = casting and not grouped
         self.stop_button.setEnabled(stoppable)
         self.stop_button.setVisible(stoppable)
         self._fit_to_content()

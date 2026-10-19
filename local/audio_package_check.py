@@ -29,7 +29,7 @@ _MODULES = (
     "api.providers", "api.audio_route_controller", "api.audio_routes",
     "api.windows_audio_devices", "api.airplay_discovery", "api.airplay_process",
     "api.windows_audio_sessions", "api.windows_app_audio_routes", "api.airplay_group_process",
-    "local.audio_output_panel", "local.audio_device_notice", "local.music_output_clock",
+    "local.audio_output_panel", "local.music_output_clock",
 )
 _DEPENDENCIES = (
     "PySide6", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets",

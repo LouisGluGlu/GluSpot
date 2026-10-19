@@ -157,8 +157,15 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                   for x in range(0, material.width(), 8)]
         self.assertTrue(all(color.alpha() == 255 for color in pixels))
         self.assertGreater(max(max(color.getRgb()[:3]) - min(color.getRgb()[:3]) for color in pixels), 3)
-        self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(panel._ink, panel._background), 4.5)
-        self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(panel._muted, panel._background), 4.5)
+        # The user's whole-scene decision supersedes independent local
+        # inversion, including this panel's average crop. Check the shared
+        # authority at the same instant rather than demanding a new local ink.
+        with patch("local.music_surface_window.time.monotonic", return_value=102.0):
+            panel._sync_surface_style()
+            decided = self.window._scene_control_ink()
+        self.assertEqual(panel._ink, decided)
+        self.assertEqual(panel._muted, decided)
+        self.assertTrue(all(row.ink == decided for row in panel._rows.values()))
         marker.hide()
 
     def test_displayed_backdrop_refreshes_material_without_repainting_lyrics(self):
@@ -195,9 +202,14 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 self.window._fullscreen = fullscreen
                 self.window._reset_control_idle(now=100.0)
                 closed_page = self._render_page(100.0)
+                closed_controls = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                closed_controls.fill(Qt.GlobalColor.transparent)
+                with QPainter(closed_controls) as painter, patch(
+                        "local.music_surface_window.time.monotonic", return_value=100.0):
+                    self.window._paint_window_controls(painter, QRectF(self.window.rect()))
                 panel = self._open_with_pointer(fullscreen)
                 buttons = self.window._button_rects
-                self.assertEqual(set(buttons), {"audio_output", "translation",
+                self.assertEqual(set(buttons), {"audio_output", "content_layout", "translation",
                                                 "mode" if fullscreen else "return"})
                 output, translation = buttons["audio_output"], buttons["translation"]
                 self.assertAlmostEqual(output.width(), output.height())
@@ -225,12 +237,34 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 native_panel.fill(Qt.GlobalColor.transparent)
                 panel.render(native_panel)
                 row_face = QPoint(row.width() // 2, row.height() - 7)
-                actual = open_page.pixelColor(row.mapTo(self.window, row_face))
-                expected = native_panel.pixelColor(row.mapTo(panel, row_face))
-                self.assertEqual(actual, expected)
+                page_point = row.mapTo(self.window, row_face)
+                actual = open_page.pixelColor(page_point)
+                # The native panel is translucent. Compare its composition
+                # over the same displayed page. The additional layout button
+                # moves the chooser above artwork/lyrics at some sizes, so a
+                # background-only raster is no longer the entire underlay.
+                background = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                background.fill(Qt.GlobalColor.transparent)
+                with patch("local.music_surface_window.time.monotonic", return_value=100.5):
+                    self.window.render(background, renderFlags=QWidget.RenderFlag.DrawWindowBackground)
+                with QPainter(background) as painter:
+                    painter.drawImage(panel.pos(), native_panel)
+                expected = background.pixelColor(page_point)
+                self.assertEqual(actual.alpha(), 255)
+                # Confirmed members now deliberately use an opaque pale face
+                # and black content; only the surrounding chooser stays glass.
+                selected_face = native_panel.pixelColor(row.mapTo(panel, row_face))
+                self.assertEqual(selected_face, row.selected_fill.lighter(104)
+                                 if row.underMouse() else QColor('#f5f5f7'))
+                self.assertEqual(row.ink, QColor('black'))
+                self.assertEqual(row.muted, QColor('black'))
+                for channel in ("red", "green", "blue"):
+                    self.assertAlmostEqual(getattr(actual, channel)(), getattr(expected, channel)(), delta=1)
                 self.assertTrue(row.isChecked())
                 self.assertTrue(row.volume_slider.isVisible())
-                self.assertGreater(closed_face.pixelColor(closed_face.width() // 2, 3).lightness(), 200)
+                face = closed_controls.pixelColor(round(output.center().x()), round(output.top()) + 3)
+                self.assertGreater(face.alpha(), 180)
+                self.assertLess(face.alpha(), 245)
                 self.assertGreater(sum(controls.pixelColor(x, y).alpha() > 0
                     for y in range(round(translation.top()), round(translation.bottom()))
                     for x in range(round(translation.left()), round(translation.right()))), 100)
@@ -266,6 +300,8 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                     self.assertEqual(panel._rows[identity].state, "pending")
                     self.assertFalse(panel._rows[identity].isChecked())
                 self.assertTrue(panel._rows["homepod-2"].volume_slider.isHidden())
+                self.assertTrue(panel.stop_button.isHidden())
+                self.assertFalse(panel.stop_button.isEnabled())
                 self.provider.calls.clear()
                 QTest.mouseClick(panel._rows["homepod-2"], Qt.MouseButton.LeftButton)
                 self.assertEqual(self.provider.calls, [("select", "homepod-2")])
@@ -283,7 +319,8 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                     self.assertEqual(panel._rows[identity].subtitle, "同步播放")
                     self.assertFalse(panel._rows[identity].volume_slider.isHidden())
                 self.assertFalse(panel._rows["local"].isChecked())
-                self.assertEqual(panel.stop_button.text(), "停止同步播放")
+                self.assertTrue(panel.stop_button.isHidden())
+                self.assertFalse(panel.stop_button.isEnabled())
                 self.assertEqual(self._background_state(), before)
                 self.assertEqual(self.window._background_cache, displayed)
                 with patch.object(self.provider, "get_audio_route_snapshot",
@@ -324,47 +361,59 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
         self.assertEqual(panel._snapshot.member_ids, members)
         self.assertEqual(self.provider.calls, [("volume", "homepod-2", requested)])
 
-    def test_compact_mixed_stop_is_scroll_accessible_and_waits_for_authoritative_snapshot(self):
+    def test_compact_mixed_member_removal_is_scroll_accessible_and_waits_for_authoritative_snapshot(self):
         self.window.resize(640, 360)
         self.provider.snapshot = self._mixed_snapshot()
         # The compact density now fits the original four rows without
-        # scrolling. Retain this footer-in-a-long-list integration scenario
+        # scrolling. Retain this action-in-a-long-list integration scenario
         # by supplying additional actual (unselected) fake endpoints.
         self.provider.snapshot = replace(self.provider.snapshot, devices=self.provider.snapshot.devices + tuple(
             AudioRouteDevice(f"extra-{index}", f"Additional output {index}", kind="speaker")
             for index in range(5)))
         panel = self._open_with_pointer()
-        self.assertGreater(panel.scroll.verticalScrollBar().maximum(), 0)
-        panel.scroll.ensureWidgetVisible(panel.stop_button)
+        scroll_bar = panel.scroll.verticalScrollBar()
+        self.assertGreater(scroll_bar.maximum(), 0)
+        scroll_bar.setValue(scroll_bar.maximum())
         self.app.processEvents()
-        stop_center = panel.stop_button.mapTo(panel.scroll.viewport(), panel.stop_button.rect().center())
-        self.assertTrue(panel.scroll.viewport().rect().contains(stop_center))
+        last = panel._rows["extra-4"]
+        last_center = last.mapTo(panel.scroll.viewport(), last.rect().center())
+        self.assertTrue(panel.scroll.viewport().rect().contains(last_center))
+        row = panel._rows["homepod-2"]
+        panel.scroll.ensureWidgetVisible(row.solo_button)
+        self.app.processEvents()
+        icon_center = row.solo_button.mapTo(panel.scroll.viewport(), row.solo_button.rect().center())
+        self.assertTrue(panel.scroll.viewport().rect().contains(icon_center))
+        self.assertLess(scroll_bar.value(), scroll_bar.maximum())
+        self.assertTrue(panel.stop_button.isHidden())
+        self.assertFalse(panel.stop_button.isEnabled())
         self.assertIn("同步播放", panel.title_label.text())
         self.assertIn("仅当前音乐软件", panel.scope_label.text())
         self.assertLessEqual(panel.scope_label.heightForWidth(panel.scope_label.width()),
                              panel.scope_label.height())
         self.provider.calls.clear()
-        QTest.mouseClick(panel.stop_button, Qt.MouseButton.LeftButton)
-        self.assertEqual(self.provider.calls, [("stop",)])
+        QTest.mouseClick(row.solo_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(self.provider.calls, [("toggle", "homepod-2")])
         self.assertEqual(panel._snapshot.member_ids, ("homepod", "homepod-2", "bluetooth"))
-        self.assertTrue(panel.stop_button.isEnabled())
+        self.assertTrue(row.isChecked())
+        self.assertTrue(all(panel._rows[identity].isChecked() for identity in ("homepod", "bluetooth")))
         before = self._background_state()
-        self.provider.snapshot = replace(self.provider.snapshot, active_id="local", state="ready",
-            member_ids=(), pending_ids=(), group_id="", capture_scope="", cast_latency_seconds=0.0,
-            status_message="同步播放已停止", devices=tuple(replace(device, route_state="available")
-                                                        for device in self.provider.snapshot.devices))
+        self.provider.snapshot = replace(self.provider.snapshot,
+            member_ids=("homepod", "bluetooth"), status_message="正在同步播放到 2 个设备",
+            devices=tuple(replace(device, route_state="available") if device.id == "homepod-2" else device
+                          for device in self.provider.snapshot.devices))
         with patch("local.audio_output_panel.time.monotonic", return_value=102.0):
             panel.sync_snapshot()
             panel._capture_material(force=True)
         self.assertFalse(panel.stop_button.isVisible())
         self.assertFalse(panel.stop_button.isEnabled())
-        self.assertTrue(panel._rows["local"].isChecked())
-        self.assertTrue(all(not panel._rows[identity].isChecked()
-                            for identity in ("homepod", "homepod-2", "bluetooth")))
-        self.assertEqual(panel.status_label.text(), "同步播放已停止")
+        self.assertFalse(panel._rows["local"].isChecked())
+        self.assertFalse(row.isChecked())
+        self.assertTrue(all(panel._rows[identity].isChecked() for identity in ("homepod", "bluetooth")))
+        self.assertEqual(panel._snapshot.member_ids, ("homepod", "bluetooth"))
+        self.assertIn("同步播放", panel.title_label.text())
         self.assertEqual(self._background_state(), before)
         self.assertTrue(self.window.rect().contains(panel.geometry()))
-        self.assertEqual(self.provider.calls, [("stop",)])
+        self.assertEqual(self.provider.calls, [("toggle", "homepod-2")])
 
 
 if __name__ == "__main__":

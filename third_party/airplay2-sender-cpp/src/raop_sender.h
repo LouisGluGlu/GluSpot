@@ -100,6 +100,10 @@ struct RaopEvents {
     // should persist for this device id (later connects skip the PIN).
     // `credsJson` is opaque to the host.
     std::function<void(const std::string& deviceId, const std::string& credsJson)> credentialsObtained;
+    // Authenticated AP2 receiver's paus/play button; both mean toggle in the
+    // interoperable OwnTone implementation. Called after encrypted ACK with a
+    // canonical numeric receiver CSeq. Optional; never calls a player itself.
+    std::function<void(const std::string& cseq)> receiverPlayPause;
 };
 
 // How the receiver sees us: the name on its PIN dialog / as the AirPlay
@@ -386,6 +390,7 @@ private:
     uint64_t    eventRecvCtr_ = 0;
     std::string eventEncBuf_;     // raw (still-encrypted) bytes from the receiver
     std::string eventPlainBuf_;   // decrypted RTSP request stream
+    std::deque<std::string> receiverControlCseqs_; // bounded retransmission dedup; reset per session
     std::deque<std::string> pendingMethods_;   // FIFO: request -> response routing
     std::deque<int> pendingCseqs_;  // GluSpot: match replies, including late volume responses.
     int         cseq_ = 0;

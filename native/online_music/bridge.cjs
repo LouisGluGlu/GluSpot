@@ -18,6 +18,7 @@ const sources = new Map();
 const loginAttempts = new Map();
 function fail(code) { const error = new Error(code); error.safeCode = code; throw error; }
 function requireId(value) { const id = String(value || ""); if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) fail("invalid_response"); return id; }
+function requireNcmId(value) { if(typeof value!=="string" || !/^[1-9][0-9]{0,19}$/.test(value)) fail("invalid_response"); return value; }
 function mergeCookies(target, incoming) {
   const lines = Array.isArray(incoming) ? incoming : String(incoming || "").split(/;\s*/);
   for (const line of lines) {
@@ -40,14 +41,21 @@ function safeAccount(source, profile) {
   const avatar=info.logo || info.avatarUrl || profile.avatarUrl || profile.avatarurl || profile.sizable_avatar || profile.pic || profile.img || profile.headurl || profile.avatar || "";
   return {source_id: source, logged_in: true, user_id: String(id), nickname: String(nickname), avatar_url: String(avatar)};
 }
+function ensureNcmAnonymousToken() {
+  // The API request module reads this file at import time. Preparation and
+  // real requests share the isolated cache, so create it without overwriting
+  // an existing token and accept only another child winning the same race.
+  try {
+    fs.writeFileSync(path.join(os.tmpdir(), "anonymous_token"), "", {flag:"wx",mode:0o600});
+  } catch (error) {
+    if (!error || error.code !== "EEXIST") throw error;
+  }
+}
 function ncmState(credential, repository=sources) {
   let state = repository.get("netease");
   if (!state) {
     const packageRoot = path.join(moduleRoot, "@neteasecloudmusicapienhanced", "api");
-    // The API request module expects an anonymous-token file initialized by
-    // its main entry. Keep this empty owned file inside the isolated cache.
-    const anonymousToken = path.join(os.tmpdir(), "anonymous_token");
-    if (!fs.existsSync(anonymousToken)) fs.writeFileSync(anonymousToken, "", {flag:"wx",mode:0o600});
+    ensureNcmAnonymousToken();
     state = {root:packageRoot, request:require(path.join(packageRoot,"util","request.js")), cookie:{}};
     repository.set("netease",state);
   }
@@ -69,7 +77,7 @@ async function ncmCall(state, method, params = {}) {
       else throw error;
     }
   } else {
-    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personal_fm","aidj_content_rcmd","lyric_new","lyric","cloudsearch","song_url"]);
+    const allowed = new Set(["login_qr_key","login_qr_create","login_status","user_playlist","playlist_track_all","recommend_songs","personalized","personal_fm","aidj_content_rcmd","lyric_new","lyric","cloudsearch","song_url","likelist","like","playlist_detail","playlist_tracks"]);
     if (!allowed.has(method)) fail("unsupported");
     const fn = require(path.join(state.root,"module",method + ".js"));
     result = await fn(query,state.request);
@@ -77,6 +85,57 @@ async function ncmCall(state, method, params = {}) {
   if (!result || typeof result.body !== "object") fail("invalid_response");
   mergeCookies(state.cookie,result.cookie);
   return result.body;
+}
+function ncmSuccess(body, failure="invalid_response") {
+  if(!body || typeof body!=="object" || Array.isArray(body)) fail("invalid_response");
+  if([301,401,403].includes(Number(body.code))) fail("auth_required");
+  if(Number(body.code)!==200) fail(failure);
+  return body;
+}
+async function ncmFavoriteAccount(state,p) {
+  const id=requireNcmId(p.user_id),body=await ncmCall(state,"login_status");
+  ncmSuccess(body.data && typeof body.data==="object"?body.data:body);
+  const account=safeAccount("netease",body.data && body.data.profile || body.profile);
+  if(!account.logged_in) fail("auth_required");
+  if(account.user_id!==id) fail("account_changed");
+  return id;
+}
+async function ncmFavorites(state,op,p) {
+  // Pinned 4.41.1: like uses string false; playlist_tracks' successful body
+  // wraps the util/request result once more. Keep writes explicit and perform
+  // no automatic transport retry: a timeout may have reached the service.
+  const id=op==="writable_playlists"?null:requireNcmId(p.song_id);
+  const playlist=op==="add_song_to_playlist"?requireNcmId(p.playlist_id):null;
+  if(op==="set_favorite" && typeof p.liked!=="boolean") fail("invalid_response");
+  const uid=await ncmFavoriteAccount(state,p);
+  if(op==="favorite_status") {
+    const body=ncmSuccess(await ncmCall(state,"likelist",{uid}));
+    if(!Array.isArray(body.ids) || body.ids.length>200000 || body.ids.some(value=>
+      !(typeof value==="string" && /^[1-9][0-9]{0,19}$/.test(value) || Number.isSafeInteger(value) && value>0))) fail("invalid_response");
+    return {liked:body.ids.some(value=>String(value)===id)};
+  }
+  if(op==="set_favorite") {
+    ncmSuccess(await ncmCall(state,"like",{id,like:p.liked?"true":"false"}),"mutation_failed");
+    return {ok:true,liked:p.liked};
+  }
+  if(op==="writable_playlists") {
+    const page=recommendationInput(p);
+    const body=ncmSuccess(await ncmCall(state,"user_playlist",{uid,limit:page.limit,offset:page.offset}));
+    if(!Array.isArray(body.playlist)) fail("invalid_response");
+    // Preserve original rows and paging here. Python filters by creator and
+    // consumes the original cursor, including subscribed rows.
+    return {code:200,playlist:body.playlist.slice(0,page.limit),more:body.more===true};
+  }
+  if(op==="add_song_to_playlist") {
+    const detail=ncmSuccess(await ncmCall(state,"playlist_detail",{id:playlist,s:0}));
+    const row=detail.playlist,creator=row && row.creator;
+    if(!row || String(row.id)!==playlist || !creator || String(creator.userId)!==uid || row.subscribed===true) fail("not_writable");
+    const response=await ncmCall(state,"playlist_tracks",{op:"add",pid:playlist,tracks:id});
+    const body=response.code!==undefined?response:response.body;
+    ncmSuccess(body,"mutation_failed");
+    return {ok:true};
+  }
+  fail("unsupported");
 }
 async function ncmPersonalDjCall(state, operation, params) {
   // Verified official 9.6.05 catalog/selection contract, documented in
@@ -173,6 +232,40 @@ function searchWindow(rows,total,p,nextPage) {
   const more=nextPage!==undefined?Number(nextPage)>0:count!==null?boundary<count:rows.length>=p.limit;
   return {items,total:count,has_more:more,next_offset:more?(nextPage!==undefined?(Number(nextPage)-1)*p.limit:boundary):p.offset+Math.min(Math.max(0,rows.length-start),p.limit)};
 }
+function recommendationInput(p) {
+  if(!Number.isSafeInteger(p.limit) || p.limit<1 || p.limit>100 || !Number.isSafeInteger(p.offset) || p.offset<0 || p.offset>100000) fail("invalid_response");
+  return {limit:p.limit,offset:p.offset};
+}
+function recommendationWindow(rows,p) {
+  if(!Array.isArray(rows)) fail("invalid_response");
+  const seen=new Set(),unique=[];
+  for(const item of rows.slice(0,100)) {
+    if(!item || typeof item!=="object" || Array.isArray(item)) continue;
+    const id=String(item.id || "");
+    if(!/^[1-9][0-9]{0,19}$/.test(id) || typeof item.name!=="string" || !item.name.trim() || seen.has(id)) continue;
+    seen.add(id);unique.push(item);
+  }
+  const items=unique.slice(p.offset,p.offset+p.limit),next_offset=p.offset+items.length;
+  return {items,total:unique.length,has_more:next_offset<unique.length,next_offset};
+}
+async function qqRecommendedPlaylists(state,p) {
+  // Pinned 3.1.4 controllers/getRecommend.js uses this exact public shelf.
+  // Its auth service has no recommendation method; reuse the same bounded
+  // JSON HTTP client as search, without importing the upstream server/config.
+  if(!state.searchHttp) state.searchHttp=require(path.join(moduleRoot,"@yakult-green-tea","qq-music-api","dist","src","services","auth","httpClient.js")).default();
+  const response=await state.searchHttp.post("https://u.y.qq.com/cgi-bin/musicu.fcg",{
+    comm:{ct:24},
+    recomPlaylist:{module:"playlist.HotRecommendServer",method:"get_hot_recommend",param:{async:1,cmd:2}}
+  },{timeout:12000,headers:{Referer:"https://y.qq.com/portal/player.html"}});
+  const body=response.data,section=body && body.recomPlaylist,data=section && section.data;
+  if(!body || Number(body.code)!==0 || !section || Number(section.code)!==0 || !data || !Array.isArray(data.v_hot)) fail("invalid_response");
+  // The real response uses id=0 and content_id=<playlist id>. Type 10014 is
+  // the verified playlist type; never route another resource to playlist_tracks.
+  const rows=data.v_hot.filter(item=>item && Number(item.type)===10014).map(item=>({
+    id:item.content_id,name:item.title,picUrl:typeof item.cover==="string"?item.cover:""
+  }));
+  return recommendationWindow(rows,p);
+}
 async function qqSearch(state,p) {
   // Pinned legacy search hardcodes song/t=0. Use its verified HTTP client for
   // the separately verified public musicu song and playlist search contract.
@@ -186,16 +279,56 @@ async function qqSearch(state,p) {
   const section=data.body[p.kind==="songs"?"song":"songlist"];
   return searchWindow(section && section.list,data.meta.sum,p,data.meta.nextpage);
 }
+async function qqLyrics(state,p) {
+  // Protocol checked against pinned song_detail and public PlayLyricInfo.
+  // The pinned getLyric only returns line LRC. Fetch actual encrypted QRC,
+  // plus that independent LRC fallback; Python owns bounded decryption.
+  const mid=requireId(p.song_id);
+  if(!state.searchHttp) state.searchHttp=require(path.join(moduleRoot,"@yakult-green-tea","qq-music-api","dist","src","services","auth","httpClient.js")).default();
+  const http=state.searchHttp,headers={Cookie:"tmeLoginType=-1;",Referer:"https://y.qq.com/","User-Agent":"okhttp/3.14.9"};
+  const comm={ct:11,cv:"1003006",v:"1003006",tmeAppID:"qqmusiclight",uid:"0"};
+  const post=async(module,method,param)=>{
+    const response=await http.post("https://u.y.qq.com/cgi-bin/musicu.fcg",{comm,request:{module,method,param}},{timeout:2500,headers});
+    const body=response.data,section=body && body.request;
+    if(!body || Number(body.code)!==0 || !section || Number(section.code)!==0 || !section.data || typeof section.data!=="object") fail("invalid_response");
+    return section.data;
+  };
+  const fallback=(async()=>{
+    try {
+      const response=await http.request({url:"https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg",method:"GET",timeout:2500,headers,params:{songmid:mid,format:"json",nobase64:1,platform:"yqq.json",needNewCode:0}});
+      const value=response.data;
+      if(!value || Number(value.code)!==0) return {};
+      const safe=key=>typeof value[key]==="string" && value[key].length<=2*1024*1024?value[key]:"";
+      return {raw_lrc:safe("lyric"),translation:safe("trans")};
+    } catch(_) {return {};}
+  })();
+  let qrc={};
+  try {
+    const data=await post("music.pf_song_detail_svr","get_song_detail_yqq",{song_type:0,song_mid:mid,song_id:""});
+    const song=data.track_info;
+    if(!song || String(song.mid)!==mid || !Number.isSafeInteger(song.id) || song.id<=0) fail("invalid_response");
+    const b64=value=>Buffer.from(String(value || ""),"utf8").toString("base64");
+    const value=await post("music.musichallSong.PlayLyricInfo","GetPlayLyricInfo",{
+      albumName:b64(song.album && song.album.name),songName:b64(song.title),
+      singerName:b64(Array.isArray(song.singer)?song.singer.map(item=>item.name).join(", "):""),
+      songID:song.id,interval:Number(song.interval)||0,crypt:1,qrc:1,qrc_t:0,lrc_t:0,trans:1,trans_t:0,roma:1,roma_t:0,ct:19,cv:2111,type:0
+    });
+    for(const key of ["lyric","trans","roma"]) if(typeof value[key]==="string" && value[key].length<=256*1024) qrc[key]=value[key];
+  } catch(_) {}
+  return {...await fallback,...qrc};
+}
 function prepareLoginModules(source) {
   // These are the same pinned modules used by the real QR path below. Requiring
-  // them preloads code only: do not call a module, construct an account service,
-  // create a QR key/session, or import the upstream HTTP/.env entry points.
+  // them preloads code only: do not call a network/QR function, create a QR
+  // key/session, or import the upstream HTTP/.env entry points. QQ constructs
+  // its inert memory-only singleton on import; no login operation is invoked.
   const files={
     netease:["@neteasecloudmusicapienhanced/api/util/request.js","@neteasecloudmusicapienhanced/api/module/login_qr_key.js","@neteasecloudmusicapienhanced/api/module/login_qr_create.js"],
     kugou:["kugoumusicapi/util/index.js","kugoumusicapi/util/request.js","kugoumusicapi/module/register_dev.js","kugoumusicapi/module/login_qr_key.js","kugoumusicapi/module/login_qr_create.js"],
     qq:["@yakult-green-tea/qq-music-api/dist/src/services/auth/qrLogin.node.js"]
   };
   if(!files[source]) fail("unsupported");
+  if(source==="netease") ensureNcmAnonymousToken();
   for(const file of files[source]) require(path.join(moduleRoot,file));
 }
 async function dispatch(source,op,p,credential,context) {
@@ -223,6 +356,7 @@ async function dispatch(source,op,p,credential,context) {
     }
     if(op==="logout") { state.cookie={}; return {}; }
     if(!state.cookie.MUSIC_U) fail("auth_required");
+    if(["favorite_status","set_favorite","writable_playlists","add_song_to_playlist"].includes(op)) return await ncmFavorites(state,op,p);
     if(op==="search") {
       const params=searchInput(p),body=await ncmCall(state,"cloudsearch",{keywords:params.query,type:params.kind==="songs"?1:1000,limit:params.limit,offset:params.offset});
       if(Number(body.code)!==200 || !body.result || typeof body.result!=="object") fail("invalid_response");
@@ -230,6 +364,12 @@ async function dispatch(source,op,p,credential,context) {
       return searchWindow(body.result[params.kind] || [],body.result[params.kind==="songs"?"songCount":"playlistCount"],params);
     }
     if(op==="playlists") return await ncmCall(state,"user_playlist",{uid:requireId(p.user_id),limit:p.limit,offset:p.offset});
+    if(op==="recommended_playlists") {
+      const params=recommendationInput(p),body=await ncmCall(state,"personalized",{limit:100});
+      if([301,401,403].includes(Number(body.code))) fail("auth_required");
+      if(Number(body.code)!==200 || !Array.isArray(body.result)) fail("invalid_response");
+      return recommendationWindow(body.result,params);
+    }
     if(op==="playlist_tracks") return await ncmCall(state,"playlist_track_all",{id:requireId(p.playlist_id),limit:p.limit,offset:p.offset});
     if(op==="daily_recommendations") return await ncmCall(state,"recommend_songs");
     if(op==="personal_fm") return await ncmCall(state,"personal_fm");
@@ -264,6 +404,8 @@ async function dispatch(source,op,p,credential,context) {
     if(op==="logout") {await state.service.logout(state.token);state.token="";state.sessions=[];return {};}
     if(!state.token) fail("auth_required");
     if(op==="search") return await qqSearch(state,searchInput(p));
+    if(op==="lyrics") return await qqLyrics(state,p);
+    if(op==="recommended_playlists") return await qqRecommendedPlaylists(state,recommendationInput(p));
     if(op==="playlists") return await state.service.getUserPlaylists(state.token);
     if(op==="playlist_tracks") {
       try {

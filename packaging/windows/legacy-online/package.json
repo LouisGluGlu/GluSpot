@@ -1,0 +1,12 @@
+{
+  "name": "gluspot-win7-online-build",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build-time JS lowering and pinned JS-only runtime shims for the experimental Windows 7 package",
+  "dependencies": {
+    "@peculiar/webcrypto": "1.5.0",
+    "abort-controller": "3.0.0",
+    "core-js": "3.45.1",
+    "esbuild": "0.24.2"
+  }
+}

@@ -12,6 +12,7 @@ from api.models import TimedLyricUnit
 from local.island_stack_visual import IslandStackVisual
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_surface_window import MusicSurfaceWindow
+from local.lyric_unit_timing import resolve_display_row_timing
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
 
@@ -88,7 +89,11 @@ class IslandLyricFollowGeometryTests(unittest.TestCase):
                     self.assertEqual(paint.call_args.args[2], "Next words")
                     self.assertGreater(paint.call_args.args[7]["progress"], 0.0)
                     if strategy == "low_perception":
-                        self.assertEqual(paint.call_args.args[7]["whole_block_progress"], 1.0)
+                        painted_phase = paint.call_args.args[7]
+                        self.assertFalse(painted_phase["whole_row"])
+                        self.assertNotIn("whole_block_progress", painted_phase)
+                        self.assertEqual(painted_phase["timing_quality"], "estimated")
+                        self.assertAlmostEqual(painted_phase["timed_position"], 5.0)
 
     def test_island_and_large_surface_share_validated_source_progress_after_hidden_time(self):
         visual = self._visual()
@@ -102,13 +107,17 @@ class IslandLyricFollowGeometryTests(unittest.TestCase):
         owner._effective_lyric_offset_seconds = lambda: 0.0
         window = MusicSurfaceWindow(owner)
         try:
+            window._display_lyrics()
             for now in (100.0, 100.016, 100.032, 105.0, 105.016, 105.032):
                 phase = visual._lyric_phase(now)
                 frame = window._lyric_frame(visual.timed_lyrics, now)
                 self.assertEqual(int(phase["active_index"]), frame.active_index)
-                self.assertAlmostEqual(phase["progress"], frame.reading_progress, places=6)
                 self.assertAlmostEqual(visual._island_lyric_source_clock.last_source_position,
                                        window._lyric_motion.last_source_position, places=6)
+                self.assertAlmostEqual(phase["timed_position"], window._lyric_motion.last_position, places=6)
+                plan = window._display_row_timings[frame.active_index]
+                self.assertEqual(plan.quality, phase["timing_quality"])
+                self.assertAlmostEqual(phase["progress"], plan.reading_progress(phase["timed_position"]), places=6)
         finally:
             window.shutdown()
             owner.close()
@@ -132,8 +141,20 @@ class IslandLyricFollowGeometryTests(unittest.TestCase):
         phase = visual._lyric_phase(101.0)
         self.assertEqual(phase["active_index"], 1)
         self.assertEqual(phase["visual_focus_index"], 1)
-        self.assertAlmostEqual(phase["progress"], 0.25)
+        plan = resolve_display_row_timing("Next words", start=4.0, next_start=8.0)
+        self.assertAlmostEqual(phase["timed_position"], 5.0)
+        self.assertAlmostEqual(phase["progress"], plan.reading_progress(5.0))
         self.assertEqual(visual.lyric_index, 0)
+        self.assertFalse(visual.media_is_playing)
+        visual.media_position_seconds = visual.media_position_observed_seconds = 1.0
+        visual.media_position_sync_at = visual.media_position_sampled_at = 102.0
+        back = visual._lyric_phase(102.0)
+        first = resolve_display_row_timing(visual.lyrics[0], start=0.0, next_start=4.0)
+        self.assertEqual(back["active_index"], 0)
+        self.assertAlmostEqual(back["timed_position"], 1.0)
+        self.assertAlmostEqual(back["progress"], first.reading_progress(1.0))
+        self.assertEqual(visual.lyric_index, 0)
+        self.assertEqual(visual._lyric_phase(150.0)["timed_character_front"], back["timed_character_front"])
 
     def test_real_units_on_first_corrected_paint_keep_actual_reading_time(self):
         visual = self._visual()

@@ -14,16 +14,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QImage
 
 
 MYDOCKFINDER_ROOT = Path(r"B:\SteamLibrary\steamapps\common\MyDockFinder")
-MYDOCKFINDER_PROCESS_NAMES = {
-    "mydockfinder.exe",
-    "myfinder.exe",
-    "mydock.exe",
-    "dock.exe",
-    "dock_64.exe",
-    "dockmod.exe",
-    "dockmod64.exe",
-}
-MYDOCKFINDER_WINDOW_TOKENS = ("mydockfinder", "myfinder", "mydock")
+MYDOCKFINDER_PROCESS_NAMES = frozenset({"dock.exe", "dock_64.exe"})
 FINDER_BAR_WINDOW_CLASS = "MyFinderApp"
 
 
@@ -93,11 +84,27 @@ def _finder_bar_identity(snapshot) -> tuple[int, int, str] | None:
     return (hwnd, pid, _normalized_runtime_path(snapshot.get("process_path", ""))) if hwnd > 0 and pid > 0 else None
 
 
+def _finder_bar_window_key(snapshot):
+    identity = _finder_bar_identity(snapshot)
+    name = str(snapshot.get("process_name", "")).casefold() if identity else ""
+    return (*identity[:2], name) if name in MYDOCKFINDER_PROCESS_NAMES else None
+
+
 def _finder_bar_presentation_snapshot(row, config_enabled, previous=None) -> dict[str, object] | None:
     identity = _finder_bar_identity(row)
     if identity is None or not str(row.get("monitor_name", "")):
         return None
-    prior = previous if _finder_bar_identity(previous) == identity else None
+    prior_identity = _finder_bar_identity(previous)
+    same_window = _finder_bar_window_key(row)
+    prior = previous if (same_window is not None and same_window == _finder_bar_window_key(previous)
+        and not (identity[2] and prior_identity[2] and identity[2] != prior_identity[2])) else None
+    if prior and not identity[2]:
+        # A denied path query is missing metadata, not a new HWND/PID/name.
+        # Retain this actual window's last verified path/config while hidden;
+        # a newly readable configuration remains authoritative on recovery.
+        row = {**row, "process_path": str(prior.get("process_path", ""))}
+        if config_enabled is None:
+            config_enabled = prior.get("config_enabled")
     if (
         prior and not _finder_bar_near_monitor_top(row.get("physical_rect"), row.get("physical_monitor_rect"))
         and _finder_bar_near_monitor_top(row.get("physical_rect"), prior.get("physical_monitor_rect"))
@@ -119,7 +126,8 @@ def _finder_bar_presentation_snapshot(row, config_enabled, previous=None) -> dic
     minimized = bool(row.get("minimized"))
     full_shape = height > 2.0 and height >= full_height - 1.0
     at_top = monitor[1] - 1.0 <= bar[1] <= monitor[1] + 1.0
-    visible = bool(row.get("visible")) and full_shape and at_top and not cloaked and not minimized
+    window_visible = bool(row.get("visible"))
+    visible = window_visible and full_shape and at_top and not cloaked and not minimized
     if full_shape and not cloaked and not minimized:
         resting = (bar[0], monitor[1], bar[2], monitor[1] + height)
     elif resting:
@@ -129,7 +137,8 @@ def _finder_bar_presentation_snapshot(row, config_enabled, previous=None) -> dic
         and (config_enabled is True or visible or bool(prior and prior.get("enabled")))
     )
     snapshot = dict(row)
-    snapshot.update(class_name=FINDER_BAR_WINDOW_CLASS, enabled=enabled, visible=visible and enabled, config_enabled=config_enabled)
+    snapshot.update(class_name=FINDER_BAR_WINDOW_CLASS, enabled=enabled,
+                    window_visible=window_visible, visible=visible and enabled, config_enabled=config_enabled)
     if resting is not None:
         snapshot["physical_resting_rect"] = list(resting)
     return snapshot
@@ -150,19 +159,22 @@ def read_live_finder_bars(
     """
     name = str(matched_name or "").strip().casefold()
     path = _normalized_runtime_path(matched_path)
-    if not name:
+    if name not in MYDOCKFINDER_PROCESS_NAMES:
         return []
-    previous = {_finder_bar_identity(item): item for item in (previous_bars or ()) if _finder_bar_identity(item) is not None}
+    previous = {_finder_bar_window_key(item): item for item in (previous_bars or ()) if _finder_bar_window_key(item) is not None}
     bars: list[dict[str, object]] = []
     for row in _native_finder_bar_window_snapshots(name, path):
         runtime_name = str(row.get("process_name", "")).casefold()
         runtime_path = _normalized_runtime_path(row.get("process_path", ""))
-        if runtime_name != name or (path and runtime_path != path):
+        # A known different runtime is rejected. A denied second path query
+        # cannot invalidate Toolhelp's current exact-name/PID evidence for the
+        # real HWND; elevated/service-launched Dock may not expose its path.
+        if runtime_name != name or (path and runtime_path and runtime_path != path):
             continue
         if str(row.get("class_name", "")).casefold() != FINDER_BAR_WINDOW_CLASS.casefold():
             continue
         config_enabled = _read_finder_enabled_for_runtime(str(row.get("process_path", "")))
-        snapshot = _finder_bar_presentation_snapshot(row, config_enabled, previous.get(_finder_bar_identity(row)))
+        snapshot = _finder_bar_presentation_snapshot(row, config_enabled, previous.get(_finder_bar_window_key(row)))
         if snapshot is not None:
             bars.append(snapshot)
     return bars
@@ -171,7 +183,10 @@ def read_live_finder_bars(
 def refresh_live_finder_bar(snapshot: dict[str, object]) -> dict[str, object] | None:
     """Refresh a trusted cached HWND without enumerating processes or files."""
     identity = _finder_bar_identity(snapshot)
-    if identity is None or not bool(snapshot.get("enabled")):
+    if (
+        identity is None or not bool(snapshot.get("enabled"))
+        or str(snapshot.get("process_name", "")).casefold() not in MYDOCKFINDER_PROCESS_NAMES
+    ):
         return None
     rows = _native_finder_bar_window_snapshots(
         str(snapshot.get("process_name", "")).casefold(), identity[2], _cached_snapshot=snapshot,
@@ -339,7 +354,7 @@ def _native_finder_bar_window_snapshots(matched_name: str, matched_path: str, *,
                                     path = buffer.value
                             finally:
                                 kernel32.CloseHandle(handle)
-                        if not matched_path or _normalized_runtime_path(path) == matched_path:
+                        if not matched_path or not path or _normalized_runtime_path(path) == matched_path:
                             identities[int(entry.th32ProcessID)] = (name, path)
                     more = kernel32.Process32NextW(process_snapshot, ctypes.byref(entry))
             finally:
@@ -537,22 +552,16 @@ def read_finder_material(
 
 
 def detect_mydockfinder(root: Path = MYDOCKFINDER_ROOT) -> FinderPresence:
+    # Installed files and a similarly titled window do not establish that the
+    # user's Dock is running. Config discovery only enriches a live main runtime.
+    process_name = _running_mydockfinder_process()
+    if str(process_name or "").casefold() not in MYDOCKFINDER_PROCESS_NAMES:
+        return FinderPresence(False, "fallback (Dock main runtime not running)")
     for candidate in _known_roots(root):
         config_file = candidate / "config.ini"
         if config_file.exists():
             return FinderPresence(True, str(candidate), config_file)
-        if any((candidate / name).exists() for name in ("MyDockFinder.exe", "mydockfinder.exe", "MyFinder.exe", "Mydock.exe", "dock.exe", "dock_64.exe", "Dockmod.exe", "Dockmod64.exe")):
-            return FinderPresence(True, str(candidate), config_file)
-
-    process_name = _running_mydockfinder_process()
-    if process_name:
-        return FinderPresence(True, f"running process: {process_name}")
-
-    window_title = _visible_mydockfinder_window()
-    if window_title:
-        return FinderPresence(True, f"visible window: {window_title}")
-
-    return FinderPresence(False, "fallback (MyDockFinder not detected)")
+    return FinderPresence(True, f"running process: {process_name}")
 
 
 def sample_live_finder_bar(
@@ -794,35 +803,6 @@ def _running_mydockfinder_process() -> str | None:
     except Exception:
         return None
     return None
-
-
-def _visible_mydockfinder_window() -> str | None:
-    if sys.platform != "win32":
-        return None
-    try:
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        found: list[str] = []
-
-        def callback(hwnd, _lparam):
-            if not user32.IsWindowVisible(hwnd):
-                return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length <= 0:
-                return True
-            buffer = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buffer, length + 1)
-            title = buffer.value
-            lowered = title.lower()
-            if any(token in lowered for token in MYDOCKFINDER_WINDOW_TOKENS):
-                found.append(title)
-                return False
-            return True
-
-        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(callback)
-        user32.EnumWindows(enum_proc, 0)
-        return found[0] if found else None
-    except Exception:
-        return None
 
 
 def _detect_bar_height(images: list[QImage], fallback: float) -> int:

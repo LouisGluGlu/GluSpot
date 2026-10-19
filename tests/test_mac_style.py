@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QColor, QImage
+from PySide6.QtWidgets import QApplication, QFrame, QLineEdit, QWidget
+
+from local.liquid_glass import GlassPushButton
 
 from local.mac_style import (
     MacTrafficButton,
@@ -54,6 +58,54 @@ class MacStyleTests(unittest.TestCase):
         self.assertGreaterEqual(len(colors), 6)
         self.assertIn("#0a84ff", colors)
         self.assertIn("#ff3b30", colors)
+
+    def test_transparent_card_containers_preserve_control_faces_and_primary_contrast(self):
+        for dark in (False, True):
+            for detail in (False, True):
+                with self.subTest(dark=dark, detail=detail):
+                    theme = mac_preferences_theme(dark)
+                    owner = QWidget()
+                    owner.setProperty("controlHoverDisabled", True)
+                    owner.setStyleSheet(mac_preferences_stylesheet(theme))
+                    owner.resize(360, 140)
+                    card = QFrame(owner)
+                    card.setObjectName("MacCard")
+                    card.setGeometry(5, 5, 350, 130)
+                    surface = card
+                    if detail:
+                        surface = QFrame(card)
+                        surface.setObjectName("DetailBody")
+                        surface.setGeometry(8, 8, 334, 114)
+                    row = QWidget(surface)
+                    row.setGeometry(15, 20, 300, 70)
+                    button = GlassPushButton("上传图标", row)
+                    button.setObjectName("Primary")
+                    button.setGeometry(0, 10, 110, 34)
+                    field = QLineEdit(row)
+                    field.setGeometry(130, 10, 140, 34)
+                    owner.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+                    try:
+                        owner.show()
+                        self.app.processEvents()
+                        dpr = owner.devicePixelRatioF()
+                        image = QImage(round(owner.width() * dpr), round(owner.height() * dpr),
+                                       QImage.Format.Format_ARGB32_Premultiplied)
+                        image.setDevicePixelRatio(dpr)
+                        owner.render(image)
+
+                        def sample(widget, point):
+                            point = widget.mapTo(owner, point)
+                            return image.pixelColor(round(point.x() * dpr), round(point.y() * dpr))
+
+                        accent = sample(button, QPoint(10, 17))
+                        self.assertGreater(accent.blue() - accent.red(), 100)
+                        self.assertEqual(sample(field, QPoint(20, 17)), QColor(theme["control"]))
+                        self.assertEqual(sample(row, QPoint(285, 55)),
+                                         QColor(theme["detail_body" if detail else "card"]))
+                    finally:
+                        owner.close()
+                        owner.deleteLater()
+                        self.app.processEvents()
 
     def test_shell_widget_factories_are_shared_helpers(self):
         self.assertTrue(callable(mac_traffic_lights))

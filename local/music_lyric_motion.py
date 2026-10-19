@@ -18,22 +18,16 @@ GLYPH_FLOAT_LIFT = 5.2
 # a fast display without quantizing motion or inventing extra media time.
 READING_LIFT_FULL_BANDS = 16
 READING_LIFT_SAMPLES_PER_BAND = 10
-SPARSE_MIN_SECONDS_PER_UNIT = 1.5
-SPARSE_MIN_SECONDS_PER_UNIT_SETTING = 0.8
-SPARSE_MAX_SECONDS_PER_UNIT_SETTING = 2.0
+SPARSE_MIN_SECONDS_PER_UNIT = 0.8
+# Kept as migration aliases for old settings/callers. The product threshold is
+# fixed; an old persisted value must not change how the same song is rendered.
+SPARSE_MIN_SECONDS_PER_UNIT_SETTING = SPARSE_MIN_SECONDS_PER_UNIT
+SPARSE_MAX_SECONDS_PER_UNIT_SETTING = SPARSE_MIN_SECONDS_PER_UNIT
 
 
 def normalize_sparse_seconds_per_unit(value: object) -> float:
-    """Keep persisted and runtime sparse-lyric thresholds in the supported range."""
-    if isinstance(value, bool):
-        return SPARSE_MIN_SECONDS_PER_UNIT
-    try:
-        seconds = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return SPARSE_MIN_SECONDS_PER_UNIT
-    if not math.isfinite(seconds):
-        return SPARSE_MIN_SECONDS_PER_UNIT
-    return max(SPARSE_MIN_SECONDS_PER_UNIT_SETTING, min(SPARSE_MAX_SECONDS_PER_UNIT_SETTING, seconds))
+    """Migrate any historical or malformed setting to the fixed 0.8 s cue."""
+    return SPARSE_MIN_SECONDS_PER_UNIT
 
 # Five spatial samples of one continuous, left-to-right sparse lyric wave.
 # Level zero is the resting size with no *extra* shine; read text may already
@@ -146,7 +140,7 @@ def lyric_emphasis_plan(
     duration = max(0.0, duration)
     seconds_per_unit = duration / len(units)
     threshold = normalize_sparse_seconds_per_unit(min_seconds_per_unit)
-    if duration < 3.0 or seconds_per_unit < threshold:
+    if duration < 3.0 or seconds_per_unit + 1e-9 < threshold:
         return LyricEmphasisPlan(
             unit_count=len(units), duration=duration, seconds_per_unit=seconds_per_unit,
         )
@@ -286,9 +280,11 @@ def sparse_glyph_frame(
     # Sample the white front by glyph ordinal so it completes halfway through
     # the effect, including long words. It is independent of the eight-stage
     # scale/glow wave, whose tail still has the rest of the line to recede.
-    front_distance = wave_position - spatial_position
     read = max(0.0, min(1.0, 2.0 * read_progress * count - index))
-    lift = GLYPH_FLOAT_LIFT * _smoothstep((front_distance - 0.15) / 1.85)
+    # Reuse the normal word-rise propagation at grapheme granularity. Adjacent
+    # letters start rising while their predecessor is still moving; the
+    # existing eight-stage growth/shine envelope remains independent.
+    lift = GLYPH_FLOAT_LIFT * continuous_read_lift(progress, index, count)
     return SparseGlyphFrame(1.0 + 0.125 * shine, lift, read, shine, True)
 
 

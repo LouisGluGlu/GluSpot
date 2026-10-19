@@ -4,12 +4,13 @@ import io
 import unittest
 from unittest.mock import Mock, patch
 from urllib.request import Request
+from urllib.error import HTTPError, URLError
 
 from PySide6.QtGui import QColor
 
 from api.models import ColorToken
 from api.online_music_artwork import (
-    _ArtworkRedirectHandler, fetch_online_artwork, online_artwork_colors,
+    _ArtworkRedirectHandler, OnlineArtworkError, fetch_online_artwork, online_artwork_colors,
 )
 from tests.test_music_palette import _png
 
@@ -91,6 +92,72 @@ class OnlineArtworkTests(unittest.TestCase):
         self.assertEqual(self.fetch(url="file:///redirected.png")[0], b"")
         with patch("api.online_music_artwork.build_opener", side_effect=RuntimeError("signed-url-secret")):
             self.assertEqual(fetch_online_artwork("https://example.test/x?token=synthetic"), b"")
+
+    def test_decodable_but_short_announced_response_is_not_published(self):
+        result, _ = self.fetch(headers={"Content-Length": str(len(self.content) + 5)})
+        self.assertEqual(result, b"")
+        opener = Mock()
+        opener.open.return_value = ArtworkResponse(self.content, headers={"Content-Length": str(len(self.content) + 5)})
+        with patch("api.online_music_artwork.build_opener", return_value=opener), \
+                self.assertRaises(OnlineArtworkError) as caught:
+            fetch_online_artwork("https://example.test/cover.png", raise_errors=True)
+        self.assertEqual(caught.exception.code, "incomplete")
+
+    def test_failed_known_size_upgrade_falls_back_to_exact_song_bound_url(self):
+        original = "https://p1.music.126.net/cover/x.jpg?param=64y64"
+        opener = Mock()
+        opener.open.side_effect = [URLError("synthetic signed-url-secret"), ArtworkResponse(self.content, url=original)]
+        with patch("api.online_music_artwork.build_opener", return_value=opener):
+            self.assertEqual(fetch_online_artwork(original, raise_errors=True), self.content)
+        self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list], [
+            "https://p1.music.126.net/cover/x.jpg?param=2560y2560", original])
+
+    def test_visible_queue_target_requests_small_same_object_with_existing_exact_fallback(self):
+        original = "https://p1.music.126.net/cover/x.jpg?param=64y64"
+        opener = Mock()
+        opener.open.side_effect = [URLError("synthetic transient"), ArtworkResponse(self.content, url=original)]
+        with patch("api.online_music_artwork.build_opener", return_value=opener):
+            self.assertEqual(fetch_online_artwork(original, raise_errors=True, target_side=320), self.content)
+        self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list], [
+            "https://p1.music.126.net/cover/x.jpg?param=320y320", original])
+
+    def test_queue_target_preserves_signed_and_unknown_urls_exactly(self):
+        for original in ("https://p1.music.126.net/x.jpg?token=synthetic&param=64y64",
+                         "https://example.test/cover.png?size=1024"):
+            with self.subTest(original=original):
+                opener = Mock()
+                opener.open.return_value = ArtworkResponse(self.content, url=original)
+                with patch("api.online_music_artwork.build_opener", return_value=opener):
+                    self.assertEqual(fetch_online_artwork(original, target_side=320), self.content)
+                self.assertEqual(opener.open.call_count, 1)
+                self.assertEqual(opener.open.call_args.args[0].full_url, original)
+
+    def test_signed_url_does_not_invent_fallback_or_expose_failure_text(self):
+        opener = Mock()
+        opener.open.side_effect = URLError("signed-url-secret")
+        with patch("api.online_music_artwork.build_opener", return_value=opener), \
+                self.assertRaises(OnlineArtworkError) as caught:
+            fetch_online_artwork("https://p1.music.126.net/x.jpg?token=synthetic&param=64y64", raise_errors=True)
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(str(caught.exception), "network")
+
+    def test_http_failures_have_sanitized_retry_classification(self):
+        for status, expected in ((503, "network"), (429, "network"), (404, "not_found"), (403, "access_denied")):
+            with self.subTest(status=status):
+                opener = Mock()
+                opener.open.side_effect = HTTPError("https://example.test/private", status, "secret", {}, None)
+                with patch("api.online_music_artwork.build_opener", return_value=opener), \
+                        self.assertRaises(OnlineArtworkError) as caught:
+                    fetch_online_artwork("https://example.test/x.png", raise_errors=True)
+                self.assertEqual(caught.exception.code, expected)
+
+    def test_corrupt_http_success_is_retryable_without_exposing_response(self):
+        opener = Mock()
+        opener.open.return_value = ArtworkResponse(b"corrupt response secret")
+        with patch("api.online_music_artwork.build_opener", return_value=opener), \
+                self.assertRaises(OnlineArtworkError) as caught:
+            fetch_online_artwork("https://example.test/x.png", raise_errors=True)
+        self.assertEqual(str(caught.exception), "invalid_image")
 
 
 if __name__ == "__main__":

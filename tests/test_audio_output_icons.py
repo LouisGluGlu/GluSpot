@@ -263,14 +263,15 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
             self.window._paint_window_controls(painter, QRectF(self.window.rect()))
         return image
 
-    def test_three_controls_share_circle_diameter_spacing_and_keep_idle_click_gate(self):
+    def test_function_controls_share_circle_diameter_spacing_and_keep_idle_click_gate(self):
         self.window._reset_control_idle(100.0)
         image = self._controls()
         mode = self.window._button_rects["return"]
         translation = self.window._button_rects["translation"]
         output = self.window._button_rects["audio_output"]
-        self.assertEqual(set(self.window._button_rects), {"audio_output", "translation", "return"})
-        circles = [output, translation, mode]
+        layout = self.window._button_rects["content_layout"]
+        self.assertEqual(set(self.window._button_rects), {"audio_output", "content_layout", "translation", "return"})
+        circles = [output, layout, translation, mode]
         for circle in circles:
             self.assertEqual(circle.size(), mode.size())
             self.assertEqual(circle.width(), circle.height())
@@ -301,7 +302,7 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         restored = self._controls()
         self.assertEqual(bytes(closed.constBits()), bytes(restored.constBits()))
 
-    def test_translation_active_uses_transparent_symbol_cutout(self):
+    def test_translation_active_has_sharp_contrasting_symbol_over_glass(self):
         self.owner.enable_dual_line_lyrics = True
         self.window._reset_control_idle(100.0)
         image = self._controls()
@@ -313,8 +314,12 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
                   for x in range(round(circle.left()) + 4, round(circle.right()) - 4)
                   if path.contains(QRectF(x + 0.2, y + 0.2, 0.6, 0.6))]
         self.assertGreater(len(points), 30)
-        self.assertTrue(all(image.pixelColor(x, y).alpha() < 70 for x, y in points))
-        self.assertGreater(image.pixelColor(round(circle.center().x()), round(circle.top()) + 3).red(), 200)
+        self.assertTrue(all(image.pixelColor(x, y).alpha() > 240 for x, y in points))
+        face = image.pixelColor(round(circle.center().x()), round(circle.top()) + 3)
+        self.assertGreater(face.alpha(), 0)
+        self.assertLess(face.alpha(), 245)
+        self.assertGreater(abs(sum(image.pixelColor(x, y).lightness() for x, y in points) / len(points)
+                               - face.lightness()), 80)
 
     def test_genuine_timing_and_reading_strategy_do_not_add_top_badges_or_slots(self):
         self.window._reset_control_idle(100.0)

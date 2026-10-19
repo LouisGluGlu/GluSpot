@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import gc
 import unittest
+import weakref
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QHelpEvent, QImage, QMouseEvent, QPainter
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QLineEdit, QListWidget, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QLineEdit, QListWidget, QWidget
 from shiboken6 import isValid
 
 from local.control_hover import (
@@ -15,6 +17,42 @@ from local.control_hover import (
 )
 from local.liquid_glass import GlassPushButton
 from local.no_wheel_widgets import NoWheelComboBox, NoWheelSlider, NoWheelSpinBox
+
+
+class _PaintedChild(QAbstractButton):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.help_positions = []
+        self.boundaries = []
+
+    def paintEvent(self, event):
+        with QPainter(self) as painter:
+            painter.fillRect(self.rect(), QColor("#ed1737"))
+
+    def event(self, event):
+        if event.type() in {QEvent.Type.Enter, QEvent.Type.Leave}:
+            self.boundaries.append(event.type())
+        if event.type() == QEvent.Type.ToolTip:
+            self.help_positions.append(event.pos())
+            event.accept()
+            return True
+        return super().event(event)
+
+
+class _CompositeControl(QWidget):
+    def __init__(self, parent, *, nested=False):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        host = self
+        if nested:
+            host = QWidget(self)
+            host.setGeometry(150, 40, 50, 20)
+            host.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.child = _PaintedChild(host)
+        self.child.setGeometry(20 if nested else 170, 5 if nested else 45, 12, 8)
+
+    def paintEvent(self, event):
+        pass
 
 
 class ControlHoverMathTests(unittest.TestCase):
@@ -102,6 +140,43 @@ class ControlHoverWidgetTests(unittest.TestCase):
         self.owner.deleteLater()
         self.app.processEvents()
 
+    def test_idle_destroyed_controls_release_records_and_bound_callbacks(self):
+        self.group.timer.stop()
+        baseline = len(self.group.controls)
+        references = []
+        for index in range(120):
+            button = GlassPushButton(str(index), self.owner)
+            install_control_hover(button, enabled_when=button.isEnabled,
+                                  bounds_provider=button.geometry)
+            references.append(weakref.ref(button))
+            button.deleteLater()
+            del button
+            self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.assertEqual(len(self.group.controls), baseline)
+            self.assertFalse(self.group.timer.isActive())
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+
+    def test_destroyed_held_control_cancels_capture_without_clicking_neighbor(self):
+        self.settle_hover()
+        destination = QPointF(self.owner.mapToGlobal(self.first.geometry().center()))
+        event = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(self.first.rect().center()),
+                            destination, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                            Qt.KeyboardModifier.NoModifier)
+        self.group._route_pointer(self.first, event)
+        self.assertIs(self.group.pressed, self.record)
+        sibling_clicks = QSignalSpy(self.second.clicked)
+        self.first.deleteLater()
+        self.app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.assertIsNone(self.group.active)
+        self.assertIsNone(self.group.pressed)
+        self.assertIsNone(self.group.pressed_widget)
+        self.assertIsNone(self.group.pressed_visual)
+        self.assertNotIn(self.record, self.group.controls)
+        self.group._tick()
+        self.assertEqual(sibling_clicks.count(), 0)
+        self.assertTrue(isValid(self.second))
+
     def settle_hover(self):
         with patch("local.control_hover.time.monotonic", return_value=100.):
             self.group._set_active(self.record, 100.)
@@ -140,6 +215,155 @@ class ControlHoverWidgetTests(unittest.TestCase):
         self.first.render(after)
         self.assertGreater(after.pixelColor(50, 20).alpha(), 0)
         self.assertEqual(before.pixelColor(50, 20), after.pixelColor(50, 20))
+
+    def _hover_composite(self, *, nested=False):
+        control = _CompositeControl(self.owner, nested=nested)
+        control.setGeometry(50, 125, 200, 60)
+        install_control_hover(control)
+        control.show()
+        self.app.processEvents()
+        registration = control._control_hover_registration
+        group, record = registration.group, registration.record
+        with patch("local.control_hover.time.monotonic", return_value=100.):
+            group._set_active(record, 100.)
+        for step in range(1, 61):
+            with patch("local.control_hover.time.monotonic", return_value=100. + step / 60):
+                group._tick()
+        return control, group, record
+
+    @staticmethod
+    def _image_for(widget):
+        dpr = widget.devicePixelRatioF()
+        image = QImage(round(widget.width() * dpr), round(widget.height() * dpr),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(Qt.GlobalColor.transparent)
+        return image
+
+    @staticmethod
+    def _logical_pixel(image, position):
+        dpr = image.devicePixelRatioF()
+        return image.pixelColor(round(position.x() * dpr), round(position.y() * dpr))
+
+    def test_composed_descendant_paints_once_at_visual_pose_and_native_render_keeps_children(self):
+        control, group, record = self._hover_composite()
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            image = self._image_for(self.owner)
+            self.owner.render(image)
+            native = self._image_for(control)
+            control.render(native)
+        marker = QColor("#ed1737")
+        # The native child begins at (220, 170), while its grown pixels begin
+        # at (227, 171.5). The old double-paint left red in this exclusive area.
+        self.assertEqual(self._logical_pixel(image, QPoint(221, 173)), QColor("#1c202a"))
+        visual = group.visual_rect(record, 101.)
+        center = visual.topLeft() + QPointF(control.child.geometry().center()) * HOVER_SCALE
+        self.assertEqual(self._logical_pixel(image, center), marker)
+        self.assertEqual(self._logical_pixel(native, control.child.geometry().center()), marker)
+
+    def test_descendant_update_replaces_cached_pixels_in_composed_snapshot(self):
+        control, group, record = self._hover_composite()
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            first = group._control_image(record)
+            control.child.setGeometry(155, 45, 12, 8)
+            self.app.sendEvent(control.child, QEvent(QEvent.Type.Paint))
+            second = group._control_image(record)
+        self.assertEqual(self._logical_pixel(first, QPoint(175, 48)), QColor("#ed1737"))
+        self.assertEqual(self._logical_pixel(second, QPoint(175, 48)).alpha(), 0)
+        self.assertEqual(self._logical_pixel(second, QPoint(160, 48)), QColor("#ed1737"))
+
+    def test_tooltip_uses_composed_child_target_and_its_local_position(self):
+        control, group, record = self._hover_composite()
+        control.child.setToolTip("Child action")
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            visual = group.visual_rect(record)
+            point = visual.topLeft() + QPointF(control.child.pos() + QPoint(6, 4)) * HOVER_SCALE
+            global_point = self.owner.mapToGlobal(point.toPoint())
+            # The original target can now be the host or another native child;
+            # help must choose the control under its composed pixels.
+            event = QHelpEvent(QEvent.Type.ToolTip, point.toPoint(), global_point)
+            self.app.sendEvent(self.owner, event)
+        self.assertEqual(len(control.child.help_positions), 1)
+        local = control.child.help_positions[0]
+        self.assertLessEqual(abs(local.x() - 6), 1)
+        self.assertLessEqual(abs(local.y() - 4), 1)
+
+    def test_hidden_descendant_retires_cached_pixels_and_mapped_hover(self):
+        control, group, record = self._hover_composite()
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            visual = group.visual_rect(record)
+            point = visual.topLeft() + QPointF(control.child.geometry().center()) * HOVER_SCALE
+            group._set_descendant_hover(record, QPointF(self.owner.mapToGlobal(point.toPoint())))
+            first = group._control_image(record)
+            self.assertTrue(control.child.underMouse())
+            control.child.hide()
+            second = group._control_image(record)
+        self.assertEqual(self._logical_pixel(first, QPoint(175, 48)), QColor("#ed1737"))
+        self.assertEqual(self._logical_pixel(second, QPoint(175, 48)).alpha(), 0)
+        self.assertFalse(control.child.underMouse())
+        self.assertFalse(group.hovered_descendants)
+
+    def test_grown_descendant_click_uses_child_and_retains_pressed_pose(self):
+        control, group, record = self._hover_composite()
+        clicked = QSignalSpy(control.child.clicked)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            visual = group.visual_rect(record)
+            point = visual.topLeft() + QPointF(control.child.pos() + QPoint(10, 4)) * HOVER_SCALE
+            self.assertFalse(control.child.rect().contains(control.child.mapFrom(self.owner, point.toPoint())))
+            QTest.mousePress(self.owner, Qt.MouseButton.LeftButton, pos=point.toPoint())
+            self.assertIs(group.pressed_widget(), control.child)
+            pressed_pose = group.visual_rect(record)
+        with patch("local.control_hover.time.monotonic", return_value=101.3):
+            group._set_active(None, 101.3)
+            group._tick()
+            self.assertEqual(group.visual_rect(record), pressed_pose)
+            QTest.mouseRelease(self.owner, Qt.MouseButton.LeftButton, pos=point.toPoint())
+        self.assertEqual(clicked.count(), 1)
+        self.assertIsNone(group.pressed)
+
+    def test_nested_descendant_uses_ancestor_composite_for_paint_and_help(self):
+        control, group, record = self._hover_composite(nested=True)
+        control.child.setToolTip("Nested child")
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            image = self._image_for(self.owner)
+            self.owner.render(image)
+            visual = group.visual_rect(record)
+            point = visual.topLeft() + QPointF(control.child.mapTo(control, QPoint(6, 4))) * HOVER_SCALE
+            event = QHelpEvent(QEvent.Type.ToolTip, point.toPoint(), self.owner.mapToGlobal(point.toPoint()))
+            self.app.sendEvent(self.owner, event)
+        self.assertEqual(self._logical_pixel(image, QPoint(221, 173)), QColor("#1c202a"))
+        self.assertEqual(self._logical_pixel(image, point), QColor("#ed1737"))
+        self.assertEqual(len(control.child.help_positions), 1)
+        self.assertLessEqual(abs(control.child.help_positions[0].x() - 6), 1)
+        self.assertLessEqual(abs(control.child.help_positions[0].y() - 4), 1)
+
+    def test_grown_child_hover_enters_and_leaves_once_while_parent_stays_hovered(self):
+        control, group, record = self._hover_composite()
+
+        def move(position):
+            self.app.sendEvent(self.owner, QMouseEvent(
+                QEvent.Type.MouseMove, QPointF(position), QPointF(self.owner.mapToGlobal(position)),
+                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+
+        with patch("local.control_hover.time.monotonic", return_value=100.):
+            group._set_active(None, 100.)
+            group._set_active(record, 100.)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            group._tick()
+            control.child.boundaries.clear()
+            visual = group.visual_rect(record)
+            point = visual.topLeft() + QPointF(control.child.pos() + QPoint(10, 4)) * HOVER_SCALE
+            self.assertFalse(control.child.rect().contains(control.child.mapFrom(self.owner, point.toPoint())))
+            move(point.toPoint())
+            move(point.toPoint())
+            self.assertTrue(control.child.underMouse())
+            self.assertTrue(control.underMouse())
+            self.assertEqual(control.child.boundaries, [QEvent.Type.Enter])
+            move(visual.center().toPoint())
+            move(visual.center().toPoint())
+            self.assertFalse(control.child.underMouse())
+            self.assertTrue(control.underMouse())
+            self.assertEqual(control.child.boundaries, [QEvent.Type.Enter, QEvent.Type.Leave])
 
     def test_dynamic_host_deletion_retires_its_window_level_overlay(self):
         host = QWidget(self.owner)
@@ -260,6 +484,29 @@ class ControlHoverWidgetTests(unittest.TestCase):
         with patch("local.control_hover.time.monotonic", return_value=101.2):
             self.group._set_active(None, 101.2)
         with patch("local.control_hover.time.monotonic", return_value=102.):
+            self.group._tick()
+        opened.assert_called_once()
+
+    def test_held_click_owns_menu_entry_until_a_fresh_hover(self):
+        opened = Mock()
+        install_control_hover(self.first, menu_callback=opened)
+        clicked = QSignalSpy(self.first.clicked)
+        with patch("local.control_hover.time.monotonic", return_value=100.):
+            self.group._set_active(self.record, 100.)
+        with patch("local.control_hover.time.monotonic", return_value=100.2):
+            self.group._tick()
+            QTest.mousePress(self.first, Qt.MouseButton.LeftButton, pos=QPoint(50, 20))
+        with patch("local.control_hover.time.monotonic", return_value=100.7):
+            self.group._tick()
+            opened.assert_not_called()
+            QTest.mouseRelease(self.first, Qt.MouseButton.LeftButton, pos=QPoint(50, 20))
+        self.assertEqual(clicked.count(), 1)
+        with patch("local.control_hover.time.monotonic", return_value=101.):
+            self.group._tick()
+            opened.assert_not_called()
+            self.group._set_active(None, 101.)
+            self.group._set_active(self.record, 101.)
+        with patch("local.control_hover.time.monotonic", return_value=101.5):
             self.group._tick()
         opened.assert_called_once()
 

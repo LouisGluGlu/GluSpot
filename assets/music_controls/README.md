@@ -39,3 +39,16 @@ one, then back, over four seconds. A thin neutral edge preserves readability.
 The render cache retains one mask per size rather than every animation tint;
 the existing control fade freezes its color and reuses the shared blur layer.
 Single-track repeat and all ordinary playlist icons retain their existing ink.
+
+On 2026-10-16, the user supplied the following five controls. All copies retain
+the source bytes, contain only SVG/path geometry and standard SVG metadata,
+and are tinted through the existing bounded renderer. No scripts, event
+handlers, external references, entity definitions or internal DTDs are present.
+
+| Asset | User-supplied filename | SHA-256 |
+| --- | --- | --- |
+| `queue_next.svg` | `音频=添加歌单备份.svg` | `cedab4bd21c0238770783a2b373092b485da043797175b6d4411a41d16f2939e` |
+| `playlist_add.svg` | `添加文件夹.svg` | `b3abf0a76b58b76c27e191bb93b0343773444020bc32c28427a508b1f84222ad` |
+| `heart_filled.svg` | `红心_点击后.svg` | `3a53c70c917cd1f6aafc09ca18dd35d08a3b9820c3f10003961d69f149f493d3` |
+| `heart_outline.svg` | `红心_未点击.svg` | `697c427922bf901267a6ce31834b7ba0d5e6ba0b21110f36ba255fa24d01611f` |
+| `login.svg` | `用户.svg` | `4baf0c6ac0af6f0082075ad37ca021ccfc0c515d2a5de43b060e357c70758718` |

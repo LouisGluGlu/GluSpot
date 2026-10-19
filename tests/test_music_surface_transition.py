@@ -115,7 +115,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
 
         self.window._finish_mode_transition()
         self.assertTrue(self.window._geometry_transition_snapshot.isNull())
-        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
         self._render()
         final_cache_size = len(self.window._lyric_layout_cache)
         self.assertEqual(final_cache_size, len(self.owner.timed_lyrics))
@@ -126,6 +126,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
         first = self._snapshot(color=QColor(80, 20, 30))
         second = self._snapshot((1120, 630), QColor(20, 80, 30))
         self.window._fullscreen = False
+        self.window.setGeometry(120, 90, 960, 540)
         original_normal = QRect(self.window.geometry())
         self.window._normal_geometry = QRect(original_normal)
         self.window._fullscreen_geometry = lambda: QRect(0, 0, 1920, 1080)
@@ -151,11 +152,11 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
     def test_only_contextual_window_button_is_painted_and_window_title_double_clicks(self):
         self.window._fullscreen = True
         self._render()
-        self.assertEqual(set(self.window._button_rects), {"mode", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"mode", "translation", "content_layout"})
 
         self.window._fullscreen = False
         self._render()
-        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
 
         accepted = []
         title_double_click = SimpleNamespace(
@@ -329,6 +330,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
     def test_reversal_inherits_motion_before_braking_toward_the_latest_target(self):
         self.window._fullscreen_geometry = lambda: QRect(0, 0, 1920, 1080)
         self.window._fullscreen = False
+        self.window.setGeometry(120, 90, 960, 540)
         original = QRect(self.window.geometry())
         with patch("local.music_surface_window.time.monotonic", return_value=100.0), patch.object(
             self.window, "_capture_transition_snapshot", return_value=self._snapshot(),
@@ -355,6 +357,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
     def test_new_mode_request_cancels_a_return_completion(self):
         self.window._island_origin_geometry = QRect(420, 12, 240, 64)
         self.window.show()
+        self.window.setGeometry(120, 90, 960, 540)
         saved_normal = QRect(self.window.geometry())
         with patch.object(self.window, "_capture_transition_snapshot", return_value=self._snapshot()):
             self.window.return_to_island()
@@ -458,7 +461,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
             self.window._mode_animation.setCurrentTime(self.window.MODE_TRANSITION_MS)
         self.assertEqual(self.window.height(), 540)
         for actual, old in zip(self.window._logical_line_spring.positions, original_positions):
-            self.assertAlmostEqual(actual, old * 0.75)
+            self.assertAlmostEqual(actual, old * .75)
 
     def test_reopen_after_interrupted_windowing_rebases_hidden_lyric_pose(self):
         origin = QRect(420, 12, 240, 64)
@@ -482,7 +485,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
             self.window.show_from_island(origin_geometry=origin)
         self.assertEqual(self.window._mode_lyric_snapshot_size.height(), 540)
         for actual, old in zip(self.window._logical_line_spring.positions, positions):
-            self.assertAlmostEqual(actual, old * 0.75)
+            self.assertAlmostEqual(actual, old * .75)
 
     def test_reopen_without_origin_rebases_a_hidden_pose_before_first_live_paint(self):
         self.window._fullscreen = True
@@ -497,7 +500,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
             self._render()
         self.assertEqual(self.window.height(), 540)
         for actual, old in zip(self.window._logical_line_spring.positions, positions):
-            self.assertAlmostEqual(actual, old * 0.75)
+            self.assertAlmostEqual(actual, old * .75)
 
 
 if __name__ == "__main__":

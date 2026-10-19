@@ -28,7 +28,9 @@ class _Owner(QWidget):
         self._music_windowed_preference = False
         self.timed_lyrics = [
             (0.0, "Shine through the quiet night"),
-            (6.0, "We walk an ordinary road together tonight"),
+            # Eight words in six seconds stay below the fixed 0.8 s
+            # highlight threshold, so this fixture exercises ordinary prewarm.
+            (6.0, "We walk an ordinary road together again tonight"),
             (12.0, "Another ordinary sentence follows this one"),
             (18.0, "The final ordinary sentence has enough words"),
         ]
@@ -168,7 +170,7 @@ class MusicLyricColdPrewarmTests(unittest.TestCase):
             wraps=self.window._advance_isolated_glyph_units,
         ) as advance:
             self.window._on_animation_tick()
-        self.assertFalse(any(call.args[0] == "We walk an ordinary road together tonight" for call in advance.call_args_list))
+        self.assertFalse(any(call.args[0] == "We walk an ordinary road together again tonight" for call in advance.call_args_list))
 
 
 if __name__ == "__main__":

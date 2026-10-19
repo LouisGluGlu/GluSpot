@@ -125,8 +125,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel._rows["bluetooth"].subtitle, "同步播放")
         self.assertEqual(self.panel._rows["local"].state, "available")
         self.assertFalse(self.panel._rows["local"].isChecked())
-        self.assertTrue(self.panel.stop_button.isEnabled())
-        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.assertFalse(self.panel.stop_button.isEnabled())
+        self.assertTrue(self.panel.stop_button.isHidden())
         self.panel._rows["homepod-2"].volume_slider.setValue(53)
         self.assertIn(("volume", "homepod-2", .53), self.provider.calls)
         self.assertFalse(any(call[0] in {"toggle", "select"} for call in self.provider.calls))
@@ -146,8 +146,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertFalse(self.panel._rows["local"].isChecked())
         self.assertIn("同步播放", self.panel.title_label.text())
         self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
-        self.assertTrue(self.panel.stop_button.isEnabled())
-        self.assertTrue(self.panel.stop_button.isVisible())
+        self.assertFalse(self.panel.stop_button.isEnabled())
+        self.assertTrue(self.panel.stop_button.isHidden())
 
     def test_reconfiguring_retains_old_members_with_pending_join_and_all_actions(self):
         devices = tuple(replace(d, volume=.4) if d.id == "homepod" else d for d in self.provider.devices)
@@ -157,9 +157,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         self._open()
         self.assertEqual(self._row_order(), ("local", "bluetooth", "homepod"))
         self.assertEqual(self.panel.title_label.text(), "同步播放 · 3 个设备")
-        self.assertTrue(self.panel.stop_button.isVisible())
-        self.assertTrue(self.panel.stop_button.isEnabled())
-        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.assertTrue(self.panel.stop_button.isHidden())
+        self.assertFalse(self.panel.stop_button.isEnabled())
         self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
         for identity in ("local", "bluetooth"):
             row = self.panel._rows[identity]
@@ -169,13 +168,13 @@ class AudioOutputPanelTests(unittest.TestCase):
             row.click()
             row.solo_button.click()
             self.assertIn(("mute", identity), self.provider.calls)
-            self.assertIn(("select", identity), self.provider.calls)
+            self.assertIn(("toggle", identity), self.provider.calls)
         self.assertEqual(self.panel._rows["homepod"].state, "pending")
         self.assertFalse(self.panel._rows["homepod"].isChecked())
         self.assertFalse(self.panel._rows["homepod"].volume_slider.isEnabled())
         self.assertEqual(self.panel._source_kinds, ("speaker", "airpods-pro"))
 
-    def test_windows_only_group_has_music_scope_membership_volumes_and_stop_action(self):
+    def test_windows_only_group_has_music_scope_membership_volumes_and_member_removal(self):
         devices = tuple(replace(device, route_state="active") if device.id in {"local", "bluetooth"}
                         else device for device in self.provider.devices)
         self.provider.snapshot = AudioRouteSnapshot(devices, active_id="bluetooth", state="casting",
@@ -186,9 +185,8 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.title_label.text(), "同步播放 · 2 个设备")
         self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
         self.assertNotIn("电脑全部声音", self.panel.scope_label.text())
-        self.assertTrue(self.panel.stop_button.isVisible())
-        self.assertTrue(self.panel.stop_button.isEnabled())
-        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.assertTrue(self.panel.stop_button.isHidden())
+        self.assertFalse(self.panel.stop_button.isEnabled())
         for identity in ("local", "bluetooth"):
             self.assertTrue(self.panel._rows[identity].isChecked())
             self.assertEqual(self.panel._rows[identity].subtitle, "同步播放")
@@ -196,10 +194,11 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.panel._rows["bluetooth"].volume_slider.setValue(55)
         self.assertIn(("volume", "bluetooth", .55), self.provider.calls)
         self.assertFalse(any(call[0] in {"toggle", "select"} for call in self.provider.calls))
-        self.panel.stop_button.click()
-        self.assertIn(("stop",), self.provider.calls)
+        self.panel._rows["bluetooth"].solo_button.click()
+        self.assertIn(("toggle", "bluetooth"), self.provider.calls)
+        self.assertNotIn(("stop",), self.provider.calls)
 
-    def test_windows_only_pending_group_remains_stoppable_without_confirmed_members(self):
+    def test_windows_only_pending_group_has_no_group_cancel_button(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="local", state="waiting_source",
             pending_ids=("local", "bluetooth"), capture_scope="music_process_tree", group_id="windows-only")
         self._open()
@@ -209,10 +208,10 @@ class AudioOutputPanelTests(unittest.TestCase):
         for identity in ("local", "bluetooth"):
             self.assertEqual(self.panel._rows[identity].state, "pending")
             self.assertFalse(self.panel._rows[identity].isChecked())
-        self.assertTrue(self.panel.stop_button.isVisible())
-        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.assertTrue(self.panel.stop_button.isHidden())
+        self.assertFalse(self.panel.stop_button.isEnabled())
         self.panel.stop_button.click()
-        self.assertIn(("stop",), self.provider.calls)
+        self.assertNotIn(("stop",), self.provider.calls)
 
     def test_windows_only_group_downgrade_restores_single_all_system_scope_and_hides_stop(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth", state="casting",
@@ -313,10 +312,13 @@ class AudioOutputPanelTests(unittest.TestCase):
     def test_reorder_waits_for_volume_drag_release_and_preserves_focus_and_request(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
         self._open()
+        self.owner.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.owner, 1000))
         self.app.processEvents()
         rows = dict(self.panel._rows)
         slider = rows["bluetooth"].volume_slider
         slider.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.assertIs(self.app.focusWidget(), slider)
         slider.setSliderDown(True)
         slider.setValue(79)
         request_until = rows["bluetooth"]._request_until
@@ -342,7 +344,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="homepod", state="casting",
             member_ids=("homepod", "bluetooth"), capture_scope="music_process_tree")
         self._open()
-        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.assertTrue(self.panel.stop_button.isHidden())
         self.provider.snapshot = replace(self.provider.snapshot, active_id="local", state="connecting",
             member_ids=(), pending_ids=("homepod",), pending_id="homepod", capture_scope="all_system")
         self.panel.sync_snapshot()
@@ -365,7 +367,7 @@ class AudioOutputPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.title_label.text(), "同步播放 · 1 个设备")
         self.assertIn("仅当前音乐软件", self.panel.scope_label.text())
         self.assertNotIn("电脑全部声音", self.panel.scope_label.text())
-        self.assertEqual(self.panel.stop_button.text(), "停止同步播放")
+        self.assertTrue(self.panel.stop_button.isHidden())
         self.assertEqual(self.panel._rows["homepod"].subtitle, "同步播放")
         self.provider.snapshot = replace(self.provider.snapshot, capture_scope="all_system",
             member_ids=(), pending_ids=("homepod", "bluetooth"), state="connecting")
@@ -763,7 +765,8 @@ class AudioOutputPanelTests(unittest.TestCase):
                 self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(self.panel._ink, self.panel._background), 4.5)
                 self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(self.panel._muted, self.panel._background), 4.5)
                 self.assertEqual(self.panel._accent, self.panel._ink)
-                self.assertEqual(self.panel._rows["local"].ink, self.panel._ink)
+                self.assertEqual(self.panel._rows["local"].ink, QColor('black'))
+                self.assertEqual(self.panel._rows["bluetooth"].ink, self.panel._ink)
                 self.assertEqual(self.panel._rows["local"].label_font.families(), self.panel._label_font.families())
         self.assertGreater(self.panel._background.red(), 240)
 

@@ -21,9 +21,10 @@ wakes pending requests and reaps every child off-thread.
 Only a genuinely visible login source page requests background module
 preparation. Its internal `prepare_login` operation loads exactly the pinned
 modules used by that platform's QR path. It does not call a network or QR
-function, create an account service, request a QR key, read a protected record,
-or save credentials. General service construction and source availability
-checks do not start prepared children. Deliberate selection still requests the
+function, request a QR key, read a protected record, or save credentials. The
+pinned QQ import constructs an inert memory-only singleton, without starting
+a login operation or network request. General service construction and source
+availability checks do not start prepared children. Deliberate selection still requests the
 actual QR, so background preparation does not consume QR validity time.
 
 An account already verified by the current service can return its existing card
@@ -77,7 +78,36 @@ The final 100 focused Python backend/service/credential/DJ tests passed in
 and stale-retirement/close races. Native controller and full-suite results are
 reported with the integrated branch verification in README.
 
-## Limits
+## October 15 diagnosis of long waiting-service states
+
+The user reports long waits on both NetEase and QQ. A fresh anonymous backend
+probe (no credential store or account access) returned NetEase QR images in
+1359 ms from a fresh child and 219 ms from the same child; QQ returned in
+2187/1453 ms. These four successful observations do not reproduce the UI's
+queue/account-validation path or the reported intermittent failure. The live
+app was running this source checkout, not an older packaged executable.
+
+Read-only tracing found avoidable orchestration costs: same-platform lock wait
+is outside the 18-second request timeout; generation cancellation discards old
+results but does not interrupt their running request; two shared FIFO UI
+workers can both remain occupied by old attempts. Warmup may be invalidated by
+automatic source selection and does not reset its started flag after failure.
+Account errors lose their safe stage/category, and the generic retry action
+starts a new QR rather than retrying saved-account verification.
+
+QQ creates a new in-memory device repository for each fresh QR, repeating the
+QIMEI bootstrap. Its composite 15-second bridge deadline is shorter than the
+pinned API's 25-second single-HTTP allowance. Folia d824c0b reuses persistent
+device context and tolerates bounded transient NetEase QR/poll errors.
+Mineradio d43de56 uses official browser-window/cookie flows for QQ in the
+inspected revision, so its apparent instant login is not an equivalent QR
+protocol measurement. References were read, not executed or copied.
+
+No login production changes are part of the October 15 glass/playback update.
+The exact stage of the user's live failed attempt remains unmeasured; these
+findings establish actionable code paths, not a proven cause for every wait.
+
+## Earlier isolation limits
 
 An already running request for the same authentication platform retains its
 original deadline; queued UI requests can be discarded, but this change does

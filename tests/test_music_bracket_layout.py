@@ -90,8 +90,13 @@ class MusicBracketLayoutTests(unittest.TestCase):
 
         def record(painter, row, text, font, layout, progress, *args, **kwargs):
             offsets = kwargs.get("line_offsets") or (0.0,)
+            # The primary reading row reserves the entire companion stack.
+            # Measure the shaped primary's own final line instead of treating
+            # the stack's row.bottom() as its sung sentence baseline.
+            last = layout.lineAt(layout.lineCount() - 1)
             captured[text] = (
-                row.top() + offsets[0], row.bottom() + offsets[-1], progress,
+                row.top() + offsets[0],
+                row.top() + last.y() + last.height() + offsets[-1], progress,
             )
             return original(painter, row, text, font, layout, progress, *args, **kwargs)
 

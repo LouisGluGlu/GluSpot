@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -182,7 +182,9 @@ class PersonalDjSurfaceOutroTests(unittest.TestCase):
                 icon, caption = self.window._personal_dj_geometry(region, 102)
                 status = self.window._personal_dj_outro_status_rect(region, 102)
                 self.assertTrue(region.contains(icon.united(status)))
-                self.assertLess(status.right(), icon.left())
+                self.assertTrue(status.contains(icon))
+                self.assertGreater(status.height(), icon.height())
+                self.assertLess(status.left(), icon.left() - icon.width() * 2)
                 self.assertTrue(self.window._personal_dj_damage_rect(region).contains(status.toAlignedRect()))
                 image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
                 image.fill(0)
@@ -260,6 +262,45 @@ class PersonalDjSurfaceOutroTests(unittest.TestCase):
                 for x in range(round(status.left()), round(status.right()))))
         self.assertFalse(self.speaking)
         self.assertEqual(self.presentation["state"], "loading")
+
+    def test_every_real_status_shares_stable_glass_prompt_and_clickable_text(self):
+        self.start_speech()
+        self.complete_speech()
+        with patch("local.music_surface_window.time.monotonic", return_value=102):
+            region = QRectF(self.window.rect())
+            stable = self.window._personal_dj_outro_status_rect(region, 102)
+            for state in ("idle", "loading", "ready", "failed"):
+                with self.subTest(state=state):
+                    self.presentation["next_preload_state"] = state
+                    self.sync(102)
+                    self.window._sync_window_control_rects()
+                    self.assertEqual(self.window._personal_dj_outro_status_rect(region, 102), stable)
+                    target = self.window._button_rects["personal_dj"]
+                    text_point = QPointF(stable.left() + 30, stable.center().y())
+                    self.assertTrue(self.window._window_control_contains("personal_dj", target, text_point))
+                    self.assertFalse(self.window._window_control_contains("personal_dj", target, stable.topLeft()))
+                    with patch.object(self.window, "_toggle_personal_dj") as toggle, \
+                            patch.object(self.window, "_open_dj_voice_selector") as select:
+                        self.window._activate_personal_dj(text_point, toggle_ready=True)
+                    toggle.assert_not_called()
+                    select.assert_called_once()
+
+    def test_status_face_is_one_live_theme_material_for_message_and_icon(self):
+        self.window._reset_control_idle(90)
+        self.presentation = {"state": "loading", "introduction_pending": True}
+        self.sync(100)
+        with patch("local.music_surface_window.time.monotonic", return_value=100):
+            region = QRectF(self.window.rect())
+            status = self.window._personal_dj_outro_status_rect(region, 100)
+            image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            with QPainter(image) as painter, patch.object(self.window, "_paint_surface_glass") as glass:
+                self.window._paint_personal_dj_control(painter, region)
+            visible = [call for call in glass.call_args_list if call.args[1] == status]
+            self.assertEqual(len(visible), 1)
+            self.assertTrue(visible[0].kwargs["live"])
+        self.window._dj_voice_selector_active = True
+        self.assertEqual(self.window._personal_dj_status_reveal_at(100), 0)
 
 
 if __name__ == "__main__":

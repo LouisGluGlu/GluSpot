@@ -242,7 +242,7 @@ def cover_art_archive_group_front_url(payload, group_id: str, verified_releases:
     member = urlsplit(str(payload.get("release") or ""))
     if member.scheme not in {"http", "https"} or member.hostname != "musicbrainz.org" or member.username or member.password:
         return ""
-    member_id = _valid_mbid(member.path.removeprefix("/release/"))
+    member_id = _valid_mbid(member.path[len("/release/"):] if member.path.startswith("/release/") else member.path)
     if member.path != f"/release/{member_id}" or member_id not in verified_releases:
         return ""
     for image in payload.get("images") or ():

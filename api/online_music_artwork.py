@@ -5,6 +5,8 @@ No request carries an account cookie, and failures never expose signed URLs.
 from __future__ import annotations
 
 import time
+from http.client import IncompleteRead
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -19,6 +21,14 @@ ONLINE_ARTWORK_MAX_BYTES = 8 * 1024 * 1024
 ONLINE_ARTWORK_MAX_SIDE = 4096
 ONLINE_ARTWORK_MAX_PIXELS = 4096 * 4096
 ONLINE_ARTWORK_BUDGET_SECONDS = 6.0
+
+
+class OnlineArtworkError(Exception):
+    """Sanitized retry evidence; never retain a request URL or response text."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
 
 
 def _safe_artwork_url(value: str) -> str:
@@ -43,7 +53,7 @@ class _ArtworkRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
-def _decoded_artwork_is_bounded(content: bytes) -> bool:
+def _decoded_artwork_is_bounded(content: bytes, *, raise_errors=False) -> bool:
     # Read dimensions before allocating the full bitmap. All decoding happens
     # on the requesting worker; no QPixmap or GUI object crosses this boundary.
     buffer = QBuffer()
@@ -54,50 +64,105 @@ def _decoded_artwork_is_bounded(content: bytes) -> bool:
     width, height = size.width(), size.height()
     if (width < 1 or height < 1 or max(width, height) > ONLINE_ARTWORK_MAX_SIDE
             or width * height > ONLINE_ARTWORK_MAX_PIXELS):
+        if raise_errors:
+            raise OnlineArtworkError("invalid_image" if width < 1 or height < 1 else "invalid_response")
         return False
     image = reader.read()
-    return not image.isNull() and image.width() == width and image.height() == height
+    valid = not image.isNull() and image.width() == width and image.height() == height
+    if not valid and raise_errors:
+        raise OnlineArtworkError("invalid_image")
+    return valid
 
 
-def fetch_online_artwork(url: str) -> bytes:
+def fetch_online_artwork(url: str, *, raise_errors=False, target_side=None) -> bytes:
     """Fetch a validated raster within the byte, decode and request budgets.
 
     Return empty bytes on unavailable/invalid artwork. Unknown and signed URLs
     retain their exact request target; only the existing NetEase CDN helper may
-    request larger pixels from the same known image object.
+    request another size of the same known image object. Queue workers can
+    request a small target without changing the full-artwork default.
     """
-    value = _safe_artwork_url(url)
-    if not value:
+    original = _safe_artwork_url(url)
+    if not original:
+        if raise_errors:
+            raise OnlineArtworkError("invalid_response")
         return b""
-    value = normalize_artwork_url(value)
+    upgraded = normalize_artwork_url(original) if target_side is None else normalize_artwork_url(original, target_side)
     deadline = time.monotonic() + ONLINE_ARTWORK_BUDGET_SECONDS
-    try:
-        request = Request(value, headers={"User-Agent": ARTWORK_USER_AGENT})
-        opener = build_opener(_ArtworkRedirectHandler())
-        with opener.open(request, timeout=3.0) as response:
-            if not _safe_artwork_url(response.geturl()):
-                return b""
-            length = response.headers.get("Content-Length")
-            if length is not None and int(length) > ONLINE_ARTWORK_MAX_BYTES:
-                return b""
-            content = bytearray()
-            while True:
-                if time.monotonic() >= deadline:
-                    return b""
-                chunk = response.read1(min(64 * 1024, ONLINE_ARTWORK_MAX_BYTES + 1 - len(content)))
-                if time.monotonic() >= deadline:
-                    return b""
-                if not chunk:
-                    break
-                content.extend(chunk)
-                if len(content) > ONLINE_ARTWORK_MAX_BYTES:
-                    return b""
-        result = bytes(content)
-        return result if result and _decoded_artwork_is_bounded(result) else b""
-    except Exception:
-        # Do not propagate arbitrary HTTP/decoder exception text: it can include
-        # the complete signed request target or remote response contents.
+    failure = "invalid_response"
+    # Only the known same-object size upgrade has a fallback. Unknown/signed
+    # addresses retain their exact target, and every attempt shares one budget.
+    for value in dict.fromkeys((upgraded, original)):
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OnlineArtworkError("timeout")
+            request = Request(value, headers={"User-Agent": ARTWORK_USER_AGENT})
+            opener = build_opener(_ArtworkRedirectHandler())
+            with opener.open(request, timeout=min(3.0, remaining)) as response:
+                if not _safe_artwork_url(response.geturl()):
+                    raise OnlineArtworkError("invalid_response")
+                header = response.headers.get("Content-Length")
+                length = int(header) if header is not None else None
+                if length is not None and not 0 < length <= ONLINE_ARTWORK_MAX_BYTES:
+                    raise OnlineArtworkError("invalid_response")
+                content = bytearray()
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise OnlineArtworkError("timeout")
+                    chunk = response.read1(min(64 * 1024, ONLINE_ARTWORK_MAX_BYTES + 1 - len(content)))
+                    if time.monotonic() >= deadline:
+                        raise OnlineArtworkError("timeout")
+                    if not chunk:
+                        break
+                    content.extend(chunk)
+                    if len(content) > ONLINE_ARTWORK_MAX_BYTES:
+                        raise OnlineArtworkError("invalid_response")
+            if length is not None and len(content) != length:
+                raise OnlineArtworkError("incomplete")
+            result = bytes(content)
+            if not result:
+                raise OnlineArtworkError("incomplete")
+            if not _decoded_artwork_is_bounded(result, raise_errors=True):
+                raise OnlineArtworkError("invalid_image")
+            return result
+        except OnlineArtworkError as exc:
+            failure = exc.code
+        except HTTPError as exc:
+            failure = ("network" if exc.code in {408, 429} or 500 <= exc.code < 600 else
+                "access_denied" if exc.code in {401, 403} else "not_found" if exc.code == 404 else "response")
+        except (TimeoutError, URLError) as exc:
+            failure = "timeout" if isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError) else "network"
+        except IncompleteRead:
+            failure = "incomplete"
+        except OSError:
+            failure = "network"
+        except Exception:
+            failure = "invalid_response"
+    if raise_errors:
+        raise OnlineArtworkError(failure)
+    return b""
+
+
+def online_artwork_min_side(content: bytes) -> int:
+    """Read dimensions on the artwork worker; the GUI receives plain metadata."""
+    image = QImage.fromData(content)
+    return min(image.width(), image.height()) if not image.isNull() else 0
+
+
+def online_artwork_thumbnail_bytes(content: bytes, side: int = 320) -> bytes:
+    """Bound queue-cache pixels on the requesting worker, retaining small previews."""
+    image = QImage.fromData(content)
+    if image.isNull():
         return b""
+    if max(image.width(), image.height()) <= side:
+        return content
+    image = image.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    return bytes(data) if image.save(buffer, "PNG") else b""
 
 
 def fetch_online_thumbnail(url: str) -> QImage:

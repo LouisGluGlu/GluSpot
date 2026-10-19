@@ -97,6 +97,106 @@ class DJPlaybackTests(unittest.TestCase):
         self.assertIn(("dj", "netease"), self.calls)
         self.assertIn(("stream", "song-1"), self.calls)
 
+    def test_initial_dj_entry_prioritizes_genuine_intro_without_losing_leading_songs(self):
+        leading = (segments(9)[1], segments(8)[1])
+        self.batch = leading + segments(4) + segments(5)
+        self.assertTrue(self.owned.set_personal_dj_enabled(True))
+        self.start_fm()
+        self.assertEqual([song.song_id for song in self.owned.queue],
+            ["dj:voice-4", "song-4", "song-9", "song-8", "dj:voice-5", "song-5"])
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-4")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertNotIn(("stream", "dj:voice-4"), self.calls)
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.owned._end_current_stream()
+        self.run_latest(self.tasks, "stream")
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-9")
+        self.assertFalse(self.owned.is_personal_dj_speaking())
+
+    def test_initial_dj_entry_moves_whole_multipart_introduction_with_matching_song(self):
+        voice, song = segments(4)
+        second = replace(voice, song_id="dj:voice-4-part-2",
+            direct_stream=replace(voice.direct_stream, song_id="dj:voice-4-part-2"))
+        self.batch = (segments(9)[1], voice, second, song) + segments(5)
+        self.owned.set_personal_dj_enabled(True)
+        self.start_fm()
+        self.assertEqual(self.owned._dj_overlay_voices, (voice, second))
+        self.assertEqual(self.owned.queue[:4], (voice, second, song, segments(9)[1]))
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        source, epoch = self.qt.source(), self.owned._epoch
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.run_latest(self.tasks, "dj_stream")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertEqual((self.qt.source(), self.owned._epoch), (source, epoch))
+
+    def test_initial_song_only_dj_provider_result_does_not_invent_introduction(self):
+        self.batch = (segments(9)[1], segments(8)[1])
+        self.owned.set_personal_dj_enabled(True)
+        self.start_fm()
+        self.assertEqual(self.owned.queue, self.batch)
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-9")
+        self.assertFalse(self.owned._dj_overlay_voices)
+        self.assertFalse(self.owned.is_personal_dj_speaking())
+
+    def test_enabling_dj_while_first_fm_catalog_is_pending_reissues_first_entry(self):
+        self.assertTrue(self.owned.play_personal_fm())
+        old_token, old_action = self.tasks.jobs[-1]
+        old_result = old_action()
+        self.assertTrue(self.owned.set_personal_dj_enabled(True))
+        self.assertEqual(self.owned.status, "loading_catalog")
+        self.assertNotEqual(self.owned._catalog_pending_epoch, 0)
+        self.assertEqual(self.tasks.jobs[-1][0][2], "dj")
+        self.tasks.completed.emit(old_token, old_result, None)
+        self.assertIsNone(self.owned.track)
+        self.run_latest(self.tasks, "catalog")
+        self.run_latest(self.tasks, "stream")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+
+    def test_disabling_dj_while_first_catalog_is_pending_reissues_plain_fm(self):
+        self.assertTrue(self.owned.play_personal_dj())
+        old_token, old_action = self.tasks.jobs[-1]
+        old_result = old_action()
+        self.assertTrue(self.owned.set_personal_dj_enabled(False))
+        self.assertEqual(self.owned.status, "loading_catalog")
+        self.assertEqual(self.tasks.jobs[-1][0][2], "fm")
+        self.tasks.completed.emit(old_token, old_result, None)
+        self.assertIsNone(self.owned.track)
+        self.run_latest(self.tasks, "catalog")
+        self.run_latest(self.tasks, "stream")
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-3")
+        self.assertFalse(self.owned._dj_overlay_voices)
+
+    def test_toggle_during_first_entry_cannot_restore_cancelled_catalog_after_stop(self):
+        self.owned.play_personal_fm()
+        self.owned.set_personal_dj_enabled(True)
+        token, action = self.tasks.jobs[-1]
+        result = action()
+        self.owned.stop()
+        self.tasks.completed.emit(token, result, None)
+        self.assertEqual(self.owned.status, "idle")
+        self.assertIsNone(self.owned.track)
+        self.assertFalse(self.owned._dj_overlay_voices)
+
+    def test_initial_feature_toggles_keep_loading_and_only_latest_batch_can_start(self):
+        statuses = []
+        self.owned.statusChanged.connect(statuses.append)
+        self.owned.play_personal_fm()
+        pending = [self.tasks.jobs[-1]]
+        for enabled in (True, False, True):
+            self.assertTrue(self.owned.set_personal_dj_enabled(enabled))
+            pending.append(self.tasks.jobs[-1])
+        self.assertEqual(len({token for token, _ in pending}), 4)
+        for token, action in pending[:-1]:
+            self.assertEqual(action(), ())
+            self.tasks.completed.emit(token, self.batch, None)
+        self.assertIsNone(self.owned.track)
+        self.assertTrue(statuses)
+        self.assertEqual(set(statuses), {"loading_catalog"})
+        self.run_latest(self.tasks, "catalog")
+        self.run_latest(self.tasks, "stream")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+
     def test_retained_playing_voice_during_catalog_wait_drives_provider_frame_until_pause_eof_or_fault(self):
         self.start()
         system = SimpleNamespace(suspend_live_audio=lambda: None, stop_audio_cast=lambda: None)
@@ -497,8 +597,8 @@ class DJPlaybackTests(unittest.TestCase):
     def test_pause_during_intro_preparation_stays_ready_until_user_resumes(self):
         self.start()
         self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
-        self.owned.send_playback_command("next")
+        # Pause the selected second song's pending preparation. Another Next
+        # here would skip it and wait for a new catalog, not prepare song 2.
         self.owned.send_playback_command("toggle_play_pause")
         self.run_latest(self.tasks, "stream")
         self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.PausedState)
@@ -582,11 +682,12 @@ class DJPlaybackTests(unittest.TestCase):
         self.start()
         self.owned._end_current_stream()
         self.run_latest(self.tasks, "stream")
-        self.owned.send_playback_command("next")
-        self.run_latest(self.tasks, "stream")
         preferences = {"marker": "old"}
         self.owned._lyrics_preferences_snapshot = lambda: dict(preferences)
-        def parse(payload, values):
+        song_snapshots = []
+        def parse(payload, values, enrichment=None, *, song=None):
+            self.assertIsNone(enrichment)
+            song_snapshots.append(song)
             return SimpleNamespace(lyrics=(values["marker"],), timed_lyrics=(), source="fixture")
         self.owned._parse_lyrics_payload = parse
         # The worker originally captured an earlier preference generation.
@@ -596,10 +697,13 @@ class DJPlaybackTests(unittest.TestCase):
         preferences["marker"] = "new"
         self.owned.refresh_lyrics()
         before = len([call for call in self.calls if call == ("lyrics", "song-2")])
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
+        # The independent speech decoder finishes; music retains this song
+        # and its pending preference parse throughout the overlay handoff.
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.run_latest(self.tasks, "lyrics_refresh")
         self.assertEqual(self.owned.track.lyrics, ("new",))
+        self.assertIsNotNone(song_snapshots[-1])
+        self.assertEqual(song_snapshots[-1].song_id, "song-2")
         self.assertEqual(len([call for call in self.calls if call == ("lyrics", "song-2")]), before)
 
     def test_translation_changed_before_voice_stream_reparses_target_lyrics_while_audio_is_pending(self):

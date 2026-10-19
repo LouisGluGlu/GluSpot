@@ -356,6 +356,8 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             border: 0;
         }}
         QPushButton#MacTrafficRed, QPushButton#MacTrafficYellow, QPushButton#MacTrafficGreen {{
+            min-height: 0;
+            min-width: 0;
             background: transparent;
             border: 0;
             padding: 0;
@@ -419,7 +421,7 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             border: 1px solid {t["card_border"]};
             border-radius: 10px;
         }}
-        QFrame#MacCard QWidget {{
+        QFrame#MacCard .QWidget {{
             background: transparent;
         }}
         QFrame#DetailPanel {{
@@ -448,7 +450,7 @@ def mac_preferences_stylesheet(theme: dict[str, str]) -> str:
             border-radius: 8px;
             margin-top: 5px;
         }}
-        QFrame#DetailBody QWidget {{
+        QFrame#DetailBody .QWidget {{
             background: transparent;
         }}
         QLabel {{

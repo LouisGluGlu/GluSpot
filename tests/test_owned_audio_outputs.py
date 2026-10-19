@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import queue
 from pathlib import Path
 from dataclasses import replace
 from types import SimpleNamespace
@@ -41,6 +42,12 @@ class Bridge:
     def set_direct(self, enabled, epoch, token=None):
         self.calls.append(("direct", enabled, epoch))
         return token is None or token == self.token
+    def prepare_direct(self, epoch, token=None):
+        self.calls.append(("prepare", epoch))
+        return token is None or token == self.token
+    def receiver_play_pause(self, epoch, identity, revision, expires_at, token=None):
+        self.calls.append(("receiver_play_pause", epoch, identity, revision, token))
+        return token == self.token and time.monotonic() < expires_at
 
 
 class Backend:
@@ -99,6 +106,81 @@ class OwnedOutputControllerTests(unittest.TestCase):
     def ready(self):
         self.sender.events = [{"event": "waiting_audio"}]
         self.controller._step()
+
+    def receiver_tap(self, **changes):
+        event = {"event": "receiver_play_pause", "pcm_epoch": self.controller._session_epoch,
+            "receiver_id": "airplay:one", "revision": 0, "cseq": "7", "age_ms": 0,
+            "_received_at": time.monotonic()}
+        event.update(changes)
+        return event
+
+    def test_authenticated_receiver_taps_toggle_existing_source_without_reconnect(self):
+        self.choose("airplay:one")
+        self.ready()
+        before = tuple(self.sender.calls)
+        self.sender.events = [self.receiver_tap(), self.receiver_tap(), self.receiver_tap(cseq="8")]
+        self.controller._step()
+        taps = [call for call in self.bridge.calls if call[0] == "receiver_play_pause"]
+        self.assertEqual(taps, [("receiver_play_pause", 1, "airplay:one", 0, self.bridge.token)] * 2)
+        self.assertEqual(tuple(self.sender.calls), before)
+        self.assertEqual(self.backend.writes, [])
+
+    def test_receiver_taps_reject_stale_wrong_member_epoch_revision_and_bad_fields(self):
+        self.choose("airplay:one")
+        self.ready()
+        for changes in ({"pcm_epoch": 0}, {"pcm_epoch": True}, {"revision": 1}, {"revision": False},
+                {"receiver_id": "one"}, {"receiver_id": "airplay:removed"}, {"receiver_id": []},
+                {"cseq": "0007"}, {"cseq": "-7"}, {"cseq": "７"}, {"cseq": "1" * 17}, {"cseq": []},
+                {"age_ms": True}, {"age_ms": 2000}, {"age_ms": -1}, {"_received_at": float("nan")},
+                {"_received_at": True}, {"_received_at": time.monotonic() - 3},
+                {"_received_at": time.monotonic() + 3},
+                {"_received_at": time.monotonic() - 1.2, "age_ms": 1000}):
+            with self.subTest(changes=changes):
+                self.sender.events = [self.receiver_tap(**changes)]
+                self.controller._step()
+        self.assertFalse(any(call[0] == "receiver_play_pause" for call in self.bridge.calls))
+
+    def test_terminal_or_superseded_source_never_applies_receiver_tap(self):
+        self.choose("airplay:one")
+        self.ready()
+        self.bridge.token = ("owned:netease:two", 2)
+        self.sender.events = [self.receiver_tap()]
+        self.controller._step()
+        self.assertFalse(any(call[0] == "receiver_play_pause" for call in self.bridge.calls))
+        self.sender.events = [self.receiver_tap(), {"event": "stopped"}]
+        self.controller._step()
+        self.assertFalse(any(call[0] == "receiver_play_pause" for call in self.bridge.calls))
+
+    def test_receiver_taps_require_feeding_and_current_confirmed_membership(self):
+        self.choose("airplay:one")
+        self.sender.events = [self.receiver_tap()]
+        self.controller._step()
+        self.ready()
+        self.controller._requested_members = ("airplay:one", "two")
+        self.controller._receiver_play_pause(self.receiver_tap())
+        self.controller._requested_members = None
+        self.sender.membership_state = lambda: {"revision": 3}
+        self.controller._receiver_play_pause(self.receiver_tap())
+        self.assertFalse(any(call[0] == "receiver_play_pause" for call in self.bridge.calls))
+        self.controller._receiver_play_pause(self.receiver_tap(revision=3))
+        self.assertEqual(sum(call[0] == "receiver_play_pause" for call in self.bridge.calls), 1)
+        self.choose("two")
+        self.controller._receiver_play_pause(self.receiver_tap(revision=3, cseq="8"))
+        self.assertEqual(sum(call[0] == "receiver_play_pause" for call in self.bridge.calls), 1)
+
+    def test_receiver_dedup_is_bounded_and_resets_for_next_owned_session(self):
+        self.choose("airplay:one")
+        self.ready()
+        for number in range(150):
+            self.controller._receiver_play_pause(self.receiver_tap(cseq=str(number)))
+        self.assertEqual(len(self.controller._receiver_controls_seen), 128)
+        self.bridge.token = ("owned:netease:two", 2)
+        self.controller.media_changed(self.bridge.token)
+        self.controller._step()
+        self.ready()
+        self.controller._receiver_play_pause(self.receiver_tap(cseq="149"))
+        self.assertEqual(len(self.controller._receiver_controls_seen), 1)
+        self.assertEqual([call for call in self.bridge.calls if call[0] == "receiver_play_pause"][-1][1], 2)
 
     def test_inventory_exposes_real_windows_and_airplay_with_owned_scope(self):
         snapshot = self.controller.snapshot()
@@ -362,6 +444,35 @@ class OwnedAudioBridgeTests(unittest.TestCase):
         self.assertFalse(self.bridge.select_device("missing"))
         self.assertEqual(self.bridge.current_device(), "two")
 
+    def test_receiver_play_pause_reuses_owned_command_and_exact_gui_fences(self):
+        calls = []
+        self.owner.send_playback_command = lambda command: calls.append(command) or True
+        self.controller.accepts_receiver_control = lambda epoch, receiver, revision, token: (
+            epoch == 4 and receiver == "airplay:one" and revision == 2 and token == self.bridge.media_token())
+        self.assertFalse(self.bridge.receiver_play_pause(4, "airplay:one", 2, time.monotonic() + 2))
+        self.assertTrue(self.bridge.set_direct(True, 4))
+        self.assertTrue(self.bridge.receiver_play_pause(4, "airplay:one", 2, time.monotonic() + 2))
+        for epoch, identity, revision, expires in ((3, "airplay:one", 2, time.monotonic() + 2),
+                (4, "airplay:removed", 2, time.monotonic() + 2), (4, "airplay:one", 1, time.monotonic() + 2),
+                (4, "airplay:one", 2, time.monotonic() - .1)):
+            self.assertFalse(self.bridge.receiver_play_pause(epoch, identity, revision, expires))
+        self.assertFalse(self.bridge.receiver_play_pause(4, "airplay:one", 2, time.monotonic() + 2, token=("old", 0)))
+        self.assertEqual(calls, ["toggle_play_pause"])
+
+    def test_tap_expiring_in_gui_queue_cannot_toggle_later(self):
+        calls, result = [], []
+        self.owner.send_playback_command = lambda command: calls.append(command) or True
+        self.controller.accepts_receiver_control = lambda *_: True
+        self.assertTrue(self.bridge.set_direct(True, 1))
+        expires = time.monotonic() + .05
+        worker = threading.Thread(target=lambda: result.append(self.bridge.receiver_play_pause(1, "airplay:one", 0, expires)))
+        worker.start()
+        time.sleep(.07)
+        self.app.processEvents()
+        worker.join(2)
+        self.assertEqual(result, [False])
+        self.assertEqual(calls, [])
+
     def test_direct_mutes_only_owned_output_and_restores_existing_mute(self):
         for originally_muted in (False, True):
             self.owner.audio.muted = originally_muted
@@ -501,6 +612,45 @@ class OwnedPcmTransportTests(unittest.TestCase):
         self.assertEqual(args[args.index("--pcm-epoch") + 1], "7")
         self.assertNotIn("--music-pid", args)
         self.assertNotIn("--source-endpoint", args)
+
+    def test_native_receiver_taps_require_live_pcm_child_and_exact_membership(self):
+        self.sender._pcm_epoch = 7
+        self.sender._pcm_stop.clear()
+        self.sender._receiver_ids = ("airplay:one",)
+        self.sender._receiver_connected = True
+        event = {"event": "receiver_play_pause", "pcm_epoch": 7, "receiver_id": "airplay:one",
+            "revision": 0, "cseq": "8", "age_ms": 0}
+        state = self.sender._mute_state
+        self.assertTrue(self.sender._remember_native_event(state, event))
+        for changes in ({"pcm_epoch": 6}, {"pcm_epoch": True}, {"revision": 2}, {"revision": False},
+                {"receiver_id": "one"}, {"receiver_id": []}, {"cseq": "08"}, {"cseq": "７"},
+                {"cseq": "8" * 17}, {"cseq": []}, {"age_ms": -1}, {"age_ms": True}, {"age_ms": 2000}):
+            with self.subTest(changes=changes):
+                self.assertFalse(self.sender._remember_native_event(state, event | changes))
+        self.assertFalse(self.sender._remember_native_event({}, event))
+        self.sender._membership_pending_revision = 1
+        self.assertFalse(self.sender._remember_native_event(state, event))
+        self.sender._membership_pending_revision = 0
+        self.sender._membership_evidence = {"revision": 1}
+        self.assertFalse(self.sender._remember_native_event(state, event))
+        self.assertTrue(self.sender._remember_native_event(state, event | {"revision": 1}))
+        self.sender._last_terminal = {"event": "stopped"}
+        self.assertFalse(self.sender._remember_native_event(state, event | {"revision": 1}))
+        self.sender._last_terminal = {}
+        self.sender._pcm_stop.set()
+        self.assertFalse(self.sender._remember_native_event(state, event | {"revision": 1}))
+
+    def test_group_reader_stamps_taps_and_drops_rejected_owned_child_events(self):
+        import json
+        from api.airplay_group_process import AirPlayGroupProcess
+        event = {"event": "receiver_play_pause", "_received_at": -999, "pcm_epoch": 3}
+        process = SimpleNamespace(stdout=io.StringIO(json.dumps(event) + "\n"))
+        events = queue.Queue(maxsize=32)
+        AirPlayGroupProcess._read_events(process, events, lambda _: True)
+        self.assertGreater(events.get_nowait()["_received_at"], 0)
+        process.stdout = io.StringIO(json.dumps(event) + "\n")
+        AirPlayGroupProcess._read_events(process, events, lambda _: False)
+        self.assertTrue(events.empty())
 
     def test_packets_preserve_pcm_and_have_strict_sequence_and_epoch(self):
         self.sender.start_pcm((self.device,), 8)

@@ -13,6 +13,10 @@ from api.audio_route_controller import AudioRouteController
 from api.audio_routes import AudioRouteDevice, AudioRouteSnapshot
 from api.audio_output_volume import AudioOutputVolumeHistory, output_volume_target
 from api.owned_pcm_process import OwnedPcmProcess
+from local.runtime_platform import legacy_qt_runtime
+
+
+_LEGACY_DEFAULT_OUTPUT_MESSAGE = "兼容版使用 Windows 默认输出，请在系统中切换"
 
 
 class OwnedAudioOutputController:
@@ -30,6 +34,7 @@ class OwnedAudioOutputController:
         self._lock = threading.RLock()
         self._snapshot = AudioRouteSnapshot(capture_scope="owned-player", status_message="正在读取播放设备")
         self._commands = deque(maxlen=16)
+        self._receiver_controls_seen = deque(maxlen=128)
         self._wake, self._closed = threading.Event(), threading.Event()
         self._members = ()
         self._confirmed_receivers = {}
@@ -40,6 +45,7 @@ class OwnedAudioOutputController:
         self._handoff_pending = False
         self._manual = {}
         self._session_epoch = 0
+        self._preparation_epoch = 0
         self._feeding_epoch = 0
         self._running = False
         self._streaming = False
@@ -83,12 +89,14 @@ class OwnedAudioOutputController:
         return self._enqueue("refresh")
 
     def select(self, identity):
-        if not any(d.id == identity and d.available for d in self.snapshot().devices):
+        if not any(d.id == identity and d.available
+                and not (legacy_qt_runtime() and d.transport == "windows") for d in self.snapshot().devices):
             return False
         return self._enqueue("select", identity)
 
     def toggle(self, identity):
-        if not any(d.id == identity and (d.available or identity in self._members) for d in self.snapshot().devices):
+        if not any(d.id == identity and (d.available or identity in self._members)
+                and not (legacy_qt_runtime() and d.transport == "windows") for d in self.snapshot().devices):
             return False
         return self._enqueue("toggle", identity)
 
@@ -96,6 +104,7 @@ class OwnedAudioOutputController:
         volume = output_volume_target(value)
         device = next((d for d in self.snapshot().devices if d.id == identity), None)
         if (volume is None or device is None or device.volume is None
+                or legacy_qt_runtime() and device.transport == "windows"
                 or not device.available and device.transport != "airplay"):
             return False
         if device.transport == "airplay" and (identity not in self._members or not self._running):
@@ -113,6 +122,7 @@ class OwnedAudioOutputController:
     def toggle_mute(self, identity):
         device = next((d for d in self.snapshot().devices if d.id == identity), None)
         if (device is None or not self._is_selected(identity)
+                or legacy_qt_runtime() and device.transport == "windows"
                 or device.transport == "windows" and not device.available
                 or device.transport == "airplay" and not self._running):
             return False
@@ -152,10 +162,13 @@ class OwnedAudioOutputController:
             return bool(self._feeding_epoch and epoch == self._feeding_epoch and not self._closed.is_set())
 
     def _inventory(self):
+        legacy = legacy_qt_runtime()
         try:
             raw = self._backend.list_outputs()
             local = tuple(AudioRouteDevice(d.id, d.name, d.kind, "windows", d.is_bluetooth, d.is_default,
-                volume=AudioRouteController._volume_scalar(getattr(d, "volume", None)),
+                available=not legacy,
+                volume=None if legacy else AudioRouteController._volume_scalar(getattr(d, "volume", None)),
+                route_message=_LEGACY_DEFAULT_OUTPUT_MESSAGE if legacy else "",
                 volume_muted=bool(getattr(d, "volume_muted", False)), **AudioRouteController._battery_fields(d)) for d in raw)
         except Exception:
             self._stop_group()
@@ -178,7 +191,12 @@ class OwnedAudioOutputController:
         if self._running and selected_local - {d.id for d in local}:
             self._stop_group()
             self._publish(state="error", status_message="播放设备已断开，请重新选择")
-        if not self._single_id:
+        if legacy:
+            # Qt 5 follows the Windows default without exposing routable
+            # MMDevice IDs. Keep that observed default visible on every poll,
+            # independently of the disabled route entries above.
+            self._single_id = next((d.id for d in local if d.is_default), "")
+        elif not self._single_id:
             current = self.bridge.current_device()
             self._single_id = current if current in ids else next((d.id for d in local if d.is_default), "")
         elif self._single_id not in ids:
@@ -200,8 +218,9 @@ class OwnedAudioOutputController:
         changes = dict(devices=tuple(decorated), discovery_state=self._discovery.state)
         if not self._running and not self._members:
             changes["active_id"] = self._single_id
-            if snapshot.state == "idle":
-                changes.update(state="ready", status_message="选择程序内音乐的播放设备")
+            if snapshot.state == "idle" or legacy and snapshot.state == "ready":
+                changes.update(state="ready", status_message=_LEGACY_DEFAULT_OUTPUT_MESSAGE
+                    if legacy else "选择程序内音乐的播放设备")
         self._publish(**changes)
         if previous_ids:
             added = next((d for d in devices if d.id not in previous_ids), None)
@@ -214,31 +233,80 @@ class OwnedAudioOutputController:
         current = self.snapshot()
         self._publish(event_serial=current.event_serial + 1, event_name=name, event_message=message, event_device_id=identity)
 
-    def _stop_group(self, *, preserve_selection=False):
+    def _stop_group(self, *, preserve_selection=False, preserve_direct=False):
         epoch = self._session_epoch
         with self._lock:
             self._feeding_epoch = 0
-        if self._running:
-            self._sender.stop()
+        try:
+            if self._running:
+                self._sender.stop()
+        except Exception:
+            # Teardown failure must not leave the player's private mute or
+            # preparation clock held indefinitely. Cleanup below is mandatory.
+            self._running = False
+            self._release_direct(epoch)
+            raise
         self._running, self._streaming, self._signal_fresh = False, False, False
         self._signal_deadline = 0.0
         self._requested_members = self._queued_members = None
         self._membership_baseline = 0
         self._handoff_pending = False
         self._volume_history.reset_intents()
+        self._receiver_controls_seen.clear()
         if not preserve_selection:
             self._members = ()
             self._confirmed_receivers.clear()
-        self.bridge.set_direct(False, epoch)
+        if not preserve_direct:
+            self._release_direct(epoch)
         self._publish(member_ids=(), pending_ids=(), pending_id="", group_id="", cast_latency_seconds=0,
             cast_latency_estimate_seconds=None, active_id=self._single_id)
 
+    def _release_direct(self, epoch):
+        # A successful GUI reservation can already own next_epoch while an
+        # old native session still owns epoch. Explicit stop/close must release
+        # that reservation too; the bridge deliberately rejects older epochs.
+        prepared, self._preparation_epoch = self._preparation_epoch, 0
+        if prepared and prepared != epoch:
+            self.bridge.set_direct(False, prepared)
+        self.bridge.set_direct(False, epoch)
+
+    def _source_superseded(self, token, *, intended=None):
+        """Fence an in-flight route without turning a new song into a failure.
+
+        QMediaPlayer.stop() emits synchronous owner changes before the next
+        track is assigned. A worker's queued GUI reservation can therefore be
+        correctly rejected for an intermediate token. Keep the user's output
+        intent and let the newest media notification prepare its replacement.
+        Genuine current-token preparation/transport failures remain terminal.
+        """
+        current = self.bridge.media_token()
+        if current == token:
+            return False
+        if intended is not None:
+            self._queued_members = tuple(intended)
+        self.media_changed(current, force=True)
+        return True
+
+    def _cancel_closed_preparation(self, epoch):
+        if not self._closed.is_set():
+            return False
+        # close() can run on Qt while the routing worker waits for this
+        # reservation. The reply may arrive after close already released its
+        # then-current epoch; cancel the exact attempted reservation again.
+        self.bridge.set_direct(False, epoch)
+        if self._preparation_epoch == epoch:
+            self._preparation_epoch = 0
+        return True
+
     def _choose(self, identities, *, restart=False):
+        if self._closed.is_set():
+            return
         identities = tuple(identities)
         if len(set(identities)) != len(identities) or len(identities) > 8:
             self._publish(status_message="同步播放最多支持 8 个不同输出设备")
             return
-        devices = {d.id: d for d in self.snapshot().devices if d.available}
+        devices = {d.id: d for d in self.snapshot().devices if d.available
+            and not (legacy_qt_runtime() and d.transport == "windows")}
         # Keep the exact address of a receiver whose transport was confirmed
         # in this selected group. Repeated seek/track restarts may precede the
         # next confirmation while mDNS remains absent. Selection removal,
@@ -280,11 +348,52 @@ class OwnedAudioOutputController:
             else:
                 self._publish(status_message="当前设备继续播放；无法加入，请稍后重试（连接期间最多 8 个设备）")
             return
-        self._stop_group(preserve_selection=True)
+        token = self.bridge.media_token()
+        needs_direct = (bool(selected) and not (len(selected) == 1 and selected[0].transport == "windows")
+            and self.bridge.supported and bool(token[0]))
+        next_epoch = self._session_epoch + 1
+        prepared = True
+        if needs_direct:
+            self._preparation_epoch = next_epoch
+            prepared = self.bridge.prepare_direct(next_epoch, token)
+        if self._cancel_closed_preparation(next_epoch):
+            return
+        if not prepared:
+            if self._source_superseded(token, intended=identities):
+                return
+            # The Qt slot may have reserved next_epoch just before the worker's
+            # wait expired. Release that exact reservation as well as the old
+            # session; an epoch-bound release cannot touch a later replacement.
+            self.bridge.set_direct(False, next_epoch)
+            self._stop_group()
+            self._publish(state="error", status_message="无法准备同步输出，已恢复程序内播放")
+            return
+        if needs_direct and self._source_superseded(token, intended=identities):
+            return
+        # Hold both the private mute and source clock across cold restarts.
+        # Releasing them here lets the new song play locally before its delayed
+        # native history, making the beginning audibly play twice.
+        try:
+            self._stop_group(preserve_selection=True, preserve_direct=needs_direct)
+        except Exception:
+            if needs_direct:
+                self.bridge.set_direct(False, next_epoch)
+            self._members = ()
+            self._confirmed_receivers.clear()
+            self._publish(state="error", member_ids=(), pending_ids=(), pending_id="", group_id="",
+                status_message="无法更新同步输出，已恢复程序内播放")
+            return
+        if self._cancel_closed_preparation(next_epoch):
+            return
         self._members = identities
         self._confirmed_receivers = {key: device for key, device in self._confirmed_receivers.items() if key in identities}
+        if needs_direct and self._source_superseded(token, intended=identities):
+            self._publish(state="connecting", pending_ids=identities,
+                pending_id=identities[0], status_message="歌曲正在切换，保留已选播放设备")
+            return
         if not identities:
-            self._publish(state="ready", status_message="程序内同步播放已停止")
+            self._publish(state="ready", status_message=_LEGACY_DEFAULT_OUTPUT_MESSAGE
+                if legacy_qt_runtime() else "程序内同步播放已停止")
             return
         if len(selected) == 1 and selected[0].transport == "windows":
             if self.bridge.select_device(selected[0].id):
@@ -300,19 +409,31 @@ class OwnedAudioOutputController:
             self._members = ()
             self._publish(state="error", status_message="当前 Qt 播放组件不支持解码音频输出")
             return
-        token = self.bridge.media_token()
         if not token[0]:
             self._publish(state="waiting_source", pending_ids=self._members, status_message="选择歌曲后开始同步播放")
             return
-        self._session_epoch += 1
+        if self._cancel_closed_preparation(next_epoch):
+            return
+        self._session_epoch = next_epoch
         self._token = token
         try:
             self._sender.start_pcm(selected, self._session_epoch)
+            if self._cancel_closed_preparation(next_epoch):
+                # Native spawn may have overlapped close too. Its teardown
+                # remains on this worker, never a Qt-thread join in close().
+                self._sender.stop()
+                self._members = ()
+                self._confirmed_receivers.clear()
+                return
             self._running = True
             self._publish(state="connecting", active_id="", pending_id=selected[0].id, pending_ids=self._members,
                 group_id=f"owned:{self._session_epoch}", music_source_app_id="GluSpot", status_message="正在连接程序内播放设备")
         except Exception:
-            self._sender.stop()
+            try:
+                self._sender.stop()
+            finally:
+                self.bridge.set_direct(False, self._session_epoch)
+                self._preparation_epoch = 0
             self._members = ()
             self._confirmed_receivers.clear()
             self._publish(state="error", status_message="无法启动同步输出，请确认完整播放组件已安装")
@@ -320,7 +441,7 @@ class OwnedAudioOutputController:
     def _toggle(self, identity):
         intended = self._queued_members if self._queued_members is not None else self._requested_members
         selected = list(self._members if intended is None else intended)
-        if not selected and self._single_id:
+        if not selected and self._single_id and not legacy_qt_runtime():
             selected = [self._single_id]
         if identity in selected:
             selected.remove(identity)
@@ -359,8 +480,39 @@ class OwnedAudioOutputController:
         if queued is not None and queued != self._members:
             self._choose(queued)
 
+    def accepts_receiver_control(self, epoch, receiver_id, revision, token):
+        """Cheap final fence, also checked on Qt before applying a queued tap."""
+        with self._lock:
+            state_reader = getattr(self._sender, "membership_state", None)
+            membership = state_reader() if callable(state_reader) else {}
+            return (not self._closed.is_set() and self._running and self._feeding_epoch == epoch
+                and epoch == self._session_epoch and token == self._token == self.bridge.media_token()
+                and self._requested_members is None and self._queued_members is None
+                and type(revision) is int and revision == membership.get("revision", 0)
+                and receiver_id in self._members
+                and any(device.id == receiver_id and device.transport == "airplay" for device in self.snapshot().devices))
+
+    def _receiver_play_pause(self, event):
+        epoch, identity, revision = event.get("pcm_epoch"), event.get("receiver_id"), event.get("revision")
+        cseq, received, age = event.get("cseq"), event.get("_received_at"), event.get("age_ms")
+        if (type(epoch) is not int or not isinstance(identity, str) or type(revision) is not int
+                or not isinstance(cseq, str) or not cseq or len(cseq) > 16
+                or not cseq.isascii() or not cseq.isdigit() or str(int(cseq)) != cseq
+                or type(age) is not int or not 0 <= age < 2000
+                or isinstance(received, bool) or not isinstance(received, (int, float))
+                or not math.isfinite(received) or not 0 <= time.monotonic() - received < 2 - age / 1000
+                or not self.accepts_receiver_control(epoch, identity, revision, self._token)):
+            return
+        key = epoch, revision, identity, cseq
+        if key in self._receiver_controls_seen:
+            return
+        self._receiver_controls_seen.append(key)
+        # This uses the bridge's cancellable Qt-thread request and current
+        # media token; never mutate QMediaPlayer from the routing worker.
+        self.bridge.receiver_play_pause(epoch, identity, revision, received + 2 - age / 1000, token=self._token)
+
     def _poll(self):
-        if not self._running:
+        if self._closed.is_set() or not self._running:
             return
         if self._sender.pcm_error():
             self._stop_group()
@@ -373,15 +525,23 @@ class OwnedAudioOutputController:
             self._members = ()
             self._publish(state="error", status_message="同步播放已中断，已恢复程序内输出")
             return
+        if self._source_superseded(self._token):
+            return
         for event in events:
             kind = event.get("event")
-            if kind == "waiting_audio" and not self._feeding_epoch:
+            if kind == "receiver_play_pause":
+                self._receiver_play_pause(event)
+            elif kind == "waiting_audio" and not self._feeding_epoch:
                 with self._lock:
                     self._feeding_epoch = self._session_epoch
-                capability = getattr(self._sender, "supports_owned_presentation", None)
-                self._handoff_pending = bool(callable(capability) and capability(self._session_epoch))
-                enabled = (self.bridge.set_direct(True, self._session_epoch, self._token, muted=False)
-                    if self._handoff_pending else self.bridge.set_direct(True, self._session_epoch, self._token))
+                # Authentication is complete. Release decoder hold to feed the
+                # native schedule, retaining the owned Qt mute throughout its
+                # presentation reserve. No prefill may be audible twice.
+                enabled = self.bridge.set_direct(True, self._session_epoch, self._token)
+                if self._source_superseded(self._token):
+                    with self._lock:
+                        self._feeding_epoch = 0
+                    return
                 if enabled:
                     self._publish(state="waiting_audio", status_message="播放设备已连接，等待程序内音乐")
                 else:
@@ -406,6 +566,10 @@ class OwnedAudioOutputController:
                     and self.snapshot().state in {"connecting", "waiting_audio"}):
                 if self._handoff_pending:
                     if not self.bridge.commit_direct_mute(self._session_epoch, self._token):
+                        if self._source_superseded(self._token):
+                            with self._lock:
+                                self._feeding_epoch = 0
+                            return
                         self._stop_group()
                         self._publish(state="error", status_message="歌曲已改变，已恢复程序内输出")
                         return
@@ -441,8 +605,8 @@ class OwnedAudioOutputController:
                 token, force = value
                 if force or token != self._token:
                     self._token = token
-                    if self._members:
-                        intended = self._queued_members if self._queued_members is not None else self._requested_members
+                    intended = self._queued_members if self._queued_members is not None else self._requested_members
+                    if self._members or intended is not None:
                         self._choose(self._members if intended is None else intended, restart=True)
             elif operation == "failure":
                 _, epoch, token = value
@@ -465,7 +629,7 @@ class OwnedAudioOutputController:
                 succeeded = False
                 if device and device.transport == "windows":
                     try:
-                        if device.available:
+                        if device.available and not legacy_qt_runtime():
                             result = self._backend.set_endpoint_volume(identity, volume)
                             succeeded = result is not False
                             if succeeded and volume > 0 and self._is_selected(identity) and device.volume_muted:
@@ -487,6 +651,8 @@ class OwnedAudioOutputController:
                 if not succeeded:
                     self._volume_history.discard(identity, fence, value=volume)
                     self._publish(status_message="设备音量调整失败，请重试")
+        if self._closed.is_set():
+            return
         self._poll()
         if time.monotonic() - self._last_inventory >= self.POLL_SECONDS:
             self._inventory()
@@ -518,7 +684,7 @@ class OwnedAudioOutputController:
         # The application closes this controller on Qt's thread. Restore its
         # private mute now, before aboutToQuit stops servicing queued requests;
         # native teardown remains on the routing worker.
-        self.bridge.set_direct(False, self._session_epoch)
+        self._release_direct(self._session_epoch)
         self._wake.set()
         if self._thread is None:
             self._stop_group()

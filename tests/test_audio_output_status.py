@@ -230,7 +230,9 @@ class MusicSurfaceOutputStatusTests(unittest.TestCase):
         self.getter.side_effect = AssertionError("provider read during paint")
         image = self._controls()
         circle = self.window._button_rects["audio_output"].toAlignedRect()
-        self.assertGreater(image.pixelColor(circle.center().x(), circle.top() + 3).red(), 200)
+        face = image.pixelColor(circle.center().x(), circle.top() + 3)
+        self.assertGreater(face.alpha(), 0)
+        self.assertLess(face.alpha(), 245)
         # Connected glyph changes the compositor key, avoiding the old cached
         # link or single-device image when group membership changes.
         self.window._audio_output_kinds = ("homepod-mini", "homepod")

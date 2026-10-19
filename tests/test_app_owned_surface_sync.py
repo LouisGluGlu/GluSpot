@@ -110,6 +110,22 @@ class OwnedSurfaceBoundarySyncTests(unittest.TestCase):
         self.surface._finish_stale_track_transition.assert_not_called()
         self.window.update.assert_called_once()
 
+    def test_paused_queue_append_refreshes_visible_list_without_changed_track_ink(self):
+        token = [1]
+        self.owned.playback_queue_token = lambda: token[0]
+        self.owned.track = replace(self.old, is_playing=False)
+        self.publish()
+        self.surface.update.reset_mock()
+        self.window.update.reset_mock()
+        self.window._refresh_media_data = Mock(return_value=False)
+        token[0] = 2
+        self.publish()
+        self.window._refresh_media_data.assert_called_once_with(100.0)
+        self.surface.update.assert_called_once()
+        self.window.update.assert_not_called()
+        self.publish()
+        self.assertEqual(self.surface.update.call_count, 1)
+
 
 class OwnedSurfaceQtIntegrationTests(unittest.TestCase):
     @classmethod

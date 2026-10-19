@@ -46,7 +46,7 @@ class FinderBarSurfaceTests(unittest.TestCase):
         self.visual.finder_mode = False
         self.visual.mydockfinder_running = True
         self.screen = SimpleNamespace(name=lambda: "DISPLAY-fixture", geometry=lambda: QRect(-1920, 0, 1920, 1080), devicePixelRatio=lambda: 1.)
-        self.bar = {"hwnd": 1, "pid": 2, "enabled": True, "visible": True,
+        self.bar = {"hwnd": 1, "pid": 2, "enabled": True, "visible": True, "window_visible": True,
             "physical_rect": [-1920, 0, 0, 24], "physical_resting_rect": [-1920, 0, 0, 24],
             "physical_monitor_rect": [-1920, 0, 0, 1080], "monitor_name": "DISPLAY-fixture"}
 
@@ -73,7 +73,7 @@ class FinderBarSurfaceTests(unittest.TestCase):
     def test_installed_or_dock_only_does_not_open_finder(self):
         self.presence([])
         self.assertEqual(self.visual.location_mode, "free")
-        self.assertEqual(self.visual.available_location_modes(), ["free"])
+        self.assertEqual(self.visual.available_location_modes(), ["top", "free"])
         self.visual.set_location_mode("finder", notify=False)
         self.assertEqual(self.visual.location_mode, "free")
 
@@ -123,12 +123,14 @@ class FinderBarSurfaceTests(unittest.TestCase):
             self.visual._refresh_finder_bar_follow_position(now=100.)
             self.visual._refresh_finder_bar_follow_position(now=100.01)
             self.visual._refresh_finder_bar_follow_position(now=100.11)
-        self.assertEqual(probe.call_count, 2)
+        self.assertEqual(probe.call_count, 3)
         self.assertFalse(self.visual.finder_bar_visible)
 
     def test_horizontal_drag_persists_finder_ratio_without_moving_bar(self):
         self.presence()
-        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=self.screen):
+        with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=self.screen), \
+                patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen]), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", side_effect=lambda snapshot: dict(snapshot)):
             self.visual._apply_finder_drag_action(QPoint(-1440, 12), QPoint(30, 0))
         self.assertAlmostEqual(self.visual.finder_bar_center_ratio, .25)
         self.assertEqual(self.visual.pos(), QPoint(-1920, 0))
@@ -139,9 +141,238 @@ class FinderBarSurfaceTests(unittest.TestCase):
         self.presence()
         self.visual.location_mode = "free"
         self.visual.finder_mode = False
-        self.assertTrue(self.visual._should_attach_to_finder(QPoint(-1500, 10), QPoint(0, -20)))
-        self.assertFalse(self.visual._should_attach_to_finder(QPoint(200, 10), QPoint(0, -20)))
-        self.assertFalse(self.visual._should_attach_to_finder(QPoint(-1500, 500), QPoint(0, -20)))
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen]), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", side_effect=lambda snapshot: dict(snapshot)):
+            self.assertTrue(self.visual._should_attach_to_finder(QPoint(-1500, 10), QPoint(0, -20)))
+            self.assertFalse(self.visual._should_attach_to_finder(QPoint(200, 10), QPoint(0, -20)))
+            self.assertFalse(self.visual._should_attach_to_finder(QPoint(-1500, 500), QPoint(0, -20)))
+
+    def test_late_presence_during_drag_preserves_geometry_grab_and_detach_snapshot(self):
+        visual = self.visual
+        visual.drag_candidate, visual.dragging = True, True
+        visual.drag_press_global = QPoint(-1000, 300)
+        visual.drag_press_window_pos = QPoint(-1400, 200)
+        visual.drag_press_main_offset = QPointF(40., 12.)
+        visual.drag_detach_global_rects = {"music": QRectF(-1100., 290., 300., 40.)}
+        before = visual.pos(), visual.size(), dict(visual.drag_detach_global_rects)
+        self.presence()
+        self.presence()
+        with patch("local.island_stack_visual.refresh_live_finder_bar") as probe:
+            self.assertFalse(visual._refresh_finder_bar_follow_position(now=100.))
+        probe.assert_not_called()
+        self.assertEqual(visual.location_mode, "free")
+        self.assertEqual((visual.pos(), visual.size(), visual.drag_detach_global_rects), before)
+        self.assertEqual(visual.drag_press_global, QPoint(-1000, 300))
+        self.assertEqual(visual.drag_press_window_pos, QPoint(-1400, 200))
+        self.assertEqual(visual.drag_press_main_offset, QPointF(40., 12.))
+        self.assertTrue(visual._finder_presence_reconcile_pending)
+        self.assertEqual(len(visual.finder_bar_snapshots), 1)
+
+    def _release_drag_at(self, global_pos):
+        event = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton,
+            globalPosition=lambda: QPointF(global_pos), position=lambda: QPointF(40., 12.))
+        self.visual._accept_taskbar_preview_drop = lambda: False
+        self.visual._save_placement_state = Mock()
+        self.visual._current_main_target_global_rect = lambda: QRectF(-1100., 290., 300., 40.)
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen]), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", side_effect=lambda snapshot: dict(snapshot)), \
+                patch("local.island_stack_visual.read_finder_material", return_value=self.visual.finder_material):
+            self.visual.mouseReleaseEvent(event)
+
+    def test_late_presence_drag_release_attaches_only_when_release_hits_real_bar(self):
+        self.visual.drag_candidate, self.visual.dragging = True, True
+        self.presence()
+        self._release_drag_at(QPoint(-1500, 10))
+        self.assertEqual(self.visual.location_mode, "finder")
+        self.assertEqual(self.visual.pos(), QPoint(-1920, 0))
+        self.assertFalse(self.visual.dragging)
+        self.assertFalse(self.visual.drag_candidate)
+
+    def test_late_presence_drag_release_away_from_bar_keeps_free_position(self):
+        visual = self.visual
+        visual.drag_candidate, visual.dragging = True, True
+        before = visual.pos(), visual.size()
+        self.presence()
+        visual._settle_standalone_drag_release = Mock(side_effect=AssertionError("A missed Finder drop must stay Free"))
+        self._release_drag_at(QPoint(-1000, 300))
+        self.assertEqual(visual.location_mode, "free")
+        self.assertEqual((visual.pos(), visual.size()), before)
+        self.assertFalse(visual.finder_mode)
+
+    def test_late_presence_during_held_press_does_not_attach_on_unrelated_click_release(self):
+        visual = self.visual
+        visual.drag_candidate, visual.dragging = True, False
+        before = visual.pos(), visual.size()
+        self.presence()
+        visual._hit_test = lambda _point: ""
+        self._release_drag_at(QPoint(-1000, 300))
+        self.assertEqual(visual.location_mode, "free")
+        self.assertEqual((visual.pos(), visual.size()), before)
+        self.assertFalse(visual._finder_presence_reconcile_pending)
+
+    def test_held_click_on_live_bar_reconciles_data_without_attaching_or_resetting(self):
+        visual = self.visual
+        visual.drag_candidate, visual.dragging = True, False
+        before = visual.pos(), visual.size()
+        self.presence()
+        visual._hit_test = lambda _point: ""
+        visual._reset_location_runtime_state = Mock(side_effect=AssertionError("A click cannot reset the surface"))
+        self._release_drag_at(QPoint(-1500, 10))
+        self.assertEqual(visual.location_mode, "free")
+        self.assertEqual((visual.pos(), visual.size()), before)
+        self.assertEqual(visual._finder_bar_hwnd, 1)
+        self.assertFalse(visual._finder_presence_reconcile_pending)
+
+    def test_held_navigation_click_does_not_normalize_or_reset_active_page(self):
+        visual = self.visual
+        for page in ("music_fullscreen_overlay", "_music_library_windows"):
+            with self.subTest(page=page):
+                visual.music_fullscreen_overlay = None
+                visual._music_library_windows = []
+                visual.location_mode = "tasker"
+                visual.drag_candidate, visual.dragging = True, False
+                self.presence()
+                visual.drag_press_key = "music:open_surface"
+                active_page = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
+                visual._activate_key = lambda _key: setattr(visual, page,
+                    [active_page] if page == "_music_library_windows" else active_page)
+                visual._start_island_button_ripple = Mock()
+                visual._reset_location_runtime_state = Mock(side_effect=AssertionError("Navigation owns the surface"))
+                self._release_drag_at(QPoint(-1500, 10))
+                self.assertTrue(visual._navigation_surface_blocks_island())
+                self.assertEqual(visual.location_mode, "tasker")
+                self.assertEqual(visual._finder_bar_hwnd, 1)
+                self.assertFalse(visual._finder_presence_reconcile_pending)
+        visual.music_fullscreen_overlay = None
+        visual._music_library_windows = []
+
+    def test_live_target_rejects_hidden_missing_cloaked_minimized_and_offscreen_owner(self):
+        self.presence()
+        visual = self.visual
+        visual.location_mode, visual.finder_mode = "free", False
+        visual._reset_location_runtime_state = Mock(side_effect=AssertionError("Hidden owners cannot attach"))
+        hidden_states = {
+            "missing": None,
+            "SW_HIDE": dict(self.bar, window_visible=False),
+            "cloaked": dict(self.bar, cloaked=True),
+            "minimized": dict(self.bar, minimized=True),
+            "slide_complete": dict(self.bar, visible=False, physical_rect=[-1920, -23, 0, 1]),
+        }
+        for state, snapshot in hidden_states.items():
+            with self.subTest(state=state), \
+                    patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen]), \
+                    patch("local.island_stack_visual.refresh_live_finder_bar", return_value=snapshot) as probe:
+                self.assertIsNone(visual._finder_bar_drag_target(QPoint(-1500, 10)))
+                self.assertFalse(visual._should_attach_to_finder(QPoint(-1500, 10), QPoint(0, -20)))
+                self.assertFalse(visual._attach_to_finder_for_drag(QPoint(-1500, 10)))
+                self.assertEqual(visual.location_mode, "free")
+                self.assertTrue(probe.called)
+
+    def test_partial_live_target_accepts_only_current_visible_monitor_intersection(self):
+        self.presence()
+        partial = dict(self.bar, visible=False, physical_rect=[-1920, -12, 0, 12])
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen]), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", return_value=partial):
+            target = self.visual._finder_bar_drag_target(QPoint(-1500, 6))
+            self.assertEqual(target[0], partial)
+            self.assertEqual(target[1], QRectF(-1920, 0, 1920, 24))
+            self.assertIsNone(self.visual._finder_bar_drag_target(QPoint(-1500, 16)))
+            self.assertIsNone(self.visual._finder_bar_drag_target(QPoint(-1500, -6)))
+
+    def test_selected_live_snapshot_overrides_old_poll_inventory_before_probe(self):
+        self.presence()
+        latest = dict(self.bar, visible=False, physical_rect=[-1920, -12, 0, 12], marker="latest")
+        self.visual._finder_bar_snapshot = latest
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen]), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", side_effect=lambda snapshot: dict(snapshot)) as probe:
+            self.assertIsNone(self.visual._finder_bar_drag_target(QPoint(-1500, 16)))
+        probe.assert_called_once_with(latest)
+
+    def test_partial_live_target_preserves_negative_monitor_origin_and_mixed_dpi(self):
+        screen = SimpleNamespace(name=lambda: "upper-left", geometry=lambda: QRect(-1280, -720, 1280, 720), devicePixelRatio=lambda: 1.5)
+        bar = dict(self.bar, monitor_name="upper-left", physical_rect=[-1280, -720, 640, -684],
+            physical_resting_rect=[-1280, -720, 640, -684], physical_monitor_rect=[-1280, -720, 640, 360])
+        partial = dict(bar, visible=False, physical_rect=[-1280, -738, 640, -702])
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen, screen]), \
+                patch("local.island_stack_visual.read_finder_material", return_value=self.visual.finder_material), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", return_value=partial):
+            self.visual.set_finder_bar_presence([bar])
+            target = self.visual._finder_bar_drag_target(QPoint(-640, -714))
+            self.assertEqual(target[1], QRectF(-1280, -720, 1280, 24))
+            self.assertIs(target[2], screen)
+            self.assertIsNone(self.visual._finder_bar_drag_target(QPoint(-640, -704)))
+            self.assertIsNone(self.visual._finder_bar_drag_target(QPoint(-640, -726)))
+
+    def test_nonselected_stale_candidate_requires_live_refresh_before_hit(self):
+        right_screen = SimpleNamespace(name=lambda: "right", geometry=lambda: QRect(0, 0, 1280, 720), devicePixelRatio=lambda: 1.5)
+        right_bar = dict(self.bar, hwnd=3, pid=4, monitor_name="right",
+            physical_rect=[0, 0, 1920, 36], physical_resting_rect=[0, 0, 1920, 36], physical_monitor_rect=[0, 0, 1920, 1080])
+        hidden_right = dict(right_bar, visible=False, physical_rect=[0, -35, 1920, 1])
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen, right_screen]), \
+                patch("local.island_stack_visual.read_finder_material", return_value=self.visual.finder_material):
+            self.visual.set_finder_bar_presence([self.bar, right_bar])
+            with patch("local.island_stack_visual.refresh_live_finder_bar",
+                    side_effect=lambda snapshot: hidden_right if snapshot["hwnd"] == 3 else dict(snapshot)) as probe:
+                self.assertIsNone(self.visual._finder_bar_drag_target(QPoint(640, 10)))
+            self.assertEqual([call.args[0]["hwnd"] for call in probe.call_args_list], [1, 3])
+
+    def test_lost_finder_during_drag_normalizes_after_release_and_preserves_no_stale_owner(self):
+        visual = self.visual
+        self.presence()
+        visual.drag_candidate, visual.dragging = True, True
+        before = visual.pos(), visual.size()
+        self.presence([])
+        self.assertEqual((visual.pos(), visual.size()), before)
+        visual._settle_standalone_drag_release = Mock(return_value=True)
+        self._release_drag_at(QPoint(-1000, 300))
+        self.assertEqual(visual.location_mode, "free")
+        self.assertFalse(visual._finder_bar_available())
+        self.assertEqual(visual._finder_bar_hwnd, 0)
+
+    def test_dock_starting_during_drag_does_not_reset_grab_state(self):
+        visual = self.visual
+        visual.mydockfinder_running = False
+        visual.drag_candidate, visual.dragging = True, True
+        visual.location_mode = "tasker"
+        visual._reset_location_runtime_state = Mock(side_effect=AssertionError("No runtime reset during drag"))
+        visual.set_mydockfinder_running(True, notify=False)
+        self.presence()
+        self.assertEqual(visual.location_mode, "tasker")
+        self.assertTrue(visual._finder_presence_reconcile_pending)
+
+    def test_drag_uses_target_bar_on_another_monitor_and_selected_runtime_material(self):
+        right_screen = SimpleNamespace(name=lambda: "right", geometry=lambda: QRect(0, 0, 1280, 720), devicePixelRatio=lambda: 1.5)
+        right_bar = dict(self.bar, hwnd=3, pid=4, monitor_name="right",
+            physical_rect=[0, 0, 1920, 36], physical_resting_rect=[0, 0, 1920, 36], physical_monitor_rect=[0, 0, 1920, 1080])
+        visual = self.visual
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen, right_screen]), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", side_effect=lambda snapshot: dict(snapshot)), \
+                patch("local.island_stack_visual.read_finder_material", return_value=visual.finder_material):
+            visual.set_finder_bar_presence([self.bar, right_bar])
+            self.assertEqual(visual._finder_bar_hwnd, 1)
+            self.assertTrue(visual._should_attach_to_finder(QPoint(640, 10), QPoint(0, -20)))
+            visual._attach_to_finder_for_drag(QPoint(640, 10))
+            self.assertEqual(visual._finder_bar_hwnd, 3)
+            self.assertEqual(visual.finder_bar_rect, QRectF(0., 0., 1280., 24.))
+            self.assertEqual(visual.pos(), QPoint(0, 0))
+            self.assertAlmostEqual(visual.finder_bar_center_ratio, .5)
+            self.assertIs(visual._finder_bar_screen(), right_screen)
+            visual.set_finder_bar_presence([self.bar, right_bar])
+            self.assertEqual(visual._finder_bar_hwnd, 3)
+
+    def test_attached_horizontal_drag_switches_real_owner_without_primary_fallback(self):
+        right_screen = SimpleNamespace(name=lambda: "right", geometry=lambda: QRect(0, 0, 1920, 1080), devicePixelRatio=lambda: 1.)
+        right_bar = dict(self.bar, hwnd=3, pid=4, monitor_name="right", physical_rect=[0, 0, 1920, 24],
+            physical_resting_rect=[0, 0, 1920, 24], physical_monitor_rect=[0, 0, 1920, 1080])
+        with patch("local.island_stack_visual.QGuiApplication.screens", return_value=[self.screen, right_screen]), \
+                patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=right_screen), \
+                patch("local.island_stack_visual.refresh_live_finder_bar", side_effect=lambda snapshot: dict(snapshot)), \
+                patch("local.island_stack_visual.read_finder_material", return_value=self.visual.finder_material):
+            self.visual.set_finder_bar_presence([self.bar, right_bar])
+            self.visual._apply_finder_drag_action(QPoint(960, 12), QPoint(1200, 0))
+            self.assertEqual(self.visual._finder_bar_hwnd, 3)
+            self.assertEqual(self.visual.pos(), QPoint(0, 0))
+            self.assertAlmostEqual(self.visual.finder_bar_center_ratio, .5)
 
     def test_dock_blocks_every_tasker_presence_and_stick_settle_path(self):
         self.presence()
@@ -156,6 +387,7 @@ class FinderBarSurfaceTests(unittest.TestCase):
     def test_external_fullscreen_does_not_hide_finder_or_tasker(self):
         self.presence()
         for mode in ("finder", "tasker"):
+            self.visual.mydockfinder_running = mode == "finder"
             self.visual.location_mode = mode
             self.visual.finder_mode = mode == "finder"
             for reason in ("fullscreen", "maximized", "video"):

@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from api.models import TimedLyricLine
 from api.netease_position import NeteasePositionSample
@@ -28,7 +28,7 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
             source_prefix="netease", sample=None,
             duration_for_track=lambda *_args: 180.0,
         )
-        reader.read = lambda *_args, **_kwargs: reader.sample
+        reader.read = Mock(side_effect=lambda *_args, **_kwargs: reader.sample)
         provider.lyrics_store = store
         provider.netease_position = reader
         provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
@@ -48,6 +48,7 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
             data = provider._apply_recent_local_seek_to_visual_data(data, now)
         provider._last_data = data
         provider._last_ready_at = now
+        provider.netease_position.read.assert_not_called()
         return data
 
     def _warm(self, provider, session):
@@ -112,7 +113,7 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
         self.assertAlmostEqual(result.track.position_seconds, 11.8)
         self.assertIn("\n翻译", result.track.timed_lyrics[0].text)
 
-    def test_precise_uia_progress_still_has_existing_external_seek_path(self):
+    def test_precise_player_progress_cannot_replace_the_smtc_clock(self):
         provider, session, reader, _store = self._provider()
         self._warm(provider, session)
         for now in (101.8, 102.4, 103.0):
@@ -121,10 +122,10 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
             reader.sample = NeteasePositionSample(82.0 + now - 101.8, 180.0,
                                                   "netease-uia-progress", 0.92, sampled_at=now, is_playing=True)
             result = self._read(provider, now)
-        self.assertEqual(result.track.position_source, "netease-uia-progress")
-        self.assertGreater(result.track.position_seconds, 82.0)
+        self.assertEqual(result.track.position_source, "windows-media")
+        self.assertAlmostEqual(result.track.position_seconds, 13.0)
 
-    def test_paused_external_coarse_seek_is_not_gated_by_old_playing_evidence(self):
+    def test_paused_player_reader_cannot_override_the_smtc_position(self):
         provider, session, reader, _store = self._provider()
         self._warm(provider, session)
         session.playback.playback_status = 3
@@ -132,8 +133,8 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
         reader.sample = self._coarse(82.0, 102.4, playing=False)
         result = self._read(provider, 102.4)
         self.assertFalse(result.track.is_playing)
-        self.assertEqual(result.track.position_source, "netease-uia-lyrics")
-        self.assertAlmostEqual(result.track.position_seconds, 82.0)
+        self.assertEqual(result.track.position_source, "windows-media")
+        self.assertAlmostEqual(result.track.position_seconds, 11.2)
 
     def test_verified_gluspot_seek_keeps_existing_override(self):
         provider, session, reader, _store = self._provider()
@@ -146,7 +147,7 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
         result = self._read(provider, 101.8)
         self.assertGreater(result.track.position_seconds, 82.0)
 
-    def test_frozen_sdk_clock_loses_authority_and_allows_coarse_fallback(self):
+    def test_frozen_sdk_clock_does_not_reenable_player_readers(self):
         provider, session, reader, _store = self._provider()
         self._warm(provider, session)
         for now in (104.0, 104.6, 105.2):
@@ -154,8 +155,8 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
             session.timeline.last_updated_time += 1
             reader.sample = self._coarse(82.0 + now - 104.0, now)
             result = self._read(provider, now)
-        self.assertEqual(result.track.position_source, "netease-uia-lyrics")
-        self.assertGreater(result.track.position_seconds, 82.0)
+        self.assertEqual(result.track.position_source, "windows-media")
+        self.assertAlmostEqual(result.track.position_seconds, 11.2)
 
     def test_sparse_natural_sdk_updates_keep_clock_between_real_events(self):
         for interval in (5.0, 10.0):
@@ -178,7 +179,7 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
                 self.assertEqual(provider._raw_lyric_anchor_clock["natural_advances"], 2)
                 self.assertEqual(provider._raw_lyric_anchor_clock["advanced_at"], last_event)
 
-    def test_sparse_clock_expires_after_missed_event_without_marker_renewal(self):
+    def test_sparse_clock_keeps_smtc_after_missed_event_and_marker_renewal(self):
         provider, session, reader, _store = self._provider()
         for now, position in ((100.0, 10.0), (105.0, 15.0), (110.0, 20.0)):
             session.timeline.position = FakeTimeSpan(position)
@@ -188,8 +189,8 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
             session.timeline.last_updated_time += 1
             reader.sample = self._coarse(82.0 + now - 116.0, now)
             result = self._read(provider, now)
-        self.assertEqual(result.track.position_source, "netease-uia-lyrics")
-        self.assertGreater(result.track.position_seconds, 82.0)
+        self.assertEqual(result.track.position_source, "windows-media")
+        self.assertAlmostEqual(result.track.position_seconds, 20.0)
         self.assertEqual(provider._raw_lyric_anchor_clock["advanced_at"], 110.0)
         self.assertEqual(provider._raw_lyric_anchor_clock["interval_seconds"], 5.0)
 
@@ -255,7 +256,7 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
         self.assertEqual(provider._raw_lyric_anchor_clock["advanced_at"], 110.0)
         self.assertEqual(provider._raw_lyric_anchor_clock["interval_seconds"], 0.0)
 
-    def test_selected_uia_progress_and_row_keep_original_observation(self):
+    def test_selected_player_progress_and_row_cannot_change_smtc_observation(self):
         for source in ("netease-uia-progress", "netease-uia-lyrics"):
             with self.subTest(source=source):
                 provider, _session, reader, _store = self._provider()
@@ -265,17 +266,16 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
                 )
                 with patch("api.providers.time.monotonic", return_value=100.7):
                     fused = asyncio.run(provider._read_visual_data())
-                self.assertGreater(fused.track.position_seconds, 25.0)
-                self.assertEqual(fused.track.position_observed_seconds, 25.0)
+                self.assertAlmostEqual(fused.track.position_seconds, 10.0)
+                self.assertEqual(fused.track.position_observed_seconds, 10.0)
                 result = self._read(provider, 100.7)
-                self.assertEqual(result.track.position_source, source)
-                # The existing discontinuity guard can hold the display at its
-                # prior clock while preserving the new independent evidence.
-                self.assertLess(result.track.position_seconds, 25.0)
-                self.assertEqual(result.track.position_sampled_at, 100.2)
-                self.assertEqual(result.track.position_observed_seconds, 25.0)
+                self.assertEqual(result.track.position_source, "windows-media")
+                self.assertAlmostEqual(result.track.position_seconds, 10.7)
+                self.assertEqual(result.track.position_sampled_at, 100.0)
+                self.assertEqual(result.track.position_observed_seconds, 10.0)
                 projected = provider._project_visual_position(result, 101.2, 100.7)
-                self.assertEqual(projected.track.position_observed_seconds, 25.0)
+                self.assertEqual(projected.track.position_observed_seconds, 10.0)
+                self.assertAlmostEqual(projected.track.position_seconds, 11.2)
 
     def test_verified_seek_keeps_initial_observation_in_replacements_and_cold_start(self):
         for cold_start in (False, True):
@@ -307,11 +307,13 @@ class ProviderLyricAnchorGuardTests(unittest.TestCase):
                 session.timeline.position = FakeTimeSpan(position)
                 session.timeline.last_updated_time += 1
                 reader.sample = self._coarse(82.0, 101.8)
-                # The private fusion result must not suppress an actual raw
-                # seek or fallback; normal seek confirmation remains outside.
+                # Actual SMTC seeks remain visible even when an obsolete
+                # player reader disagrees; no private window state is read.
                 with patch("api.providers.time.monotonic", return_value=101.8):
                     result = asyncio.run(provider._read_visual_data())
-                self.assertGreaterEqual(result.track.position_seconds, 82.0)
+                self.assertAlmostEqual(result.track.position_seconds, position)
+                self.assertEqual(result.track.position_source, "windows-media")
+                provider.netease_position.read.assert_not_called()
                 if position > 0.0:
                     self.assertLessEqual(result.track.position_seconds, 84.0)
                     self.assertEqual(provider._raw_lyric_anchor_clock["natural_advances"], 0)

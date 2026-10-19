@@ -409,9 +409,11 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual(self.player.track.duration_seconds, 124)
         self.assertTrue(self.qt_player.url.isEmpty())
         self.assertEqual([job[0][0] for job in self.tasks.jobs], ["stream", "stream"])
-        self.assertNotIn("0", {key[1] for key in self.player._art_cache})
+        self.assertIn("0", {key[1] for key in self.player._art_cache})
+        self.assertNotIn(self.player._art_key(songs[0]), self.player._art_window)
         self.finish_artwork()
-        self.assertEqual({key[1] for key in self.player._art_cache}, set("1234567"))
+        self.assertEqual({key[1] for key in self.player._art_cache}, set("01234567"))
+        self.assertEqual({key[1] for key in self.player._art_window}, set("1234567"))
         self.player.send_playback_command("previous")
         self.assertEqual(self.player.track.album_art_bytes, b"art:3")
 
@@ -919,7 +921,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         with patch("local.owned_music_player.fetch_online_artwork", return_value=b"source-art") as fetch, \
                 patch("local.owned_music_player.online_artwork_colors", return_value=colors):
             result = action()
-        fetch.assert_called_once_with(songs[0].artwork_url)
+        fetch.assert_called_once_with(songs[0].artwork_url, raise_errors=True)
         self.artwork_tasks.completed.emit(art_token, result, None)
         self.assertEqual(self.player.track.album_art_bytes, b"source-art")
         self.assertEqual(self.player.track.album_art_source, "original")
@@ -984,7 +986,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         workers = MusicTasks()
         player = OwnedMusicPlayer(self.service, self.lyrics, player=Player(), audio=object(),
             tasks=self.tasks, artwork_tasks=workers, stream_cache=None)
-        def fetch(url):
+        def fetch(url, *, raise_errors=False):
             entered.set()
             release.wait(2)
             return b""
@@ -1048,7 +1050,7 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.qt_player.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.assertEqual(self.tasks.jobs[-1][0][2], "fm_continue")
 
-    def test_playlist_follows_all_pages(self):
+    def test_playlist_starts_first_page_before_following_remaining_pages(self):
         offsets = []
         def page(source, playlist, *, limit, offset):
             offsets.append(offset)
@@ -1057,6 +1059,15 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.player.play_playlist("netease", "list")
         token, action = self.tasks.jobs[-1]
         self.tasks.completed.emit(token, action(), None)
+        self.assertEqual(offsets, [0])
+        self.assertEqual(self.player.queue, self.songs[:1])
+        self.assertEqual(self.player.status, "loading_stream")
+        self.assertFalse(self.prefetch_tasks.jobs)
+        stream = next(token for token, _ in reversed(self.tasks.jobs) if token[0] == "stream")
+        self.tasks.completed.emit(stream, StreamInfo("netease", "1", "https://example.test/audio", True), None)
+        token, action = self.prefetch_tasks.jobs[-1]
+        self.assertEqual(token[0], "playlist_page")
+        self.prefetch_tasks.completed.emit(token, action(), None)
         self.assertEqual(offsets, [0, 100])
         self.assertEqual(self.player.queue, self.songs)
 
@@ -1312,7 +1323,7 @@ class StartupRoutingTests(unittest.TestCase):
         for owned, system, playing, expected in (
             (True, False, False, "login"), (True, False, True, "login"),
             (False, True, False, "island"), (False, True, True, "island"),
-            (True, True, False, "login"), (True, True, True, "island"),
+            (True, True, False, "login"), (True, True, True, "login"),
         ):
             with self.subTest(owned=owned, system=system, playing=playing):
                 self.assertEqual(startup_destination(first_run=True, owned=owned, system=system,

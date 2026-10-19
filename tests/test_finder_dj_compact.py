@@ -25,6 +25,7 @@ class FinderDjCompactTests(unittest.TestCase):
         # bands; an auto-generated Mock is not a provider audio-frame contract.
         visual.data_provider.get_owned_personal_dj_audio_frame.return_value = None
         visual.expanded = False
+        visual.mydockfinder_running = True
         visual.finder_mode = True
         visual.finder_bar_enabled = True
         visual.finder_bar_rect = QRectF(0., 0., 1600., height)
@@ -232,6 +233,7 @@ class FinderDjCompactTests(unittest.TestCase):
                 self.sync(visual, finished, 101.)
                 if reason == "page":
                     visual._music_surface_active = True
+                    visual.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
                 elif reason == "suppressed":
                     visual.scene_suppressed = True
                 elif reason == "hidden":

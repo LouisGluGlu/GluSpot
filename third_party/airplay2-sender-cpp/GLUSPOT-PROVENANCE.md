@@ -11,6 +11,20 @@ Git metadata, CI configuration, release artifacts and runtime files are omitted.
 `GLUSPOT-UPSTREAM-SHA256.json` records the original imported files' SHA-256
 hashes. This provenance file and that manifest are GluSpot additions.
 
+Local modification (2026-10-18): an optional `RaopEvents.receiverPlayPause`
+callback exposes the existing authenticated AP2 `/command` event's exact
+`sendMediaRemoteCommand` string values `paus` and `play` as one source toggle.
+It fires after the existing encrypted minimal acknowledgement, requires a
+canonical numeric receiver CSeq and deduplicates a bounded 64-entry window per
+session. Unknown commands, volume updates, authentication and transport framing
+retain their prior behavior. Interoperability facts were checked against
+OwnTone commit `3aee59740c715d40df8de87e06b7b91badfbe20b`,
+[`src/outputs/airplay_events.c`](https://github.com/owntone/owntone-server/blob/3aee59740c715d40df8de87e06b7b91badfbe20b/src/outputs/airplay_events.c#L288):
+both values toggle the player's current state. No OwnTone implementation code
+was incorporated. GluSpot's own encrypted-receiver tests live in
+`native/airplay_sender/sender_policy_tests.cpp`; the original upstream hash
+manifest remains unchanged. This does not add HomePod native-queue access.
+
 Local modification: `test/loop_tests.cpp` uses the malformed AF_INET hostname
 `invalid:host` instead of `no-such-host.invalid` for the resolution-failure
 test. The workspace's DNS resolver returned a wildcard address for `.invalid`,

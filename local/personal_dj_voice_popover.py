@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from api.online_music import PersonalDjVoice
-from local.liquid_glass import paint_liquid_glass
+from local.liquid_glass import paint_liquid_glass, widget_glass_level
 from local.music_tasks import MusicTasks
 
 
@@ -128,9 +128,16 @@ class PersonalDjVoicePopover(QWidget):
 
     def paintEvent(self, event):
         bounds = QRectF(self.rect()).adjusted(.5, .5, -.5, -.5)
+        # Sample in the music page's coordinates; the child painter keeps its
+        # own coordinates and never captures/re-renders its parent.
+        surface_bounds = bounds.translated(QPointF(self.pos()))
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            paint_liquid_glass(painter, bounds, base_color=QColor(42, 43, 46, 228))
+            painter.save()
+            painter.translate(-QPointF(self.pos()))
+            self.surface._paint_surface_glass(painter, surface_bounds, live=True)
+            painter.restore()
+            ink = self.surface._surface_glass_ink(surface_bounds, live=True)
             font = QFont(self.font())
             font.setPixelSize(max(9, min(14, round(self.height() * .30))))
             font.setWeight(QFont.Weight.DemiBold)
@@ -141,16 +148,19 @@ class PersonalDjVoicePopover(QWidget):
                 if self._selected >= 0:
                     indicator = QRectF(track.left() + self._indicator_at(time.monotonic()) * width,
                                        track.top(), width, track.height())
-                    accent = self.surface._future_lyric_color(bounds)
+                    accent = self.surface._future_lyric_color(surface_bounds)
                     accent = QColor(accent)
                     accent.setAlpha(65)
-                    paint_liquid_glass(painter, indicator, base_color=accent, hovered=True)
+                    paint_liquid_glass(painter, indicator, base_color=accent, hovered=True,
+                        face_opacity=min(1., .8 * widget_glass_level(self.surface) / 50.))
                 for i, voice in enumerate(self._voices):
                     cell = QRectF(track.left() + i * width, track.top(), width, track.height())
-                    painter.setPen(QColor(255, 255, 255, 250 if i == self._selected else 195))
+                    cell_ink = QColor(ink)
+                    cell_ink.setAlpha(250 if i == self._selected else 195)
+                    painter.setPen(cell_ink)
                     painter.drawText(cell, Qt.AlignmentFlag.AlignCenter, voice.name)
             else:
-                painter.setPen(QColor(235, 236, 238))
+                painter.setPen(ink)
                 painter.drawText(bounds.adjusted(7, 0, -7, 0), Qt.AlignmentFlag.AlignCenter, self._status)
             if self.hasFocus():
                 painter.setBrush(Qt.BrushStyle.NoBrush)

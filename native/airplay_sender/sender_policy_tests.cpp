@@ -559,6 +559,96 @@ void testUnansweredFeedbackIsBoundedAndRecoverable() {
     CHECK(!d.eventConnected && d.feedbackReplies == 2, "final diagnostics retain evidence after releasing sockets");
 }
 
+void testAuthenticatedReceiverPlayPause() {
+    g_test = "GluSpot authenticated receiver play/pause after encrypted ACK";
+    Rig rig;
+    std::vector<std::string> controls;
+    std::vector<uint64_t> acksAtCallback;
+    RaopEvents events;
+    events.launched = [&](bool ok, const std::string& error) { rig.launchedOk = ok; rig.launchedErr = error; };
+    events.receiverPlayPause = [&](const std::string& cseq) {
+        controls.push_back(cseq);
+        acksAtCallback.push_back(rig.sender->diagnostics().eventAcks);
+    };
+    rig.sender = std::make_unique<RaopSender>(rig.io, std::move(events));
+    rig.sender->setClock([&] { return rig.now; });
+    rig.sender->attachRing(&rig.ring);
+    rig.sender->setInputFormat(44100);
+    rig.sender->setPreserveReceiverVolume(true);
+    rig.sender->setStrictReceiverAuth(true);
+    auto connect = [&] {
+        // Each connection has an independently fresh fake receiver's control
+        // framing, keys and counters, just as the real reconnect does.
+        rig.io.takeTcp(RaopTcp::Control); rig.io.takeTcp(RaopTcp::Event);
+        rig.rx = FakeReceiver{};
+        rig.launchedOk.reset();
+        runAp2Handshake(rig, FakeReceiver::Mode::Ap2Transient, RaopDeviceInfo::Auth::HapTransient);
+        REQUIRE(rig.launchedOk && *rig.launchedOk, "synthetic receiver authenticates before controls");
+        rig.rx.evOut = airplay::hkdfSha512("Events-Salt", "Events-Write-Encryption-Key", rig.rx.sharedSecret, 32);
+        rig.rx.evIn = airplay::hkdfSha512("Events-Salt", "Events-Read-Encryption-Key", rig.rx.sharedSecret, 32);
+        rig.sender->onTcpConnected(RaopTcp::Event, {rig.localIp, 50001}, {rig.peerIp, 7001});
+    };
+    connect();
+    auto request = [](const std::string& cseq, const std::string& command, const std::string& type = "sendMediaRemoteCommand") {
+        using airplay::bplist::Value;
+        const auto body = airplay::bplist::encode(Value::object({{"type", Value::str(type)}, {"value", Value::str(command)}}));
+        return "POST /command RTSP/1.0\r\n" + (cseq.empty() ? "" : "CSeq: " + cseq + "\r\n")
+            + "Content-Type: application/x-apple-binary-plist\r\nContent-Length: " + std::to_string(body.size())
+            + "\r\n\r\n" + std::string(reinterpret_cast<const char*>(body.data()), body.size());
+    };
+    auto send = [&](const std::string& raw, const std::string& cseq, bool fragment = false) {
+        const auto encrypted = rig.rx.pushEvent(raw);
+        if (fragment) {
+            rig.sender->onTcpData(RaopTcp::Event, spanOf(std::string_view(encrypted).substr(0, 9)));
+            CHECK(rig.io.takeTcp(RaopTcp::Event).empty() && controls.empty(), "fragment cannot trigger a control or premature ACK");
+        }
+        rig.sender->onTcpData(RaopTcp::Event, spanOf(std::string_view(encrypted).substr(fragment ? 9 : 0)));
+        const auto reply = rig.rx.readEventReplies(rig.io.takeTcp(RaopTcp::Event));
+        CHECK(reply == "RTSP/1.0 200 OK\r\nServer: AirTunes/550.10\r\n"
+            + (cseq.empty() ? "" : "CSeq: " + cseq + "\r\n") + "\r\n", "controls and ignored messages retain independently decrypted minimal ACK");
+    };
+    send(request("7", "paus"), "7", true);
+    send(request("8", "play"), "8");
+    CHECK(controls == std::vector<std::string>({"7", "8"}) && acksAtCallback == std::vector<uint64_t>({1, 2}),
+        "both exact physical button names produce one toggle only after ACK");
+    send(request("7", "play"), "7");
+    send(request("0007", "paus"), "0007");
+    send(request("9", "pause"), "9");
+    send(request("10", "nitm"), "10");
+    send(request("11", "pitm"), "11");
+    send(request("12", "paus", "unknown"), "12");
+    send(request("", "paus"), "");
+    send(request("-13", "paus"), "-13");
+    send(request("12345678901234567", "paus"), "12345678901234567");
+    auto wrongMethod = request("14", "play"); wrongMethod.replace(0, 4, "GET ");
+    send(wrongMethod, "14");
+    auto wrongValue = request("15", "play");
+    const auto valueAt = wrongValue.rfind("play"); REQUIRE(valueAt != std::string::npos, "test plist contains string value");
+    wrongValue[valueAt - 1] = char(0x10); // Int marker replaces the known short string marker.
+    send(wrongValue, "15");
+    CHECK(controls.size() == 2, "duplicate, malformed and unsupported messages never become playback actions");
+    const auto both = rig.rx.pushEvent(request("16", "paus") + request("17", "play"));
+    rig.sender->onTcpData(RaopTcp::Event, spanOf(both));
+    const auto replies = rig.rx.readEventReplies(rig.io.takeTcp(RaopTcp::Event));
+    CHECK(controls == std::vector<std::string>({"7", "8", "16", "17"}) && replies.find("CSeq: 16") != std::string::npos
+        && replies.find("CSeq: 17") != std::string::npos, "coalesced encrypted requests are each ACKed and dispatched once");
+    const auto volume = rig.sender->diagnostics();
+    CHECK(volumeRequests(rig.rx) == 0 && !rig.rx.controlDecryptFailed && volume.eventDecryptFailures == 0,
+        "receiver taps preserve audio session and volume policy");
+    rig.sender->stop();
+    rig.io.takeTcp(RaopTcp::Event);
+    rig.sender->onTcpData(RaopTcp::Event, spanOf(rig.rx.pushEvent(request("18", "paus"))));
+    CHECK(controls.size() == 4 && rig.io.takeTcp(RaopTcp::Event).empty(), "a stopped session cannot dispatch or acknowledge taps");
+    connect();
+    send(request("7", "paus"), "7");
+    CHECK(controls.size() == 5 && controls.back() == "7", "a fresh authenticated session resets receiver CSeq dedup");
+    auto corrupt = rig.rx.pushEvent(request("19", "play")); corrupt.back() ^= 1;
+    rig.sender->onTcpData(RaopTcp::Event, spanOf(corrupt));
+    CHECK(controls.size() == 5 && rig.io.takeTcp(RaopTcp::Event).empty()
+        && rig.sender->diagnostics().eventDecryptFailures == 1, "unauthenticated ciphertext cannot control or claim an ACK");
+    rig.sender->stop();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -578,6 +668,7 @@ int main(int argc, char** argv) {
     testExplicitVolumeDuringHandshake();
     testTransientSessionPastReceiverWatchdog();
     testUnansweredFeedbackIsBoundedAndRecoverable();
+    testAuthenticatedReceiverPlayPause();
     std::printf("GluSpot sender policy: %d/%d checks passed\n", g_checks - g_failures, g_checks);
     return g_failures ? 1 : 0;
 }

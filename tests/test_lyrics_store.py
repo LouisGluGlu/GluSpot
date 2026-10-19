@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import tempfile
 import unittest
 import os
@@ -10,7 +11,7 @@ from pathlib import Path
 from urllib.error import URLError
 from unittest.mock import patch
 
-from api.lyrics import LocalLyricsStore, LyricsMatch
+from api.lyrics import LocalLyricsStore, LyricsMatch, is_structured_lyric_metadata
 from api.models import TimedLyricLine, TimedLyricUnit
 
 
@@ -104,6 +105,83 @@ class LyricsStoreTests(unittest.TestCase):
         self.assertAlmostEqual(timed[0].time_seconds, 1.2)
         self.assertEqual(timed[0].timing_kind, "unit")
         self.assertEqual(timed[0].units, (TimedLyricUnit(1.2, 1.7, "你"), TimedLyricUnit(1.7, 2.3, "好")))
+
+    def test_structured_metadata_requires_the_exact_netease_header_schema(self):
+        for timestamp in (-1, 0, 1200.5, 10 ** 400):
+            with self.subTest(timestamp=timestamp):
+                self.assertTrue(is_structured_lyric_metadata(json.dumps({
+                    "t": timestamp, "c": [{"tx": "作词: "}, {"tx": "Jerry Murad"}],
+                })))
+        unrelated = (
+            '{"verse":"Keep singing"}',
+            '{"t":true,"c":[{"tx":"sung"}]}',
+            '{"t":"-1","c":[{"tx":"sung"}]}',
+            '{"t":NaN,"c":[{"tx":"sung"}]}',
+            '{"t":Infinity,"c":[{"tx":"sung"}]}',
+            '{"t":-1,"c":[]}',
+            '{"t":-1,"c":{"tx":"sung"}}',
+            '{"t":-1,"c":[{"text":"sung"}]}',
+            '{"t":-1,"c":[{"tx":3}]}',
+            '{"t":-1,"c":[{"tx":"sung","verse":1}]}',
+            '{"t":-1,"c":[{"tx":"sung"}],"verse":1}',
+            '{"t":-1,"c":[{"tx":"unfinished"}]} trailing',
+            "Sing {with me}",
+        )
+        for text in unrelated:
+            with self.subTest(text=text):
+                self.assertFalse(is_structured_lyric_metadata(text))
+
+    def test_netease_header_only_payload_never_becomes_synthetic_lyrics(self):
+        credits = (
+            '{"t":-1,"c":[{"tx":"作词: "},{"tx":"Jerry Murad,, Al Fiore,, Pete Pedersen,, Bob Hadamik"}]}\n'
+            '{"t":-1,"c":[{"tx":"作曲: "},{"tx":"Henry Mancini"}]}'
+        )
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+            self.assertEqual(store._parse_lrc_text(credits), ((), ()))
+            self.assertIsNone(store.parse_online_lyrics(raw_lrc=credits, source="netease-account"))
+            self.assertIsNone(store.parse_online_lyrics(raw_yrc=credits, source="netease-account"))
+
+    def test_structured_headers_in_cached_timestamp_wrappers_are_removed(self):
+        header = '{"t":-1,"c":[{"tx":"作曲: "},{"tx":"Henry Mancini"}]}'
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+            timed, plain = store._parse_lrc_text(
+                f"[00:00.000]{header}\n[00:00.100][00:00.200]{header}\n"
+                f"[300,500]{header}\n[00:01.200]real lyric"
+            )
+        self.assertEqual(plain, ())
+        self.assertEqual(timed, (TimedLyricLine(1.2, "real lyric"),))
+
+    def test_netease_headers_do_not_change_real_yrc_units_or_translation(self):
+        header = '{"t":0,"c":[{"tx":"作词: "},{"tx":"Someone"}]}'
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root), settings_getter=lambda key, default=None: {
+                "v2_enable_dual_line_lyrics": True,
+                "v2_dual_line_secondary_source": "translation",
+            }.get(key, default))
+            match = store.parse_online_lyrics(
+                raw_lrc=header + "\n[00:01.200]你好",
+                raw_yrc=header + "\n[1200,2400](1200,500,0)你(1700,600,0)好",
+                translation="[00:01.200]Hello there",
+                source="netease-account",
+            )
+        self.assertIsNotNone(match)
+        self.assertEqual(match.lyrics, ("你好\nHello there",))
+        self.assertEqual(match.timed_lyrics, (TimedLyricLine(
+            1.2, "你好\nHello there",
+            (TimedLyricUnit(1.2, 1.7, "你"), TimedLyricUnit(1.7, 2.3, "好")), "unit",
+        ),))
+
+    def test_unrelated_json_and_sung_braces_remain_lyric_text(self):
+        sung = ('{"verse":"Keep singing"}', "Sing {with me}", '{"t":-1,"c":[{"tx":"unfinished"}]')
+        with tempfile.TemporaryDirectory() as root:
+            store = LocalLyricsStore(Path(root))
+            timed, plain = store._parse_lrc_text("\n".join(sung))
+            wrapped, _ = store._parse_lrc_text(f"[00:01.200]{sung[0]}")
+        self.assertEqual(timed, ())
+        self.assertEqual(plain, sung)
+        self.assertEqual(wrapped, (TimedLyricLine(1.2, sung[0]),))
 
     def test_parse_qrc_xml_and_plain_krc_preserve_distinct_clock_conventions(self):
         with tempfile.TemporaryDirectory() as root:
@@ -278,7 +356,7 @@ class LyricsStoreTests(unittest.TestCase):
         self.assertEqual(match.timed_lyrics[0].time_seconds, 1.5)
         self.assertEqual(match.timed_lyrics[0].units, new_line.units)
 
-    def test_unit_source_upgrade_does_not_copy_translation_from_different_original(self):
+    def test_unit_source_upgrade_rejects_different_original_without_mixing_translation(self):
         with tempfile.TemporaryDirectory() as root:
             store = LocalLyricsStore(Path(root))
             old_line = TimedLyricLine(1.0, "Shine on\n继续闪耀")
@@ -289,8 +367,16 @@ class LyricsStoreTests(unittest.TestCase):
             store._resolve_qq = lambda *_args: LyricsMatch((new_line,), (new_line.text,), "qq")
             store._resolve_lrclib = lambda *_args: None
             match = store._resolve_online("Song", "Artist", "", 0.0)
+            # The companion helper still cannot attach this translation to
+            # another original. Source selection must now reject that whole
+            # incompatible upgrade instead of discarding the visible lyrics.
+            isolated = store._retain_matching_subrows(
+                LyricsMatch((new_line,), (new_line.text,), "qq"),
+                LyricsMatch((old_line,), (old_line.text,), "netease"),
+            )
 
-        self.assertEqual(match.timed_lyrics, (new_line,))
+        self.assertEqual(match.timed_lyrics, (old_line,))
+        self.assertEqual(isolated.timed_lyrics, (new_line,))
 
     def test_unit_source_upgrade_keeps_repeated_original_translations_in_order(self):
         with tempfile.TemporaryDirectory() as root:
@@ -576,7 +662,7 @@ class LyricsStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             store = LocalLyricsStore(Path(root))
             calls = []
-            store._resolve_netease = lambda *_args: calls.append("netease") or LyricsMatch((TimedLyricLine(0.0, "line"),), ("line",), "netease")
+            store._resolve_netease = lambda *_args: calls.append("netease") or LyricsMatch((TimedLyricLine(0.0, "字"),), ("字",), "netease")
             unit_line = TimedLyricLine(0.0, "字", (TimedLyricUnit(0.0, 1.0, "字"),), "unit")
             store._resolve_qq = lambda *_args: calls.append("qq") or LyricsMatch((unit_line,), ("字",), "qq")
             store._resolve_lrclib = lambda *_args: calls.append("lrclib") or None

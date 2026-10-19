@@ -78,9 +78,12 @@ class IslandDjOutroTests(unittest.TestCase):
             visual = self.visual()
             finished = self.finish(visual)
             visual._music_surface_active = hidden
+            visual.music_fullscreen_overlay = (SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
+                                               if hidden else None)
             self.sync(visual, finished, 101. + age)
             self.assertFalse(visual.expanded)
             visual._music_surface_active = False
+            visual.music_fullscreen_overlay = None
             self.sync(visual, finished, 101. + age + .1)
             self.assertFalse(visual.expanded)
 
@@ -94,6 +97,7 @@ class IslandDjOutroTests(unittest.TestCase):
                 visual.media_track_id = "replacement"
             elif case == "surface":
                 visual._music_surface_active = True
+                visual.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
             elif case == "suppressed":
                 visual.scene_suppressed = True
             elif case == "hidden":

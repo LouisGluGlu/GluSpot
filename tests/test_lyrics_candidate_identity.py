@@ -78,6 +78,46 @@ class LyricsCandidateIdentityTests(unittest.TestCase):
         self.assertFalse(self.store._explicit_version_tags("Live Forever"))
         self.assertFalse(self.store._explicit_version_tags("Alive"))
 
+    def test_radio_edit_extended_and_specific_remixer_conflicts_are_rejected(self):
+        long_title = "Lose My Mind (feat. Doja Cat)"
+        for requested, supplied in (
+            (long_title, long_title + " (Radio Edit)"),
+            (long_title, long_title + " Extended Mix"),
+            (long_title + " (A Remix)", long_title + " (B Remix)"),
+            (long_title + " (Extended Mix)", long_title + " (Radio Edit)"),
+            (long_title + " (Live at Wembley)", long_title + " (Live at Glastonbury)"),
+            (long_title + " (2011 Remastered)", long_title + " (2022 Remastered)"),
+        ):
+            with self.subTest(requested=requested, supplied=supplied):
+                self.assertFalse(self.store._candidate_identity_matches(
+                    requested, "Don Toliver / Doja Cat", supplied, "Don Toliver / Doja Cat", 209., 209.,
+                ))
+
+    def test_version_formatting_and_feat_parentheses_do_not_invent_conflicts(self):
+        for requested, supplied in (
+            ("Shine on (A Remix)", "Shine on - A Remix Version"),
+            ("Shine on (Radio Edit)", "Shine on Radio Version"),
+            ("Shine on (Extended Mix)", "Shine on - Extended Version"),
+            ("Shine on (Live)", "Shine on Live Version"),
+            ("Lose My Mind (feat. Doja Cat)", "Lose My Mind (feat. Doja Cat)"),
+        ):
+            with self.subTest(requested=requested, supplied=supplied):
+                self.assertTrue(self.store._candidate_identity_matches(
+                    requested, "Don Toliver / Doja Cat", supplied, "Don Toliver / Doja Cat", 209., 209.,
+                ))
+        self.assertFalse(self.store._explicit_version_tags("Lose My Mind (feat. Doja Cat)"))
+
+    def test_resolver_does_not_bind_a_different_named_remix_as_verified_identity(self):
+        title = "Lose My Mind (feat. Doja Cat) (A Remix)"
+        search = {"result": {"songs": [{
+            "id": 123, "name": title.replace("A Remix", "B Remix"),
+            "ar": [{"name": "Don Toliver"}, {"name": "Doja Cat"}], "dt": 209000,
+        }]}}
+        with patch.object(self.store, "_fetch_json", return_value=search) as fetch:
+            self.assertIsNone(self.store._resolve_netease(title, "Don Toliver / Doja Cat", "", 209.))
+        fetch.assert_called_once()
+        self.assertFalse(self.store._trusted_platform_ids)
+
     def test_netease_resolver_rejects_duration_mismatch_before_fetching_lyrics(self):
         search = {"result": {"songs": [{
             "id": 123, "name": "Shine on", "artists": [{"name": "Example Artist"}], "dt": 220000,

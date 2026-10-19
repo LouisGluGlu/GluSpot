@@ -13,6 +13,13 @@ from tests.test_personal_dj_voice_window import _Tasks
 
 
 class _Surface(QWidget):
+    def _paint_surface_glass(self, painter, bounds, *, live=False, **kwargs):
+        from local.liquid_glass import paint_liquid_glass
+        paint_liquid_glass(painter, bounds, refractive=True, **kwargs)
+
+    def _surface_glass_ink(self, bounds, **kwargs):
+        return QColor("white")
+
     def _personal_dj_geometry(self, rect, now):
         return QRectF(360, 160, 88, 88), QRectF(300, 270, 240, 44)
 

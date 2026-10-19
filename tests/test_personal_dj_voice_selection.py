@@ -285,21 +285,53 @@ class PersonalDjVoiceSelectionTests(unittest.TestCase):
         self.assertEqual(self.dj_calls[-1], ("netease", "M792-NP"))
         self.assertEqual(self.owned.queue[self.owned.index].song_id, "song-7")
 
-    def test_pending_continuation_buffered_error_keeps_existing_fault_handling(self):
+    def test_pending_continuation_ignores_retired_source_error_after_voice_change(self):
         self.start_music()
         self.qt.durationChanged.emit(120000)
+        self.owned.queue = self.owned.queue[:1]
         self.owned._fm_prefetch_pending = False
-        self.owned._advance_fm()
+        self.assertTrue(self.owned.send_playback_command("next"))
         token, action = self.tasks.jobs[-1]
         stale = action()
+        # Next has retired this source. A late decoder error cannot restore
+        # its playback authority while the new voice's continuation is pending.
         self.qt.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "fixture secret")
         self.assertTrue(self.owned.set_personal_dj_voice("M792-NP"))
+        self.assertEqual(self.owned._catalog_pending_epoch, 0)
+        self.assertTrue(self.owned._fm_advance_pending)
+        self.assertIsNone(self.owned._stream_fault)
+        self.assertEqual(self.owned.failure_reason, "")
+        self.assertFalse(self.owned.track.is_playing)
+        self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.StoppedState)
+        self.assertTrue(self.qt.source().isEmpty())
+        self.tasks.completed.emit(token, stale, None)
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+        self.finish(self.prefetch, "fm_prefetch")
+        self.assertEqual(self.dj_calls[-1], ("netease", "M792-NP"))
+        self.finish(self.tasks, "stream")
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-7")
+        self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.PlayingState)
+
+    def test_pending_replacement_buffered_error_keeps_fault_handling_after_voice_change(self):
+        self.start_music()
+        self.qt.durationChanged.emit(120000)
+        self.service.daily_recommendations = lambda source: (segments(6)[1],)
+        self.owned.play_daily()
+        token, _action = self.tasks.jobs[-1]
+        self.qt.errorOccurred.emit(QMediaPlayer.Error.ResourceError, "fixture secret")
+        self.assertTrue(self.owned.set_personal_dj_voice("M792-NP"))
+        self.assertEqual(self.owned._catalog_pending_epoch, token[1])
+        self.assertTrue(self.owned.track.is_playing)
+        # An ordinary library replacement still retains the healthy current
+        # source. Its buffered fault returns to the existing watchdog when
+        # that replacement fails; it is not a skipped continuation source.
+        self.tasks.completed.emit(token, None, "network")
         self.assertEqual(self.owned._catalog_pending_epoch, 0)
         self.assertIsNotNone(self.owned._stream_fault)
         self.assertEqual(self.owned.failure_reason, "resource")
         self.assertTrue(self.owned.track.is_playing)
-        self.tasks.completed.emit(token, stale, None)
-        self.assertEqual(self.owned.track.track_id, "owned:netease:song-1")
+        self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.PlayingState)
+        self.assertFalse(self.qt.source().isEmpty())
 
     def test_continuation_at_eof_uses_new_voice_and_rejects_old_catalog(self):
         self.start_music()

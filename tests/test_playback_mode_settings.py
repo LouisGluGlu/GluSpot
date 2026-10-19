@@ -30,19 +30,20 @@ class PlaybackModeSettingsTests(unittest.TestCase):
     def toggle(self, control):
         QTest.mouseClick(control, Qt.MouseButton.LeftButton, pos=control.rect().center())
 
-    def test_default_modes_are_owned_enabled_system_disabled(self):
+    def test_default_modes_enable_both_playback_sources(self):
         self.assertTrue(self.window.owned_playback_switch.isChecked())
-        self.assertFalse(self.window.system_capture_switch.isChecked())
+        self.assertTrue(self.window.system_capture_switch.isChecked())
         self.assertFalse(self.settings.get("v2_playback_onboarding_completed"))
 
     def test_switching_off_last_owned_mode_is_rejected_and_control_restored(self):
+        self.settings.set("v2_system_capture_enabled", False)
+        self.window.sync_from_widget()
         self.toggle(self.window.owned_playback_switch)
         self.assertTrue(self.settings.get("v2_owned_playback_enabled"))
         self.assertFalse(self.settings.get("v2_system_capture_enabled"))
         self.assertTrue(self.window.owned_playback_switch.isChecked())
 
     def test_dual_mode_can_be_changed_to_system_only_but_last_system_mode_stays_enabled(self):
-        self.toggle(self.window.system_capture_switch)
         self.toggle(self.window.owned_playback_switch)
         self.assertFalse(self.settings.get("v2_owned_playback_enabled"))
         self.assertTrue(self.settings.get("v2_system_capture_enabled"))
@@ -52,7 +53,6 @@ class PlaybackModeSettingsTests(unittest.TestCase):
         self.assertFalse(self.settings.get("v2_owned_playback_enabled"))
 
     def test_dual_mode_can_return_to_owned_only_without_implicitly_completing_onboarding(self):
-        self.toggle(self.window.system_capture_switch)
         self.toggle(self.window.system_capture_switch)
         self.assertTrue(self.settings.get("v2_owned_playback_enabled"))
         self.assertFalse(self.settings.get("v2_system_capture_enabled"))
@@ -73,7 +73,7 @@ class PlaybackModeSettingsTests(unittest.TestCase):
         self.window.online_login_button.click()
         self.assertEqual(calls, ["open"])
         self.assertTrue(self.settings.get("v2_owned_playback_enabled"))
-        self.assertFalse(self.settings.get("v2_system_capture_enabled"))
+        self.assertTrue(self.settings.get("v2_system_capture_enabled"))
 
 
 class PlaybackModePersistenceTests(unittest.TestCase):
@@ -95,7 +95,8 @@ class PlaybackModePersistenceTests(unittest.TestCase):
                     manager = SettingsManager()
                     try:
                         self.assertTrue(manager.get("v2_owned_playback_enabled"))
-                        self.assertFalse(manager.get("v2_system_capture_enabled"))
+                        self.assertEqual(manager.get("v2_system_capture_enabled"),
+                                         not isinstance(data["v2_system_capture_enabled"], bool))
                         self.assertFalse(manager.get("v2_playback_onboarding_completed"))
                     finally:
                         manager.save_now()

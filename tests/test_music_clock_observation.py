@@ -172,26 +172,27 @@ class MusicClockObservationTests(unittest.TestCase):
         provider._foreground_track_metadata = lambda *_args: None
         provider._schedule_current_netease_art_lookup = lambda *_args, **_kwargs: None
 
-    def test_interactive_raw_clock_preserves_the_sdk_observation_identity(self):
+    def test_foreground_player_does_not_change_the_smtc_observation_identity(self):
         provider, _session = self._provider()
         self._use_adapter(provider, foreground=True)
         first = self._read(provider, 100.0)
         for now in (100.5, 100.9):
             data = self._read(provider, now)
-            self.assertEqual(data.track.position_source, "interactive")
+            self.assertEqual(data.track.position_source, "windows-media")
             self.assertEqual(data.track.position_sampled_at, first.track.position_sampled_at)
             self.assertAlmostEqual(data.track.position_seconds, 10.0 + now - 100.0)
 
-    def test_local_background_projection_does_not_add_original_raw_age_twice(self):
+    def test_zero_smtc_position_does_not_reuse_private_player_projection(self):
         provider, session = self._provider()
         self._use_adapter(provider, foreground=False)
         self._read(provider, 100.0)
         session.timeline.position = FakeTimeSpan(0.0)
         for now in (101.5, 102.0):
             data = self._read(provider, now)
-            self.assertEqual(data.track.position_source, "local-background")
-            self.assertEqual(data.track.position_sampled_at, now)
-            self.assertAlmostEqual(data.track.position_seconds, 10.0 + now - 100.0)
+            self.assertEqual(data.track.position_source, "windows-media")
+            self.assertEqual(data.track.position_observed_seconds, 0.0)
+            self.assertEqual(data.track.position_sampled_at, 101.5)
+            self.assertAlmostEqual(data.track.position_seconds, now - 101.5)
 
     def test_first_delivery_latency_is_projected_once_not_again_on_cached_poll(self):
         provider, _session = self._provider()

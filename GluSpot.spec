@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_data_files, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
 
 
 ROOT = Path(SPECPATH)
-APP_VERSION = "6.412"
+APP_VERSION = "6.413"
 AIRPLAY_EXE = ROOT / "build" / "native-airplay" / "GluSpotAirPlay.exe"
 AIRPLAY_LICENSES = AIRPLAY_EXE.parent / "licenses"
 DISCOVERY_LICENSES = ROOT / "build" / "audio-licenses"
@@ -43,7 +43,9 @@ datas += collect_data_files("ToJyutping") + copy_metadata("ToJyutping")
 datas += collect_data_files("zeroconf") + copy_metadata("zeroconf") + copy_metadata("ifaddr")
 
 hiddenimports = [
+    "winsdk.windows.media",
     "winsdk.windows.media.control",
+    "winsdk.windows.media.playback",
     "winsdk.windows.storage.streams",
     "winsdk.windows.foundation",
     "soundcard",
@@ -58,7 +60,8 @@ hiddenimports = [
 a = Analysis(
     [str(ROOT / "local" / "main.py")],
     pathex=[str(ROOT)],
-    binaries=[(str(AIRPLAY_EXE), "native")],
+    # UIAutomation loads its bundled DLLs through ctypes from its bin directory.
+    binaries=[(str(AIRPLAY_EXE), "native")] + collect_dynamic_libs("uiautomation"),
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[str(ROOT / "packaging" / "windows" / "hooks")],

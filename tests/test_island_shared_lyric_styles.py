@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.models import TimedLyricUnit
 from local.island_stack_visual import IslandStackVisual
+from local.lyric_unit_timing import resolve_display_row_timing
 from local.music_lyric_reading import LyricReadingRenderer
 
 
@@ -118,7 +119,7 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
         )
         self.assertEqual(fonts[0].families()[0], calls[0].families()[0])
 
-    def test_low_perception_bilingual_block_uses_shared_half_second_ramp(self):
+    def test_legacy_bilingual_block_painter_honors_supplied_progress_without_own_clock(self):
         calls_by_style = []
         for style in ("wave_stream", "gelv_songscatter"):
             visual = self._visual(style)
@@ -162,14 +163,18 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
                     if position >= 1.8:
                         self.assertEqual(gelv_phase["visual_focus_index"], 1)
 
-    def test_line_only_low_perception_phase_matches_shared_wave_block(self):
+    def test_line_only_low_perception_phase_matches_shared_word_reading(self):
         for position in (0.1, 0.25, 0.75):
             wave = self._phase_visual("wave_stream", real_units=False, strategy="low_perception", position=position)
             gelv = self._phase_visual("gelv_songscatter", real_units=False, strategy="low_perception", position=position)
             phase = gelv._lyric_phase(100.0)
             self.assertEqual(phase, wave._lyric_phase(100.0))
-            self.assertTrue(phase["whole_row"])
-            self.assertAlmostEqual(phase["whole_block_progress"], min(1, position / 0.5))
+            self.assertFalse(phase["whole_row"])
+            self.assertNotIn("whole_block_progress", phase)
+            self.assertEqual(phase["timing_quality"], "estimated")
+            self.assertAlmostEqual(phase["progress"], resolve_display_row_timing(
+                "Shine softly", start=0., next_start=4.,
+            ).reading_progress(position))
 
     def test_mixed_timing_song_estimates_missing_row_units_for_both_strategies(self):
         for strategy in ("gold_reading", "low_perception"):
@@ -182,7 +187,8 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
                 self.assertGreater(phase["progress"], 0)
                 self.assertLess(phase["progress"], 1)
                 self.assertNotIn("whole_block_progress", phase)
-                self.assertNotIn("timed_units", phase)
+                self.assertTrue(phase["timed_units"])
+                self.assertTrue(all(unit.estimated for unit in phase["timed_units"]))
                 phases.append(phase)
             self.assertEqual(phases[0], phases[1])
 

@@ -5,11 +5,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PySide6.QtGui import QFont, QImage
+from PySide6.QtGui import QColor, QFont, QImage
 from PySide6.QtWidgets import QApplication, QWidget
 
-from local.lyric_unit_timing import timed_unit_reading_front
-from local.music_lyric_presentation import split_display_layers
+from local.lyric_unit_timing import display_row_reading_front, timed_unit_reading_front
+from local.music_lyric_presentation import INTRO_COUNTDOWN_TEXT, split_display_layers
+from local.music_lyric_motion import LyricEmphasisPlan
 from local.music_surface_window import MusicSurfaceWindow
 
 
@@ -40,6 +41,14 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # These fixtures exercise the ordinary primary/companion layers.
+        # Highlight dispatch has its own integration suites; a historical
+        # per-owner threshold can no longer suppress it after the fixed cue.
+        for name, value in (("lyric_emphasis_plan", LyricEmphasisPlan()),
+                            ("explicit_slow_unit_groups", ())):
+            classifier = patch("local.music_surface_window." + name, return_value=value)
+            classifier.start()
+            self.addCleanup(classifier.stop)
         self.owner = _LayerOwner()
         self.window = MusicSurfaceWindow(self.owner)
         self.window.resize(960, 540)
@@ -60,6 +69,116 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         ]
         self.owner.timed_lyric_units = [(), (), (), ()]
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
+
+    def _reading_lane_lyrics(self):
+        self.owner.music_surface_reading_strategy = "low_perception"
+        self.owner.media_position_seconds = 25.0
+        self.owner.timed_lyrics = [
+            (0.0, "Past line\n翻译：过去"),
+            (20.0, "Current line\n翻译：当前"),
+            (40.0, "Future line\n翻译：未来"),
+            (60.0, "Later line\n翻译：稍后"),
+        ]
+        self.owner.timed_lyric_units = [()] * 4
+        self.owner.timed_lyric_timing_kinds = ["line"] * 4
+        self.owner.album_art = QImage(32, 32, QImage.Format.Format_RGB32)
+        self.owner.album_art.fill(QColor("#d87954"))
+
+    def _reading_lane_ink(self):
+        opacities = {}
+        draw_past = self.window._draw_sprung_cached_wrapped_layout
+        draw_future = self.window._draw_future_wrapped_layout
+        draw_reading = self.window._paint_wrapped_lifted_lyric
+
+        def capture(draw, painter, layout, origin, text, *args, **kwargs):
+            opacities[text] = max(opacities.get(text, 0.0), painter.opacity())
+            return draw(painter, layout, origin, text, *args, **kwargs)
+
+        def capture_reading(painter, row, text, *args, **kwargs):
+            # Estimated rows now use the same reading painter as source
+            # words. Observe its real opacity without forcing a static path.
+            opacities[text] = max(opacities.get(text, 0.0), painter.opacity())
+            return draw_reading(painter, row, text, *args, **kwargs)
+
+        dpr = self.window.devicePixelRatioF()
+        image = QImage(round(self.window.width() * dpr), round(self.window.height() * dpr),
+                       QImage.Format.Format_RGB32)
+        image.setDevicePixelRatio(dpr)
+        with (
+            patch("local.music_surface_window.time.monotonic", return_value=100.0),
+            patch.object(self.window, "_draw_sprung_cached_wrapped_layout",
+                         side_effect=lambda *args, **kwargs: capture(draw_past, *args, **kwargs)),
+            patch.object(self.window, "_draw_future_wrapped_layout",
+                         side_effect=lambda *args, **kwargs: capture(draw_future, *args, **kwargs)),
+            patch.object(self.window, "_paint_wrapped_lifted_lyric",
+                         side_effect=capture_reading),
+        ):
+            self.window.render(image)
+        return opacities
+
+    def test_visible_title_subdues_surrounding_primary_and_translation_ink_only(self):
+        self._reading_lane_lyrics()
+        for width, height, fullscreen in ((640, 360, False), (1920, 1080, True)):
+            with self.subTest(fullscreen=fullscreen):
+                self.window.resize(width, height)
+                self.window._fullscreen = fullscreen
+                self.owner.track_title = ""
+                without_title = self._reading_lane_ink()
+                ambience = QImage(self.window._background_cache)
+                hit_rows = dict(self.window._lyric_hit_rects)
+                self.owner.track_title = "Visual layers"
+                with_title = self._reading_lane_ink()
+                for text in ("Past line", "过去", "Future line", "未来"):
+                    self.assertAlmostEqual(without_title[text], 1.0)
+                    self.assertGreater(with_title[text], 0.0)
+                    self.assertLess(with_title[text], without_title[text])
+                for text in ("Current line", "当前"):
+                    self.assertAlmostEqual(with_title[text], without_title[text])
+                    self.assertAlmostEqual(with_title[text], 1.0)
+                self.assertEqual(self.window._background_cache, ambience)
+                self.assertEqual(self.window._lyric_hit_rects, hit_rows)
+
+    def test_surrounding_ink_follows_actual_title_fade_during_cover_travel(self):
+        self._reading_lane_lyrics()
+        ratios = []
+        for fraction in (0.0, 0.5, 0.65):
+            with patch.object(self.window, "_cover_layout_fraction_at", return_value=fraction):
+                ink = self._reading_lane_ink()
+            ratios.append(ink["Future line"] / ink["Current line"])
+            self.assertAlmostEqual(ink["Current line"], 1.0 - fraction)
+            self.assertAlmostEqual(ink["当前"], ink["Current line"])
+        # Both title layouts are absent halfway through the travel. Their
+        # gradual return subdues surrounding ink without changing lyric fade.
+        self.assertLess(ratios[0], ratios[2])
+        self.assertLess(ratios[2], ratios[1])
+        self.assertAlmostEqual(ratios[1], 1.0)
+        blur_follow = self.window._lyric_blur_follow_levels
+
+        def half_blur(*args, **kwargs):
+            levels, moving = blur_follow(*args, **kwargs)
+            return tuple(level * 0.5 for level in levels), moving
+
+        with patch.object(self.window, "_lyric_blur_follow_levels", side_effect=half_blur):
+            partial_blur = self._reading_lane_ink()
+        self.assertAlmostEqual(partial_blur["Current line"], 1.0)
+        self.assertGreater(partial_blur["Future line"], ratios[0])
+        self.assertLess(partial_blur["Future line"], 1.0)
+
+    def test_idle_keeps_title_lane_width_and_browsing_restores_full_lyric_ink(self):
+        self._reading_lane_lyrics()
+        with patch.object(self.window, "_control_reveal_at", return_value=1.0):
+            revealed = self._reading_lane_ink()
+            lane_width = self.window._metadata_hit_rects["title"].width()
+        with patch.object(self.window, "_control_reveal_at", return_value=0.0):
+            idle = self._reading_lane_ink()
+            self.assertEqual(self.window._metadata_hit_rects["title"].width(), lane_width)
+        for text in ("Past line", "过去", "Future line", "未来", "Current line", "当前"):
+            self.assertAlmostEqual(idle[text], revealed[text])
+        self.window._browse_index = 1.0
+        self.window._browse_until = 110.0
+        browsing = self._reading_lane_ink()
+        for text in ("Past line", "过去", "Future line", "未来", "Current line", "当前"):
+            self.assertAlmostEqual(browsing[text], 1.0)
 
     def test_render_builds_independent_small_regular_translation_and_parenthesis_layouts(self):
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")
@@ -176,11 +295,27 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
                     self._render()
             self.assertEqual(set(painted), {"echo", "回声"})
             self.assertAlmostEqual(painted["echo"], painted["回声"])
+            plan = self.window._display_row_timings[0]
+            self.assertEqual(plan.quality, "estimated")
+            layers = self.window._visual_lyric_layers_for_rows(
+                *self.window._display_lyrics(), outgoing=False,
+            )[0]
+            offsets = self.window._visible_primary_source_offsets(plan.text, layers)
+            source_front = display_row_reading_front(
+                plan, position, range(len(plan.text) + 1),
+            )
+            visible = self.window._project_source_front(source_front, offsets) / len(layers.primary_text)
+            self.assertAlmostEqual(
+                painted["echo"], max(0.0, min(1.0, (visible - 0.8) / 0.2)), places=5,
+            )
             return painted["echo"]
 
+        # Word-weighted display estimates keep the one-second preview. The
+        # annotation follows the visible primary, excluding its own source
+        # parentheses, rather than assuming a uniform whole-row clock.
         self.assertEqual(progress_at(15.0, 100.0), 0.0)
-        self.assertEqual(progress_at(16.0, 101.0), 0.0)
-        self.assertAlmostEqual(progress_at(18.0, 102.0), 0.5, places=3)
+        self.assertGreater(progress_at(16.0, 101.0), 0.0)
+        self.assertLess(progress_at(18.0, 102.0), 1.0)
         self.assertGreater(progress_at(19.99, 103.0), 0.99)
 
     def test_real_unit_bracket_read_uses_visible_primary_progress(self):
@@ -300,15 +435,15 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         expected = self.window._project_source_front(front, offsets) / len(layers.primary_text)
         self.assertAlmostEqual(painted["照耀我"][1], expected, places=4)
 
-    def test_low_perception_line_timing_switches_primary_and_translation_together(self):
+    def test_low_perception_line_timing_reads_estimated_primary_and_translation(self):
         self.owner.music_surface_reading_strategy = "low_perception"
         self._four_rows("One line to sing\n一句歌词")
         self.owner.media_position_seconds = 1.0
-        lifted = []
+        lifted = {}
         whole = []
 
-        def capture_lifted(_painter, _row, text, *_args, **_kwargs):
-            lifted.append(text)
+        def capture_lifted(_painter, _row, text, _font, _layout, progress, **kwargs):
+            lifted[text] = (progress, kwargs.get("real_progresses"))
 
         def capture_whole(_painter, _layout, _origin, text, *_args, **_kwargs):
             whole.append(text)
@@ -318,10 +453,14 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
             patch.object(self.window, "_draw_sprung_cached_wrapped_layout", side_effect=capture_whole),
         ):
             self._render()
-        self.assertIn("One line to sing", whole)
-        self.assertIn("一句歌词", whole)
-        self.assertNotIn("One line to sing", lifted)
-        self.assertNotIn("一句歌词", lifted)
+        self.assertNotIn("One line to sing", whole)
+        self.assertNotIn("一句歌词", whole)
+        self.assertIn("One line to sing", lifted)
+        self.assertIn("一句歌词", lifted)
+        self.assertEqual(self.window._display_row_timings[0].quality, "estimated")
+        self.assertIsNotNone(lifted["One line to sing"][1])
+        self.assertGreater(lifted["一句歌词"][0], 0.0)
+        self.assertLess(lifted["一句歌词"][0], 1.0)
 
     def test_low_perception_real_unit_timing_reads_primary_and_translation(self):
         self.owner.music_surface_reading_strategy = "low_perception"
@@ -375,23 +514,26 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
                 self._render()
 
                 plan = self.window._display_duet_presentation
+                timed = self.window._display_lyrics()[1]
+                self.assertEqual(timed[0], (0.0, INTRO_COUNTDOWN_TEXT))
                 self.assertEqual([(group.first_index, group.second_index) for group in plan.groups],
-                                 [(0, 1), (2, 3)])
+                                 [(1, 2), (3, 4)])
                 self.assertEqual([layout.text() for layout, _height in self.window._song_layouts], [
+                    INTRO_COUNTDOWN_TEXT,
                     "我等你的雨季 如此安静", "我记得是雨季 爱上的你",
                     "我记得那草坪 一览无遗", "我等你的草坪 高楼耸起",
                 ])
                 tops = self.window._song_row_tops
-                self.assertEqual(tops[0], tops[1])
-                self.assertEqual(tops[2], tops[3])
-                self.assertGreater(tops[2], tops[1])
+                self.assertEqual(tops[1], tops[2])
+                self.assertEqual(tops[3], tops[4])
+                self.assertGreater(tops[3], tops[2])
                 self.assertEqual(tuple(sorted(self.window._song_visual_tops)),
                                  self.window._song_visual_tops)
-                self.assertEqual([start for start, _text in self.window._display_lyrics()[1]],
+                self.assertEqual([start for start, _text in timed[1:]],
                                  [row[0] for row in self.owner.timed_lyrics])
 
-                left = self.window._lyric_hit_rects[0]
-                right = self.window._lyric_hit_rects[1]
+                left = self.window._lyric_hit_rects[1]
+                right = self.window._lyric_hit_rects[2]
                 self.assertGreater(left.width(), 0)
                 self.assertGreater(right.width(), 0)
                 self.assertLess(left.right(), right.left())
@@ -470,17 +612,58 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.owner.media_position_sampled_at = time.monotonic()
         painted = {}
 
-        def capture(_painter, _row, text, _font, _layout, progress, **_kwargs):
-            painted[text] = progress
+        def capture(_painter, _row, text, _font, _layout, progress, **kwargs):
+            # The source plan includes the verified singer prefix. The
+            # actual reading painter receives projected visible fronts.
+            self.assertIsNotNone(kwargs.get("real_progresses"))
+            painted[text] = kwargs["real_progresses"][0]
 
         with patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture):
             self._render()
-        self.assertEqual(self.window._lyric_motion.active_index, 1)
+        timed = self.window._display_lyrics()[1]
+        self.assertEqual(timed[0], (0.0, INTRO_COUNTDOWN_TEXT))
+        self.assertEqual(timed[self.window._lyric_motion.active_index], self.owner.timed_lyrics[1])
         self.assertIn("我先开始唱", painted)
         self.assertIn("我后开始唱", painted)
         self.assertGreater(painted["我先开始唱"], painted["我后开始唱"])
         self.assertAlmostEqual(painted["我先开始唱"], 1.0 / 6.0, delta=0.05)
         self.assertAlmostEqual(painted["我后开始唱"], 0.25 / 5.25, delta=0.05)
+        for index, start in ((1, 10.0), (2, 10.75)):
+            row = self.window._display_row_timings[index]
+            self.assertEqual(row.quality, "estimated")
+            self.assertEqual(row.start_seconds, start)
+            self.assertEqual(row.end_seconds, 16.0)
+
+    def test_estimated_duet_translations_keep_their_own_visible_reading_fronts(self):
+        self.owner.artist = "薛之谦、刘惜君"
+        self.owner.timed_lyrics = [
+            (10.0, "薛：我先开始唱\n翻译：First voice"),
+            (10.75, "刘：我后开始唱\n翻译：Second voice"),
+            (16.0, "第三句"), (20.0, "第四句"),
+        ]
+        self.owner.timed_lyric_units = [()] * 4
+        self.owner.timed_lyric_timing_kinds = ["line"] * 4
+        self.owner.media_position_seconds = 11.0
+        self.owner.media_position_source = "local-seek"
+        self.owner.media_position_sampled_at = 100.0
+        companions = {}
+
+        def capture(_painter, _row, text, _font, _layout, progress, **_kwargs):
+            if text in {"First voice", "Second voice"}:
+                companions[text] = progress
+
+        with (
+            patch("local.music_surface_window.time.monotonic", return_value=100.0),
+            patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture),
+        ):
+            self._render()
+        # Verified singer labels consume no estimated singing time. The
+        # earlier voice's translation must not borrow the active later
+        # voice's source front (or its hidden-prefix progress).
+        self.assertEqual(set(companions), {"First voice", "Second voice"})
+        self.assertAlmostEqual(companions["First voice"], 1.0 / 6.0)
+        self.assertAlmostEqual(companions["Second voice"], 0.25 / 5.25)
+        self.assertGreater(companions["First voice"], companions["Second voice"])
 
     def test_one_late_verified_singer_aligns_following_rows_right(self):
         self.owner.artist = "薛之谦、刘惜君"

@@ -827,7 +827,7 @@ def taskbar_stack_direction_for_rect(taskbar_rect: QRectF, screen_geometry) -> i
 
 def available_location_modes_for_state(*, mydockfinder_available: bool, finder_bar_available: bool | None = None) -> list[str]:
     if bool(mydockfinder_available):
-        return ["free", "finder"] if finder_bar_available is not False else ["free"]
+        return ["free", "finder"] if finder_bar_available is not False else ["top", "free"]
     return ["top", "free", "tasker"]
 
 
@@ -851,12 +851,42 @@ def canonical_location_mode(
         value = "top"
     if value == "finder" and (not bool(mydockfinder_available) or finder_bar_available is False):
         value = "free"
-    if value in {"top", "tasker", "stick"} and bool(mydockfinder_available):
+    if value == "top" and bool(mydockfinder_available) and finder_bar_available is not False:
+        value = "free"
+    if value in {"tasker", "stick"} and bool(mydockfinder_available):
         value = "free"
     auto_hide_mode = str(taskbar_auto_hide_mode or "auto").strip().lower()
     if value == "stick" and auto_hide_mode == "disabled":
         value = "free"
     return value
+
+
+def fullscreen_placement_mode(
+    *,
+    mydockfinder_available: bool,
+    finder_bar_available: bool,
+    owner_bar_hidden: bool,
+    hide_follow_enabled: bool,
+) -> tuple[str, bool]:
+    """Project a fullscreen owner's state to the automatic island placement.
+
+    A visible immersive bar owns its matching island. A hidden owner either
+    suppresses that matching island or falls back to a visible Top island.
+    Dock without Finder has no immersive owner, so its Top island follows the
+    fullscreen application's visibility only when hide following is enabled.
+    This projection does not expand the user's manually selectable modes.
+    """
+    if bool(mydockfinder_available):
+        if not bool(finder_bar_available):
+            return "top", bool(hide_follow_enabled)
+        owner_mode = "finder"
+    else:
+        owner_mode = "tasker"
+    if not bool(owner_bar_hidden):
+        return owner_mode, False
+    if bool(hide_follow_enabled):
+        return owner_mode, True
+    return "top", False
 
 
 def normalize_taskbar_auto_hide_mode(mode: str) -> str:
@@ -1516,6 +1546,7 @@ def taskbar_shell_rect_is_hidden_autohide(
     *,
     auto_hide: bool,
     unit: float = 1.0,
+    screen_geometry=None,
 ) -> bool:
     taskbar = QRectF(shell_rect)
     if taskbar.isNull() or not bool(auto_hide):
@@ -1527,6 +1558,19 @@ def taskbar_shell_rect_is_hidden_autohide(
     hidden_threshold = max(6.0 * u, 4.0)
     if expected_thickness > 0.0:
         hidden_threshold = max(hidden_threshold, min(expected_thickness * 0.35, 18.0 * u))
+    try:
+        screen = QRectF(screen_geometry) if screen_geometry is not None else QRectF()
+    except Exception:
+        screen = QRectF()
+    if not screen.isNull():
+        visible = taskbar.intersected(screen)
+        if visible.isEmpty() or min(float(visible.width()), float(visible.height())) <= 1.0:
+            return True
+        if visible_thickness > hidden_threshold:
+            # Windows can translate a full-size HWND out of its monitor rather
+            # than shrink it. Keep following every visible animation frame;
+            # the one-pixel reveal strip is the settled hidden boundary.
+            return False
     return visible_thickness <= hidden_threshold
 
 
@@ -1729,6 +1773,7 @@ def build_taskbar_autohide_hidden_plan(
     detected_auto_hide: bool = False,
     interaction_keeps_visible: bool = False,
     unit: float = 1.0,
+    screen_geometry=None,
 ) -> TaskbarAutohideHiddenPlan:
     mode = normalize_taskbar_auto_hide_mode(taskbar_auto_hide_mode)
     auto_hide = True if mode == "enabled" else False if mode == "disabled" else bool(detected_auto_hide)
@@ -1745,6 +1790,7 @@ def build_taskbar_autohide_hidden_plan(
         QRectF(appbar_rect) if appbar_rect is not None else QRectF(),
         auto_hide=True,
         unit=unit,
+        screen_geometry=screen_geometry,
     )
     return TaskbarAutohideHiddenPlan(auto_hide=True, hidden=hidden, probe_taskbar=probe)
 
@@ -1854,7 +1900,7 @@ def resolve_taskbar_rect_for_screen(
     u = max(0.0, float(unit))
 
     if not shell.isNull():
-        if taskbar_shell_rect_is_hidden_autohide(shell, appbar, auto_hide=auto_hide, unit=u):
+        if taskbar_shell_rect_is_hidden_autohide(shell, appbar, auto_hide=auto_hide, unit=u, screen_geometry=geo):
             if not appbar.isNull():
                 return appbar
             fallback = taskbar_hidden_fallback_rect(
@@ -3232,7 +3278,7 @@ def taskbar_follow_refresh_due(
         last = 0.0
     if last <= 0.0:
         return True
-    return float(now) - last >= max(0.012, float(interval))
+    return float(now) - last >= max(0.008, float(interval))
 
 
 def taskbar_follow_force_visible_active(
@@ -3843,11 +3889,12 @@ def should_snap_top_notch_for_release(
     *,
     mydockfinder_available: bool,
     finder_mode: bool,
+    finder_bar_available: bool | None = None,
     min_threshold: float = 18.0,
     max_threshold: float = 84.0,
     anchor_height_factor: float = 1.4,
 ) -> bool:
-    if bool(mydockfinder_available) or bool(finder_mode):
+    if bool(finder_mode) or (bool(mydockfinder_available) and finder_bar_available is not False):
         return False
     anchor = QRectF(anchor_rect)
     if anchor.isNull() or screen_geometry is None:
@@ -3880,6 +3927,7 @@ def decide_standalone_release_action(
     mydockfinder_available: bool,
     finder_mode: bool,
     taskbar_compact_active: bool,
+    finder_bar_available: bool | None = None,
     current_location_mode: str = "free",
     bottom_min_threshold: float = 24.0,
     bottom_max_threshold: float = 96.0,
@@ -3905,6 +3953,7 @@ def decide_standalone_release_action(
         screen,
         mydockfinder_available=mydockfinder_available,
         finder_mode=finder_mode,
+        finder_bar_available=finder_bar_available,
         min_threshold=top_min_threshold,
         max_threshold=top_max_threshold,
     ):
@@ -3915,7 +3964,7 @@ def decide_standalone_release_action(
         release_global_pos,
         screen,
         taskbar,
-        taskbar_allowed=taskbar_allowed,
+        taskbar_allowed=bool(taskbar_allowed) and not bool(mydockfinder_available),
         auto_hide_enabled=auto_hide_enabled,
         min_threshold=bottom_min_threshold,
         max_threshold=bottom_max_threshold,
@@ -3927,12 +3976,12 @@ def decide_standalone_release_action(
         release_global_pos,
         screen,
         taskbar,
-        taskbar_allowed=taskbar_allowed,
+        taskbar_allowed=bool(taskbar_allowed) and not bool(mydockfinder_available),
         auto_hide_enabled=auto_hide_enabled,
         min_threshold=bottom_min_threshold,
         max_threshold=bottom_max_threshold,
     ):
-        return StandaloneReleaseDecision("stick")
+        return StandaloneReleaseDecision("tasker")
 
     mode = str(current_location_mode or "free").strip().casefold()
     return StandaloneReleaseDecision("free", exiting_edge_notch_mode=mode in {"stick", "top"})
@@ -4150,7 +4199,7 @@ def build_taskbar_follow_target(
         ratio = max(0.0, min(1.0, float(current_position_ratio)))
     center_x = center_for_position_ratio(track, main_width, ratio)
     center_y = follow.center().y()
-    if bool(auto_hide_follow) and not bool(hidden_autohide):
+    if bool(auto_hide_follow):
         center_y -= max(0.0, float(visible_follow_lift))
     zone = intended_zone_rect(center_x, center_y, main_width, main_height)
     new_pos = QPoint(
@@ -4200,11 +4249,6 @@ def build_taskbar_follow_refresh_plan(
 ) -> TaskbarFollowRefreshPlan:
     if target.visible_taskbar.isNull() or target.track_rect.isNull():
         return TaskbarFollowRefreshPlan(valid=False)
-    animate_follow = (
-        bool(target.auto_hide_follow)
-        and not bool(target.partial_shell_follow)
-        and (bool(target.hidden_autohide) or bool(previous_hidden))
-    )
     material_due = float(material_elapsed) >= max(0.20, float(material_interval))
     refresh_material = (
         (bool(force_visible) or not bool(taskbar_autohide_hidden))
@@ -4212,7 +4256,9 @@ def build_taskbar_follow_refresh_plan(
     )
     return TaskbarFollowRefreshPlan(
         valid=True,
-        animate_follow=animate_follow,
+        # The owner already supplies its animated native positions. A second
+        # easing pass would lag behind it and restart at the hide boundary.
+        animate_follow=False,
         refresh_material=refresh_material,
     )
 
