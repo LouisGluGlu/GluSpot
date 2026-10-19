@@ -17,9 +17,9 @@ from local.diagnostics_presentation import (
 
 
 class DiagnosticsPresentationTests(unittest.TestCase):
-    def test_visual_context_uses_four_public_placement_names(self):
-        for mode, label in (("tasker", "Tasker Bar"), ("top", "Top Island"), ("free", "Free"),
-                            ("finder", "Finder Bar"), ("stick", "Free")):
+    def test_visual_context_groups_immersive_placements_under_three_public_modes(self):
+        for mode, label in (("tasker", "沉浸栏 · Tasker Bar"), ("top", "Top"), ("free", "Free"),
+                            ("finder", "沉浸栏 · Finder Bar"), ("stick", "Free")):
             with self.subTest(mode=mode):
                 self.assertIn(f"紧凑/{label}", format_visual_runtime_context({"location_mode": mode}))
 
@@ -165,7 +165,7 @@ class DiagnosticsPresentationTests(unittest.TestCase):
         self.assertIn("bands 0.90/0.50/0.20", values["music_reactive_input"])
         self.assertIn("sea_level", values["visual_runtime_context"])
         self.assertIn("歌词 ember_fade", values["visual_runtime_context"])
-        self.assertIn("展开/Tasker Bar紧凑", values["visual_runtime_context"])
+        self.assertIn("展开/沉浸栏 · Tasker Bar紧凑", values["visual_runtime_context"])
         self.assertIn("律动开 72", values["visual_runtime_context"])
         self.assertIn("证据可用", values["diagnostics_evidence"])
         self.assertIn("5 samples/4.0s", values["diagnostics_evidence"])

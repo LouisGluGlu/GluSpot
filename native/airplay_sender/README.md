@@ -27,6 +27,16 @@ Transient pairing derives both control and event keys from full SRP K; the
 reverse event channel decrypts receiver requests and answers an encrypted,
 minimal 200 OK. Sending feedback alone does not satisfy the event watchdog.
 
+Owned direct-PCM sessions additionally return authenticated receiver button
+events to the current owned player. Exact `sendMediaRemoteCommand` values
+`paus` and `play` both mean toggle, matching OwnTone's interoperable handler.
+The encrypted ACK remains first; a bounded host queue publishes only current,
+committed members and includes PCM epoch, receiver ID, membership revision,
+numeric CSeq and queue age. Python and Qt recheck that authority and expiry.
+System-capture sessions do not control the owned player. There is no DACP HTTP
+server, native HomePod queue import or queue injection. Protocol evidence and
+hardware limits are in `docs/homepod-remote-control-research-2026-10-18.md`.
+
 ## Build
 
 Use CMake 3.20+ and a Windows C++20 compiler. An MSVC Developer PowerShell with

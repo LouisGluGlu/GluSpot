@@ -22,15 +22,16 @@ class MusicCleanupEdgesV2Tests(unittest.TestCase):
     def present(self, rows, **kwargs):
         return present_timed_lyric_rows(rows, intro_countdown=False, **kwargs)
 
-    def test_both_edge_runs_are_removed_but_interior_colon_rows_survive(self):
+    def test_edge_notes_and_interior_production_credits_are_removed(self):
         source = [
             (0.0, "节目：开场"), (1.0, "Producer: Someone"),
-            (8.0, "First sung line"), (12.0, "作词：这是正文中保留的词"),
+            (8.0, "First sung line"), (12.0, "作词：Someone"),
+            (14.0, "注记：正文中的注记"),
             (16.0, "Last sung line"), (20.0, "制作人：Someone"),
             (21.0, "备注：结束"),
         ]
         original = list(source)
-        self.assertEqual(self.present(source), source[2:5])
+        self.assertEqual(self.present(source), [source[2], source[4], source[5]])
         self.assertEqual(source, original)
 
     def test_numeric_colon_is_preserved_with_ascii_fullwidth_and_unicode_digits(self):
@@ -40,8 +41,12 @@ class MusicCleanupEdgesV2Tests(unittest.TestCase):
                 self.assertEqual(self.present(rows), rows)
 
     def test_exact_repeated_colon_row_survives_even_with_a_credit_label(self):
-        rows = [(0.0, "Music: is my life"), (4.0, "Sing again"), (8.0, "Music： is my life")]
-        self.assertEqual(self.present(rows), rows)
+        for label, body in (("Music", "is my life"), ("Master", "of my heart"),
+                            ("Strings", "are pulling me")):
+            rows = [(0.0, f"{label}: {body}"), (4.0, "Sing again"),
+                    (8.0, f"{label}： {body}")]
+            with self.subTest(label=label):
+                self.assertEqual(self.present(rows), rows)
 
     def test_repeated_speaker_label_and_known_one_off_singer_survive_at_edges(self):
         rows = [(0.0, "成龙：第一句"), (4.0, "成龙: 第二句"), (8.0, "金善喜：第三句")]
@@ -69,7 +74,7 @@ class MusicCleanupEdgesV2Tests(unittest.TestCase):
         rows = [(0.0, "Shine on\n发行：Label"), (4.0, "Final line")]
         layers = split_display_layers(self.present(rows)[0][1])
         self.assertIsNone(layers.translation_text)
-        self.assertEqual(layers.primary_text, "Shine on\n发行：Label")
+        self.assertEqual(layers.primary_text, "Shine on")
 
     def test_cleanup_precedes_countdown_and_sparse_song_classification(self):
         rows = [(0.0, "节目：开始"), (8.0, "Sung line"), (14.0, "备注：结束")]
@@ -193,17 +198,21 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
         try:
             lines, timed = window._display_lyrics()
             layers = window._visual_lyric_layers_for_rows(lines, timed, outgoing=False)
-            self.assertEqual([start for start, _text in timed], [10.0, 20.0, 25.0])
-            self.assertIs(window._display_timed_units[0], units)
-            self.assertEqual(window._display_timed_kinds[0], "unit")
-            self.assertEqual(window._display_timed_read_ends, (12.0, None, None))
-            self.assertEqual(window._display_raw_source_texts[0], original_rows[0][1])
-            self.assertEqual(layers[0].original_primary_text, original)
-            self.assertEqual(layers[0].primary_text, "I love")
-            self.assertEqual(layers[0].translation_text, "我爱你")
-            self.assertEqual(layers[0].parenthetical_text, "love echo")
-            self.assertEqual(layers[0].parenthetical_translation_text, "回声")
-            self.assertEqual(window._visible_primary_source_offsets(timed[0][1], layers[0]),
+            self.assertEqual(timed[0], (0.0, INTRO_COUNTDOWN_TEXT))
+            self.assertEqual(lines[0], INTRO_COUNTDOWN_TEXT)
+            self.assertEqual(window._display_timed_units[0], ())
+            self.assertEqual(window._display_timed_kinds[0], "line")
+            self.assertEqual([start for start, _text in timed[1:]], [10.0, 20.0, 25.0])
+            self.assertIs(window._display_timed_units[1], units)
+            self.assertEqual(window._display_timed_kinds[1], "unit")
+            self.assertEqual(window._display_timed_read_ends, (None, 12.0, None, None))
+            self.assertEqual(window._display_raw_source_texts[1], original_rows[0][1])
+            self.assertEqual(layers[1].original_primary_text, original)
+            self.assertEqual(layers[1].primary_text, "I love")
+            self.assertEqual(layers[1].translation_text, "我爱你")
+            self.assertEqual(layers[1].parenthetical_text, "love echo")
+            self.assertEqual(layers[1].parenthetical_translation_text, "回声")
+            self.assertEqual(window._visible_primary_source_offsets(timed[1][1], layers[1]),
                              split_display_layers(original).primary_source_offsets)
             self.assertEqual(owner.timed_lyrics, original_rows)
         finally:
@@ -272,8 +281,15 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
 
     def test_estimated_interval_retains_bracket_boundary_in_pure_gold_and_mixed_songs(self):
         from local.music_surface_window import MusicSurfaceWindow
+        from local.lyric_unit_timing import resolve_display_row_timing
 
-        for mixed, expected in ((False, 0.45), (True, 0.9)):
+        # Each line now uses its own display estimate, regardless of whether
+        # another row in the song supplies genuine words. The attached raw
+        # backing-vocal onset remains the bound before preview is applied.
+        shared = resolve_display_row_timing("春風", start=0., next_start=2.)
+        expected = shared.reading_progress(.9)
+        self.assertAlmostEqual(expected, .9)
+        for mixed in (False, True):
             with self.subTest(mixed=mixed):
                 owner = self._boundary_owner((), mixed=mixed)
                 window = MusicSurfaceWindow(owner)
@@ -282,9 +298,10 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
                     self._sample_boundary(window, owner, 100.0, 0.0)
                     ink, _fronts = self._sample_boundary(window, owner, 100.7, 0.9)
                     self.assertAlmostEqual(ink["春風"], expected)
-                    if mixed:
-                        self.assertAlmostEqual(ink["echo"], 0.5)
+                    self.assertAlmostEqual(ink["echo"], 0.5)
                     self.assertEqual(window._display_timed_read_ends[0], 2.0)
+                    self.assertEqual(owner.timed_lyrics[1][0], 2.0)
+                    self.assertEqual(window._display_row_timings[0].end_seconds, shared.end_seconds)
                 finally:
                     window.shutdown()
                     owner.close()
@@ -383,13 +400,26 @@ class MusicAnnotationBoundaryAuditV2Tests(unittest.TestCase):
 
     def test_protected_credit_shaped_original_retains_island_unit_classification(self):
         island = self._island()
-        sung = "作词：这是歌词"
+        sung = "Music: is my life"
         units = tuple(TimedLyricUnit(index * 0.2, (index + 1) * 0.2, char)
                       for index, char in enumerate(sung))
         island.timed_lyrics = [(0.0, sung), (4.0, "Another line"), (8.0, sung)]
         island.timed_lyric_units = [units, (), units]
         island.timed_lyric_timing_kinds = ["unit", "line", "unit"]
         self.assertTrue(island._island_song_has_genuine_unit_timing())
+
+    def test_repeated_production_credit_cannot_classify_the_song_as_unit_timed(self):
+        island = self._island()
+        credit = "作词：Someone"
+        units = tuple(TimedLyricUnit(index * 0.2, (index + 1) * 0.2, char)
+                      for index, char in enumerate(credit))
+        source = [(0.0, credit), (4.0, "Another line"), (8.0, credit)]
+        island.timed_lyrics = list(source)
+        island.timed_lyric_units = [units, (), units]
+        island.timed_lyric_timing_kinds = ["unit", "line", "unit"]
+        self.assertFalse(island._island_song_has_genuine_unit_timing())
+        self.assertEqual(island.timed_lyrics, source)
+        self.assertEqual(island.timed_lyric_units, [units, (), units])
 
     def test_multiple_attached_brackets_preserve_the_first_source_boundary(self):
         rows = [(0.0, "春風"), (2.0, "(echo)"), (3.0, "(again)"), (6.0, "Next")]

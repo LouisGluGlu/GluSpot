@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from PySide6.QtCore import QPointF, QRect, QRectF
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF
+from PySide6.QtGui import QCloseEvent, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from api.providers import EmptyIslandDataProvider, empty_visual_data
@@ -55,6 +55,7 @@ class IslandSurfaceReturnTests(unittest.TestCase):
         self.island.music_fullscreen_overlay = SimpleNamespace(hide=Mock(), isVisible=lambda: False)
 
     def tearDown(self):
+        self.island._keep_minimum_surface = False
         self.island.music_fullscreen_overlay = None
         self.island.close()
         self.island.deleteLater()
@@ -146,13 +147,99 @@ class IslandSurfaceReturnTests(unittest.TestCase):
         self.assertEqual(self.island.media_position_seconds, 5.0)
         self.assertFalse(self.island.media_is_playing)
 
-    def test_return_does_not_settle_or_show_an_intentionally_hidden_island(self):
-        self.island._island_visible_before_music_surface = False
+    def test_return_does_not_settle_or_show_a_tray_hidden_island(self):
+        self.island._tray_hidden = True
         with patch.object(self.island, "_settle_island_return_motion") as settle, \
                 patch.object(self.island, "show") as show:
             self.island._restore_island_from_music_surface()
         settle.assert_not_called()
         show.assert_not_called()
+
+    def test_return_restores_minimum_even_when_island_was_hidden_before_music_page(self):
+        self.island._island_visible_before_music_surface = False
+        with patch.object(self.island, "_settle_island_return_motion") as settle, \
+                patch.object(self.island, "show") as show:
+            self.island._restore_island_from_music_surface()
+        settle.assert_called_once()
+        show.assert_called_once()
+
+    def test_managed_close_keeps_minimum_island_without_retiring_it(self):
+        self.island._keep_minimum_surface = True
+        event = QCloseEvent()
+        with patch.object(self.island, "ensure_minimum_surface") as restore, \
+                patch.object(self.island, "_close_solid_album_palette_worker") as shutdown:
+            self.island.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        restore.assert_called_once()
+        shutdown.assert_not_called()
+
+    def test_minimized_page_does_not_block_minimum_or_topmost_but_keeps_navigation_ownership(self):
+        page = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: True)
+        self.island.music_fullscreen_overlay = page
+        self.island._music_library_active = True
+        self.island._music_library_windows = (page,)
+        with patch.object(self.island, "show") as show, patch.object(self.island, "raise_"):
+            self.island.ensure_minimum_surface()
+        show.assert_called_once()
+        self.assertTrue(self.island._music_surface_active)
+        self.assertTrue(self.island._music_library_active)
+        page.isMinimized = lambda: False
+        with patch.object(self.island, "show") as show, patch.object(self.island, "hide") as hide:
+            self.island._sync_minimum_surface()
+        hide.assert_called_once()
+        show.assert_not_called()
+
+    def test_hidden_and_quitting_flags_prevent_minimum_resurrection(self):
+        for flag in ("_tray_hidden", "_application_quitting"):
+            with self.subTest(flag=flag):
+                setattr(self.island, flag, True)
+                with patch.object(self.island, "show") as show, patch.object(self.island, "raise_"):
+                    self.island.ensure_minimum_surface()
+                    self.island._sync_minimum_surface()
+                    self.island._restore_island_from_music_surface()
+                show.assert_not_called()
+                setattr(self.island, flag, False)
+
+    def test_system_offset_never_reanchors_owned_playback_with_default_system_adapter(self):
+        self.island.media_track_id = "owned:netease:offset-song"
+        self.island.media_lyric_offset_adapter = "system"
+        self.island.media_app_lyric_offset_seconds = 0.0
+        with patch.object(self.island, "_reanchor_lyric_offset") as reanchor:
+            self.assertFalse(self.island.set_active_music_app_lyric_offset("system", 2.5))
+        self.assertEqual(self.island.media_app_lyric_offset_seconds, 0.0)
+        reanchor.assert_not_called()
+        self.island.media_track_id = "external-system-song"
+        with patch.object(self.island, "_reanchor_lyric_offset") as reanchor:
+            self.assertTrue(self.island.set_active_music_app_lyric_offset("system", 2.5))
+        self.assertEqual(self.island.media_app_lyric_offset_seconds, 2.5)
+        reanchor.assert_called_once()
+
+    def test_player_minimize_restore_events_resync_minimum_after_qt_state_settles(self):
+        from local.music_surface_window import MusicSurfaceWindow
+        page = MusicSurfaceWindow(self.island)
+        self.island.music_fullscreen_overlay = page
+        try:
+            with patch.object(self.island, "_sync_minimum_surface") as sync:
+                page.show()
+                self.app.processEvents()
+                sync.reset_mock()
+                page.showMinimized()
+                self.app.processEvents()
+                self.assertTrue(page.isMinimized())
+                sync.assert_called()
+                self.assertFalse(self.island._navigation_surface_blocks_island())
+                sync.reset_mock()
+                page.showNormal()
+                self.app.processEvents()
+                self.assertFalse(page.isMinimized())
+                sync.assert_called()
+                self.assertTrue(self.island._navigation_surface_blocks_island())
+                self.assertTrue(self.island._music_surface_active)
+        finally:
+            page.shutdown()
+            page.close()
+            page.deleteLater()
+            self.island.music_fullscreen_overlay = None
 
     def test_own_song_page_never_starts_external_fullscreen_scene_transition(self):
         self.island.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: True, winId=lambda: 222)

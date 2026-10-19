@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.models import TimedLyricUnit
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_lyric_motion import LyricEmphasisPlan
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
 
@@ -36,8 +37,14 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Keep this suite on the ordinary reading path it measures; sparse
+        # highlight dispatch is covered independently and is now fixed at .8s.
+        for name, value in (("lyric_emphasis_plan", LyricEmphasisPlan()),
+                            ("explicit_slow_unit_groups", ())):
+            classifier = patch("local.music_surface_window." + name, return_value=value)
+            classifier.start()
+            self.addCleanup(classifier.stop)
         self.owner = _LayerOwner()
-        self.owner.music_sparse_highlight_seconds_per_unit = 2.0
         self.owner.music_surface_reading_lift_level = 0
         self.owner.media_position_source = "local-seek"
         self.owner.media_position_sampled_at = 100.0
@@ -169,6 +176,9 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
 
     def test_obo_prefocused_aside_enters_before_its_reading_clock(self):
         self._rows("Alpha beta", "Next sentence starts here (aside)")
+        # A short, non-interlude gap keeps the established early-focus path.
+        # A proven twelve-second gap now belongs to the interlude dots instead.
+        self.owner.timed_lyrics[1] = (10.0, self.owner.timed_lyrics[1][1])
         self.owner.timed_lyric_units[0] = (
             SimpleNamespace(start_seconds=0.0, end_seconds=4.0, text="Alpha "),
             SimpleNamespace(start_seconds=4.0, end_seconds=8.0, text="beta"),
@@ -182,6 +192,20 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self.assertLess(entering.opacity, settled.opacity)
         self.assertEqual(entering.progress, 0.0)
         self.assertEqual(settled.progress, 0.0)
+
+    def test_interlude_does_not_prefocus_the_next_parenthetical_voice(self):
+        self._rows("Alpha beta", "Next sentence starts here (aside)")
+        self.owner.timed_lyric_units[0] = (
+            TimedLyricUnit(0.0, 4.0, "Alpha "),
+            TimedLyricUnit(4.0, 8.0, "beta"),
+        )
+        self.owner.timed_lyric_timing_kinds[0] = "unit"
+        with patch.object(self.window, "_paint_intro_countdown",
+                          wraps=self.window._paint_intro_countdown) as dots:
+            painted = self._render(100.08, 9.08)
+        self.assertIn((8.0, "· · ·"), self.window._display_lyrics()[1])
+        self.assertFalse(any(item.text == "aside" for item in painted))
+        self.assertTrue(any(abs(call.args[3] - .09) < .001 for call in dots.call_args_list))
 
     def test_future_bracket_has_no_empty_lane_and_translation_moves_elastically_on_focus(self):
         main = "下一句在夜色里轻轻回响"

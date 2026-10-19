@@ -71,6 +71,27 @@ class PersonalDjOverlayTests(unittest.TestCase):
         self.assertAlmostEqual(self.audio.volume(), .65 * .2)
         self.assertAlmostEqual(self.voice_audio.volume(), .9)
 
+    def test_first_entry_prioritized_intro_waits_for_its_voice_and_uses_existing_duck_timeline(self):
+        self.service.personal_dj = lambda source: (segments(9)[1],) + segments(4) + segments(5)
+        self.assertTrue(self.owned.play_personal_fm())
+        self.finish("catalog")
+        self.finish("stream")
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-4")
+        self.assertNotEqual(self.music.state, QMediaPlayer.PlaybackState.PlayingState)
+        self.assertNotEqual(self.voice.state, QMediaPlayer.PlaybackState.PlayingState)
+        self.finish("dj_stream")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertAlmostEqual(self.audio.volume(), .65 * .2)
+        self.assertEqual(self.owned.personal_dj_music_gain(), .2)
+        self.music.positionChanged.emit(12500)
+        self.voice.position = 12500
+        self.voice.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.owned.track.position_seconds, 12.5)
+        self.music.positionChanged.emit(13500)
+        self.owned._restore_dj_music_gain()
+        self.assertAlmostEqual(self.audio.volume(), .65)
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-4")
+
     def test_pause_before_neither_source_ready_prevents_automatic_start(self):
         self.owned._replace_queue(segments(1), fm_source="netease", fm_kind="dj")
         self.owned.send_playback_command("toggle_play_pause")

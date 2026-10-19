@@ -593,17 +593,18 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         self.assertEqual(third.track.album_art_source, "cover-art-archive-original")
         self.assertEqual(third.track.album_art_bytes, original)
 
-    def test_player_original_does_not_require_requested_2560_to_win_search(self):
-        player_art, fallback_art = self.png(1200, 0xFF203060), self.png(1600, 0xFF806020)
-        provider = self.provider(b"")
-        provider._player_window_track_metadata = lambda *_args: SimpleNamespace(title="Song", artist="Artist", album_title="Album", album_art_bytes=player_art)
-        provider._queue_album_art_bytes = lambda _track: player_art
-        provider._current_online_album_art_bytes = lambda _track: fallback_art
+    def test_large_smtc_image_does_not_require_2560_to_avoid_search(self):
+        player_art = self.png(1200, 0xFF203060)
+        provider = self.provider(player_art)
+        provider._player_window_track_metadata = Mock(side_effect=AssertionError("player window read"))
         data = asyncio.run(provider._read_visual_data())
         self.assertEqual(data.track.album_art_bytes, player_art)
-        self.assertEqual(data.track.album_art_source, "original")
-        self.assertEqual(data.track.album_art_lookup_state, "ready")
+        self.assertEqual(data.track.album_art_source, "thumbnail")
+        # SMTC supplies a usable preview, without original-URL provenance.
+        # A terminal upgrade state must retain these bytes for display.
+        self.assertEqual(data.track.album_art_lookup_state, "failed")
         provider._schedule_current_netease_art_lookup.assert_not_called()
+        provider._player_window_track_metadata.assert_not_called()
 
     def test_new_subtarget_player_original_keeps_larger_retained_fallback(self):
         player_art, fallback_art = self.png(1200, 0xFF203060), self.png(1600, 0xFF806020)
@@ -611,45 +612,35 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         provider._current_online_album_art_bytes = lambda _track: fallback_art
         first = asyncio.run(provider._read_visual_data())
         provider._last_data = first
-        provider._player_window_track_metadata = lambda *_args: SimpleNamespace(title="Song", artist="Artist", album_title="", album_art_bytes=player_art)
-        provider._queue_album_art_bytes = lambda _track: player_art
+        provider._read_thumbnail = lambda *_args: asyncio.sleep(0, result=player_art)
         second = asyncio.run(provider._read_visual_data())
         self.assertEqual(second.track.track_id, first.track.track_id)
         self.assertEqual(second.track.album_art_bytes, fallback_art)
 
-    def test_target_size_player_original_wins_larger_fallback(self):
-        player_art, fallback_art = self.png(2560, 0xFF203060), self.png(3200, 0xFF806020)
-        provider = self.provider(b"")
-        provider._player_window_track_metadata = lambda *_args: SimpleNamespace(title="Song", artist="Artist", album_title="Album", album_art_bytes=player_art)
-        provider._queue_album_art_bytes = lambda _track: player_art
+    def test_online_original_wins_smtc_preview(self):
+        player_art, fallback_art = self.png(128, 0xFF203060), self.png(2560, 0xFF806020)
+        provider = self.provider(player_art)
         provider._current_online_album_art_bytes = lambda _track: fallback_art
         data = asyncio.run(provider._read_visual_data())
-        self.assertEqual(data.track.album_art_bytes, player_art)
+        self.assertEqual(data.track.album_art_bytes, fallback_art)
         self.assertEqual(data.track.album_art_source, "original")
         provider._schedule_current_netease_art_lookup.assert_not_called()
 
-    def test_tiny_player_bytes_remain_thumbnail_until_original_arrives(self):
+    def test_tiny_smtc_bytes_remain_thumbnail_until_original_arrives(self):
         tiny = self.png(100, 0xFF203060)
-        provider = self.provider(b"")
-        provider._player_window_track_metadata = lambda *_args: SimpleNamespace(
-            title="Song", artist="Artist", album_title="Album", album_art_bytes=tiny,
-        )
-        provider._queue_album_art_bytes = lambda _track: tiny
+        provider = self.provider(tiny)
         first = asyncio.run(provider._read_visual_data())
         self.assertEqual(first.track.album_art_source, "thumbnail")
         self.assertNotEqual(first.track.album_art_lookup_state, "ready")
         provider._schedule_current_netease_art_lookup.assert_called_once()
 
-    def test_1417_source_original_is_ready_without_new_search(self):
+    def test_1417_smtc_image_is_usable_without_new_search(self):
         original = self.png(1417, 0xFF203060)
-        provider = self.provider(b"")
-        provider._player_window_track_metadata = lambda *_args: SimpleNamespace(
-            title="Song", artist="Artist", album_title="Album", album_art_bytes=original,
-        )
-        provider._queue_album_art_bytes = lambda _track: original
+        provider = self.provider(original)
         data = asyncio.run(provider._read_visual_data())
-        self.assertEqual(data.track.album_art_source, "original")
-        self.assertEqual(data.track.album_art_lookup_state, "ready")
+        self.assertEqual(data.track.album_art_source, "thumbnail")
+        self.assertEqual(data.track.album_art_bytes, original)
+        self.assertEqual(data.track.album_art_lookup_state, "failed")
         provider._schedule_current_netease_art_lookup.assert_not_called()
 
 

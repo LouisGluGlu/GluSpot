@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -316,6 +317,7 @@ class PluginManagerWindow(QDialog):
         timer_row.addWidget(self.minutes_input, 1)
         start = QPushButton("开始")
         start.setObjectName("Primary")
+        start.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         start.clicked.connect(lambda: self._start_timer(int(self.minutes_input.value())))
         timer_row.addWidget(start)
         settings.addLayout(timer_row)

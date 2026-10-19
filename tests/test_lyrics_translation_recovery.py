@@ -256,7 +256,7 @@ class LyricsTranslationRecoveryTests(unittest.TestCase):
         provider, _session, _reader, _fake_store = fixture._provider()
         provider.lyrics_store = self.store
         provider._dual_line_lyrics_enabled = self.store._dual_line_lyrics_enabled
-        self.store._persist_match("Song", "Artist", "", self._match(self.original))
+        self.store._persist_match("Song", "Artist", "", self._match(self.original), duration_seconds=180.0)
         self.settings["v2_enable_dual_line_lyrics"] = False
         first = fixture._read(provider, 100.0)
         self.assertEqual(first.track.timed_lyrics[0].text, "Shine on")
@@ -294,7 +294,7 @@ class LyricsTranslationRecoveryTests(unittest.TestCase):
         provider.lyrics_store = self.store
         provider._dual_line_lyrics_enabled = self.store._dual_line_lyrics_enabled
         self.settings["v2_enable_dual_line_lyrics"] = False
-        self.store._persist_match("Song", "Artist", "", self._match(TimedLyricLine(1.0, "Shine on")))
+        self.store._persist_match("Song", "Artist", "", self._match(TimedLyricLine(1.0, "Shine on")), duration_seconds=180.0)
         with patch("api.lyrics.threading.Thread") as thread:
             first = fixture._read(provider, 100.0)
             self.assertEqual(thread.call_count, 1)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from local.runtime_platform import owned_playback_only, system_media_unavailable_reason
+
 import json
 import math
 import time
@@ -50,19 +52,19 @@ from local.settings_store import (
     DEFAULT_MUSIC_AMBIENCE_VALUES,
     DEFAULT_SETTINGS,
     DEFAULT_MUSIC_APP_PROFILES,
-    DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
     MUSIC_READING_GRADIENT_DEFAULT_STEPS,
     MUSIC_READING_LIFT_DEFAULT_LEVEL,
     MUSIC_READING_STRATEGY_DEFAULT,
-    MYDOCKFINDER_LISTEN_PROCESS_CHOICES,
     PLACEMENT_MODE_LABELS,
+    PLACEMENT_FAMILY_LABELS,
     normalize_music_reading_gradient_steps,
     normalize_music_reading_lift_level,
     normalize_music_reading_strategy,
+    normalize_music_glass_level,
     normalize_music_ambience_style,
-    normalize_mydockfinder_listener_process_names,
     normalize_finder_bar_style,
     placement_mode_label,
+    placement_mode_family,
 )
 from local.startup import StartupManager, build_startup_command, normalize_startup_mode
 from local.ui_theme import (
@@ -130,6 +132,7 @@ class StatusLamp(QWidget):
     def __init__(self, active: bool, text: str = "", parent=None):
         super().__init__(parent)
         self._active = bool(active)
+        self._monitor_enabled = True
         self._text = str(text or "")
         self.setObjectName("StatusLamp")
         self.setFixedSize(8, 8)
@@ -141,6 +144,10 @@ class StatusLamp(QWidget):
         self.setToolTip(self._text)
         self.update()
 
+    def set_monitor_enabled(self, enabled: bool):
+        self._monitor_enabled = bool(enabled)
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -149,7 +156,7 @@ class StatusLamp(QWidget):
 
     def _paint_lamp(self, painter: QPainter):
         rect = QRectF(self.rect()).adjusted(0.8, 0.8, -0.8, -0.8)
-        base = QColor("#1fc95b" if self._active else "#ff453a")
+        base = QColor("#8e8e93" if not self._monitor_enabled else "#1fc95b" if self._active else "#ff453a")
         shadow = QColor(base)
         shadow.setAlpha(80 if self._active else 64)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -170,6 +177,75 @@ class StatusLamp(QWidget):
         gleam = QRectF(rect.left() + rect.width() * 0.2, rect.top() + rect.height() * 0.15, rect.width() * 0.34, rect.height() * 0.26)
         painter.setBrush(QColor(255, 255, 255, 190))
         painter.drawEllipse(gleam)
+
+
+class FinderBarPreview(QWidget):
+    def __init__(self, island, parent=None):
+        super().__init__(parent)
+        self.island = island
+        self.style = "transparent"
+        self.mode = "tasker"
+        self.setMinimumHeight(90)
+        self.setAccessibleName("沉浸栏样式预览")
+
+    def set_style(self, style):
+        self.style = normalize_finder_bar_style(style)
+        self.update()
+
+    def set_mode(self, mode):
+        self.mode = "finder" if mode == "finder" else "tasker"
+        self.update()
+
+    def paintEvent(self, event):
+        from local.finder_bar_style import finder_fade_positions, paint_finder_background
+        with QPainter(self) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            frame = QRectF(self.rect()).adjusted(0.5, 4, -0.5, -4)
+            dark = app_dark_mode()
+            bar = QColor("#373d45" if dark else "#e1e6eb")
+            painter.setPen(QPen(QColor(255, 255, 255, 28) if dark else QColor(0, 0, 0, 24), 1))
+            painter.setBrush(QColor("#252b34" if dark else "#edf1f5"))
+            painter.drawRoundedRect(frame, 10, 10)
+            painter.setPen(Qt.PenStyle.NoPen)
+            pigment = QColor(getattr(self.island, "album_color", "#578ed1"))
+            if not pigment.isValid():
+                pigment = QColor("#578ed1")
+            width = min(316, frame.width()*.80)
+            if self.mode == "finder":
+                lane_spec = ("Finder Bar · 顶栏", frame.top()+29, 28, 0, frame.center().x()-width/2)
+            else:
+                lane_spec = ("Tasker Bar · 任务栏", frame.top()+29, 38, 5, frame.left()+8)
+            for name, top, height, inset, left_edge in (lane_spec,):
+                painter.setPen(QColor("#b9c2ce" if dark else "#687583"))
+                painter.setFont(QFont(self.font().family(), 8))
+                painter.drawText(QRectF(frame.left()+12, top-20, frame.width()-24, 18),
+                                 Qt.AlignmentFlag.AlignVCenter, name)
+                lane = QRectF(frame.left()+1, top, frame.width()-2, height)
+                painter.fillRect(lane, bar)
+                row = QRectF(left_edge, top+inset, width, height-2*inset)
+                paint_finder_background(painter, row, self.style, pigment)
+                cover = QRectF(row.left()+8, row.top()+3, 22, 22)
+                gradient = QLinearGradient(cover.topLeft(), cover.bottomRight())
+                gradient.setColorAt(0, pigment.lighter(135))
+                gradient.setColorAt(1, QColor(getattr(self.island, "secondary_color", "#b96d9a")))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(gradient)
+                painter.drawRoundedRect(cover, 4, 4)
+                backdrop = QColor(bar)
+                if self.style != "transparent":
+                    backdrop = QColor(round(bar.red()*.13+pigment.red()*.87),
+                                      round(bar.green()*.13+pigment.green()*.87),
+                                      round(bar.blue()*.13+pigment.blue()*.87))
+                painter.setPen(solid_album_ink_color(backdrop))
+                painter.setFont(QFont(self.font().family(), 10, QFont.Weight.DemiBold))
+                left = cover.right()+8
+                if self.style == "fade":
+                    left = max(left, row.left()+row.width()*finder_fade_positions(row)[1]+4)
+                text = painter.fontMetrics().elidedText("♪  音乐与歌词，随你而动", Qt.TextElideMode.ElideRight,
+                                                       max(0, int(row.right()-left-10)))
+                painter.drawText(QRectF(left, row.top(), row.right()-left-10, row.height()),
+                                 Qt.AlignmentFlag.AlignVCenter, text)
 
 
 class MusicAmbiencePreview(QWidget):
@@ -751,9 +827,9 @@ class SettingsWindow(QDialog):
     LOCATION_MODES = tuple((label, mode) for mode, label in PLACEMENT_MODE_LABELS.items())
 
     FINDER_BAR_STYLES = (
-        ("无背景 · 封面与歌词", "transparent"),
-        ("圆角底色", "capsule"),
-        ("左右渐隐色条", "fade"),
+        ("专辑与无背景", "transparent"),
+        ("专辑与渐变色背景", "fade"),
+        ("专辑与背景", "capsule"),
     )
 
     TOP_NOTCH_HEIGHT_MODES = (
@@ -891,7 +967,9 @@ class SettingsWindow(QDialog):
 
     def _apply_rounded_window_mask(self):
         path = QPainterPath()
-        path.addRoundedRect(QRectF(self.rect()), 14.0, 14.0)
+        # The stylesheet paints the actual antialiased contour. This region
+        # is only an input fringe and must not cut its partial-alpha pixels.
+        path.addRoundedRect(QRectF(self.rect()).adjusted(-2, -2, 2, 2), 14.0, 14.0)
         self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def _settings_dark_mode(self) -> bool:
@@ -1522,6 +1600,7 @@ class SettingsWindow(QDialog):
         line_edit.setSizePolicy(QSizePolicy.Policy.Expanding, line_edit.sizePolicy().verticalPolicy())
         browse_button = GlassPushButton("选择")
         browse_button.setObjectName("PathBrowseButton")
+        browse_button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
         browse_button.clicked.connect(browse_callback)
         container_layout.addWidget(line_edit, 1)
         container_layout.addWidget(browse_button, 0)
@@ -1599,13 +1678,18 @@ class SettingsWindow(QDialog):
         grid.setHorizontalSpacing(10 if getattr(self, "_compact_card_active", False) else 12)
         grid.setVerticalSpacing(2)
         grid.setColumnMinimumWidth(0, 12)
-        grid.setColumnMinimumWidth(1, self._row_label_width())
+        # The lamp and its gaps belong inside the regular form's label slot,
+        # so status values and controls below them share the same left edge.
+        row_spacing = 12 if getattr(self, "_compact_card_active", False) else 14
+        label_width = self._row_label_width() + row_spacing - 12 - 2 * grid.horizontalSpacing()
+        grid.setColumnMinimumWidth(1, label_width)
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 0)
         grid.setColumnStretch(2, 1)
         label = QLabel(title)
         label.setObjectName("RowTitle")
-        label.setFixedWidth(self._row_label_width())
+        label.setFixedWidth(label_width)
+        label.setWordWrap(True)
         control.setSizePolicy(QSizePolicy.Policy.Expanding, control.sizePolicy().verticalPolicy())
         grid.addWidget(indicator, 0, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         grid.addWidget(label, 0, 1, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1961,8 +2045,8 @@ class SettingsWindow(QDialog):
         available = getattr(self.island_widget, "available_location_modes", None)
         if callable(available):
             modes = available()
-        elif bool(getattr(self.island_widget, "mydockfinder_running", False)):
-            modes = ["finder", "free"] if self._finder_bar_presence()[0] else ["free"]
+        elif self._mydockfinder_present():
+            modes = ["finder", "free"] if self._finder_bar_presence()[0] else ["top", "free"]
         else:
             modes = ["top", "free", "tasker"]
         return [(placement_mode_label(mode), mode) for mode in modes if mode in PLACEMENT_MODE_LABELS]
@@ -1971,6 +2055,20 @@ class SettingsWindow(QDialog):
         current = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "top")) or "top")
         return placement_mode_label(current)
 
+    def _placement_family_items(self) -> list[tuple[str, str]]:
+        available = {placement_mode_family(mode) for _label, mode in self._location_mode_items()}
+        return [(label, family) for family, label in PLACEMENT_FAMILY_LABELS.items() if family in available]
+
+    def _immersive_placement_items(self) -> list[tuple[str, str]]:
+        labels = {"finder": "Finder Bar · MyFinder 顶栏", "tasker": "Tasker Bar · Windows 任务栏"}
+        return [(labels[mode], mode) for _label, mode in self._location_mode_items() if mode in labels]
+
+    def _mydockfinder_present(self) -> bool:
+        if not bool(self._setting_value("v2_mydockfinder_monitor_enabled", True)):
+            return False
+        available = getattr(self.island_widget, "_mydockfinder_available", None)
+        return bool(available()) if callable(available) else bool(getattr(self.island_widget, "mydockfinder_running", False))
+
     def _finder_bar_presence(self) -> tuple[bool, bool]:
         diagnostics = getattr(self.island_widget, "mydockfinder_diagnostics", {}) or {}
         if not isinstance(diagnostics, dict):
@@ -1978,7 +2076,7 @@ class SettingsWindow(QDialog):
         bars = diagnostics.get("finder_bars") or []
         if not isinstance(bars, (list, tuple)):
             bars = []
-        enabled = bool(getattr(self.island_widget, "mydockfinder_running", False)) and bool(
+        enabled = self._mydockfinder_present() and bool(
             getattr(self.island_widget, "finder_bar_enabled", diagnostics.get("finder_enabled", False))
         )
         visible = enabled and bool(getattr(self.island_widget, "finder_bar_visible", any(
@@ -1989,11 +2087,13 @@ class SettingsWindow(QDialog):
         return enabled, visible
 
     def _finder_bar_status_text(self) -> str:
-        if not bool(getattr(self.island_widget, "mydockfinder_running", False)):
-            return "MyDockFinder 未运行。可使用 Top Island、Free 或 Tasker Bar。"
+        if not bool(self._setting_value("v2_mydockfinder_monitor_enabled", True)):
+            return "监听已关闭，不检测 MyFinder 顶栏。"
+        if not self._mydockfinder_present():
+            return "MyDockFinder 未运行。可使用 Free、Top 或沉浸栏（Tasker Bar）。"
         enabled, visible = self._finder_bar_presence()
         if not enabled:
-            return "Dock 已运行，尚未检测到已开启的 MyFinder 顶栏。当前仅可使用 Free。"
+            return "Dock 主程序已运行，尚未检测到已开启的 MyFinder 顶栏。当前可使用 Top 或 Free。"
         if visible:
             return "MyFinder 顶栏已开启并显示。Finder Bar 随顶栏显示，播放区域可左右拖动。"
         return "MyFinder 顶栏已开启，当前自动隐藏。Finder Bar 随顶栏隐藏与显示。"
@@ -2003,79 +2103,42 @@ class SettingsWindow(QDialog):
         if not isinstance(combo, QComboBox):
             return
         current = str(getattr(self.island_widget, "location_mode", "top") or "top")
-        if current == "stick":
-            current = "free"
-        items = self._location_mode_items()
+        family = placement_mode_family(current)
+        items = self._placement_family_items()
         combo.blockSignals(True)
         if items != [(combo.itemText(index), combo.itemData(index)) for index in range(combo.count())]:
             combo.clear()
             for label, mode in items:
                 combo.addItem(label, mode)
-        self._set_combo_data(combo, current if current in {mode for _label, mode in items} else "free")
+        self._set_combo_data(combo, family if family in {mode for _label, mode in items} else "free")
         combo.blockSignals(False)
         self._style_combo_popup(combo)
-
-    def _mydockfinder_listener_process_names_setting(self) -> tuple[str, ...]:
-        raw = getattr(self.island_widget, "mydockfinder_listener_process_names", None)
-        if raw is None:
-            raw = self._setting_value(
-                "v2_mydockfinder_listener_process_names",
-                list(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES),
-            )
-        return normalize_mydockfinder_listener_process_names(raw)
+        placement = getattr(self, "immersive_placement", None)
+        if isinstance(placement, QComboBox):
+            placements = self._immersive_placement_items()
+            placement.blockSignals(True)
+            if placements != [(placement.itemText(i), placement.itemData(i)) for i in range(placement.count())]:
+                placement.clear()
+                for label, mode in placements:
+                    placement.addItem(label, mode)
+            self._set_combo_data(placement, current)
+            placement.setEnabled(len(placements) > 1)
+            placement.blockSignals(False)
+            self._style_combo_popup(placement)
+            self.immersive_placement_row.setVisible(family == "immersive" and bool(placements))
 
     def _mydockfinder_status_text(self) -> str:
-        running = bool(getattr(self.island_widget, "mydockfinder_running", False))
+        if not bool(self._setting_value("v2_mydockfinder_monitor_enabled", True)):
+            return "监听已关闭，不扫描进程与顶栏。"
+        running = self._mydockfinder_present()
         diagnostics = getattr(self.island_widget, "mydockfinder_diagnostics", {}) or {}
         if not isinstance(diagnostics, dict):
             diagnostics = {}
-        configured = str(diagnostics.get("configured_path") or getattr(self.island_widget, "mydockfinder_path", "") or "").strip()
         matched = str(diagnostics.get("matched_name") or "").strip()
-        reason = str(diagnostics.get("reason") or "").strip()
         if running:
             detail = matched or "MyDockFinder"
             return f"已检测到 {detail}。"
-        candidates = diagnostics.get("candidate_names") or []
-        if isinstance(candidates, (list, tuple, set)):
-            candidate_text = "、".join(str(item) for item in list(candidates)[:6])
-        else:
-            candidate_text = str(candidates or "")
-        if not candidate_text:
-            candidate_text = "、".join(self._mydockfinder_listener_process_names_setting())
-        if not configured:
-            return f"未填写应用位置。监听会扫描已勾选进程：{candidate_text or '无'}。"
-        if candidate_text:
-            return f"未检测到。已扫描：{candidate_text}。{reason or '请确认 MyDockFinder 已启动。'}"
-        return f"未检测到。{reason or '请确认 MyDockFinder 已启动。'}"
-
-    def _mydockfinder_process_checklist(self) -> QWidget:
-        selected = set(self._mydockfinder_listener_process_names_setting())
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        group: dict[str, IosSwitch] = {}
-        for process_name, label in MYDOCKFINDER_LISTEN_PROCESS_CHOICES:
-            checkbox = self._check(
-                label,
-                process_name in selected,
-                lambda enabled, name=process_name: self._set_mydockfinder_listener_process(name, enabled),
-            )
-            group[process_name] = checkbox
-            layout.addWidget(checkbox)
-        if not hasattr(self, "mydockfinder_process_checkbox_groups"):
-            self.mydockfinder_process_checkbox_groups = []
-        self.mydockfinder_process_checkbox_groups.append(group)
-        self.mydockfinder_process_checkboxes = group
-        return container
-
-    def _sync_mydockfinder_process_checkboxes(self):
-        selected = set(self._mydockfinder_listener_process_names_setting())
-        for group in getattr(self, "mydockfinder_process_checkbox_groups", []):
-            for process_name, checkbox in group.items():
-                checkbox.blockSignals(True)
-                checkbox.setChecked(process_name in selected)
-                checkbox.blockSignals(False)
+        return "仅检测 dock.exe / Dock_64.exe 主程序。尚未检测到，请确认 MyDockFinder 已启动。"
 
     def _basic_settings_page(self) -> QWidget:
         page = self._page("基础设置")
@@ -2113,6 +2176,12 @@ class SettingsWindow(QDialog):
         )
         c.addWidget(self.music_background_follow_theme_checkbox)
         self.music_background_follow_theme_checkboxes.append(self.music_background_follow_theme_checkbox)
+        self.music_glass_level = self._slider_row(
+            c, "播放控件玻璃浓度", 0, 100,
+            normalize_music_glass_level(self._setting_value("v2_music_glass_level", 50)),
+            self._set_music_glass_level, "%",
+        )
+        self.music_glass_level.setToolTip("窗口与全屏共用。越高越不透明，映射的背景模糊越强；越低越透明，背景模糊越弱。文字和图标保持清晰。")
 
         c = self._card(layout).layout()
         c.addWidget(self._section_label("动画", 2, 6))
@@ -2153,6 +2222,12 @@ class SettingsWindow(QDialog):
         )
         c.addWidget(self.owned_playback_switch)
         c.addWidget(self.system_capture_switch)
+        if owned_playback_only():
+            self._set_switch_checked(self.owned_playback_switch, True)
+            self._set_switch_checked(self.system_capture_switch, False)
+            self.owned_playback_switch.setEnabled(False)
+            self.system_capture_switch.setEnabled(False)
+            self.system_capture_switch.setToolTip(system_media_unavailable_reason())
         self.online_login_button = GlassPushButton("登录音乐来源")
         self.online_login_button.clicked.connect(self._open_online_music_login)
         c.addWidget(self.online_login_button)
@@ -2160,23 +2235,29 @@ class SettingsWindow(QDialog):
         self.personal_dj_voice_button.clicked.connect(self._open_personal_dj_voices)
         c.addWidget(self.personal_dj_voice_button)
 
-        c = self._card(layout).layout()
-        c.addWidget(self._section_label("音乐软件监听", 2, 8))
-        self.music_sync_status = QLabel(self._music_sync_summary_text())
-        self.music_sync_status.setObjectName("Muted")
-        self.music_sync_status.setWordWrap(True)
-        c.addWidget(self.music_sync_status)
-        player_hint = QLabel("系统抓取时，填写播放器路径后可开启对应同步插件。未填写路径时不会加载监听器；网易云和 QQ 已接入专用进度读取，其它播放器先保留入口。")
+        player_hint = QLabel("外部播放通过 Windows 系统媒体会话（SMTC）读取，无需填写播放器路径。若播放时没有会话，请在播放器中开启系统媒体控制；无法据此判断播放器内部开关。")
+        if owned_playback_only():
+            player_hint.setText(system_media_unavailable_reason())
         player_hint.setWordWrap(True)
+        player_hint.setMaximumWidth(600)
         player_hint.setStyleSheet(self._hint_style(2, 12))
         c.addWidget(player_hint)
         self.music_app_profile_controls = {}
-        for service, label, placeholder in self.MUSIC_APP_PROFILE_PANELS:
-            self._build_music_app_profile_panel(c, service, label, placeholder)
-        self._update_music_app_profile_statuses()
+        self.system_lyric_offset = self._slider_row(
+            c, "系统歌词偏移", -12000, 12000,
+            round(float(self._setting_value("v2_system_lyric_offset_seconds", 0.0)) * 1000),
+            self._set_system_lyric_offset, " ms",
+        )
+        if owned_playback_only():
+            self.system_lyric_offset.setEnabled(False)
 
         c = self._card(layout).layout()
         c.addWidget(self._section_label("MyDockFinder 监听", 2, 8))
+        self.mydockfinder_monitor_switch = self._check(
+            "", bool(self._setting_value("v2_mydockfinder_monitor_enabled", True)),
+            self._set_mydockfinder_monitor_enabled,
+        )
+        self._row(c, "监听 MyDockFinder", self.mydockfinder_monitor_switch)
         running = bool(getattr(self.island_widget, "mydockfinder_running", False))
         self.mydockfinder_status_indicator = self._status_indicator(running, "已检测" if running else "未检测")
         self.mydockfinder_status_label = QLabel(self._mydockfinder_status_text())
@@ -2189,31 +2270,46 @@ class SettingsWindow(QDialog):
         self.myfinder_status_label.setObjectName("Muted")
         self.myfinder_status_label.setWordWrap(True)
         self._indicator_row(c, "MyFinder 顶栏", self.myfinder_status_indicator, self.myfinder_status_label)
-        self.mydockfinder_path_input = QLineEdit(str(getattr(self.island_widget, "mydockfinder_path", self._setting_value("v2_mydockfinder_path", "")) or ""))
-        self.mydockfinder_path_input.setPlaceholderText(r"C:\Program Files\MyDockFinder\MyDockFinder.exe")
-        self.mydockfinder_path_input.editingFinished.connect(self._set_mydockfinder_path)
-        self.mydockfinder_path_row = self._path_picker_row(
-            c, "MyDockFinder 应用位置", self.mydockfinder_path_input,
-            self._browse_mydockfinder_path, stacked=True,
-        )
-        _panel, listener_layout, self.mydockfinder_listener_detail_toggle = self._detail_panel(c, "MyDockFinder 监听进程")
-        self.mydockfinder_listener_detail_body = self._detail_panels[-1][1]
-        listener_layout.addWidget(self._mydockfinder_process_checklist())
         self.placement_mode = self._combo(
-            self._location_mode_items(), str(getattr(self.island_widget, "location_mode", "top") or "top"),
+            self._placement_family_items(), placement_mode_family(getattr(self.island_widget, "location_mode", "top")),
             self._set_placement_mode,
         )
-        self._row(c, "显示位置", self.placement_mode)
+        self._row(c, "音乐岛模式", self.placement_mode)
+        self.placement_mode.setToolTip("Free：悬浮圆角矩形；Top：贴屏幕顶边；沉浸栏：融入 Finder Bar 或 Tasker Bar。")
+        self.immersive_placement = self._combo(
+            self._immersive_placement_items(), str(getattr(self.island_widget, "location_mode", "top")),
+            self._set_immersive_placement,
+        )
+        self.immersive_placement_row = self._row(c, "沉浸栏位置", self.immersive_placement)
+        self.immersive_placement.setToolTip("按已检测到的 MyFinder 顶栏或 Windows 任务栏选择位置。")
         self.finder_bar_style = self._combo(
             list(self.FINDER_BAR_STYLES), normalize_finder_bar_style(getattr(
                 self.island_widget, "finder_bar_style", self._setting_value("v2_finder_bar_style", "transparent"),
             )), self._set_finder_bar_style,
         )
-        self._row(c, "Finder Bar 样式", self.finder_bar_style)
-        self.finder_bar_hint = QLabel("Finder Bar 在 MyFinder 顶栏内展示封面与歌词，可直接左右拖动；样式与拖动位置单独保存。Tasker Bar 占位 Windows 任务栏，Top Island 固定顶部，Free 在屏幕中自由浮动。")
+        self._row(c, "沉浸栏样式", self.finder_bar_style)
+        self.finder_bar_preview = FinderBarPreview(self.island_widget, self)
+        self.finder_bar_preview.set_style(self.finder_bar_style.currentData())
+        c.addWidget(self.finder_bar_preview)
+        self.finder_bar_hint = QLabel(
+            "Finder Bar 与 Tasker Bar 共用沉浸栏样式，切换位置时保留同一选择。\n"
+            "Finder Bar 位于 MyFinder 顶栏，可左右拖动；Tasker Bar 位于 Windows 任务栏。"
+        )
         self.finder_bar_hint.setObjectName("Muted")
         self.finder_bar_hint.setWordWrap(True)
+        self.finder_bar_hint.setMaximumWidth(600)
         c.addWidget(self.finder_bar_hint)
+        self.bar_hide_follow_switch = self._check(
+            "", bool(getattr(self.island_widget, "bar_hide_follow_enabled",
+                             self._setting_value("v2_bar_hide_follow_enabled", True))),
+            self._set_bar_hide_follow_enabled,
+        )
+        self._row(c, "隐藏时跟随", self.bar_hide_follow_switch)
+        self.bar_hide_follow_switch.setToolTip(
+            "开启后随所属栏隐藏与显示；关闭后，所属栏隐藏时临时置顶 Top，栏恢复后返回。\n"
+            "Dock 已运行但未开启 Finder 时，全屏下的 Top 会按此开关隐藏或保持显示。"
+        )
+        self._refresh_placement_mode_options()
         self._update_taskbar_controls()
 
         c = self._card(layout).layout()
@@ -2324,26 +2420,8 @@ class SettingsWindow(QDialog):
         gradient_hint.setStyleSheet(self._hint_style(2, 8))
         c.addWidget(gradient_hint)
 
-        self.music_sparse_highlight_seconds_per_unit = self._slider_row(
-            c, "高光触发阈值（每字词）", 8, 20,
-            int(round(10 * normalize_sparse_seconds_per_unit(getattr(
-                self.island_widget,
-                "music_sparse_highlight_seconds_per_unit",
-                self._setting_value("v2_music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT),
-            )))),
-            self._set_music_sparse_highlight_seconds_per_unit,
-        )
-        self.music_sparse_highlight_seconds_per_unit._value_formatter = lambda value: f"{value / 10:.1f} 秒"
-        self._update_slider_value_label(
-            self.music_sparse_highlight_seconds_per_unit,
-            self.music_sparse_highlight_seconds_per_unit.value(),
-        )
-        self.music_intro_cleanup_checkbox = self._check(
-            "片头制作信息改为 · · · 倒计时",
-            bool(getattr(self.island_widget, "music_intro_cleanup_enabled", self._setting_value("v2_music_intro_cleanup_enabled", True))),
-            self._set_music_intro_cleanup_enabled,
-        )
-        c.addWidget(self.music_intro_cleanup_checkbox)
+        self.music_sparse_highlight_label = QLabel("0.8 秒 / 字词")
+        self._row(c, "高光触发阈值", self.music_sparse_highlight_label)
         secondary_card = self._card(layout).layout()
         self.dual_line_secondary_source = self._combo(
             list(self.DUAL_LINE_SECONDARY_SOURCES),
@@ -2585,13 +2663,11 @@ class SettingsWindow(QDialog):
         for control, key, default in (
             (self.owned_playback_switch, "v2_owned_playback_enabled", True),
             (self.system_capture_switch, "v2_system_capture_enabled", False),
+            (self.mydockfinder_monitor_switch, "v2_mydockfinder_monitor_enabled", True),
+            (self.bar_hide_follow_switch, "v2_bar_hide_follow_enabled", True),
             (self.music_background_follow_theme_checkbox, "v2_music_background_follow_theme", False),
         ):
             self._set_switch_checked(control, bool(self._setting_value(key, default)))
-        self._set_switch_checked(
-            self.music_intro_cleanup_checkbox,
-            bool(getattr(self.island_widget, "music_intro_cleanup_enabled", self._setting_value("v2_music_intro_cleanup_enabled", True))),
-        )
         for control, value in (
             (self.theme_mode, str(self._setting_value("v2_theme_mode", "system") or "system")),
             (self.startup_mode, normalize_startup_mode(str(self._setting_value("v2_startup_mode", "none") or "none"))),
@@ -2617,12 +2693,12 @@ class SettingsWindow(QDialog):
         for control, value in (
             (self.theme_dark_start, str(self._setting_value("v2_theme_dark_start", "22:00") or "22:00")),
             (self.theme_dark_end, str(self._setting_value("v2_theme_dark_end", "07:00") or "07:00")),
-            (self.mydockfinder_path_input, str(getattr(self.island_widget, "mydockfinder_path", self._setting_value("v2_mydockfinder_path", "")) or "")),
         ):
             control.blockSignals(True)
             control.setText(value)
             control.blockSignals(False)
         for control, value in (
+            (self.music_glass_level, normalize_music_glass_level(self._setting_value("v2_music_glass_level", 50))),
             (self.music_surface_preload_count, max(1, min(6, int(self._setting_value("v2_music_surface_preload_count", 6))))),
             (self.fps_slider, self._fps_setting_value(getattr(self.island_widget, "animation_fps", 60))),
             (self.lyric_fps_slider, self._fps_setting_value(getattr(self.island_widget, "lyric_animation_fps", self._setting_value("v2_lyric_animation_fps", 120)))),
@@ -2630,18 +2706,15 @@ class SettingsWindow(QDialog):
                 self.island_widget, "music_surface_reading_gradient_steps",
                 self._setting_value("v2_music_surface_reading_gradient_steps", MUSIC_READING_GRADIENT_DEFAULT_STEPS),
             ))),
-            (self.music_sparse_highlight_seconds_per_unit, int(round(10 * normalize_sparse_seconds_per_unit(getattr(
-                self.island_widget, "music_sparse_highlight_seconds_per_unit",
-                self._setting_value("v2_music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT),
-            ))))),
+            (self.system_lyric_offset, round(float(self._setting_value("v2_system_lyric_offset_seconds", 0.0)) * 1000)),
         ):
             self._set_slider_value(control, value)
             self._update_slider_value_label(control, control.value())
         self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
         self.myfinder_status_label.setText(self._finder_bar_status_text())
         self._refresh_placement_mode_options()
-        self._sync_mydockfinder_process_checkboxes()
         self._update_taskbar_controls()
+        self.finder_bar_preview.set_style(self.finder_bar_style.currentData())
         self._update_music_app_profile_controls()
         self._update_theme_schedule_controls()
         self._update_music_ambience_controls()
@@ -2911,6 +2984,9 @@ class SettingsWindow(QDialog):
         if self.settings:
             self.settings.set(key, value)
 
+    def _set_music_glass_level(self, value: int):
+        self._save("v2_music_glass_level", normalize_music_glass_level(value))
+
     def _music_background_follow_previous_style(self) -> str:
         value = str(self._setting_value("v2_music_background_follow_previous_style", "") or "").strip().lower()
         if value and value in self._music_background_options_allowed() and music_ambience_theme_category(value) == "dark":
@@ -3081,10 +3157,14 @@ class SettingsWindow(QDialog):
             self.island_widget.set_settings_window_active(False)
         if self.settings and hasattr(self.settings, "save_now"):
             self.settings.save_now()
+        restore = getattr(self.island_widget, "ensure_minimum_surface", None)
+        if callable(restore):
+            restore()
         super().closeEvent(event)
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._apply_rounded_window_mask()
 
     def hideEvent(self, event):
         if hasattr(self.island_widget, "set_settings_window_active"):
@@ -3230,7 +3310,17 @@ class SettingsWindow(QDialog):
         self._touch()
 
     def _set_placement_mode(self, _index: int = -1):
-        mode = str(self.placement_mode.currentData() or "free")
+        family = str(self.placement_mode.currentData() or "free")
+        candidates = [mode for _label, mode in self._location_mode_items() if placement_mode_family(mode) == family]
+        current = str(getattr(self.island_widget, "location_mode", "free"))
+        mode = current if current in candidates else next(iter(candidates), "")
+        self._apply_placement_mode(mode)
+
+    def _set_immersive_placement(self, _index: int = -1):
+        if self.placement_mode.currentData() == "immersive":
+            self._apply_placement_mode(str(self.immersive_placement.currentData() or ""))
+
+    def _apply_placement_mode(self, mode: str):
         if mode not in {value for _label, value in self._location_mode_items()}:
             self._refresh_placement_mode_options()
             return
@@ -3253,7 +3343,33 @@ class SettingsWindow(QDialog):
         else:
             self.island_widget.finder_bar_style = style
         self._save("v2_finder_bar_style", style)
+        self.finder_bar_preview.set_style(style)
         self._touch()
+
+    def _set_bar_hide_follow_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        setter = getattr(self.island_widget, "set_bar_hide_follow_enabled", None)
+        if callable(setter):
+            setter(enabled, notify=False)
+        else:
+            self.island_widget.bar_hide_follow_enabled = enabled
+        self._save("v2_bar_hide_follow_enabled", enabled)
+        self._touch()
+
+    def _set_system_lyric_offset(self, value: int):
+        seconds = max(-12.0, min(12.0, value / 1000.0))
+        self._save("v2_system_lyric_offset_seconds", seconds)
+        apply_offset = getattr(self.island_widget, "set_active_music_app_lyric_offset", None)
+        if callable(apply_offset):
+            apply_offset("system", seconds)
+        self._touch()
+
+    def _set_mydockfinder_monitor_enabled(self, enabled: bool):
+        self._save("v2_mydockfinder_monitor_enabled", bool(enabled))
+        self._refresh_placement_mode_options()
+        self._update_taskbar_controls()
+        self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
+        self.myfinder_status_label.setText(self._finder_bar_status_text())
 
     def _set_top_notch_height_mode(self, _index: int = -1):
         if not isinstance(getattr(self, "top_notch_height_mode", None), QComboBox):
@@ -3341,10 +3457,10 @@ class SettingsWindow(QDialog):
         self._style_combo_popup(self.location_mode)
 
     def _update_taskbar_controls(self):
+        monitor_enabled = bool(self._setting_value("v2_mydockfinder_monitor_enabled", True))
         location = str(getattr(self.island_widget, "location_mode", self._setting_value("v2_location_mode", "free")) or "free")
-        mydockfinder_running = bool(
-            getattr(self.island_widget, "_mydockfinder_available", lambda: bool(getattr(self.island_widget, "mydockfinder_running", False)))()
-        )
+        mydockfinder_running = self._mydockfinder_present()
+        finder_enabled = self._finder_bar_presence()[0]
         tasker_available = location != "finder" and not mydockfinder_running
         for widget in (
             getattr(self, "taskbar_corner_style", None),
@@ -3355,7 +3471,22 @@ class SettingsWindow(QDialog):
                 widget.setEnabled(tasker_available)
         top_height = getattr(self, "top_notch_height_mode", None)
         if top_height is not None:
-            top_height.setEnabled(not mydockfinder_running)
+            top_height.setEnabled(not mydockfinder_running or not finder_enabled)
+        if hasattr(self, "finder_bar_preview"):
+            immersive_available = not mydockfinder_running or finder_enabled
+            self.finder_bar_style.setEnabled(immersive_available)
+            self.finder_bar_preview.setVisible(immersive_available)
+            if immersive_available:
+                self.finder_bar_preview.set_mode("finder" if mydockfinder_running else "tasker")
+                self.finder_bar_hint.setText(
+                    "Finder Bar 与 Tasker Bar 共用沉浸栏样式，切换位置时保留同一选择。\n"
+                    + ("当前预览：Finder Bar · MyFinder 顶栏。" if mydockfinder_running else "当前预览：Tasker Bar · Windows 任务栏。")
+                )
+                self.finder_bar_style.setToolTip("")
+            else:
+                reason = "Dock 主程序已运行，但 MyFinder 顶栏未开启；沉浸栏样式暂不可用，原选择会保留。"
+                self.finder_bar_hint.setText(reason)
+                self.finder_bar_style.setToolTip(reason)
         for indicator in (
             getattr(self, "taskbar_corner_status", None),
             getattr(self, "taskbar_auto_hide_status", None),
@@ -3364,12 +3495,14 @@ class SettingsWindow(QDialog):
             if indicator is not None:
                 self._set_status_indicator(indicator, tasker_available, "可选" if tasker_available else "不可选")
         if hasattr(self, "mydockfinder_status_indicator"):
+            self.mydockfinder_status_indicator.set_monitor_enabled(monitor_enabled)
             self._set_status_indicator(
                 self.mydockfinder_status_indicator,
                 mydockfinder_running,
                 "已检测" if mydockfinder_running else "未检测",
             )
         if hasattr(self, "myfinder_status_indicator"):
+            self.myfinder_status_indicator.set_monitor_enabled(monitor_enabled)
             enabled, visible = self._finder_bar_presence()
             self._set_status_indicator(
                 self.myfinder_status_indicator, enabled,
@@ -3377,53 +3510,6 @@ class SettingsWindow(QDialog):
             )
         if hasattr(self, "location_mode") and not isinstance(self.location_mode, QComboBox):
             self.location_mode.setText(self._location_mode_label())
-
-    def _browse_mydockfinder_path(self, _checked: bool = False):
-        path, _selected_filter = QFileDialog.getOpenFileName(
-            self,
-            "选择 MyDockFinder 应用",
-            str(self.mydockfinder_path_input.text() or ""),
-            "Executable Files (*.exe);;All Files (*)",
-        )
-        if not path:
-            return
-        self.mydockfinder_path_input.setText(path)
-        self._set_mydockfinder_path()
-
-    def _set_mydockfinder_path(self):
-        value = str(self.mydockfinder_path_input.text() or "").strip().strip('"')
-        self.mydockfinder_path_input.setText(value)
-        if hasattr(self.island_widget, "set_mydockfinder_path"):
-            self.island_widget.set_mydockfinder_path(value, notify=False)
-        else:
-            self.island_widget.mydockfinder_path = value
-        self._save("v2_mydockfinder_path", value)
-        if hasattr(self, "mydockfinder_status_label"):
-            self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
-        self._update_taskbar_controls()
-        self._touch()
-
-    def _set_mydockfinder_listener_process(self, process_name: str, enabled: bool):
-        normalized = normalize_mydockfinder_listener_process_names((process_name,))
-        if not normalized:
-            return
-        process_name = normalized[0]
-        selected = set(self._mydockfinder_listener_process_names_setting())
-        if enabled:
-            selected.add(process_name)
-        else:
-            selected.discard(process_name)
-        ordered = list(normalize_mydockfinder_listener_process_names(selected))
-        if hasattr(self.island_widget, "set_mydockfinder_listener_process_names"):
-            self.island_widget.set_mydockfinder_listener_process_names(ordered, notify=False)
-        else:
-            self.island_widget.mydockfinder_listener_process_names = tuple(ordered)
-        self._save("v2_mydockfinder_listener_process_names", ordered)
-        self._sync_mydockfinder_process_checkboxes()
-        if hasattr(self, "mydockfinder_status_label"):
-            self.mydockfinder_status_label.setText(self._mydockfinder_status_text())
-        self._update_taskbar_controls()
-        self._touch()
 
     def _open_app_location(self, _checked: bool = False):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(__file__).resolve().parents[1])))
@@ -4620,17 +4706,6 @@ class SettingsWindow(QDialog):
         self._save("v2_enable_dual_line_lyrics", enabled)
         self._update_lyric_flow_controls()
         self._request_lyric_display_progress_follow()
-        self._touch()
-
-    def _set_music_intro_cleanup_enabled(self, enabled: bool):
-        enabled = bool(enabled)
-        setter = getattr(self.island_widget, "set_music_intro_cleanup_enabled", None)
-        if callable(setter):
-            setter(enabled, notify=False)
-        else:
-            self.island_widget.music_intro_cleanup_enabled = enabled
-            self.island_widget.update()
-        self._save("v2_music_intro_cleanup_enabled", enabled)
         self._touch()
 
     def _request_lyric_display_progress_follow(self):

@@ -25,7 +25,14 @@ class IslandAudioDeviceSurfaceTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.visual = IslandStackVisual(data_provider=EmptyIslandDataProvider(empty_visual_data()))
+        data = empty_visual_data("Fixture song", "Fixture artist")
+        # This historical painter exercises a retained paused song, not true
+        # no-media state. Publish that authority through the normal provider
+        # boundary; changing display fields later cannot replace an idle marker.
+        data = replace(data, track=replace(data.track, track_id="fixture-song",
+                       position_source="windows-media", position_confidence=1.0,
+                       duration_seconds=180.0, position_seconds=7.0))
+        self.visual = IslandStackVisual(data_provider=EmptyIslandDataProvider(data))
         self.visual.timer.stop()
         # Explicitly opt this independent historical painter fixture into the
         # retained helper. Production islands never construct notice motion.
@@ -196,16 +203,20 @@ class IslandAudioDeviceSurfaceTests(unittest.TestCase):
                 self.assertEqual(ink.lightness() > 128, light_ink)
 
     def test_white_bridge_ink_uses_rendered_background_not_dark_style_name(self):
-        self._notice(replace(PAYLOAD, battery_percent=None))
-        self.visual.music_ambience_style = "pure_black"
-        self.visual.music_surface_transition_mode = "white_bridge"
-        self.visual.music_surface_transition_started_at = self.now - 0.3
-        self.visual.music_surface_transition_duration = 0.62
-        self.visual.music_surface_transition_from = (QColor(245, 247, 250), QColor(228, 233, 241))
-        self.visual.music_surface_transition_to = (QColor(245, 247, 250), QColor(228, 233, 241))
-        self.assertGreater(self.visual._music_control_icon_color().lightness(), 128)
-        self._image()
-        self.assertLess(self.visual._audio_device_ink(QRectF(120, 25, 100, 20)).lightness(), 128)
+        self.assertFalse(self.visual._no_audio_visual_active())
+        # Retired pure_black is now a system-theme alias. Establish a genuine
+        # dark canonical selection independently of the machine's theme.
+        with patch("local.island_stack_visual.system_dark_mode", return_value=True):
+            self.visual.set_music_ambience_style("system", notify=False)
+            self._notice(replace(PAYLOAD, battery_percent=None))
+            self.visual.music_surface_transition_mode = "white_bridge"
+            self.visual.music_surface_transition_started_at = self.now - 0.3
+            self.visual.music_surface_transition_duration = 0.62
+            self.visual.music_surface_transition_from = (QColor(245, 247, 250), QColor(228, 233, 241))
+            self.visual.music_surface_transition_to = (QColor(245, 247, 250), QColor(228, 233, 241))
+            self.assertGreater(self.visual._music_control_icon_color().lightness(), 128)
+            self._image()
+            self.assertLess(self.visual._audio_device_ink(QRectF(120, 25, 100, 20)).lightness(), 128)
 
     def test_background_ink_sampling_never_reads_desktop_or_provider(self):
         self._notice()

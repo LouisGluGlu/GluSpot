@@ -529,6 +529,7 @@ void RaopSender::start(const std::string& host, uint16_t port, const std::string
     eventRecvCtr_ = 0;
     eventEncBuf_.clear();
     eventPlainBuf_.clear();
+    receiverControlCseqs_.clear();
     pendingMethods_.clear();
     pendingCseqs_.clear();
     rtspSession_.clear();
@@ -1005,6 +1006,7 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
         }
         const size_t total = headEnd + 4 + size_t(contentLen > 0 ? contentLen : 0);
         if (eventPlainBuf_.size() < total) break;   // body still arriving
+        std::string controlCseq;
         // The authenticated receiver may publish its current level in a real
         // updateInfo event. Keep the existing minimal acknowledgement intact.
         if (contentLen > 0 && contentLen <= 65536 &&
@@ -1022,6 +1024,24 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
                         updateReceiverVolume_(double(volume->i), "receiver_info");
                     if (volumeRequestCseq_ < 0 && diagnostics_.receiverVolumeKnown)
                         diagnostics_.receiverVolumeOperation = "info";
+                }
+                // Wire names from OwnTone airplay_events.c: paus and play are
+                // both physical play/pause toggles, not independent setters.
+                // No speculative next/previous commands or public listener.
+                if (state_ == State::Streaming && events_.receiverPlayPause
+                    && type && type->asStr() == "sendMediaRemoteCommand" && value
+                    && value->type == airplay::bplist::Value::Type::Str
+                    && (value->asStr() == "paus" || value->asStr() == "play")
+                    && !cseq.empty() && cseq.size() <= 16
+                    && std::all_of(cseq.begin(), cseq.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+                    const auto digit = cseq.find_first_not_of('0');
+                    const std::string canonical = digit == std::string::npos ? "0" : cseq.substr(digit);
+                    if (std::find(receiverControlCseqs_.begin(), receiverControlCseqs_.end(), canonical)
+                            == receiverControlCseqs_.end()) {
+                        if (receiverControlCseqs_.size() == 64) receiverControlCseqs_.pop_front();
+                        receiverControlCseqs_.push_back(canonical);
+                        controlCseq = canonical;
+                    }
                 }
             }
         }
@@ -1051,6 +1071,10 @@ void RaopSender::onEventReadyRead_(std::span<const uint8_t> bytes) {
         out.append(reinterpret_cast<const char*>(rct.data()), rct.size());
         io_.tcpSend(RaopTcp::Event, spanOf(out));
         ++diagnostics_.eventAcks;
+        if (!controlCseq.empty()) {
+            events_.receiverPlayPause(controlCseq);
+            if (state_ == State::Idle) return;
+        }
     }
 }
 

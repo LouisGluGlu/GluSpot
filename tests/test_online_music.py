@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import tempfile
 import threading
 import unittest
@@ -57,6 +58,32 @@ class Backend:
 
 
 class OnlineMusicServiceTests(unittest.TestCase):
+    def test_netease_keeps_raw_companion_variants_and_original_clocks(self):
+        self.login("netease")
+        raw = {"lrc": {"lyric": "[00:01]Hello"},
+            "yrc": {"lyric": "[1500,1000](1500,1000,0)Hello"},
+            "tlyric": {"lyric": "[00:01]旧译文"}, "ytlrc": {"lyric": "[00:01.5]准确译文"},
+            "romalrc": {"lyric": "[00:01]old roman"}, "yromalrc": {"lyric": "[00:01.5]accurate roman"}}
+        self.backend.catalog["lyrics"] = raw
+        payload = self.service.lyrics("netease", "1")
+        self.assertEqual(json.loads(payload.raw_netease), raw)
+        self.assertEqual(payload.translation, raw["ytlrc"]["lyric"])
+        self.assertEqual(payload.romanization, raw["yromalrc"]["lyric"])
+
+    def test_qq_service_really_decrypts_qrc_and_preserves_corrupt_field_lrc(self):
+        from tests.test_lyric_source_formats import QRC_CIPHER, QRC_TEXT
+        self.login("qq")
+        for encrypted, expected in ((QRC_CIPHER, QRC_TEXT), ("bad hex", "")):
+            with self.subTest(encrypted=encrypted[:10]):
+                self.backend.catalog["lyrics"] = {"lyric": encrypted,
+                    "raw_lrc": "[00:01]existing line", "translation": "[00:01]译文"}
+                payload = self.service.lyrics("qq", "mid9")
+                self.assertEqual(payload.raw_qrc, expected)
+                self.assertEqual(payload.raw_lrc, "[00:01]existing line")
+                self.assertEqual(payload.translation, "[00:01]译文")
+                self.assertEqual(payload.source, "qq-account")
+                self.assertEqual((payload.source_id, payload.song_id), ("qq", "mid9"))
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
@@ -149,6 +176,7 @@ class OnlineMusicServiceTests(unittest.TestCase):
         daily = self.service.daily_recommendations()
         self.assertEqual(daily[0].song_id, "9")
         self.assertEqual(daily[0].duration_seconds, 245)
+        self.assertEqual(daily[0].artwork_url, "https://example.org/art.png")
         self.assertEqual(self.service.personal_fm()[0], daily[0])
         stream = self.service.stream_url("netease", "9")
         self.assertTrue(stream.playable)
@@ -183,6 +211,192 @@ class OnlineMusicServiceTests(unittest.TestCase):
         for source in ("qq", "kugou"):
             with self.subTest(source=source):
                 self.assertEqual(self.service._song(source, {"id": 9, "name": "曲目", "duration": 178}).duration_seconds, 178)
+
+    def recommendation_fixture(self):
+        self.backend.catalog["daily_recommendations"] = {"data": {"dailySongs": [
+            {"id": 1, "name": "no picture"},
+            {"id": 2, "name": "daily picture", "al": {"picUrl": "https://example.org/daily.jpg"}}]}}
+        self.backend.catalog["personal_fm"] = {"data": [
+            {"id": 3, "name": "invalid picture", "album": {"picUrl": "file:///private"}},
+            {"id": 4, "name": "FM picture", "album": {"picUrl": "https://example.org/fm.jpg"}}]}
+
+    def test_recommendation_artwork_keeps_the_same_batch_for_one_actual_play(self):
+        self.login()
+        self.recommendation_fixture()
+        for kind, operation, play in (("daily", "daily_recommendations", self.service.daily_recommendations),
+                                      ("fm", "personal_fm", self.service.personal_fm)):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.service.recommendation_artwork(kind), f"https://example.org/{kind}.jpg")
+                self.assertEqual(self.service.recommendation_artwork(kind), f"https://example.org/{kind}.jpg")
+                songs = play()
+                self.assertEqual(len(songs), 2)
+                self.assertEqual(len([call for call in self.backend.calls if call[1] == operation]), 1)
+                self.assertNotIn(kind, self.service._recommendation_previews)
+                self.assertEqual(play(), songs)
+                self.assertEqual(len([call for call in self.backend.calls if call[1] == operation]), 2)
+
+    def test_playback_before_cover_reuses_the_real_playback_cover_without_consuming_next_fm(self):
+        self.login()
+        self.recommendation_fixture()
+        self.service.personal_fm()
+        self.assertEqual(self.service.recommendation_artwork("fm"), "https://example.org/fm.jpg")
+        self.assertEqual(len([call for call in self.backend.calls if call[1] == "personal_fm"]), 1)
+        self.assertNotIn("fm", self.service._recommendation_previews)
+
+    def test_simultaneous_recommendation_cover_and_playback_share_one_request_in_both_orders(self):
+        self.login()
+        self.recommendation_fixture()
+        original = self.backend.request
+        for preview_first in (True, False):
+            with self.subTest(preview_first=preview_first):
+                self.service._recommendation_previews.clear()
+                self.service._recommendation_covers.clear()
+                started, release = threading.Event(), threading.Event()
+                def request(source, operation, params, credential=None):
+                    if operation == "personal_fm":
+                        started.set()
+                        if not release.wait(3):
+                            raise RuntimeError("fixture release timeout")
+                    return original(source, operation, params, credential)
+                self.backend.request = request
+                results, errors = {}, []
+                def run(key):
+                    try:
+                        results[key] = (self.service.recommendation_artwork("fm") if key == "cover"
+                                        else self.service.personal_fm())
+                    except Exception as error:
+                        errors.append(error)
+                first, second = ("cover", "play") if preview_first else ("play", "cover")
+                workers = [threading.Thread(target=run, args=(key,)) for key in (first, second)]
+                before = len([call for call in self.backend.calls if call[1] == "personal_fm"])
+                workers[0].start()
+                self.assertTrue(started.wait(1))
+                workers[1].start()
+                release.set()
+                for worker in workers:
+                    worker.join(3)
+                    self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(results["cover"], "https://example.org/fm.jpg")
+                self.assertEqual([song.song_id for song in results["play"]], ["3", "4"])
+                self.assertEqual(len([call for call in self.backend.calls if call[1] == "personal_fm"]) - before, 1)
+        self.backend.request = original
+
+    def test_recommendation_cache_ttl_refreshes_daily_but_never_discards_unread_fm(self):
+        self.login()
+        self.recommendation_fixture()
+        for kind in ("daily", "fm"):
+            self.service.recommendation_artwork(kind)
+        self.clock_value += 301
+        self.backend.catalog["daily_recommendations"] = {"songs": [{"id": 20, "name": "new daily"}]}
+        self.backend.catalog["personal_fm"] = {"data": [{"id": 40, "name": "new radio"}]}
+        self.assertEqual(self.service.daily_recommendations()[0].song_id, "20")
+        self.assertEqual(self.service.recommendation_artwork("fm"), "https://example.org/fm.jpg")
+        self.assertEqual([song.song_id for song in self.service.personal_fm()], ["3", "4"])
+        self.assertEqual(self.service.personal_fm()[0].song_id, "40")
+        self.assertLessEqual(len(self.service._recommendation_covers), 2)
+        self.assertEqual(self.service._recommendation_previews, {})
+
+    def test_recommendation_failure_retries_without_retaining_an_invalid_batch_or_fabricating_art(self):
+        self.login()
+        self.backend.error = True
+        with self.assertRaises(OnlineMusicError):
+            self.service.recommendation_artwork("fm")
+        self.assertEqual(self.service._recommendation_previews, {})
+        self.assertEqual(self.service._recommendation_covers, {})
+        self.backend.error = False
+        self.backend.catalog["personal_fm"] = {"data": [{"id": 7, "name": "no image"}]}
+        self.assertEqual(self.service.recommendation_artwork("fm"), "")
+        self.assertEqual(self.service.recommendation_artwork("fm"), "")
+        self.assertEqual(self.service.personal_fm()[0].song_id, "7")
+        self.assertEqual(len([call for call in self.backend.calls if call[1] == "personal_fm"]), 2)  # One failed, one retained.
+
+    def test_recommendation_preview_inflight_logout_and_relogin_cannot_restore_old_songs(self):
+        self.login()
+        self.recommendation_fixture()
+        original = self.backend.request
+        started, release = threading.Event(), threading.Event()
+        def request(source, operation, params, credential=None):
+            if operation == "personal_fm":
+                started.set()
+                release.wait(3)
+            return original(source, operation, params, credential)
+        self.backend.request = request
+        errors = []
+        def preview():
+            try:
+                self.service.recommendation_artwork("fm")
+            except OnlineMusicError as error:
+                errors.append(error.code)
+        worker = threading.Thread(target=preview)
+        worker.start()
+        self.addCleanup(release.set)
+        self.addCleanup(worker.join, 3)
+        self.assertTrue(started.wait(1))
+        self.service.logout("netease")
+        self.login()
+        release.set()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, ["cancelled"])
+        self.assertEqual(self.service._recommendation_previews, {})
+        self.assertEqual(self.service._recommendation_covers, {})
+        self.backend.catalog["personal_fm"] = {"data": [{"id": 10, "name": "new account"}]}
+        self.assertEqual(self.service.personal_fm()[0].song_id, "10")
+
+    def test_recommendation_artwork_rejects_unknown_kind_or_platform_before_request(self):
+        self.login()
+        count = len(self.backend.calls)
+        for kind, source in (("other", "netease"), ("fm", "qq"), ("daily", "kugou")):
+            with self.subTest(kind=kind, source=source), self.assertRaises(OnlineMusicError):
+                self.service.recommendation_artwork(kind, source)
+        self.assertEqual(len(self.backend.calls), count)
+
+    def test_parallel_recommendation_auth_expiry_cannot_be_undone_by_successful_old_response(self):
+        self.login()
+        self.recommendation_fixture()
+        self.backend.catalog["daily_recommendations"] = {"code": 301}
+        original = self.backend.request
+        started, release = threading.Event(), threading.Event()
+        def request(source, operation, params, credential=None):
+            if operation == "personal_fm":
+                started.set()
+                release.wait(3)
+            return original(source, operation, params, credential)
+        self.backend.request = request
+        errors = []
+        def preview():
+            try:
+                self.service.recommendation_artwork("fm")
+            except OnlineMusicError as error:
+                errors.append(error.code)
+        worker = threading.Thread(target=preview)
+        worker.start()
+        self.addCleanup(release.set)
+        self.addCleanup(worker.join, 3)
+        self.assertTrue(started.wait(1))
+        with self.assertRaises(OnlineMusicError) as raised:
+            self.service.recommendation_artwork("daily")
+        self.assertEqual(raised.exception.code, "auth_required")
+        release.set()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, ["auth_required"])
+        self.assertEqual(self.service._recommendation_previews, {})
+        self.assertEqual(self.service._recommendation_covers, {})
+
+    def test_cached_recommendation_requires_still_verified_account(self):
+        self.login()
+        self.recommendation_fixture()
+        self.service.recommendation_artwork("fm")
+        from api.online_music import AccountSnapshot
+        self.service._accounts["netease"] = AccountSnapshot("netease", state="expired")
+        self.backend.verified = False
+        with self.assertRaises(OnlineMusicError) as raised:
+            self.service.recommendation_artwork("fm")
+        self.assertEqual(raised.exception.code, "auth_required")
+        self.assertEqual(self.service._recommendation_previews, {})
+        self.assertEqual(self.service._recommendation_covers, {})
 
     def test_playlist_and_track_pagination(self):
         self.login()
@@ -376,6 +590,96 @@ class OnlineMusicServiceTests(unittest.TestCase):
         self.assertEqual((page.items, page.next_offset, page.has_more, page.total), ((), 30, False, 0))
         self.backend.catalog["search"] = {"items": [], "next_offset": 20, "has_more": True}
         self.assertFalse(self.service.search("kugou", "query", offset=30).has_more)
+
+    def test_recommended_playlists_keep_platform_identity_and_page_cursor(self):
+        for source in ("netease", "qq"):
+            with self.subTest(source=source):
+                self.login(source)
+                self.backend.catalog["recommended_playlists"] = {
+                    "items": [{"id": 12, "name": "平台推荐", "picUrl": "https://example.org/playlist.png", "trackCount": 7}],
+                    "total": 3, "next_offset": 2, "has_more": True,
+                }
+                page = self.service.recommended_playlists(source, limit=1, offset=1)
+                item = page.items[0]
+                self.assertEqual((item.source_id, item.playlist_id, item.title, item.track_count), (source, "12", "平台推荐", 7))
+                self.assertEqual(item.artwork_url, "https://example.org/playlist.png")
+                self.assertEqual((page.total, page.next_offset, page.has_more), (3, 2, True))
+                self.assertEqual(self.backend.calls[-1], (source, "recommended_playlists", {"limit": 1, "offset": 1}))
+
+    def test_recommended_playlists_are_bounded_deduplicated_and_do_not_invent_more(self):
+        self.login()
+        self.backend.catalog["recommended_playlists"] = {
+            "items": [{"id": 9, "name": "推荐"}, {"id": 9, "name": "重复"}, {"id": 10}, None, {"id": 11, "name": " "}],
+            "total": 3, "next_offset": 4, "has_more": True,
+        }
+        page = self.service.recommended_playlists("netease", limit=1000)
+        self.assertEqual([item.playlist_id for item in page.items], ["9"])
+        self.assertFalse(page.has_more)
+        self.assertEqual(self.backend.calls[-1][2]["limit"], 100)
+        self.backend.catalog["recommended_playlists"] = {"items": [], "total": 0, "next_offset": 0, "has_more": True}
+        page = self.service.recommended_playlists("netease", offset=1000000)
+        self.assertEqual((page.items, page.next_offset, page.has_more), ((), 100000, False))
+
+    def test_recommended_playlists_require_verified_login_and_real_supported_source(self):
+        for source in ("netease", "qq"):
+            with self.subTest(source=source), self.assertRaises(OnlineMusicError) as raised:
+                self.service.recommended_playlists(source)
+            self.assertEqual(raised.exception.code, "auth_required")
+        with self.assertRaises(OnlineMusicError) as raised:
+            self.service.recommended_playlists("kugou")
+        self.assertEqual(raised.exception.code, "unsupported")
+        self.assertNotIn("recommendations", next(s for s in self.service.list_sources() if s.source_id == "kugou").capabilities)
+        self.assertTrue(all("recommendations" in s.capabilities for s in self.service.list_sources() if s.source_id in {"netease", "qq"}))
+
+    def test_recommended_playlists_invalid_response_and_failure_remain_errors(self):
+        self.login()
+        for data in ({}, {"items": {}}, {"items": None}):
+            self.backend.catalog["recommended_playlists"] = data
+            with self.subTest(data=data), self.assertRaises(OnlineMusicError) as raised:
+                self.service.recommended_playlists("netease")
+            self.assertEqual(raised.exception.code, "response")
+        self.backend.error = True
+        with self.assertRaises(OnlineMusicError) as raised:
+            self.service.recommended_playlists("netease")
+        self.assertEqual(raised.exception.code, "network")
+
+    def test_recommended_playlists_reject_invalid_bounds_before_catalog_request(self):
+        self.login()
+        for limit, offset in ((True, 0), (1, False), (None, 0), (1, float("inf"))):
+            count = len(self.backend.calls)
+            with self.subTest(limit=limit, offset=offset), self.assertRaises(OnlineMusicError) as raised:
+                self.service.recommended_playlists("netease", limit=limit, offset=offset)
+            self.assertEqual(raised.exception.code, "argument")
+            self.assertEqual(len(self.backend.calls), count)
+
+    def test_recommended_playlists_response_cannot_survive_logout_generation(self):
+        self.login()
+        started, release = threading.Event(), threading.Event()
+        original = self.backend.request
+        self.backend.catalog["recommended_playlists"] = {"items": [{"id": 9, "name": "旧账号推荐"}], "total": 1, "next_offset": 1}
+        def request(source, operation, params, credential=None):
+            if operation == "recommended_playlists":
+                started.set()
+                release.wait(3)
+            return original(source, operation, params, credential)
+        self.backend.request = request
+        errors, result = [], []
+        def load():
+            try:
+                result.append(self.service.recommended_playlists("netease"))
+            except OnlineMusicError as error:
+                errors.append(error.code)
+        worker = threading.Thread(target=load)
+        worker.start()
+        self.addCleanup(release.set)
+        self.addCleanup(worker.join, 3)
+        self.assertTrue(started.wait(1))
+        self.service.logout("netease")
+        release.set()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual((errors, result), (["cancelled"], []))
+        self.assertFalse(self.service.has_login_record("netease"))
 
 
 if __name__ == "__main__":

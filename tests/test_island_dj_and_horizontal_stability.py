@@ -75,13 +75,18 @@ class IslandDjAndHorizontalTests(unittest.TestCase):
         visual.music_surface_reading_strategy = "low_perception"
         visual.media_position_seconds = 2.
         visual.media_is_playing = False
-        poses = []
+        poses, fronts = [], []
         for now in (100., 101., 103., 106., 109.):
             visual.scroll_phase = now
             phase = visual._lyric_phase(now)
-            self.assertTrue(phase["whole_row"])
-            self.assertIn("whole_block_progress", phase)
+            self.assertFalse(phase["whole_row"])
+            self.assertNotIn("whole_block_progress", phase)
+            self.assertEqual(phase["timing_quality"], "estimated")
+            self.assertEqual(phase["timed_position"], 2.)
+            fronts.append(phase["timed_character_front"])
             poses.append(visual._island_lyric_row_x(QRectF(10, 0, 200, 44), 500., True, phase))
+        self.assertGreater(fronts[0], 0.)
+        self.assertEqual(len(set(fronts)), 1)
         self.assertEqual(len(set(poses)), 1)
 
     def test_live_whole_row_painter_no_longer_uses_metadata_marquee(self):

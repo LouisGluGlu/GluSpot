@@ -16,6 +16,30 @@ from local.music_lyric_presentation import (
 
 
 class MusicLyricPresentationTests(unittest.TestCase):
+    def test_cached_netease_json_credits_are_removed_without_changing_sung_rows(self):
+        writer = '{"t":-1,"c":[{"tx":"作词: "},{"tx":"Jerry Murad, Al Fiore, Pete Pedersen, Bob Hadamik"}]}'
+        composer = '{"t":-1,"c":[{"tx":"作曲: "},{"tx":"Henry Mancini"}]}'
+        source = [(0., writer), (3., composer), (10., "Hello world\n翻译：你好世界"),
+                  (20., writer), (30., "Next line")]
+        for clean_intro in (False, True):
+            for translated in (False, True):
+                with self.subTest(clean_intro=clean_intro, translated=translated):
+                    self.assertEqual(present_timed_lyric_rows(
+                        source, clean_intro=clean_intro, show_translation=translated,
+                        intro_countdown=False,
+                    ), [(10., "Hello world\n你好世界" if translated else "Hello world"),
+                        (30., "Next line")])
+                    self.assertEqual(present_timed_lyric_rows(
+                        [(0., writer), (3., composer)], clean_intro=clean_intro,
+                    ), [])
+                    self.assertEqual(present_lyric_text(writer, clean_intro=clean_intro), "")
+
+    def test_braced_and_unrelated_json_lyrics_are_not_metadata(self):
+        for text in ('{Stay with me}', '{"message":"Sing with me"}',
+                     '{"t":0,"c":[{"text":"Still a lyric"}]}'):
+            with self.subTest(text=text):
+                self.assertEqual(present_lyric_text(text, clean_intro=False), text)
+
     def test_display_layers_separate_inline_bracket_and_bilingual_echo(self):
         text = "Shine (echo) on me\n翻译：照耀（回声）我"
         layers = split_display_layers(text)
@@ -269,9 +293,9 @@ class MusicLyricPresentationTests(unittest.TestCase):
         ]
         self.assertEqual(
             present_timed_lyric_rows(source),
-            # The latest colon rule removes only edge runs; interior notes
-            # cannot be discarded based on a field name alone.
-            [(0.0, INTRO_COUNTDOWN_TEXT), (6.0, "Shine on\n发行：Label"),
+            # Explicit production roles are removed inside coalesced rows;
+            # unknown labels and translations retain their original times.
+            [(0.0, INTRO_COUNTDOWN_TEXT), (6.0, "Shine on"),
              (9.0, "翻译：单独说明"), (12.0, "下一句")],
         )
         self.assertEqual(source[2], (6.0, "Shine on\n发行：Label"))
@@ -309,7 +333,7 @@ class MusicLyricPresentationTests(unittest.TestCase):
         source = [(0.0, "节目：介绍"), (1.0, "旁白：开场")] + sung
         self.assertEqual(present_timed_lyric_rows(source, intro_countdown=False), sung)
 
-    def test_same_time_three_subrows_keep_interior_note_translation_and_known_singer(self):
+    def test_same_time_three_subrows_remove_credit_and_keep_translation_and_known_singer(self):
         source = [
             (0.0, "片头：开场"),
             (6.0, "成龙：开唱\n翻译：Sing now\n制作人：A"),
@@ -317,7 +341,7 @@ class MusicLyricPresentationTests(unittest.TestCase):
         ]
         self.assertEqual(
             present_timed_lyric_rows(source, intro_countdown=False, singer_names="成龙、金善喜"),
-            [(6.0, "成龙：开唱\nSing now\n制作人：A"),
+            [(6.0, "成龙：开唱\nSing now"),
              (10.0, "成龙：再唱\n金善喜：合唱")],
         )
         self.assertEqual(
@@ -327,6 +351,37 @@ class MusicLyricPresentationTests(unittest.TestCase):
         self.assertEqual(
             present_lyric_text("翻译：闪耀\n制作人：A\nShine on"),
             "Shine on\n闪耀",
+        )
+
+    def test_extended_production_roles_and_rights_notes_do_not_leak_between_sung_rows(self):
+        notes = (
+            "【吉他 / 贝斯：Alex】", "Vocal Producer: Alice", "混音工程师 Alex",
+            "Mastering Engineer — Bob", "（和声编配：Carol）", "OP/SP: Example Publishing",
+            "© 2026 Example Music", "℗ Example Label", "All rights reserved.",
+            "未经版权方授权不得翻唱或使用", "本歌曲版权归 Example 所有",
+        )
+        for note in notes:
+            source = [(0.0, "Shine on"), (3.0, note), (6.0, "Stay with me")]
+            with self.subTest(note=note):
+                self.assertEqual(
+                    present_timed_lyric_rows(source, clean_intro=False),
+                    [source[0], source[2]],
+                )
+                self.assertEqual(source[1][1], note)
+
+    def test_repeated_production_credit_is_removed_without_removing_repeated_vocals(self):
+        source = [(0.0, "制作人：Alex"), (3.0, "Shine on"),
+                  (6.0, "制作人：Alex"), (9.0, "Shine on")]
+        self.assertEqual(present_timed_lyric_rows(source), [source[1], source[3]])
+
+    def test_credit_words_in_actual_lyrics_and_translation_payload_are_preserved(self):
+        source = [(0.0, "Music is all I need"),
+                  (3.0, "Master of my heart\n翻译：制作人也会心动"),
+                  (6.0, "The strings are pulling me"),
+                  (9.0, "Alex：再唱一句")]
+        self.assertEqual(
+            present_timed_lyric_rows(source, singer_names="Alex"),
+            [source[0], (3.0, "Master of my heart\n制作人也会心动"), source[2], source[3]],
         )
 
     def test_labeled_translation_remains_available_without_colon_label(self):

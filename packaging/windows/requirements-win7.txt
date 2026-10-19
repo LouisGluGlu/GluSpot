@@ -1,0 +1,19 @@
+# Runtime pins for CPython 3.8 x64. No WinRT/SMTC package in the legacy build.
+PySide2==5.15.2.1
+shiboken2==5.15.2.1
+numpy==1.24.4
+Pillow==10.4.0
+ToJyutping==3.2.0
+zeroconf==0.132.2
+ifaddr==0.2.0
+async-timeout==5.0.1
+# Build-only dependencies. Do not update these with the modern environment.
+setuptools==56.0.0
+pyinstaller==6.10.0
+pyinstaller-hooks-contrib==2026.8
+pefile==2024.8.26
+pywin32-ctypes==0.2.3
+altgraph==0.17.5
+packaging==26.2
+importlib-metadata==8.5.0
+zipp==3.20.2

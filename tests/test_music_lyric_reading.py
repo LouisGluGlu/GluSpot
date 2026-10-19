@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.models import TimedLyricUnit
 from local.island_stack_visual import IslandStackVisual
+from local.lyric_unit_timing import resolve_display_row_timing
 from local.music_lyric_presentation import present_timed_lyric_rows
 from local.music_lyric_reading import (
     LyricReadingRenderer,
@@ -84,16 +85,28 @@ class MusicLyricReadingTests(unittest.TestCase):
     def test_compact_word_lift_keeps_width_and_settles_above_start(self):
         visual = self._visual()
         rect = QRectF(0.0, 8.0, 360.0, 76.0)
-        start = self._paint_active(visual, "Shine softly", 0.0, rect)
-        middle = self._paint_active(visual, "Shine softly", 0.5, rect)
-        end = self._paint_active(visual, "Shine softly", 1.0, rect)
-        bounds = [self._ink_bounds(image) for image in (start, middle, end)]
-        self.assertEqual([right - left for left, _top, right, _bottom in bounds], [bounds[0][2] - bounds[0][0]] * 3)
+        bounds = []
+        horizontal_geometry = []
+        renderer = visual._wave_reading_renderer
+        for progress in (0.0, 0.5, 1.0):
+            with patch.object(renderer, "_draw_subpixel_image", wraps=renderer._draw_subpixel_image) as draw:
+                image = self._paint_active(visual, "Shine softly", progress, rect)
+            bounds.append(self._ink_bounds(image))
+            horizontal_geometry.append(sorted({
+                (call.args[1].x(), call.args[2].width() / call.args[2].devicePixelRatio())
+                for call in draw.call_args_list
+            }))
+        self.assertTrue(horizontal_geometry[0])
+        self.assertEqual(horizontal_geometry, [horizontal_geometry[0]] * 3)
+        # Fractional vertical image sampling can move the alpha-threshold fringe
+        # by one output pixel; the actual horizontal placement/width stays exact.
+        ink_widths = [right - left for left, _top, right, _bottom in bounds]
+        self.assertLessEqual(max(ink_widths) - min(ink_widths), 1)
         self.assertLess(bounds[1][1], bounds[0][1])
         self.assertLess(bounds[2][3], bounds[0][3])
         self.assertLessEqual(bounds[2][3], bounds[1][3])
 
-    def test_island_reading_strategy_uses_real_unit_evidence_for_whole_song(self):
+    def test_island_reading_strategy_uses_each_rows_safe_display_interval(self):
         visual = self._visual()
         visual.track_title = "计时测试"
         visual.lyrics = ["真逐字", "只有行时间"]
@@ -108,9 +121,9 @@ class MusicLyricReadingTests(unittest.TestCase):
         self.assertFalse(visual._island_whole_row_reading(1))
         visual.music_surface_reading_strategy = "low_perception"
         self.assertFalse(visual._island_whole_row_reading(0))
-        self.assertFalse(visual._island_whole_row_reading(1))
+        self.assertTrue(visual._island_whole_row_reading(1))
         visual.timed_lyric_timing_kinds = ["line", "line"]
-        self.assertTrue(visual._island_whole_row_reading(0))
+        self.assertFalse(visual._island_whole_row_reading(0))
         self.assertTrue(visual._island_whole_row_reading(1))
         visual.timed_lyric_timing_kinds = ["synthetic", "synthetic"]
         self.assertTrue(visual._island_whole_row_reading(0))
@@ -135,7 +148,7 @@ class MusicLyricReadingTests(unittest.TestCase):
         visual.timed_lyric_timing_kinds = ["unit", "line", "line"]
         with patch("local.island_stack_visual.present_timed_lyric_rows", wraps=present_timed_lyric_rows) as clean:
             self.assertFalse(visual._island_song_has_genuine_unit_timing())
-            self.assertTrue(visual._island_whole_row_reading(1))
+            self.assertFalse(visual._island_whole_row_reading(1))
             self.assertEqual(clean.call_count, 1)
             visual.media_track_id = "same-rows-new-track"
             self.assertFalse(visual._island_song_has_genuine_unit_timing())
@@ -152,7 +165,7 @@ class MusicLyricReadingTests(unittest.TestCase):
             self.assertEqual(clean.call_count, 4)
             visual.music_intro_cleanup_enabled = False
             self.assertTrue(visual._island_song_has_genuine_unit_timing())
-            self.assertEqual(clean.call_count, 5)
+            self.assertEqual(clean.call_count, 4)
 
     def test_low_perception_whole_row_draws_without_read_wipe_or_lift(self):
         visual = self._visual()
@@ -217,7 +230,7 @@ class MusicLyricReadingTests(unittest.TestCase):
         self.assertLessEqual(first_colors[1] - first_colors[0], 1)
         self.assertLessEqual(last_colors[-1] - last_colors[-2], 1)
 
-    def test_island_low_mode_half_second_is_source_timed_and_pause_stable(self):
+    def test_island_low_mode_estimate_uses_row_clock_and_is_pause_seek_stable(self):
         visual = self._visual()
         visual.music_surface_reading_strategy = "low_perception"
         visual.lyrics = ["First line\n第一行", "Second line"]
@@ -236,16 +249,23 @@ class MusicLyricReadingTests(unittest.TestCase):
         phases = []
         for at, source in ((100.0, 10.0), (100.1, 10.1), (100.25, 10.25), (100.5, 10.5)):
             position[0] = source
-            phases.append(visual._lyric_phase(at)["whole_block_progress"])
-        for actual, expected in zip(phases, (0.0, 0.2, 0.5, 1.0)):
+            phase = visual._lyric_phase(at)
+            self.assertNotIn("whole_block_progress", phase)
+            self.assertFalse(phase["whole_row"])
+            self.assertEqual(phase["timing_quality"], "estimated")
+            phases.append(phase["progress"])
+        plan = resolve_display_row_timing("First line", start=10., next_start=14.)
+        for actual, source in zip(phases, (10., 10.1, 10.25, 10.5)):
+            expected = plan.reading_progress(source)
             self.assertAlmostEqual(actual, expected)
+        self.assertLess(phases[-1], .2)
         position[0] = 10.25
         visual.media_is_playing = False
-        self.assertEqual(visual._lyric_phase(200.0)["whole_block_progress"], 0.5)
-        self.assertEqual(visual._lyric_phase(210.0)["whole_block_progress"], 0.5)
+        self.assertEqual(visual._lyric_phase(200.0)["progress"], plan.reading_progress(10.25))
+        self.assertEqual(visual._lyric_phase(210.0)["progress"], plan.reading_progress(10.25))
         position[0] = 10.12
         visual.media_position_source = "local-seek"
-        self.assertAlmostEqual(visual._lyric_phase(201.0)["whole_block_progress"], 0.24)
+        self.assertAlmostEqual(visual._lyric_phase(201.0)["progress"], plan.reading_progress(10.12))
 
     def test_island_mixed_timing_song_reads_estimated_rows_and_focuses_next_unread(self):
         visual = self._visual()
@@ -281,14 +301,16 @@ class MusicLyricReadingTests(unittest.TestCase):
         position[0] = 5.0
         midpoint = visual._lyric_phase(105.0)
         self.assertEqual(midpoint["visual_focus_index"], 1)
-        self.assertAlmostEqual(midpoint["progress"], 2.0 / 3.0)
+        self.assertAlmostEqual(midpoint["progress"], resolve_display_row_timing(
+            "Estimated words", start=3., next_start=7.,
+        ).reading_progress(5.))
         position[0] = 6.0
         early = visual._lyric_phase(106.0)
         self.assertEqual(early["visual_focus_index"], 2)
         self.assertEqual(early["progress"], 1.0)
         self.assertEqual(visual.lyric_index, 1)
 
-    def test_island_no_real_units_keeps_whole_song_line_mode_without_early_focus(self):
+    def test_island_no_real_units_estimates_reading_without_early_focus(self):
         visual = self._visual()
         visual.media_track_id = "line-song"
         visual.lyrics = ["First line", "Second line"]
@@ -307,10 +329,12 @@ class MusicLyricReadingTests(unittest.TestCase):
         visual._estimated_media_position = lambda _now: 3.5
         phase = visual._lyric_phase(103.5)
         self.assertEqual(phase["visual_focus_index"], 0)
-        self.assertTrue(phase["whole_row"])
-        self.assertEqual(phase["whole_block_progress"], 1.0)
+        self.assertFalse(phase["whole_row"])
+        self.assertEqual(phase["progress"], 1.0)
+        self.assertEqual(phase["timing_quality"], "estimated")
+        self.assertNotIn("whole_block_progress", phase)
 
-    def test_island_gold_pure_line_song_does_not_compress_or_focus_early(self):
+    def test_island_gold_pure_line_song_uses_shared_estimate_without_early_focus(self):
         visual = self._visual()
         visual.media_track_id = "gold-lines"
         visual.lyrics = ["First line", "Second line"]
@@ -330,7 +354,8 @@ class MusicLyricReadingTests(unittest.TestCase):
         phase = visual._lyric_phase(103.5)
         self.assertEqual(phase["visual_focus_index"], 0)
         self.assertFalse(phase["whole_row"])
-        self.assertLess(phase["progress"], 1.0)
+        self.assertEqual(phase["progress"], 1.0)
+        self.assertEqual(phase["timing_quality"], "estimated")
 
     def test_ember_extra_offset_uses_same_estimated_end_for_mixed_timing_song(self):
         visual = self._visual()
@@ -351,8 +376,138 @@ class MusicLyricReadingTests(unittest.TestCase):
         visual._estimated_media_position = lambda _now: 5.0
         phase = visual._ember_lyric_phase(105.0)
         self.assertEqual(int(phase["active_index"]), 1)
-        self.assertAlmostEqual(float(phase["progress"]), 2.5 / 3.0)
+        self.assertAlmostEqual(float(phase["progress"]), resolve_display_row_timing(
+            "Long sentence", start=3., next_start=7.,
+        ).reading_progress(5.5))
         self.assertEqual(visual.lyric_index, 1)
+
+    def test_island_multiword_segments_keep_real_anchors_in_every_style_and_strategy(self):
+        source_units = (
+            TimedLyricUnit(1., 5., "Hello world "), TimedLyricUnit(7., 8., "again"),
+        )
+        expected = resolve_display_row_timing(
+            "Hello world again", source_units, "unit", start=1., next_start=12.,
+        )
+        for style in ("wave_stream", "gelv_songscatter", "ember_fade"):
+            for strategy in ("gold_reading", "low_perception"):
+                with self.subTest(style=style, strategy=strategy):
+                    visual = self._visual()
+                    visual.lyric_flow_style = style
+                    visual.music_surface_reading_strategy = strategy
+                    visual.media_track_id = "source-segments"
+                    visual.timed_lyrics = [(1., "Hello world again"), (12., "Next")]
+                    visual.timed_lyric_units = [source_units, ()]
+                    visual.timed_lyric_timing_kinds = ["unit", "line"]
+                    visual.lyric_index = 0
+                    visual.lyric_changed_at = 100.
+                    visual.media_is_playing = True
+                    visual._effective_lyric_offset_seconds = lambda: 0.
+                    position = [3.]
+                    visual._stable_lyric_source_position = lambda _now: position[0]
+                    phase = visual._lyric_phase(103.)
+                    self.assertFalse(phase["whole_row"])
+                    self.assertEqual(phase["timing_quality"], "segment")
+                    self.assertEqual(phase["timed_units"], expected.display_units)
+                    self.assertEqual(phase["timed_units"][1].end_seconds, 5.)
+                    self.assertEqual(phase["timed_units"][2].start_seconds, 7.)
+                    self.assertEqual(phase["progress"], expected.reading_progress(3.))
+                    self.assertNotIn("whole_block_progress", phase)
+                    self.assertNotIn("gap_kind", phase)
+                    self.assertIs(visual.timed_lyric_units[0], source_units)
+                    # A pause and a backward seek evaluate the same immutable
+                    # source-clock plan, rather than advancing an effect timer.
+                    visual.media_is_playing = False
+                    self.assertEqual(visual._lyric_phase(120.)["progress"], phase["progress"])
+                    position[0] = 2.
+                    visual.media_position_source = "local-seek"
+                    self.assertEqual(visual._lyric_phase(121.)["progress"], expected.reading_progress(2.))
+
+    def test_island_row_plan_reuses_cache_and_invalidates_on_source_change(self):
+        visual = self._visual()
+        visual.media_track_id = "cache-a"
+        visual.timed_lyrics = [(0., "Hello world"), (8., "Next")]
+        visual.timed_lyric_units = [(), ()]
+        visual.timed_lyric_timing_kinds = ["line", "line"]
+        with patch("local.island_stack_visual.resolve_display_row_timing", wraps=resolve_display_row_timing) as resolve:
+            first = visual._island_display_row_timing(0)
+            self.assertIs(visual._island_display_row_timing(0), first)
+            self.assertEqual(resolve.call_count, 1)
+            visual.timed_lyrics[1] = (10., "Next")
+            second = visual._island_display_row_timing(0)
+            self.assertIsNot(second, first)
+            self.assertEqual(resolve.call_count, 2)
+            visual.timed_lyric_units[0] = (TimedLyricUnit(0., 4., "Hello world"),)
+            visual.timed_lyric_timing_kinds[0] = "unit"
+            self.assertEqual(visual._island_display_row_timing(0).quality, "segment")
+            self.assertEqual(resolve.call_count, 3)
+            visual.media_track_id = "cache-b"
+            self.assertEqual(visual._island_display_row_timing(0).quality, "segment")
+            self.assertEqual(resolve.call_count, 4)
+
+    def test_continuous_song_switch_cannot_inherit_previous_word_front(self):
+        visual = self._visual()
+        visual.music_surface_reading_strategy = "low_perception"
+        visual.media_track_id = "old-song"
+        visual.timed_lyrics = [(0., "Hello world"), (8., "Next")]
+        visual.timed_lyric_units = [(TimedLyricUnit(0., 3., "Hello "), TimedLyricUnit(3., 6., "world")), ()]
+        visual.timed_lyric_timing_kinds = ["unit", "line"]
+        visual.lyric_index = 0
+        visual.lyric_changed_at = 100.
+        visual.media_is_playing = True
+        visual._effective_lyric_offset_seconds = lambda: 0.
+        position = [5.]
+        visual._stable_lyric_source_position = lambda _now: position[0]
+        self.assertGreater(visual._lyric_phase(105.)["progress"], .8)
+        # A new song can have the same visible row/index and source tuple.
+        # Its identity fence must still discard the old monotonic paint clamp.
+        visual.media_track_id = "new-song"
+        position[0] = .1
+        phase = visual._lyric_phase(105.1)
+        self.assertLess(phase["progress"], .1)
+        self.assertLess(phase["timed_character_front"], 1.)
+
+    def test_island_duet_estimate_skips_peer_and_borrows_only_verified_same_time_onset(self):
+        visual = self._visual()
+        visual.artist = "甲、乙"
+        visual.media_track_id = "duet-source"
+        visual.timed_lyrics = [(0., "甲：春風"), (0., "乙：明月"), (10., "Next")]
+        measured = (TimedLyricUnit(2., 3., "春"), TimedLyricUnit(3., 4., "風"))
+        visual.timed_lyric_units = [measured, (), ()]
+        visual.timed_lyric_timing_kinds = ["unit", "line", "line"]
+        second = visual._island_display_row_timing(1)
+        self.assertEqual((second.quality, second.start_seconds, second.end_seconds), ("estimated", 2., 10.))
+        self.assertEqual(second.reading_progress(1.), 0.)
+        visual.timed_lyrics = [(0., "甲：春風"), (.5, "乙：明月"), (10., "Next")]
+        second = visual._island_display_row_timing(1)
+        self.assertEqual((second.start_seconds, second.end_seconds), (.5, 10.))
+        visual.timed_lyric_units[1] = (TimedLyricUnit(.5, 6., "乙：明月"),)
+        visual.timed_lyric_timing_kinds[1] = "unit"
+        segment = visual._island_display_row_timing(1)
+        self.assertEqual((segment.quality, segment.start_seconds, segment.end_seconds), ("segment", .5, 6.))
+        self.assertIs(visual.timed_lyric_units[0], measured)
+
+    def test_ember_extra_offset_preserves_source_segment_anchors_and_pause_seek(self):
+        visual = self._visual()
+        source_units = (TimedLyricUnit(0., 4., "Hello world "), TimedLyricUnit(6., 8., "again"))
+        visual.timed_lyrics = [(0., "Hello world again"), (12., "Next")]
+        visual.timed_lyric_units = [source_units, ()]
+        visual.timed_lyric_timing_kinds = ["unit", "line"]
+        visual.lyric_index = 0
+        visual.lyric_changed_at = 100.
+        visual.media_is_playing = True
+        visual.ember_lyric_offset_seconds = .5
+        visual._effective_lyric_offset_seconds = lambda: 0.
+        position = [2.]
+        visual._stable_lyric_source_position = lambda _now: position[0]
+        plan = resolve_display_row_timing("Hello world again", source_units, "unit", start=0., next_start=12.)
+        phase = visual._ember_lyric_phase(100.)
+        self.assertEqual(phase["timed_units"], plan.display_units)
+        self.assertEqual(phase["progress"], plan.reading_progress(2.5))
+        visual.media_is_playing = False
+        self.assertEqual(visual._ember_lyric_phase(120.)["progress"], phase["progress"])
+        position[0] = .5
+        visual.media_position_source = "local-seek"
+        self.assertEqual(visual._ember_lyric_phase(121.)["progress"], plan.reading_progress(1.))
 
     def test_island_compact_uses_visual_next_without_changing_source_index(self):
         visual = self._visual()

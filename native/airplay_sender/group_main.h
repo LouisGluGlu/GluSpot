@@ -19,6 +19,27 @@
 namespace gluspot {
 int runGroupHelper(int argc, wchar_t** argv);
 
+// The AP2 callback must never block on the parent's stdout. Only the host
+// thread drains this small queue after checking its current member/session.
+class GroupReceiverControls {
+public:
+    using Clock = std::chrono::steady_clock;
+    void push(const std::string& cseq, Clock::time_point now) {
+        if (pending_.size() < 8) pending_.emplace_back(cseq, now);
+    }
+    std::vector<std::pair<std::string, uint64_t>> take(bool eligible, Clock::time_point now) {
+        std::vector<std::pair<std::string, uint64_t>> result;
+        for (const auto& [cseq, received] : pending_) {
+            const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - received).count();
+            if (eligible && age >= 0 && age < 2000) result.emplace_back(cseq, uint64_t(age));
+        }
+        pending_.clear();
+        return result;
+    }
+private:
+    std::deque<std::pair<std::string, Clock::time_point>> pending_;
+};
+
 // AP2 realtime/NTP keeps the RTP buffer and the requested receiver render
 // lead separate on the wire. Local playback needs both once (OwnTone's
 // network buffer B-250ms vs local B policy). This is protocol evidence,

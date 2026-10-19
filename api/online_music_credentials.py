@@ -72,10 +72,11 @@ class ProtectedCredentialStore:
 
     def __init__(self, root: Path | str | None = None, protector: CredentialProtector | None = None):
         if root is None:
+            from local.branding import is_packaged_app, local_app_data_dir
             base = os.environ.get("LOCALAPPDATA")
-            if not base:
+            if not base and not is_packaged_app():
                 raise CredentialProtectionError("Local application data is unavailable")
-            root = Path(base) / "GluSpot" / "accounts"
+            root = Path(local_app_data_dir()) / "accounts"
         self.root = Path(root).absolute()
         self.protector = protector or WindowsDPAPI()
         self._lock = threading.RLock()

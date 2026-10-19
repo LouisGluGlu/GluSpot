@@ -12,7 +12,206 @@ import math
 from typing import Sequence
 import unicodedata
 
-from api.lyric_timeline import genuinely_timed_unit_row
+from api.lyric_timeline import _spoken_token_spans, genuinely_timed_unit_row
+
+
+@dataclass(frozen=True)
+class DisplayTimedLyricUnit:
+    """Ephemeral reading unit; never a provider/cache or interlude record.
+
+    ``estimated`` marks both line interpolation and words split inside a
+    genuine multiword source segment. ``timing_origin`` distinguishes those
+    cases from unchanged source word anchors and missing-end interpolation.
+    """
+
+    start_seconds: float
+    end_seconds: float | None
+    text: str
+    estimated: bool = False
+    timing_origin: str = "source"
+
+
+@dataclass(frozen=True)
+class DisplayRowTiming:
+    """One immutable, display-only timing decision shared by every surface.
+
+    Quality is ``word`` (source word anchors), ``segment`` (source spans,
+    estimated words within each span), ``estimated`` (row interpolation), or
+    ``line`` (no safe reading interval). ``source_units`` retains the original
+    objects. Only ``display_units`` may be fed to a reading renderer.
+    """
+
+    text: str
+    quality: str
+    source_units: tuple[object, ...]
+    display_units: tuple[DisplayTimedLyricUnit, ...]
+    start_seconds: float
+    end_seconds: float | None
+
+    @property
+    def has_reading_timing(self) -> bool:
+        return bool(self.display_units)
+
+    @property
+    def has_estimates(self) -> bool:
+        return any(unit.estimated for unit in self.display_units)
+
+    def reading_progress(self, position: float) -> float | None:
+        front = display_row_reading_front(self, position, tuple(range(len(self.text) + 1)))
+        return None if front is None else max(0.0, min(1.0, front / max(1, len(self.text))))
+
+
+def _split_display_span(
+    text: str, start: float, end: float | None, *, estimated: bool, origin: str,
+) -> tuple[DisplayTimedLyricUnit, ...]:
+    spans = _spoken_token_spans(text)
+    if len(spans) <= 1 or end is None or end <= start:
+        return (DisplayTimedLyricUnit(start, end, text, estimated, origin),) if text else ()
+    # Punctuation and whitespace stay attached to their preceding word. The
+    # original start and end are exact anchors; only the internal allocation
+    # is estimated. A long Latin word gets more time than a short connector.
+    offsets = (0,) + tuple(left for left, _right in spans[1:]) + (len(text),)
+    weights = tuple(max(1, right - left) for left, right in spans)
+    total = sum(weights)
+    result = []
+    consumed = 0
+    for index, weight in enumerate(weights):
+        beginning = start + (end - start) * consumed / total
+        consumed += weight
+        ending = end if index + 1 == len(weights) else start + (end - start) * consumed / total
+        result.append(DisplayTimedLyricUnit(
+            beginning, ending, text[offsets[index]:offsets[index + 1]], True, origin,
+        ))
+    return tuple(result)
+
+
+def resolve_display_row_timing(
+    text: str, units: Sequence[object] = (), kind: str = "line", *,
+    start: float, next_start: float | None = None,
+    estimated_start: float | None = None, estimated_end: float | None = None,
+    estimated_body_offset: int = 0,
+) -> DisplayRowTiming:
+    """Keep source anchors while deriving explicitly estimated reading words.
+
+    This does not change source text, unit objects, cache data, interval
+    detection, or real long-syllable evidence. Synthetic rows have no real
+    clock interval and stay line-only. Ordinary LRC can use its next real row
+    for a display estimate with the existing one-second preview policy.
+
+    A caller may supply a verified duet's final display estimate boundaries.
+    ``estimated_end`` is already a reading end and is not shortened again.
+    Neither override moves valid source word/segment anchors, or fills their
+    missing ends. Without a next source row or explicit verified end, ordinary
+    tail rows remain line-only.
+    A verified singer prefix may be excluded from estimated sung duration
+    through ``estimated_body_offset`` while retaining raw text alignment.
+    """
+    text, raw_units = str(text), tuple(units)
+    try:
+        beginning = float(start)
+    except (TypeError, ValueError, OverflowError):
+        beginning = math.nan
+    try:
+        following = None if next_start is None else float(next_start)
+    except (TypeError, ValueError, OverflowError):
+        following = None
+    if following is not None and not math.isfinite(following):
+        following = None
+    empty = DisplayRowTiming(text, "line", raw_units, (), beginning, None)
+    if not text or not math.isfinite(beginning) or kind == "synthetic":
+        return empty
+    def estimated_row(anchor: float = beginning) -> DisplayRowTiming:
+        try:
+            anchor = anchor if estimated_start is None else float(estimated_start)
+            end = estimated_row_read_end(anchor, following) if estimated_end is None else float(estimated_end)
+        except (TypeError, ValueError, OverflowError):
+            return empty
+        if not math.isfinite(anchor) or anchor < beginning or (end is not None and not math.isfinite(end)):
+            return empty
+        if end is not None and following is not None:
+            end = min(end, following)
+        if end is None or end <= anchor:
+            return empty
+        try:
+            body_offset = int(estimated_body_offset)
+        except (TypeError, ValueError, OverflowError):
+            body_offset = 0
+        if not 0 <= body_offset < len(text):
+            body_offset = 0
+        prefix = (DisplayTimedLyricUnit(anchor, anchor, text[:body_offset], True, "label"),) if body_offset else ()
+        estimated_units = prefix + _split_display_span(text[body_offset:], anchor, end, estimated=True, origin="line")
+        return DisplayRowTiming(text, "estimated", raw_units, estimated_units, anchor, end)
+
+    offsets = _aligned_offsets(text, raw_units) if kind == "unit" and raw_units else None
+    if offsets is None:
+        return estimated_row()
+    clocks = []
+    for unit in raw_units:
+        try:
+            onset = float(getattr(unit, "start_seconds"))
+            raw_end = getattr(unit, "end_seconds", None)
+            ending = None if raw_end is None else float(raw_end)
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return estimated_row()
+        if not math.isfinite(onset) or (
+            ending is not None and (not math.isfinite(ending) or ending < onset)
+        ):
+            return estimated_row()
+        clocks.append((onset, ending))
+    if any(clocks[index][0] < clocks[index - 1][0] for index in range(1, len(clocks))):
+        return estimated_row()
+    if len(clocks) == 1 and clocks[0][1] in {None, clocks[0][0]}:
+        return estimated_row(clocks[0][0])
+
+    genuine = genuinely_timed_unit_row(raw_units)
+    display_units = []
+    index = 0
+    while index < len(raw_units):
+        onset, ending = clocks[index]
+        stop = index + 1
+        # Simultaneous sentence fragments are one source segment, not several
+        # independently sung words. Avoid jumping to its last fragment at t0.
+        while stop < len(raw_units) and clocks[stop][0] == onset:
+            stop += 1
+        if stop > index + 1:
+            known_ends = [value for _onset, value in clocks[index:stop] if value is not None]
+            ending = max(known_ends) if known_ends else None
+        missing_end = ending is None
+        if ending is None:
+            # A missing source-unit end is bounded by the next actual onset,
+            # including a separately timed attached backing-vocal row. The
+            # one-second display preview belongs only to line interpolation;
+            # applying it here truncates a word which is still being sung.
+            ending = clocks[stop][0] if stop < len(clocks) else following
+        if ending is not None and ending < onset:
+            ending = None
+        fragment = text[offsets[index]:offsets[stop]]
+        segment = len(_spoken_token_spans(fragment)) > 1 or stop > index + 1
+        display_units.extend(_split_display_span(
+            fragment, onset, ending,
+            estimated=missing_end or segment or any(bool(getattr(unit, "estimated", False)) for unit in raw_units[index:stop]),
+            origin="segment" if segment else ("missing-end" if missing_end else "source"),
+        ))
+        index = stop
+    if not display_units:
+        return empty
+    end_times = [unit.end_seconds for unit in display_units if unit.end_seconds is not None]
+    return DisplayRowTiming(
+        text, "word" if genuine else "segment", raw_units, tuple(display_units),
+        clocks[0][0], max(end_times) if end_times and len(end_times) == len(display_units) else None,
+    )
+
+
+def display_row_reading_front(
+    timing: DisplayRowTiming, position: float, boundaries: Sequence[float],
+) -> float | None:
+    """Evaluate the same display plan directly from the current play clock."""
+    if not timing.has_reading_timing:
+        return None
+    return timed_unit_reading_front(
+        timing.text, timing.display_units, position, boundaries,
+        line_end=timing.end_seconds,
+    )
 
 
 def lyric_timing_quality_label(
@@ -110,6 +309,68 @@ def duet_estimated_read_start(
 
 
 @dataclass(frozen=True)
+class DisplayRowEstimateBoundaries:
+    """Display interpolation bounds; not evidence of a measured vocal end."""
+
+    next_start: float | None
+    estimated_start: float | None = None
+    estimated_end: float | None = None
+    body_offset: int = 0
+
+
+def display_row_estimate_boundaries(
+    rows: Sequence[tuple[float, str]], unit_rows: Sequence[Sequence[object]],
+    index: int, *, singer_names: Sequence[str] | str = (),
+    duet_presentation: object | None = None,
+) -> DisplayRowEstimateBoundaries:
+    """Skip simultaneous/paired voices before choosing a reading interval.
+
+    Only verified singer groups may borrow a peer's body onset, and only at
+    exactly matching source times through ``duet_estimated_read_start``.
+    Staggered duets keep each source start. The final group never invents an
+    end from track duration or a fallback animation span.
+    """
+    if not 0 <= index < len(rows):
+        return DisplayRowEstimateBoundaries(None)
+    beginning = float(rows[index][0])
+    following = next((float(start) for start, _text in rows[index + 1:]
+                      if math.isfinite(float(start)) and float(start) > beginning), None)
+    if duet_presentation is None:
+        from local.music_lyric_presentation import analyze_duet_lyric_rows
+        duet_presentation = analyze_duet_lyric_rows(rows, singer_names=singer_names)
+    row = duet_presentation.rows[index]
+    own_primary = str(rows[index][1]).replace("\u2028", "\n").splitlines()
+    own_body = str(row.body_text).replace("\u2028", "\n").splitlines()
+    own_text = own_primary[0] if own_primary else ""
+    body_text = own_body[0] if own_body else ""
+    own_body_offset = own_text.find(body_text) if row.singer is not None and body_text else 0
+    own_body_offset = max(0, own_body_offset)
+    group = next((group for group in duet_presentation.groups
+                  if index in (group.first_index, group.second_index)), None)
+    if group is None:
+        return DisplayRowEstimateBoundaries(following, body_offset=own_body_offset)
+    group_start = max(float(rows[group.first_index][0]), float(rows[group.second_index][0]))
+    following = next((float(start) for start, _text in rows[group.second_index + 1:]
+                      if math.isfinite(float(start)) and float(start) > group_start), None)
+    peer = group.second_index if index == group.first_index else group.first_index
+    raw_primary = str(rows[peer][1]).replace("\u2028", "\n").splitlines()
+    body_primary = str(duet_presentation.rows[peer].body_text).replace("\u2028", "\n").splitlines()
+    primary = raw_primary[0] if raw_primary else ""
+    body = body_primary[0] if body_primary else ""
+    peer_units = unit_rows[peer] if peer < len(unit_rows) else ()
+    body_offset = primary.find(body) if body else -1
+    offsets = (body_offset,) if body_offset >= 0 else None
+    source_text = "".join(str(getattr(unit, "text", "")) for unit in peer_units)
+    if " ".join(source_text.split()) == " ".join(body.split()):
+        primary, offsets = body, (0,)
+    onset = duet_estimated_read_start(
+        beginning, primary, peer_units, offsets,
+        peer_source_start=float(rows[peer][0]),
+    )
+    return DisplayRowEstimateBoundaries(following, onset, following, own_body_offset)
+
+
+@dataclass(frozen=True)
 class TimedHighlightGroup:
     """A contiguous run of individually timed slow characters."""
 
@@ -119,6 +380,7 @@ class TimedHighlightGroup:
     end_seconds: float
     unit_starts: tuple[float, ...] = ()
     unit_ends: tuple[float, ...] = ()
+    source_text: str = ""
 
 
 def timed_highlight_wave_progress(group: TimedHighlightGroup, position: float) -> float:
@@ -310,9 +572,13 @@ def explicit_slow_unit_groups(
     text: str,
     units: Sequence[object],
     *,
-    min_duration: float = 1.0,
+    min_duration: float = 0.8,
 ) -> tuple[TimedHighlightGroup, ...]:
-    """Select slow timed characters and Latin words with attached punctuation."""
+    """Select measured characters/words lasting at least the fixed 0.8 s cue.
+
+    ``min_duration`` remains accepted for historical callers; it no longer
+    changes the product's highlight threshold.
+    """
     offsets = _aligned_offsets(str(text), units)
     if offsets is None:
         return ()
@@ -344,6 +610,10 @@ def explicit_slow_unit_groups(
         latin_letters = tuple(character.isalpha() and ord(character) < 0x2E80 for character in core)
         alphabetic_word = bool(core) and all(
             latin_letters[position] or (
+                unicodedata.category(character).startswith("M")
+                and position > 0
+                and (latin_letters[position - 1] or unicodedata.category(core[position - 1]).startswith("M"))
+            ) or (
                 character in connectors
                 and position > 0 and position + 1 < len(core)
                 and latin_letters[position - 1]
@@ -354,8 +624,9 @@ def explicit_slow_unit_groups(
         spoken_characters = alphabetic_word or (len(spoken) == 1 and spoken.isalnum())
         eligible = (
             spoken_characters
+            and not bool(getattr(unit, "estimated", False))
             and end is not None and math.isfinite(start) and math.isfinite(end)
-            and end - start > float(min_duration)
+            and end - start >= 0.8 - 1e-9
             and offsets[index + 1] - offsets[index] == len(token)
         )
         if not eligible:
@@ -369,6 +640,7 @@ def explicit_slow_unit_groups(
                 max(current.end_seconds, end),
                 current.unit_starts + (start,) * len(spoken),
                 current.unit_ends + (end,) * len(spoken),
+                current.source_text + spoken,
             )
         else:
             if current is not None:
@@ -376,6 +648,7 @@ def explicit_slow_unit_groups(
             current = TimedHighlightGroup(
                 spoken_start, spoken_end, start, end,
                 (start,) * len(spoken), (end,) * len(spoken),
+                spoken,
             )
     if current is not None:
         result.append(current)

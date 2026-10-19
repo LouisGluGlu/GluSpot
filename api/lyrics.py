@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import html
 import json
 import math
@@ -13,7 +14,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
@@ -23,11 +24,13 @@ from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 from api.models import TimedLyricLine, TimedLyricUnit
+from api.lyric_metadata import is_structured_lyric_metadata, is_explicit_lyric_credit
 from api.cantonese import (
     cantonese_secondary_rows, group_cantonese_plain_lines,
     group_secondary_source_rows, has_cantonese_evidence,
 )
-from api.lyric_timeline import genuinely_timed_unit_row
+from api.lyric_timeline import has_sufficient_word_timing, lyric_timing_quality, _spoken_token_spans
+from api.ttml import parse_ttml
 
 LRC_TIME_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]")
 LRC_OFFSET_RE = re.compile(r"^\[offset\s*:\s*([+-]?\d+)\s*\]$", re.I)
@@ -40,7 +43,7 @@ QRC_UNIT_RE = re.compile(r"\(\s*(?P<start>\d+)\s*,\s*(?P<duration>\d+)\s*\)")
 KRC_UNIT_RE = re.compile(r"<\s*(?P<start>\d+)\s*,\s*(?P<duration>\d+)\s*,\s*\d+\s*>")
 QRC_CONTENT_RE = re.compile(r"<Lyric_1\b[^>]*\bLyricContent\s*=\s*([\"'])(.*?)\1", re.I | re.S)
 JSONP_RE = re.compile(r"^[A-Za-z_][\w.]*\((.*)\)\s*;?\s*$", re.S)
-METADATA_RE = re.compile(r"^\[(?:ar|ti|al|by|offset|length|re|ve|kana|language):.*\]$", re.I)
+METADATA_RE = re.compile(r"^\[(?:ar|ti|al|by|offset|length|re|ve|kana|language|gluspot_raw):.*\]$", re.I)
 ONLINE_SOURCE_ORDER = ("netease", "qq", "lrclib")
 SECONDARY_LABEL_RE = re.compile(
     r"^\s*(?:翻译|译文|中文翻译|粤语译文|粵語譯文|粤语音译|粵語音譯|"
@@ -112,10 +115,18 @@ class LyricsMatch:
     # Preserve source alternatives for preference changes and generated-cache
     # reloads. The provider still consumes only the selected timed_lyrics.
     secondary_source_rows: tuple[TimedLyricLine, ...] = ()
+    # Original source payloads, before conversion, filtering or gap markers.
+    # Each pair is (field name, original text); the source is retained too.
+    raw_sources: tuple[tuple[str, str], ...] = ()
+    # Set only after the caller/provider validates an immutable catalog song.
+    # This process-local evidence authorizes whole-source upgrades, never
+    # relaxed companion mixing or trust in a raw cache/source label.
+    verified_identity: tuple[str, str, str, str, str, float] | None = None
 
 
 class LocalLyricsStore:
     RESOLVED_CACHE_LIMIT = 128
+    RECORDING_CONTEXT_LIMIT = 256
     MISSED_CACHE_LIMIT = 256
     LOCAL_MISS_CACHE_LIMIT = 256
     LOCAL_FUZZY_FILE_LIMIT = 256
@@ -156,6 +167,11 @@ class LocalLyricsStore:
         # lock so a pre-clear lookup cannot restore a discarded result.
         self._cache_lock = threading.RLock()
         self._cache_generation = 0
+        # Stable request contexts retain harmless late metadata/jitter while
+        # fencing known different recordings, including their pending work.
+        self._recording_contexts: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self._trusted_platform_ids: OrderedDict[str, tuple[tuple[str, str], ...]] = OrderedDict()
+        self._trusted_results: OrderedDict[tuple, tuple[float, LyricsMatch | None]] = OrderedDict()
         self._local_miss_cache: OrderedDict[str, tuple[tuple[str, int], ...]] = OrderedDict()
         self._lyric_index_cache: dict[str, tuple[int, dict[str, tuple[Path, ...]]]] = {}
         self._lyric_index_lock = threading.Lock()
@@ -166,6 +182,9 @@ class LocalLyricsStore:
         override = str(os.environ.get(cls.GENERATED_CACHE_DIR_ENV, "") or "").strip()
         if override:
             return Path(override)
+        from local.branding import is_packaged_app, local_app_data_dir
+        if is_packaged_app():
+            return Path(local_app_data_dir()) / "lyrics-cache"
         base_dir = str(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or "").strip()
         if base_dir:
             return Path(base_dir) / "GluSpot" / "lyrics-cache"
@@ -184,6 +203,9 @@ class LocalLyricsStore:
             self._enrich_pending_keys.clear()
             self._enrich_attempted_at.clear()
             self._enrich_retry_seconds.clear()
+            self._trusted_platform_ids.clear()
+            self._trusted_results.clear()
+            self._recording_contexts.clear()
             with self._lyric_index_lock:
                 self._lyric_index_cache.clear()
             try:
@@ -238,7 +260,7 @@ class LocalLyricsStore:
         if cached is not None:
             return cached
 
-        match, local_source = self._read_local_match(title, artist)
+        match, local_source = self._read_local_match(title, artist, album_title, duration_seconds)
         if match.timed_lyrics:
             if not self._store_cache(cache_key, match, generation=generation):
                 return LyricsMatch((), (), "")
@@ -317,7 +339,7 @@ class LocalLyricsStore:
             if unit_timing_only:
                 cached = self._resolved_cache.get(cache_key)
                 path = self._resolved_local_paths.get(cache_key)
-                if cached is None or path is None or any(line.units for line in cached.timed_lyrics):
+                if cached is None or path is None or has_sufficient_word_timing(cached.timed_lyrics):
                     return False
                 # This is a generated online result, never a hand-authored
                 # local lyric. A source-root match takes precedence and is
@@ -351,7 +373,7 @@ class LocalLyricsStore:
                 prefix = handle.read(1024)
         except (OSError, UnicodeError):
             return False
-        return bool(re.search(r"^\[by\s*:\s*(?:netease|qq|lrclib)\s*\]$", prefix, re.I | re.M))
+        return bool(re.search(r"^\[by\s*:\s*(?:netease(?:-account)?|qq(?:-account)?|lrclib|amll)(?::[^\]\n]*)?\s*\]$", prefix, re.I | re.M))
 
     def is_lookup_pending(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0) -> bool:
         cache_key = self._cache_key(title, artist, album_title, duration_seconds)
@@ -376,17 +398,17 @@ class LocalLyricsStore:
 
         match = self._resolve_online(title, artist, album_title, duration_seconds)
         if match.timed_lyrics or match.lyrics:
-            self._persist_match(title, artist, album_title, match, generation=generation)
             if not self._store_cache(cache_key, match, generation=generation):
                 return LyricsMatch((), (), "")
+            self._persist_match(title, artist, album_title, match, generation=generation, duration_seconds=duration_seconds)
         return match
 
     def _read_local(self, title: str, artist: str) -> tuple[tuple[TimedLyricLine, ...], str]:
         match, source = self._read_local_match(title, artist)
         return match.timed_lyrics, source
 
-    def _read_local_match(self, title: str, artist: str) -> tuple[LyricsMatch, str]:
-        miss_key = self._local_lookup_key(title, artist)
+    def _read_local_match(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0) -> tuple[LyricsMatch, str]:
+        miss_key = f"{self._local_lookup_key(title, artist)}\0{self._normalize_text(album_title)}\0{self._recording_duration(duration_seconds)}"
         roots_signature = self._local_roots_signature()
         with self._cache_lock:
             cached_signature = self._local_miss_cache.get(miss_key)
@@ -394,6 +416,10 @@ class LocalLyricsStore:
                 self._local_miss_cache.move_to_end(miss_key)
                 return LyricsMatch((), ()), ""
         for path in self._candidate_paths(title, artist):
+            if self._is_generated_online_cache(path) and not self._generated_recording_matches(
+                path, title, artist, album_title, duration_seconds,
+            ):
+                continue
             match = self._read_lrc_match(path)
             if match.timed_lyrics:
                 self._clear_local_miss(miss_key)
@@ -495,7 +521,9 @@ class LocalLyricsStore:
 
     def _clear_local_miss(self, key: str):
         with self._cache_lock:
-            self._local_miss_cache.pop(key, None)
+            for candidate in tuple(self._local_miss_cache):
+                if candidate == key or candidate.startswith(key + "\0"):
+                    self._local_miss_cache.pop(candidate, None)
 
     def _lyric_file_paths(self, directory: Path) -> tuple[Path, ...]:
         directory = Path(directory)
@@ -625,8 +653,62 @@ class LocalLyricsStore:
         return value
 
     def _cache_key(self, title: str, artist: str, album_title: str, duration_seconds: float) -> str:
-        raw = f"{title}\0{artist}\0{self._cache_preference_key()}"
-        return raw.casefold()
+        identity = f"{title}\0{artist}".casefold()
+        requested = (self._normalize_text(album_title), self._recording_duration(duration_seconds))
+        with self._cache_lock:
+            for context, metadata in tuple(self._recording_contexts.items()):
+                if context != identity and not context.startswith(identity + "\0recording:"):
+                    continue
+                if self._recording_metadata_compatible(metadata, requested):
+                    refining = any(not known and supplied for known, supplied in zip(metadata, requested))
+                    occupied = any(key.rpartition("\0")[0] == context for key in (
+                        *self._resolved_cache, *self._pending_keys, *self._enrich_pending_keys,
+                        *self._missed_at, *self._enrich_attempted_at, *self._trusted_platform_ids,
+                    ))
+                    if refining and occupied:
+                        # An unknown-recording request/result cannot become
+                        # proof of subsequently supplied recording metadata.
+                        continue
+                    self._recording_contexts[context] = (metadata[0] or requested[0], metadata[1] or requested[1])
+                    self._recording_contexts.move_to_end(context)
+                    return f"{context}\0{self._cache_preference_key()}".casefold()
+            context = identity
+            if context in self._recording_contexts:
+                suffix = hashlib.sha256(repr(requested).encode("utf-8")).hexdigest()[:20]
+                context = f"{identity}\0recording:{suffix}"
+            self._recording_contexts[context] = requested
+            self._prune_recording_contexts()
+            return f"{context}\0{self._cache_preference_key()}".casefold()
+
+    @staticmethod
+    def _recording_duration(value: float) -> float:
+        try:
+            number = float(value)
+            return number if math.isfinite(number) and number > 0.0 else 0.0
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    @staticmethod
+    def _recording_metadata_compatible(first: tuple[str, float], second: tuple[str, float]) -> bool:
+        if first[0] and second[0] and first[0] != second[0]:
+            return False
+        return not (first[1] and second[1] and abs(first[1] - second[1]) > max(3.0, 0.02 * min(first[1], second[1])))
+
+    def _prune_recording_contexts(self):
+        # Never recycle a context while an old request can still publish to
+        # it. Completed working sets and negative/ID caches remain bounded.
+        for context in tuple(self._recording_contexts):
+            if len(self._recording_contexts) <= int(self.RECORDING_CONTEXT_LIMIT):
+                break
+            prefix = context + "\0"
+            if any(key.startswith(prefix) for key in self._pending_keys | self._enrich_pending_keys):
+                continue
+            self._recording_contexts.pop(context, None)
+            for cache in (self._resolved_cache, self._resolved_local_paths, self._missed_at,
+                          self._enrich_attempted_at, self._enrich_retry_seconds, self._trusted_platform_ids):
+                for key in tuple(cache):
+                    if key.rpartition("\0")[0] == context:
+                        cache.pop(key, None)
 
     def _setting_value(self, key: str, default=None):
         getter = getattr(self, "settings_getter", None)
@@ -687,6 +769,17 @@ class LocalLyricsStore:
                         self._resolved_local_paths[key] = manual_path
                         self._missed_at.pop(key, None)
                     return False
+            if match.verified_identity is not None:
+                context = key.rpartition("\0")[0]
+                source_id, song_id, title, artist, album, duration = match.verified_identity
+                metadata = (self._normalize_text(album), self._recording_duration(duration))
+                requested = self._recording_contexts.get(context, ("", 0.0))
+                requested_name = context.split("\0")[:2]
+                if (len(requested_name) != 2 or not self._candidate_identity_matches(
+                        requested_name[0], requested_name[1], title, artist)
+                        or not self._recording_metadata_compatible(requested, metadata)):
+                    return False
+                self._recording_contexts[context] = (requested[0] or metadata[0], requested[1] or metadata[1])
             self._resolved_cache[key] = match
             self._resolved_cache.move_to_end(key)
             self._resolved_local_paths.pop(key, None)
@@ -755,7 +848,7 @@ class LocalLyricsStore:
                 cache_key, candidate, protect_manual=True, manual_names=self._candidate_names(title, artist),
                 generation=generation,
             ):
-                self._persist_match(title, artist, album_title, candidate, generation=generation)
+                self._persist_match(title, artist, album_title, candidate, generation=generation, duration_seconds=duration_seconds)
                 fallback_published = True
                 fallback_match = candidate
 
@@ -775,6 +868,7 @@ class LocalLyricsStore:
                     if not fallback_published or match != fallback_match:
                         self._persist_match(
                             title, artist, album_title, match, overwrite=fallback_published, generation=generation,
+                            duration_seconds=duration_seconds,
                         )
             else:
                 # A completed lookup with no result is final for this cache key.
@@ -787,6 +881,7 @@ class LocalLyricsStore:
             with self._cache_lock:
                 if generation == self._cache_generation:
                     self._pending_keys.discard(cache_key)
+                    self._prune_recording_contexts()
 
     def _enrich_background(
         self, cache_key: str, title: str, artist: str, album_title: str, duration_seconds: float,
@@ -802,27 +897,47 @@ class LocalLyricsStore:
         try:
             with self._cache_lock:
                 previous = self._resolved_cache.get(cache_key)
-            match = self._resolve_online(title, artist, album_title, duration_seconds)
+            observed = []
+            match = self._resolve_online(title, artist, album_title, duration_seconds, observed.append)
             if previous is not None:
-                if any(line.timing_kind == "unit" and genuinely_timed_unit_row(line.units)
-                       for line in previous.timed_lyrics):
+                if previous.verified_identity is None:
+                    # A disk cache is not identity evidence. Rebind it only
+                    # when this lookup independently validated an official
+                    # original whose retained raw payload and row clock are
+                    # unchanged; otherwise the strict old association wins.
+                    old_fields = dict(previous.raw_sources)
+                    for official in observed:
+                        fields = dict(official.raw_sources)
+                        originals = ("raw_netease", "raw_yrc", "raw_qrc", "raw_lrc", "raw_ttml")
+                        common = [key for key in originals if old_fields.get(key) and fields.get(key)]
+                        if (official.verified_identity is not None and common
+                                and all(old_fields[key] == fields[key] for key in common)
+                                and self._compatible_source_rows(previous, official)):
+                            previous = replace(previous, verified_identity=official.verified_identity)
+                            break
+                if not self.is_compatible_lyric_upgrade(previous, match):
                     # A translated line-only source may supplement the known
                     # original, but cannot replace its measured word clock.
                     match = self._retain_matching_subrows(previous, match)
                 else:
                     match = self._retain_matching_subrows(match, previous)
             secondary_found = self.has_secondary_companion(match.timed_lyrics)
-            has_actual_units = any(
-                line.timing_kind == "unit" and genuinely_timed_unit_row(line.units)
-                for line in match.timed_lyrics
-            )
+            manual_names = self._candidate_names(title, artist)
+            if previous is not None and self._manual_lyric_path(manual_names) is not None:
+                # Even a rejected online candidate must observe an explicit
+                # file authored while its request was in flight.
+                self._store_cache(cache_key, previous, protect_manual=True,
+                    manual_names=manual_names, generation=generation)
+                return
+            has_actual_units = bool(lyric_timing_quality(match.timed_lyrics).genuine_word_tokens)
             has_multiline = match.timed_lyrics and self._has_multiline_timed_lyrics(match.timed_lyrics)
             if has_actual_units or (not unit_timing_only and has_multiline):
                 if self._store_cache(
                     cache_key, match, protect_manual=True, manual_names=self._candidate_names(title, artist),
                     generation=generation,
                 ):
-                    self._persist_match(title, artist, album_title, match, overwrite=True, generation=generation)
+                    self._persist_match(title, artist, album_title, match, overwrite=True, generation=generation,
+                        duration_seconds=duration_seconds)
         finally:
             with self._cache_lock:
                 if generation == self._cache_generation and cache_key in self._enrich_attempted_at:
@@ -832,6 +947,7 @@ class LocalLyricsStore:
                     )
                 if generation == self._cache_generation:
                     self._enrich_pending_keys.discard(cache_key)
+                    self._prune_recording_contexts()
 
     def _resolve_online(
         self,
@@ -841,7 +957,7 @@ class LocalLyricsStore:
         duration_seconds: float,
         on_line_fallback: Callable[[LyricsMatch], None] | None = None,
     ) -> LyricsMatch:
-        resolvers = self._ordered_online_resolvers()
+        resolvers = self._ordered_online_resolvers() + [("amll", self._resolve_amll)]
         line_fallback: LyricsMatch | None = None
         unit_match: LyricsMatch | None = None
         wants_secondary = self._dual_line_lyrics_enabled() and self._dual_line_secondary_source() != "none"
@@ -860,15 +976,23 @@ class LocalLyricsStore:
                 # A failed provider must not discard an earlier usable match.
                 continue
             if match is not None:
-                if any(
-                    line.timing_kind == "unit" and genuinely_timed_unit_row(line.units)
-                    for line in match.timed_lyrics
-                ):
+                if source_name == "amll" and line_fallback is not None and not self.is_compatible_lyric_upgrade(line_fallback, match):
+                    continue
+                if lyric_timing_quality(match.timed_lyrics).genuine_word_tokens:
                     if unit_match is None:
+                        if line_fallback is not None and not self.is_compatible_lyric_upgrade(line_fallback, match):
+                            # A first word-timed source is still an upgrade
+                            # over the visible original, not a fresh lookup.
+                            # A short excerpt cannot claim whole-song 100%
+                            # coverage by discarding the retained verses.
+                            continue
                         unit_match = self._retain_matching_subrows(match, line_fallback) if line_fallback is not None else match
+                    elif self.is_compatible_lyric_upgrade(unit_match, match):
+                        unit_match = self._retain_matching_subrows(match, unit_match)
                     else:
                         unit_match = self._retain_matching_subrows(unit_match, match)
-                    if not wants_secondary or self.has_secondary_companion(unit_match.timed_lyrics):
+                    if (has_sufficient_word_timing(unit_match.timed_lyrics)
+                            and (not wants_secondary or self.has_secondary_companion(unit_match.timed_lyrics))):
                         self._record_source_hit(str(unit_match.source or source_name))
                         return unit_match
                     # Publish the usable original while this same background
@@ -877,7 +1001,8 @@ class LocalLyricsStore:
                     publish(unit_match)
                 elif unit_match is not None:
                     unit_match = self._retain_matching_subrows(unit_match, match)
-                    if self.has_secondary_companion(unit_match.timed_lyrics):
+                    if (has_sufficient_word_timing(unit_match.timed_lyrics)
+                            and self.has_secondary_companion(unit_match.timed_lyrics)):
                         self._record_source_hit(unit_match.source)
                         return unit_match
                 elif line_fallback is None and (match.timed_lyrics or match.lyrics):
@@ -963,14 +1088,14 @@ class LocalLyricsStore:
                 break
         for raw_line in raw_lines:
             line = raw_line.strip()
-            if not line or METADATA_RE.match(line):
+            if not line or METADATA_RE.match(line) or is_structured_lyric_metadata(line):
                 continue
             yrc_match = YRC_LINE_RE.match(raw_line.strip())
             if yrc_match:
                 timestamp = max(0.0, int(yrc_match.group(1)) / 1000.0 + offset_seconds)
                 raw_content = yrc_match.group(3)
                 content = self._clean_timed_lyric_content(raw_content)
-                if content:
+                if content and not is_structured_lyric_metadata(content):
                     line_start_ms = int(yrc_match.group(1))
                     line_duration_ms = int(yrc_match.group(2))
                     if KRC_UNIT_RE.search(raw_content):
@@ -993,6 +1118,10 @@ class LocalLyricsStore:
                 content_start = match.end()
             raw_content = raw_line[content_start:]
             content = self._clean_timed_lyric_content(raw_content)
+            # Old generated caches may already wrap a structured header in
+            # an LRC timestamp; it remains metadata after removing that tag.
+            if is_structured_lyric_metadata(content):
+                continue
             if leading_times and content:
                 for match in leading_times:
                     timestamp = self._lrc_time_seconds(match, offset_seconds)
@@ -1199,19 +1328,129 @@ class LocalLyricsStore:
         return tuple(TimedLyricLine(index * step_seconds, line, timing_kind="synthetic") for index, line in enumerate(lines))
 
     def parse_online_lyrics(self, *, raw_lrc: str = "", raw_yrc: str = "", translation: str = "",
-                            romanization: str = "", source: str = "") -> LyricsMatch | None:
+                            romanization: str = "", source: str = "", raw_qrc: str = "",
+                            raw_ttml: str = "", raw_netease: str = "") -> LyricsMatch | None:
         """Parse source-owned lyrics through the same timing/secondary pipeline.
 
         Malformed word timing falls back to LRC; genuine YRC units retain their
         exact timestamps. No independent online lookup or disk write is started.
         """
-        payload = {"lrc": {"lyric": raw_lrc}, "yrc": {"lyric": raw_yrc},
+        raw_sources = tuple((key, value) for key, value in (
+            ("source", source), ("raw_lrc", raw_lrc), ("raw_yrc", raw_yrc), ("raw_qrc", raw_qrc),
+            ("raw_ttml", raw_ttml), ("translation", translation), ("romanization", romanization),
+            ("raw_netease", raw_netease),
+        ) if isinstance(value, str) and value)
+        if raw_netease and len(raw_netease) <= 6 * 1024 * 1024:
+            try:
+                payload = json.loads(raw_netease)
+            except (ValueError, RecursionError):
+                payload = None
+            if isinstance(payload, dict):
+                text = self._extract_netease_lyric_text(payload,
+                    secondary_source=self._dual_line_secondary_source(),
+                    prefer_secondary=self._dual_line_lyrics_enabled(),
+                    prefer_original=not self._dual_line_lyrics_enabled())
+                match = self._lyrics_match_from_text(text, source)
+                if match is not None:
+                    return replace(match, raw_sources=raw_sources)
+        document = parse_ttml(raw_ttml) if raw_ttml else None
+        if document is not None:
+            selected = (document.romanizations if self._dual_line_secondary_source() == "transliteration"
+                        else document.translations)
+            groups = [document.originals]
+            if self._dual_line_lyrics_enabled() and self._dual_line_secondary_source() != "none" and selected:
+                groups.append(selected)
+            timed = self._merge_timed_lyric_sources(groups, companions_only=True)
+            match = self._finalize_lyrics_match(LyricsMatch(timed, tuple(row.text for row in timed), source))
+            return replace(match, raw_sources=raw_sources)
+        payload = {"lrc": {"lyric": raw_lrc}, "yrc": {"lyric": raw_yrc or raw_qrc},
                    "tlyric": {"lyric": translation}, "romalrc": {"lyric": romanization}}
         text = self._extract_netease_lyric_text(payload,
             secondary_source=self._dual_line_secondary_source(),
             prefer_secondary=self._dual_line_lyrics_enabled(),
             prefer_original=not self._dual_line_lyrics_enabled())
-        return self._lyrics_match_from_text(text, source)
+        match = self._lyrics_match_from_text(text, source)
+        return replace(match, raw_sources=raw_sources) if match is not None else None
+
+    def reparse_source_match(self, match: LyricsMatch) -> LyricsMatch:
+        fields = dict(match.raw_sources)
+        if fields:
+            allowed = {key: value for key, value in fields.items() if key in {
+                "source", "raw_lrc", "raw_yrc", "raw_qrc", "raw_ttml", "translation", "romanization", "raw_netease",
+            }}
+            restored = self.parse_online_lyrics(**allowed) or match
+            encoded = fields.get("compatible_previous", "")
+            previous = self._read_compatible_previous(encoded) if encoded else None
+            if (previous is not None and self._dual_line_lyrics_enabled()
+                    and self._dual_line_secondary_source() != "none"
+                    and self._compatible_source_rows(restored, previous)):
+                restored = self._retain_matching_subrows(restored, previous)
+            # Keep dormant raw companions while the display toggle is off.
+            return replace(restored, raw_sources=match.raw_sources, verified_identity=match.verified_identity)
+        return self._finalize_lyrics_match(match)
+
+    def _read_compatible_previous(self, encoded: str) -> LyricsMatch | None:
+        """One bounded source layer; never recurse through companion history."""
+        if not isinstance(encoded, str) or len(encoded.encode("utf-8")) > 2 * 1024 * 1024:
+            return None
+        try:
+            value = json.loads(encoded)
+            if not isinstance(value, dict) or value.get("version") != 1:
+                return None
+            fields = value.get("fields")
+            allowed = {"source", "raw_lrc", "raw_yrc", "raw_qrc", "raw_ttml", "translation", "romanization", "raw_netease"}
+            if isinstance(fields, dict) and fields and set(fields) <= allowed and all(isinstance(item, str) for item in fields.values()):
+                parsed = self.parse_online_lyrics(**fields)
+                return parsed if parsed is not None and len(parsed.timed_lyrics) <= 2000 else None
+            # Legacy line-only inputs lack raw payloads. Their measured starts
+            # can recover attached text, but never create unit timing.
+            rows = value.get("rows")
+            if (not isinstance(rows, list) or not 0 < len(rows) <= 2000 or not isinstance(value.get("source"), str)
+                    or value.get("secondary_mode") != self._dual_line_secondary_source()):
+                return None
+            timed = []
+            for row in rows:
+                if not isinstance(row, list) or len(row) != 2 or not isinstance(row[1], str):
+                    return None
+                start = float(row[0])
+                if not math.isfinite(start) or start < 0:
+                    return None
+                timed.append(TimedLyricLine(start, row[1]))
+            return LyricsMatch(tuple(timed), tuple(row.text for row in timed), value["source"])
+        except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
+            return None
+
+    def _companion_source(self, previous: LyricsMatch) -> LyricsMatch:
+        """Flatten an upgrade's imported companion to its real source.
+
+        A previous LRC can itself have acquired text from another provider.
+        Saving only its original LRC fields would silently lose that text on
+        the next unit upgrade. Inspect one existing layer without recursion.
+        """
+        fields = dict(previous.raw_sources)
+        encoded = fields.pop("compatible_previous", "")
+        if not encoded or not fields:
+            return previous
+        own = self.parse_online_lyrics(**fields)
+        if own is None or len(own.timed_lyrics) > 2000 or self.has_secondary_companion(own.timed_lyrics):
+            return previous
+        imported = self._read_compatible_previous(encoded)
+        if (imported is not None and self.has_secondary_companion(imported.timed_lyrics)
+                and self._compatible_source_rows(previous, imported)):
+            return imported
+        return own
+
+    def _serialize_compatible_previous(self, previous: LyricsMatch) -> str:
+        previous = self._companion_source(previous)
+        if len(previous.timed_lyrics) > 2000:
+            return ""
+        fields = {key: value for key, value in previous.raw_sources if key != "compatible_previous"}
+        value = {"version": 1, "fields": fields} if fields else {
+            "version": 1, "source": previous.source, "secondary_mode": self._dual_line_secondary_source(),
+            "rows": [[row.time_seconds, row.text] for row in previous.timed_lyrics],
+        }
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return encoded if len(encoded.encode("utf-8")) <= 2 * 1024 * 1024 else ""
 
     def _lyrics_match_from_text(self, text: str | tuple[str, ...], source: str) -> LyricsMatch | None:
         if isinstance(text, tuple):
@@ -1280,7 +1519,7 @@ class LocalLyricsStore:
         alternatives = originals if has_cantonese_evidence(
             "\n".join(row.text for row in originals), hint,
         ) else ()
-        match = LyricsMatch(timed, tuple(line.text for line in timed), match.source, alternatives)
+        match = replace(match, timed_lyrics=timed, lyrics=tuple(line.text for line in timed), secondary_source_rows=alternatives)
         mode = self._lyric_chinese_conversion_mode()
         if mode == "off":
             return match
@@ -1289,7 +1528,7 @@ class LocalLyricsStore:
             for line in match.timed_lyrics
         )
         plain = tuple(self._convert_chinese_text(line, mode) for line in match.lyrics)
-        return LyricsMatch(timed, plain, match.source, match.secondary_source_rows)
+        return replace(match, timed_lyrics=timed, lyrics=plain)
 
     def _convert_timed_line(self, line: TimedLyricLine, mode: str) -> TimedLyricLine:
         text = self._convert_chinese_text(str(line.text or ""), mode)
@@ -1396,6 +1635,9 @@ class LocalLyricsStore:
 
     def _retain_matching_subrows(self, match: LyricsMatch, previous: LyricsMatch) -> LyricsMatch:
         """Keep known companions when the same original gains unit timing."""
+        previous = self._companion_source(previous)
+        if match.source != previous.source and not self._compatible_source_rows(match, previous):
+            return match
         retain_alternatives = bool(match.secondary_source_rows or previous.secondary_source_rows)
         # Generated LRC reloads represent a composite as separate source rows
         # at exactly the same timestamp. Reconstruct only the local association
@@ -1425,11 +1667,17 @@ class LocalLyricsStore:
         if not changed and not (retain_alternatives and pairs):
             return match
         result = tuple(timed)
-        retained = LyricsMatch(result, tuple(line.text for line in result), match.source,
-                               result if retain_alternatives else ())
+        raw_sources = match.raw_sources
+        if changed and raw_sources:
+            encoded = self._serialize_compatible_previous(previous)
+            if encoded:
+                raw_sources = tuple((key, value) for key, value in raw_sources if key != "compatible_previous") + (("compatible_previous", encoded),)
+        retained = replace(match, timed_lyrics=result, lyrics=tuple(line.text for line in result),
+                           secondary_source_rows=result if retain_alternatives else (), raw_sources=raw_sources)
         return self._finalize_lyrics_match(retained) if retain_alternatives else retained
 
-    def _merge_timed_lyric_sources(self, sources: list[tuple[TimedLyricLine, ...]]) -> tuple[TimedLyricLine, ...]:
+    def _merge_timed_lyric_sources(self, sources: list[tuple[TimedLyricLine, ...]], *,
+                                 companions_only: bool = False) -> tuple[TimedLyricLine, ...]:
         tracks: list[list[TimedLyricLine]] = []
         for source in sources:
             track = []
@@ -1468,7 +1716,7 @@ class LocalLyricsStore:
                 matches[anchor_index].append(track[translation_index])
                 paired_indices.add(translation_index)
             for index, item in enumerate(track):
-                if index not in paired_indices and item.units and item.timing_kind == "unit":
+                if not companions_only and index not in paired_indices and item.units and item.timing_kind == "unit":
                     # A richer original track can contain a real line absent
                     # from source one; unpaired translations remain omitted.
                     unmatched_timed_originals.append(item)
@@ -1480,9 +1728,13 @@ class LocalLyricsStore:
                 duplicate = next((index for index, part in enumerate(unique) if part.text == companion.text), None)
                 if duplicate is None:
                     unique.append(companion)
-                elif len(companion.units) > len(unique[duplicate].units):
+                elif not companions_only and len(companion.units) > len(unique[duplicate].units):
                     unique[duplicate] = companion
-            primary = next((part for part in unique if part.units and part.timing_kind == "unit"), unique[0])
+            # TTML roles identify the original independently of timing detail.
+            # A timed translation cannot replace a line-timed original or
+            # introduce an unmatched original vocal into the source timeline.
+            primary = anchor if companions_only else next(
+                (part for part in unique if part.units and part.timing_kind == "unit"), unique[0])
             ordered = [primary, *(part for part in unique if part is not primary)]
             merged.append(TimedLyricLine(
                 anchor.time_seconds,
@@ -1510,6 +1762,27 @@ class LocalLyricsStore:
         except OSError:
             return LyricsMatch((), ())
 
+        if text.startswith(self.GENERATED_CACHE_MARKER + "\n"):
+            for header in text.splitlines()[:10]:
+                if not header.startswith("[gluspot_raw:") or not header.endswith("]"):
+                    continue
+                encoded = header[len("[gluspot_raw:"):-1]
+                if len(encoded) > 8 * 1024 * 1024:
+                    break
+                try:
+                    envelope = json.loads(base64.b64decode(encoded, validate=True).decode("utf-8"))
+                    fields = envelope.get("fields") if isinstance(envelope, dict) and envelope.get("version") == 1 else None
+                    allowed = {"source", "raw_lrc", "raw_yrc", "raw_qrc", "raw_ttml", "translation", "romanization", "raw_netease", "compatible_previous"}
+                    if (isinstance(fields, dict) and fields and set(fields) <= allowed
+                            and all(isinstance(value, str) and len(value) <= (6 if key == "raw_netease" else 2) * 1024 * 1024
+                                    for key, value in fields.items())):
+                        restored = self.reparse_source_match(LyricsMatch((), (), str(fields.get("source") or ""),
+                            raw_sources=tuple(fields.items())))
+                        if restored.timed_lyrics:
+                            return restored
+                except (ValueError, UnicodeError, RecursionError):
+                    pass
+                break
         timed, plain = self._parse_lrc_text(text)
         lines = timed or self._synthesize_timed_lyrics(plain, language_hint=text)
         return self._finalize_lyrics_match(
@@ -1518,15 +1791,16 @@ class LocalLyricsStore:
 
     def _persist_match(
         self, title: str, artist: str, album_title: str, match: LyricsMatch, overwrite: bool = False,
-        generation: int | None = None,
+        generation: int | None = None, duration_seconds: float = 0.0,
     ):
         with self._cache_lock:
             if generation is not None and generation != self._cache_generation:
                 return
-            self._persist_match_locked(title, artist, album_title, match, overwrite)
+            self._persist_match_locked(title, artist, album_title, match, overwrite, duration_seconds)
 
     def _persist_match_locked(
         self, title: str, artist: str, album_title: str, match: LyricsMatch, overwrite: bool,
+        duration_seconds: float = 0.0,
     ):
         if not match.lyrics:
             return
@@ -1534,16 +1808,21 @@ class LocalLyricsStore:
         if not candidates:
             return
         path = self.generated_root / f"{candidates[0]}.lrc"
-        if path.exists() and not overwrite:
-            return
-        if path.exists() and overwrite and not self._is_generated_online_cache(path):
+        if path.exists() and not self._is_generated_online_cache(path):
             # A manually authored file can share this name when callers use
             # the same root for generated and local lyrics.
+            return
+        duration_seconds = self._recording_duration(duration_seconds)
+        if not duration_seconds and match.verified_identity is not None:
+            duration_seconds = self._recording_duration(match.verified_identity[5])
+        if path.exists() and not overwrite and self._generated_recording_matches(
+            path, title, artist, album_title, duration_seconds,
+        ):
             return
         temporary = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_text(self._render_lrc(title, artist, album_title, match), encoding="utf-8")
+            temporary.write_text(self._render_lrc(title, artist, album_title, match, duration_seconds), encoding="utf-8")
             os.replace(temporary, path)
         except OSError:
             return
@@ -1597,7 +1876,35 @@ class LocalLyricsStore:
             except OSError:
                 continue
 
-    def _render_lrc(self, title: str, artist: str, album_title: str, match: LyricsMatch) -> str:
+    def _generated_recording_matches(self, path: Path, title: str, artist: str,
+                                     album_title: str, duration_seconds: float) -> bool:
+        """Ordinary request metadata is a cache fence, never verified trust.
+
+        Legacy generated files without the requested album/duration cannot
+        certify a recording. Keep them on disk, but refresh rather than reuse
+        them for a known recording. Explicit local files bypass this check.
+        """
+        try:
+            with path.open("r", encoding="utf-8-sig") as handle:
+                headers = {}
+                for _index in range(10):
+                    line = handle.readline(8 * 1024 * 1024 + 32)
+                    found = re.fullmatch(r"\[(ti|ar|al|length):([^\n]*)\]\s*", line, re.I)
+                    if found:
+                        headers[found[1].casefold()] = found[2].strip()
+        except (OSError, UnicodeError):
+            return False
+        for field, requested in (("ti", title), ("ar", artist)):
+            if requested and self._normalize_text(headers.get(field, "")) != self._normalize_text(requested):
+                return False
+        requested = (self._normalize_text(album_title), self._recording_duration(duration_seconds))
+        cached = (self._normalize_text(headers.get("al", "")), self._recording_duration(headers.get("length", "")))
+        if requested[0] and not cached[0] or requested[1] and not cached[1]:
+            return False
+        return self._recording_metadata_compatible(requested, cached)
+
+    def _render_lrc(self, title: str, artist: str, album_title: str, match: LyricsMatch,
+                    duration_seconds: float = 0.0) -> str:
         lines: list[str] = [self.GENERATED_CACHE_MARKER]
         if artist:
             lines.append(f"[ar:{artist}]")
@@ -1607,6 +1914,13 @@ class LocalLyricsStore:
             lines.append(f"[al:{album_title}]")
         if match.source:
             lines.append(f"[by:{match.source}]")
+        if self._recording_duration(duration_seconds):
+            lines.append(f"[length:{float(duration_seconds):.6f}]")
+        if match.raw_sources:
+            envelope = json.dumps({"version": 1, "fields": dict(match.raw_sources)}, ensure_ascii=False, separators=(",", ":"))
+            encoded = base64.b64encode(envelope.encode("utf-8")).decode("ascii")
+            if len(encoded) <= 8 * 1024 * 1024:
+                lines.append(f"[gluspot_raw:{encoded}]")
         if match.secondary_source_rows:
             lines.append("[language:yue]")
         timed = match.secondary_source_rows or match.timed_lyrics or self._synthesize_timed_lyrics(match.lyrics)
@@ -1681,6 +1995,210 @@ class LocalLyricsStore:
                     return True
         return False
 
+    def is_compatible_lyric_upgrade(self, previous: LyricsMatch | None, candidate: LyricsMatch | None) -> bool:
+        if candidate is None or not lyric_timing_quality(candidate.timed_lyrics).genuine_word_tokens:
+            return False
+        if previous is None or not previous.timed_lyrics:
+            return True
+        if previous.verified_identity is not None and candidate.verified_identity is not None:
+            old_id, new_id = previous.verified_identity, candidate.verified_identity
+            if old_id[2:] != new_id[2:] or (old_id[0] == new_id[0] and old_id[1] != new_id[1]):
+                return False
+        old_quality = lyric_timing_quality(previous.timed_lyrics)
+        new_quality = lyric_timing_quality(candidate.timed_lyrics)
+        if (new_quality.word_coverage <= old_quality.word_coverage + 1e-9
+                or new_quality.genuine_word_tokens < old_quality.genuine_word_tokens * 0.95):
+            return False
+        old_rows, new_rows = self._verified_vocal_rows(previous), self._verified_vocal_rows(candidate)
+        old_vocals = lyric_timing_quality(old_rows).spoken_tokens
+        new_vocals = lyric_timing_quality(new_rows).spoken_tokens
+        if new_vocals < old_vocals * 0.95:
+            return False
+        if all(row.timing_kind == "synthetic" for row in previous.timed_lyrics):
+            # A provisional plain-text clock is not evidence against real
+            # timestamps. Require the same complete ordered vocal text here;
+            # do not relax measured-clock/companion association for LRC.
+            def original_tokens(rows):
+                return tuple(unicodedata.normalize("NFKC", row.text[left:right]).casefold().replace("’", "'")
+                             for row in rows for left, right in _spoken_token_spans(row.text))
+            return bool(old_vocals) and original_tokens(old_rows) == original_tokens(new_rows)
+        if self._compatible_source_rows(previous, candidate):
+            return True
+        if (previous.verified_identity is None
+                or previous.verified_identity != candidate.verified_identity):
+            return False
+        return self._compatible_verified_vocals(previous, candidate)
+
+    def _verified_vocal_rows(self, match: LyricsMatch) -> tuple[TimedLyricLine, ...]:
+        """Read-only original view for full-source matching, without companions.
+
+        Only established explicit credit evidence is excluded. Ordinary colon
+        prose, unknown staff fields, sung parentheses and verified performer
+        labels remain vocals. The raw model and persistent cache are untouched.
+        """
+        identity = match.verified_identity
+        artists = str(identity[3]) if identity is not None else ""
+        aliases = {self._normalize_text(value) for value in re.split(r"\s*[/＆&、+,，]\s*", artists)}
+        aliases.discard("")
+        result = []
+        for row in group_secondary_source_rows(match.timed_lyrics):
+            text = str(row.text or "").split("\n", 1)[0].strip()
+            prefix = re.match(r"^([^:：\n]{1,80})[:：]\s*(\S.*)$", text)
+            if prefix and self._normalize_text(prefix.group(1)) in aliases:
+                text = prefix.group(2)
+            elif is_explicit_lyric_credit(text):
+                continue
+            if text:
+                result.append(replace(row, text=text))
+        return tuple(result)
+
+    def _compatible_verified_vocals(self, previous: LyricsMatch, candidate: LyricsMatch) -> bool:
+        """Accept changed row breaks only within one verified recording.
+
+        Both complete original-token sequences need 95% ordered coverage.
+        Exact full-row anchors must cover half of each source, span half the
+        vocal timeline and retain measured starts within 750 ms. Shared row
+        starts in the token alignment receive the same clock check. A few
+        matching chorus lines cannot authorize an unrelated verse/version.
+        This is deliberately separate from strict companion-row association.
+        """
+        old, new = self._verified_vocal_rows(previous), self._verified_vocal_rows(candidate)
+        def tokens(rows):
+            values, starts = [], {}
+            for index, row in enumerate(rows):
+                spans = _spoken_token_spans(row.text)
+                if spans:
+                    starts[len(values)] = (index, row.time_seconds)
+                values.extend(unicodedata.normalize("NFKC", row.text[left:right]).casefold().replace("’", "'")
+                              for left, right in spans)
+            return values, starts
+        old_tokens, old_starts = tokens(old)
+        new_tokens, new_starts = tokens(new)
+        if not old_tokens or not new_tokens or max(len(old_tokens), len(new_tokens)) > 10000:
+            return False
+        blocks = SequenceMatcher(None, old_tokens, new_tokens, autojunk=False).get_matching_blocks()
+        matched = sum(block.size for block in blocks)
+        if matched < 0.95 * len(old_tokens) or matched < 0.95 * len(new_tokens):
+            return False
+        pairs = self._ordered_lyric_row_pairs(new, old, same_original_text=True)
+        if len(pairs) < min(3, len(old), len(new)) or any(
+            abs(new[i].time_seconds - old[j].time_seconds) > 0.75 for i, j in pairs
+        ):
+            return False
+        old_anchored = sum(len(_spoken_token_spans(old[j].text)) for _i, j in pairs)
+        new_anchored = sum(len(_spoken_token_spans(new[i].text)) for i, _j in pairs)
+        if old_anchored < 0.5 * len(old_tokens) or new_anchored < 0.5 * len(new_tokens):
+            return False
+        for rows, indices in ((old, [j for _i, j in pairs]), (new, [i for i, _j in pairs])):
+            extent = rows[-1].time_seconds - rows[0].time_seconds
+            if extent > 0 and rows[max(indices)].time_seconds - rows[min(indices)].time_seconds < extent * 0.5:
+                return False
+        for block in blocks:
+            for offset in range(block.size):
+                old_start, new_start = old_starts.get(block.a + offset), new_starts.get(block.b + offset)
+                if old_start is not None and new_start is not None and abs(old_start[1] - new_start[1]) > 0.75:
+                    return False
+        return True
+
+    def _compatible_source_rows(self, previous: LyricsMatch, candidate: LyricsMatch) -> bool:
+        old = group_secondary_source_rows(previous.timed_lyrics)
+        new = group_secondary_source_rows(candidate.timed_lyrics)
+        pairs = self._ordered_lyric_row_pairs(new, old, same_original_text=True)
+        if not pairs or len(pairs) < 0.8 * max(len(old), len(new)):
+            return False
+        return all(abs(new[i].time_seconds - old[j].time_seconds) <= 0.75 for i, j in pairs)
+
+    def _remember_platform_id(self, title, artist, album_title, duration_seconds, source_id, song_id):
+        key = self._cache_key(title, artist, album_title, duration_seconds)
+        pair = (str(source_id), str(song_id))
+        with self._cache_lock:
+            values = self._trusted_platform_ids.get(key, ())
+            self._trusted_platform_ids[key] = tuple(dict.fromkeys((*values, pair)))[:3]
+            self._trusted_platform_ids.move_to_end(key)
+            while len(self._trusted_platform_ids) > self.RESOLVED_CACHE_LIMIT:
+                self._trusted_platform_ids.popitem(last=False)
+
+    def _resolve_amll(self, title, artist, album_title, duration_seconds):
+        key = self._cache_key(title, artist, album_title, duration_seconds)
+        with self._cache_lock:
+            identities = self._trusted_platform_ids.get(key, ())
+        for source_id, song_id in identities:
+            match = self.resolve_trusted_lyrics(source_id, song_id, title, artist, album_title, duration_seconds)
+            if match is not None:
+                return match
+        return None
+
+    def resolve_trusted_lyrics(self, source_id: str, song_id: str, title: str, artist: str,
+                               album_title: str = "", duration_seconds: float = 0.0) -> LyricsMatch | None:
+        """One bounded AMLL ID lookup, after the caller verified platform identity.
+
+        The DB must echo that exact platform ID and compatible title, artist
+        and version. Document duration only bounds its timeline; the final
+        vocal is never treated as a recording's full duration.
+        """
+        platform_key = {"netease": "ncmMusicId", "qq": "qqMusicId"}.get(source_id)
+        if (platform_key is None or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(song_id))
+                or source_id == "netease" and not re.fullmatch(r"[1-9][0-9]{0,19}", str(song_id))
+                or not self._normalize_text(title) or not self._normalize_text(artist)):
+            return None
+        key = (source_id, str(song_id), title, artist, album_title, float(duration_seconds))
+        with self._cache_lock:
+            generation = self._cache_generation
+            cached = self._trusted_results.get(key)
+            if cached is not None and time.monotonic() - cached[0] < (3600.0 if cached[1] else 60.0):
+                self._trusted_results.move_to_end(key)
+                return self.reparse_source_match(cached[1]) if cached[1] is not None else None
+        body = self._fetch_public_json("https://api.amll.dev/v1/lyrics/get?" + urlencode({platform_key: str(song_id)}))
+        data = body.get("data") if isinstance(body, dict) and body.get("status") == 200 else None
+        match = None
+        if isinstance(data, dict) and data.get("format") == "ttml":
+            ids = data.get("ncmMusicIds" if source_id == "netease" else "qqMusicIds")
+            names, artists = data.get("musicNames"), data.get("artistNames")
+            if (isinstance(ids, list) and str(song_id) in ids and isinstance(names, list)
+                    and isinstance(artists, list) and all(isinstance(value, str) for value in names + artists)
+                    and any(self._candidate_identity_matches(title, artist, name, supplied)
+                            for name in names for supplied in [" / ".join(artists), *artists])):
+                document = parse_ttml(data.get("lyrics"))
+                if document is not None:
+                    latest = max((unit.end_seconds or unit.start_seconds for row in document.originals for unit in row.units), default=0.0)
+                    latest = max(latest, max(row.time_seconds for row in document.originals))
+                    explicit_track_duration = data.get("duration")
+                    try:
+                        explicit_track_duration = float(explicit_track_duration or 0.0)
+                    except (ValueError, TypeError, OverflowError):
+                        explicit_track_duration = 0.0
+                    tolerance = max(3.0, 0.02 * duration_seconds)
+                    if ((not duration_seconds or latest <= duration_seconds + tolerance)
+                            and (not explicit_track_duration or not duration_seconds
+                                 or abs(explicit_track_duration - duration_seconds) <= tolerance)):
+                        match = self.parse_online_lyrics(raw_ttml=document.raw_text,
+                            source=f"amll:{source_id}:{song_id}")
+                        if match is not None:
+                            match = replace(match, verified_identity=(source_id, str(song_id), title,
+                                artist, album_title, float(duration_seconds)))
+        with self._cache_lock:
+            if generation != self._cache_generation:
+                return None
+            self._trusted_results[key] = (time.monotonic(), match)
+            self._trusted_results.move_to_end(key)
+            while len(self._trusted_results) > self.RESOLVED_CACHE_LIMIT:
+                self._trusted_results.popitem(last=False)
+        return match
+
+    def _fetch_public_json(self, url: str, body: dict | None = None) -> Any | None:
+        request = Request(url, data=json.dumps(body).encode("utf-8") if body is not None else None,
+            headers={"User-Agent": "GluSpot/6.413 (lyrics)", "Content-Type": "application/json",
+                     "Referer": "https://y.qq.com/", "Cookie": "tmeLoginType=-1;"} if body is not None
+            else {"User-Agent": "GluSpot/6.413 (lyrics)", "Accept": "application/json"})
+        try:
+            with urlopen(request, timeout=min(3.0, self.request_timeout)) as response:
+                data = response.read(2 * 1024 * 1024 + 1)
+                if len(data) > 2 * 1024 * 1024:
+                    return None
+            return json.loads(data.decode("utf-8"))
+        except (HTTPError, URLError, OSError, TimeoutError, ValueError, RecursionError):
+            return None
+
     def _resolve_netease(self, title: str, artist: str, album_title: str, duration_seconds: float) -> LyricsMatch | None:
         query = self._search_query(title, artist, album_title)
         if not query:
@@ -1700,6 +2218,7 @@ class LocalLyricsStore:
         song_id = candidate.get("id") or candidate.get("song_id") or candidate.get("songid")
         if song_id is None:
             return None
+        self._remember_platform_id(title, artist, album_title, duration_seconds, "netease", song_id)
         lyric_payload = self._fetch_json(
             "https://music.163.com/api/song/lyric",
             # Version 1 asks for changes relative to an already-held version.
@@ -1716,11 +2235,23 @@ class LocalLyricsStore:
             prefer_secondary=self._dual_line_lyrics_enabled(),
         )
         match = self._lyrics_match_from_text(lyric_text, "netease")
+        if match is not None and isinstance(lyric_payload, dict):
+            # Keep both LRC/YRC companion variants and their original clocks.
+            # Choosing one here would change reloaded text when preferences
+            # switch, or remap ytlrc against the unrelated LRC clock.
+            raw = {key: lyric_payload[key] for key in (
+                "lrc", "yrc", "klyric", "tlyric", "ytlrc", "romalrc", "yromalrc", "romaLrc", "romalyrics", "language", "lyric")
+                if key in lyric_payload}
+            match = replace(match, raw_sources=(("source", "netease"),
+                ("raw_netease", json.dumps(raw, ensure_ascii=False, separators=(",", ":")))))
         if match is not None and self._dual_line_lyrics_enabled():
             hint = title + " " + str(candidate.get("language") or "")
             if isinstance(lyric_payload, dict):
                 hint += " " + str(lyric_payload.get("language") or "")
             match = self._finalize_lyrics_match(match, language_hint=hint)
+        if match is not None:
+            match = replace(match, verified_identity=("netease", str(song_id), title,
+                artist, album_title, float(duration_seconds)))
         return match
 
     def _resolve_qq(self, title: str, artist: str, album_title: str, duration_seconds: float) -> LyricsMatch | None:
@@ -1741,6 +2272,10 @@ class LocalLyricsStore:
         song_mid = candidate.get("songmid") or candidate.get("mid") or candidate.get("song_mid")
         if not song_mid:
             return None
+        self._remember_platform_id(title, artist, album_title, duration_seconds, "qq", song_mid)
+        numeric_id = candidate.get("songid") or candidate.get("id")
+        if str(numeric_id or "").isdigit():
+            self._remember_platform_id(title, artist, album_title, duration_seconds, "qq", numeric_id)
         lyric_payload = self._fetch_json(
             "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg",
             params={
@@ -1752,8 +2287,40 @@ class LocalLyricsStore:
             },
             headers=self._qq_lyric_headers(),
         )
-        lyric_text = self._extract_qq_lyric_text(lyric_payload)
-        return self._lyrics_match_from_text(lyric_text, "qq")
+        raw_lrc = self._decode_qq_lyric_field(lyric_payload.get("lyric")) if isinstance(lyric_payload, dict) else ""
+        translated = self._decode_qq_lyric_field(lyric_payload.get("trans")) if isinstance(lyric_payload, dict) else ""
+        raw_qrc = roman = ""
+        if str(numeric_id or "").isdigit():
+            body = self._fetch_public_json("https://u.y.qq.com/cgi-bin/musicu.fcg", {
+                "comm": {"ct": 11, "cv": "1003006", "v": "1003006", "tmeAppID": "qqmusiclight", "uid": "0"},
+                "request": {"module": "music.musichallSong.PlayLyricInfo", "method": "GetPlayLyricInfo",
+                    "param": {"songID": int(numeric_id), "crypt": 1, "qrc": 1, "qrc_t": 0,
+                        "lrc_t": 0, "trans": 1, "trans_t": 0, "roma": 1, "roma_t": 0,
+                        "ct": 19, "cv": 2111, "type": 0,
+                        "interval": int(duration_seconds or self._candidate_duration_seconds(candidate, "qq")),
+                        "songName": base64.b64encode(title.encode()).decode(),
+                        "singerName": base64.b64encode(artist.encode()).decode(),
+                        "albumName": base64.b64encode(album_title.encode()).decode()}}})
+            section = body.get("request") if isinstance(body, dict) and body.get("code") == 0 else None
+            data = section.get("data") if isinstance(section, dict) and section.get("code") == 0 else None
+            if isinstance(data, dict):
+                from api.qrc import decrypt_qrc
+                try:
+                    raw_qrc = decrypt_qrc(data.get("lyric"))
+                    try:
+                        translated = decrypt_qrc(data["trans"]) if data.get("trans") else translated
+                    except ValueError:
+                        pass
+                    try:
+                        roman = decrypt_qrc(data["roma"]) if data.get("roma") else ""
+                    except ValueError:
+                        pass
+                except ValueError:
+                    pass
+        match = self.parse_online_lyrics(raw_lrc=raw_lrc, raw_qrc=raw_qrc,
+            translation=translated, romanization=roman, source="qq")
+        return replace(match, verified_identity=("qq", str(song_mid), title, artist, album_title,
+            float(duration_seconds))) if match is not None else None
 
     def _resolve_lrclib(self, title: str, artist: str, album_title: str, duration_seconds: float) -> LyricsMatch | None:
         params: dict[str, str] = {"track_name": title, "artist_name": artist}
@@ -1841,7 +2408,11 @@ class LocalLyricsStore:
         best_candidate: dict[str, Any] | None = None
         for candidate in candidates:
             candidate_title, candidate_artist, candidate_album = text_resolver(candidate)
-            source = str(getattr(text_resolver, "__name__", "")).removeprefix("_").removesuffix("_candidate_text")
+            source = str(getattr(text_resolver, "__name__", ""))
+            if source.startswith("_"):
+                source = source[1:]
+            if source.endswith("_candidate_text"):
+                source = source[:-len("_candidate_text")]
             if not self._candidate_identity_matches(
                 title, artist, candidate_title, candidate_artist, duration_seconds,
                 self._candidate_duration_seconds(candidate, source),
@@ -1865,7 +2436,7 @@ class LocalLyricsStore:
                 continue
             if self._text_score(requested, supplied) < threshold:
                 return False
-        if candidate_title and self._explicit_version_tags(title) != self._explicit_version_tags(candidate_title):
+        if candidate_title and self._explicit_version_signature(title) != self._explicit_version_signature(candidate_title):
             return False
         if (duration_seconds > 0.0 and candidate_duration_seconds > 0.0
                 and abs(duration_seconds - candidate_duration_seconds) > max(3.0, 0.02 * duration_seconds)):
@@ -1891,22 +2462,53 @@ class LocalLyricsStore:
 
     @staticmethod
     def _explicit_version_tags(title: str) -> frozenset[str]:
-        value = str(title or "")
+        return frozenset(kind for kind, _detail in LocalLyricsStore._explicit_version_signature(title))
+
+    @staticmethod
+    def _explicit_version_signature(title: str) -> frozenset[tuple[str, str]]:
+        """Keep explicit recording details, not just broad version classes.
+
+        Two named remixes or concert recordings can have identical durations.
+        Their author/venue/year is therefore part of the identity evidence.
+        Formatting and a generic ``Version`` suffix are cosmetic; featured
+        artist/title parentheses without a version marker are not versions.
+        """
+        value = unicodedata.normalize("NFKC", str(title or ""))
         qualifiers = re.findall(r"[\[(（【]([^\])）】]*)[\])）】]", value)
         qualifiers.extend(re.findall(r"\s[-–—]\s(.+)$", value))
         # Also recognize an explicit version word at the end when the source
         # omitted parentheses, without treating 'Live Forever' as a version.
-        trailing = re.search(r"\b(?:live|remix|instrumental|studio)(?:\s+version)?\s*$", value, re.I)
-        if trailing:
+        # A containing qualifier already preserves more detail (for example
+        # "Artist Remix"), so do not add a second, generic trailing signature.
+        trailing = re.search(r"\b(?:radio\s+(?:edit|version)|extended(?:\s+(?:mix|edit|version))?|live|remix|instrumental|studio|cover|acoustic|remaster(?:ed)?|sped\s*up|slowed)(?:\s+version)?\s*$", value, re.I)
+        if trailing and not any(trailing.start() >= match.start() and trailing.end() <= match.end()
+                                for match in re.finditer(r"\s[-–—]\s(.+)$", value)):
             qualifiers.append(trailing.group())
-        text = " ".join(qualifiers)
         patterns = {
+            "radio_edit": r"\bradio\s+(?:edit|version)\b|电台(?:剪辑)?版|電台(?:剪輯)?版",
+            "extended": r"\bextended(?:\s+(?:mix|edit|version))?\b|加长版|加長版",
             "live": r"\blive\b|现场(?:版)?",
             "remix": r"\bremix\b|混音",
             "instrumental": r"\binstrumental\b|纯音乐|伴奏",
             "studio": r"\bstudio\b|录音室",
+            "cover": r"\bcover\b|翻唱|翻唱版",
+            "acoustic": r"\bacoustic\b|不插电",
+            "remaster": r"\bremaster(?:ed)?\b|重制|重製",
+            "sped_up": r"\bsped\s*up\b|加速版",
+            "slowed": r"\bslowed\b|慢速版",
         }
-        return frozenset(kind for kind, pattern in patterns.items() if re.search(pattern, text, re.I))
+        result = set()
+        for qualifier in qualifiers:
+            kinds = tuple(kind for kind, pattern in patterns.items() if re.search(pattern, qualifier, re.I))
+            if not kinds:
+                continue
+            detail = qualifier.casefold()
+            for pattern in patterns.values():
+                detail = re.sub(pattern, " ", detail, flags=re.I)
+            detail = re.sub(r"\b(?:version|ver)\b|版本|版", " ", detail, flags=re.I)
+            detail = "".join(character for character in detail if character.isalnum())
+            result.update((kind, detail) for kind in kinds)
+        return frozenset(result)
 
     def _candidate_score(
         self,

@@ -28,7 +28,7 @@ class AirPlayGroupProcess(AirPlayProcess):
     MAX_EVENT_CHARS = 65536
     TIMING_METHODS = frozenset({"protocol_plus_input_queue", "windows_shared_pcm_clock"})
     _EVENTS = frozenset({"connecting", "waiting_audio", "streaming", "error", "stopped",
-                         "stats", "mute_state", "receiver_volume", "capabilities", "membership"})
+                         "stats", "mute_state", "receiver_volume", "capabilities", "membership", "receiver_play_pause"})
     _ENDPOINT_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
     _LOCAL_BOOL_FIELDS = frozenset({"ready", "armed", "playing", "endpoint_clock_valid",
                                     "acoustic_delay_known", "clock_qpc_age_known"})

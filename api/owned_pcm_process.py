@@ -347,6 +347,10 @@ class OwnedPcmProcess(AirPlayGroupProcess):
                 or len(content) > self.MAX_PACKET_FRAMES * 4):
             return False
         with self._pcm_lock:
+            # Stop can win after the first fast fence while this submitter is
+            # waiting for the lock. Never append audio back into a retired queue.
+            if self._pcm_stop.is_set() or epoch != self._pcm_epoch or self._process is None:
+                return False
             if self._pcm_error or self._pcm_bytes + len(content) > self.MAX_QUEUED_BYTES:
                 self._pcm_error = "backpressure"
                 return False
@@ -386,20 +390,38 @@ class OwnedPcmProcess(AirPlayGroupProcess):
                 with self._pcm_lock:
                     self._pcm_error = "pipe_failed"
         finally:
-            if pipe is not None:
-                pipe.close()
-                dispose = getattr(pipe, "dispose", None)
-                if callable(dispose):
-                    dispose()
-            with self._pcm_lock:
-                if self._pcm_pipe is pipe and self._pcm_pipe_epoch == epoch:
-                    self._pcm_pipe, self._pcm_pipe_epoch = None, 0
+            try:
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    finally:
+                        dispose = getattr(pipe, "dispose", None)
+                        if callable(dispose):
+                            dispose()
+            finally:
+                with self._pcm_lock:
+                    if self._pcm_pipe is pipe and self._pcm_pipe_epoch == epoch:
+                        self._pcm_pipe, self._pcm_pipe_epoch = None, 0
 
     def pcm_error(self):
         with self._pcm_lock:
             return self._pcm_error
 
     def _remember_native_event(self, state, event):
+        if event.get("event") == "receiver_play_pause":
+            with self._diagnostic_lock:
+                # Only the current authenticated direct-PCM child's confirmed
+                # members may control the owned source. Never widen this to
+                # system-capture events or an uncommitted joining receiver.
+                return (state is self._mute_state and not self._pcm_stop.is_set()
+                    and not self._last_terminal and self._receiver_connected
+                    and type(event.get("pcm_epoch")) is int and event["pcm_epoch"] == self._pcm_epoch
+                    and type(event.get("revision")) is int and not self._membership_pending_revision
+                    and event["revision"] == self._membership_evidence.get("revision", 0)
+                    and isinstance(event.get("receiver_id"), str) and event["receiver_id"] in self._receiver_ids
+                    and isinstance(event.get("cseq"), str)
+                    and re.fullmatch(r"0|[1-9][0-9]{0,15}", event["cseq"]) is not None
+                    and type(event.get("age_ms")) is int and 0 <= event["age_ms"] < 2000)
         if event.get("event") in {"capabilities", "membership"}:
             with self._diagnostic_lock:
                 if (state is not self._mute_state or type(event.get("pcm_epoch")) is not int
@@ -449,20 +471,39 @@ class OwnedPcmProcess(AirPlayGroupProcess):
         self._pcm_stop.set()
         with self._pcm_lock:
             pipe = self._pcm_pipe if self._pcm_pipe_epoch == self._pcm_epoch else None
-        if pipe is not None:
-            pipe.close()
+            # Stopping the consumer does not drain Queue automatically. Drop
+            # decoded audio now, including authentication/cancel paths where
+            # the pipe worker never began reading it.
+            while True:
+                try:
+                    self._pcm_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self._pcm_bytes = 0
         try:
-            super().stop()
+            try:
+                if pipe is not None:
+                    pipe.close()
+            finally:
+                super().stop()
         finally:
             thread, self._pcm_thread = self._pcm_thread, None
             if thread is not None and thread is not threading.current_thread():
                 thread.join(.5)
             self._pcm_epoch = 0
+            with self._pcm_lock:
+                if self._pcm_pipe is pipe:
+                    self._pcm_pipe, self._pcm_pipe_epoch = None, 0
             with self._diagnostic_lock:
                 self._pcm_membership_supported = False
                 self._pcm_presentation_supported = False
                 self._membership_pending_revision = 0
                 self._membership_requested = ()
+                self._pcm_devices = ()
+                self._membership_evidence = {}
+                self._receiver_ids = self._local_endpoints = ()
+                self._member_evidence = self._local_evidence = {}
+                self._receiver_connected = False
 
     def diagnostics(self):
         result = super().diagnostics()

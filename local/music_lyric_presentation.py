@@ -13,29 +13,26 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Sequence
 
+from api.lyrics import is_structured_lyric_metadata
+from api.lyric_metadata import is_explicit_lyric_credit as _is_credit_line
+
 
 INTRO_COUNTDOWN_TEXT = "· · ·"
 INTRO_COUNTDOWN_MIN_START_SECONDS = 5.0
 
-_CREDIT_LABEL = (
-    r"(?:作词|填词|词曲|作曲|编曲|制作人|音乐制作人|联合制作人|配唱制作人|"
-    r"监制|录音(?:师|工程师|室)?|混音(?:师|工程师|室|助理)?|母带(?:制作|处理|工程师)?|"
-    r"和声(?:编写)?|人声编辑|音频编辑|出品(?:人)?|发行|策划|统筹|企划|"
-    r"演唱|原唱|翻译|译者|封面设计|版权|专辑|"
-    r"album|lyrics?|lyricist|composer|composition|music|arrangement|arranger|"
-    r"producer|production|recording|mixing|mix|mastering|master|"
-    r"translation|translator|copyright|op|sp)"
+# Legacy edge annotations remain explicit fields, rather than a general rule
+# that treats every short colon-prefixed lyric as disposable metadata.
+_EDGE_NOTE_LABELS = frozenset(("节目", "片头", "旁白", "备注", "注记", "说明", "介绍"))
+_STAFF_FIELD_RE = re.compile(r"^([^:：=\n]{1,120})[:：=]\s*(\S.*)$")
+_SENTENCE_FIELD_RE = re.compile(
+    r"^(?:我|你|他|她|它|我们|你们|他们|她们).+|"
+    r"(?:鼓起|勇气|记得|记住|想起|告诉|因为|所以|如果|但是|曾经|永远|说道|说过|说着|说$)",
 )
-_CREDIT_LINE_RE = re.compile(
-    rf"^\s*{_CREDIT_LABEL}(?:\s*[/＆&、]\s*{_CREDIT_LABEL})*\s*[:：]\s*\S",
-    re.I,
-)
-_CREDIT_BY_RE = re.compile(
-    r"^\s*(?:lyrics?|music|written|composed|arranged|produced|mixed|mastered|"
-    r"recorded|translated)\s+by\s*[:：]?\s*\S",
-    re.I,
-)
-_LRC_METADATA_RE = re.compile(r"^\s*\[(?:ar|al|ti|by|offset|length)\s*:[^\]]*\]\s*$", re.I)
+_FIELD_PUNCTUATION_RE = re.compile(r"[，。！？；…!?;{}\[\]()（）]")
+# These nouns are also plausible sung subjects. An exact repeated row is
+# lyric evidence for them; concrete roles such as Producer/作词 remain credits
+# even when the source repeats its production block.
+_AMBIGUOUS_CREDIT_LABELS = frozenset(("music", "master", "strings"))
 _VERSE_TAG_RE = re.compile(
     r"[\[【［(（]\s*verse\s+\d+(?:\s*[:：]\s*[^\]】］)）]+)?\s*[\]】］)）]",
     re.I,
@@ -342,7 +339,7 @@ def _line_singer_prefix(text: str, aliases: dict[str, str]) -> tuple[str, str] |
         return None
     label, body = first[:colon_index], first[colon_index + 1:]
     label = " ".join(label.split())
-    if not label or not body.strip() or len(label) > 32 or _is_credit_line(first):
+    if not label or not body.strip() or len(label) > 32:
         return None
     components = _SINGER_JOIN_RE.split(label)
     if not components or any(not component.strip() for component in components):
@@ -427,8 +424,84 @@ def analyze_duet_lyric_rows(
     return DuetLyricPresentation(tuple(aligned), tuple(groups))
 
 
-def _is_credit_line(text: str) -> bool:
-    return bool(_CREDIT_LINE_RE.match(text) or _CREDIT_BY_RE.match(text) or _LRC_METADATA_RE.match(text))
+
+
+def _staff_separator(text: str) -> bool:
+    value = str(text or "").strip()
+    return len(value) <= 8 and not any(char.isalnum() for char in value)
+
+
+def _possible_staff_field(text: str) -> bool:
+    """A structural candidate, never sufficient evidence on its own.
+
+    This is used only after two explicit credits establish a leading block.
+    Sentence punctuation and pronoun/verb clauses end that block, so ordinary
+    sung colons cannot be absorbed just because they are short.
+    """
+    match = _STAFF_FIELD_RE.fullmatch(str(text or "").strip())
+    if match is None:
+        return False
+    label, payload = (part.strip() for part in match.groups())
+    if (
+        not label or _FIELD_PUNCTUATION_RE.search(label)
+        or _SENTENCE_FIELD_RE.search(label)
+        or re.search(r"\d\s*[:：]\s*\d", text)
+        or len(payload) > 160 or re.search(r"[。！？!?{}\[\]]", payload)
+    ):
+        return False
+    return True
+
+
+def _leading_staff_block_indexes(
+    texts: Sequence[str], explicit: set[int], protected: set[int],
+) -> set[int]:
+    """Find evidence-backed neighbours of a leading production-credit block.
+
+    Explicit single rows are cleaned independently. Expansion needs two
+    explicit fields, and an unanchored trailing run needs at least two more
+    fields. A protected singer/translation/vocal always terminates the scan.
+    No row duration, playback position or source data is changed here.
+    """
+    start = 0
+    while start < len(texts):
+        if start in protected:
+            return set()
+        if start in explicit:
+            break
+        if not (_staff_separator(texts[start]) or _colon_prefix(texts[start]) in _EDGE_NOTE_LABELS):
+            return set()
+        start += 1
+    accepted: list[int] = []
+    separators: list[int] = []
+    pending: list[int] = []
+    hits = 0
+    for index in range(start, len(texts)):
+        if index in protected:
+            break
+        if _staff_separator(texts[index]):
+            pending.append(index)
+            continue
+        if index in explicit:
+            hits += 1
+        elif hits < 2 or not _possible_staff_field(texts[index]):
+            break
+        accepted.append(index)
+        separators.extend(pending)
+        pending.clear()
+    if hits < 2:
+        return set()
+    trailing = 0
+    for index in reversed(accepted):
+        if index in explicit:
+            break
+        trailing += 1
+    if trailing == 1:
+        accepted.pop()
+        pending.clear()
+    if not accepted:
+        return set()
+    last = accepted[-1]
+    return set(accepted) | {index for index in separators if index < last} | set(pending)
 
 
 def _colon_prefix(text: str) -> str | None:
@@ -570,16 +643,21 @@ def present_timed_lyric_rows(
     clean_intro: bool = True,
     intro_countdown: bool = True,
     singer_names: Sequence[str] | str = (),
+    attach_parentheticals: bool = True,
 ) -> list[tuple[float, str]]:
     """Prepare display rows without rewriting provider text or unit clocks.
 
-    Only removable note/credit runs at the song's beginning and end are
-    discarded. Numeric colons, repeated rows or speaker labels, verified
+    Explicit production rows are removed wherever they occur; unknown fields
+    require a leading, evidence-backed credit block. Known edge notes may be
+    removed at the song's beginning/end. Numeric colons,
+    repeated sung rows or speaker labels, verified
     singers, actual translations and colons within lyric phrases survive.
     A standalone parenthetical vocal joins the immediately preceding sung
     display row, retaining the latter's start and unchanged primary source
     subrow. Its translation remains paired to that annotation. The provider's
     separately timed source row is never mutated by this display-only merge.
+    ``attach_parentheticals=False`` keeps those rows separate for consumers
+    whose visual slots retain the original source indexes, such as the island.
     The optional countdown starts at zero only when the first surviving sung
     line starts at least five seconds in; it is the sole synthetic timestamp.
     """
@@ -628,12 +706,26 @@ def present_timed_lyric_rows(
             if (body or parenthetical) in companions:
                 translated_subrows.add((row_index, part_index))
 
+    def repeated_lyric(flat_index: int) -> bool:
+        part = flat[flat_index][2]
+        normalized = " ".join(part.replace("：", ":").split()).casefold()
+        return row_counts[normalized] > 1 and (
+            not _is_credit_line(part) or labels[flat_index] in _AMBIGUOUS_CREDIT_LABELS
+        )
+
     def removable(flat_index: int) -> bool:
         row_index, part_index, part = flat[flat_index]
-        normalized = " ".join(part.replace("：", ":").split()).casefold()
+        if repeated_lyric(flat_index):
+            return False
         if (
-            row_counts[normalized] > 1
-            or re.search(r"\d\s*[:：]\s*\d", part)
+            (row_index, part_index) not in translated_subrows
+            and not _TRANSLATION_LABEL_RE.match(part)
+            and _line_singer_prefix(part, singer_aliases) is None
+            and _is_credit_line(part)
+        ):
+            return True
+        if (
+            re.search(r"\d\s*[:：]\s*\d", part)
             or (row_index, part_index) in translated_subrows
             or _PARENTHETICAL_LABEL_RE.match(part)
             or _line_singer_prefix(part, singer_aliases) is not None
@@ -646,20 +738,28 @@ def present_timed_lyric_rows(
             return True
         if label is None:
             return False
-        # A colon after a whole phrase is sung punctuation, not a leading
-        # metadata label. Compact unknown labels remain eligible only at the
-        # two song edges. Common pronoun-led clauses are kept conservatively.
-        if (
-            len(label) > 32
-            or len(_HAN_RE.findall(label)) > 4
-            or len(label.split()) > 1
-            or re.search(r"[，。！？、,.!?;；()（）]", label)
-            or re.match(r"(?:我|你|他|她|它|我们|你们|他们|她们).+", label)
-        ):
-            return False
-        return True
+        return label in _EDGE_NOTE_LABELS
 
     removed: set[int] = set()
+    # Strongly identified production/rights metadata must not leak into a
+    # coalesced sung row or reappear merely because the service repeats it.
+    # Translations are recognized first and keep their existing toggle.
+    removed.update(
+        index for index, (row_index, part_index, part) in enumerate(flat)
+        if (row_index, part_index) not in translated_subrows
+        and not _TRANSLATION_LABEL_RE.match(part) and _is_credit_line(part)
+        and _line_singer_prefix(part, singer_aliases) is None
+        and not repeated_lyric(index)
+    )
+    protected = {
+        index for index, (row_index, part_index, part) in enumerate(flat)
+        if (row_index, part_index) in translated_subrows
+        or _TRANSLATION_LABEL_RE.match(part) or _PARENTHETICAL_LABEL_RE.match(part)
+        or _line_singer_prefix(part, singer_aliases) is not None or repeated_lyric(index)
+    }
+    removed.update(_leading_staff_block_indexes(
+        [part for _row_index, _part_index, part in flat], removed, protected,
+    ))
     for positions in (range(len(flat)), range(len(flat) - 1, -1, -1)):
         for flat_index in positions:
             if not removable(flat_index):
@@ -676,9 +776,10 @@ def present_timed_lyric_rows(
         if parts := remaining.get(row_index):
             result.append((timestamp, "\n".join(parts)))
             result_sources.append(prepared_sources[row_index])
-    result = _attach_standalone_parenthetical_rows(
-        result, source_texts=result_sources, show_translation=show_translation,
-    )
+    if attach_parentheticals:
+        result = _attach_standalone_parenthetical_rows(
+            result, source_texts=result_sources, show_translation=show_translation,
+        )
     if (
         clean_intro
         and intro_countdown

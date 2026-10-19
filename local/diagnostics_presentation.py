@@ -248,7 +248,7 @@ def format_visual_runtime_context(context: Mapping[str, Any] | None) -> str:
     lyric = data.get("lyric_flow_style") or "-"
     location = data.get("location_mode") or "-"
     expanded = "展开" if data.get("expanded") else "紧凑"
-    taskbar = "Tasker Bar紧凑" if data.get("taskbar_compact_active") else placement_mode_label(location) if location != "-" else "-"
+    taskbar = f"{placement_mode_label('tasker')}紧凑" if data.get("taskbar_compact_active") else placement_mode_label(location) if location != "-" else "-"
     reactive = "律动开" if data.get("reactive_background_enabled") else "律动关"
     reactive_intensity = int(_float(data.get("reactive_background_intensity", 0)))
     fps = int(_float(data.get("animation_fps", 0)))

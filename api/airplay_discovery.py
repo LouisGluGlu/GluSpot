@@ -27,7 +27,10 @@ def receiver_from_service(info, service_type: str) -> AudioRouteDevice | None:
         k = key.decode("utf-8", "replace") if isinstance(key, bytes) else str(key)
         v = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
         properties[k.casefold()] = v
-    label = str(info.name).removesuffix("." + service_type)
+    label = str(info.name)
+    suffix = "." + service_type
+    if label.endswith(suffix):
+        label = label[:-len(suffix)]
     if service_type == "_raop._tcp.local." and "@" in label:
         raop_id, label = label.split("@", 1)
     else:

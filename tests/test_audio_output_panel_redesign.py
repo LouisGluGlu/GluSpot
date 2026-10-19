@@ -177,6 +177,34 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
         self.assertFalse(inactive.details_visible)
         self.assertEqual(inactive.name_font_size, 14)
 
+    def test_track_endpoints_align_with_text_and_dispatch_only_volume(self):
+        row = self._open()
+        with patch.object(row, "_paint_name") as painted_name:
+            self._row_image(row)
+        name_rect = painted_name.call_args.args[1]
+        slider = row.volume_slider
+        self.assertEqual(slider.x() + 8, name_rect.left())
+        self.assertEqual(slider.x() + slider.width() - 8, row.width() - 14)
+        self.assertFalse(slider.geometry().intersects(row.solo_button.geometry()))
+        # Send events to the visible row, not directly to the slider: native
+        # child routing must agree with the track that the user sees.
+        for x, expected in ((name_rect.left(), 0.), (row.width() - 14, 1.)):
+            self.provider.calls.clear()
+            QTest.mouseClick(row, Qt.MouseButton.LeftButton,
+                             pos=QPoint(round(x), slider.geometry().center().y()))
+            self.assertTrue(self.provider.calls)
+            self.assertTrue(all(call[0] == "volume" for call in self.provider.calls))
+            self.assertEqual(self.provider.calls[-1], ("volume", "speaker", expected))
+
+    def test_short_confirmed_percentage_leaves_room_for_device_name(self):
+        name = "AirPods Pro - Wireless"
+        self.provider.update_device("speaker", name=name, volume=.58)
+        row = self._open()
+        with patch.object(row, "_paint_name") as painted_name:
+            self._row_image(row)
+        self.assertEqual(painted_name.call_args.args[2], name)
+        self.assertEqual(row.volume_text, "58%")
+
     def test_pending_volume_is_labelled_target_without_fabricating_actual_readback(self):
         row = self._open()
         self.assertEqual(row.volume_text, "14%")
@@ -308,26 +336,107 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
         self.assertTrue(row.isChecked())
         self.assertFalse(inactive.isChecked())
 
-    def test_owned_windows_group_shows_sync_and_exposes_stop(self):
+    def test_owned_windows_group_edits_members_instead_of_exposing_group_cancel(self):
         self.provider.snapshot = replace(self.provider.snapshot, state="casting",
             member_ids=("speaker", "headphones"), group_id="owned-renderer-epoch")
         self._open()
         self.assertIn("同步", self.panel.title_label.text())
         self.assertIn("同步", self.panel._rows["speaker"].subtitle)
-        self.assertFalse(self.panel.stop_button.isHidden())
-        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.assertTrue(self.panel.stop_button.isHidden())
+        self.assertFalse(self.panel.stop_button.isEnabled())
         self.panel.stop_button.click()
-        self.assertEqual(self.provider.calls, [("stop",)])
+        self.assertEqual(self.provider.calls, [])
+        row = self.panel._rows["headphones"]
+        QTest.keyClick(row.solo_button, Qt.Key.Key_Space)
+        self.assertEqual(self.provider.calls, [("join", "headphones")])
+        self.assertTrue(row.isChecked())
+        self.assertIn("移出", row.solo_button.accessibleName())
+        self.assertIn("移出", row.toolTip())
         self.assertEqual(self.provider.snapshot.group_id, "owned-renderer-epoch")
 
-    def test_one_remaining_owned_renderer_keeps_its_group_stop_action(self):
+    def test_one_remaining_owned_windows_renderer_has_no_group_cancel_action(self):
         self.provider.snapshot = replace(self.provider.snapshot, state="casting",
             member_ids=("speaker",), group_id="owned-renderer-epoch")
         self._open()
-        self.assertFalse(self.panel.stop_button.isHidden())
-        self.assertTrue(self.panel.stop_button.isEnabled())
+        self.assertTrue(self.panel.stop_button.isHidden())
+        self.assertFalse(self.panel.stop_button.isEnabled())
         self.panel.stop_button.click()
-        self.assertEqual(self.provider.calls, [("stop",)])
+        self.assertEqual(self.provider.calls, [])
+
+    def test_group_icon_removes_while_name_mutes_and_slider_remains_independent(self):
+        for scope in ("owned-player", "music_process_tree"):
+            with self.subTest(scope=scope):
+                self.panel.dismiss(immediate=True)
+                self.provider.snapshot = replace(self.provider.snapshot, state="casting", capture_scope=scope,
+                    member_ids=("speaker", "headphones"), group_id="group-epoch")
+                row = self._open()
+                QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(24, 20))
+                QTest.mouseClick(row, Qt.MouseButton.LeftButton, pos=QPoint(100, 20))
+                QTest.keyClick(row.solo_button, Qt.Key.Key_Space)
+                QTest.keyClick(row, Qt.Key.Key_Space)
+                QTest.keyClick(row.volume_slider, Qt.Key.Key_Right)
+                self.assertEqual(self.provider.calls[:4], [
+                    ("join", "speaker"), ("mute", "speaker"),
+                    ("join", "speaker"), ("mute", "speaker"),
+                ])
+                self.assertEqual(self.provider.calls[4:], [("volume", "speaker", .16)])
+                self.assertTrue(row.isChecked())
+                self.assertFalse(any(call[0] in {"solo", "stop"} for call in self.provider.calls))
+
+    def test_failed_member_removal_retains_confirmed_group_and_explains_action(self):
+        self.provider.snapshot = replace(self.provider.snapshot, state="casting",
+            member_ids=("speaker", "headphones"), group_id="group-epoch")
+        row = self._open()
+        self.provider.accept = False
+        row.solo_button.click()
+        self.assertEqual(self.provider.calls, [("join", "speaker")])
+        self.assertTrue(row.isChecked())
+        self.assertTrue(self.panel._rows["headphones"].isChecked())
+        self.assertIn("移出", self.panel.status_label.text())
+
+    def test_same_owner_stale_membership_toggle_never_reverses_confirmed_membership(self):
+        for was_member in (True, False):
+            with self.subTest(was_member=was_member):
+                self.panel.dismiss(immediate=True)
+                members = ("speaker", "headphones") if was_member else ("speaker", "screen")
+                self.provider.snapshot = replace(self.provider.snapshot, state="casting",
+                    member_ids=members, group_id="same-group-epoch")
+                self._open()
+                row = self.panel._rows["headphones"]
+                self.provider.snapshot = replace(self.provider.snapshot,
+                    member_ids=("speaker", "screen") if was_member else ("speaker", "headphones"))
+                # No poll: the old remove/join button must not reverse the
+                # already published change within the same renderer owner.
+                (row.solo_button if was_member else row.join_button).click()
+                self.assertEqual(self.provider.calls, [])
+                self.assertEqual(row.isChecked(), not was_member)
+                self.assertEqual(self.panel._snapshot, self.provider.snapshot)
+
+    def test_polled_membership_change_preserves_held_remove_intent_without_solo_or_readd(self):
+        # Song surfaces disable hover composition. Cover both their native
+        # child target and the row's fallback hit handling with real events.
+        self.owner.setProperty("controlHoverDisabled", True)
+        for target_kind in ("row", "icon"):
+            for still_member in (False, True):
+                with self.subTest(target=target_kind, still_member=still_member):
+                    self.panel.dismiss(immediate=True)
+                    self.provider.snapshot = replace(self.provider.snapshot, state="casting",
+                        member_ids=("speaker", "headphones"), group_id="same-group-epoch")
+                    row = self._open()
+                    target = row if target_kind == "row" else row.solo_button
+                    position = QPoint(24, 20) if target_kind == "row" else target.rect().center()
+                    QTest.mousePress(target, Qt.MouseButton.LeftButton, pos=position)
+                    self.assertTrue(target.isDown())
+                    self.provider.snapshot = replace(self.provider.snapshot,
+                        member_ids=("speaker",) if still_member else ("headphones",))
+                    self.panel.sync_snapshot()
+                    QTest.mouseRelease(target, Qt.MouseButton.LeftButton, pos=position)
+                    # If it is now the last member, keep the original remove
+                    # intent and let the existing provider own default fallback.
+                    expected = [("join", "speaker")] if still_member else []
+                    self.assertEqual(self.provider.calls, expected)
+                    self.assertEqual(row.isChecked(), still_member)
+                    self.assertFalse(any(call[0] == "solo" for call in self.provider.calls))
 
     def test_failed_member_retains_confirmed_membership_and_explains_failure(self):
         self.provider.snapshot = replace(self.provider.snapshot, state="casting",
@@ -462,6 +571,9 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
                     self.provider.snapshot = replace(self.provider.snapshot, state="casting",
                         capture_scope="owned-player", music_source_app_id="original-player",
                         member_ids=("speaker", "headphones"), group_id="original-renderer-epoch")
+                    if action == "stop":
+                        self.provider.snapshot = replace(self.provider.snapshot,
+                            active_id="receiver", member_ids=("receiver",))
                     selected = self._open()
                     row = self.panel._rows["screen"] if action == "join" else selected
                     group, record = self._settle_hover(row)
@@ -482,7 +594,8 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
                     if action != "stop":
                         self.assertIs(group.pressed, record)
                     calls_before_owner_change = tuple(self.provider.calls)
-                    self.provider.snapshot = replace(self.provider.snapshot, **{field: target})
+                    next_owner = "all_system" if action == "stop" and field == "capture_scope" else target
+                    self.provider.snapshot = replace(self.provider.snapshot, **{field: next_owner})
                     # Deliberately do not poll. The action itself must notice
                     # the newly published owner before sending its command.
                     with patch("local.control_hover.time.monotonic", return_value=101.2), \
@@ -531,7 +644,8 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
                         with patch("local.control_hover.time.monotonic", return_value=101.), \
                              patch("local.audio_output_panel.time.monotonic", return_value=101.):
                             QTest.mouseClick(fresh_destination, Qt.MouseButton.LeftButton, pos=fresh_position)
-                        expected = ("stop",) if action == "stop" else (action, row.device.id)
+                        expected = (("stop",) if action == "stop" else
+                                    ("join" if action == "solo" else action, row.device.id))
                         self.assertEqual(self.provider.calls, [expected])
 
     def test_healthy_same_epoch_member_addition_preserves_pending_drag(self):
@@ -555,7 +669,7 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
     def test_polled_owner_change_discards_held_stop_move_and_release_before_fresh_click(self):
         self.provider.snapshot = replace(self.provider.snapshot, state="casting",
             capture_scope="owned-player", music_source_app_id="original-player",
-            member_ids=("speaker", "headphones"), group_id="original-renderer-epoch")
+            active_id="receiver", member_ids=("receiver",), group_id="original-renderer-epoch")
         self._open()
         button = self.panel.stop_button
         position = button.rect().center()

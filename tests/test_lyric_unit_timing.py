@@ -104,7 +104,7 @@ class TimedUnitReadingTests(unittest.TestCase):
         spaced = (Unit(45.0, 50.0, "shine "), Unit(50.0, 51.0, "on"))
         self.assertEqual(
             [(group.start_offset, group.end_offset) for group in explicit_slow_unit_groups("shine on", spaced)],
-            [(0, 5)],
+            [(0, 5), (6, 8)],
         )
         self.assertAlmostEqual(
             timed_highlight_wave_progress(explicit_slow_unit_groups("shine on", spaced)[0], 49.0),
@@ -125,12 +125,18 @@ class TimedUnitReadingTests(unittest.TestCase):
         self.assertEqual(groups[1].unit_ends, (4.5,) * len("goin'"))
         self.assertAlmostEqual(timed_highlight_wave_progress(groups[0], 1.5), 0.5)
 
-    def test_slow_contractions_still_require_explicit_duration_over_one_second(self):
+    def test_slow_contractions_use_fixed_eight_tenths_and_require_explicit_end(self):
         text = "I'm goin’"
-        units = (Unit(0.0, 1.0, "I'm "), Unit(1.0, None, "goin’"))
+        units = (Unit(0.0, 0.799, "I'm "), Unit(0.799, None, "goin’"))
         self.assertEqual(explicit_slow_unit_groups(text, units), ())
-        groups = explicit_slow_unit_groups(text, (Unit(0.0, 1.1, "I'm "), Unit(1.1, 2.2, "goin’")))
+        groups = explicit_slow_unit_groups(text, (Unit(0.0, 0.8, "I'm "), Unit(0.8, 1.6, "goin’")))
         self.assertEqual([(group.start_offset, group.end_offset) for group in groups], [(0, 3), (4, 9)])
+
+    def test_old_threshold_argument_cannot_change_fixed_real_unit_highlight(self):
+        units = (Unit(0.0, 0.8, "shine"),)
+        for value in (0.1, 3.0, None, float("nan")):
+            with self.subTest(value=value):
+                self.assertTrue(explicit_slow_unit_groups("shine", units, min_duration=value))
 
     def test_wave_respects_unequal_real_character_durations(self):
         units = (

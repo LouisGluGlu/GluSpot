@@ -34,6 +34,20 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
     def setUp(self):
         self.owner = _WheelOwner()
         self.owner.resize(640, 360)
+        if self._testMethodName in {
+                "test_stationary_hover_timer_reveals_without_extra_mouse_move",
+                "test_native_handoff_arms_hover_under_stationary_pointer",
+                "test_native_leave_within_same_visual_capsule_preserves_detail_dwell",
+                "test_half_second_hover_anywhere_reveals_and_exit_clears_details",
+                "test_active_hover_font_has_fractional_frames_and_reverses_from_current_size",
+                "test_confirmed_muted_member_animates_but_pending_and_removed_members_do_not"}:
+            # These fixtures supply synthetic positions and a 100-second
+            # clock. Native handoff must not arm dwell with the desktop's
+            # real pointer/time before that controlled input begins.
+            self.owner.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+            pointer = patch("local.audio_output_panel.QCursor.pos", return_value=QPoint(-10000, -10000))
+            pointer.start()
+            self.addCleanup(pointer.stop)
         self.owner.show()
         self.provider = _RouteProvider()
         self.provider.snapshot = replace(self.provider.snapshot, devices=tuple(
@@ -299,6 +313,25 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
         self.assertEqual(other.details_progress, 0)
         self.assertFalse(row.details_visible)
 
+    def test_native_leave_within_same_visual_capsule_preserves_detail_dwell(self):
+        row = self.panel._rows["local"]
+        self.panel._clear_row_hover()
+        point = row.mapToGlobal(row.volume_slider.geometry().center())
+        with patch("local.audio_output_panel.QCursor.pos", return_value=point):
+            self._move(row, QPoint(90, 25), 101.)
+            started = self.panel._hover_row_since
+            self.assertEqual(started, 101.)
+            self.app.sendEvent(row, QEvent(QEvent.Type.Leave))
+            self.assertEqual(self.panel._hover_row_id, row.device.id)
+            self.assertEqual(self.panel._hover_row_since, started)
+            self.assertTrue(self.panel._hover_detail_timer.isActive())
+            self._move(row.volume_slider, row.volume_slider.rect().center(), 101.51)
+            self.assertTrue(row.details_visible)
+        with patch("local.audio_output_panel.QCursor.pos", return_value=self.owner.mapToGlobal(QPoint(0, 0))):
+            self.app.sendEvent(row, QEvent(QEvent.Type.Leave))
+        self.assertFalse(row.details_visible)
+        self.assertFalse(self.panel._hover_detail_timer.isActive())
+
     def test_active_hover_font_has_fractional_frames_and_reverses_from_current_size(self):
         row = self.panel._rows["local"]
         row.elapsed = 100
@@ -344,7 +377,14 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
             row.advance(1)
             after = self._native_image(row)
             row.render(after)
-        self.assertEqual(bytes(before.constBits()), bytes(after.constBits()))
+        dpr = row.devicePixelRatioF()
+        name_area = QRectF(52, 9, row.width() - 98, 21)
+        pixels = QRectF(*(value * dpr for value in (name_area.x(), name_area.y(),
+                                                  name_area.width(), name_area.height()))).toAlignedRect()
+        before_name, after_name = before.copy(pixels), after.copy(pixels)
+        self.assertEqual(bytes(before_name.constBits()), bytes(after_name.constBits()))
+        self.assertNotEqual(bytes(before.constBits()), bytes(after.constBits()))
+        self.assertTrue(row.join_button.underMouse())
         self.assertFalse(row.details_visible)
         self.assertEqual(row.details_progress, 0)
         self.assertEqual(self.provider.calls, [])
@@ -398,11 +438,13 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
 
     def test_stationary_hover_timer_reveals_without_extra_mouse_move(self):
         row = self.panel._rows["local"]
-        self._move(row, QPoint(90, 25), 101.0)
-        self.assertTrue(self.panel._hover_detail_timer.isActive())
-        self.assertFalse(row.details_visible)
-        QTest.qWait(520)
-        self.assertTrue(row.details_visible)
+        point = row.mapToGlobal(QPoint(90, 25))
+        with patch("local.audio_output_panel.QCursor.pos", return_value=point):
+            self._move(row, QPoint(90, 25), 101.0)
+            self.assertTrue(self.panel._hover_detail_timer.isActive())
+            self.assertFalse(row.details_visible)
+            QTest.qWait(520)
+            self.assertTrue(row.details_visible)
         self.panel.dismiss(immediate=True)
         self.assertFalse(row.details_visible)
         self.assertFalse(self.panel._hover_detail_timer.isActive())
@@ -410,19 +452,20 @@ class AudioOutputPanelMotionTests(unittest.TestCase):
     def test_native_handoff_arms_hover_under_stationary_pointer(self):
         row = self.panel._rows["local"]
         point = row.mapToGlobal(QPoint(row.width() - 18, row.height() // 2))
+        self.panel._clear_row_hover()
         self.panel._reveal = .8
         self.panel._apply_reveal_pose()
         self.assertTrue(self.panel._scroll_opacity.isEnabled())
-        with patch("local.audio_output_panel.QCursor.pos", return_value=point), \
-                patch("local.audio_output_panel.time.monotonic", return_value=101.0):
-            self.panel._reveal = 1
-            self.panel._reveal_velocity = 0
-            self.panel._apply_reveal_pose()
-        self.assertEqual(self.panel._hover_row_id, "local")
-        self.assertTrue(self.panel._hover_detail_timer.isActive())
-        self.assertFalse(row.details_visible)
-        QTest.qWait(520)
-        self.assertTrue(row.details_visible)
+        with patch("local.audio_output_panel.QCursor.pos", return_value=point):
+            with patch("local.audio_output_panel.time.monotonic", return_value=101.0):
+                self.panel._reveal = 1
+                self.panel._reveal_velocity = 0
+                self.panel._apply_reveal_pose()
+            self.assertEqual(self.panel._hover_row_id, "local")
+            self.assertTrue(self.panel._hover_detail_timer.isActive())
+            self.assertFalse(row.details_visible)
+            QTest.qWait(520)
+            self.assertTrue(row.details_visible)
         self.assertEqual(self.provider.calls, [])
 
     def test_list_scroll_before_hover_threshold_resets_details_and_keeps_volume(self):

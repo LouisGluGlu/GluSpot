@@ -122,6 +122,7 @@ struct Member {
     std::string state = "connecting";
     uint64_t volumeRevision = UINT64_MAX;
     GroupFeedbackWatchdog feedback;
+    GroupReceiverControls controls;
     bool committed = true, armed = false, retiring = false;
     uint64_t sourceBase = 0;
     std::string failure;
@@ -393,6 +394,10 @@ int runGroupHelper(int argc, wchar_t** argv) {
             events.pinRequired = [sink](const std::string&) {
                 if (!sink->retiring) { sink->state = "error"; sink->failure = "Receiver requires interactive pairing"; }
             };
+            events.receiverPlayPause = [&, sink](const std::string& cseq) {
+                if (args.directPcm() && groupArmed && !failed && sink->committed && sink->ready && !sink->retiring)
+                    sink->controls.push(cseq, Clock::now());
+            };
             member->sender = std::make_unique<fxchain::RaopSender>(member->loop, std::move(events),
                 [id = receiver.id](fxchain::RaopLogLevel, const std::string& line) { std::cerr << '[' << id << "] " << line << '\n'; });
             member->sender->setStrictReceiverAuth(true); member->sender->setPreserveReceiverVolume(true);
@@ -569,6 +574,14 @@ int runGroupHelper(int argc, wchar_t** argv) {
             if (!capture.error().empty()) { fail(capture.error()); break; }
             if (!capture.sourceAlive()) { fail("Music process ended; synchronized group stopped"); break; }
             if (capture.droppedSamples.load()) { fail("Music capture overran; synchronized group stopped before source frames diverged"); break; }
+            for (auto& member : members) {
+                const bool eligible = args.directPcm() && groupArmed && !staged && member->committed && member->ready && !member->retiring;
+                for (const auto& [cseq, age] : member->controls.take(eligible, now))
+                    std::cout << "{\"event\":\"receiver_play_pause\",\"pcm_epoch\":" << args.pcmEpoch
+                        << ",\"receiver_id\":" << quoted(member->args.id) << ",\"revision\":" << membershipRevision
+                        << ",\"cseq\":" << quoted(cseq)
+                        << ",\"age_ms\":" << age << "}\n" << std::flush;
+            }
 #if GLUSPOT_HAS_LOCAL_RENDERER
             for (const auto& output : locals.outputs()) if (const auto error = output.renderer->error(); !error.empty()) {
                 if (stagedLocals.count(output.endpoint)) joinFailed = true;

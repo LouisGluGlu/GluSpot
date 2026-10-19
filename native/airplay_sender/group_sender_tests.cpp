@@ -842,6 +842,22 @@ void testLateJoinUsesTheSameSourcePresentationWithoutRearmingOldReceiver() {
 } // namespace
 
 int main() {
+    {
+        g_test = "GluSpot bounded receiver controls belong to one eligible host member";
+        gluspot::GroupReceiverControls controls;
+        const auto now = gluspot::GroupReceiverControls::Clock::now();
+        for (unsigned i = 0; i < 40; ++i) controls.push(std::to_string(i), now);
+        const auto accepted = controls.take(true, now + std::chrono::milliseconds(1999));
+        CHECK(accepted.size() == 8 && accepted.front().first == "0" && accepted.back().first == "7"
+            && accepted.front().second == 1999, "receiver floods retain only eight FIFO taps with their true queue age");
+        CHECK(controls.take(true, now).empty(), "a consumed host queue does not replay taps");
+        controls.push("next", now);
+        CHECK(controls.take(false, now).empty() && controls.take(true, now).empty(), "retiring, unarmed or uncommitted member clears pending taps");
+        controls.push("late", now);
+        CHECK(controls.take(true, now + std::chrono::milliseconds(2000)).empty(), "two-second host stalls expire taps");
+        controls.push("future", now + std::chrono::seconds(1));
+        CHECK(controls.take(true, now).empty(), "negative ages cannot become fresh controls");
+    }
     testStaggeredReceiversSharePcmAndPresentationClock();
     testRejectedPacketsDoNotChangeGroupTimeline();
     testReadyBarrierRetainsFeedbackAndEventAcknowledgements();

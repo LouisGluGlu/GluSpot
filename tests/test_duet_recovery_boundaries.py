@@ -12,6 +12,8 @@ from api.lyrics import LocalLyricsStore
 from api.models import TimedLyricLine, TimedLyricUnit
 from local.island_stack_visual import IslandStackVisual
 from local.lyric_unit_timing import duet_estimated_read_start
+from local.music_lyric_motion import LyricEmphasisPlan
+from local.music_lyric_presentation import INTRO_COUNTDOWN_TEXT
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
@@ -69,10 +71,20 @@ class DuetRecoveryBoundaryTests(unittest.TestCase):
 
         image = QImage(960, 540, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(0)
-        with patch.object(surface, "_paint_wrapped_lifted_lyric", side_effect=capture), patch(
-            "local.music_surface_window.time.monotonic", return_value=100.0,
+        # This suite inspects ordinary reading fronts and original source
+        # boundaries. Highlight classification is covered independently.
+        with (
+            patch.object(surface, "_paint_wrapped_lifted_lyric", side_effect=capture),
+            patch("local.music_surface_window.time.monotonic", return_value=100.0),
+            patch("local.music_surface_window.lyric_emphasis_plan", return_value=LyricEmphasisPlan()),
+            patch("local.music_surface_window.explicit_slow_unit_groups", return_value=()),
         ):
             surface.render(image)
+        displayed = surface._display_lyrics()[1]
+        self.assertEqual(displayed[0], (0., INTRO_COUNTDOWN_TEXT))
+        self.assertEqual(surface._display_timed_units[0], ())
+        self.assertEqual(surface._display_timed_kinds[0], "line")
+        self.assertEqual(surface._display_raw_source_texts[0], INTRO_COUNTDOWN_TEXT)
         return surface, painted
 
     @staticmethod
@@ -85,6 +97,24 @@ class DuetRecoveryBoundaryTests(unittest.TestCase):
               for index, char in enumerate(text[4:])),
         )
 
+    def _row_plan(self, surface, source_row):
+        displayed = surface._display_lyrics()[1]
+        return surface._display_row_timings[displayed.index(source_row)]
+
+    def _assert_visible_unread(self, painted, body):
+        # The raw row fraction includes the hidden singer prefix. Assertions
+        # therefore inspect the actual projected front supplied to the native
+        # painter for every wrapped visible body row.
+        fronts = painted[body][1]
+        self.assertIsNotNone(fronts)
+        self.assertTrue(fronts)
+        self.assertTrue(all(front == 0. for front in fronts), fronts)
+
+    def _assert_visible_started(self, painted, body):
+        fronts = painted[body][1]
+        self.assertIsNotNone(fronts)
+        self.assertTrue(any(0. < front < 1. for front in fronts), fronts)
+
     def test_same_time_generated_cache_stays_unread_until_real_body_onset(self):
         data = self._cached_data()
         rows, units, kinds = data
@@ -95,11 +125,15 @@ class DuetRecoveryBoundaryTests(unittest.TestCase):
         for position in (188.34, 190.0, 191.6, 191.62):
             with self.subTest(position=position):
                 surface, painted = self._render_data(data, position)
-                self.assertEqual(painted[right_body], (0.0, None))
-                self.assertEqual([start for start, _text in surface._display_lyrics()[1][:2]],
-                                 [188.34, 188.34])
+                self._assert_visible_unread(painted, right_body)
+                plan = self._row_plan(surface, rows[1])
+                self.assertEqual(plan.quality, "estimated")
+                self.assertEqual((plan.start_seconds, plan.end_seconds), (191.62, 197.52))
+                self.assertEqual(plan.display_units[0].timing_origin, "label")
+                self.assertEqual(plan.display_units[0].start_seconds, plan.display_units[0].end_seconds)
+                self.assertEqual(surface._display_lyrics()[1][1:], rows)
         _surface, painted = self._render_data(data, 191.7)
-        self.assertGreater(painted[right_body][0], 0.0)
+        self._assert_visible_started(painted, right_body)
 
     def test_same_time_real_voices_keep_independent_body_clocks_in_native_painter(self):
         rows, units, kinds = self._cached_data()
@@ -107,13 +141,20 @@ class DuetRecoveryBoundaryTests(unittest.TestCase):
         units[1] = self._voice_units(rows[1][1], 188.6)
         kinds[1] = "unit"
         surface, painted = self._render_data((rows, units, kinds), 188.7)
-        self.assertEqual(surface._display_timed_units[:2], tuple(units[:2]))
-        left_front = painted["我记得那草坪 一览无遗"][1]
-        right_front = painted["我等你的草坪 高楼耸起"][1]
-        self.assertTrue(all(progress == 0.0 for progress in left_front))
-        self.assertGreater(right_front[0], 0.0)
+        displayed = surface._display_lyrics()[1]
+        voice_indices = [index for index, row in enumerate(displayed) if row in rows[:2]]
+        self.assertEqual([displayed[index] for index in voice_indices], rows[:2])
+        self.assertEqual(tuple(surface._display_timed_units[index] for index in voice_indices), tuple(units[:2]))
+        for row, row_units in zip(rows[:2], units[:2]):
+            plan = self._row_plan(surface, row)
+            self.assertEqual(plan.quality, "word")
+            self.assertEqual(plan.source_units, row_units)
+            self.assertEqual(tuple((unit.start_seconds, unit.end_seconds) for unit in plan.display_units),
+                             tuple((unit.start_seconds, unit.end_seconds) for unit in row_units))
+        self._assert_visible_unread(painted, "我记得那草坪 一览无遗")
+        self._assert_visible_started(painted, "我等你的草坪 高楼耸起")
 
-    def test_pseudo_unit_continuation_uses_peer_body_without_inventing_real_front(self):
+    def test_measured_sentence_segment_keeps_own_anchors_instead_of_borrowing_peer_onset(self):
         left = "薛 : 我记得那草坪一览无遗"
         right = "刘 : 我等你的草坪高楼耸起"
         data = self._coalesce([
@@ -123,12 +164,22 @@ class DuetRecoveryBoundaryTests(unittest.TestCase):
             TimedLyricLine(203.0, "最后一句歌词"),
         ])
         surface, painted = self._render_data(data, 191.4)
-        self.assertEqual(surface._lyric_motion.active_index, 1)
-        self.assertEqual(painted[left[4:]], (0.0, None))
-        self.assertTrue(all(progress == 0.0 for progress in painted[right[4:]][1]))
-        _surface, later = self._render_data(data, 191.7)
-        self.assertGreater(later[left[4:]][0], 0.0)
-        self.assertIsNone(later[left[4:]][1])
+        displayed = surface._display_lyrics()[1]
+        self.assertEqual(displayed[surface._lyric_motion.active_index], (188.34, right))
+        left_plan = self._row_plan(surface, (188.34, left))
+        right_plan = self._row_plan(surface, (188.34, right))
+        self.assertEqual(left_plan.quality, "segment")
+        self.assertEqual((left_plan.start_seconds, left_plan.end_seconds), (188.34, 198.))
+        self.assertEqual(left_plan.source_units, (TimedLyricUnit(188.34, 198., left),))
+        self.assertTrue(all(unit.estimated for unit in left_plan.display_units))
+        self.assertEqual(left_plan.display_units[0].timing_origin, "segment")
+        self.assertEqual(right_plan.quality, "word")
+        self._assert_visible_started(painted, left[4:])
+        self._assert_visible_unread(painted, right[4:])
+        later_surface, later = self._render_data(data, 191.7)
+        self._assert_visible_started(later, left[4:])
+        self._assert_visible_started(later, right[4:])
+        self.assertEqual(self._row_plan(later_surface, (188.34, left)), left_plan)
 
     def test_staggered_duet_keeps_estimate_at_its_own_source_start(self):
         data = self._cached_data()
@@ -155,9 +206,13 @@ class DuetRecoveryBoundaryTests(unittest.TestCase):
                 )
                 self.assertEqual(len(surface._display_duet_presentation.groups), 1)
                 start = first_start if body.startswith("我记得") else second_start
-                expected = (position - start) / (rows[2][0] - start)
-                self.assertAlmostEqual(painted[body][0], expected)
-                self.assertIsNone(painted[body][1])
+                source_row = staggered_rows[0 if body.startswith("我记得") else 1]
+                plan = self._row_plan(surface, source_row)
+                self.assertEqual(plan.quality, "estimated")
+                self.assertEqual((plan.start_seconds, plan.end_seconds), (start, rows[2][0]))
+                self.assertEqual(plan.display_units[0].timing_origin, "label")
+                self.assertEqual(plan.display_units[1].start_seconds, start)
+                self._assert_visible_started(painted, body)
 
     def test_shared_onset_requires_known_matching_source_times(self):
         text = "薛 : 我记得那草坪一览无遗"

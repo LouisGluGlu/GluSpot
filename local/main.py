@@ -9,6 +9,13 @@ if ROOT_DIR not in sys.path:
 
 def main(argv: list[str] | None = None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--legacy-package-check" in arguments:
+        if len(arguments) != 2 or arguments[0] != "--legacy-package-check":
+            if sys.stderr is not None:
+                sys.stderr.write("Usage: GluSpot --legacy-package-check REPORTFILE\n")
+            return 2
+        from local.legacy_package_check import run_legacy_package_check
+        return run_legacy_package_check(arguments[1])
     if "--audio-package-check" in arguments:
         if len(arguments) != 2 or arguments[0] != "--audio-package-check":
             if sys.stderr is not None:
@@ -18,6 +25,16 @@ def main(argv: list[str] | None = None):
         # app.main acquires the normal single-instance guard.
         from local.audio_package_check import run_audio_package_check
         return run_audio_package_check(arguments[1])
+    if "--installer-handoff" in arguments:
+        from local.installer_handoff import parse_handoff_request
+        try:
+            handoff, token = parse_handoff_request(arguments)
+        except ValueError:
+            return 2
+        from local.app import main as run_app
+        if token is not None:
+            return run_app(installer_handoff=handoff, installer_sync=token)
+        return run_app(installer_handoff=handoff)
     from local.app import main as run_app
     return run_app()
 

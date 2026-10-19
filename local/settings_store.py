@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from local.branding import APP_NAME, app_data_dir, legacy_app_data_dirs, settings_file_for
 from local.music_lyric_motion import SPARSE_MIN_SECONDS_PER_UNIT, normalize_sparse_seconds_per_unit
+from local.runtime_platform import owned_playback_only
 
 
 APP_DATA_DIR = app_data_dir()
@@ -21,6 +22,26 @@ MUSIC_READING_GRADIENT_DEFAULT_STEPS = 30
 MUSIC_READING_LIFT_DEFAULT_LEVEL = 2
 MUSIC_READING_LIFT_LEVELS = (0, 1, 2, 4)
 MUSIC_READING_STRATEGY_DEFAULT = "gold"
+MUSIC_GLASS_DEFAULT_LEVEL = 50
+
+
+def normalize_music_glass_level(value) -> int:
+    """One persisted material level: more opaque also means more blur."""
+    try:
+        number = float(value)
+        if isinstance(value, bool) or not math.isfinite(number):
+            return MUSIC_GLASS_DEFAULT_LEVEL
+        return max(0, min(100, round(number)))
+    except (TypeError, ValueError, OverflowError):
+        return MUSIC_GLASS_DEFAULT_LEVEL
+
+
+def normalize_system_lyric_offset(value) -> float:
+    try:
+        number = float(value)
+        return max(-12.0, min(12.0, number)) if math.isfinite(number) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def normalize_music_reading_strategy(value) -> str:
@@ -127,26 +148,29 @@ DEFAULT_MUSIC_APP_PROFILES = {
 
 MYDOCKFINDER_LISTEN_PROCESS_CHOICES = (
     ("dock.exe", "dock.exe"),
-    ("dock_64.exe", "dock_64.exe"),
-    ("dockmod.exe", "dockmod.exe"),
-    ("dockmod64.exe", "dockmod64.exe"),
-    ("mydockfinder.exe", "MyDockFinder.exe"),
-    ("myfinder.exe", "MyFinder.exe"),
-    ("mydock.exe", "Mydock.exe"),
+    ("dock_64.exe", "Dock_64.exe"),
 )
 
-DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES = ("dock.exe", "dock_64.exe")
+DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES = tuple(name for name, _label in MYDOCKFINDER_LISTEN_PROCESS_CHOICES)
 
 PLACEMENT_MODE_LABELS = {
-    "tasker": "Tasker Bar",
-    "top": "Top Island",
+    "tasker": "沉浸栏 · Tasker Bar",
+    "top": "Top",
     "free": "Free",
-    "finder": "Finder Bar",
+    "finder": "沉浸栏 · Finder Bar",
 }
+
+PLACEMENT_FAMILY_LABELS = {"free": "Free", "top": "Top", "immersive": "沉浸栏"}
+
+
+def placement_mode_family(mode) -> str:
+    """Project compatible physical routes onto the three public island families."""
+    value = str(mode or "free")
+    return "immersive" if value in {"finder", "tasker"} else "top" if value == "top" else "free"
 
 
 def placement_mode_label(mode) -> str:
-    """Keep internal auto-hide placement within the four public modes."""
+    """Name the family and, for immersive bars, its physical placement."""
     return PLACEMENT_MODE_LABELS.get(str(mode or "free"), "Free")
 
 
@@ -183,9 +207,12 @@ DEFAULT_SETTINGS = {
     "v2_playback_onboarding_completed": False,
     "v2_owned_playback_enabled": True,
     "v2_owned_playback_mode": "sequential",
+    "v2_library_expanded": False,
+    "v2_library_last_playback_surface": "fullscreen",
+    "v2_music_content_layout": "lyrics",
     "v2_personal_dj_enabled": False,
     "v2_personal_dj_voice_key": "",
-    "v2_system_capture_enabled": False,
+    "v2_system_capture_enabled": True,
     "v2_startup_mode": "none",
     "v2_custom_icon_path": "",
     "v2_music_playing": True,
@@ -196,8 +223,12 @@ DEFAULT_SETTINGS = {
     "v2_top_notch_height_mode": "standard",
     "v2_finder_mode": None,
     "v2_manual_mydockfinder": False,
+    # Retain retired listener details for compatibility with existing files.
+    # Only the two main runtime names are monitored; helpers cannot widen it.
     "v2_mydockfinder_path": "",
+    "v2_mydockfinder_monitor_enabled": True,
     "v2_mydockfinder_listener_process_names": list(DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES),
+    "v2_bar_hide_follow_enabled": True,
     "v2_finder_bar_style": "transparent",
     "v2_finder_bar_center_ratio": 0.5,
     "v2_taskbar_corner_style": "win11",
@@ -225,7 +256,7 @@ DEFAULT_SETTINGS = {
     "v2_music_ambience_values": copy.deepcopy(DEFAULT_MUSIC_AMBIENCE_VALUES),
     "v2_enable_player_progress_plugin": False,
     "v2_player_progress_auto_detect": False,
-    "v2_music_player_mode": "netease",
+    "v2_music_player_mode": "system",
     "v2_netease_betterncm_path": "",
     "v2_music_app_profiles": copy.deepcopy(DEFAULT_MUSIC_APP_PROFILES),
     "v2_lyric_flow_style": "wave_stream",
@@ -265,6 +296,7 @@ DEFAULT_SETTINGS = {
     "v2_theme_dark_start": "22:00",
     "v2_theme_dark_end": "07:00",
     "v2_music_background_follow_theme": False,
+    "v2_music_glass_level": MUSIC_GLASS_DEFAULT_LEVEL,
     "v2_tasker_follow_taskbar_color": False,
     "v2_music_background_follow_previous_style": "",
     "v2_font_family": "Alibaba PuHuiTi",
@@ -303,6 +335,7 @@ DEFAULT_SETTINGS = {
     "v2_music_sparse_highlight_seconds_per_unit": SPARSE_MIN_SECONDS_PER_UNIT,
     "v2_music_surface_preload_count": 6,
     "v2_music_intro_cleanup_enabled": True,
+    "v2_system_lyric_offset_seconds": 0.0,
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_font_size": 12,
     "v2_dual_line_secondary_weight": 72,
@@ -340,6 +373,11 @@ DEFAULT_SETTINGS = {
 # exports cannot restore custom styles or restart retired runtime services.
 # Playback-page translation is a session action; its persisted default stays off.
 FIXED_DEFAULT_SETTING_KEYS = frozenset({
+    "v2_music_sparse_highlight_seconds_per_unit",
+    "v2_music_intro_cleanup_enabled",
+    "v2_music_player_mode", "v2_music_app_profiles",
+    "v2_enable_player_progress_plugin", "v2_player_progress_auto_detect",
+    "v2_netease_betterncm_path",
     "v2_music_playing", "v2_music_auto_detect", "v2_persistent_plugin",
     "v2_enabled_plugins", "v2_super_topmost", "v2_location_mode", "v2_top_notch_height_mode",
     "v2_finder_mode", "v2_manual_mydockfinder", "v2_show_seconds",
@@ -438,8 +476,9 @@ class SettingsManager(QObject):
                 return
             migrated = any(key in data for key in _REMOVED_VISUAL_SETTING_KEYS)
             self._settings.update({key: value for key, value in data.items() if key not in _REMOVED_VISUAL_SETTING_KEYS})
-            for key, default in (("v2_owned_playback_enabled", True), ("v2_system_capture_enabled", False),
-                                 ("v2_playback_onboarding_completed", False), ("v2_personal_dj_enabled", False)):
+            for key, default in (("v2_owned_playback_enabled", True), ("v2_system_capture_enabled", True),
+                                 ("v2_playback_onboarding_completed", False), ("v2_personal_dj_enabled", False),
+                                 ("v2_library_expanded", False), ("v2_bar_hide_follow_enabled", True)):
                 if not isinstance(self._settings.get(key), bool):
                     self._settings[key] = default
                     migrated = True
@@ -449,6 +488,12 @@ class SettingsManager(QObject):
             if self._settings.get("v2_owned_playback_mode") not in ("sequential", "shuffle", "repeat_one"):
                 self._settings["v2_owned_playback_mode"] = "sequential"
                 migrated = True
+            if self._settings.get("v2_library_last_playback_surface") not in ("fullscreen", "window", "island"):
+                self._settings["v2_library_last_playback_surface"] = "fullscreen"
+                migrated = True
+            if self._settings.get("v2_music_content_layout") not in ("cover", "cover_lyrics", "lyrics", "playlist"):
+                self._settings["v2_music_content_layout"] = "lyrics"
+                migrated = True
             voice = self._settings.get("v2_personal_dj_voice_key", "")
             if not isinstance(voice, str) or voice and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", voice) is None:
                 self._settings["v2_personal_dj_voice_key"] = ""
@@ -456,6 +501,8 @@ class SettingsManager(QObject):
             for key, normalize in (
                 ("v2_finder_bar_style", normalize_finder_bar_style),
                 ("v2_finder_bar_center_ratio", normalize_finder_bar_center_ratio),
+                ("v2_system_lyric_offset_seconds", normalize_system_lyric_offset),
+                ("v2_music_glass_level", normalize_music_glass_level),
             ):
                 raw = self._settings.get(key)
                 value = normalize(raw)
@@ -476,9 +523,9 @@ class SettingsManager(QObject):
             if self._settings.get("v2_album_island_secondary_style") != "perspective_dim":
                 self._settings["v2_album_island_secondary_style"] = "perspective_dim"
                 migrated = True
-            self._settings["v2_music_sparse_highlight_seconds_per_unit"] = normalize_sparse_seconds_per_unit(
-                self._settings.get("v2_music_sparse_highlight_seconds_per_unit")
-            )
+            raw_sparse_threshold = self._settings.get("v2_music_sparse_highlight_seconds_per_unit")
+            self._settings["v2_music_sparse_highlight_seconds_per_unit"] = normalize_sparse_seconds_per_unit(raw_sparse_threshold)
+            migrated = migrated or raw_sparse_threshold != self._settings["v2_music_sparse_highlight_seconds_per_unit"]
             raw_lift_level = self._settings.get("v2_music_surface_reading_lift_level")
             lift_level = normalize_music_reading_lift_level(raw_lift_level)
             self._settings["v2_music_surface_reading_lift_level"] = lift_level
@@ -522,14 +569,26 @@ class SettingsManager(QObject):
             pass
 
     def get(self, key: str, default=None):
+        if key in {"v2_owned_playback_enabled", "v2_system_capture_enabled"} and owned_playback_only():
+            return key == "v2_owned_playback_enabled"
         if key in FIXED_DEFAULT_SETTING_KEYS:
             return copy.deepcopy(DEFAULT_SETTINGS[key])
         return self._settings.get(key, default)
 
     def set(self, key: str, value):
+        if key in {"v2_owned_playback_enabled", "v2_system_capture_enabled"} and owned_playback_only():
+            value = key == "v2_owned_playback_enabled"
         if key in _REMOVED_VISUAL_SETTING_KEYS or key in FIXED_DEFAULT_SETTING_KEYS:
             return
         if key == "v2_personal_dj_enabled" and not isinstance(value, bool):
+            return
+        if key == "v2_library_expanded" and not isinstance(value, bool):
+            return
+        if key == "v2_bar_hide_follow_enabled" and not isinstance(value, bool):
+            return
+        if key == "v2_library_last_playback_surface" and value not in ("fullscreen", "window", "island"):
+            return
+        if key == "v2_music_content_layout" and value not in ("cover", "cover_lyrics", "lyrics", "playlist"):
             return
         if key == "v2_personal_dj_voice_key" and (not isinstance(value, str) or value and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is None):
             return
@@ -549,6 +608,10 @@ class SettingsManager(QObject):
             value = "perspective_dim"
         if key == "v2_music_sparse_highlight_seconds_per_unit":
             value = normalize_sparse_seconds_per_unit(value)
+        if key == "v2_system_lyric_offset_seconds":
+            value = normalize_system_lyric_offset(value)
+        if key == "v2_music_glass_level":
+            value = normalize_music_glass_level(value)
         if key == "v2_music_surface_reading_lift_level":
             value = normalize_music_reading_lift_level(value)
         if key == "v2_music_surface_reading_gradient_steps":

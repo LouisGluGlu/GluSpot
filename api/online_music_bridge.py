@@ -93,7 +93,9 @@ class NodeOnlineMusicBackend:
         # Inherited platform cookies are deliberately not consumed by this bridge.
         environment = {key: value for key, value in os.environ.items() if not any(word in key.upper() for word in ("COOKIE", "TOKEN", "SECRET"))}
         environment.update({"GLUSPOT_ONLINE_MUSIC_MODULE_ROOT": str(self.module_root), "NODE_ENV": "test", "QQ_AUTH_STATE_PATH": "memory", "AUTO_OPEN_EXPLORER": "false", "ENABLE_RANDOM_CN_IP": "false"})
-        work_root = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "GluSpot" / "cache" / "online-music-bridge"
+        from local.branding import is_packaged_app, local_app_data_dir
+        state_root = Path(local_app_data_dir()) if is_packaged_app() else Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "GluSpot"
+        work_root = state_root / "cache" / "online-music-bridge"
         work_root.mkdir(parents=True, exist_ok=True)
         environment.update({"TEMP": str(work_root), "TMP": str(work_root)})
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -195,8 +197,8 @@ class NodeOnlineMusicBackend:
                 raise OnlineMusicError("runtime", source_id, "在线音乐运行时连接中断")
             if response.get("ok") is not True:
                 code = response.get("error")
-                code = code if code in {"network", "timeout", "invalid_response", "auth_required", "unsupported", "expired", "runtime"} else "network"
-                messages = {"auth_required": "请先登录此音乐来源", "unsupported": "此来源暂不支持该操作", "expired": "二维码已过期，请刷新", "timeout": "音乐服务请求超时，请重试", "invalid_response": "音乐服务返回的数据无效"}
+                code = code if code in {"network", "timeout", "invalid_response", "auth_required", "unsupported", "expired", "runtime", "account_changed", "not_writable", "mutation_failed"} else "network"
+                messages = {"auth_required": "请先登录此音乐来源", "unsupported": "此来源暂不支持该操作", "expired": "二维码已过期，请刷新", "timeout": "音乐服务请求超时，请重试", "invalid_response": "音乐服务返回的数据无效", "account_changed": "账号已变化，请刷新后重试", "not_writable": "此歌单不可添加歌曲，请选择自己的歌单", "mutation_failed": "音乐服务未确认收藏操作，请刷新后重试"}
                 raise OnlineMusicError(code, source_id, messages.get(code, "音乐服务连接失败，请重试"))
             return response
 

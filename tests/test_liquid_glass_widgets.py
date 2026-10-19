@@ -103,16 +103,16 @@ class LiquidGlassWidgetTests(unittest.TestCase):
             self.owner._background_cache.fill(color)
             self.assertEqual(self.render(button).pixelColor(60, 22).alpha(), 0)
 
-    def test_custom_faces_keep_their_original_identity_without_full_backdrop_replacement(self):
+    def test_home_glass_tracks_backdrop_while_mode_sweep_and_cover_keep_their_identity(self):
         controls = (
-            EntryNavigationButton("back", "返回", self.owner),
-            PlaybackModeButton("程序内播放", self.owner),
-            MusicSourceButton(ENTRY_SOURCES[0], self.owner),
-            _LibraryActionButton("switch", "切换平台", self.owner),
-            _ModeButton("window", self.owner),
-            _CollectionCover("netease", "fm", self.owner),
+            (EntryNavigationButton("back", "返回", self.owner), True),
+            (PlaybackModeButton("程序内播放", self.owner), True),
+            (MusicSourceButton(ENTRY_SOURCES[0], self.owner), True),
+            (_LibraryActionButton("switch", "切换平台", self.owner), True),
+            (_ModeButton("window", self.owner), True),
+            (_CollectionCover("netease", "fm", self.owner), False),
         )
-        for control in controls:
+        for control, transmits_backdrop in controls:
             with self.subTest(control=type(control).__name__):
                 control.resize(132, 76)
                 control.move(25, 30)
@@ -122,7 +122,10 @@ class LiquidGlassWidgetTests(unittest.TestCase):
                 self.owner._background_cache.fill(QColor("#347b9d"))
                 clear_glass_cache()
                 cool = self.render(control)
-                self.assertEqual(bytes(warm.constBits()), bytes(cool.constBits()))
+                self.assertEqual(
+                    bytes(warm.constBits()) != bytes(cool.constBits()),
+                    transmits_backdrop,
+                )
                 spy = QSignalSpy(control.clicked)
                 control.click()
                 self.assertEqual(spy.count(), 1)
@@ -140,19 +143,25 @@ class LiquidGlassWidgetTests(unittest.TestCase):
         button.setChecked(False)
         self.assertEqual(button._progress, 0)
 
-    def test_source_selection_retains_the_original_dark_face_and_source_rim(self):
+    def test_source_selection_uses_scene_glass_and_retains_source_rim_and_artwork(self):
         button = MusicSourceButton(ENTRY_SOURCES[2], self.owner)
         button.resize(132, 100)
-        button.setChecked(True)
-        with patch("local.playback_entry_window.paint_liquid_glass", wraps=paint_liquid_glass) as material:
-            image = self.render(button)
-        self.assertEqual(material.call_args.kwargs["base_color"], QColor("#2b2d33"))
-        self.assertEqual(material.call_args.kwargs["border_color"], QColor(ENTRY_SOURCES[2].color))
-        self.assertLess(image.pixelColor(20, 40).lightness(), 80)
-        button.setChecked(False)
-        with patch("local.playback_entry_window.paint_liquid_glass", wraps=paint_liquid_glass) as material:
-            self.render(button)
-        self.assertEqual(material.call_args.kwargs["base_color"], QColor("#202227"))
+        button.move(25, 30)
+        for selected in (True, False):
+            with self.subTest(selected=selected):
+                button.setChecked(selected)
+                with patch("local.playback_entry_window.paint_liquid_glass", wraps=paint_liquid_glass) as material, \
+                        patch("local.playback_entry_window.paint_music_source_icon") as artwork:
+                    self.render(button)
+                face = material.call_args.kwargs
+                self.assertTrue(face["refractive"])
+                self.assertIs(face["backdrop"], self.owner._background_cache)
+                self.assertEqual(face["backdrop_rect"], QRectF(26, 31, 130, 98))
+                self.assertEqual(face["active"], selected)
+                self.assertEqual(face["border_color"],
+                                 QColor(ENTRY_SOURCES[2].color if selected else "#3c3e44"))
+                artwork.assert_called_once()
+                self.assertEqual(artwork.call_args.args[2], ENTRY_SOURCES[2].source_id)
 
     def test_device_unselected_face_has_no_added_fill_template(self):
         row = _OutputRow(AudioRouteDevice("idle", "空闲设备"), self.owner)
