@@ -37,6 +37,7 @@ class _Request:
     byte_count: int
     render: object
     dirty: tuple
+    interval: float
     ready_callback: object = None
 
 
@@ -185,7 +186,8 @@ class GlassPixelTasks(QObject):
         callback = weakref.WeakMethod(ready_callback) if ready_callback is not None else None
         request = _Request(slot, state.generation, domain, stamp, self._serial, payload,
                            max(0, int(byte_count)), render,
-                           (rect.x(), rect.y(), rect.width(), rect.height()), callback)
+                           (rect.x(), rect.y(), rect.width(), rect.height()),
+                           max(0., interval), callback)
         self.failed.pop(slot, None)
         self.latest[slot] = _Desired(request.generation, domain, stamp, request.serial)
         self.latest.move_to_end(slot)
@@ -218,6 +220,16 @@ class GlassPixelTasks(QObject):
             _slot, request = self.pending.popitem(last=False)
             state = self.owners.get(request.slot[0])
             if state is None or not self._live(state.reference()) or request.generation != state.generation:
+                continue
+            ready = self.cache.get(request.slot)
+            if (ready is not None and (ready.generation, ready.domain) == (
+                    request.generation, request.domain)
+                    and (ready.stamp == request.stamp or time.monotonic() - ready.at < request.interval)):
+                # A newer backdrop can queue while this role has no ready
+                # material. Once the in-flight result is accepted, the same
+                # freshness rule as request() applies before another render.
+                # Keep the latest desire, so the existing animation clock
+                # can retry after its interval without an extra timer.
                 continue
             self.active = request
             # Only payload and a module-level pure renderer enter this closure.

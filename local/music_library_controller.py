@@ -126,13 +126,19 @@ class MusicLibraryController(QObject):
         if (watched in getattr(self, "_navigation_windows", ())
                 and event.type() in (QEvent.Type.Move, QEvent.Type.Resize)
                 and watched.isVisible() and not self._music_geometry_applying
+                and not self._navigation.destination_geometry(watched).isValid()
                 and getattr(watched, "page", "sources") == "sources"
                 and getattr(watched, "_contraction_target", None) is None
                 and getattr(watched, "_page_morph_to", QImage()).isNull()):
             self._publish_shared_music_geometry(watched.geometry())
-        if watched is self.window and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress):
+        if watched is self.window and event.type() in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress,
+                QEvent.Type.WindowStateChange,
+                getattr(QEvent.Type, "DevicePixelRatioChange", None),
+                getattr(QEvent.Type, "ScreenChangeInternal", None)):
             # A user's new interaction owns placement over delayed native-map
-            # repair callbacks from the preceding page handoff.
+            # repair callbacks. A changed screen/DPI/state also invalidates
+            # those old screen coordinates even without pointer interaction.
             self._library_placement_epoch += 1
         if watched is self.window and event.type() in (QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.WindowStateChange):
             QTimer.singleShot(0, self._arm_catalog_retry)
@@ -266,8 +272,7 @@ class MusicLibraryController(QObject):
         self.window.set_has_more(False)
         self.window.set_toolbar_expanded(True)
         self.window.set_loading(True, "正在加载账号与歌单…")
-        self._restore_library_geometry()
-        self.window.show()
+        self._restore_library_geometry(show=True)
         self.window.raise_()
         self.window.activateWindow()
         self._navigation.request_start(frame, self.window)
@@ -356,8 +361,7 @@ class MusicLibraryController(QObject):
         account = self.window._account
         if self._source == source_id and account is not None and account.logged_in:
             self.window.set_loading(False)
-            self.window.show()
-            self._restore_library_geometry()
+            self._restore_library_geometry(show=True)
             self.window.raise_()
             self.window.activateWindow()
             self._navigation.request_start(frame, self.window)
@@ -411,17 +415,24 @@ class MusicLibraryController(QObject):
         self.window.activateWindow()
         return False
 
-    def _restore_library_geometry(self):
-        if self._library_geometry.isValid():
+    def _restore_library_geometry(self, *, show=False):
+        # Native mapping and transparent-window changes can emit temporary
+        # Move events. Preserve the intended rectangle before showing, rather
+        # than publishing a platform placement as the user's new page size.
+        expected = QRect(self._library_geometry)
+        if expected.isValid():
             self._library_placement_epoch += 1
             epoch = self._library_placement_epoch
+            applying = self._music_geometry_applying
             self._music_geometry_applying = True
             try:
-                self.window.setGeometry(self._library_geometry)
+                self.window.setGeometry(expected)
+                if show:
+                    self.window.show()
+                    self.window.setGeometry(expected)
             finally:
-                self._music_geometry_applying = False
+                self._music_geometry_applying = applying
             # Native first mapping may be placed after show() returns.
-            expected = QRect(self._library_geometry)
             def settle():
                 if (not self._closed and epoch == self._library_placement_epoch
                         and self.window.isVisible() and not self.window.isMinimized()
@@ -429,6 +440,8 @@ class MusicLibraryController(QObject):
                     self.window.setGeometry(expected)
             for delay in (0, 75, 200):
                 QTimer.singleShot(delay, settle)
+        elif show:
+            self.window.show()
 
     def _set_surface_loading(self, row=None):
         surface = getattr(self.island, "music_fullscreen_overlay", None)
@@ -1202,8 +1215,7 @@ class MusicLibraryController(QObject):
             if not self.window.isVisible():
                 self._navigation.cancel()
                 self._own_library_surface()
-                self.window.show()
-                self._restore_library_geometry()
+                self._restore_library_geometry(show=True)
                 self.window.raise_()
                 self.window.activateWindow()
 

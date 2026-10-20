@@ -2,6 +2,8 @@
 
 日期：2026-10-20。基于 `v6.415`（`a1c0a5f`），独立分支 `codex/animation-performance-6.416`。本轮交付源码与验证，不构建、不上传 6.416 发行包。视觉规则、动画时长、交互、布局、provider、原始歌词和持久缓存边界保留。
 
+2026-10-21 的返回错层与材质队列跟进单独记录在[后续报告](animation-return-followup-2026-10-21.md)。下文的 5,691 项与性能数据属于 10 月 20 日候选，后续候选的验证和限制以跟进报告为准。
+
 ## 版本隔离
 
 - 6.415 tag 与完整历史保留。源码 bundle：`.runtime/animation-performance-2026-10-20/GluSpot-6.415-source.bundle`，另备份至 `E:/gpt-island/release/GluSpot-6.415-source-2026-10-20.bundle`。两者均为 71,390,784 bytes，SHA-256 `ed7cd730306abcdfbb8f4509ce40d3d4ad194e2d80cab4b58f546c5ab62e217f`，`git bundle verify` 通过。
