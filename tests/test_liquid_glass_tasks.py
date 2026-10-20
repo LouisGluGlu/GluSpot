@@ -150,6 +150,49 @@ class GlassPixelTaskTests(unittest.TestCase):
         self.assertEqual(next(iter(self.store.cache.values())).stamp, 3)
         self.assertEqual(self.store.discarded, 1)
 
+    def test_queued_live_refresh_rechecks_fresh_result_interval_before_starting(self):
+        image = self.image()
+        def request(stamp, domain='geometry', interval=.1):
+            return self.store.request(self.owner, 'face', self.owner.current_scene, domain, stamp,
+                                      QImage(image), lambda value: value, QRectF(self.owner.rect()),
+                                      byte_count=int(image.sizeInBytes()), interval=interval)
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.):
+            request(1)
+            request(2)
+            self.assertEqual(len(self.store.pending), 1)
+            self.store.tasks.finish()
+            self.assertEqual(self.store.submitted, 1)
+            self.assertFalse(self.store.pending)
+            self.assertEqual(self.store.latest[(1, 'face')].stamp, 2)
+            self.assertEqual(next(iter(self.store.cache.values())).stamp, 1)
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.05):
+            self.assertIsNotNone(request(2))
+            self.assertEqual(self.store.submitted, 1)
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.101):
+            request(2)
+            self.assertEqual(self.store.submitted, 2)
+            self.store.tasks.finish()
+            self.assertEqual(next(iter(self.store.cache.values())).stamp, 2)
+
+    def test_queue_freshness_never_skips_new_geometry_or_zero_interval_background(self):
+        image = self.image()
+        def request(stamp, domain, interval):
+            self.store.request(self.owner, 'face', self.owner.current_scene, domain, stamp,
+                               QImage(image), lambda value: value, QRectF(self.owner.rect()),
+                               byte_count=int(image.sizeInBytes()), interval=interval)
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.):
+            request(1, 'old', .1)
+            request(2, 'new', .1)
+            self.store.tasks.finish()
+            self.assertEqual(self.store.submitted, 2)
+            self.store.tasks.finish()
+            request(3, 'new', 0.)
+            request(4, 'new', 0.)
+            self.store.tasks.finish()
+            self.assertEqual(self.store.submitted, 4)
+            self.store.tasks.finish()
+            self.assertEqual(next(iter(self.store.cache.values())).stamp, 4)
+
     def test_pending_count_input_bytes_ready_bytes_and_slots_remain_bounded(self):
         self.store.MAX_PENDING = 3
         self.store.MAX_SLOTS = 4
