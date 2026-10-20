@@ -188,13 +188,15 @@ class FinderBarSurfaceTests(unittest.TestCase):
         self.assertFalse(self.visual.dragging)
         self.assertFalse(self.visual.drag_candidate)
 
-    def test_late_presence_drag_release_away_from_bar_keeps_free_position(self):
+    def test_late_presence_drag_release_away_from_bar_requests_free_settlement(self):
         visual = self.visual
         visual.drag_candidate, visual.dragging = True, True
         before = visual.pos(), visual.size()
         self.presence()
-        visual._settle_standalone_drag_release = Mock(side_effect=AssertionError("A missed Finder drop must stay Free"))
+        visual._settle_standalone_drag_release = Mock(return_value=True)
         self._release_drag_at(QPoint(-1000, 300))
+        visual._settle_standalone_drag_release.assert_called_once_with(
+            QRectF(-1100., 290., 300., 40.), QPoint(-1000, 300))
         self.assertEqual(visual.location_mode, "free")
         self.assertEqual((visual.pos(), visual.size()), before)
         self.assertFalse(visual.finder_mode)

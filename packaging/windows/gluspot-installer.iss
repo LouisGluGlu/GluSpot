@@ -1,7 +1,7 @@
 ; Current-user Windows installer. Only shipped binaries are replaced on upgrade.
 ; The sibling GluSpot state directory is retained until an explicit uninstall.
 #ifndef AppVersion
-  #define AppVersion "6.413"
+  #define AppVersion "6.414"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must point to a completed GluSpot onedir build

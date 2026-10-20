@@ -9503,7 +9503,11 @@ class IslandStackVisual(QWidget):
         if self._finder_bar_available():
             if str(getattr(self, "location_mode", "free")) != "free":
                 self.set_location_mode("free", notify=False)
-            return True
+            # Only an actual Finder hit consumes the drop. Free still needs
+            # its normal release settlement: dragging latches the expansion
+            # direction, and unlocking it must rebase the native canvas while
+            # keeping the painted island at the same screen position.
+            return False
         if pending:
             canonical = self._canonical_location_mode(getattr(self, "location_mode", "free"))
             if canonical != getattr(self, "location_mode", "free"):
@@ -10185,6 +10189,11 @@ class IslandStackVisual(QWidget):
         target = self._standalone_free_release_target_for_screen(anchor, screen)
         if target is None:
             return False
+        # A new expansion direction changes the main row's local origin.
+        # Rebase the live springs as well as the layout target so the first
+        # released frame stays at the pointer instead of jumping across the
+        # transparent canvas before its springs catch up.
+        self._remember_motion_global_rects()
         self.stack_direction = target.direction
         self.move(target.window_pos)
         self._restore_motion_global_rects_after_move()

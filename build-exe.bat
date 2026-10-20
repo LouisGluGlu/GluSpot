@@ -35,8 +35,8 @@ if errorlevel 1 goto native_failed
 if errorlevel 1 exit /b 1
 "%PYEXE%" -X utf8 -m PyInstaller --noconfirm --clean --workpath "%ROOT%build\pyinstaller" --distpath "%ROOT%release" "%ROOT%GluSpot.spec"
 if errorlevel 1 goto build_failed
-echo GluSpot 6.413 build is ready:
-echo "%ROOT%release\GluSpot-6.413\GluSpot.exe"
+echo GluSpot 6.414 build is ready:
+echo "%ROOT%release\GluSpot-6.414\GluSpot.exe"
 if not defined NOPAUSE pause
 exit /b 0
 
@@ -48,6 +48,6 @@ exit /b %RESULT%
 echo GluSpot AirPlay helper build failed. Install CMake and a Windows C++20 toolchain; see native\airplay_sender\README.md.
 exit /b 1
 :build_failed
-echo GluSpot 6.413 build failed.
+echo GluSpot 6.414 build failed.
 if not defined NOPAUSE pause
 exit /b 1
