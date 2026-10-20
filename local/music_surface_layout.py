@@ -125,12 +125,22 @@ class MusicContentLayoutMixin:
         # A tall, independently resized window can be wider than the former
         # 640px cutoff yet have no room beside its height-scaled artwork. Use
         # the exact cover, gutters and font that the two-column layout paints.
-        _content, _cover, column = self._content_column_geometry()
         scale = self._surface_scale()
+        # Fit is queried by controls, cover and lyrics during one paint. Font
+        # shaping is stable until the exact size/font/device inputs change;
+        # retain only this current result, rather than accumulate resize keys.
+        key = (self.width(), self.height(), scale, self.LYRIC_PIXEL_SIZE,
+               tuple(self.SURFACE_FONT_FAMILIES), self.devicePixelRatioF(),
+               self.logicalDpiX(), self.logicalDpiY())
+        if key == getattr(self, "_content_layout_fit_key", None):
+            return self._content_layout_fit_narrow
+        _content, _cover, column = self._content_column_geometry()
         font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
         six_glyphs = QFontMetricsF(font).horizontalAdvance("音乐正在播放")
         required = max(180., six_glyphs, (43. + 61. + 14. + 4. * 18.) * scale)
-        return column.width() < required
+        self._content_layout_fit_key = key
+        self._content_layout_fit_narrow = column.width() < required
+        return self._content_layout_fit_narrow
 
     def _content_column_geometry(self, rect=None):
         """One bounded source of artwork/side-column geometry for fit and ink."""

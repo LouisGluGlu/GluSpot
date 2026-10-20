@@ -7,7 +7,7 @@ from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRectF, Qt, QTimer, QV
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_level
+from local.liquid_glass import GlassCaptureMixin, GlassPushButton, paint_liquid_glass, widget_glass_level
 from local.music_source_icons import paint_music_source_icon
 from local.song_collection_controller import SongCollectionState
 
@@ -53,7 +53,9 @@ class CollectionGlassButton(GlassPushButton):
                 material_level=widget_glass_level(self.surface),
                 refractive=True, backdrop=image,
                 backdrop_rect=self.surface._surface_glass_source_rect(target, image),
-                hovered=self.underMouse(), pressed=self.isDown(), cache_token=id(self))
+                hovered=self.underMouse(), pressed=self.isDown(), cache_token=id(self),
+                material_owner=self, material_role='collection-row',
+                material_scene=self.surface._visual_track_identity)
             ink = self.surface._scene_control_ink()
             if not self.isEnabled():
                 painter.setOpacity(.5)
@@ -106,7 +108,7 @@ class CollectionGlassButton(GlassPushButton):
                 painter.drawRoundedRect(face.adjusted(2, 2, -2, -2), 14, 14)
 
 
-class SongPlaylistPanel(QWidget):
+class SongPlaylistPanel(GlassCaptureMixin, QWidget):
     """Native scroll/focus targets; no account I/O in widget callbacks."""
 
     def __init__(self, surface, controller, track_id, authority):
@@ -317,7 +319,8 @@ class SongPlaylistPanel(QWidget):
                               material_level=widget_glass_level(self.surface),
                               refractive=True, backdrop=image,
                               backdrop_rect=self.surface._surface_glass_source_rect(target, image),
-                              cache_token=id(self))
+                              cache_token=id(self), material_owner=self, material_role='playlist-panel',
+                              material_scene=self.surface._visual_track_identity)
 
 
 class MusicSongCollectionMixin:
@@ -422,7 +425,10 @@ class MusicSongCollectionMixin:
         paint_liquid_glass(painter, face, radius=face.height()/2., light=self._surface_glass_light(),
                           material_level=widget_glass_level(self),
                           refractive=True, backdrop=image,
-                          backdrop_rect=self._surface_glass_source_rect(face, image), cache_token=(id(self), "collection"))
+                          backdrop_rect=self._surface_glass_source_rect(face, image), cache_token=(id(self), "collection"),
+                          material_owner=self, material_role='collection',
+                          material_scene=self._visual_track_identity,
+                          material_dirty=painter.worldTransform().mapRect(face))
         for key, target in self._song_collection_rects(rect, now).items():
             painter.save()
             started = self._song_collection_clicks.get(key)

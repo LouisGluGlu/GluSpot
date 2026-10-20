@@ -25,7 +25,8 @@ from local.music_library_search import LibraryProgress, LibrarySearch
 from local.artwork_skeleton import paint_artwork_skeleton
 from local.music_page_resize import MusicPageResizeMixin
 from local.music_source_icons import music_source_icon_image, paint_music_source_icon
-from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
+from local.liquid_glass import (GlassCaptureMixin, GlassPushButton, glass_owner_is_live,
+                                paint_liquid_glass, widget_glass_backdrop, widget_glass_level)
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_surface_palette import artwork_surface_palette, cached_artwork_surface_palette
 from local.music_lyric_motion import MotionSimulationClock
@@ -473,7 +474,7 @@ class _CatalogSkeleton(QWidget):
                 paint_artwork_skeleton(painter, QRectF(left + 3, 184, 100, 11), ink, seconds, radius=5.5)
 
 
-class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
+class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     backRequested = Signal()
     sourceSwitchRequested = Signal()
     logoutRequested = Signal()
@@ -512,6 +513,7 @@ class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
         self._logout_confirmation = None
         self._background_frame = QImage()
         self._background_key = None
+        self._background_source_key = None
         self._background_renderer = AlbumFlowBackgroundRenderer()
         self._background_seconds = 0.0
         self._background_clock = MotionSimulationClock()
@@ -853,17 +855,23 @@ class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
         self._accumulate_album_rotation()
         self._navigation_cover_frozen = True
         self._sync_album_rotation()
+        # The navigation layer owns a frozen copy of this page. Do not keep
+        # repainting scenery or missing covers behind its invisible target.
+        self._sync_background_animation()
+        self._sync_artwork_skeleton()
         return self.navigation_cover_state()
 
     def resume_navigation_cover(self):
         self._navigation_cover_frozen = False
         self._sync_album_rotation()
+        self._sync_background_animation()
+        self._sync_artwork_skeleton()
 
     def navigation_background_frame(self, excluded_cover_rect=None):
         """Capture the UI without the separately animated navigation album."""
         excluded = []
         if excluded_cover_rect is not None:
-            for cover in self.findChildren(_CollectionCover):
+            for cover in self._collection_covers():
                 center = cover.mapToGlobal(cover.rect().center())
                 if cover.isVisible() and excluded_cover_rect.contains(center):
                     cover._navigation_capture_hidden = True
@@ -1139,10 +1147,19 @@ class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
                 self.artworkNeeded.emit(key, url)
         self._sync_artwork_skeleton()
 
+    def _collection_covers(self):
+        # Rows/shelves already own the exact cover set. Do not walk labels,
+        # scrollbars and every other QObject on each 33ms skeleton pulse.
+        for row in self._rows:
+            yield row.cover
+        for shelf in self._shelves:
+            for _, cover, _ in shelf.tiles:
+                yield cover
+
     def _missing_artwork_widgets(self):
-        if not self.isVisible() or self.isMinimized():
+        if self._navigation_cover_frozen or not self.isVisible() or self.isMinimized():
             return ()
-        covers = tuple(cover for cover in self.findChildren(_CollectionCover)
+        covers = tuple(cover for cover in self._collection_covers()
             if cover.loading and cover.image.isNull() and not cover.visibleRegion().isEmpty())
         groups = tuple(group for group in self._groups if not group.visibleRegion().isEmpty()
             and any((item.artwork_url or item.kind in {"daily", "fm"})
@@ -1430,7 +1447,8 @@ class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
             self.update()
 
     def _background_should_animate(self):
-        return (not self._background_closing and self.isVisible() and not self.isMinimized()
+        return (not self._background_closing and not self._navigation_cover_frozen
+                and self.isVisible() and not self.isMinimized()
                 and self._now_playing is not None and self._now_playing.is_playing
                 and self._background_intensity() > 0.)
 
@@ -1530,6 +1548,11 @@ class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
             self._background_palette_pending = None
         self._start_background_palette_worker()
 
+    def _background_scene_identity(self):
+        track = self._now_playing
+        return (getattr(track, 'track_id', ''), getattr(track, 'title', ''),
+                getattr(track, 'artist', ''), self._now_playing_image.cacheKey())
+
     def _update_background(self):
         """One bounded scene raster, frozen whenever playback is not visible."""
         source = self.source_button.source
@@ -1545,16 +1568,26 @@ class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
                tuple(color.rgba() for color in colors), weights, intensity, seconds)
         if key == self._background_key:
             return False
-        if (palette is None or (not self._background_should_animate() and self.isVisible()
+        if (palette is None or (not self._navigation_cover_frozen
+                and not self._background_should_animate() and self.isVisible()
                 and self._background_key is not None and key[3:5] != self._background_key[3:5])):
             # A deliberate paused song/artwork change still gets its own
             # static colors; it must not need a running timer to settle them.
             self._background_renderer = AlbumFlowBackgroundRenderer()
-        self._background_frame = self._background_renderer.render(
-            self.size(), colors, seconds, intensity=intensity, weights=weights).copy()
+        live_owner = self if self._background_should_animate() and glass_owner_is_live(self) else None
+        frame = self._background_renderer.render(
+            self.size(), colors, seconds, intensity=intensity, weights=weights,
+            material_owner=live_owner, material_scene=self._background_scene_identity)
+        self._background_key = key
+        source_key = frame.cacheKey()
+        if source_key == self._background_source_key:
+            # A pending worker retains the displayed source. Do not detach
+            # and reapply the same reading veil on every unchanged tick.
+            return False
+        self._background_frame = frame.copy()
         with QPainter(self._background_frame) as painter:
             painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, 142))
-        self._background_key = key
+        self._background_source_key = source_key
         return True
 
     def eventFilter(self, watched, event):

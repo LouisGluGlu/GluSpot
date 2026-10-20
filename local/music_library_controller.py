@@ -13,7 +13,7 @@ from api.online_music_artwork import fetch_online_thumbnail
 from api.online_music_diagnostics import record_login_phase
 from local.music_library_window import LibraryCollection, MusicLibraryWindow
 from local.music_tasks import MusicTasks
-from local.music_navigation_transition import MusicNavigationTransition, capture_navigation_frame
+from local.music_navigation_transition import MusicNavigationTransition
 
 
 class MusicLibraryController(QObject):
@@ -97,7 +97,11 @@ class MusicLibraryController(QObject):
         self._catalog_retry_timer = QTimer(self)
         self._catalog_retry_timer.setSingleShot(True)
         self._catalog_retry_timer.timeout.connect(self._retry_catalog)
-        self._navigation = MusicNavigationTransition()
+        # Login, library and playback are one visual journey. Share its
+        # existing overlay so a fast reverse samples the currently visible
+        # pose instead of starting a second independent handoff window.
+        self._navigation = getattr(entry, "_navigation", None) or MusicNavigationTransition()
+        entry._navigation = self._navigation
         self.window.set_library_expanded(bool(settings.get("v2_library_expanded", False)), animate=False)
         self.window.set_now_playing(self.player.track)
         self._minimum_surface_sync_pending = False
@@ -233,8 +237,7 @@ class MusicLibraryController(QObject):
         self.entry._library_origin = None
         if frame is None:
             overlay = getattr(self.island, "music_fullscreen_overlay", None)
-            frame = capture_navigation_frame(overlay) or capture_navigation_frame(getattr(self.entry, "window", None))
-        self._navigation.cancel()
+            frame = self._navigation.origin_frame(overlay) or self._navigation.origin_frame(getattr(self.entry, "window", None))
         self._own_library_surface()
         self._epoch += 1
         self._request += 1
@@ -267,7 +270,7 @@ class MusicLibraryController(QObject):
         self.window.show()
         self.window.raise_()
         self.window.activateWindow()
-        self._navigation.start(frame, self.window)
+        self._navigation.request_start(frame, self.window)
         self._pending = True
         self._catalog_pending = False
         restore = getattr(self.service, "restore_account", None)
@@ -303,14 +306,13 @@ class MusicLibraryController(QObject):
     def switch_source(self):
         if self._closed:
             return
-        frame = capture_navigation_frame(self.window)
-        self._navigation.cancel()
+        frame = self._navigation.origin_frame(self.window)
         self._invalidate()
         self._source = ""
         self.window.set_loading(False)
         self.window.hide()
         self.entry.show_login()
-        self._navigation.start(frame, getattr(self.entry, "window", None))
+        self._navigation.request_start(frame, getattr(self.entry, "window", None))
 
     def back(self):
         if self._closed:
@@ -345,8 +347,7 @@ class MusicLibraryController(QObject):
             source_id = track.track_id.split(":", 2)[1]
         self._remember_surface()
         self._capture_player_geometry()
-        frame = capture_navigation_frame(getattr(self.island, "music_fullscreen_overlay", None), separate_cover=True)
-        self._navigation.cancel()
+        frame = self._navigation.origin_frame(getattr(self.island, "music_fullscreen_overlay", None), separate_cover=True)
         self._opening = None
         self._opening_ready = False
         self._pending_row = self._pending_collection = None
@@ -359,7 +360,7 @@ class MusicLibraryController(QObject):
             self._restore_library_geometry()
             self.window.raise_()
             self.window.activateWindow()
-            self._navigation.start(frame, self.window)
+            self._navigation.request_start(frame, self.window)
         else:
             self.entry._library_origin = frame
             self.open_source(source_id)
@@ -373,9 +374,8 @@ class MusicLibraryController(QObject):
         track = self.player.track
         if track is None or not track.track_id.startswith("owned:"):
             return False
-        self._navigation.cancel()
         self._set_surface_loading()
-        frame = capture_navigation_frame(self.window, separate_cover=True, freeze_cover=True)
+        frame = self._navigation.origin_frame(self.window, separate_cover=True, freeze_cover=True)
         visual = self.player.visual_data()
         if visual is not None:
             self.island._apply_visual_data(visual)
@@ -385,7 +385,6 @@ class MusicLibraryController(QObject):
 
     def _present_music_surface(self, mode, frame):
         """Expose the final surface once, then animate only frozen layers."""
-        self._navigation.cancel()
         if self.window.isVisible():
             self._publish_shared_music_geometry(self.window.geometry())
         if getattr(self.island, "_music_surface_active", False):
@@ -401,7 +400,7 @@ class MusicLibraryController(QObject):
         self.island._show_music_fullscreen(fullscreen=mode == "fullscreen",
             origin_geometry=QRect(), origin_snapshot=QImage(), **kwargs)
         if getattr(self.island, "_music_surface_active", False):
-            self._navigation.start(frame, getattr(self.island, "music_fullscreen_overlay", None))
+            self._navigation.request_start(frame, getattr(self.island, "music_fullscreen_overlay", None))
             self.window.hide()
             return True
         if frame is not None:
@@ -1101,7 +1100,7 @@ class MusicLibraryController(QObject):
         self._opening_origin = None
         self._pending_collection = identity
         self._pending_row = row
-        frame = capture_navigation_frame(self.window, separate_cover=True, cover_state=(rect, snapshot, 0.))
+        frame = self._navigation.origin_frame(self.window, separate_cover=True, cover_state=(rect, snapshot, 0.))
         if frame is not None and rect.width() > 0:
             frame.cover_roundness = min(.5, 14. / rect.width())
         if row.kind == "daily":

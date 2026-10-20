@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF
 from PySide6.QtGui import QCloseEvent, QImage, QPainter
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
 
 from api.providers import EmptyIslandDataProvider, empty_visual_data
 from local.island_stack_visual import IslandStackVisual, SpringRect
@@ -113,6 +115,12 @@ class IslandSurfaceReturnTests(unittest.TestCase):
         self.island.enable_dual_line_lyrics = True
         self.island.lyrics[1] += "\n新的译文"
         self.island.timed_lyrics[1] = (4.0, self.island.lyrics[1])
+        # Production precomputes on provider delivery while the page is open.
+        # Wait for that same shared result before measuring the return target.
+        deadline = time.perf_counter() + 3.
+        while self.island._lyric_presentation_store.get() is None and time.perf_counter() < deadline:
+            QTest.qWait(5)
+        self.assertIsNotNone(self.island._lyric_presentation_store.get())
         self.island.lyric_index = self.island.prev_lyric_index = 0
         key = self._seed_hidden_motion()
         self._restore()

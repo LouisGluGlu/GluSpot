@@ -301,7 +301,7 @@ class PlaybackEntryControllerTests(unittest.TestCase):
         with patch("local.playback_entry_controller.MusicNavigationTransition") as transition:
             self.controller.show_login()
         self.assertIsNone(self.controller._library_origin)
-        transition.return_value.start.assert_called_once_with(frame, self.window)
+        transition.return_value.request_start.assert_called_once_with(frame, self.window)
         self.window.close()
         self.assertTrue(transition.return_value.cancel.called)
 

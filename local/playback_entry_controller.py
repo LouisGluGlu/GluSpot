@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QTransform
 from api.online_music import LoginSnapshot
 from local.music_tasks import MusicTasks
 from local.playback_entry_window import ChoicePlacement, PlaybackEntryWindow
-from local.music_navigation_transition import MusicNavigationTransition, capture_navigation_frame
+from local.music_navigation_transition import MusicNavigationTransition
 from local.runtime_platform import normalize_playback_selection, owned_playback_only, system_media_unavailable_reason
 
 
@@ -234,7 +234,7 @@ class PlaybackEntryController(QObject):
         if frame is not None:
             if self._navigation is None:
                 self._navigation = MusicNavigationTransition()
-            self._navigation.start(frame, self.window)
+            self._navigation.request_start(frame, self.window)
         generation = self._generation
         self._select_after_sources = (source_id, enter_saved)
         if not self.tasks.submit(("sources", generation), lambda: self.service.list_sources()
@@ -275,7 +275,11 @@ class PlaybackEntryController(QObject):
             self._show_island()
             return
         self._cancel_login()
-        self._library_origin = capture_navigation_frame(self.window)
+        if self._navigation is None:
+            self._navigation = MusicNavigationTransition()
+        # Detach the old destination watcher before the intentional hide;
+        # the shared overlay will retarget from its actual visible pose.
+        self._library_origin = self._navigation.origin_frame(self.window)
         self.window.hide()
         self.login_callback(source_id)
 

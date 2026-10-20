@@ -241,45 +241,98 @@ class MusicLibraryButtonTests(unittest.TestCase):
         self.window._control_layer_next_prewarm_at = math.inf
         self.window._set_library_expanded(True, 100.0)
         rect = QRectF(self.window.rect())
-        before_visible = (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes)
-        for instant in [100.0 + index / 300 for index in range(120)]:
-            with patch("local.music_surface_window.time.monotonic", return_value=instant):
-                image = self._image()
-                with QPainter(image) as painter:
-                    self.window._paint_library_back(painter, rect)
-        self.assertEqual(before_visible, (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes))
-        for instant in (102.02, 102.08, 102.15):
-            with patch("local.music_surface_window.time.monotonic", return_value=instant):
-                image = self._image()
-                with QPainter(image) as painter:
-                    self.window._paint_library_back(painter, rect)
-        self.assertLessEqual(len(self.window._control_layer_cache), 48)
-        self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)
-        before = (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes)
-        for instant in (103.0, 104.0, 105.0):
-            with patch("local.music_surface_window.time.monotonic", return_value=instant):
-                image = self._image()
-                with QPainter(image) as painter:
-                    self.window._paint_library_back(painter, rect)
-                self.assertFalse(any(image.constBits()))
-        self.assertEqual(before, (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes))
 
-    def test_expanded_idle_pose_prewarm_matches_exact_idle_start_and_all_fade_frames(self):
-        self.window._set_library_expanded(True, 100.0)
-        rect = QRectF(self.window.rect())
         def paint_at(instant):
             with patch("local.music_surface_window.time.monotonic", return_value=instant):
                 image = self._image()
                 with QPainter(image) as painter:
                     self.window._paint_library_back(painter, rect)
+            return image
+
+        def direct_visible_layer(painter, bounds, reveal, shift, key, draw, **kwargs):
+            # The uncached fully visible path is the visual reference. Keep
+            # the production geometry, glass and glyph drawing unchanged.
+            self.assertGreaterEqual(reveal, .999)
+            painter.save()
+            painter.translate(shift)
+            draw(painter)
+            painter.restore()
+
+        def assert_budget():
+            self.assertLessEqual(len(self.window._control_layer_cache), 48)
+            self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)
+            self.assertEqual(self.window._control_layer_cache_bytes,
+                             sum(image.sizeInBytes() for image in self.window._control_layer_cache.values()))
+
+        visible_rasters = []
+        for index in range(120):
+            instant = 100.0 + index / 300
+            image = paint_at(instant)
+            assert_budget()
+            if index in (0, 30, 60, 119):
+                with patch.object(self.window, "_paint_control_layer", side_effect=direct_visible_layer):
+                    reference = paint_at(instant)
+                self.assertEqual(image, reference)
+                visible_rasters.append(bytes(image.constBits()))
+        self.assertGreater(len(set(visible_rasters)), 1)
+        # Fully visible controls paint directly; repeated settled paints
+        # must not allocate new exit-blur layers.
+        settled = paint_at(100.5)
+        before_stable = {key: image.cacheKey() for key, image in self.window._control_layer_cache.items()}
+        for _ in range(3):
+            with patch.object(self.window, "_remember_control_layer", wraps=self.window._remember_control_layer) as remember:
+                self.assertEqual(paint_at(100.5), settled)
+                remember.assert_not_called()
+        self.assertEqual(before_stable, {key: image.cacheKey() for key, image in self.window._control_layer_cache.items()})
+        for instant in (102.02, 102.08, 102.15):
+            paint_at(instant)
+            assert_budget()
+        before = (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes)
+        for instant in (103.0, 104.0, 105.0):
+            image = paint_at(instant)
+            self.assertFalse(any(image.constBits()))
+        self.assertEqual(before, (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes))
+
+    def test_expanded_idle_pose_prewarm_matches_exact_idle_start_and_all_fade_frames(self):
+        self.window._set_library_expanded(True, 100.0)
+        rect = QRectF(self.window.rect())
+
+        def paint_at(instant):
+            with patch("local.music_surface_window.time.monotonic", return_value=instant):
+                image = self._image()
+                with QPainter(image) as painter:
+                    self.window._paint_library_back(painter, rect)
+            return image
+
         for index in range(25):
             paint_at(100.5 + index / 25)
-        warmed = (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes)
-        self.assertGreater(warmed[0], 1)
-        for instant in (102.0, 102.001, 102.02, 102.1, 102.3):
-            paint_at(instant)
-            self.assertEqual(self.window._library_expansion_at(instant), 1.0)
-            self.assertEqual(warmed, (len(self.window._control_layer_cache), self.window._control_layer_cache_bytes))
+        warmed_blurs = {key: image.cacheKey() for key, image in self.window._control_layer_cache.items()
+                        if key[1] > 0.}
+        self.assertGreater(len(warmed_blurs), 1)
+        def direct_visible_layer(painter, bounds, reveal, shift, key, draw, **kwargs):
+            self.assertGreaterEqual(reveal, .999)
+            painter.save()
+            painter.translate(shift)
+            draw(painter)
+            painter.restore()
+
+        with patch.object(self.window, "_build_control_blur", wraps=self.window._build_control_blur) as build_blur:
+            for instant in (102.0, 102.001, 102.02, 102.1, 102.3):
+                image = paint_at(instant)
+                # Repainting the same fade pose must produce the same image
+                # without a lazily built/replaced Gaussian level.
+                self.assertEqual(paint_at(instant), image)
+                self.assertEqual(self.window._library_expansion_at(instant), 1.0)
+                self.assertEqual(warmed_blurs, {key: item.cacheKey()
+                    for key, item in self.window._control_layer_cache.items() if key[1] > 0.})
+                self.assertLessEqual(len(self.window._control_layer_cache), 48)
+                self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)
+                self.assertEqual(self.window._control_layer_cache_bytes,
+                                 sum(item.sizeInBytes() for item in self.window._control_layer_cache.values()))
+                if instant == 102.0:
+                    with patch.object(self.window, "_paint_control_layer", side_effect=direct_visible_layer):
+                        self.assertEqual(paint_at(instant), image)
+            build_blur.assert_not_called()
 
     def test_output_chooser_holds_library_and_inactive_pointer_cannot_reveal_it(self):
         with patch("local.music_surface_window.time.monotonic", return_value=100.0):

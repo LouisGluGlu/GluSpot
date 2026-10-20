@@ -169,6 +169,38 @@ class AlbumFlowBackgroundTests(unittest.TestCase):
         self.assertEqual(next_frame.cacheKey(), retained.cacheKey())
         self.assertNotEqual(first.pixelColor(0, 0), QColor(255, 255, 255))
 
+    def test_unchanged_palette_skips_color_analysis_even_across_new_frames(self):
+        renderer = AlbumFlowBackgroundRenderer()
+        colors = tuple(QColor(color) for color in self.COLORS)
+        with patch.object(renderer, '_palette_slots', wraps=renderer._palette_slots) as slots, \
+                patch.object(renderer, '_domain_strengths', wraps=renderer._domain_strengths) as strengths:
+            first = renderer.render(QSize(960, 540), colors, 0., weights=(.6, .3, .1))
+            cached = renderer.render(QSize(960, 540), tuple(QColor(color) for color in colors),
+                                     .016, weights=(.6, .3, .1))
+            moving = renderer.render(QSize(960, 540), colors, .034, weights=(.6, .3, .1))
+            renderer.render(QSize(500, 700), colors, .05, .3, weights=(.6, .3, .1))
+        self.assertEqual(first.cacheKey(), cached.cacheKey())
+        self.assertNotEqual(first.cacheKey(), moving.cacheKey())
+        self.assertEqual(slots.call_count, 1)
+        self.assertEqual(strengths.call_count, 1)
+
+    def test_palette_input_snapshot_observes_mutated_colors_and_support(self):
+        renderer = AlbumFlowBackgroundRenderer()
+        colors = (QColor('#c73542'), QColor('#2476c1'))
+        with patch.object(renderer, '_palette_slots', wraps=renderer._palette_slots) as slots:
+            renderer.render(QSize(960, 540), colors, 0., weights=(.6, .4))
+            old_target = renderer._target_colors
+            colors[0].setRgb(33, 198, 71)
+            renderer.render(QSize(960, 540), colors, 0., weights=(.6, .4))
+            self.assertNotEqual(renderer._target_colors, old_target)
+            renderer.render(QSize(960, 540), colors, 0., weights=(.99, .01))
+            self.assertEqual(slots.call_count, 3)
+        # Only the most recent <=6 colors/support values are retained.
+        renderer.render(QSize(960, 540), self.COLORS * 20, .1,
+                        weights=(1. / 60,) * 60)
+        self.assertEqual(len(renderer._palette_input_key[0]), renderer.MAX_COLORS)
+        self.assertEqual(len(renderer._palette_input_key[1]), renderer.MAX_COLORS)
+
     def test_heavy_softening_has_no_sharp_color_boundary(self):
         frame = AlbumFlowBackgroundRenderer().render(QSize(1920, 1080), self.COLORS, 0.0)
         pixels = _pixels(frame)

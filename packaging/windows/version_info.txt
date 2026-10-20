@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(6, 415, 0, 0),
-    prodvers=(6, 415, 0, 0),
+    filevers=(6, 416, 0, 0),
+    prodvers=(6, 416, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'GluSpot'),
           StringStruct('FileDescription', 'GluSpot Windows floating music island'),
-          StringStruct('FileVersion', '6.415.0.0'),
+          StringStruct('FileVersion', '6.416.0.0'),
           StringStruct('InternalName', 'GluSpot'),
           StringStruct('OriginalFilename', 'GluSpot.exe'),
           StringStruct('ProductName', 'GluSpot'),
-          StringStruct('ProductVersion', '6.415.0.0')
+          StringStruct('ProductVersion', '6.416.0.0')
         ]
       )
     ]),

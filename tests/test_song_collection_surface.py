@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QObject, QPointF, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QRegion
 from PySide6.QtWidgets import QApplication
 
 from api.online_music import OnlinePlaylist
@@ -87,6 +87,25 @@ class SongCollectionSurfaceTests(unittest.TestCase):
                 self.assertFalse(face.intersects(self.window._media_control_panel_rect), (size, mode, face))
                 icon, caption = self.window._personal_dj_geometry(region, 100., expansion=0.)
                 self.assertFalse(face.intersects(icon))
+
+    def test_unrelated_dirty_region_skips_footer_material_without_losing_footer_hits(self):
+        with patch("local.music_surface_window.time.monotonic", return_value=100.):
+            self.window._reset_control_idle(100.)
+            output = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            output.fill(Qt.GlobalColor.transparent)
+            self.window.render(output)
+            unrelated = QRect(5, 5, 24, 24)
+            expected = output.copy(unrelated)
+            with patch.object(self.window, "_paint_song_collection_control", wraps=self.window._paint_song_collection_control) as draw:
+                self.window.render(output, unrelated.topLeft(), QRegion(unrelated))
+            draw.assert_not_called()
+            self.assertEqual(output.copy(unrelated), expected)
+            self.assertIn("favorite", self.window._button_rects)
+            face = self.window._song_collection_geometry(QRectF(self.window.rect()))
+            with patch.object(self.window, "_paint_song_collection_control", wraps=self.window._paint_song_collection_control) as draw:
+                damage = QRegion(face.adjusted(-4, -4, 4, 4).toAlignedRect())
+                self.window.render(output, damage.boundingRect().topLeft(), damage)
+            draw.assert_called_once()
 
     def test_narrow_source_endpoint_fits_complete_metadata_and_transport_above_footer(self):
         for size in ((200, 400), (303, 400)):

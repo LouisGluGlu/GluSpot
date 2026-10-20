@@ -8,6 +8,7 @@ not acquire artwork or start an independent animation loop.
 from __future__ import annotations
 
 import math
+import sys
 
 import numpy as np
 from PIL import Image
@@ -17,6 +18,20 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 
 from local.music_lyric_motion import MotionSimulationClock
 from local.music_surface_palette import relative_luminance, single_hue_background_colors
+
+
+def _render_background_snapshot(snapshot) -> QImage:
+    """Only immutable numbers cross the existing pixel-worker boundary."""
+    width, height, geometry_seconds, colors, strengths = snapshot
+    return AlbumFlowBackgroundRenderer._paint_field_pixels(
+        QSize(width, height), tuple(QColor(*color) for color in colors),
+        strengths, geometry_seconds,
+    )
+
+
+def _snapshot_bytes(value) -> int:
+    return sys.getsizeof(value) + (sum(_snapshot_bytes(item) for item in value)
+                                     if isinstance(value, tuple) else 0)
 
 
 class AlbumFlowBackgroundRenderer:
@@ -53,6 +68,9 @@ class AlbumFlowBackgroundRenderer:
         self._frame = QImage()
         self._frame_at: float | None = None
         self._frame_key: tuple | None = None
+        self._palette_input_key: tuple | None = None
+        self._async_epoch = 0
+        self._async_domain = None
 
     @classmethod
     def _ambient_color(cls, source: QColor) -> QColor:
@@ -203,12 +221,17 @@ class AlbumFlowBackgroundRenderer:
         return path
 
     def _paint_field(self, size: QSize, colors: tuple[QColor, ...], strengths: tuple[float, ...] = ()) -> QImage:
+        return self._paint_field_pixels(size, colors, strengths, self._geometry_seconds)
+
+    @classmethod
+    def _paint_field_pixels(cls, size: QSize, colors: tuple[QColor, ...],
+                            strengths: tuple[float, ...], geometry_seconds: float) -> QImage:
         width, height = size.width(), size.height()
         base = np.array(colors[0].getRgb()[:3], dtype=np.float32)
         # Light covers in the reference carry broad, connected color bands;
         # dark covers let localized pigments leave a mostly quiet base. Ease
         # their occupied size with base brightness, including during retargets.
-        spread = 1.0 + 0.45 * min(1.0, relative_luminance(colors[0]) / self.MAX_LUMINANCE)
+        spread = 1.0 + 0.45 * min(1.0, relative_luminance(colors[0]) / cls.MAX_LUMINANCE)
         total = np.zeros((height, width), dtype=np.float32)
         strongest = np.zeros_like(total)
         # Keep channels planar while combining masks: contiguous spatial
@@ -224,7 +247,7 @@ class AlbumFlowBackgroundRenderer:
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(Qt.GlobalColor.white)
-                painter.drawPath(self._blob_path(size, index, self._geometry_seconds, strength * spread))
+                painter.drawPath(cls._blob_path(size, index, geometry_seconds, strength * spread))
             pixels = Image.frombytes("L", (width, height), mask.constBits().tobytes(),
                                      "raw", "L", mask.bytesPerLine())
             # Soften the domain, not already mixed RGB paint. The interior
@@ -234,7 +257,7 @@ class AlbumFlowBackgroundRenderer:
             weight = domain * domain * domain
             total += weight
             np.maximum(strongest, domain, out=strongest)
-            tone = 0.97 + 0.03 * math.sin(self._geometry_seconds * 0.18 + index * 1.21)
+            tone = 0.97 + 0.03 * math.sin(geometry_seconds * 0.18 + index * 1.21)
             pigment = np.array(color.getRgb()[:3], dtype=np.float32) * tone
             weighted += pigment[:, None, None] * weight[None, :, :]
         mixture = weighted / np.maximum(total[None, :, :], 1e-8)
@@ -247,6 +270,14 @@ class AlbumFlowBackgroundRenderer:
         payload = np.concatenate((rgb, opaque), axis=2).tobytes()
         return QImage(payload, size.width(), size.height(), size.width() * 4,
                       QImage.Format.Format_RGBA8888).copy()
+
+    def _accept_background_frame(self, image: QImage, domain, stamp) -> None:
+        if domain != self._async_domain:
+            return
+        self._frame = image
+        self._frame_key, self._frame_at = domain[2], stamp[0]
+        self._painted_colors = tuple(QColor(*color) for color in stamp[2])
+        self._painted_strengths = stamp[3]
 
     def contrast_backdrop(self, displayed: QImage) -> QColor | None:
         """Bound the lightest possible field while its album pigments move.
@@ -261,7 +292,7 @@ class AlbumFlowBackgroundRenderer:
         return QColor(max(self._from_colors + self._target_colors, key=relative_luminance))
 
     def render(self, size: QSize, colors: tuple[QColor, ...], now: float, intensity: float = 0.74,
-               *, weights: tuple[float, ...] = ()) -> QImage:
+               *, weights: tuple[float, ...] = (), material_owner=None, material_scene=None) -> QImage:
         now = float(now)
         intensity = min(1.0, max(0.0, float(intensity)))
         # Normalize colors and their support together. An invalid first
@@ -277,10 +308,19 @@ class AlbumFlowBackgroundRenderer:
         previous_intensity = intensity if self._last_intensity is None else self._last_intensity
         self._geometry_seconds += delta * previous_intensity
         self._last_intensity = intensity
-        target = self._palette_slots(colors, weights)
-        strengths = self._domain_strengths(colors, weights)
+        # A paint-cache hit must not repeat hue analysis, luminance searches
+        # and QColor allocation. Keep only the current bounded input, using
+        # value snapshots so an in-place QColor change still retargets.
+        palette_input_key = (tuple(QColor(color) for color in colors), weights)
+        if palette_input_key != self._palette_input_key:
+            target = self._palette_slots(colors, weights)
+            strengths = self._domain_strengths(colors, weights)
+            self._palette_input_key = palette_input_key
+        else:
+            target, strengths = self._target_colors, self._target_strengths
         retargeted = target != self._target_colors or strengths != self._target_strengths
         if retargeted:
+            self._async_epoch += 1
             self._from_colors = self._painted_colors or target
             self._target_colors = target
             self._from_strengths = self._painted_strengths or strengths
@@ -291,10 +331,34 @@ class AlbumFlowBackgroundRenderer:
         if (retargeted or key != self._frame_key or self._frame.isNull()
                 or self._frame_at is None or now < self._frame_at
                 or now - self._frame_at >= self.FRAME_SECONDS - 1e-9):
-            self._painted_colors = self._palette_at(self._motion_seconds)
+            painted_colors = self._palette_at(self._motion_seconds)
             fraction = self._palette_fraction(self._motion_seconds)
-            self._painted_strengths = tuple(first + (second - first) * fraction
-                                           for first, second in zip(self._from_strengths, self._target_strengths))
-            self._frame = self._paint_field(raster_size, self._painted_colors, self._painted_strengths)
+            painted_strengths = tuple(first + (second - first) * fraction
+                                      for first, second in zip(self._from_strengths, self._target_strengths))
+            if material_owner is not None and not self._frame.isNull():
+                from local.liquid_glass_tasks import glass_pixel_tasks
+                tasks = glass_pixel_tasks()
+                if tasks is not None:
+                    rgb = tuple(color.getRgb()[:3] for color in painted_colors)
+                    self._async_domain = (self._async_epoch, (size.width(), size.height()), key,
+                                          tuple(color.getRgb()[:3] for color in target))
+                    stamp = (now, self._geometry_seconds, rgb, painted_strengths)
+                    snapshot = (raster_size.width(), raster_size.height(), self._geometry_seconds,
+                                rgb, painted_strengths)
+                    tasks.request(
+                        material_owner, ("album-flow-background", id(self)), material_scene,
+                        self._async_domain, stamp, snapshot, _render_background_snapshot,
+                        material_owner.rect(), byte_count=_snapshot_bytes(snapshot),
+                        # render's frame clock already owns the 30 Hz gate;
+                        # a second delivery-time gate would slow it further.
+                        interval=0., ready_callback=self._accept_background_frame,
+                    )
+                    return QImage(self._frame)
+            # First paint and explicit snapshots keep a complete synchronous
+            # frame. Fence any old live job before it can replace this image.
+            self._async_epoch += 1
+            self._async_domain = None
+            self._painted_colors, self._painted_strengths = painted_colors, painted_strengths
+            self._frame = self._paint_field(raster_size, painted_colors, painted_strengths)
             self._frame_key, self._frame_at = key, now
         return QImage(self._frame)
