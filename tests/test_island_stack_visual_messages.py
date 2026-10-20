@@ -18,6 +18,7 @@ from api.providers import EmptyIslandDataProvider, empty_visual_data
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
 
 from local.island_stack_visual import BarrageOverlay, FullscreenPluginAlertOverlay, IslandKind, IslandStackVisual, LyricLayout, Message, ReactiveFrame, SpringRect, StackVisual, TaskbarDropOverlay
 from local.island_presentation import (
@@ -11450,6 +11451,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             self.assertEqual(visual.timed_lyric_units[0], units)
             self.assertEqual(visual.timed_lyric_timing_kinds[0], "unit")
             self.assertEqual(visual.media_lyric_offset_adapter, "netease_betterncm")
+            deadline = time.monotonic() + 3.
+            while visual._lyric_presentation_store.get() is None and time.monotonic() < deadline:
+                QTest.qWait(5)
+            self.assertIsNotNone(visual._lyric_presentation_store.get())
             phase = visual._lyric_phase(time.monotonic())
             self.assertAlmostEqual(phase["progress"], 0.5 / 3.0)
             self.assertEqual(phase["timed_primary_text"], "\u8c01\u4eba\u90fd")
@@ -11473,6 +11478,10 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             )
             visual._apply_visual_data(IslandVisualData(next_track, (), ()))
             self.assertEqual(visual.timed_lyric_timing_kinds[0], "synthetic")
+            deadline = time.monotonic() + 3.
+            while visual._lyric_presentation_store.get() is None and time.monotonic() < deadline:
+                QTest.qWait(5)
+            self.assertIsNotNone(visual._lyric_presentation_store.get())
             self.assertEqual(visual._lyric_phase(time.monotonic())["progress"], 1.0)
         finally:
             visual.close()

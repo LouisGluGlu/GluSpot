@@ -203,7 +203,12 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
             self.assertEqual(window._display_timed_units[0], ())
             self.assertEqual(window._display_timed_kinds[0], "line")
             self.assertEqual([start for start, _text in timed[1:]], [10.0, 20.0, 25.0])
-            self.assertIs(window._display_timed_units[1], units)
+            # Mutable foreign units are detached in the worker snapshot;
+            # source coordinates and provider containers remain unchanged.
+            self.assertEqual(tuple((u.start_seconds, u.end_seconds, u.text)
+                                   for u in window._display_timed_units[1]),
+                             tuple((u.start_seconds, u.end_seconds, u.text) for u in units))
+            self.assertIs(owner.timed_lyric_units[0], units)
             self.assertEqual(window._display_timed_kinds[1], "unit")
             self.assertEqual(window._display_timed_read_ends, (None, 12.0, None, None))
             self.assertEqual(window._display_raw_source_texts[1], original_rows[0][1])

@@ -19,9 +19,24 @@ from local.music_lyric_motion import MotionSimulationClock
 from local.music_surface_palette import relative_luminance
 from local.no_wheel_widgets import NoWheelSlider
 from local.liquid_glass import (GlassPushButton, glass_material_tint, paint_liquid_glass,
-                                widget_glass_backdrop, widget_glass_level, glass_blur_scale)
+                                widget_glass_backdrop, widget_glass_level, glass_blur_scale,
+                                GlassCaptureMixin, glass_owner_is_live)
 from local.ui_theme import app_dark_mode
 from local.control_hover import control_local_position, install_control_hover
+
+
+def _render_panel_material(payload):
+    """Owned image + numeric options only; safe on the shared pixel worker."""
+    source, blur, desaturate, veil, crop = payload
+    bitmap = Image.frombytes("RGBA", (source.width(), source.height()), bytes(source.constBits()),
+                             "raw", "RGBA", source.bytesPerLine())
+    if desaturate:
+        bitmap = ImageEnhance.Color(bitmap).enhance(.35)
+    bitmap = bitmap.filter(ImageFilter.GaussianBlur(blur))
+    bitmap = Image.alpha_composite(bitmap, Image.new("RGBA", bitmap.size, veil))
+    blurred = QImage(bitmap.tobytes(), bitmap.width, bitmap.height, bitmap.width * 4,
+                     QImage.Format.Format_RGBA8888).copy()
+    return blurred.copy(*crop)
 
 
 class _VolumeSlider(NoWheelSlider):
@@ -564,7 +579,7 @@ class _OutputRow(QAbstractButton):
                          Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
 
-class AudioOutputPanel(QWidget):
+class AudioOutputPanel(GlassCaptureMixin, QWidget):
     """Cached frosted popup that queues actions through published route state."""
 
     dismissed = Signal()
@@ -607,6 +622,8 @@ class AudioOutputPanel(QWidget):
         self._inset = 12
         self._material = QImage()
         self._material_at, self._material_key = -math.inf, None
+        self._material_requested_at = -math.inf
+        self._material_pending_stamp = None
         self._background = QColor(35, 35, 38)
         self._ink, self._muted = QColor(245, 245, 247), QColor(195, 195, 200)
         self._accent = QColor(self._ink)
@@ -969,6 +986,8 @@ class AudioOutputPanel(QWidget):
                 return
             if now - self._material_at < self.MATERIAL_INTERVAL:
                 return
+            if displayed and now - self._material_requested_at < self.MATERIAL_INTERVAL:
+                return
         region = geometry.adjusted(-24, -24, 24, 24).intersected(parent.rect())
         if region.isEmpty():
             return
@@ -986,23 +1005,52 @@ class AudioOutputPanel(QWidget):
                 painter.scale(.5, .5)
                 # Omitting DrawChildren prevents recursive popup capture.
                 parent.render(painter, QPoint(), QRegion(region), QWidget.RenderFlag.DrawWindowBackground)
-        bitmap = Image.frombytes("RGBA", (source.width(), source.height()), bytes(source.constBits()), "raw", "RGBA", source.bytesPerLine())
         if self._song_page:
             # Keep actual album pigments. The old desaturation plus 70% grey
             # veil made even green/blue scenes look like an opaque grey card.
-            bitmap = bitmap.filter(ImageFilter.GaussianBlur(7 * glass_blur_scale(self._glass_level)))
+            blur = 7 * glass_blur_scale(self._glass_level)
             tint = glass_material_tint(light=self._theme_light, material_level=self._glass_level)
             veil = tint.getRgb()
         else:
-            bitmap = ImageEnhance.Color(bitmap).enhance(.35).filter(ImageFilter.GaussianBlur(9))
+            blur = 9
             light = relative_luminance(self._background) > .45
             veil = (248, 248, 250, 188) if light else (43, 43, 46, 176)
-        bitmap = Image.alpha_composite(bitmap, Image.new("RGBA", bitmap.size, veil))
-        blurred = QImage(bitmap.tobytes(), bitmap.width, bitmap.height, bitmap.width * 4, QImage.Format.Format_RGBA8888).copy()
         offset = geometry.topLeft() - region.topLeft()
-        self._material = blurred.copy(round(offset.x() / 2), round(offset.y() / 2), max(1, round(geometry.width() / 2)), max(1, round(geometry.height() / 2)))
+        crop = (round(offset.x() / 2), round(offset.y() / 2),
+                max(1, round(geometry.width() / 2)), max(1, round(geometry.height() / 2)))
+        payload = (QImage(source), blur, not self._song_page, veil, crop)
+        if (not force and displayed and not self._material.isNull() and glass_owner_is_live(self)):
+            from local.liquid_glass_tasks import glass_pixel_tasks
+            service = glass_pixel_tasks()
+            if service is not None:
+                self._material_requested_at = now
+                self._material_pending_stamp = backdrop.cacheKey()
+                service.request(self, 'panel', self._glass_material_scene, geometry_key,
+                                backdrop.cacheKey(), payload, _render_panel_material,
+                                QRectF(self.rect()), byte_count=int(source.sizeInBytes()),
+                                interval=self.MATERIAL_INTERVAL, ready_callback=self._accept_material_result)
+                return
+        # The first open, explicit captures and unavailable-scene fallback
+        # retain their exact synchronous picture; only live refresh is async.
+        self._material_pending_stamp = None
+        self._material = _render_panel_material(payload)
         self._material_key, self._material_at = key, now
         self.update()
+
+    def _glass_material_scene(self):
+        parent = self.parentWidget()
+        identity = getattr(parent, '_visual_track_identity', None)
+        track = identity() if callable(identity) else str(getattr(parent, 'media_track_id', ''))
+        return track, self._style_key, self._song_page
+
+    def _accept_material_result(self, image, geometry_key, stamp):
+        geometry = self.geometry()
+        current = (geometry.x(), geometry.y(), geometry.width(), geometry.height(), self._style_key)
+        if geometry_key != current or stamp != self._material_pending_stamp:
+            return
+        self._material_pending_stamp = None
+        self._material = image
+        self._material_key, self._material_at = geometry_key + (stamp,), time.monotonic()
 
     @property
     def render_pose(self):

@@ -356,8 +356,10 @@ class LocalIslandApp:
     def _open_music_login(self):
         if not self._music_login_required():
             return False
-        from local.music_navigation_transition import capture_navigation_frame
-        frame = capture_navigation_frame(getattr(self.window, "music_fullscreen_overlay", None))
+        from local.music_navigation_transition import MusicNavigationTransition
+        if self.playback_entry._navigation is None:
+            self.playback_entry._navigation = MusicNavigationTransition()
+        frame = self.playback_entry._navigation.origin_frame(getattr(self.window, "music_fullscreen_overlay", None))
         self.window._music_library_active = True
         if self.window._music_surface_active:
             self.window._restore_island_from_music_surface()

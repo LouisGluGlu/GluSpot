@@ -127,6 +127,26 @@ class LiquidGlassBackdropTests(unittest.TestCase):
         self.assertNotEqual(first, moved)
         self.assertNotEqual(moved, hovered)
 
+    def test_live_veil_states_share_material_without_delaying_state_feedback(self):
+        scene = self.scene(QColor('#808080'))
+        with patch('local.liquid_glass.time.monotonic', return_value=10.), \
+                patch.object(glass, '_render_glass_material', wraps=glass._render_glass_material) as raster:
+            images = [self.render(scene, cache_token='control', **state)
+                      for state in ({}, {'light': True}, {'hovered': True},
+                                    {'pressed': True}, {'active': True})]
+        self.assertEqual(raster.call_count, 1)
+        self.assertEqual(len({image.pixelColor(90, 50).rgba() for image in images}), 5)
+
+    def test_shared_state_material_still_refreshes_geometry_and_blur_immediately(self):
+        scene = self.scene()
+        with patch('local.liquid_glass.time.monotonic', return_value=10.), \
+                patch.object(glass, '_render_glass_material', wraps=glass._render_glass_material) as raster:
+            self.render(scene, QRectF(0, 0, 100, 60), cache_token='control')
+            self.render(scene, QRectF(10, 0, 100, 60), cache_token='control', hovered=True)
+            self.render(scene, QRectF(10, 0, 100, 60), cache_token='control',
+                        hovered=True, material_level=80)
+        self.assertEqual(raster.call_count, 3)
+
     def test_material_cache_and_each_raster_are_bounded_and_clearable(self):
         scene = self.scene()
         for index in range(80):

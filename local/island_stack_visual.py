@@ -216,6 +216,7 @@ from local.music_surface_palette import (
     solid_album_ink_color,
 )
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_lyric_preparation_store import LyricPresentationStore
 from local.music_mode_controls import ArtworkHoverMotion, paint_presentation_glyph
 from local.personal_dj_icon import paint_personal_dj_icon, personal_dj_lightening_limit
 from local.mydockfinder import MYDOCKFINDER_PROCESS_NAMES, FinderGlassMaterial, read_finder_material, finder_bar_screen_mapping, refresh_live_finder_bar
@@ -1527,6 +1528,10 @@ class IslandStackVisual(QWidget):
         self.barrage_preview_messages: list[Message] = []
         self._seen_provider_message_keys: set[str] = set()
 
+        self._lyric_presentation_revision = 0
+        self._lyric_presentation_store = LyricPresentationStore(self)
+        self._lyric_presentation_store.changed.connect(self._on_prepared_lyrics_ready)
+
         self._apply_visual_data(visual_data, initial=True)
         self.current_audio_bands = (0.44, 0.48, 0.36)
         self.live_audio_available = False
@@ -1771,6 +1776,11 @@ class IslandStackVisual(QWidget):
             self.lyrics = ["正在播放"]
         if tuple(self.lyrics) != previous_lyrics:
             self._clear_lyric_metrics_cache()
+        if track_changed or timing_changed or tuple(self.lyrics) != previous_lyrics:
+            self._lyric_presentation_revision = int(getattr(self, "_lyric_presentation_revision", 0)) + 1
+            preparation = getattr(self, "_lyric_presentation_store", None)
+            if preparation is not None:
+                preparation.get()
         queue_signature = self._album_queue_signature(getattr(track, "album_queue", ()))
         queue_changed = queue_signature != str(getattr(self, "album_queue_signature", "") or "")
         if (flow_direction >= 0 or not getattr(self, "album_queue", None)) and (track_changed or queue_changed or not getattr(self, "album_queue", None)):
@@ -1962,6 +1972,15 @@ class IslandStackVisual(QWidget):
     def _coalesced_timed_lyrics(self, timed_lyrics: list[tuple[float, str]]) -> list[tuple[float, str]]:
         rows, _units, _kinds = self._coalesced_timed_lyric_data(timed_lyrics)
         return rows
+
+    def _on_prepared_lyrics_ready(self):
+        # Delivered through MusicTasks' queued QObject signal on this thread.
+        # Reuse existing clocks; no preparation timer or QWidget worker calls.
+        if self.isVisible():
+            self.update()
+        surface = getattr(self, "music_fullscreen_overlay", None)
+        if surface is not None and surface.isVisible():
+            surface.update()
 
     def _coalesced_timed_lyric_data(self, timed_lyrics) -> tuple[list[tuple[float, str]], list[tuple[object, ...]], list[str]]:
         if not timed_lyrics:
@@ -3924,6 +3943,9 @@ class IslandStackVisual(QWidget):
             if callable(changed):
                 changed(bool(enabled))
         self.enable_dual_line_lyrics = bool(enabled)
+        preparation = getattr(self, "_lyric_presentation_store", None)
+        if preparation is not None:
+            preparation.get()
         self._pulse_stack()
         surface = getattr(self, "music_fullscreen_overlay", None)
         if surface is not None:
@@ -10452,6 +10474,9 @@ class IslandStackVisual(QWidget):
             self.ensure_minimum_surface()
             return
         self._close_solid_album_palette_worker()
+        preparation = getattr(self, "_lyric_presentation_store", None)
+        if preparation is not None:
+            preparation.close()
         music_surface = getattr(self, "music_fullscreen_overlay", None)
         if music_surface is not None:
             try:
@@ -12283,6 +12308,13 @@ class IslandStackVisual(QWidget):
         artist = str(getattr(self, "artist", "") or "")
         translated = (bool(getattr(self, "enable_dual_line_lyrics", False))
                       if show_translation is None else bool(show_translation))
+        preparation = getattr(self, "_lyric_presentation_store", None)
+        if preparation is not None:
+            prepared = preparation.get(translated=translated) or preparation.previous_compatible()
+            placeholder = str(getattr(self, "no_lyrics_text", "暂无歌词")) if preparation.failed is not None else "加载歌词中"
+            result = prepared.island_rows if prepared is not None else tuple(placeholder for _ in raw_rows)
+            self._island_cleaned_lyrics_by_source = dict(zip(raw_rows, result))
+            return result
         key = (raw_rows, artist, translated)
         if key == getattr(self, "_island_cleaned_lyrics_key", None):
             return self._island_cleaned_lyrics_value
@@ -17219,6 +17251,10 @@ class IslandStackVisual(QWidget):
         unit evidence to the existing large-page presentation only for the
         song-wide reading decision; the match is cached across paint frames.
         """
+        preparation = getattr(self, "_lyric_presentation_store", None)
+        if preparation is not None:
+            prepared = preparation.get() or preparation.previous_compatible()
+            return prepared.has_genuine_timing if prepared is not None else False
         timed = getattr(self, "timed_lyrics", ()) or ()
         kinds = getattr(self, "timed_lyric_timing_kinds", ()) or ()
         units = getattr(self, "timed_lyric_units", ()) or ()
@@ -17275,6 +17311,11 @@ class IslandStackVisual(QWidget):
         same immutable plan immediately. Source unit tuples are never replaced
         with these display-only estimates or used for interlude evidence.
         """
+        preparation = getattr(self, "_lyric_presentation_store", None)
+        if preparation is not None:
+            prepared = preparation.get() or preparation.previous_compatible()
+            return (prepared.island_timings[index]
+                    if prepared is not None and 0 <= index < len(prepared.island_timings) else None)
         timed = getattr(self, "timed_lyrics", ()) or ()
         if not 0 <= index < len(timed):
             return None
@@ -17370,6 +17411,15 @@ class IslandStackVisual(QWidget):
         timed = getattr(self, "timed_lyrics", ()) or ()
         if not timed:
             return None
+        preparation = getattr(self, "_lyric_presentation_store", None)
+        if preparation is not None:
+            prepared = preparation.get() or preparation.previous_compatible()
+            if prepared is None:
+                return None
+            if position_seconds is None:
+                stamp = time.monotonic() if now is None else float(now)
+                position_seconds = self._stable_lyric_source_position(stamp) + self._effective_lyric_offset_seconds()
+            return gap_at_position(prepared.timed, position_seconds)
         units = getattr(self, "timed_lyric_units", ()) or ()
         kinds = getattr(self, "timed_lyric_timing_kinds", ()) or ()
         translated = bool(getattr(self, "enable_dual_line_lyrics", False))

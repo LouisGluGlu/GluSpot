@@ -16,12 +16,13 @@ from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApp
 from PySide6.QtWidgets import QWidget
 
 from api.lyric_timeline import active_index_for_position
-from local.music_lyric_intervals import add_interlude_rows
+from local.music_lyric_preparation import (
+    coalesced_timed_lyrics, prepare_lyric_presentation, snapshot_lyric_input,
+)
 from local.lyric_unit_timing import (
     TimedHighlightGroup,
     resolve_display_row_timing,
     display_row_reading_front,
-    display_row_estimate_boundaries,
     duet_estimated_read_start,
     estimated_row_read_end,
     estimated_row_reading_progress,
@@ -65,10 +66,6 @@ from local.music_lyric_motion import (
 from local.music_lyric_presentation import (
     INTRO_COUNTDOWN_TEXT,
     DuetLyricPresentation,
-    analyze_duet_lyric_rows,
-    attached_parenthetical_read_end,
-    present_lyric_text,
-    present_timed_lyric_rows,
     split_display_layers,
 )
 from local.music_surface_palette import (
@@ -86,7 +83,7 @@ from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
 from local.music_source_icons import paint_music_source_icon
 from local.personal_dj_icon import DJ_RING_CYCLE_SECONDS, paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
-from local.liquid_glass import paint_liquid_glass, widget_glass_level, glass_material_tint
+from local.liquid_glass import GlassCaptureMixin, paint_liquid_glass, widget_glass_level, glass_material_tint, live_glass_paint
 from local.ui_theme import app_dark_mode
 from local.control_hover import HoverMotion, hover_scale
 from local.music_surface_layout import MusicContentLayoutMixin
@@ -116,7 +113,7 @@ def constrained_window_size(
     return QSize(bounded_width, max(1, int(round(bounded_width / ratio))))
 
 
-class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, MusicContentLayoutMixin, QWidget):
+class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, MusicContentLayoutMixin, GlassCaptureMixin, QWidget):
     """Frameless full-screen/windowed music surface owned by the V2 island."""
 
     seekFinished = Signal(bool, float, str)
@@ -167,7 +164,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     ARTWORK_SCALE_CACHE_LIMIT = 24
     ARTWORK_SCALE_CACHE_BYTES = 64 * 1024 * 1024
     OBO_REVEAL_SECONDS = 3.0
-    ANIMATION_FRAME_MS = 8
+    ANIMATION_FRAME_MS = 16
     EMPHASIS_FRAME_MS = 4
     LYRIC_LAYOUT_BATCH_SECONDS = 0.0025
     CONTROL_BLUR_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
@@ -178,7 +175,15 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     LYRIC_GLOW_CACHE_MAX_ENTRIES = 48
     GLOW_EDGE_FEATHER_STEPS = 4
     GLYPH_TINT_CACHE_MAX_BYTES = 16 * 1024 * 1024
+    GLYPH_TINT_CACHE_MAX_ENTRIES = 2048
     SPARSE_GLYPH_HALO_CACHE_MAX_BYTES = 24 * 1024 * 1024
+    SPARSE_GLYPH_HALO_CACHE_MAX_ENTRIES = 1024
+    GLYPH_RUN_CACHE_MAX_ENTRIES = 128
+    GLYPH_RUN_CACHE_MAX_BYTES = 16 * 1024 * 1024
+    ISOLATED_GLYPH_CACHE_MAX_ENTRIES = 128
+    ISOLATED_GLYPH_CACHE_MAX_BYTES = 24 * 1024 * 1024
+    ISOLATED_GLYPH_BUILD_MAX_ENTRIES = 16
+    ISOLATED_GLYPH_BUILD_MAX_BYTES = 8 * 1024 * 1024
 
     def __init__(self, owner):
         super().__init__(None)
@@ -279,8 +284,12 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._glyph_cache_key = None
         self._glyph_cache: tuple[QImage, tuple[float, ...]] | None = None
         self._glyph_run_cache: dict[tuple[str, str, str], tuple[QImage, tuple[float, ...]]] = {}
+        self._glyph_run_cache_bytes = 0
         self._isolated_glyph_cache: dict[tuple[str, str, str], tuple[tuple[QImage, float], ...]] = {}
+        self._isolated_glyph_cache_bytes = 0
         self._isolated_glyph_builds: dict[tuple[str, str, str], dict] = {}
+        self._isolated_glyph_builds_bytes = 0
+        self._isolated_glyph_build_last_key = None
         self._glyph_tint_cache: OrderedDict[tuple[int, int], QImage] = OrderedDict()
         self._glyph_tint_cache_bytes = 0
         self._reading_feather_cache: dict[tuple[str, str, int], float] = {}
@@ -290,6 +299,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._emphasis_protected_glyph_runs: frozenset[tuple[str, str, str]] = frozenset()
         self._emphasis_protected_source_keys: set[int] = set()
         self._emphasis_protected_token = None
+        self._emphasis_protected_tint_color = None
         self._sparse_static_run_cache: OrderedDict[tuple, QImage] = OrderedDict()
         self._sparse_static_run_cache_bytes = 0
         self._sparse_timing_map_cache: dict[tuple, tuple[tuple[TimedHighlightGroup, int] | None, ...]] = {}
@@ -409,6 +419,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._background_cache_key = None
         self._background_cache_at = -1.0
         self._background_cache = QImage()
+        self._background_rebuilt_this_paint = False
         self._glass_idle_backdrop = QImage()
         self._glass_idle_backdrop_key = None
         self._frame_glass_light = None
@@ -498,8 +509,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._hidden_lyric_pose_track = None
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-        # Let high-refresh displays receive intermediate lift/spring frames.
-        # Qt coalesces updates to the actual compositor rate on 60 Hz panels.
+        # One display-sized request cadence; the existing measured-budget
+        # branch enables higher rates on displays that can sustain them.
         self._timer.setInterval(self.ANIMATION_FRAME_MS)
         self._timer.timeout.connect(self._on_animation_tick)
         # Route snapshots are cached by the provider. Read them outside paint,
@@ -1225,8 +1236,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._sync_surface_shape()
         self._reset_control_idle()
         self._sync_audio_output_status(settle=True)
-        self._audio_output_status_timer.start()
-        self._timer.start()
+        if not self.isMinimized():
+            self._audio_output_status_timer.start()
+            self._timer.start()
         super().showEvent(event)
 
     def focusInEvent(self, event):
@@ -1247,6 +1259,12 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 self._release_window_compact()
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
+            if self.isMinimized():
+                self._timer.stop()
+                self._audio_output_status_timer.stop()
+            elif self.isVisible() and not self._closing_for_shutdown:
+                self._timer.start()
+                self._audio_output_status_timer.start()
             sync = getattr(self.owner, "_sync_minimum_surface", None)
             if callable(sync):
                 # Qt can deliver this before the final show/hide state settles.
@@ -1916,8 +1934,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
         A shorter timeout cannot force extra display frames.  Match a faster
         cadence to a high-refresh screen only after recent local paints have
-        shown a safe frame budget; 60 Hz and expensive frames remain at the
-        existing 8 ms request cadence.
+        shown a safe frame budget; ordinary/expensive frames use 16 ms
+        requests. These timer requests are never presented-FPS measurements.
         """
         if self._closing_for_shutdown:
             return
@@ -3038,174 +3056,59 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return frame["lyrics"]
 
     def _resolve_display_lyrics(self) -> tuple[list[str], list[tuple[float, str]]]:
-        # Provider lists can be replaced or edited in place.  A cheap complete
-        # value signature catches both without rerunning the coalescer and
-        # display-only bilingual regex for every row at 120+ Hz.
-        raw_timed = tuple(
-            (start, str(text)) for start, text in (getattr(self.owner, "timed_lyrics", ()) or ())
-        )
+        translated = self._translation_render_enabled(time.monotonic())
+        raw_timed = tuple((start, str(text)) for start, text in (getattr(self.owner, "timed_lyrics", ()) or ()))
         owner_units = getattr(self.owner, "timed_lyric_units", ()) or ()
         owner_kinds = getattr(self.owner, "timed_lyric_timing_kinds", ()) or ()
-        show_translation = self._translation_render_enabled(time.monotonic())
         if self._translation_exit_source is not None:
             raw_timed, owner_units, owner_kinds = self._translation_exit_source
         if bool(getattr(self.owner, "enable_dual_line_lyrics", False)):
             self._translation_last_source = (raw_timed, owner_units, owner_kinds)
-        clean_intro = True
-        singer_names = str(getattr(self.owner, "artist", "") or "")
-        if raw_timed:
-            # The island replaces the metadata lists on each provider update.
-            # Avoid copying every unit of a 180-line song on each 6 ms paint.
-            key = (
-                "timed", raw_timed,
-                (id(owner_units), len(owner_units)),
-                (id(owner_kinds), len(owner_kinds)),
-                show_translation, clean_intro, singer_names,
-            )
+        source = (raw_timed, owner_units, owner_kinds)
+        store = getattr(self.owner, "_lyric_presentation_store", None)
+        if store is not None:
+            # The live owner submits on provider/settings updates. A miss here
+            # only replaces the latest pending snapshot, never processes text.
+            prepared = store.get(translated=translated,
+                                 source=source if self._translation_exit_source is not None else None)
+            if prepared is None:
+                if (self._display_lyrics_cache is not None
+                        and getattr(self, "_prepared_lyric_identity", None) == self._visual_track_identity()):
+                    return self._display_lyrics_cache
+                self._display_timed_units = self._display_timed_kinds = self._display_row_timings = ()
+                self._display_timed_read_ends = self._display_raw_source_texts = ()
+                self._display_duet_presentation = None
+                return (["暂无歌词" if store.failed is not None else "加载歌词中"], [])
+            key = (prepared.source.identity, id(prepared))
+        else:
+            # Standalone/offline callers retain a synchronous pure accessor.
+            # Every live V2 owner installs the shared bounded store before its
+            # first provider update; no QWidget/font/layout enters that worker.
+            key = (self._visual_track_identity(), str(getattr(self.owner, "track_title", "")),
+                   str(getattr(self.owner, "artist", "")), raw_timed,
+                   id(owner_units), len(owner_units), id(owner_kinds), len(owner_kinds),
+                   tuple(getattr(self.owner, "lyrics", ()) or ()), translated)
             if key == self._display_lyrics_cache_key and self._display_lyrics_cache is not None:
                 return self._display_lyrics_cache
-            raw_units = tuple(tuple(group or ()) for group in owner_units)
-            raw_kinds = tuple(str(kind or "line") for kind in owner_kinds)
-            coalesced = self._coalesced_timed_lyrics(
-                raw_timed, clean_intro=clean_intro, singer_names=singer_names,
-            )
-            timed = present_timed_lyric_rows(
-                coalesced,
-                show_translation=show_translation,
-                clean_intro=clean_intro,
-                singer_names=singer_names,
-            )
-            timed = add_interlude_rows(
-                timed, raw_timed, raw_units, raw_kinds,
-                show_translation=show_translation, singer_names=singer_names,
-            )
-            self._display_duet_presentation = analyze_duet_lyric_rows(
-                timed, singer_names=singer_names,
-            )
-            result = (
-                [text.replace("\n", "\u2028") for _started_at, text in timed] if timed else ["暂无歌词"],
-                timed,
-            )
-            # The surface intentionally keeps its old (time, text) timeline
-            # for seeking/follow. Match source metadata to *surviving* display
-            # rows after intro and translation filtering, never by raw index:
-            # the synthetic countdown or a removed credit shifts those rows.
-            mapped_units: list[tuple[object, ...]] = []
-            mapped_kinds: list[str] = []
-            mapped_sources: list[str] = []
-            mapped_read_ends: list[float | None] = []
-            source_cursor = 0
-            for started_at, display_text in timed:
-                display_primary = self._primary_timed_lyric_text(display_text)
-                mapped_read_ends.append(attached_parenthetical_read_end(
-                    display_text, coalesced, float(started_at),
-                    show_translation=show_translation, clean_intro=clean_intro,
-                ))
-                # Keep labels/bracket evidence with precisely this display
-                # sentence, including a voice expanded from a combined row.
-                # Same-time labels belonging to the other singer must not be
-                # copied into this voice's translation provenance.
-                mapped_sources.append(next((
-                    text for source_time, text in coalesced
-                    if abs(float(source_time) - float(started_at)) <= 0.0005
-                    and self._primary_timed_lyric_text(present_lyric_text(
-                        text, show_translation=show_translation, clean_intro=clean_intro, clean_credits=False,
-                    )) == display_primary
-                ), display_text))
-                matched = None
-                for source_index in range(source_cursor, len(raw_timed)):
-                    source_time, source_text = raw_timed[source_index]
-                    if abs(float(source_time) - float(started_at)) > 0.0005:
-                        if float(source_time) > float(started_at) + 0.0005:
-                            break
-                        continue
-                    prepared = present_lyric_text(
-                        source_text,
-                        show_translation=show_translation,
-                        clean_intro=clean_intro,
-                        clean_credits=False,
-                    )
-                    if (
-                        self._primary_timed_lyric_text(source_text) == display_primary
-                        or self._primary_timed_lyric_text(prepared) == display_primary
-                    ):
-                        matched = source_index
-                        break
-                if matched is None:
-                    mapped_units.append(())
-                    mapped_kinds.append("line")
-                else:
-                    units = raw_units[matched] if matched < len(raw_units) else ()
-                    kind = raw_kinds[matched] if matched < len(raw_kinds) else "line"
-                    if kind == "unit" and timed_unit_reading_front(
-                        display_primary, units, float(started_at), range(len(display_primary) + 1),
-                    ) is None:
-                        # Cleanup may change the primary subrow. Never label
-                        # unmatched source units as genuine reading evidence.
-                        units, kind = (), "line"
-                    mapped_units.append(units)
-                    mapped_kinds.append(kind)
-                    source_cursor = matched + 1
-            self._display_timed_units = tuple(mapped_units)
-            self._display_timed_kinds = tuple(mapped_kinds)
-            # A source row can contain real word anchors, measured phrases,
-            # or only a row start. Resolve each once after display filtering;
-            # cover/external lyrics and both window sizes share these plans.
-            plans = []
-            duet_rows = self._display_duet_presentation
-            for index, (start, text) in enumerate(timed):
-                bounds = display_row_estimate_boundaries(timed, mapped_units, index,
-                    singer_names=singer_names, duet_presentation=duet_rows)
-                following = bounds.next_start
-                if mapped_read_ends[index] is not None:
-                    following = mapped_read_ends[index]
-                plans.append(resolve_display_row_timing(
-                    self._primary_timed_lyric_text(text), mapped_units[index], mapped_kinds[index],
-                    start=float(start), next_start=following,
-                    estimated_start=bounds.estimated_start, estimated_end=bounds.estimated_end,
-                    estimated_body_offset=bounds.body_offset,
-                ))
-            self._display_row_timings = tuple(plans)
-            self._display_raw_source_texts = tuple(mapped_sources)
-            self._display_timed_read_ends = tuple(mapped_read_ends)
-            self._display_units_source = owner_units
-            self._display_kinds_source = owner_kinds
-            self._display_lyrics_cache_key = key
-            self._display_lyrics_cache = result
-            self._display_timing_quality = None
-            return result
-        raw_lines = tuple(str(line) for line in (getattr(self.owner, "lyrics", ()) or ()))
-        title = str(getattr(self.owner, "track_title", "") or "").strip()
-        key = ("untimed", title, singer_names, raw_lines, show_translation, clean_intro)
+            prepared = prepare_lyric_presentation(snapshot_lyric_input(
+                self.owner, translated=translated, source=source,
+            ))
         if key == self._display_lyrics_cache_key and self._display_lyrics_cache is not None:
             return self._display_lyrics_cache
-        timed: list[tuple[float, str]] = []
-        lines = [
-            presented.replace("\n", "\u2028")
-            for _index, presented in present_timed_lyric_rows(
-                tuple((index, line) for index, line in enumerate(raw_lines)),
-                show_translation=show_translation,
-                clean_intro=clean_intro,
-                intro_countdown=False,
-                singer_names=singer_names,
-            )
-        ]
-        if title in {"", "暂无媒体", "暂无播放", "媒体初始化中"}:
-            result = ([], timed)
-        else:
-            result = (lines or ["暂无歌词"], timed)
-        self._display_timed_units = ()
-        self._display_row_timings = ()
-        self._display_timed_kinds = ()
-        self._display_timed_read_ends = ()
-        self._display_raw_source_texts = raw_lines
-        self._display_duet_presentation = None
-        self._display_units_source = None
-        self._display_kinds_source = None
+        self._display_duet_presentation = prepared.duet
+        self._display_timed_units, self._display_timed_kinds = prepared.units, prepared.kinds
+        self._display_row_timings = prepared.timings
+        self._display_timed_read_ends = prepared.read_ends
+        self._display_raw_source_texts = prepared.raw_source_texts
+        self._display_units_source, self._display_kinds_source = owner_units, owner_kinds
+        self._prepared_lyric_layers = prepared.layers
+        self._prepared_lyric_result = prepared
+        self._prepared_lyric_identity = self._visual_track_identity()
         self._display_lyrics_cache_key = key
-        self._display_lyrics_cache = result
+        self._display_lyrics_cache = (list(prepared.lines), list(prepared.timed))
         self._display_timing_quality = None
-        return result
+        self._visual_lyric_cache_key = None
+        return self._display_lyrics_cache
 
     def _reading_strategy(self) -> str:
         return normalize_music_reading_strategy(getattr(
@@ -3228,6 +3131,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             id(duet) if use_duet else None, show_translation,
         )
         if key != self._visual_lyric_cache_key:
+            if (use_duet and getattr(self, "_prepared_lyric_layers", None) is not None
+                    and len(self._prepared_lyric_layers) == len(lines)):
+                self._visual_lyric_layers = self._prepared_lyric_layers
+                self._visual_lyric_cache_key = key
+                return self._visual_lyric_layers
             source = (row.body_text for row in duet.rows) if use_duet else lines
             self._visual_lyric_layers = tuple(
                 split_display_layers(
@@ -3504,65 +3412,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return unverified
 
     @staticmethod
-    def _coalesced_timed_lyrics(
-        timed_lyrics, *, clean_intro: bool = True, singer_names: str = "",
-    ) -> list[tuple[float, str]]:
-        """Keep original/translation rows at one timestamp in one logical sentence.
-
-        Persisted LRC stores each visual line with the same timestamp.  Treating
-        those entries as separate timeline rows makes ``bisect_right`` select
-        only the translation and makes the next real sentence look like a
-        replay. Keep all distinct subrows until the whole-song presentation
-        pass can distinguish intro credits from recurring singer labels.
-        """
-        grouped: list[tuple[float, list[str]]] = []
-        expanded = []
-        for raw_time, raw_text in timed_lyrics:
-            parts = str(raw_text or "").replace("\u2028", "\n").splitlines()
-            # Providers may already combine both same-time singers into one
-            # TimedLyricLine. Separate only verified line-leading voices;
-            # keep each voice's following translation with that voice.
-            voice_indices = [
-                index for index, part in enumerate(parts)
-                if analyze_duet_lyric_rows(
-                    ((0.0, part),), singer_names=singer_names,
-                ).rows[0].singer is not None
-            ]
-            if len(voice_indices) >= 2 and voice_indices[0] == 0:
-                for start, end in zip(voice_indices, (*voice_indices[1:], len(parts))):
-                    expanded.append((raw_time, "\n".join(parts[start:end])))
-            else:
-                expanded.append((raw_time, raw_text))
-        for raw_time, raw_text in expanded:
-            try:
-                started_at = max(0.0, float(raw_time))
-            except (TypeError, ValueError):
-                continue
-            text = str(raw_text or "").strip()
-            if not text:
-                continue
-            if grouped and abs(grouped[-1][0] - started_at) <= 0.0005:
-                # Two verified singer-prefixed voices at one timestamp are
-                # separate source rows. Keep their individual clocks/indexes
-                # for the duet planner; ordinary original+translation pairs
-                # still coalesce into a single bilingual sentence.
-                if (
-                    analyze_duet_lyric_rows(
-                        ((grouped[-1][0], "\n".join(grouped[-1][1])), (started_at, text)),
-                        singer_names=singer_names,
-                    ).groups
-                ):
-                    grouped.append((started_at, [text]))
-                    continue
-                if text not in grouped[-1][1]:
-                    grouped[-1][1].append(text)
-                continue
-            grouped.append((started_at, [text]))
-        return [
-            (started_at, "\n".join(parts))
-            for started_at, parts in grouped
-            if parts
-        ]
+    def _coalesced_timed_lyrics(timed_lyrics, *, clean_intro=True, singer_names=""):
+        return coalesced_timed_lyrics(timed_lyrics, clean_intro=clean_intro, singer_names=singer_names)
 
     @staticmethod
     def _primary_timed_lyric_text(text: str) -> str:
@@ -3929,8 +3780,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         key = (text, font.toString(), str(unit_mode))
         cached = self._glyph_run_cache.get(key)
         if cached is not None:
+            previous_working_key = self._glyph_cache_key
             self._glyph_cache_key = key
             self._glyph_cache = cached
+            if previous_working_key != key and self._glyph_run_cache_bytes > self.GLYPH_RUN_CACHE_MAX_BYTES:
+                self._trim_emphasis_glyph_caches()
             return cached
         if key == self._glyph_cache_key and self._glyph_cache is not None:
             return self._glyph_cache
@@ -3967,11 +3821,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._glyph_cache_key = key
         self._glyph_cache = image, tuple(boundaries)
         self._glyph_run_cache[key] = self._glyph_cache
-        while len(self._glyph_run_cache) > 128:
-            oldest = next((item for item in self._glyph_run_cache if item not in self._emphasis_protected_glyph_runs), None)
-            if oldest is None:
-                break
-            self._glyph_run_cache.pop(oldest)
+        self._glyph_run_cache_bytes += int(image.sizeInBytes())
+        self._trim_emphasis_glyph_caches()
         return self._glyph_cache
 
     def _isolated_glyph_units(
@@ -3999,8 +3850,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     ) -> tuple[tuple[tuple[QImage, float], ...], bool]:
         """Build a bounded part of a line so prewarming cannot block one frame."""
         key = (text, font.toString(), str(unit_mode))
+        previous_working_key = self._isolated_glyph_build_last_key
+        self._isolated_glyph_build_last_key = key
         cached = self._isolated_glyph_cache.get(key)
         if cached is not None:
+            if (previous_working_key != key
+                    and self._isolated_glyph_builds_bytes > self.ISOLATED_GLYPH_BUILD_MAX_BYTES):
+                self._trim_emphasis_glyph_caches()
             return cached, True
         build = self._isolated_glyph_builds.get(key)
         if build is None:
@@ -4024,10 +3880,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 "whole_height": whole.height(),
                 "result": [],
                 "next_index": 0,
+                "bytes": 0,
             }
             self._isolated_glyph_builds[key] = build
-            while len(self._isolated_glyph_builds) > 16:
-                self._isolated_glyph_builds.pop(next(iter(self._isolated_glyph_builds)))
+            self._trim_emphasis_glyph_caches()
         offsets = build["offsets"]
         start_index = build["next_index"]
         end_index = len(offsets) - 1 if max_units is None else min(len(offsets) - 1, start_index + max(1, int(max_units)))
@@ -4058,6 +3914,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 layer.setPen(Qt.GlobalColor.white)
                 layout.draw(layer, QPointF())
             build["result"].append((image, build["boundaries"][index] - horizontal_bleed))
+            size = int(image.sizeInBytes())
+            build["bytes"] += size
+            self._isolated_glyph_builds_bytes += size
             if key in self._emphasis_protected_glyph_runs:
                 self._emphasis_protected_source_keys.add(image.cacheKey())
         build["next_index"] = end_index
@@ -4065,18 +3924,41 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         complete = end_index >= len(offsets) - 1
         if complete:
             self._isolated_glyph_builds.pop(key, None)
+            self._isolated_glyph_builds_bytes -= build["bytes"]
             self._isolated_glyph_cache[key] = output
-            while len(self._isolated_glyph_cache) > 128:
-                oldest = next((item for item in self._isolated_glyph_cache if item not in self._emphasis_protected_glyph_runs), None)
+            self._isolated_glyph_cache_bytes += build["bytes"]
+        self._trim_emphasis_glyph_caches()
+        return output, complete
+
+    def _trim_emphasis_glyph_caches(self):
+        """Bound cold pixels, retaining the current row and one working run.
+
+        Arbitrarily long visible lyrics are a separate measured working set;
+        evicting them would make a ready highlight fall back on every frame.
+        The single last run/build is also needed to finish bounded prewarm.
+        """
+        protected = self._emphasis_protected_glyph_runs
+        for cache, byte_name, count_limit, byte_limit, working, size_of in (
+            (self._glyph_run_cache, "_glyph_run_cache_bytes", self.GLYPH_RUN_CACHE_MAX_ENTRIES,
+             self.GLYPH_RUN_CACHE_MAX_BYTES, self._glyph_cache_key, lambda value: int(value[0].sizeInBytes())),
+            (self._isolated_glyph_cache, "_isolated_glyph_cache_bytes", self.ISOLATED_GLYPH_CACHE_MAX_ENTRIES,
+             self.ISOLATED_GLYPH_CACHE_MAX_BYTES, None, lambda value: sum(int(image.sizeInBytes()) for image, _left in value)),
+            (self._isolated_glyph_builds, "_isolated_glyph_builds_bytes", self.ISOLATED_GLYPH_BUILD_MAX_ENTRIES,
+             self.ISOLATED_GLYPH_BUILD_MAX_BYTES, self._isolated_glyph_build_last_key, lambda value: value["bytes"]),
+        ):
+            while len(cache) > count_limit or getattr(self, byte_name) > byte_limit:
+                oldest = next((key for key in cache if key not in protected and key != working), None)
                 if oldest is None:
                     break
-                self._isolated_glyph_cache.pop(oldest)
-        return output, complete
+                setattr(self, byte_name, getattr(self, byte_name) - size_of(cache.pop(oldest)))
 
     def _tinted_glyph_image(self, source: QImage, color: QColor) -> QImage:
         opaque = QColor(color)
         opaque.setAlpha(255)
         key = (source.cacheKey(), opaque.rgba())
+        if (self._emphasis_protected_tint_color is None
+                and key[0] in self._emphasis_protected_source_keys):
+            self._emphasis_protected_tint_color = key[1]
         cached = self._glyph_tint_cache.get(key)
         if cached is not None:
             return cached
@@ -4139,15 +4021,18 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         ordinary reading. A row's working set may exceed the cold-cache
         budget; changing rows releases that protection and trims it again.
         """
-        while self._glyph_tint_cache_bytes > self.GLYPH_TINT_CACHE_MAX_BYTES:
+        while (self._glyph_tint_cache_bytes > self.GLYPH_TINT_CACHE_MAX_BYTES
+               or len(self._glyph_tint_cache) > self.GLYPH_TINT_CACHE_MAX_ENTRIES):
             oldest = next((
                 key for key in self._glyph_tint_cache
-                if key[0] not in self._emphasis_protected_source_keys
+                if (key[0] not in self._emphasis_protected_source_keys
+                    or key[1] != self._emphasis_protected_tint_color)
             ), None)
             if oldest is None:
                 break
             self._glyph_tint_cache_bytes -= self._glyph_tint_cache.pop(oldest).sizeInBytes()
-        while self._sparse_glyph_halo_cache_bytes > self.SPARSE_GLYPH_HALO_CACHE_MAX_BYTES:
+        while (self._sparse_glyph_halo_cache_bytes > self.SPARSE_GLYPH_HALO_CACHE_MAX_BYTES
+               or len(self._sparse_glyph_halo_cache) > self.SPARSE_GLYPH_HALO_CACHE_MAX_ENTRIES):
             oldest = next((
                 key for key in self._sparse_glyph_halo_cache
                 if key not in self._emphasis_protected_source_keys
@@ -4158,13 +4043,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._sparse_glyph_halo_cache_bytes -= old.sizeInBytes()
 
     def _protect_lyric_emphasis_assets(
-        self, text: str, font: QFont, layout: QTextLayout | None,
+        self, text: str, font: QFont, layout: QTextLayout | None, *, unread_color: QColor | None = None,
     ) -> None:
         """Pin exactly the current effect's shaped runs before future prewarm."""
-        token = (str(text), font.toString(), id(layout)) if layout is not None else None
+        color = QColor(unread_color) if unread_color is not None else None
+        if color is not None:
+            color.setAlpha(255)
+        token = (str(text), font.toString(), id(layout), color.rgba() if color is not None else None) if layout is not None else None
         if token == self._emphasis_protected_token:
             return
         self._emphasis_protected_token = token
+        self._emphasis_protected_tint_color = color.rgba() if color is not None else None
         keys = frozenset(
             (
                 self._utf16_slice(text, layout.lineAt(index).textStart(), layout.lineAt(index).textLength()),
@@ -4189,6 +4078,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 for key in keys
                 for source, _left in self._isolated_glyph_cache[key]
             )
+        self._trim_emphasis_glyph_caches()
         self._trim_emphasis_image_caches()
 
     @staticmethod
@@ -7460,11 +7350,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             if active_priority_mode != "none" and focus_index == pair_first_by_row.get(active, active) and 0 <= active < len(layouts)
             else None
         )
+        emphasis_unread_color = self._future_lyric_color(lyric_clip)
         self._protect_lyric_emphasis_assets(
             paint_lines[active] if active_emphasis_layout is not None else "", lyric_font,
-            active_emphasis_layout,
+            active_emphasis_layout, unread_color=emphasis_unread_color,
         )
-        emphasis_unread_color = self._future_lyric_color(lyric_clip)
         obo_active_translation_lift = (
             obo_reading_handoff * self._reading_lift_height()
             * max(0.5, float(max(1, secondary_font.pixelSize())) / self.LYRIC_PIXEL_SIZE)
@@ -8322,7 +8212,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._media_control_panel_rect = QRectF(transport_rect)
         if not content_snapshot and (paint_region is None or paint_region.intersects(self._personal_dj_damage_rect(rect))):
             self._paint_personal_dj_control(painter, rect)
-        if not content_snapshot:
+        collection_damage = self._song_collection_geometry(rect).adjusted(-4., -4., 4., 4.)
+        if not content_snapshot and (paint_region is None or paint_region.intersects(collection_damage.toAlignedRect())):
             self._paint_song_collection_control(painter, rect)
         normal_control_region = QRectF(
             0.0, rect.bottom() - self.CONTROL_BOTTOM_REGION_HEIGHT * surface_scale,
@@ -8370,19 +8261,28 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # Advancing during a lyric-only dirty paint would leave a newer
         # background patch surrounded by old pixels. Hold the displayed
         # frame and its contrast samples until a whole-surface paint.
+        self._background_rebuilt_this_paint = False
         if self._background_cache.isNull() or (advance_frame and (
             key != self._background_cache_key
+            or self._album_flow_background._frame.cacheKey() != self._background_cache.cacheKey()
             or now < self._background_cache_at
             or now - self._background_cache_at >= self.AMBIENT_FRAME_SECONDS
         )):
+            previous_frame_key = self._background_cache.cacheKey()
             self._background_cache = self._album_flow_background.render(
                 QSize(width, height), colors, now, intensity, weights=ambient_weights,
+                material_owner=self if live_glass_paint(painter, self) else None,
+                material_scene=self._visual_track_identity,
             )
             self._background_cache_key = key
             self._background_cache_at = now
+            self._background_rebuilt_this_paint = self._background_cache.cacheKey() != previous_frame_key
         if not getattr(self, "_navigation_cover_capture", False):
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            # Expanding to a full native-DPR image costs more on ambient
+            # frames than direct smooth sampling. Keep the small source and
+            # let Qt sample only the actual dirty region of this paint.
             painter.drawImage(rect, self._background_cache)
             painter.restore()
 
@@ -8572,13 +8472,15 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return self._scene_control_ink()
 
     def _paint_surface_glass(self, painter: QPainter, target: QRectF, *, hovered=False,
-                             pressed=False, active=False, live=False):
+                             pressed=False, active=False, live=False, role=None):
         image = self._background_cache if live else self._surface_glass_backdrop()
         paint_liquid_glass(painter, target, hovered=hovered, pressed=pressed, active=active,
                            light=self._surface_glass_light(), refractive=True,
                            material_level=self._surface_glass_level(),
                            backdrop=image, backdrop_rect=self._surface_glass_source_rect(target, image),
-                           cache_token=id(self))
+                           cache_token=id(self), material_owner=self, material_role=role,
+                           material_scene=self._visual_track_identity,
+                           material_dirty=painter.worldTransform().mapRect(target))
 
     def _paint_library_back(self, painter: QPainter, rect: QRectF):
         if not self._library_back_available():
@@ -8597,7 +8499,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             face = self._hover_control_rect("library", face, {"library": face}, now)
             growth = face.height() / max(.001, original_height)
             layer.save()
-            self._paint_surface_glass(layer, face, hovered=is_hovered, pressed=is_pressed)
+            self._paint_surface_glass(layer, face, hovered=is_hovered, pressed=is_pressed, role="library")
             ink = self._surface_glass_ink(face)
             icon_side = 20.0 * scale * growth
             center_x = face.left() + face.height() / 2
@@ -9085,13 +8987,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             painter.save()
             painter.setOpacity(reveal * status_reveal)
             self._paint_surface_glass(painter, status_rect, hovered=hovered,
-                                     pressed=self._pressed_window_button == "personal_dj", live=True)
+                                     pressed=self._pressed_window_button == "personal_dj", live=True, role="dj-status")
             painter.restore()
         if status_reveal < .999:
             painter.save()
             painter.setOpacity(reveal * (1.0 - status_reveal))
             self._paint_surface_glass(painter, caption, hovered=hovered,
-                                     pressed=self._pressed_window_button == "personal_dj", live=True)
+                                     pressed=self._pressed_window_button == "personal_dj", live=True, role="dj-caption")
             painter.setBrush(Qt.BrushStyle.NoBrush)
             border = QColor(170, 172, 175, round(150 + 80 * energy))
             painter.setPen(QPen(border, max(1.0, scale) + energy * scale * 1.5))
@@ -9100,7 +9002,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 painter.save()
                 painter.setOpacity(reveal * (1.0 - status_reveal) * (1.0 - expansion))
                 self._paint_surface_glass(painter, icon, hovered=hovered,
-                                         pressed=self._pressed_window_button == "personal_dj", live=True)
+                                         pressed=self._pressed_window_button == "personal_dj", live=True, role="dj-icon")
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawEllipse(icon)
                 painter.restore()
@@ -9411,9 +9313,14 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             prewarm_default = (prewarm_default[0] + (material_key,), prewarm_default[1])
         painter.save()
         scale = self._surface_scale()
-        native_dpr = max(1.0, float(self.devicePixelRatioF()))
+        transform = painter.deviceTransform()
+        native_dpr = max(1., math.hypot(transform.m11(), transform.m12()),
+                         math.hypot(transform.m21(), transform.m22()))
         dpr = min(native_dpr, self.CONTROL_LAYER_DPR_CAP)
         if reveal >= 0.999:
+            # The background can rebuild on every paint at low cadence. Its
+            # presence must not starve the existing one-level/35 ms prewarm
+            # budget or the controls would lose their idle-exit blur.
             if prewarm_default is not None:
                 self._maybe_prewarm_control_blur(
                     bounds, scale, dpr, prewarm_default[0], prewarm_default[1],
@@ -9581,9 +9488,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                  self._audio_output_button_rect(self._window_control_base_rect(rect), scale)))
             layer.save()
             def face(target: QRectF, is_hovered: bool = False, is_pressed: bool = False,
-                     active: bool = False):
+                     active: bool = False, *, role=None):
                 self._paint_surface_glass(layer, target, hovered=is_hovered,
-                                         pressed=is_pressed, active=active)
+                                         pressed=is_pressed, active=active, role=role)
 
             def icon_rect(target: QRectF, fraction: float = 0.55):
                 side = target.width() * fraction
@@ -9592,22 +9499,22 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
             ink = self._surface_glass_ink(button)
             current_layout_button = posed_layout if use_hover_pose else self._content_layout_button_rect(button, scale)
-            face(current_layout_button, layout_hovered, layout_pressed, False)
+            face(current_layout_button, layout_hovered, layout_pressed, False, role="content-layout")
             self._paint_content_layout_icon(layer, icon_rect(current_layout_button, .62))
             if audio_available and not audio_active and audio_pose is None:
-                face(audio_button, audio_hovered, audio_pressed, audio_active or bool(audio_kinds))
+                face(audio_button, audio_hovered, audio_pressed, audio_active or bool(audio_kinds), role="audio-output")
                 audio_ink = self._surface_glass_ink(audio_button, active=bool(audio_kinds))
                 paint_audio_output_status(layer, audio_button, audio_kinds, audio_ink, count=audio_count)
             if playback_mode is not None:
-                face(playback_button, playback_hovered, playback_pressed, playback_active)
+                face(playback_button, playback_hovered, playback_pressed, playback_active, role="playback-mode")
                 paint_music_source_icon(layer, icon_rect(playback_button, 0.55), playback_asset,
                                         tint=mode_ink, gradient_stops=fm_stops, gradient_phase=gradient_phase)
             translation_symbol = self._translation_symbol_path(icon_rect(translation, 0.58))
-            face(translation, translation_hovered, translation_pressed, translated)
+            face(translation, translation_hovered, translation_pressed, translated, role="translation")
             layer.setPen(Qt.PenStyle.NoPen)
             layer.setBrush(self._surface_glass_ink(translation, active=translated))
             layer.drawPath(translation_symbol)
-            face(button, hovered_state, pressed_state)
+            face(button, hovered_state, pressed_state, role="window-mode")
             if not self._capturing_transition_snapshot:
                 self._paint_window_mode_icon(layer, icon_rect(button, 0.60), self._fullscreen, ink)
             layer.restore()
@@ -9630,6 +9537,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot,
                                gradient_key, default_fm_phase if fm_continuous else None, (),
                                self._content_layout, 1., False, False, False), draw_default),
+            # The live FM gradient changes every frame. Caching the entire
+            # group here would only churn native rasters and evict its idle
+            # blur levels; its existing direct vector path stays continuous.
         )
         if audio_available and not audio_active and audio_pose is not None:
             painter.save()
@@ -9645,7 +9555,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                   material_level=self._surface_glass_level(),
                                   light=self._surface_glass_light(), ink=self._surface_glass_ink(posed_connection),
                                   backdrop=self._surface_glass_backdrop(),
-                                  backdrop_rect=self._surface_glass_source_rect(posed_connection, self._surface_glass_backdrop()))
+                                  backdrop_rect=self._surface_glass_source_rect(posed_connection, self._surface_glass_backdrop()),
+                                  material_owner=self, material_role="audio-connection",
+                                  material_scene=self._visual_track_identity,
+                                  material_dirty=painter.worldTransform().mapRect(posed_connection))
             painter.restore()
 
     @staticmethod
@@ -9728,7 +9641,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                            hovered=hovered, pressed=pressed,
                            material_level=level, backdrop=image,
                            backdrop_rect=self._surface_glass_source_rect(shape.boundingRect(), image),
-                           cache_token=(id(self), "transport", command))
+                           cache_token=(id(self), "transport", command),
+                           material_owner=self, material_role=("transport", command),
+                           material_scene=self._visual_track_identity,
+                           material_dirty=painter.worldTransform().mapRect(shape.boundingRect()))
         painter.restore()
 
     @staticmethod
@@ -9861,6 +9777,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             for command in ("previous", "next"):
                 state = self._transport_feedback.get(command)
                 if state is None:
+                    continue
+                # At the exact initial pose the glyph has not moved. Keep
+                # its native cached compositing path until motion begins,
+                # avoiding a one-frame premultiplied-alpha rounding change.
+                if now <= state[0]:
                     continue
                 icon_seconds = state[3] * self.TRANSPORT_FEEDBACK_SECONDS / (
                     self.TRANSPORT_LIGHT_EXPAND_SECONDS + self.TRANSPORT_LIGHT_FADE_SECONDS

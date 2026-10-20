@@ -9,6 +9,7 @@ widgets or starts timers; glyphs remain independent foreground paint.
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import contextmanager
 import math
 import time
 
@@ -31,12 +32,63 @@ _glass_material_slots: OrderedDict[tuple, tuple[tuple, float]] = OrderedDict()
 _glass_material_cache_bytes = 0
 
 
+@contextmanager
+def synchronous_glass_capture(owner):
+    """QWidget.render/grab redirect painting without changing painter.device()."""
+    previous = int(getattr(owner, '_glass_capture_depth', 0))
+    owner._glass_capture_depth = previous + 1
+    try:
+        yield
+    finally:
+        owner._glass_capture_depth = previous
+
+
+class GlassCaptureMixin:
+    """Keep redirected/offscreen captures on the complete synchronous material."""
+    def render(self, *args, **kwargs):
+        with synchronous_glass_capture(self):
+            return super().render(*args, **kwargs)
+
+    def grab(self, *args, **kwargs):
+        with synchronous_glass_capture(self):
+            return super().grab(*args, **kwargs)
+
+
+def glass_owner_is_live(owner):
+    """Lifecycle/capture check shared by paint and popup pixel preparation."""
+    if owner is None:
+        return False
+    try:
+        if not owner.isVisible() or owner.window().isMinimized():
+            return False
+        current = owner
+        while current is not None:
+            if any(bool(getattr(current, flag, False)) for flag in (
+                '_glass_capture_depth', '_capturing_transition_snapshot', '_capturing_content_snapshot',
+                '_navigation_cover_capture', '_navigation_capture_hide_cover', '_navigation_cover_frozen',
+            )):
+                return False
+            current = current.parentWidget()
+    except RuntimeError:
+        return False
+    return True
+
+
+def live_glass_paint(painter, owner):
+    """Explicit opt-in only; captures and QImage blur sources remain synchronous."""
+    return owner is not None and painter.device() is owner and glass_owner_is_live(owner)
+
+
 def clear_glass_cache() -> None:
     """Release only the bounded, opt-in scene-material rasters."""
     global _glass_material_cache_bytes
     _glass_material_cache.clear()
     _glass_material_slots.clear()
     _glass_material_cache_bytes = 0
+    from local.liquid_glass_tasks import glass_pixel_tasks
+    service = glass_pixel_tasks(create=False)
+    if service is not None:
+        service.clear()
 
 
 def glass_material_tint(*, light: bool = False, hovered: bool = False,
@@ -83,8 +135,17 @@ def _sample_rgba(pixels: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray
     x0, y0 = np.floor(x).astype(np.intp), np.floor(y).astype(np.intp)
     x1, y1 = np.minimum(x0 + 1, pixels.shape[1] - 1), np.minimum(y0 + 1, pixels.shape[0] - 1)
     fx, fy = (x - x0)[..., None], (y - y0)[..., None]
-    return ((pixels[y0, x0] * (1. - fx) + pixels[y0, x1] * fx) * (1. - fy)
-            + (pixels[y1, x0] * (1. - fx) + pixels[y1, x1] * fx) * fy)
+    # Keep the same float64 operation order while reusing the two row
+    # results; a material refresh samples twice, and need not allocate every
+    # intermediate full RGBA plane again for the following operation.
+    top = pixels[y0, x0] * (1. - fx)
+    top += pixels[y0, x1] * fx
+    top *= 1. - fy
+    bottom = pixels[y1, x0] * (1. - fx)
+    bottom += pixels[y1, x1] * fx
+    bottom *= fy
+    top += bottom
+    return top
 
 
 def _render_glass_material(backdrop: QImage, source_rect: QRectF,
@@ -130,7 +191,7 @@ def _render_glass_material(backdrop: QImage, source_rect: QRectF,
 
 
 def _glass_material(backdrop: QImage, source_rect: QRectF, rect: QRectF,
-                    radius: float, state: tuple, cache_token,
+                    radius: float, cache_token,
                     material_level: int = MUSIC_GLASS_DEFAULT_LEVEL) -> QImage:
     global _glass_material_cache_bytes
     geometry = tuple(round(value, 4) for value in (
@@ -141,7 +202,10 @@ def _glass_material(backdrop: QImage, source_rect: QRectF, rect: QRectF,
         token = cache_token
     except TypeError:
         token = (type(cache_token).__name__, id(cache_token))
-    slot = (token, backdrop.width(), backdrop.height(), geometry, state, material_level)
+    # Hover/theme/selection veils and the rim are painted above this raster;
+    # none changes its crop, blur or refraction. Share the expensive material
+    # through those live state changes instead of rerasterizing it on input.
+    slot = (token, backdrop.width(), backdrop.height(), geometry, material_level)
     key = (backdrop.cacheKey(), slot)
     now = time.monotonic()
     previous = _glass_material_slots.get(slot) if cache_token is not None else None
@@ -170,6 +234,30 @@ def _glass_material(backdrop: QImage, source_rect: QRectF, rect: QRectF,
     return cached
 
 
+def _render_glass_request(payload):
+    image, sample, width, height, radius, level = payload
+    return _render_glass_material(image, QRectF(*sample), width, height, radius, level)
+
+
+def _live_glass_material(owner, role, scene, dirty, backdrop, source_rect, rect, radius, level):
+    from local.liquid_glass_tasks import glass_pixel_tasks
+    service = glass_pixel_tasks()
+    if service is None:
+        return None
+    sample = tuple(float(value) for value in (
+        source_rect.x(), source_rect.y(), source_rect.width(), source_rect.height()))
+    geometry = tuple(round(value, 4) for value in (
+        *sample, rect.x(), rect.y(), rect.width(), rect.height(), radius, float(level),
+        float(backdrop.width()), float(backdrop.height())))
+    # An independent implicitly shared wrapper is safe for read-only worker
+    # use; any writer detaches. No deep copy is claimed or required here.
+    snapshot = QImage(backdrop)
+    payload = (snapshot, sample, rect.width(), rect.height(), radius, level)
+    return service.request(owner, role, scene, geometry, backdrop.cacheKey(), payload,
+                           _render_glass_request, dirty, byte_count=int(snapshot.sizeInBytes()),
+                           interval=GLASS_MATERIAL_FRAME_SECONDS)
+
+
 def widget_glass_backdrop(widget, rect: QRectF | None = None) -> tuple[QImage | None, QRectF | None]:
     """Map an existing ancestor raster without capture, for existing callers."""
     ancestor = widget.parentWidget()
@@ -195,7 +283,9 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
                        backdrop: QImage | None = None, backdrop_rect: QRectF | None = None,
                        opacity: float = 1.0, cache_token=None, refractive: bool = False,
                        material_level: int = MUSIC_GLASS_DEFAULT_LEVEL,
-                       path: QPainterPath | None = None) -> None:
+                       path: QPainterPath | None = None,
+                       material_owner=None, material_role=None, material_scene=None,
+                       material_dirty: QRectF | None = None) -> None:
     """Keep the supplied face and add an inset rim; ``None`` paints only a rim.
 
     Original alpha is multiplied by ``face_opacity``. Selection and hover never
@@ -224,13 +314,19 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
         if material_level > 0 and isinstance(backdrop, QImage) and not backdrop.isNull():
             sample = QRectF(backdrop_rect) if backdrop_rect is not None else QRectF(backdrop.rect())
             if sample.isValid() and not sample.isEmpty():
-                material = _glass_material(backdrop, sample, rect, radius,
-                                            (bool(light), bool(hovered), bool(pressed), bool(active)), cache_token, material_level)
-                painter.save()
-                painter.setOpacity(painter.opacity() * glass_backdrop_opacity(material_level))
-                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-                painter.drawImage(rect, material)
-                painter.restore()
+                if material_role is not None and live_glass_paint(painter, material_owner):
+                    material = _live_glass_material(
+                        material_owner, material_role, material_scene,
+                        rect if material_dirty is None else material_dirty,
+                        backdrop, sample, rect, radius, material_level)
+                else:
+                    material = _glass_material(backdrop, sample, rect, radius, cache_token, material_level)
+                if material is not None:
+                    painter.save()
+                    painter.setOpacity(painter.opacity() * glass_backdrop_opacity(material_level))
+                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                    painter.drawImage(rect, material)
+                    painter.restore()
         painter.fillRect(rect, glass_material_tint(light=light, hovered=hovered, pressed=pressed,
                                                  active=active, material_level=material_level))
         painter.restore()
@@ -275,7 +371,7 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
     painter.restore()
 
 
-class GlassPushButton(QPushButton):
+class GlassPushButton(GlassCaptureMixin, QPushButton):
     """Original Qt/QSS face and label, with a translucent face and fine rim."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

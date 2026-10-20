@@ -187,9 +187,20 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
         self._render_page(112.0)
         displayed = self._background_state()
         self.assertNotEqual(displayed, state)
-        with patch.object(self.window, "render", side_effect=AssertionError("extra page repaint")):
+        from local.liquid_glass_tasks import GlassPixelTasks
+        from tests.test_liquid_glass_tasks import ControlledTasks
+        pixels = GlassPixelTasks(tasks=ControlledTasks())
+        self.addCleanup(pixels.close)
+        with patch('local.liquid_glass_tasks.glass_pixel_tasks', return_value=pixels), \
+                patch.object(self.window, "render", side_effect=AssertionError("extra page repaint")):
             with patch("local.audio_output_panel.time.monotonic", return_value=113.0):
                 panel._capture_material()
+                # Live refresh keeps its complete displayed material until
+                # the bounded pixel task returns, without repainting lyrics.
+                self.assertEqual(panel._material, before)
+                self.assertEqual(panel._material_at, captured_at)
+                self.assertEqual(pixels.submitted, 1)
+                pixels.tasks.finish()
         self.assertNotEqual(panel._material, before)
         self.assertEqual(self._background_state(), displayed)
         self.assertEqual(panel._material_at, 113.0)

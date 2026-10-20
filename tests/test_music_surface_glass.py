@@ -8,7 +8,9 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
-from local.music_surface_window import MusicSurfaceWindow
+from local.music_surface_window import (MusicSurfaceWindow, paint_audio_output_status,
+                                       paint_music_source_icon, paint_personal_dj_icon,
+                                       paint_presentation_glyph)
 from tests.test_music_surface_transition import _TransitionOwner
 
 
@@ -180,11 +182,14 @@ class MusicSurfaceGlassTests(unittest.TestCase):
         self.window._owned_playback_mode = "shuffle"
         self.window._owned_personal_dj_enabled = True
         self.window._owned_dj_speaking = False
-        image = self.image()
         for mode in ("dark", "light"):
             self.mode = mode
             for fullscreen in (False, True):
                 self.window._fullscreen = fullscreen
+                # Exercise the real direct drawing path for each theme and
+                # presentation; material reuse must not change glyph ink.
+                self.window._control_layer_cache.clear()
+                self.window._control_layer_cache_bytes = 0
                 with self.subTest(mode=mode, fullscreen=fullscreen), \
                         patch("local.music_surface_window.time.monotonic", return_value=100.), \
                         patch.object(self.window, "_audio_output_available", return_value=True), \
@@ -192,19 +197,33 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                         patch.object(self.window, "_future_lyric_color", return_value=QColor("magenta")), \
                         patch.object(self.window, "_personal_dj_reveal_at", return_value=1.), \
                         patch.object(self.window, "_personal_dj_activity_at", return_value=0.), \
-                        patch("local.music_surface_window.paint_music_source_icon") as source, \
-                        patch("local.music_surface_window.paint_audio_output_status") as output, \
-                        patch("local.music_surface_window.paint_presentation_glyph") as presentation, \
-                        patch("local.music_surface_window.paint_personal_dj_icon") as dj, \
-                        patch.object(self.window, "_paint_transport_icon") as transport:
-                    with QPainter(image) as painter:
-                        rect = QRectF(self.window.rect())
-                        self.window._paint_library_back(painter, rect)
-                        self.window._paint_window_controls(painter, rect)
-                        self.window._paint_media_controls(painter, QRectF(20, 400, 330, 60), QColor("red"), QColor("green"))
-                        self.window._paint_personal_dj_control(painter, rect)
-                        self.window._paint_transition_mode_glyph(painter)
+                        patch("local.music_surface_window.paint_music_source_icon", wraps=paint_music_source_icon) as source, \
+                        patch("local.music_surface_window.paint_audio_output_status", wraps=paint_audio_output_status) as output, \
+                        patch("local.music_surface_window.paint_presentation_glyph", wraps=paint_presentation_glyph) as presentation, \
+                        patch("local.music_surface_window.paint_personal_dj_icon", wraps=paint_personal_dj_icon) as dj, \
+                        patch.object(self.window, "_paint_transport_icon", wraps=self.window._paint_transport_icon) as transport:
+                    def paint_controls():
+                        image = self.image()
+                        with QPainter(image) as painter:
+                            rect = QRectF(self.window.rect())
+                            self.window._paint_library_back(painter, rect)
+                            self.window._paint_window_controls(painter, rect)
+                            self.window._paint_media_controls(painter, QRectF(20, 400, 330, 60), QColor("red"), QColor("green"))
+                            self.window._paint_personal_dj_control(painter, rect)
+                            self.window._paint_transition_mode_glyph(painter)
+                        return image
+
+                    cold = paint_controls()
                     self.assertTrue(source.called and output.called and presentation.called and dj.called and transport.called)
+                    self.assertTrue(any(cold.constBits()))
+                    cache_before = {key: image.cacheKey() for key, image in self.window._control_layer_cache.items()}
+                    calls_before = (source.call_count, output.call_count, transport.call_count)
+                    self.assertEqual(paint_controls(), cold)
+                    self.assertEqual((source.call_count, output.call_count, transport.call_count),
+                                     tuple(2 * count for count in calls_before))
+                    self.assertEqual({key: image.cacheKey() for key, image in self.window._control_layer_cache.items()}, cache_before)
+                    self.assertLessEqual(len(cache_before), 48)
+                    self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)
                     self.assertTrue(all(call.kwargs["tint"] == QColor("black") for call in source.call_args_list))
                     self.assertTrue(all(call.args[3] == QColor("black") for call in output.call_args_list))
                     self.assertTrue(all(call.args[3] == QColor("black") for call in presentation.call_args_list))

@@ -767,7 +767,10 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(timed[0], (0.0, "· · ·"))
         self.assertEqual(lines[1], "谁人都可以\u2028Anyone can")
         self.assertEqual(self.window._display_timed_kinds, ("line", "unit", "line"))
-        self.assertIs(self.window._display_timed_units[1], units)
+        self.assertEqual(
+            tuple((unit.start_seconds, unit.end_seconds, unit.text) for unit in self.window._display_timed_units[1]),
+            tuple((unit.start_seconds, unit.end_seconds, unit.text) for unit in units),
+        )
         self.assertEqual(self.window._primary_timed_lyric_text(""), "")
 
         font = self.window._surface_font(38, QFont.Weight.Bold)
@@ -4050,7 +4053,10 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         lines, timed = self.window._display_lyrics()
         self.assertEqual([text for _time, text in timed], ["成龙：跟我唱", "一起唱", "成龙：再一起"])
         self.assertEqual(lines[0], "成龙：跟我唱")
-        self.assertIs(self.window._display_timed_units[0], first_units)
+        self.assertEqual(
+            tuple((unit.start_seconds, unit.end_seconds, unit.text) for unit in self.window._display_timed_units[0]),
+            tuple((unit.start_seconds, unit.end_seconds, unit.text) for unit in first_units),
+        )
 
     def test_sparse_priority_rule_uses_primary_line_not_same_timestamp_translation(self):
         timed = self.window._coalesced_timed_lyrics(
@@ -4792,8 +4798,11 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertGreater(early.pixelColor(*near).value(), baseline.pixelColor(*near).value() + 20)
         self.assertEqual(early.pixelColor(near[0], 650), baseline.pixelColor(near[0], 650))
         self.assertGreater(late.pixelColor(*far).value(), early.pixelColor(*far).value() + 20)
-        reached_edge, edge_scales = render(51.5)
-        self.assertAlmostEqual(edge_scales[0], baseline_scales[0], delta=0.01)
+        reached_edge, _ = render(51.5)
+        # A completed icon pose may reuse its native layer without invoking
+        # the glyph painter. Observe the restored pixels, not redraw count.
+        previous_bounds = hit_rects["previous"].toAlignedRect()
+        self.assertEqual(reached_edge.copy(previous_bounds), baseline.copy(previous_bounds))
         self.assertAlmostEqual(
             origin.x() + max_radius * self.window._transport_feedback_frame(1.5, duration)[1] * 0.79,
             self.window.rect().right(), delta=1.0,

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from api.models import ColorToken, TrackData
 from api.online_music import AccountSnapshot
 from local.music_library_window import MusicLibraryWindow
+from local.liquid_glass_tasks import GlassPixelTasks
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_surface_palette import artwork_surface_palette, relative_luminance
 from tests.test_music_palette import _png
@@ -30,6 +31,12 @@ class MusicLibraryBackgroundTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # These palette/timing examples deliberately drain no event loop.
+        # Exercise their original deterministic synchronous contract here;
+        # the controlled live-worker handoff is verified separately below.
+        self.pixel_service = patch('local.liquid_glass_tasks.glass_pixel_tasks', return_value=None)
+        self.pixel_service.start()
+        self.addCleanup(self.pixel_service.stop)
         self.window = MusicLibraryWindow()
         self.window.resize(760, 720)
         self.window.set_account(AccountSnapshot("netease", True, "background-account", "背景账号"))
@@ -176,6 +183,60 @@ class MusicLibraryBackgroundTests(unittest.TestCase):
         renderer = self.window._background_renderer
         self.assertEqual(renderer._painted_colors, renderer._target_colors)
         self.assertNotEqual(_pixels(previous), _pixels(self.window._background_frame))
+
+
+class MusicLibraryPixelWorkerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from tests.test_liquid_glass_tasks import ControlledTasks
+        self.store = GlassPixelTasks(tasks=ControlledTasks())
+        self.window = MusicLibraryWindow()
+        self.window.show()
+        self.window._background_timer.stop()
+        self.window.set_background_context({'v2_music_flow_intensity': .74}.get)
+
+    def tearDown(self):
+        self.store.close()
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def test_live_background_retains_frame_until_ready_and_applies_veil_once(self):
+        self.window.set_now_playing(_track())
+        self.window._background_timer.stop()
+        initial = QImage(self.window._background_frame)
+        frame_key = initial.cacheKey()
+        with patch('local.liquid_glass_tasks.glass_pixel_tasks', return_value=self.store):
+            self.window._background_seconds += .05
+            self.assertFalse(self.window._update_background())
+            self.assertEqual(self.store.submitted, 1)
+            self.assertEqual(self.window._background_frame.cacheKey(), frame_key)
+            self.store.tasks.finish()
+            raw = QImage(self.window._background_renderer._frame)
+            self.window._background_seconds += .01
+            self.assertTrue(self.window._update_background())
+            from PySide6.QtGui import QPainter
+            expected = raw.copy()
+            with QPainter(expected) as painter:
+                painter.fillRect(expected.rect(), QColor(12, 14, 20, 142))
+            self.assertEqual(self.window._background_frame, expected)
+            self.assertFalse(self.window._update_background())
+
+    def test_song_change_without_new_request_rejects_old_background_result(self):
+        self.window.set_now_playing(_track())
+        self.window._background_timer.stop()
+        with patch('local.liquid_glass_tasks.glass_pixel_tasks', return_value=self.store):
+            self.window._background_seconds += .05
+            self.window._update_background()
+            self.assertEqual(self.store.submitted, 1)
+            before = QImage(self.window._background_renderer._frame)
+            self.window._now_playing = _track('other')
+            self.store.tasks.finish()
+            self.assertEqual(self.window._background_renderer._frame, before)
+            self.assertEqual(self.store.discarded, 1)
 
 
 if __name__ == "__main__":

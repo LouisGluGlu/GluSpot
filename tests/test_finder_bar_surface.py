@@ -21,6 +21,10 @@ class FinderBarSurfaceTests(unittest.TestCase):
     def setUp(self):
         self.visual = IslandStackVisual(EmptyIslandDataProvider(empty_visual_data()))
         self.visual.timer.stop()
+        # These fixtures supply bar state, not a real foreground application.
+        # Keep the workstation's fullscreen windows out of their assertions;
+        # fullscreen precedence has separate explicit coverage below.
+        self.visual._detect_external_scene_suppression = Mock(return_value=(False, ""))
         self.visual._force_super_topmost = Mock()
         self.visual._notify_settings_changed = Mock()
         self.visual._begin_surface_transition = lambda reason: False
