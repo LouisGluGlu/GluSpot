@@ -167,7 +167,10 @@ def online_artwork_thumbnail_bytes(content: bytes, side: int = 320) -> bytes:
 
 def fetch_online_thumbnail(url: str) -> QImage:
     """Decode and downsample list/avatar artwork on the requesting worker."""
-    content = fetch_online_artwork(url)
+    # The known CDN can deliver the list-sized object directly. Downloading
+    # the player original here made every search tile compete for 2560px
+    # artwork before its small preview could appear.
+    content = fetch_online_artwork(url, target_side=320)
     if not content:
         return QImage()
     return QImage.fromData(content).scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio,

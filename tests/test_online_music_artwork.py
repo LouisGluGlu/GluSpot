@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor
 
 from api.models import ColorToken
 from api.online_music_artwork import (
-    _ArtworkRedirectHandler, OnlineArtworkError, fetch_online_artwork, online_artwork_colors,
+    _ArtworkRedirectHandler, OnlineArtworkError, fetch_online_artwork, fetch_online_thumbnail, online_artwork_colors,
 )
 from tests.test_music_palette import _png
 
@@ -120,6 +120,16 @@ class OnlineArtworkTests(unittest.TestCase):
             self.assertEqual(fetch_online_artwork(original, raise_errors=True, target_side=320), self.content)
         self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list], [
             "https://p1.music.126.net/cover/x.jpg?param=320y320", original])
+
+    def test_library_and_search_thumbnail_do_not_download_the_player_original(self):
+        original = "https://p1.music.126.net/cover/x.jpg?param=64y64"
+        opener = Mock()
+        opener.open.return_value = ArtworkResponse(self.content, url=original)
+        with patch("api.online_music_artwork.build_opener", return_value=opener):
+            self.assertFalse(fetch_online_thumbnail(original).isNull())
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(opener.open.call_args.args[0].full_url,
+                         "https://p1.music.126.net/cover/x.jpg?param=320y320")
 
     def test_queue_target_preserves_signed_and_unknown_urls_exactly(self):
         for original in ("https://p1.music.126.net/x.jpg?token=synthetic&param=64y64",

@@ -9,7 +9,7 @@ from unittest.mock import Mock
 from PySide6.QtCore import QObject, QRect, Signal
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtMultimedia import QMediaPlayer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from api.lyrics import LocalLyricsStore
 from api.models import ColorToken, IslandVisualData, TrackData
@@ -183,6 +183,17 @@ class Entry:
     def _show_island(self): self.calls.append(("island",))
 
 
+def run_search(tasks):
+    """Finish the current independent song/playlist jobs in submission order."""
+    current = tasks.latest("search")[0][:3]
+    finished = getattr(tasks, "_finished_search_actions", set())
+    for job in tuple(tasks.jobs):
+        if job[0][:3] == current and id(job[1]) not in finished:
+            finished.add(id(job[1]))
+            tasks.run(job)
+    tasks._finished_search_actions = finished
+
+
 class MusicLibraryControllerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -286,7 +297,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         recommendation, _ = self.tasks.latest("recommended_catalog")
         self.service.search_pages["netease", "query", "songs", 0] = CatalogPage((self.song,), 30, True)
         self.search("query")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertTrue(self.window._has_more)
         self.tasks.completed.emit(recommendation, None, "network")
         self.assertTrue(self.window._has_more)
@@ -349,7 +360,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.assertEqual(retry[0][-1], 0)
         self.service.search_pages["netease", "query", "songs", 0] = CatalogPage((self.song,), 30, True)
         self.search("query")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.window.set_notice("已加入播放列表，将在下一首播放")
         self.tasks.completed.emit(retry[0], CatalogPage((), 0, False), None)
         self.assertFalse(self.controller._recommended_retry)
@@ -436,7 +447,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         second = OnlineSong("netease", "song-2", "second")
         self.service.search_pages["netease", "query", "songs", 0] = CatalogPage((self.song, second), 2, False)
         self.search("query")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.window._rows[1].cover.click()
         self.assertEqual(self.player.queue, (self.song, second))
         self.assertEqual(self.player.index, 1)
@@ -540,7 +551,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         catalog = self.tasks.latest("initial_catalog")
         self.search("query")
         self.service.search_pages["qq", "query", "songs", 0] = CatalogPage((OnlineSong("qq", "song", "song"),), 1, False)
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.tasks.run(catalog)
         self.assertEqual([row.kind for row in self.window.collections], ["song"])
         self.window.search.clear()
@@ -741,10 +752,10 @@ class MusicLibraryControllerTests(unittest.TestCase):
         second = OnlineSong("netease", "song-2", "second song")
         self.service.search_pages["netease", "query", "songs", 30] = CatalogPage((self.song, second), 60, False)
         self.search("query")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertEqual([row.kind for row in self.window.collections], ["song", "playlist"])
         self.controller.load_more()
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         calls = [call for call in self.service.calls if call[0] == "search"]
         self.assertEqual(calls, [("search", "netease", "query", "songs", 30, 0),
                                 ("search", "netease", "query", "playlists", 30, 0),
@@ -771,7 +782,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         second = OnlineSong("netease", "second", "second result")
         self.service.search_pages["netease", "second", "songs", 0] = CatalogPage((second,), 1, False)
         self.window._submit_search()
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertEqual(tuple(row.song for row in self.window._results), (second,))
 
     def test_search_paginates_while_initial_personal_catalog_is_still_pending(self):
@@ -783,11 +794,11 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.service.search_pages["qq", "query", "songs", 0] = CatalogPage((first,), 30, True)
         self.service.search_pages["qq", "query", "songs", 30] = CatalogPage((second,), 60, False)
         self.search("query")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertTrue(self.controller._catalog_pending)
         self.window.more_button.click()
         self.assertTrue(self.controller._pending)
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertFalse(self.window._more_requested)
         self.assertEqual(tuple(row.song for row in self.window._results), (first, second))
         self.tasks.run(catalog)
@@ -812,7 +823,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.service.search_pages["netease", "q", "songs", 0] = CatalogPage((self.song,), 30, False)
         self.service.search_pages["netease", "q", "playlists", 0] = RuntimeError("synthetic-secret")
         self.search("q")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertEqual([row.kind for row in self.window.collections], ["song"])
         self.assertEqual(self.window._error, "")
         self.assertIn("search", self.controller._catalog_retry_at)
@@ -848,6 +859,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.open()
         self.player.play_queue((self.song,))
         self.window.logout_button.click()
+        self.window._logout_confirmation.button(QMessageBox.StandardButton.Ok).click()
         self.tasks.run(self.tasks.latest("logout"))
         self.assertIn(("stop",), self.player.calls)
         self.assertIn(("logout", "netease"), self.service.calls)

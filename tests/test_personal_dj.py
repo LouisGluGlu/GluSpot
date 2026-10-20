@@ -310,7 +310,7 @@ class PersonalDJServiceTests(unittest.TestCase):
             self.service.personal_dj_voices()
         self.assertEqual(self.service.personal_dj_voices_cached(), ())
 
-    def test_signed_out_refresh_discards_catalog_even_if_account_recovers(self):
+    def test_signed_out_refresh_discards_catalog_and_requires_fresh_login(self):
         self.login()
         self.backend.catalog["personal_dj_voices"] = voice_catalog()
         self.service.personal_dj_voices()
@@ -318,6 +318,9 @@ class PersonalDJServiceTests(unittest.TestCase):
         self.assertFalse(self.service.account_status("netease", refresh=True).logged_in)
         self.assertEqual(self.service.personal_dj_voices_cached(), ())
         self.backend.verified = True
+        self.assertFalse(self.service.account_status("netease", refresh=True).logged_in)
+        self.assertFalse(self.service.has_login_record("netease"))
+        self.login()
         self.assertTrue(self.service.account_status("netease", refresh=True).logged_in)
         self.assertEqual(self.service.personal_dj_voices_cached(), ())
 

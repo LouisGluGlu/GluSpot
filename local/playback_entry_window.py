@@ -22,8 +22,9 @@ from local.island_stack_visual import IslandStackVisual
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_source_icons import paint_music_source_icon
-from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop
+from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
 from local.control_hover import install_control_hover
+from local.music_page_resize import MusicPageResizeMixin
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class EntryNavigationButton(QAbstractButton):
             backdrop, source = widget_glass_backdrop(self, rect)
             paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
                               backdrop=backdrop, backdrop_rect=source, refractive=True, cache_token=id(self),
+                              material_level=widget_glass_level(self),
                               border_color=QColor("#494b51") if self.hasFocus() else None)
             painter.setPen(QPen(QColor("#e8e9ec"), 2, Qt.PenStyle.SolidLine,
                                 Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
@@ -275,6 +277,7 @@ class MusicSourceButton(QAbstractButton):
             backdrop, source = widget_glass_backdrop(self, face)
             paint_liquid_glass(painter, face, radius=16,
                               backdrop=backdrop, backdrop_rect=source, refractive=True, cache_token=id(self),
+                              material_level=widget_glass_level(self),
                               border_color=QColor(self.source.color) if self.isChecked() else QColor("#3c3e44"),
                               hovered=self.underMouse(), pressed=self.isDown(),
                               active=self.isChecked())
@@ -311,7 +314,7 @@ class MusicSourceButton(QAbstractButton):
                                            self.width() - 4, 16), Qt.AlignmentFlag.AlignCenter, self._availability_status)
 
 
-class PlaybackEntryWindow(QWidget):
+class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     selectionAccepted = Signal(bool, bool)
     sourceSelected = Signal(str)
     refreshRequested = Signal()
@@ -333,6 +336,7 @@ class PlaybackEntryWindow(QWidget):
         self.setWindowTitle(f"{APP_NAME} · 播放来源")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setProperty("controlHoverDisabled", True)
+        self.setMouseTracking(True)
         self._resize_page(370, 176)
         self.page = "modes"
         self.selected_source = ""
@@ -431,7 +435,7 @@ class PlaybackEntryWindow(QWidget):
             button.setProperty("glassRefractive", True)
             button.setFont(_entry_font(15))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet("QPushButton { color: #f4f5f7; background: rgba(255,255,255,12); border: none; border-radius: 12px; padding: 6px 15px; } QPushButton:hover { background: rgba(255,255,255,24); } QPushButton:disabled { color: #9296a1; } QPushButton:focus { border: 2px solid #afb6c8; }")
+            button.setStyleSheet("QPushButton { color: #f4f5f7; background: rgba(255,255,255,12); border: none; border-radius: 12px; padding: 6px 8px; } QPushButton:hover { background: rgba(255,255,255,24); } QPushButton:disabled { color: #9296a1; } QPushButton:focus { border: 2px solid #afb6c8; }")
         self.continue_button.setFont(_entry_font(21, heavy=True))
         self.continue_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.continue_button.setStyleSheet("QPushButton { color: #050505; background: #ffffff; border: none; border-radius: 21px; padding: 0; } QPushButton:pressed { background: #dedee0; } QPushButton:focus { border: 2px solid #92949a; }")
@@ -446,6 +450,14 @@ class PlaybackEntryWindow(QWidget):
         screen = QGuiApplication.screenAt(self.frameGeometry().center()) or QGuiApplication.primaryScreen()
         available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
         self._available_page_height = available.height()
+        shared = getattr(self, "_shared_music_geometry", QRect())
+        if getattr(self, "page", "modes") == "sources" and shared.isValid():
+            # QR/account expansion changes the content, never the native
+            # destination geometry established by the music-page controller.
+            self.setMinimumSize(min(330, available.width()), min(400, available.height()))
+            self.setGeometry(shared)
+            return
+        self.setMinimumSize(0, 0)
         self.resize(min(width, available.width()), min(height, available.height()))
 
     def _ensure_mode(self, changed: PlaybackModeButton, checked: bool):
@@ -564,6 +576,7 @@ class PlaybackEntryWindow(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._release_login()
         self.page = "modes"
+        self.setMinimumSize(0, 0)
         self._accept_snapshots = True
         self.selected_source = ""
         self._background_frame = QImage()
@@ -728,6 +741,7 @@ class PlaybackEntryWindow(QWidget):
         if str(getattr(snapshot, "source_id", "")) != self.selected_source:
             return
         self.login_state = str(getattr(snapshot, "state", "unavailable"))
+        self._login_failure_stage = getattr(snapshot, "failure_stage", "")
         self._qr_image = QImage()
         payload = getattr(snapshot, "qr_image_bytes", b"")
         if self.login_state not in {"confirmed", "expired", "error", "unavailable", "unsupported", "cancelled"} and isinstance(payload, bytes) and 0 < len(payload) <= 4 * 1024 * 1024:
@@ -751,7 +765,8 @@ class PlaybackEntryWindow(QWidget):
         }
         if message in standard_messages.get(self.login_state, set()):
             message = defaults[self.login_state]
-        if self._qr_image.isNull() and self.login_state in {"waiting", "scanned"}:
+        if (self._qr_image.isNull() and self.login_state in {"waiting", "scanned"}
+                and self._login_failure_stage != "account_status"):
             message = "登录服务未提供可显示的二维码，请刷新重试"
         self.message_label.setText(message)
         self.message_label.setToolTip(backend_message if message != backend_message else "")
@@ -855,7 +870,8 @@ class PlaybackEntryWindow(QWidget):
         _qr, detail = self._login_content_rects()
         compact = self._compact_login_layout()
         title = QRectF(detail.x(), detail.y(), detail.width(), 28 if compact else 32)
-        helper = QRectF(detail.x(), detail.y() + (34 if compact else 40), detail.width(), 32 if compact else 48)
+        helper_height = 62 if detail.width() < 150 else 32 if compact else 48
+        helper = QRectF(detail.x(), detail.y() + (34 if compact else 40), detail.width(), helper_height)
         action_y = self._source_pane_rect().bottom() - (8 if compact else 16) - 44
         message_y = helper.bottom() + 6
         message = QRectF(detail.x(), message_y, detail.width(), max(24, min(76, action_y - 8 - message_y)))
@@ -881,6 +897,8 @@ class PlaybackEntryWindow(QWidget):
         }.get(self.login_state, "暂无二维码")
 
     def _login_action_text(self) -> str:
+        if getattr(self, "_login_failure_stage", "") == "account_status":
+            return "重试账号核验"
         if self.login_state in {"starting", "loading"}:
             return "正在连接…"
         if self.login_state == "error" and "刷新" in self.message_label.text():
@@ -932,6 +950,7 @@ class PlaybackEntryWindow(QWidget):
         self.refresh_button.setVisible(expanded and self.login_state != "confirmed")
         self.refresh_button.setEnabled(self.login_state not in {"starting", "loading", "unavailable", "unsupported"})
         self.refresh_button.setText(self._login_action_text())
+        self.refresh_button.setFont(_entry_font(12 if self._compact_login_layout() else 15))
         self.refresh_button.setAccessibleName(self.refresh_button.text())
         _title, _helper, _message, action = self._login_detail_geometry()
         self.refresh_button.setGeometry(action.toAlignedRect())
@@ -1027,6 +1046,7 @@ class PlaybackEntryWindow(QWidget):
             self._source_backdrop()
 
     def hideEvent(self, event):
+        self._end_page_resize()
         self._cancel_page_morph()
         self._frame_timer.stop()
         self._accept_snapshots = False
@@ -1059,6 +1079,8 @@ class PlaybackEntryWindow(QWidget):
             self._layout_children()
 
     def mousePressEvent(self, event):
+        if self._begin_page_resize(event):
+            return
         if event.button() == Qt.MouseButton.LeftButton and not (self.page == "modes" and self._choices_placement is not None):
             handle = self.windowHandle()
             if handle is None or not handle.startSystemMove():
@@ -1066,11 +1088,14 @@ class PlaybackEntryWindow(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._move_page_resize(event):
+            return
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_origin)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        self._end_page_resize()
         self._drag_origin = None
         super().mouseReleaseEvent(event)
 
@@ -1195,8 +1220,10 @@ class PlaybackEntryWindow(QWidget):
                         title_rect, helper_rect, _message_rect, _action = self._login_detail_geometry()
                         painter.setFont(_entry_font(18 if self._compact_login_layout() else 20))
                         painter.setPen(QColor("#f4f5f8"))
+                        title = source.name if title_rect.width() < 150 else f"连接{source.name}"
                         painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter,
-                                         f"连接{source.name}")
+                                         painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight,
+                                                                          round(title_rect.width())))
                         painter.setFont(_entry_font(12 if self._compact_login_layout() else 13))
                         painter.setPen(QColor("#b8bdc7"))
                         if self.login_state in {"starting", "loading"}:

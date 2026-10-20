@@ -397,12 +397,12 @@ class PlaybackEntryControllerTests(unittest.TestCase):
         self.window.choose_source("qishui")
         self.assertEqual(len(self.tasks.jobs), count)
 
-    def test_visible_source_picker_prepares_supported_sources_without_qr_request(self):
+    def test_visible_source_picker_prepares_preferred_source_without_qr_request(self):
         self.make_controller()
         self.show_sources()
         self.assertEqual(self.service.prepared, [])
         self.tasks.run(self.tasks.latest("prepare"))
-        self.assertEqual(self.service.prepared, ["netease", "qq"])
+        self.assertEqual(self.service.prepared, ["netease"])
         self.assertFalse(any(call[0] == "begin" for call in self.service.calls))
 
     def test_hidden_source_picker_does_not_prepare_login_runtime(self):

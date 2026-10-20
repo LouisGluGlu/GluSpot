@@ -62,6 +62,19 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.window.system_button.click()
         self.assertEqual(self.window.selection, (True, False))
 
+    def test_compact_verification_retry_label_fits_the_action(self):
+        self._login_page()
+        self.window.resize(330, 400)
+        self.window.set_login_snapshot(SimpleNamespace(
+            source_id="netease", state="error", failure_stage="account_status",
+            message="扫码已确认，账号核验失败；点击重试核验"))
+        button = self.window.refresh_button
+        self.assertEqual(button.text(), "重试账号核验")
+        self.assertLessEqual(button.fontMetrics().horizontalAdvance(button.text()), button.width() - 20)
+        self.window.resize(960, 540)
+        self.window._layout_children()
+        self.assertEqual(button.font().pixelSize(), 15)
+
     def test_disposing_entry_after_page_resize_preserves_shared_screen_wrapper(self):
         shared = QGuiApplication.primaryScreen()
         entry = PlaybackEntryWindow()

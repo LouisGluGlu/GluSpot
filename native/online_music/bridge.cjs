@@ -16,6 +16,18 @@ const moduleRoot = process.env.GLUSPOT_ONLINE_MUSIC_MODULE_ROOT;
 if (!moduleRoot) process.exit(2);
 const sources = new Map();
 const loginAttempts = new Map();
+let activeRequest = null;
+let qqDeviceContext = null;
+function moduleLoad(load) {
+  const started=Date.now();
+  try { return load(); }
+  finally { if(activeRequest) activeRequest.timings.module_load+=Date.now()-started; }
+}
+function remainingTimeout(maximum=12000) {
+  const remaining=activeRequest?activeRequest.deadline-Date.now():maximum;
+  if(remaining<=0) fail("timeout");
+  return Math.max(1,Math.min(maximum,remaining));
+}
 function fail(code) { const error = new Error(code); error.safeCode = code; throw error; }
 function requireId(value) { const id = String(value || ""); if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) fail("invalid_response"); return id; }
 function requireNcmId(value) { if(typeof value!=="string" || !/^[1-9][0-9]{0,19}$/.test(value)) fail("invalid_response"); return value; }
@@ -56,20 +68,20 @@ function ncmState(credential, repository=sources) {
   if (!state) {
     const packageRoot = path.join(moduleRoot, "@neteasecloudmusicapienhanced", "api");
     ensureNcmAnonymousToken();
-    state = {root:packageRoot, request:require(path.join(packageRoot,"util","request.js")), cookie:{}};
+    state = {root:packageRoot, request:moduleLoad(()=>require(path.join(packageRoot,"util","request.js"))), cookie:{}};
     repository.set("netease",state);
   }
   if (credential && credential.cookie && typeof credential.cookie === "object") state.cookie = {...credential.cookie};
   return state;
 }
 async function ncmCall(state, method, params = {}) {
-  const query = {...params, cookie:{...state.cookie}, timeout:12000, randomCNIP:false, ip:"", realIP:"", timestamp:Date.now()};
+  const query = {...params, cookie:{...state.cookie}, timeout:activeRequest && activeRequest.auth?remainingTimeout():12000, randomCNIP:false, ip:"", realIP:"", timestamp:Date.now()};
   let result;
   // The pinned package's QR-check catch references an out-of-scope result.
   // Use its verified request API directly so network errors remain errors.
   if (method === "login_qr_check") {
     try {
-      result = await state.request("/api/login/qrcode/client/login",{key:query.key,type:3},{crypto:"",cookie:query.cookie,timeout:12000,randomCNIP:false});
+      result = await state.request("/api/login/qrcode/client/login",{key:query.key,type:3},{crypto:"",cookie:query.cookie,timeout:query.timeout,randomCNIP:false});
     } catch (error) {
       // Pending/expired QR statuses may be carried by a rejected result. Accept
       // only the verified protocol codes, never transform transport failure.
@@ -155,19 +167,71 @@ async function ncmPersonalDjCall(state, operation, params) {
   mergeCookies(state.cookie,result.cookie);
   return result.body;
 }
+function createQqService(root, credential) {
+  // Pinned 3.1.4 exposes a runtime-neutral factory with real injection seams.
+  // Reproduce its Node wrapper's dependencies while sharing only the device
+  // repository; every account/attempt retains a fresh session resolver.
+  return moduleLoad(()=>{
+    const auth=path.join(root,"dist","src","services","auth");
+    const mod=require(path.join(auth,"qrLogin.js"));
+    const devices=require(path.join(auth,"deviceContext.js"));
+    const createHttp=require(path.join(auth,"httpClient.js")).createAuthHttpClient;
+    const axios=require(require.resolve("axios",{paths:[root]}));
+    const WebSocket=require(require.resolve("ws",{paths:[root]}));
+    const seed=credential && credential.device_context;
+    if(!qqDeviceContext && seed && JSON.stringify(seed).length<=32768 && devices.isAndroidDevice(seed)) qqDeviceContext=JSON.parse(JSON.stringify(seed));
+    const repository={kind:"gluspot-protected-device",load:()=>qqDeviceContext,
+      save:device=>{if(devices.isAndroidDevice(device)) qqDeviceContext=device;},clear:()=>{qqDeviceContext=null;}};
+    const createSessionHttp=()=>createHttp({request:config=>{
+      const timeout=remainingTimeout();
+      const request={...config,timeout:Math.min(Number(config.timeout)||timeout,timeout)};
+      if(activeRequest && activeRequest.controller) request.signal=activeRequest.controller.signal;
+      return axios.request(request);
+    }});
+    return mod.createQrLoginService({http:createSessionHttp(),createSessionHttp,
+      deviceRepository:repository,listen:mod.createMqttListen(WebSocket),randomBytes:crypto.randomBytes});
+  });
+}
+function qqLoginResult(body) {
+  if(!body || typeof body!=="object" || Array.isArray(body)) fail("invalid_response");
+  const state=({801:"waiting",802:"scanned",803:"confirmed"})[body.code];
+  if(state) return {state};
+  if(body.code!==800) fail("invalid_response");
+  // Pinned 3.1.4 uses 800 both for expiry and terminal QR/exchange failures.
+  // Those failed sessions cannot be retried, so do not retain their QR or call
+  // them expired. Only fixed SDK enums select our own safe public diagnostics.
+  const stages=new Set(["qr-key","device-bootstrap","session-bootstrap","qr-create","mqtt-listener","qr-poll","qr-event","credential-payload","credential-exchange","credential-validation","session-issue"]);
+  const reasons=new Set(["local-backoff","session-busy","upstream-http-error","upstream-rejected","mqtt-websocket-error","mqtt-websocket-closed","mqtt-packet-timeout","mqtt-handshake-timeout","mqtt-handshake-failed","missing-credential","network-timeout","dns-error","connection-reset","connection-refused","network-error","login-rejected","user-canceled","qr-timeout","unexpected-error"]);
+  const stage=stages.has(body.failureStage)?body.failureStage:"";
+  const reason=reasons.has(body.failureReason)?body.failureReason:"";
+  if(reason==="user-canceled") return {state:"cancelled"};
+  if(reason==="qr-timeout" || !body.failureStage && !body.failureReason) return {state:"expired"};
+  let category="runtime",message="登录服务异常，请刷新二维码";
+  if(["network-timeout","mqtt-packet-timeout","mqtt-handshake-timeout"].includes(reason)) category="timeout";
+  else if(["upstream-http-error","mqtt-websocket-error","mqtt-websocket-closed","mqtt-handshake-failed","dns-error","connection-reset","connection-refused","network-error","local-backoff","session-busy"].includes(reason)) category="network";
+  else if(reason==="login-rejected") {category="auth_required";message="音乐服务未能确认登录，请刷新二维码";}
+  else if(reason==="upstream-rejected") {category="invalid_response";message="音乐服务未能确认登录，请刷新二维码";}
+  else if(reason==="missing-credential") {category="invalid_response";message="扫码确认数据无效，请刷新二维码";}
+  else if(!stage || !reason) category="invalid_response";
+  if(category==="network" || category==="timeout") {
+    message=["credential-payload","credential-exchange","credential-validation","session-issue"].includes(stage)
+      ?"登录确认连接失败，请刷新二维码"
+      :["mqtt-listener","qr-poll"].includes(stage)?"扫码连接中断，请刷新二维码":"登录服务暂不可用，请刷新二维码";
+  }
+  return {state:"error",failure_category:category,failure_stage:"poll_login",message};
+}
 function qqState(credential, repository=sources) {
   let state = repository.get("qq");
   const restored=credential && Array.isArray(credential.sessions);
   if (!state || restored) {
     const root = path.join(moduleRoot,"@yakult-green-tea","qq-music-api");
     // These exact exports/contracts are verified against pinned 3.1.4.
-    const mod = require(path.join(root,"dist","src","services","auth","qrLogin.node.js"));
     // Python's complete protected envelope is authoritative. The pinned
     // useRepository merges its old in-memory records over incoming records;
     // reusing that resolver across auth/catalog lanes could resurrect a logged
     // out account or overwrite refreshed fields under the same token. Keep the
     // cached module, but restore into a fresh non-network service/resolver.
-    state = {service:mod.createNodeQrLoginService(), sessions:restored?credential.sessions:[], token:restored?String(credential.token || ""):""};
+    state = {service:createQqService(root,credential), sessions:restored?credential.sessions:[], token:restored?String(credential.token || ""):""};
     state.service.configureAuthSessionRepository({kind:"gluspot-protected-host",load:() => state.sessions,save:value => {state.sessions = JSON.parse(JSON.stringify(value));}});
     repository.set("qq",state);
   }
@@ -205,7 +269,7 @@ async function operationState(source,op,p,credential,createState) {
         if(attempt.source==="qq") await attempt.state.service.logout("");
       }
     }
-    return createState(null,new Map());
+    return createState(source==="qq" && credential && credential.device_context?{device_context:credential.device_context}:null,new Map());
   }
   if(op==="poll_login" || op==="cancel_login") {
     const attempt=loginAttempts.get(source+":"+requireId(p.key));
@@ -329,7 +393,7 @@ function prepareLoginModules(source) {
   };
   if(!files[source]) fail("unsupported");
   if(source==="netease") ensureNcmAnonymousToken();
-  for(const file of files[source]) require(path.join(moduleRoot,file));
+  for(const file of files[source]) moduleLoad(()=>require(path.join(moduleRoot,file)));
 }
 async function dispatch(source,op,p,credential,context) {
   if(op==="prepare_login") {prepareLoginModules(source);return {ready:true};}
@@ -352,7 +416,8 @@ async function dispatch(source,op,p,credential,context) {
     if(op==="cancel_login") return {state:"cancelled"};
     if(op==="account_status") {
       const body=await ncmCall(state,"login_status");
-      return safeAccount(source,body.data && body.data.profile || body.profile);
+      const account=ncmSuccess(body.data && typeof body.data==="object"?body.data:body);
+      return safeAccount(source,account.profile);
     }
     if(op==="logout") { state.cookie={}; return {}; }
     if(!state.cookie.MUSIC_U) fail("auth_required");
@@ -397,11 +462,11 @@ async function dispatch(source,op,p,credential,context) {
         if(!validSecret(token) || !Array.isArray(state.sessions) || !state.sessions.some(item=>item.token===token)) fail("invalid_response");
         state.token=token;
       }
-      return {state:({800:"expired",801:"waiting",802:"scanned",803:"confirmed"})[body.code] || "error"};
+      return qqLoginResult(body);
     }
     if(op==="cancel_login") {state.service.cancelSession(requireId(p.key));return {state:"cancelled"};}
     if(op==="account_status") return safeAccount(source,await state.service.getLoginStatus(state.token));
-    if(op==="logout") {await state.service.logout(state.token);state.token="";state.sessions=[];return {};}
+    if(op==="logout") {await state.service.logout(state.token);state.token="";state.sessions=[];qqDeviceContext=null;return {};}
     if(!state.token) fail("auth_required");
     if(op==="search") return await qqSearch(state,searchInput(p));
     if(op==="lyrics") return await qqLyrics(state,p);
@@ -443,7 +508,7 @@ async function dispatch(source,op,p,credential,context) {
     if(op==="account_status") {
       if(!state.cookie.token || !state.cookie.userid) return {source_id:source,logged_in:false};
       const body=await kgCall(state,"user_detail");
-      if(Number(body.status)!==1 || body.error_code!==undefined && Number(body.error_code)!==0 || !body.data || typeof body.data!=="object" || Array.isArray(body.data) || Object.keys(body.data).length===0) return {source_id:source,logged_in:false};
+      if(Number(body.status)!==1 || body.error_code!==undefined && Number(body.error_code)!==0 || !body.data || typeof body.data!=="object" || Array.isArray(body.data) || Object.keys(body.data).length===0) fail("invalid_response");
       const data=body.data;
       const nested=data.user_info || data.userinfo || data.profile;
       const profile=nested && typeof nested==="object" && !Array.isArray(nested)?nested:data;
@@ -475,7 +540,7 @@ async function dispatch(source,op,p,credential,context) {
 }
 function envelope(source,state=sources.get(source)) {
   if(!state) return null;
-  if(source==="qq") return {token:state.token,sessions:state.sessions};
+  if(source==="qq") return {token:state.token,sessions:state.sessions,...(qqDeviceContext?{device_context:JSON.parse(JSON.stringify(qqDeviceContext))}:{})};
   return {cookie:state.cookie};
 }
 let sequence=Promise.resolve();
@@ -488,7 +553,9 @@ input.on("line",line => {
       request=JSON.parse(line);
       if(!Number.isSafeInteger(request.id) || !["netease","qq","kugou"].includes(request.source) || !request.params || typeof request.params!=="object") fail("invalid_response");
       let timer;
-      const timeout=new Promise((_,reject) => {timer=setTimeout(() => {const e=new Error("timeout");e.safeCode="timeout";reject(e);},15000);});
+      const budget=Number.isSafeInteger(request.timeout_ms)?Math.max(1,Math.min(45000,request.timeout_ms)):15000;
+      activeRequest={deadline:Date.now()+budget,timings:{module_load:0},auth:["begin_login","poll_login","account_status","prepare_login","cancel_login","logout"].includes(request.operation),controller:typeof AbortController==="function"?new AbortController():null};
+      const timeout=new Promise((_,reject) => {timer=setTimeout(() => {if(activeRequest && activeRequest.controller) activeRequest.controller.abort();const e=new Error("timeout");e.safeCode="timeout";reject(e);},budget);});
       let data;const context={};
       try {data=await Promise.race([dispatch(request.source,request.operation,request.params,request.credential,context),timeout]);} finally {clearTimeout(timer);}
       const credential=envelope(request.source,context.state);
@@ -496,11 +563,13 @@ input.on("line",line => {
         loginAttempts.delete(request.source+":"+request.params.key);
         if(request.source==="qq") await context.state.service.logout("");
       }
-      writeProtocol(JSON.stringify({id:request.id,ok:true,data,credential})+"\n");
+      writeProtocol(JSON.stringify({id:request.id,ok:true,data,credential,timings:activeRequest.timings})+"\n");
+      activeRequest=null;
     } catch(error) {
       const safeStage = request && ["begin_login","poll_login","account_status"].includes(request.operation) ? request.operation : "catalog";
       const safeFailure = error.code && ["ENOTFOUND","ECONNRESET","ECONNREFUSED","ETIMEDOUT","ENOENT"].includes(error.code) ? error.code : (error.response && Number.isInteger(error.response.status) ? "HTTP_"+error.response.status : (error.safeCode || "UPSTREAM"));
-      writeProtocol(JSON.stringify({id:request && request.id,ok:false,error:error.safeCode || "network",failure:safeFailure,stage:safeStage})+"\n");
+      writeProtocol(JSON.stringify({id:request && request.id,ok:false,error:error.safeCode || "network",failure:safeFailure,stage:safeStage,timings:activeRequest && activeRequest.timings})+"\n");
+      activeRequest=null;
       // A timed-out upstream can still mutate authentication state later. Exit
       // instead of allowing that abandoned generation to service another request.
       if(error.safeCode==="timeout") process.exit(4);

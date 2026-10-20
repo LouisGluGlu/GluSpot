@@ -88,6 +88,53 @@ class PersonalDjSurfaceOutroTests(unittest.TestCase):
             self.assertEqual(self.window._personal_dj_reveal_at(106.85), 0)
             self.assertFalse(self.window._button_rects)
 
+    def test_next_preload_color_outlives_prompt_without_extending_idle_visibility(self):
+        self.start_speech()
+        self.complete_speech(preload="ready")
+        self.sync(120)
+        self.assertIsNone(self.window._dj_outro_started_at)
+        self.assertEqual(self.window._personal_dj_ring_status(), "ready")
+        self.assertEqual(self.window._personal_dj_reveal_at(120), 0)
+        for fullscreen in (False, True):
+            self.window._fullscreen = fullscreen
+            self.window._reset_control_idle(120)
+            with patch("local.music_surface_window.time.monotonic", return_value=120):
+                self.assertEqual(self.window._personal_dj_status_reveal_at(120), 0)
+                for state in ("loading", "ready", "failed"):
+                    self.presentation["next_preload_state"] = state
+                    self.sync(120)
+                    self.assertEqual(self.window._personal_dj_ring_status(), state)
+        self.enabled = False
+        self.sync(121)
+        self.assertEqual(self.window._personal_dj_ring_status(), "idle")
+
+    def test_current_intro_status_overrules_next_song_preload_ring(self):
+        for pending, failed, state in ((True, False, "loading"), (False, True, "failed")):
+            self.presentation = {"state": state, "introduction_pending": pending,
+                "introduction_failed": failed, "next_preload_state": "ready"}
+            self.sync(100)
+            self.assertEqual(self.window._personal_dj_ring_status(), state)
+
+    def test_ready_outline_is_actually_rendered_after_prompt_has_gone(self):
+        self.start_speech()
+        self.complete_speech(preload="ready")
+        self.sync(120)
+        for fullscreen in (False, True):
+            self.window._fullscreen = fullscreen
+            self.window._reset_control_idle(120)
+            image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            with patch("local.music_surface_window.time.monotonic", return_value=120), \
+                    patch.object(self.window, "_future_lyric_color", return_value=QColor("magenta")), \
+                    patch.object(self.window, "_paint_surface_glass"), QPainter(image) as painter:
+                region = QRectF(self.window.rect())
+                self.window._paint_personal_dj_control(painter, region)
+            icon, _ = self.window._personal_dj_geometry(region, 120)
+            pixels = [image.pixelColor(x, y)
+                for y in range(max(0, round(icon.top()-8)), min(image.height(), round(icon.bottom()+8)))
+                for x in range(max(0, round(icon.left()-8)), min(image.width(), round(icon.right()+8)))]
+            self.assertGreater(sum(c.alpha() > 25 and c.green() > c.red()+30 and c.green() > c.blue()+30 for c in pixels), 20)
+
     def test_status_reports_actual_preload_and_never_restarts_outro_or_contraction(self):
         self.start_speech()
         self.complete_speech(preload="loading")
