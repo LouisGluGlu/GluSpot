@@ -57,6 +57,10 @@ def widget_glass_level(widget) -> int:
         getter = getattr(getattr(current, "owner", None), "settings_getter", None)
         if not callable(getter):
             getter = getattr(current, "settings_getter", None)
+        if not callable(getter):
+            # Library/login pages already receive the same settings through
+            # their background context rather than a song-page owner.
+            getter = getattr(current, "_background_settings_getter", None)
         if callable(getter):
             return normalize_music_glass_level(getter("v2_music_glass_level", MUSIC_GLASS_DEFAULT_LEVEL))
         current = current.parentWidget()

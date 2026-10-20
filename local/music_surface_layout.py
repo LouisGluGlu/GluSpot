@@ -59,6 +59,7 @@ class MusicContentLayoutMixin:
     def _init_content_layout(self):
         getter = getattr(self.owner, "settings_getter", None)
         self._content_layout = normalize_content_layout(getter("v2_music_content_layout", "lyrics") if callable(getter) else "lyrics")
+        self._content_layout_cross_pair_next = False
         self._layout_snapshot = QImage()
         self._layout_target_snapshot = QImage()
         self._layout_composite = QImage()
@@ -154,13 +155,25 @@ class MusicContentLayoutMixin:
         effective = self._effective_content_layout()
         if self._content_layout_is_narrow():
             following = "cover" if effective == "cover_lyrics" else "cover_lyrics"
+            cross_pair_next = False
         else:
-            cycle = ("lyrics", "playlist", "cover", "cover_lyrics")
-            following = cycle[(cycle.index(effective) + 1) % len(cycle)]
-        return self.set_content_layout(following)
+            # The first click always tries the other member of the visible
+            # family. The next click crosses to its corresponding compact /
+            # external form, so starting on either member still visits four
+            # layouts instead of becoming trapped in a two-item toggle.
+            same_pair = {"lyrics": "playlist", "playlist": "lyrics",
+                         "cover": "cover_lyrics", "cover_lyrics": "cover"}
+            other_pair = {"lyrics": "cover_lyrics", "playlist": "cover",
+                          "cover": "playlist", "cover_lyrics": "lyrics"}
+            following = (other_pair if self._content_layout_cross_pair_next else same_pair)[effective]
+            cross_pair_next = not self._content_layout_cross_pair_next
+        changed = self.set_content_layout(following)
+        if changed:
+            self._content_layout_cross_pair_next = cross_pair_next
+        return changed
 
     def _content_layout_tooltip(self):
-        return "单击切换专辑 / 封面歌词" if self._content_layout_is_narrow() else "单击切换：歌词 → 播放列表 → 专辑 → 封面歌词"
+        return "单击切换专辑 / 封面歌词" if self._content_layout_is_narrow() else "单击切换：先切换同组布局，再切换另一组"
 
     def _pulse_content_layout_edges(self):
         self._layout_edge_started_at = time.monotonic()
@@ -174,6 +187,7 @@ class MusicContentLayoutMixin:
         # baseline must not discard the spring it has just rebased.
         self._last_content_layout_narrow = self._content_layout_is_narrow()
         self._last_effective_content_layout = self._effective_content_layout()
+        self._content_layout_cross_pair_next = False
 
     def _resize_content_layout(self, *, user_resize=False):
         self._queue_artwork_hint_timer.stop()
@@ -185,6 +199,8 @@ class MusicContentLayoutMixin:
             # become the baseline for a listener's next resize gesture.
             return
         narrow = self._content_layout_is_narrow()
+        if narrow != self._last_content_layout_narrow:
+            self._content_layout_cross_pair_next = False
         if user_resize and self._last_content_layout_narrow is True and not narrow:
             # Only an actual edge drag crossing out of the compact family
             # promotes its two forms. Presentation changes retain selection.
@@ -207,6 +223,7 @@ class MusicContentLayoutMixin:
 
     def set_content_layout(self, layout, *, animate=True):
         layout = normalize_content_layout(layout)
+        self._content_layout_cross_pair_next = False
         if layout == self._content_layout:
             return False
         cover_from = self._content_layout_cover_pose()

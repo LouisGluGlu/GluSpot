@@ -90,6 +90,7 @@ class OnlineMusicBridgeTests(unittest.TestCase):
           getAuthenticatedSongListDetail:async(token,id,p)=>({songlist:[{mid:'fallback-mid',name:'fixture'}],limit:p.limit}),
           getMusicPlay:async(token,id)=>({[id]:{url:'https://example.org/'+id+'.m4a',error:''}})
         });''', encoding="utf-8")
+        self.write_modules("@yakult-green-tea/qq-music-api", "3.1.4", {})
         self.backend.bridge_path = Path(__file__).resolve().parents[1] / "native" / "online_music" / "bridge.cjs"
         return {"token": "synthetic-qq-token", "sessions": []}
 
@@ -101,6 +102,18 @@ class OnlineMusicBridgeTests(unittest.TestCase):
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(body, encoding="utf-8")
+        if package == "@yakult-green-tea/qq-music-api":
+            auth = root / "dist/src/services/auth"
+            auth.mkdir(parents=True, exist_ok=True)
+            (auth / "qrLogin.js").write_text("exports.createQrLoginService=d=>require('./qrLogin.node.js').createNodeQrLoginService(d);exports.createMqttListen=()=>()=>{};", encoding="utf-8")
+            (auth / "deviceContext.js").write_text("exports.isAndroidDevice=()=>false;", encoding="utf-8")
+            client = auth / "httpClient.js"
+            body = client.read_text(encoding="utf-8") if client.exists() else "exports.default=()=>({});"
+            client.write_text(body + "\nexports.createAuthHttpClient=exports.createAuthHttpClient||exports.default;", encoding="utf-8")
+            for name, body in {"axios": "exports.request=()=>{throw Error('fixture must not perform network I/O')};", "ws": "module.exports=class {};"}.items():
+                folder = self.modules / name
+                folder.mkdir(exist_ok=True)
+                (folder / "index.js").write_text(body, encoding="utf-8")
         self.backend.bridge_path = Path(__file__).resolve().parents[1] / "native" / "online_music" / "bridge.cjs"
 
     def assert_invalid_confirmation(self, source, key):
@@ -544,7 +557,7 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
             "module/login_qr_key.js": "let i=0;module.exports=async()=>({body:{data:{unikey:'qr-'+(++i)}}});",
             "module/login_qr_create.js": "module.exports=async()=>({body:{data:{qrimg:'fixture'}}});",
-            "module/login_status.js": "module.exports=async q=>({body:{profile:{userId:q.cookie.MUSIC_U==='new-cookie'?2:1}}});",
+            "module/login_status.js": "module.exports=async q=>({body:{data:{code:200,profile:{userId:q.cookie.MUSIC_U==='new-cookie'?2:1}}}});",
             "util/request.js": r'''module.exports=async(url,data)=>({body:{code:803},cookie:data.key==='qr-2'?['MUSIC_U=new-cookie']:[]});''',
         })
         old = {"cookie": {"MUSIC_U": "old-cookie"}}
@@ -619,6 +632,59 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         self.assertEqual(confirmed["credential"]["token"], "new-token")
         self.assertEqual([s["token"] for s in confirmed["credential"]["sessions"]], ["new-token"])
 
+    def qq_poll_results_fixture(self, results):
+        self.write_modules("@yakult-green-tea/qq-music-api", "3.1.4", {
+            "dist/src/services/auth/qrLogin.node.js": "const results=" + json.dumps(results) + r''';let index=0;
+              exports.createNodeQrLoginService=()=>{const current=index++;return {
+                configureAuthSessionRepository:()=>{},createSession:async()=>('qq-'+current),
+                createQr:async()=>('fixture'),checkQr:async()=>results[current],logout:async()=>{}
+              };};''',
+        })
+
+    def test_qq_poll_distinguishes_actual_expiry_user_cancel_and_live_states(self):
+        cases = (({"code": 800}, "expired"),
+                 ({"code": 800, "failureStage": "qr-event", "failureReason": "qr-timeout"}, "expired"),
+                 ({"code": 800, "failureStage": "qr-event", "failureReason": "user-canceled"}, "cancelled"),
+                 ({"code": 801}, "waiting"), ({"code": 802}, "scanned"))
+        self.qq_poll_results_fixture([body for body, _ in cases])
+        for body, expected in cases:
+            with self.subTest(expected=expected, body=body):
+                attempt = self.backend.request("qq", "begin_login", {})
+                result = self.backend.request("qq", "poll_login", {"key": attempt["data"]["key"]})
+                self.assertEqual(result["data"], {"state": expected})
+
+    def test_qq_failed_terminal_sessions_keep_safe_stage_and_do_not_report_expiry(self):
+        cases = (("credential-exchange", "network-timeout", "timeout", "登录确认连接失败，请刷新二维码"),
+                 ("credential-validation", "connection-reset", "network", "登录确认连接失败，请刷新二维码"),
+                 ("mqtt-listener", "mqtt-websocket-closed", "network", "扫码连接中断，请刷新二维码"),
+                 ("qr-poll", "mqtt-packet-timeout", "timeout", "扫码连接中断，请刷新二维码"),
+                 ("credential-payload", "missing-credential", "invalid_response", "扫码确认数据无效，请刷新二维码"),
+                 ("qr-event", "login-rejected", "auth_required", "音乐服务未能确认登录，请刷新二维码"),
+                 ("credential-exchange", "upstream-rejected", "invalid_response", "音乐服务未能确认登录，请刷新二维码"))
+        self.qq_poll_results_fixture([{"code": 800, "failureStage": stage, "failureReason": reason,
+            "message": "Cookie=synthetic-private", "upstreamCode": 123456, "retryAfterMs": 12000}
+            for stage, reason, _, _ in cases])
+        for stage, reason, category, message in cases:
+            with self.subTest(stage=stage, reason=reason):
+                key = self.backend.request("qq", "begin_login", {})["data"]["key"]
+                result = self.backend.request("qq", "poll_login", {"key": key})
+                self.assertEqual(result["data"], {"state": "error", "failure_category": category,
+                    "failure_stage": "poll_login", "message": message})
+                self.assertNotIn("synthetic-private", json.dumps(result))
+                self.assertNotIn("upstreamCode", json.dumps(result))
+                with self.assertRaises(OnlineMusicError) as raised:
+                    self.backend.request("qq", "poll_login", {"key": key})
+                self.assertEqual(raised.exception.code, "expired", "terminal session must be retired")
+
+    def test_qq_unknown_failure_diagnostics_are_terminal_safe_errors(self):
+        self.qq_poll_results_fixture([{"code": 800, "failureStage": "Cookie=synthetic-private",
+            "failureReason": "Token=synthetic-private", "message": "synthetic-private"}])
+        key = self.backend.request("qq", "begin_login", {})["data"]["key"]
+        result = self.backend.request("qq", "poll_login", {"key": key})
+        self.assertEqual(result["data"], {"state": "error", "failure_category": "invalid_response",
+            "failure_stage": "poll_login", "message": "登录服务异常，请刷新二维码"})
+        self.assertNotIn("synthetic-private", json.dumps(result))
+
     def test_netease_search_uses_native_offset_and_distinct_search_types(self):
         self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
             "util/request.js": "module.exports=()=>{};",
@@ -690,7 +756,7 @@ class OnlineMusicBridgeTests(unittest.TestCase):
           if(url!=='https://u.y.qq.com/cgi-bin/musicu.fcg'||p.request.module!=='music.search.SearchCgiService'||p.request.method!=='DoSearchForQQMusicDesktop'||config.headers.Cookie!=='tmeLoginType=-1;')throw new Error('wrong contract');
           const rows=Array.from({length:q.num_per_page},(_,i)=>({mid:'mid-'+i,dissid:'list-'+i,name:q.query,page:q.page_num,limit:q.num_per_page}));
           return {data:{code:0,request:{code:0,data:{body:{[field]:{list:rows}},meta:{sum:99,nextpage:q.page_num+1,is_filter:q.query==='filtered'?-2:0}}}}};
-        }});''', encoding="utf-8")
+        }});exports.createAuthHttpClient=exports.default;''', encoding="utf-8")
         songs = self.backend.request("qq", "search", {"query": "keyword", "kind": "songs", "limit": 3, "offset": 3}, credential)["data"]
         self.assertEqual(songs["items"][0]["page"], 2)
         self.assertEqual((songs["total"], songs["next_offset"], songs["has_more"]), (99, 6, True))

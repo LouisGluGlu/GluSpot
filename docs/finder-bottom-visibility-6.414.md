@@ -26,7 +26,7 @@
 
 ## 交付
 
-[GitHub Release](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.414)。本地以下文件均保存到当前工作区的 `release`，旧版分开保留：
+main 与 `v6.414` tag 已同步；GitHub 附件上传因网络失败未完成，Release 仍为未发布草稿，不能视为已发布。本地以下文件均保存到当前工作区的 `release` 及 `E:\gpt-island\release`，两处 SHA-256 一致，旧版分开保留：
 
 | 文件 | 大小（字节） | SHA-256 |
 | --- | ---: | --- |

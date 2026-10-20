@@ -8,10 +8,13 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
 from api.online_music import OnlineMusicError
+from api.online_music_diagnostics import current_login_trace, login_phase, login_request_cancelled, record_login_phase
 
 
 class NodeOnlineMusicBackend:
@@ -30,6 +33,10 @@ class NodeOnlineMusicBackend:
         self.node_path = str(configured_node or (runtime / "node.exe" if (runtime / "node.exe").is_file() else shutil.which("node") or ""))
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 45.0))
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
+        self._active_request: tuple[subprocess.Popen, str, threading.Event] | None = None
+        self._cancellation_epoch = 0
+        self._retiring_processes: set[subprocess.Popen] = set()
         self._process: subprocess.Popen | None = None
         self._responses: queue.Queue = queue.Queue(maxsize=16)
         self._serial = 0
@@ -90,6 +97,9 @@ class NodeOnlineMusicBackend:
             raise OnlineMusicError("closed", message="在线音乐服务已关闭")
         if self._process is not None and self._process.poll() is None:
             return self._process
+        with self._lifecycle_lock:
+            if len(self._retiring_processes) >= 2:
+                raise OnlineMusicError("runtime", message="登录服务正在回收旧请求，请稍后重试")
         # Inherited platform cookies are deliberately not consumed by this bridge.
         environment = {key: value for key, value in os.environ.items() if not any(word in key.upper() for word in ("COOKIE", "TOKEN", "SECRET"))}
         environment.update({"GLUSPOT_ONLINE_MUSIC_MODULE_ROOT": str(self.module_root), "NODE_ENV": "test", "QQ_AUTH_STATE_PATH": "memory", "AUTO_OPEN_EXPLORER": "false", "ENABLE_RANDOM_CN_IP": "false"})
@@ -161,12 +171,38 @@ class NodeOnlineMusicBackend:
             except OnlineMusicError:
                 # The deliberate login remains the source of user-facing errors
                 # and can restart a failed warm-up using the same transport.
-                pass
-        threading.Thread(target=prepare, daemon=True, name=f"GluSpot-login-prepare-{source_id}").start()
+                with backend._authentication_lock:
+                    backend._prepare_started = False
+                    if backend._prepare_retirement_timer is not None:
+                        backend._prepare_retirement_timer.cancel()
+        context = copy_context()
+        threading.Thread(target=lambda: context.run(prepare), daemon=True, name=f"GluSpot-login-prepare-{source_id}").start()
         timer.start()
         return True
 
+    def cancel_login_request(self, source_id: str) -> bool:
+        """Interrupt only this source's currently owned authentication request.
+
+        The controller calls this synchronously before submitting a replacement.
+        Idle QR state, catalog I/O and every other source remain untouched.
+        """
+        with self._authentication_lock:
+            backend = self._authentication_backends.get(source_id)
+        if backend is None:
+            return False
+        with backend._lifecycle_lock:
+            backend._cancellation_epoch += 1
+            active = backend._active_request
+            if active is None or active[1] not in {"begin_login", "poll_login", "account_status"}:
+                return False
+            process, _, cancelled = active
+            cancelled.set()
+            backend._stop_process(expected_process=process)
+            return True
+
     def request(self, source_id: str, operation: str, params: dict[str, Any], credential: dict[str, Any] | None = None) -> dict[str, Any]:
+        if operation in self._authentication_operations and login_request_cancelled():
+            raise OnlineMusicError("cancelled", source_id, "登录请求已取消", stage="auth_queue", category="cancelled")
         ready, reason = self.available(source_id)
         if not ready:
             raise OnlineMusicError("unavailable", source_id, reason)
@@ -178,36 +214,106 @@ class NodeOnlineMusicBackend:
             # Each child keeps the existing bounded protocol and serial state.
             return self._authentication_backend(source_id, used=operation != "prepare_login").request(
                 source_id, operation, params, credential)
-        with self._lock:
-            process = self._start()
+        trace = current_login_trace()
+        with self._lifecycle_lock:
+            cancellation_epoch = self._cancellation_epoch
+        deadline = min(time.monotonic() + self.timeout_seconds, trace.deadline) if trace else time.monotonic() + self.timeout_seconds
+        with login_phase("auth_queue"):
+            acquired = self._lock.acquire(timeout=max(0., deadline - time.monotonic()))
+        if not acquired:
+            raise OnlineMusicError("timeout", source_id, "登录请求排队超时，请重试", stage="auth_queue", category="timeout")
+        process = None
+        cancelled = threading.Event()
+        try:
+            if deadline <= time.monotonic():
+                raise OnlineMusicError("timeout", source_id, "登录请求已超时，请重试", stage="auth_queue", category="timeout")
+            with self._lifecycle_lock:
+                if (cancellation_epoch != self._cancellation_epoch
+                        or operation in self._authentication_operations and login_request_cancelled()):
+                    raise OnlineMusicError("cancelled", source_id, "登录请求已取消", stage="auth_queue", category="cancelled")
+                with login_phase("runtime_start"):
+                    process = self._start()
+                self._active_request = (process, operation, cancelled)
+            if deadline <= time.monotonic():
+                self._stop_process(expected_process=process)
+                raise OnlineMusicError("timeout", source_id, "登录服务启动超时，请重试", stage="runtime_start", category="timeout")
             self._serial += 1
             serial = self._serial
-            payload = json.dumps({"id": serial, "source": source_id, "operation": operation, "params": params, "credential": credential}, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
+            budget_ms = max(1, int((deadline - time.monotonic()) * 1000) - 50)
+            payload = json.dumps({"id": serial, "source": source_id, "operation": operation, "params": params, "credential": credential, "timeout_ms": budget_ms}, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n"
             if len(payload) > self._max_line_bytes:
                 raise OnlineMusicError("response", source_id, "在线音乐请求超出大小限制")
+            responses = self._responses
+            def send_authentication() -> None:
+                # A broken child that never reads stdin must not hold this
+                # worker inside a blocking pipe write beyond its total budget.
+                # This writer belongs to the exact bounded child; killing that
+                # child releases its pipe, including during GUI cancellation.
+                try:
+                    if not cancelled.is_set():
+                        process.stdin.write(payload)
+                        process.stdin.flush()
+                except (OSError, ValueError):
+                    try:
+                        responses.put_nowait({"id": serial, "ok": False, "error": "runtime", "stage": "request"})
+                    except queue.Full:
+                        pass
             try:
-                process.stdin.write(payload)
-                process.stdin.flush()
-                response = self._responses.get(timeout=self.timeout_seconds)
-            except (OSError, queue.Empty):
-                self._stop_process()
-                raise OnlineMusicError("timeout", source_id, "在线音乐请求超时，请重试") from None
+                with login_phase("request"):
+                    if self._authentication_lane:
+                        threading.Thread(target=send_authentication, daemon=True, name="GluSpot-online-music-writer").start()
+                    else:
+                        process.stdin.write(payload)
+                        process.stdin.flush()
+                    response = responses.get(timeout=max(.001, deadline - time.monotonic()))
+            except (OSError, ValueError, queue.Empty) as error:
+                self._stop_process(expected_process=process)
+                if cancelled.is_set():
+                    raise OnlineMusicError("cancelled", source_id, "登录请求已取消", stage="request", category="cancelled") from None
+                if not isinstance(error, queue.Empty):
+                    raise OnlineMusicError("runtime", source_id, "在线音乐运行时连接中断", stage="request", category="runtime", session_lost=self._authentication_lane) from None
+                raise OnlineMusicError("timeout", source_id, "在线音乐请求超时，请重试", stage="request", category="timeout", session_lost=self._authentication_lane) from None
+            if cancelled.is_set():
+                raise OnlineMusicError("cancelled", source_id, "登录请求已取消", stage="request", category="cancelled")
             if not isinstance(response, dict) or response.get("id") != serial:
-                self._stop_process()
-                raise OnlineMusicError("runtime", source_id, "在线音乐运行时连接中断")
+                self._stop_process(expected_process=process)
+                raise OnlineMusicError("runtime", source_id, "在线音乐运行时连接中断", session_lost=self._authentication_lane)
+            if trace is not None:
+                timings = response.get("timings")
+                if isinstance(timings, dict):
+                    for stage in ("module_load",):
+                        elapsed = timings.get(stage)
+                        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and 0 <= elapsed <= 45000:
+                            record_login_phase(source_id, trace.operation, stage, elapsed / 1000, trace.generation)
             if response.get("ok") is not True:
                 code = response.get("error")
                 code = code if code in {"network", "timeout", "invalid_response", "auth_required", "unsupported", "expired", "runtime", "account_changed", "not_writable", "mutation_failed"} else "network"
                 messages = {"auth_required": "请先登录此音乐来源", "unsupported": "此来源暂不支持该操作", "expired": "二维码已过期，请刷新", "timeout": "音乐服务请求超时，请重试", "invalid_response": "音乐服务返回的数据无效", "account_changed": "账号已变化，请刷新后重试", "not_writable": "此歌单不可添加歌曲，请选择自己的歌单", "mutation_failed": "音乐服务未确认收藏操作，请刷新后重试"}
-                raise OnlineMusicError(code, source_id, messages.get(code, "音乐服务连接失败，请重试"))
+                stage = response.get("stage")
+                stage = stage if stage in {"begin_login", "poll_login", "account_status", "module_load", "request"} else "request"
+                lost = self._authentication_lane and (code == "timeout" or code == "runtime" and stage == "request")
+                if lost:
+                    self._stop_process(expected_process=process)
+                raise OnlineMusicError(code, source_id, messages.get(code, "音乐服务连接失败，请重试"), stage=stage, category=code, session_lost=lost)
             return response
+        finally:
+            with self._lifecycle_lock:
+                if self._active_request and self._active_request[0] is process:
+                    self._active_request = None
+            self._lock.release()
 
-    def _stop_process(self) -> None:
-        process, self._process = self._process, None
-        try:
-            self._responses.put_nowait(None)
-        except queue.Full:
-            pass
+    def _stop_process(self, *, expected_process=None) -> None:
+        with self._lifecycle_lock:
+            if expected_process is not None and self._process is not expected_process:
+                return
+            process, self._process = self._process, None
+            self._prepare_started = False
+            try:
+                self._responses.put_nowait(None)
+            except queue.Full:
+                pass
+            if process is not None:
+                self._retiring_processes.add(process)
         if process is None:
             return
         # Do not acquire the long request lock or wait for a child from the GUI
@@ -233,6 +339,9 @@ class NodeOnlineMusicBackend:
                             stream.close()
                         except (OSError, ValueError):
                             pass
+                with self._lifecycle_lock:
+                    if process.poll() is not None:
+                        self._retiring_processes.discard(process)
         threading.Thread(target=reap, daemon=True, name="GluSpot-online-music-reaper").start()
 
     def close(self) -> None:

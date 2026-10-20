@@ -122,6 +122,53 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         self.window._cycle_content_layout()
         self.assertEqual(self.window._effective_content_layout(), "cover")
 
+    def test_wide_click_priority_starts_with_each_current_layouts_own_pair(self):
+        cycles = {
+            "lyrics": ("playlist", "cover", "cover_lyrics", "lyrics"),
+            "playlist": ("lyrics", "cover_lyrics", "cover", "playlist"),
+            "cover": ("cover_lyrics", "lyrics", "playlist", "cover"),
+            "cover_lyrics": ("cover", "playlist", "lyrics", "cover_lyrics"),
+        }
+        for fullscreen in (False, True):
+            self.window._fullscreen = fullscreen
+            self.window.resize(960, 540)
+            self.assertFalse(self.window._content_layout_is_narrow())
+            for current, cycle in cycles.items():
+                with self.subTest(fullscreen=fullscreen, current=current):
+                    self.window.set_content_layout(current, animate=False)
+                    for expected in cycle * 2:
+                        self.window._cycle_content_layout()
+                        self.assertEqual(self.window._effective_content_layout(), expected)
+        self.assertEqual(self.owner.data_provider.calls, [])
+
+    def test_landscape_without_a_usable_side_column_keeps_only_compact_pair(self):
+        for fullscreen in (False, True):
+            self.window._fullscreen = fullscreen
+            self.window.resize(665, 628)
+            self.assertGreater(self.window.width(), self.window.height())
+            self.assertTrue(self.window._content_layout_is_narrow())
+            for current in CONTENT_LAYOUTS:
+                self.window.set_content_layout(current, animate=False)
+                for _ in range(6):
+                    before = self.window._effective_content_layout()
+                    self.window._cycle_content_layout()
+                    self.assertEqual(self.window._effective_content_layout(),
+                                     "cover" if before == "cover_lyrics" else "cover_lyrics")
+
+    def test_explicit_layout_and_width_family_changes_restart_same_pair_priority(self):
+        self.window.set_content_layout("playlist", animate=False)
+        self.window._cycle_content_layout()
+        self.assertEqual(self.window._content_layout, "lyrics")
+        self.window.set_content_layout("cover", animate=False)
+        self.window._cycle_content_layout()
+        self.assertEqual(self.window._content_layout, "cover_lyrics")
+        self.window.resize(665, 628)
+        self.window._resize_content_layout()
+        self.window.resize(960, 540)
+        self.window._resize_content_layout()
+        self.window._cycle_content_layout()
+        self.assertEqual(self.window._content_layout, "cover")
+
     def test_album_only_hides_lyric_hits_and_cover_lyrics_reuses_seekable_real_rows(self):
         self.window.set_content_layout("cover", animate=False); self.settle()
         self.assertTrue(self.window._no_lyrics_cover_target())

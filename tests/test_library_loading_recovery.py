@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 from api.online_music import CatalogPage, OnlinePlaylist, OnlineSong
 from local.music_library_controller import MusicLibraryController
 from local.music_library_window import MusicLibraryWindow
-from tests.test_music_library_controller import Entry, Island, Player, Service
+from tests.test_music_library_controller import Entry, Island, Player, Service, run_search
 from tests.test_playback_entry_controller import FakeSettings, FakeTasks
 
 
@@ -144,7 +144,7 @@ class LibraryLoadingRecoveryTests(unittest.TestCase):
         self.controller.search("Query")
         song = OnlineSong("netease", "song", "Result")
         self.service.search_pages["netease", "Query", "songs", 0] = CatalogPage((song,), 1, False)
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.service.recommended_pages["netease", 0] = CatalogPage((OnlinePlaylist("netease", "recommended", "Recommended"),), 1, False)
         self.due("recommended")
         self.tasks.run(self.tasks.latest("recommended_catalog"))
@@ -159,14 +159,14 @@ class LibraryLoadingRecoveryTests(unittest.TestCase):
         self.window.search.setText("Query")
         self.window._search_timer.stop()
         self.controller.search("Query")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertEqual([row.title for row in self.window.collections], ["Song"])
         self.assertEqual(self.window._error, "")
         self.assertTrue(self.window._catalog_skeleton.isVisible())
         self.service.search_pages["qq", "Query", "playlists", 0] = CatalogPage((OnlinePlaylist("qq", "list", "Playlist"),), 1, False)
         previous_calls = len(self.service.calls)
         self.due("search")
-        self.tasks.run(self.tasks.latest("search"))
+        run_search(self.tasks)
         self.assertEqual(self.service.calls[previous_calls:], [("search", "qq", "Query", "playlists", 30, 0)])
         self.assertEqual([row.title for row in self.window.collections], ["Song", "Playlist"])
 

@@ -52,10 +52,15 @@ class PlaybackEntryController(QObject):
         self.window = window or PlaybackEntryWindow(
             owned=bool(settings.get(OWNED_KEY, True)), system=bool(settings.get(SYSTEM_KEY, True)))
         self.tasks = tasks or MusicTasks(self)
+        # Optional avatar I/O must not occupy the two authentication workers.
+        # One bounded existing worker queue is enough for this selected account.
+        self._account_art_tasks = MusicTasks(self, worker_count=1) if tasks is None else tasks
+        if self._account_art_tasks is not self.tasks:
+            self._account_art_tasks.completed.connect(self._completed)
         self.tasks.completed.connect(self._completed)
         self.window.selectionAccepted.connect(self.accept_selection)
         self.window.sourceSelected.connect(self.select_source)
-        self.window.refreshRequested.connect(lambda: self.begin_login(self.window.selected_source))
+        self.window.refreshRequested.connect(self._refresh_login)
         self.window.closed.connect(self._entry_closed)
         self.window.backRequested.connect(self._cancel_login)
         self.window.loginAccepted.connect(self.enter_account)
@@ -75,7 +80,7 @@ class PlaybackEntryController(QObject):
         self._probe_timer.setInterval(100)
         self._probe_timer.timeout.connect(self._probe)
         self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(2000)
+        self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._poll_login)
         self._hint_timer = QTimer(self)
         self._hint_timer.setInterval(1000)
@@ -84,6 +89,21 @@ class PlaybackEntryController(QObject):
         self._placement_timer.setInterval(100)
         self._placement_timer.timeout.connect(self._refresh_choices_placement)
         self._choices_screen_anchor = QPoint()
+        self._account_source = ""
+
+    def _refresh_login(self):
+        source = self.window.selected_source
+        if getattr(self, "_verification_retry", False) and self._session:
+            session, generation = self._session, self._generation
+            self._verification_retry = False
+            self._poll_pending = self.tasks.submit(("poll", generation, source),
+                lambda: self.service.retry_login_verification(session)
+                if not self._closed and generation == self._generation else None)
+            return
+        if getattr(self, "_account_retry_source", "") == source:
+            self.select_source(source)
+        else:
+            self.begin_login(source)
 
     def _refresh_system_hint(self):
         if self._closed or self.window.page != "modes" or not self.window.isVisible():
@@ -202,6 +222,9 @@ class PlaybackEntryController(QObject):
         self._cancel_login()
         self._enter_saved_source = ""
         self.window.set_mode_back_enabled(False)
+        prepare_geometry = getattr(self.window, "_prepare_shared_music_geometry", None)
+        if callable(prepare_geometry):
+            prepare_geometry()
         self.window.show_login()
         self.window.show()
         self.window.raise_()
@@ -225,6 +248,8 @@ class PlaybackEntryController(QObject):
         if self._closed or source_id not in {s.source_id for s in self._sources if s.available}:
             return
         self._cancel_login()
+        self._account_source = source_id
+        self._account_retry_source = ""
         generation = self._generation
         self.window.set_login_snapshot(LoginSnapshot("", source_id, "loading", message="正在读取账号…"))
         def account():
@@ -233,8 +258,11 @@ class PlaybackEntryController(QObject):
             # A card verified in this session is already the provider's source
             # of truth. Do not repeat the live login-status request on every
             # return from the library; logged-out/startup records still validate.
-            cached = self.service.account_status(source_id)
+            restore = getattr(self.service, "restore_account", None)
+            cached = restore(source_id) if callable(restore) else self.service.account_status(source_id)
             if cached.logged_in or self._closed or generation != self._generation:
+                return cached
+            if cached.state == "cached":
                 return cached
             return self.service.account_status(source_id, refresh=True)
         if not self.tasks.submit(("account", generation, source_id), account):
@@ -275,10 +303,22 @@ class PlaybackEntryController(QObject):
         self._generation += 1
         self._poll_timer.stop()
         self._poll_pending = False
+        self._verification_retry = False
         session, self._session = self._session, ""
         source, self._attempt_source = self._attempt_source, ""
+        account_source = self._account_source
+        self._account_source = ""
+        discard = getattr(self.tasks, "discard", None)
+        if callable(discard):
+            discard(lambda token: token[0] not in {"accounts"} and token[1] != self._generation)
+        if self._account_art_tasks is not self.tasks:
+            self._account_art_tasks.discard(lambda token: token[1] != self._generation)
         if source:
             self.service.invalidate_source_login(source)
+        elif account_source:
+            cancel = getattr(self.service, "cancel_account_validation", None)
+            if callable(cancel):
+                cancel(account_source)
         if session:
             self.service.invalidate_login(session)
         if session:
@@ -296,7 +336,7 @@ class PlaybackEntryController(QObject):
                 self._probe()
             return
         if kind == "begin" and generation != self._generation:
-            if result is not None and getattr(result, "session_id", ""):
+            if result is not None and getattr(result, "session_id", "") and result.state != "cancelled":
                 self.tasks.submit(("cancel", self._generation), lambda: self.service.cancel_login(result.session_id))
             return
         if generation != self._generation:
@@ -304,29 +344,39 @@ class PlaybackEntryController(QObject):
         if kind == "sources":
             self._sources = result or ()
             self.window.set_sources(self._sources)
+            source, enter_saved = getattr(self, "_select_after_sources", ("", False))
+            self._select_after_sources = ("", False)
+            if source in {s.source_id for s in self._sources if s.available}:
+                self._enter_saved_source = source if enter_saved else ""
+                self.window.select_source(source)
+            generation = self._generation
             if self.window.isVisible() and self.window.page == "sources":
-                sources = tuple(source.source_id for source in self._sources if source.available)
+                available = tuple(source.source_id for source in self._sources if source.available)
+                selected = source or self.settings.get("v2_online_music_source", "netease")
+                sources = (selected,) if selected in available else available[:1]
                 def prepare():
                     for source_id in sources:
                         if self._closed or generation != self._generation:
                             break
                         self.service.prepare_login_runtime(source_id)
                 self.tasks.submit(("prepare", generation), prepare)
-            source, enter_saved = getattr(self, "_select_after_sources", ("", False))
-            self._select_after_sources = ("", False)
-            if source in {s.source_id for s in self._sources if s.available}:
-                self._enter_saved_source = source if enter_saved else ""
-                self.window.select_source(source)
             return
         if kind == "account":
             source = extra[0]
+            self._account_source = ""
+            if result is not None and result.state == "cached":
+                # The library displays this account's protected local snapshot
+                # while independently validating; logged_in remains False.
+                self.enter_account(source)
+                return
             if error or result is None or result.state == "error":
+                self._account_retry_source = source
                 self.window.set_login_snapshot(LoginSnapshot("", source, "error", message="账号读取失败，请重试"))
             elif result.logged_in:
                 self.window.set_account(result)
                 if result.avatar_url:
                     from api.online_music_artwork import fetch_online_thumbnail
-                    self.tasks.submit(("avatar", generation, source), lambda: fetch_online_thumbnail(result.avatar_url)
+                    self._account_art_tasks.submit(("avatar", generation, source), lambda: fetch_online_thumbnail(result.avatar_url)
                                       if not self._closed and generation == self._generation else None)
                 if getattr(self, "_enter_saved_source", "") == source:
                     self._enter_saved_source = ""
@@ -346,11 +396,15 @@ class PlaybackEntryController(QObject):
         if error or result is None:
             self._poll_timer.stop()
             self.window.set_login_snapshot(LoginSnapshot(self._session, extra[0], "error",
-                message="登录请求失败，请刷新二维码重试"))
+                message="二维码获取失败，请重试" if kind == "begin" else "扫码状态检测失败，请重试",
+                failure_category=str(error) if str(error) in {"network", "timeout", "runtime", "credential", "cancelled"} else "request_failed",
+                failure_stage="begin_login" if kind == "begin" else "poll_login"))
             return
         self._session = result.session_id
+        self._verification_retry = result.state == "error" and result.failure_stage == "account_status"
         self.window.set_login_snapshot(result)
         if result.state in {"waiting", "scanned", "loading"}:
+            self._poll_timer.setInterval(max(1000, round(getattr(result, "retry_after_seconds", 0.) * 1000)))
             self._poll_timer.start()
         else:
             self._poll_timer.stop()
@@ -460,4 +514,6 @@ class PlaybackEntryController(QObject):
         self._placement_timer.stop()
         self._probe_timer.stop()
         self.tasks.close()
+        if self._account_art_tasks is not self.tasks:
+            self._account_art_tasks.close()
         self.window.close()

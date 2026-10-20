@@ -14,7 +14,7 @@ import time
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import QAbstractButton, QGraphicsOpacityEffect, QLabel, QPushButton, QScrollArea, QWidget
+from PySide6.QtWidgets import QAbstractButton, QGraphicsOpacityEffect, QLabel, QMessageBox, QPushButton, QScrollArea, QWidget
 
 from api.online_music import AccountSnapshot, OnlineSong
 from local.branding import APP_NAME
@@ -23,8 +23,9 @@ from local.music_mode_controls import paint_presentation_glyph
 from local.music_library_layout import CatalogMotionOverlay
 from local.music_library_search import LibraryProgress, LibrarySearch
 from local.artwork_skeleton import paint_artwork_skeleton
+from local.music_page_resize import MusicPageResizeMixin
 from local.music_source_icons import music_source_icon_image, paint_music_source_icon
-from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop
+from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_surface_palette import artwork_surface_palette, cached_artwork_surface_palette
 from local.music_lyric_motion import MotionSimulationClock
@@ -70,13 +71,14 @@ class _LibraryActionButton(QAbstractButton):
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
             backdrop, source = widget_glass_backdrop(self, rect)
             paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self))
+                              refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self),
+                              material_level=widget_glass_level(self))
             paint_music_source_icon(painter, rect.adjusted(10, 10, -10, -10), self.kind,
                                      tint=QColor("white") if self.kind == "switch" else None)
-            if self.hasFocus():
+            if self.hasFocus() and self.window().testAttribute(Qt.WidgetAttribute.WA_KeyboardFocusChange):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(QColor("white"), 1.5, Qt.PenStyle.DotLine))
-                painter.drawRoundedRect(rect, 6, 6)
+                painter.setPen(QPen(QColor(255, 255, 255, 110), 1.0))
+                painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 11, 11)
 
 
 class _NowPlayingCover(QAbstractButton):
@@ -126,11 +128,13 @@ class _ExpandSwitch(QAbstractButton):
             rect=QRectF(self.width()-48,10,46,24)
             backdrop,source=widget_glass_backdrop(self,rect)
             paint_liquid_glass(p,rect,radius=12,refractive=True,backdrop=backdrop,backdrop_rect=source,
-                              active=self.isChecked(),cache_token=id(self))
+                              hovered=self.underMouse(),pressed=self.isDown(),
+                              active=self.isChecked(),cache_token=id(self),
+                              material_level=widget_glass_level(self))
             p.setPen(Qt.PenStyle.NoPen);p.setBrush(QColor('#f4f5f7'))
             p.drawEllipse(QRectF(rect.right()-21 if self.isChecked() else rect.left()+3,rect.top()+3,18,18))
-            if self.hasFocus():
-                p.setBrush(Qt.BrushStyle.NoBrush);p.setPen(QPen(QColor('white'),1,Qt.PenStyle.DotLine))
+            if self.hasFocus() and self.window().testAttribute(Qt.WidgetAttribute.WA_KeyboardFocusChange):
+                p.setBrush(Qt.BrushStyle.NoBrush);p.setPen(QPen(QColor(255,255,255,110),1))
                 p.drawRoundedRect(QRectF(self.rect()).adjusted(1,1,-1,-1),12,12)
 
 
@@ -150,7 +154,8 @@ class _ModeButton(QAbstractButton):
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
             backdrop, source = widget_glass_backdrop(self, rect)
             paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self))
+                              refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self),
+                              material_level=widget_glass_level(self))
             if self.hasFocus():
                 painter.setPen(QPen(QColor("#a8a8a8"), 1.3))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -468,7 +473,7 @@ class _CatalogSkeleton(QWidget):
                 paint_artwork_skeleton(painter, QRectF(left + 3, 184, 100, 11), ink, seconds, radius=5.5)
 
 
-class MusicLibraryWindow(QWidget):
+class MusicLibraryWindow(MusicPageResizeMixin, QWidget):
     backRequested = Signal()
     sourceSwitchRequested = Signal()
     logoutRequested = Signal()
@@ -499,11 +504,12 @@ class MusicLibraryWindow(QWidget):
         # Application queries preserve the shared QScreen wrapper's lifetime.
         screen = QGuiApplication.screenAt(self.frameGeometry().center()) or QGuiApplication.primaryScreen()
         available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
-        self.setMinimumSize(min(520, available.width()), min(360, available.height()))
-        self.resize(min(760, available.width()), min(720, available.height()))
+        self.setMinimumSize(min(330, available.width()), min(400, available.height()))
+        self.resize(min(960, available.width()), min(540, available.height()))
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._account: AccountSnapshot | None = None
+        self._logout_confirmation = None
         self._background_frame = QImage()
         self._background_key = None
         self._background_renderer = AlbumFlowBackgroundRenderer()
@@ -598,7 +604,7 @@ class MusicLibraryWindow(QWidget):
         self.switch_button = _LibraryActionButton("switch", "切换音乐平台", self)
         self.switch_button.clicked.connect(self.sourceSwitchRequested)
         self.logout_button = _LibraryActionButton("logout", "退出当前平台账号", self)
-        self.logout_button.clicked.connect(self.logoutRequested)
+        self.logout_button.clicked.connect(self._confirm_logout)
         self.back_button = EntryNavigationButton("back", "返回音乐来源", self)
         self.back_button.clicked.connect(self.backRequested)
         # Retain compatibility objects for controller/keyboard contracts. The
@@ -635,7 +641,7 @@ class MusicLibraryWindow(QWidget):
         self.search_button.setIconSize(QSize(22, 22))
         self.search_button.setAccessibleName("搜索歌曲与歌单")
         self.search_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.search_button.setStyleSheet("QPushButton { border: none; background: transparent; } QPushButton:focus { border: 1px dotted white; border-radius: 15px; }")
+        self.search_button.setStyleSheet("QPushButton { border: none; background: transparent; }")
         self.search_button.clicked.connect(self._activate_search_button)
         self.progress_button = LibraryProgress(self.search, self)
         self.search.poseChanged.connect(self._layout_search)
@@ -652,7 +658,7 @@ class MusicLibraryWindow(QWidget):
         self.empty_action.setProperty("glassRefractive", True)
         self.empty_action.setGlassLight(False)
         self.empty_action.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.empty_action.setStyleSheet("QPushButton { color: #f3f4f7; background: transparent; border: none; padding: 0 16px; } QPushButton:focus { border: 1px dotted white; }")
+        self.empty_action.setStyleSheet("QPushButton { color: #f3f4f7; background: transparent; border: none; padding: 0 16px; }")
         self.empty_action.clicked.connect(self._focus_empty_search)
         self.recovery_action = GlassPushButton(self)
         self.recovery_action.setFont(_entry_font(14))
@@ -761,7 +767,7 @@ class MusicLibraryWindow(QWidget):
         self.now_playing_button.setVisible(side > .5)
         label_x = round(_mix(104, 154, fraction))
         self.account_name_label.setGeometry(label_x, round(_mix(30, 32, fraction)),
-                                            max(1, self.width()-144-label_x), 30)
+                                            max(1, self.source_button.x()-16-label_x), 30)
         name = self._account.nickname if self._account else ""
         full_name = name or "音乐账号"
         self.account_name_label.setText(self.account_name_label.fontMetrics().elidedText(
@@ -769,6 +775,41 @@ class MusicLibraryWindow(QWidget):
         self.account_name_label.setToolTip(f"<qt>{escape(full_name)}</qt>")
         self.account_name_label.setAccessibleName(full_name)
         self.account_name_label.setAccessibleDescription(self.source_button.source.name if self._account else "")
+
+    def _confirm_logout(self):
+        """Keep the current account until an explicit, account-bound answer."""
+        if self._logout_confirmation is not None:
+            self._logout_confirmation.raise_()
+            self._logout_confirmation.activateWindow()
+            return
+        account = self._account
+        if account is None:
+            return
+        identity = (account.source_id, account.user_id)
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(f"{APP_NAME} · 退出登录")
+        dialog.setText("确认退出当前音乐账号？")
+        dialog.setInformativeText("退出后需要重新登录才能访问此账号的音乐库。")
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        dialog.button(QMessageBox.StandardButton.Ok).setText("退出登录")
+        dialog.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self._logout_confirmation = dialog
+
+        def finished(result):
+            if self._logout_confirmation is not dialog:
+                return
+            self._logout_confirmation = None
+            current = self._account
+            confirmed = result == int(QMessageBox.StandardButton.Ok)
+            if confirmed and current is not None and (current.source_id, current.user_id) == identity and self.isVisible():
+                self.logoutRequested.emit()
+            dialog.deleteLater()
+
+        dialog.finished.connect(finished)
+        dialog.open()
 
     def _album_should_rotate(self):
         return (not self._background_closing and not self._navigation_cover_frozen
@@ -1287,7 +1328,7 @@ class MusicLibraryWindow(QWidget):
         self.close_button.setGeometry(self.width()-68, 20, 44, 44)
         self.logout_button.setGeometry(self.width()-120, 20, 44, 44)
         self.logout_button.show()
-        self.source_button.setGeometry(self.width()-214, 158, 44, 44)
+        self.source_button.setGeometry(self.width()-172, 20, 44, 44)
         self.source_button.show()
         self.expand_button.setGeometry(self.width()-164, 158, 140, 44)
         self._layout_header()
@@ -1527,11 +1568,15 @@ class MusicLibraryWindow(QWidget):
         return super().eventFilter(watched, event)
 
     def mouseMoveEvent(self, event):
+        if self._move_page_resize(event):
+            return
         if self._drag_origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_origin)
         super().mouseMoveEvent(event)
 
     def mousePressEvent(self, event):
+        if self._begin_page_resize(event):
+            return
         if event.button() == Qt.MouseButton.LeftButton and event.position().y() < 60:
             handle = self.windowHandle()
             if handle is None or not handle.startSystemMove():
@@ -1539,6 +1584,7 @@ class MusicLibraryWindow(QWidget):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        self._end_page_resize()
         self._drag_origin = None
         super().mouseReleaseEvent(event)
 
@@ -1557,6 +1603,9 @@ class MusicLibraryWindow(QWidget):
         super().resizeEvent(event)
 
     def hideEvent(self, event):
+        self._end_page_resize()
+        if self._logout_confirmation is not None:
+            self._logout_confirmation.reject()
         self._finish_section_motion()
         self._artwork_skeleton_timer.stop()
         self._background_timer.stop()
@@ -1650,7 +1699,7 @@ class MusicLibraryWindow(QWidget):
                                                              round(self.width()-subtitle_x-24)))
             section = "搜索结果" if self.search.text().strip() else "我的音乐"
             painter.setFont(_entry_font(17));painter.setPen(QColor("#e3e7ef"))
-            painter.drawText(QRectF(24,164,max(1,self.source_button.x()-40),30),Qt.AlignmentFlag.AlignVCenter,section)
+            painter.drawText(QRectF(24,164,max(1,self.expand_button.x()-40),30),Qt.AlignmentFlag.AlignVCenter,section)
             if not self._visual_items() and not self._catalog_skeleton.isVisible():
                 painter.setFont(_entry_font(17))
                 painter.setPen(QColor("#b8b8b8"))

@@ -590,6 +590,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._timer.start()
         if fullscreen is None:
             fullscreen = not bool(getattr(self.owner, "_music_windowed_preference", False))
+        shared_geometry = getattr(self.owner, "_music_page_geometry", QRect())
+        if shared_geometry.isValid():
+            self._normal_geometry = QRect(shared_geometry)
         if not self._normal_geometry.isValid():
             self._normal_geometry = self._default_window_geometry()
         self._normal_geometry = self._bounded_window_geometry(self._normal_geometry)
@@ -1718,7 +1721,12 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         if (source == "original" or source.endswith("-original")) and self._art_loading_preview_key is not None:
             # The source label can arrive before decoding updates the image.
             # Keep the actual displayed preview soft until it is replaced.
-            return self._artwork_display_key(image) == self._art_loading_preview_key
+            # A same-object original can legitimately contain the exact same
+            # pixels as its 320px preview. The provider's completed result,
+            # rather than a changed QImage key, ends that upgrade. Tiny retained
+            # previews and pending results still keep their existing guard.
+            completed = lookup_state in {"original", "ready"} and min(image.width(), image.height()) >= 320
+            return not completed and self._artwork_display_key(image) == self._art_loading_preview_key
         return False
 
     @staticmethod
@@ -9043,6 +9051,16 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     def _window_button_clickable(self, key: str, shared: bool) -> bool:
         return shared or key == "personal_dj" and self._personal_dj_reveal_at(time.monotonic()) >= .75
 
+    def _personal_dj_ring_status(self):
+        """The actual preload status outlives its short text notification."""
+        if self._owned_personal_dj_enabled is not True or self._owned_dj_speaking:
+            return "idle"
+        if self._dj_introduction_pending or self._dj_introduction_failed:
+            return self._dj_presentation_state
+        if self._dj_next_preload_state in {"loading", "ready", "failed"}:
+            return self._dj_next_preload_state
+        return self._dj_presentation_state
+
     def _paint_personal_dj_control(self, painter: QPainter, rect: QRectF):
         now = time.monotonic()
         reveal = self._personal_dj_reveal_at(now)
@@ -9087,9 +9105,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 painter.drawEllipse(icon)
                 painter.restore()
             painter.restore()
-        outro_reveal = self._personal_dj_outro_reveal_at(now)
-        status_state = self._dj_next_preload_state if outro_reveal > .001 and not self._owned_dj_speaking else self._dj_presentation_state
+        status_state = self._personal_dj_ring_status()
         status_color = personal_dj_status_color(status_state)
+        if status_color is None and self._owned_personal_dj_enabled is True and not self._owned_dj_speaking:
+            # Enabled remains visible when no brief status text is open. This
+            # is an outline only: glass keeps the same neutral scene material
+            # as its neighboring controls, and ordinary idle hiding is shared.
+            status_color = self._interpolated_control_color("dj-accent", self._future_lyric_color(button))
         if status_color is not None and status_reveal < .999:
             painter.save()
             painter.setOpacity(reveal * (1.0 - status_reveal))

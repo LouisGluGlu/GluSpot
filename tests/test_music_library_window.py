@@ -6,7 +6,7 @@ from dataclasses import FrozenInstanceError
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QMouseEvent, QPalette, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from shiboken6 import isValid
 
 from api.online_music import AccountSnapshot, OnlineSong
@@ -127,14 +127,51 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self._finish_toolbar()
         self.assertEqual(self.window._expanded, 1.0)
 
-    def test_source_switch_and_logout_emit_without_mutating_account(self):
+    def test_source_switch_and_confirmed_logout_emit_without_mutating_account(self):
         switch = QSignalSpy(self.window.sourceSwitchRequested)
         logout = QSignalSpy(self.window.logoutRequested)
         self.window.switch_button.click()
         self.window.logout_button.click()
+        self.assertEqual(logout.count(), 0)
+        self.window._logout_confirmation.button(QMessageBox.StandardButton.Ok).click()
         self.assertEqual(switch.count(), 1)
         self.assertEqual(logout.count(), 1)
         self.assertEqual(self.window._account, self.account)
+
+    def test_platform_action_sits_immediately_left_of_logout_in_the_top_row(self):
+        for width in (520, 760, 1200):
+            self.window.resize(width, 720)
+            platform, logout = self.window.source_button.geometry(), self.window.logout_button.geometry()
+            self.assertEqual(platform.top(), logout.top())
+            self.assertEqual(platform.bottom(), logout.bottom())
+            self.assertGreater(logout.left() - platform.right(), 0)
+            self.assertLess(logout.left() - platform.right(), 12)
+            self.assertFalse(platform.intersects(self.window.account_name_label.geometry()))
+
+    def test_logout_confirmation_defaults_to_cancel_and_is_deduplicated(self):
+        logout = QSignalSpy(self.window.logoutRequested)
+        self.window.logout_button.click()
+        dialog = self.window._logout_confirmation
+        self.assertIsNotNone(dialog)
+        self.assertIs(dialog.defaultButton(), dialog.button(QMessageBox.StandardButton.Cancel))
+        self.window.logout_button.click()
+        self.assertIs(self.window._logout_confirmation, dialog)
+        dialog.button(QMessageBox.StandardButton.Cancel).click()
+        self.assertIsNone(self.window._logout_confirmation)
+        self.assertEqual(logout.count(), 0)
+        self.assertEqual(self.window._account, self.account)
+
+    def test_old_logout_confirmation_cannot_sign_out_a_new_account_or_hidden_page(self):
+        logout = QSignalSpy(self.window.logoutRequested)
+        self.window.logout_button.click()
+        dialog = self.window._logout_confirmation
+        self.window.set_account(AccountSnapshot("qq", True, "different-user", "其他账号", state="verified"))
+        dialog.button(QMessageBox.StandardButton.Ok).click()
+        self.assertEqual(logout.count(), 0)
+        self.window.logout_button.click()
+        self.window.hide()
+        self.assertIsNone(self.window._logout_confirmation)
+        self.assertEqual(logout.count(), 0)
 
     def test_collection_cover_explains_first_song_and_song_cover_remembers_previous_surface(self):
         self._show_personal_rows()
@@ -307,12 +344,13 @@ class MusicLibraryWindowTests(unittest.TestCase):
                         Qt.TextElideMode.ElideRight, name.width()))
                     self.assertEqual(name.accessibleName(), nickname)
         self.window.resize(520, 500)
-        self.assertGreaterEqual(self.window.account_name_label.width(), 260)
+        self.assertGreaterEqual(self.window.account_name_label.width(), 220)
         source = QSignalSpy(self.window.sourceSwitchRequested)
         logout = QSignalSpy(self.window.logoutRequested)
         self.window.source_button.click()
         self.window.switch_button.click()
         self.window.logout_button.click()
+        self.window._logout_confirmation.button(QMessageBox.StandardButton.Ok).click()
         self.assertEqual(source.count(), 2)
         self.assertEqual(logout.count(), 1)
 

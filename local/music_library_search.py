@@ -7,7 +7,7 @@ from PySide6.QtCore import QEasingCurve, QRect, QRectF, Qt, QVariantAnimation, S
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import QAbstractButton, QLineEdit
 
-from local.liquid_glass import paint_liquid_glass, widget_glass_backdrop
+from local.liquid_glass import paint_liquid_glass, widget_glass_backdrop, widget_glass_level
 
 
 def _ease(value):
@@ -112,7 +112,7 @@ class LibrarySearch(QLineEdit):
             paint_liquid_glass(painter, rect, radius=14 + 8 * (1 - self._extent),
                               refractive=True, backdrop=backdrop, backdrop_rect=source,
                               border_color=QColor("#727989") if self.hasFocus() else None,
-                              cache_token=id(self))
+                              cache_token=id(self), material_level=widget_glass_level(self))
         # Omitting the native ink paint while width changes also suppresses the
         # native selection/caret; the underlying editor and composition persist.
         if self._ink > 0.:
@@ -201,7 +201,9 @@ class LibraryProgress(QAbstractButton):
                 backdrop, source = widget_glass_backdrop(self, rect)
                 painter.setOpacity(extent)
                 paint_liquid_glass(painter, rect, radius=22, refractive=True,
-                                  backdrop=backdrop, backdrop_rect=source, cache_token=id(self))
+                                  backdrop=backdrop, backdrop_rect=source, cache_token=id(self),
+                                  hovered=self.underMouse(), pressed=self.isDown(),
+                                  material_level=widget_glass_level(self))
                 painter.setOpacity(1.)
             pen = QPen(QColor(255, 255, 255, 52), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
@@ -221,7 +223,7 @@ class LibraryProgress(QAbstractButton):
                 rect = QRectF(14, 25, self.width() - 28, 16)
                 painter.drawText(rect, Qt.AlignmentFlag.AlignLeft, clock(position))
                 painter.drawText(rect, Qt.AlignmentFlag.AlignRight, clock(duration))
-            if self.hasFocus():
+            if self.hasFocus() and self.window().testAttribute(Qt.WidgetAttribute.WA_KeyboardFocusChange):
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.setPen(QPen(QColor("#e9edf5"), 1, Qt.PenStyle.DotLine))
+                painter.setPen(QPen(QColor(233, 237, 245, 110), 1))
                 painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 20, 20)

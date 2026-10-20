@@ -106,6 +106,23 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         self.assertTrue(self.window._art_loading_waiting)
         self.assertTrue(self.window._should_blur_preview(preview))
 
+    def test_completed_original_can_reuse_the_same_displayable_preview_pixels(self):
+        self.start("same-object-upgrade")
+        image = cover(320, QColor(25, 82, 111))
+        self.owner.album_art = image
+        self.owner.album_art_source = "thumbnail"
+        self.render(101.2)
+        self.assertTrue(self.window._art_loading_waiting)
+        self.assertEqual(self.window._art_loading_preview_key, image.cacheKey())
+        self.owner.album_art_source = "original"
+        self.owner.album_art_lookup_state = "original"
+        self.render(101.4)
+        self.assertFalse(self.window._art_loading_waiting)
+        self.assertFalse(self.window._should_blur_preview(image))
+        self.render(110.)
+        self.window._update_transport_feedback_regions(110.)
+        self.assertNotIn("art_loading", self.window._transport_feedback)
+
     def test_ready_without_displayable_image_keeps_loading_visual(self):
         self.start("invalid-original")
         self.owner.album_art = QImage()

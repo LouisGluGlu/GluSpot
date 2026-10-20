@@ -39,6 +39,9 @@ class LoginSnapshot:
     expires_at: float = 0.0
     message: str = ""
     account: AccountSnapshot | None = None
+    failure_category: str = ""
+    failure_stage: str = ""
+    retry_after_seconds: float = 0.
 
 
 @dataclass(frozen=True)
@@ -113,11 +116,14 @@ class LyricPayload:
 
 
 class OnlineMusicError(RuntimeError):
-    def __init__(self, code: str, source_id: str = "", message: str = "在线音乐请求失败"):
+    def __init__(self, code: str, source_id: str = "", message: str = "在线音乐请求失败", *, stage="", category="", session_lost=False):
         super().__init__(message)
         self.code = code
         self.source_id = source_id
         self.message = message
+        self.stage = stage if stage in {"begin_login", "poll_login", "account_status", "catalog", "auth_queue", "runtime_start", "request", "module_load"} else ""
+        self.category = category if category in {"network", "timeout", "runtime", "expired", "auth_required", "invalid_response", "account_changed", "cancelled"} else code
+        self.session_lost = session_lost is True
 
 
 class OnlineBackend(Protocol):
@@ -136,6 +142,7 @@ import time
 from urllib.parse import urlsplit
 
 from api.online_music_credentials import ProtectedCredentialStore, CredentialProtectionError
+from api.online_music_diagnostics import current_login_trace, login_phase, login_request_guard
 
 
 @dataclass
@@ -143,6 +150,9 @@ class _LoginAttempt:
     snapshot: LoginSnapshot
     key: str = field(repr=False)
     generation: int = 0
+    pending_credential: dict | None = field(default=None, repr=False)
+    failures: int = 0
+    retry_at: float = 0.
 
 
 class OnlineMusicService:
@@ -169,6 +179,79 @@ class OnlineMusicService:
         self._recommendation_previews: dict[str, tuple[int, float, tuple[OnlineSong, ...]]] = {}
         self._recommendation_covers: dict[str, tuple[int, float, str]] = {}
         self._closed = False
+        self._validation_locks = {source: threading.Lock() for source, _ in self._names}
+        self._validation_serials = {source: 0 for source, _ in self._names}
+        self._validation_epochs = {source: 0 for source, _ in self._names}
+        self._validation_completed_keys = {source: None for source, _ in self._names}
+        self._login_cancel_events = {source: threading.Event() for source, _ in self._names}
+        self._validation_cancel_events = {source: threading.Event() for source, _ in self._names}
+
+    def _cancel_source_generation(self, source_id):
+        """Called under _lock; transport reads these events without locking back."""
+        self._login_cancel_events[source_id].set()
+        self._login_cancel_events[source_id] = threading.Event()
+        self._validation_cancel_events[source_id].set()
+        self._validation_cancel_events[source_id] = threading.Event()
+
+    def cancel_account_validation(self, source_id):
+        """Abandon a verification without invalidating an established account/catalog."""
+        with self._lock:
+            if source_id not in self._validation_epochs:
+                return
+            self._validation_epochs[source_id] += 1
+            self._validation_cancel_events[source_id].set()
+            self._validation_cancel_events[source_id] = threading.Event()
+            # Cancellation only signals/terminates the owned child; it never
+            # waits for network I/O. Keep registration fenced until signalled.
+            cancel = getattr(self.backend, "cancel_login_request", None)
+            if callable(cancel):
+                cancel(source_id)
+
+    def restore_account(self, source_id: str) -> AccountSnapshot:
+        """Worker-only local presentation restore, never grants authorization."""
+        if source_id not in self._accounts:
+            raise OnlineMusicError("unsupported", source_id)
+        with self._lock:
+            generation = self._generations[source_id]
+            account = self._accounts[source_id]
+            if account.logged_in:
+                return account
+        credential = self._load_credential(source_id)
+        from api.online_music_resume import cached_account, read_resume
+        restored = cached_account(read_resume(credential, source_id, self._clock()), source_id)
+        with self._lock:
+            if not self._closed and generation == self._generations[source_id] and not self._accounts[source_id].logged_in:
+                if restored.state == "cached":
+                    self._accounts[source_id] = restored
+            return self._accounts[source_id]
+
+    def cached_catalog(self, source_id: str, section="playlists") -> CatalogPage:
+        """Account-bound display data only; callers still gate every live action."""
+        if section not in {"playlists", "recommended"}:
+            return CatalogPage(())
+        credential = self._load_credential(source_id)
+        from api.online_music_resume import read_resume, read_catalog
+        with self._lock:
+            account = self._accounts[source_id]
+            data = read_resume(credential, source_id, self._clock())
+            if not data or account.user_id != data["profile"]["user_id"]:
+                return CatalogPage(())
+        return read_catalog(data, source_id, section)
+
+    def _save_catalog_snapshot(self, source_id, section, page, expected_user_id):
+        from api.online_music_resume import attach_catalog
+        with self._lock:
+            account = self._accounts[source_id]
+            credential = self._credentials.get(source_id)
+            if not account.logged_in or account.user_id != expected_user_id or not credential:
+                return
+            updated = attach_catalog(credential, section, page)
+            try:
+                self.credential_store.save(source_id, updated)
+                self._credentials[source_id] = updated
+            except (CredentialProtectionError, OSError):
+                # Optional presentation persistence cannot invalidate live auth.
+                pass
 
     def _clear_recommendation_previews(self, source_id):
         if source_id == "netease":
@@ -201,12 +284,15 @@ class OnlineMusicService:
         with self._lock:
             if source_id in self._credentials:
                 return self._credentials[source_id]
+            generation = self._generations[source_id]
         try:
             credential = self.credential_store.load(source_id)
         except CredentialProtectionError:
             raise OnlineMusicError("credential", source_id, "本机受保护的登录记录无法读取，请重新登录") from None
         if credential:
             with self._lock:
+                if self._closed or generation != self._generations[source_id]:
+                    return self._credentials.get(source_id)
                 self._credentials[source_id] = credential
         return credential
 
@@ -243,7 +329,9 @@ class OnlineMusicService:
 
     @staticmethod
     def _account(source_id: str, data: Any) -> AccountSnapshot:
-        if not isinstance(data, dict) or data.get("logged_in") is not True or not str(data.get("user_id", "")).strip():
+        identity = data.get("user_id") if isinstance(data, dict) else None
+        if (not isinstance(data, dict) or data.get("logged_in") is not True
+                or type(identity) not in {str, int} or not str(identity).strip()):
             return AccountSnapshot(source_id, state="signed_out", message="此来源尚未登录或登录已过期")
         return AccountSnapshot(source_id, True, str(data["user_id"])[:128], str(data.get("nickname", ""))[:256], OnlineMusicService._artwork_url(data.get("avatar_url", "")), "verified", "")
 
@@ -271,14 +359,22 @@ class OnlineMusicService:
         self._check_source(source_id)
         with self._lock:
             self._generations[source_id] += 1
+            self._cancel_source_generation(source_id)
             self._clear_recommendation_previews(source_id)
             generation = self._generations[source_id]
+            cancelled = self._login_cancel_events[source_id]
             for attempt in self._attempts.values():
                 if attempt.snapshot.source_id == source_id and attempt.snapshot.state not in {"confirmed", "expired", "cancelled", "error"}:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
             session_id = secrets.token_hex(16)
         # Deliberately do not import an existing session for a fresh QR attempt.
-        response = self.backend.request(source_id, "begin_login", {})
+        device = None
+        if source_id == "qq":
+            saved = self._load_credential(source_id)
+            if saved and isinstance(saved.get("device_context"), dict):
+                device = {"device_context": saved["device_context"]}
+        with login_request_guard(cancelled), login_phase("qr_acquisition"):
+            response = self.backend.request(source_id, "begin_login", {}, device) if device else self.backend.request(source_id, "begin_login", {})
         data = response.get("data", {})
         if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
             raise OnlineMusicError("response", source_id, "音乐服务未返回有效二维码")
@@ -292,6 +388,14 @@ class OnlineMusicService:
         with self._lock:
             if self._closed or generation != self._generations[source_id]:
                 snapshot = self._snapshot_state(snapshot, "cancelled", "登录已取消")
+            elif source_id == "qq" and isinstance(response.get("credential"), dict) and isinstance(response["credential"].get("device_context"), dict):
+                saved = dict(self._credentials.get(source_id) or {})
+                saved["device_context"] = response["credential"]["device_context"]
+                try:
+                    self.credential_store.save(source_id, saved)
+                    self._credentials[source_id] = saved
+                except (CredentialProtectionError, OSError):
+                    pass
             self._attempts[session_id] = _LoginAttempt(snapshot, data["key"], generation)
             # Bound retained terminal attempts. Active attempts are never removed.
             if len(self._attempts) > 16:
@@ -320,9 +424,17 @@ class OnlineMusicService:
                 attempt.snapshot = self._snapshot_state(snapshot, "expired", "二维码已过期，请刷新")
                 return attempt.snapshot
             source_id, generation, key = snapshot.source_id, attempt.generation, attempt.key
+            cancelled = self._login_cancel_events[source_id]
+            if self._clock() < attempt.retry_at:
+                return snapshot
         try:
-            response = self.backend.request(source_id, "poll_login", {"key": key})
-            data = response.get("data", {})
+            if attempt.pending_credential is None:
+                with login_request_guard(cancelled), login_phase("scan_detection"):
+                    response = self.backend.request(source_id, "poll_login", {"key": key})
+                data = response.get("data", {})
+            else:
+                response = {"credential": attempt.pending_credential}
+                data = {"state": "confirmed"}
             state = data.get("state") if isinstance(data, dict) else None
             if state not in {"waiting", "scanned", "confirmed", "expired", "error", "cancelled"}:
                 raise OnlineMusicError("response", source_id, "音乐服务返回的数据无效")
@@ -331,8 +443,17 @@ class OnlineMusicService:
             if state == "confirmed":
                 if not isinstance(credential, dict):
                     raise OnlineMusicError("response", source_id, "音乐服务未返回可验证的登录会话")
-                verified = self.backend.request(source_id, "account_status", {}, credential)
-                account = self._account(source_id, verified.get("data"))
+                with self._lock:
+                    if self._closed or generation != self._generations[source_id] or attempt.snapshot.state == "cancelled":
+                        return attempt.snapshot
+                    attempt.pending_credential = credential
+                with login_request_guard(cancelled), login_phase("confirmed_account_validation"):
+                    verified = self.backend.request(source_id, "account_status", {}, credential)
+                verified_data = verified.get("data")
+                account = self._account(source_id, verified_data)
+                if (not isinstance(verified_data, dict) or not isinstance(verified_data.get("logged_in"), bool)
+                        or verified_data.get("logged_in") is True and not account.logged_in):
+                    raise OnlineMusicError("invalid_response", source_id, "账号核验响应不完整，请重试")
                 credential = verified.get("credential", credential)
                 if not account.logged_in:
                     raise OnlineMusicError("auth", source_id, "扫码确认后未能验证账号，请重试")
@@ -341,9 +462,12 @@ class OnlineMusicService:
                 if self._closed or generation != self._generations[source_id] or attempt.snapshot.state == "cancelled":
                     return attempt.snapshot
                 if self._clock() >= snapshot.expires_at:
+                    attempt.pending_credential = None
                     attempt.snapshot = self._snapshot_state(snapshot, "expired", messages["expired"])
                     return attempt.snapshot
                 if state == "confirmed":
+                    from api.online_music_resume import attach_profile
+                    credential = attach_profile(credential, account, self._credentials.get(source_id), self._clock())
                     try:
                         self.credential_store.save(source_id, credential)
                     except (CredentialProtectionError, OSError):
@@ -352,25 +476,85 @@ class OnlineMusicService:
                     self._accounts[source_id] = account
                     self._dj_voice_catalogs.pop(source_id, None)
                     self._clear_recommendation_previews(source_id)
+                    attempt.pending_credential = None
+                attempt.failures = 0
                 attempt.snapshot = self._snapshot_state(snapshot, state, messages[state], account)
+                if state == "error":
+                    from dataclasses import replace
+                    category = data.get("failure_category")
+                    category = category if isinstance(category, str) and category in {"network", "timeout", "runtime", "invalid_response", "auth", "auth_required"} else "request_failed"
+                    safe_messages = {"network": "登录确认连接失败，请刷新二维码", "timeout": "登录确认超时，请刷新二维码",
+                                     "runtime": "登录服务异常，请刷新二维码", "invalid_response": "扫码确认数据无效，请刷新二维码"}
+                    attempt.snapshot = replace(attempt.snapshot, failure_category=category, failure_stage="poll_login",
+                                               message=safe_messages.get(category, messages[state]))
                 return attempt.snapshot
         except OnlineMusicError as error:
             with self._lock:
                 if generation != self._generations[source_id] or attempt.snapshot.state == "cancelled":
                     return attempt.snapshot
-                attempt.snapshot = self._snapshot_state(snapshot, "error", error.message)
+                if error.session_lost and attempt.pending_credential is None:
+                    from dataclasses import replace
+                    attempt.snapshot = replace(self._snapshot_state(snapshot, "error", "登录服务已重启，请刷新二维码"),
+                                               failure_category="runtime", failure_stage="poll_login")
+                    return attempt.snapshot
+                attempt.failures += 1
+                if error.code in {"network", "timeout", "runtime", "invalid_response", "response"} and attempt.failures <= 3 and self._clock() < snapshot.expires_at:
+                    delay = min(4., .75 * 2 ** (attempt.failures - 1))
+                    attempt.retry_at = self._clock() + delay
+                    stage = "account_status" if attempt.pending_credential is not None else "poll_login"
+                    state = "scanned" if attempt.pending_credential is not None else snapshot.state
+                    message = "已确认，账号核验暂不可用，正在重试" if stage == "account_status" else "网络暂不可用，保留二维码并自动重试"
+                    attempt.snapshot = LoginSnapshot(snapshot.session_id, source_id, state,
+                        snapshot.qr_image_bytes, snapshot.qr_url, snapshot.expires_at, message,
+                        failure_category=error.code, failure_stage=stage, retry_after_seconds=delay)
+                    return attempt.snapshot
+                from dataclasses import replace
+                stage = "account_status" if attempt.pending_credential is not None else "poll_login"
+                category = error.code if error.code in {"network", "timeout", "runtime", "invalid_response", "response", "auth", "auth_required", "credential", "expired"} else "request_failed"
+                if category not in {"network", "timeout", "runtime", "invalid_response", "response", "credential"}:
+                    attempt.pending_credential = None
+                message = "扫码已确认，账号核验失败；点击重试核验" if attempt.pending_credential is not None else error.message
+                attempt.snapshot = replace(self._snapshot_state(snapshot, "error", message),
+                                           failure_category=category, failure_stage=stage)
                 return attempt.snapshot
 
+    def retry_login_verification(self, session_id):
+        """Explicit retry of a confirmed QR's verification, without another scan."""
+        with self._lock:
+            attempt = self._attempts.get(session_id)
+            if attempt is None:
+                raise OnlineMusicError("expired", message="二维码会话已结束，请刷新")
+            if (attempt.generation != self._generations[attempt.snapshot.source_id]
+                    or attempt.snapshot.state != "error" or attempt.pending_credential is None):
+                return attempt.snapshot
+            if self._clock() >= attempt.snapshot.expires_at:
+                attempt.pending_credential = None
+                attempt.snapshot = self._snapshot_state(attempt.snapshot, "expired", "登录确认已过期，请重新扫码")
+                return attempt.snapshot
+            attempt.failures = 0
+            attempt.retry_at = 0.
+            attempt.snapshot = self._snapshot_state(attempt.snapshot, "scanned", "扫码已确认，正在重试账号核验")
+        return self.poll_login(session_id)
+
     def invalidate_login(self, session_id: str) -> None:
-        """Invalidate immediately without any network or child-process operation."""
+        """Fence replacement registration while signalling owned cancellation."""
         with self._lock:
             attempt = self._attempts.get(session_id)
             if attempt is None or attempt.snapshot.state in {"confirmed", "cancelled", "expired"}:
                 return
             source_id = attempt.snapshot.source_id
+            if attempt.generation != self._generations[source_id]:
+                attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
+                attempt.pending_credential = None
+                return
             self._generations[source_id] += 1
+            self._cancel_source_generation(source_id)
             self._clear_recommendation_previews(source_id)
             attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
+            attempt.pending_credential = None
+            cancel = getattr(self.backend, "cancel_login_request", None)
+            if callable(cancel):
+                cancel(source_id)
 
     def invalidate_source_login(self, source_id: str) -> None:
         """Also fence an in-flight begin that has not produced a session id yet."""
@@ -378,12 +562,22 @@ class OnlineMusicService:
             if source_id not in self._generations:
                 return
             self._generations[source_id] += 1
+            self._cancel_source_generation(source_id)
             self._clear_recommendation_previews(source_id)
             for attempt in self._attempts.values():
                 if attempt.snapshot.source_id == source_id and attempt.snapshot.state in {"waiting", "scanned"}:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
+                    attempt.pending_credential = None
+            cancel = getattr(self.backend, "cancel_login_request", None)
+            if callable(cancel):
+                cancel(source_id)
 
     def cancel_login(self, session_id: str) -> None:
+        with self._lock:
+            attempt = self._attempts.get(session_id)
+            if attempt is None or attempt.generation != self._generations[attempt.snapshot.source_id]:
+                # A retired attempt cannot cancel the new source's live child.
+                return
         self.invalidate_login(session_id)
         with self._lock:
             attempt = self._attempts.get(session_id)
@@ -402,27 +596,85 @@ class OnlineMusicService:
             with self._lock:
                 return self._accounts[source_id]
         self._check_source(source_id)
+        with self._lock:
+            serial = self._validation_serials[source_id]
+            validation_key = (self._generations[source_id], self._validation_epochs[source_id])
+            cancelled = (self._login_cancel_events[source_id], self._validation_cancel_events[source_id])
+        trace = current_login_trace()
+        budget = max(0., (trace.deadline - time.monotonic()) if trace else 18.)
+        with login_phase("auth_queue"):
+            acquired = self._validation_locks[source_id].acquire(timeout=budget)
+        if not acquired:
+            raise OnlineMusicError("timeout", source_id, "账号核验排队超时，请重试", stage="auth_queue")
+        try:
+            with self._lock:
+                if validation_key != (self._generations[source_id], self._validation_epochs[source_id]):
+                    raise OnlineMusicError("cancelled", source_id, "账号核验已取消")
+                if (serial != self._validation_serials[source_id]
+                        and self._validation_completed_keys[source_id] == validation_key):
+                    return self._accounts[source_id]
+            with login_request_guard(*cancelled):
+                return self._validate_account(source_id, validation_key)
+        finally:
+            with self._lock:
+                self._validation_serials[source_id] += 1
+                self._validation_completed_keys[source_id] = validation_key
+            self._validation_locks[source_id].release()
+
+    def _validate_account(self, source_id, validation_key):
         credential = self._load_credential(source_id)
         if not credential:
             return AccountSnapshot(source_id)
         with self._lock:
-            generation = self._generations[source_id]
+            generation, validation_epoch = validation_key
+            if (self._closed or generation != self._generations[source_id]
+                    or validation_epoch != self._validation_epochs[source_id]):
+                return self._accounts[source_id]
         try:
-            response = self.backend.request(source_id, "account_status", {}, credential)
-            account = self._account(source_id, response.get("data"))
+            with login_phase("saved_account_validation"):
+                response = self.backend.request(source_id, "account_status", {}, credential)
+            data = response.get("data")
+            account = self._account(source_id, data)
+            if (not isinstance(data, dict) or not isinstance(data.get("logged_in"), bool)
+                    or data.get("logged_in") is True and not account.logged_in):
+                raise OnlineMusicError("invalid_response", source_id, "账号核验响应不完整，请重试")
+            from api.online_music_resume import read_resume
+            resume = read_resume(credential, source_id, self._clock())
+            if account.logged_in and resume and resume["profile"]["user_id"] != account.user_id:
+                raise OnlineMusicError("account_changed", source_id, "账号身份已变化，请重新登录")
             refreshed = response.get("credential")
         except OnlineMusicError as error:
             account = AccountSnapshot(source_id, state="error", message=error.message)
             refreshed = None
+            if error.code in {"auth_required", "auth", "account_changed"}:
+                account = AccountSnapshot(source_id, state="expired", message="登录已失效，请重新登录")
         with self._lock:
-            if not self._closed and generation == self._generations[source_id]:
+            if (not self._closed and generation == self._generations[source_id]
+                    and validation_epoch == self._validation_epochs[source_id]):
                 self._accounts[source_id] = account
-                if account.logged_in and isinstance(refreshed, dict):
+                if account.logged_in:
+                    from api.online_music_resume import attach_profile
+                    refreshed = attach_profile(refreshed if isinstance(refreshed, dict) else credential,
+                                               account, credential, self._clock())
                     try:
                         self.credential_store.save(source_id, refreshed)
                         self._credentials[source_id] = refreshed
                     except (CredentialProtectionError, OSError):
                         self._accounts[source_id] = AccountSnapshot(source_id, state="error", message="本机加密保存失败，请重新登录")
+                elif account.state == "error":
+                    from api.online_music_resume import cached_account, read_resume
+                    from dataclasses import replace
+                    cached = cached_account(read_resume(credential, source_id, self._clock()), source_id)
+                    if cached.user_id:
+                        self._accounts[source_id] = replace(cached, state="error", message="网络暂不可用，已保留本地快照，可重试核验")
+                else:
+                    # An explicit signed-out/mismatched response invalidates the
+                    # matching generation only. Transient failures never do.
+                    self._credentials.pop(source_id, None)
+                    try:
+                        self.credential_store.delete(source_id)
+                    except (CredentialProtectionError, OSError):
+                        pass
                 if not self._accounts[source_id].logged_in:
                     self._dj_voice_catalogs.pop(source_id, None)
                     self._clear_recommendation_previews(source_id)
@@ -434,6 +686,7 @@ class OnlineMusicService:
             raise OnlineMusicError("unsupported", source_id, "未知音乐来源")
         with self._lock:
             self._generations[source_id] += 1
+            self._cancel_source_generation(source_id)
             self._accounts[source_id] = AccountSnapshot(source_id)
             self._credentials.pop(source_id, None)
             self._dj_voice_catalogs.pop(source_id, None)
@@ -441,6 +694,7 @@ class OnlineMusicService:
             for attempt in self._attempts.values():
                 if attempt.snapshot.source_id == source_id:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
+                    attempt.pending_credential = None
             try:
                 self.credential_store.delete(source_id)
             except (CredentialProtectionError, OSError):
@@ -471,6 +725,9 @@ class OnlineMusicService:
             refreshed = response.get("credential")
             if isinstance(refreshed, dict):
                 try:
+                    from api.online_music_resume import attach_profile
+                    account = self._accounts[source_id]
+                    refreshed = attach_profile(refreshed, account, credential, self._clock())
                     self.credential_store.save(source_id, refreshed)
                     self._credentials[source_id] = refreshed
                 except (CredentialProtectionError, OSError):
@@ -579,7 +836,10 @@ class OnlineMusicService:
         items = tuple(item for item in items if item.playlist_id and item.title)
         next_offset = offset + len(raw)
         has_more = next_offset < total if total is not None else bool(data.get("more") or len(raw) == limit)
-        return CatalogPage(items, next_offset, has_more and bool(raw), total)
+        page = CatalogPage(items, next_offset, has_more and bool(raw), total)
+        if offset == 0:
+            self._save_catalog_snapshot(source_id, "playlists", page, account.user_id)
+        return page
 
     def _favorite_account(self, source_id: str, expected_user_id: str = "") -> tuple[AccountSnapshot, int]:
         """Capture the existing account authority before any favorite operation.
@@ -709,6 +969,7 @@ class OnlineMusicService:
             raise OnlineMusicError("unsupported", source_id, "此来源暂不支持推荐歌单")
         limit, offset = self._page_bounds(limit, offset)
         limit = min(100, limit)
+        account = self.account_status(source_id)
         data = self._catalog(source_id, "recommended_playlists", {"limit": limit, "offset": offset})
         if not isinstance(data.get("items"), list):
             raise OnlineMusicError("response", source_id, "推荐歌单返回的数据无效")
@@ -722,7 +983,10 @@ class OnlineMusicService:
         next_offset = min(offset + limit, max(offset, self._nonnegative_int(data.get("next_offset"))))
         total = min(100, self._nonnegative_int(data["total"])) if data.get("total") is not None else None
         has_more = data.get("has_more") is True and next_offset > offset and (total is None or next_offset < total)
-        return CatalogPage(tuple(items), next_offset, has_more, total)
+        page = CatalogPage(tuple(items), next_offset, has_more, total)
+        if offset == 0 and account.logged_in:
+            self._save_catalog_snapshot(source_id, "recommended", page, account.user_id)
+        return page
 
     def playlist_tracks(self, source_id: str, playlist_id: str, limit: int = 100, offset: int = 0) -> CatalogPage:
         limit, offset = self._page_bounds(limit, offset)
@@ -1010,9 +1274,12 @@ class OnlineMusicService:
             self._closed = True
             for source_id in self._generations:
                 self._generations[source_id] += 1
+                self._login_cancel_events[source_id].set()
+                self._validation_cancel_events[source_id].set()
             for attempt in self._attempts.values():
                 if attempt.snapshot.state in {"waiting", "scanned"}:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
+                attempt.pending_credential = None
             self._credentials.clear()
             self._dj_voice_catalogs.clear()
             self._recommendation_previews.clear()

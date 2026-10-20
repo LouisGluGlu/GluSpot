@@ -14,6 +14,20 @@ from api.online_music_bridge import NodeOnlineMusicBackend
 
 
 class OnlineMusicPlatformBridgeTests(unittest.TestCase):
+    def test_netease_status_requires_success_before_accepting_missing_profile_as_logout(self):
+        for code, expected in ((500,"invalid_response"),(301,"auth_required"),(200,None)):
+            with self.subTest(code=code):
+                self.modules_for("@neteasecloudmusicapienhanced/api","4.41.1",{
+                    "util/request.js":"module.exports=()=>{};",
+                    "module/login_status.js":f"module.exports=async()=>({{body:{{data:{{code:{code},profile:null}}}}}});"})
+                if expected:
+                    with self.assertRaises(OnlineMusicError) as raised:
+                        self.backend.request("netease","account_status",{},{"cookie":{"MUSIC_U":"synthetic"}})
+                    self.assertEqual(raised.exception.code,expected)
+                else:
+                    self.assertFalse(self.backend.request("netease","account_status",{},{"cookie":{"MUSIC_U":"synthetic"}})["data"]["logged_in"])
+                self.backend._authentication_backends["netease"]._stop_process()
+
     def test_qq_lyrics_fetches_real_qrc_contract_and_keeps_independent_lrc_fallback(self):
         self.modules_for("@yakult-green-tea/qq-music-api", "3.1.4", {
             "dist/src/services/auth/qrLogin.node.js": "exports.createNodeQrLoginService=()=>({configureAuthSessionRepository:()=>{}});",
@@ -157,6 +171,18 @@ class OnlineMusicPlatformBridgeTests(unittest.TestCase):
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+        if package == "@yakult-green-tea/qq-music-api":
+            auth = root / "dist/src/services/auth"
+            auth.mkdir(parents=True, exist_ok=True)
+            (auth / "qrLogin.js").write_text("exports.createQrLoginService=d=>require('./qrLogin.node.js').createNodeQrLoginService(d);exports.createMqttListen=()=>()=>{};", encoding="utf-8")
+            (auth / "deviceContext.js").write_text("exports.isAndroidDevice=()=>false;", encoding="utf-8")
+            client = auth / "httpClient.js"
+            body = client.read_text(encoding="utf-8") if client.exists() else "exports.default=()=>({});"
+            client.write_text(body + "\nexports.createAuthHttpClient=exports.createAuthHttpClient||exports.default;", encoding="utf-8")
+            for name, body in {"axios": "exports.request=()=>{throw Error('fixture must not perform network I/O')};", "ws": "module.exports=class {};"}.items():
+                folder = self.modules / name
+                folder.mkdir(exist_ok=True)
+                (folder / "index.js").write_text(body, encoding="utf-8")
 
     def test_qq_nested_current_profile_is_whitelisted_without_contact_metadata(self):
         self.modules_for("@yakult-green-tea/qq-music-api", "3.1.4", {
