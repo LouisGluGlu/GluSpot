@@ -11,7 +11,7 @@ import re
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, MessageData, TimedLyricLine, TimedLyricUnit, TrackData
 from api.providers import EmptyIslandDataProvider, empty_visual_data
@@ -13591,6 +13591,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._standalone_bottom_boundary_extension_for_screen = lambda _screen: 0.0
         visual._bottom_taskbar_rect_for_screen = lambda _screen: QRectF()
         visual._taskbar_auto_hide_enabled_for_screen = lambda _screen: False
+        visual._remember_motion_global_rects = Mock()
         moves: list[QPoint] = []
         visual.move = lambda pos: moves.append(QPoint(pos))
 
@@ -13599,6 +13600,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             visual._settle_standalone_drag_release(anchor, QPoint(920, 1042))
 
         self.assertEqual(visual.stack_direction, -1)
+        visual._remember_motion_global_rects.assert_called_once_with()
         self.assertTrue(moves)
         self.assertAlmostEqual(moves[-1].y() + 600.0, anchor.top(), delta=1.0)
 
@@ -13625,6 +13627,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._standalone_bottom_boundary_extension_for_screen = lambda _screen: 0.0
         visual._bottom_taskbar_rect_for_screen = lambda _screen: QRectF()
         visual._taskbar_auto_hide_enabled_for_screen = lambda _screen: False
+        visual._remember_motion_global_rects = Mock()
         moves: list[QPoint] = []
         visual.move = lambda pos: moves.append(QPoint(pos))
 
@@ -13714,6 +13717,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._main_top_for_direction = lambda _kind, _main_h, direction: 72.0 if direction >= 0 else 600.0
         visual._expanded_stack_height = lambda _kind, _main_h, include_popups=False: 120.0
         visual.save_last_position = lambda _pos: None
+        visual._remember_motion_global_rects = Mock()
         moves: list[QPoint] = []
         visual.move = lambda pos: moves.append(QPoint(pos))
 

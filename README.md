@@ -2,14 +2,14 @@
 
 Windows 桌面音乐悬浮岛，让歌词、专辑和播放状态融入桌面。
 
-[下载 6.413 安装程序与便携版](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.413) · [更新记录](https://github.com/LouisGluGlu/GluSpot/releases) · [本版改进与验证](docs/lyric-word-timing-6.413.md)
+[下载 6.414 安装程序与便携版](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.414) · [更新记录](https://github.com/LouisGluGlu/GluSpot/releases) · [本版改进与验证](docs/finder-bottom-visibility-6.414.md)
 
 - **音乐与歌词**：网易云、QQ 音乐库及 Windows SMTC，支持逐词读亮、翻译和可靠前奏／间奏提示。
 - **桌面显示**：Free、Top 和沉浸栏，搭配 Liquid Glass 控件与专辑取色背景。
 - **播放布局**：封面、封面内歌词、封面外歌词和播放列表，随窗口宽度切换。
 - **音频输出**：本机与兼容 AirPlay 设备，可组合多设备同步播放。
 
-适用于 **Windows 10 1809+／Windows 11 x64**。安装版支持原目录覆盖升级并保留配置；便携版需完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。当前 **6.413 为未签名测试版**，设备兼容与验证边界见本版报告。
+适用于 **Windows 10 1809+／Windows 11 x64**。安装版支持原目录覆盖升级并保留配置；便携版需完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。当前 **6.414 为未签名测试版**，设备兼容与验证边界见本版报告。
 
 源码入口为 `local/main.py`。开发环境运行 `setup-env.bat` 后使用 `launch.bat`；完整测试为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
 
@@ -20,10 +20,12 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 6.414 repairs a Free island disappearing after a bottom-edge drag while a real MyDockFinder/Finder bar is enabled. Only actual Finder hits consume the drop; missed hits run existing Free settlement and preserve live spring coordinates while changing expansion direction. Verification passed **5524 Python tests / 329.396 seconds**, 12 native suites, 168 new production Qt render frames, 401 package checks and ten isolated installer scenarios. All 8399 portable entries passed CRC/per-file SHA-256; 595 frozen inputs and 8427 previous distribution files remained unchanged. No new controls, placement rules or playback behavior are introduced. See [root cause, verification and release artifacts](docs/finder-bottom-visibility-6.414.md). Physical multi-monitor dragging and compositor smoothness remain unverified.
+
 - 6.413 improves whole-song source coverage and shared per-row reading, repairs invisible search text and packages all accumulated desktop/playback changes. Final verification passed **5518 Python tests / 297.018 seconds**, 12 native suites, 2447 production-render checks at each DPR 1/2, 401 package checks, frozen EXE diagnostics, 14 offline adapter checks, 19 QRC fallback checks and ten isolated installer scenarios. All 8399 portable entries passed CRC/per-file SHA-256; 594 frozen inputs and previous distribution files remained unchanged. [Download the modern x64 Setup and portable ZIP](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.413); see [source, artifact hashes and verification limits](docs/lyric-word-timing-6.413.md). Real account coverage, physical-display smoothness and hardware listening remain unverified.
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.413`.
+- Current test-build version: `6.414`.
 - The October 19 lyric release packages the new credit cleanup, reliable interlude dots, QQ QRC and trusted-ID AMLL fallback in the modern Windows x64 Setup and portable ZIP. A packaging review corrected QQ's fallback to the pinned SDK's real `request` interface and verified it with the actual packaged dependency over loopback. Final verification passed **5443 Python tests / 287.814 seconds**, 12 native suites, 274 package checks, frozen EXE acceptance, 14 offline adapter checks and ten isolated installer scenarios; all 8399 ZIP entries passed CRC and per-file SHA-256. All 421 frozen source/build inputs remained unchanged, and previous dated releases are retained. See [artifacts, verification and usage](docs/windows-release-lyrics-2026-10-19.md). Real account coverage, physical-display smoothness and listening remain unverified.
 - The October 19 lyric-pipeline source follow-up expands evidence-based credit cleanup, adds display-only middle-gap dots from reliable real word endings, and obtains QQ QRC plus bounded trusted-ID AMLL TTML fallback without a new dependency. Raw lyrics, translation/romanization provenance, identity/version guards and existing provider/cache boundaries are retained. Final native Windows verification passed **5442 Python tests in 288.230 seconds**, 904 follow-up checks at each DPR 1/2 and 364 production-renderer frames per scale; all 386 frozen source files remained unchanged. Public fixed-ID QQ and AMLL read-only probes succeeded, while the existing QQ search entry missed the sample; account playback, long-session listening and physical-display smoothness remain unverified. Version and existing packages are unchanged. See [staged implementation, evidence and limits](docs/lyric-pipeline-2026-10-19.md).
 - The October 19 window-visibility release restores a proportionate **960 × 540 (16:9)** first player window, with 4:3 fallback for narrow work areas, while preserving manually resized windows and the **330 × 400** minimum. Completed compression clears inherited fullscreen/bar hiding state and restores the native island before aligning it to the cached preview, including formerly minimized windows. The production-credit cleanup/countdown option is removed and fixed on, including legacy disabled settings. Final verification passed **5310 Python tests in 276.895 seconds**, 542 related tests at each DPR 1/2, and six isolated native window lifecycle scenarios with 14 visible, non-minimized checkpoints. The new dated window-visibility Setup and portable ZIP passed 249 package checks, frozen EXE acceptance, 12 native suites, 14 offline runtime checks, ten isolated installer scenarios and all 8399 ZIP entries' CRC/per-file SHA-256 checks. All 397 frozen Python sources remained unchanged through packaging; the previous window-resize release is preserved. See [fixes, artifacts and verification](docs/window-visibility-and-release-2026-10-19.md).
@@ -120,7 +122,7 @@ Build from the project root:
 Expected output:
 
 ```text
-release\GluSpot-6.413\GluSpot.exe
+release\GluSpot-6.414\GluSpot.exe
 ```
 
 The package is an unsigned internal test build. It does not include Steamworks ownership validation and should not be treated as a public release artifact.
