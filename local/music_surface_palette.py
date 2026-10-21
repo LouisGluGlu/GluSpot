@@ -120,6 +120,89 @@ def single_hue_background_colors(
                  ))
 
 
+def _oklab(color: QColor) -> tuple[float, float, float]:
+    """Read perceptual lightness/chroma from an occupied sRGB pigment."""
+    # Bjorn Ottosson's public-domain 2021 linear-sRGB/OKLab matrices:
+    # https://bottosson.github.io/posts/oklab/#converting-from-linear-srgb-to-oklab
+    channels = tuple(component / 12.92 if component <= .04045 else ((component + .055) / 1.055) ** 2.4
+                     for component in QColor(color).getRgbF()[:3])
+    red, green, blue = channels
+    light = (.4122214708 * red + .5363325363 * green + .0514459929 * blue) ** (1 / 3)
+    middle = (.2119034982 * red + .6806995451 * green + .1073969566 * blue) ** (1 / 3)
+    short = (.0883024619 * red + .2817188376 * green + .6299787005 * blue) ** (1 / 3)
+    return (.2104542553 * light + .7936177850 * middle - .0040720468 * short,
+            1.9779984951 * light - 2.4285922050 * middle + .4505937099 * short,
+            .0259040371 * light + .7827717662 * middle - .8086757660 * short)
+
+
+def _oklab_color(lightness: float, first: float, second: float) -> QColor:
+    """Fit sRGB by reducing chroma at fixed lightness and perceptual hue."""
+    def linear_rgb(fraction):
+        light = (lightness + .3963377774 * first * fraction + .2158037573 * second * fraction) ** 3
+        middle = (lightness - .1055613458 * first * fraction - .0638541728 * second * fraction) ** 3
+        short = (lightness - .0894841775 * first * fraction - 1.2914855480 * second * fraction) ** 3
+        return (4.0767416621 * light - 3.3077115913 * middle + .2309699292 * short,
+                -1.2684380046 * light + 2.6097574011 * middle - .3413193965 * short,
+                -.0041960863 * light - .7034186147 * middle + 1.7076147010 * short)
+
+    fraction = 1.0
+    channels = linear_rgb(fraction)
+    if min(channels) < 0 or max(channels) > 1:
+        low, high = 0.0, 1.0
+        for _ in range(12):
+            fraction = (low + high) * .5
+            candidate = linear_rgb(fraction)
+            if min(candidate) < 0 or max(candidate) > 1:
+                high = fraction
+            else:
+                low = fraction
+        channels = linear_rgb(low)
+    return QColor(*(round(255 * max(0.0, min(1.0, 12.92 * value if value <= .0031308
+                                            else 1.055 * value ** (1 / 2.4) - .055))) for value in channels))
+
+
+def balanced_background_colors(
+    colors: tuple[QColor, ...], *, weights: tuple[float, ...] = (),
+) -> tuple[QColor, ...]:
+    """Give strongly posterized artwork a quiet base and occupied color cores.
+
+    Raw extraction, source coverage and Solid island colors stay untouched.
+    A bright, chromatic majority beside a substantial neutral area needs its
+    own moving domain: using that pigment as the uncovered canvas amplified
+    a red/white/cyan cover into a nearly uniform red page. Other covers keep
+    their established route, including single-hue art and dark photographs.
+    Returned colors are display slots: one foundation followed by one domain
+    per source pigment, with no invented accent hue and at most seven slots.
+    """
+    if (len(colors) < 2 or len(weights) != len(colors)
+            or any(not color.isValid() for color in colors)
+            or any(not math.isfinite(weight) or weight < 0 for weight in weights)):
+        return ()
+    source = QColor(colors[0])
+    lightness, first, second = _oklab(source)
+    chroma = math.hypot(first, second)
+    neutral_area = sum(weight for color, weight in zip(colors, weights) if _is_neutral(color))
+    if (_is_neutral(source) or lightness < .42 or chroma < .19
+            or weights[0] < .45 or neutral_area < .08):
+        return ()
+
+    domains = []
+    for color in colors[:6]:
+        lightness, first, second = _oklab(color)
+        if _is_neutral(color):
+            domains.append(_oklab_color(.22 + .40 * lightness, 0.0, 0.0))
+            continue
+        chroma = math.hypot(first, second)
+        # A smooth high-chroma shoulder preserves restrained pigments and
+        # avoids treating perceptually bright yellow like low-luminance blue.
+        display_chroma = chroma if chroma <= .12 else .12 + .055 * (1 - math.exp(-((chroma - .12) / .055)))
+        fraction = display_chroma / chroma
+        domains.append(_oklab_color(.28 + .38 * lightness, first * fraction, second * fraction))
+    lightness, first, second = _oklab(domains[0])
+    foundation = _oklab_color(max(.28, lightness * .82), first * .18, second * .18)
+    return (foundation, *domains)
+
+
 def _contrast_ratio(first: QColor, second: QColor) -> float:
     first_luminance = relative_luminance(first)
     second_luminance = relative_luminance(second)

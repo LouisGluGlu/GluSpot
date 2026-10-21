@@ -17597,6 +17597,7 @@ class IslandStackVisual(QWidget):
             prepared.append((rect, x, text, font, unread, read))
         renderer.paint_whole_block(
             painter, tuple(prepared), float(phase.get("whole_block_progress", 1.0)),
+            highlight_parentheticals=True,
         )
 
     def _paint_expanded_lyric_row(
@@ -20974,6 +20975,7 @@ class IslandStackVisual(QWidget):
             max(0.0, min(1.0, float(progress))),
             QColor(base_color),
             QColor(live_color),
+            highlight_parentheticals=True,
             **paint_kwargs,
         )
 

@@ -102,7 +102,7 @@ class MusicPresentationEdgeTests(unittest.TestCase):
             if text in {"echo", "回声", "reply", "回应"}:
                 captured[text] = (row.top(), progress)
 
-        with patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture):
+        with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
             self._render_at(101.0, 12.0)
         self.assertEqual(self.window._lyric_motion.active_index, 3)
         self.assertEqual(set(captured), {"echo", "回声", "reply", "回应"})
@@ -143,7 +143,7 @@ class MusicPresentationEdgeTests(unittest.TestCase):
                 if text in {"echo", "回声"}:
                     layers[text] = (row.top(), progress)
 
-            with patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture):
+            with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
                 self._render_at(now, position)
             return layers
 
@@ -159,26 +159,36 @@ class MusicPresentationEdgeTests(unittest.TestCase):
         )
         self.assertAlmostEqual(entering["echo"][1], entering["回声"][1])
 
-        self._render_at(101.5, 20.5)
+        # A reads until 19.0. Its aside begins at 17.2 and stays clear until
+        # 22.25: C starts at 20.0 and its estimated read ends at 29.0.
+        held = captured_at(101.5, 20.5)
+        self.assertAlmostEqual(held["echo"][1], (20.5 - 17.2) / (22.25 - 17.2))
+        self.assertAlmostEqual(held["回声"][1], held["echo"][1])
         completed = {}
+        parent_opacity = []
         native = self.window._draw_sprung_cached_wrapped_layout
 
         def record_completed(painter, layout, origin, text, *args, **kwargs):
+            if text == "Shine on me" and not parent_opacity:
+                parent_opacity.append(painter.opacity())
             if text in {"echo", "回声"}:
                 # Fractional blur recursively draws weighted cached layers.
                 # Inspect the logical layer's opacity before those weights.
                 completed.setdefault(text, (origin.y(), painter.opacity(), kwargs.get("blur_level")))
             return native(painter, layout, origin, text, *args, **kwargs)
 
+        self._render_at(103.25, 22.25)
         with patch.object(self.window, "_draw_sprung_cached_wrapped_layout", side_effect=record_completed):
-            self._render_at(101.65, 20.65)
+            self._render_at(103.55, 22.55)
         self.assertEqual(set(completed), {"echo", "回声"})
         self.assertAlmostEqual(
             completed["回声"][0] - completed["echo"][0],
             settled["回声"][0] - settled["echo"][0], delta=0.01,
         )
         self.assertAlmostEqual(completed["echo"][1], completed["回声"][1])
-        self.assertGreater(completed["echo"][1], 0.90)
+        self.assertEqual(len(parent_opacity), 1)
+        self.assertAlmostEqual(completed["echo"][1], parent_opacity[0])
+        self.assertGreater(completed["echo"][1], 0.0)
         self.assertEqual(completed["echo"][2], completed["回声"][2])
 
     def test_next_rows_translation_and_both_bracket_layers_are_queued_for_prewarm(self):

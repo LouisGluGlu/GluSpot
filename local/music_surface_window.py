@@ -8,6 +8,8 @@ import re
 import time
 import unicodedata
 
+import numpy as np
+
 from PIL import Image, ImageFilter
 from local.artwork_skeleton import paint_artwork_skeleton
 
@@ -60,6 +62,7 @@ from local.music_lyric_motion import (
     continuous_read_lift,
     lyric_emphasis_plan,
     lyric_glow_phase,
+    parenthetical_reading_window,
     SparseGlyphFrame,
     sparse_glyph_frame,
 )
@@ -3236,6 +3239,59 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         opacity = opacity_phase * opacity_phase * (3.0 - 2.0 * opacity_phase)
         return back, opacity
 
+    def _parenthetical_read_window(self, index: int, timed):
+        """An aside's display clock; source timings and gap evidence stay intact."""
+        plans = self._display_row_timings
+        if not 0 <= index < min(len(timed), len(plans)):
+            return None
+        plan = plans[index]
+        ending = plan.end_seconds
+        overrides = getattr(self, "_display_timed_read_ends", ())
+        if index < len(overrides) and overrides[index] is not None:
+            ending = overrides[index]
+        following = plans[index + 1] if index + 1 < len(plans) else None
+        # Dots are a vocal gap, not the next sung sentence's first quarter.
+        if following is not None and (
+            index + 1 >= len(timed) or timed[index + 1][1] == INTRO_COUNTDOWN_TEXT
+        ):
+            following = None
+        return parenthetical_reading_window(
+            plan.start_seconds, ending,
+            following.start_seconds if following is not None else None,
+            following.end_seconds if following is not None else None,
+        )
+
+    def _paint_parenthetical_highlight(
+        self, painter, row, text, font, layout, progress, *, line_offsets=(),
+    ):
+        """Every sung aside uses the existing character bloom, even when short."""
+        unread = self._future_lyric_color(row)
+        if not self._lyric_emphasis_assets_ready(text, font, row.width(), layout, "scatter_glow", unread):
+            # A late lyric result must still visibly bloom while individual
+            # character sprites warm. Reuse the bounded whole-line light
+            # field rather than silently reverting the aside to ordinary ink.
+            if 0. < progress < 1.:
+                for index in range(layout.lineCount()):
+                    self._lyric_glow_sprite(text, font, row.width(), layout, index)
+                self._paint_lyric_scatter_glow(
+                    painter, text, font, row.width(), layout, row.topLeft(), line_offsets, progress,
+                )
+            self._paint_cold_emphasis_reading(
+                painter, row, text, font, layout, progress, unread, line_offsets,
+            )
+            return
+        runs = self._wrapped_lyric_runs(text, font, layout, "character")
+        progresses = self._visual_line_progresses(progress, tuple(run[4] for run in runs))
+        wave, mappings, count = self._wrapped_lift_wave(
+            text, font, layout, runs, progress, "character", None, ordinal_mode="character",
+        )
+        for index, ((segment, x, y, height, _count), local) in enumerate(zip(runs, progresses)):
+            self._paint_sparse_glyph_run(
+                painter, QPointF(row.left() + x, row.top() + y + (line_offsets[index] if index < len(line_offsets) else 0.)),
+                height, segment, font, local, unread,
+                wave_progress=wave, wave_unit_indices=mappings[index], wave_unit_count=count,
+            )
+
     def on_translation_visibility_changed(self, enabled: bool) -> None:
         """Retain the outgoing companion long enough for a visible collapse."""
         enabled = bool(enabled)
@@ -5650,6 +5706,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         phase = lyric_glow_phase(progress)
         if phase.intensity <= 0.001 or phase.visible_fraction <= 0.001:
             return
+        opacity = painter.opacity()
         painter.save()
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
         for index in range(layout.lineCount()):
@@ -5667,7 +5724,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             edge = target.left() + target.width() * phase.visible_fraction
             feather = min(24.0, max(8.0, line.height() * 0.38))
             opaque_right = min(target.right(), max(target.left(), edge - feather))
-            painter.setOpacity(phase.intensity)
+            painter.setOpacity(opacity * phase.intensity)
             if phase.stage == "hold":
                 painter.drawImage(target.topLeft(), sprite)
                 continue
@@ -5681,7 +5738,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             for strip in range(self.GLOW_EDGE_FEATHER_STEPS):
                 left = opaque_right + strip * step
                 source = QRectF(left - target.left(), 0.0, step, target.height())
-                painter.setOpacity(phase.intensity * (1.0 - (strip + 0.5) / self.GLOW_EDGE_FEATHER_STEPS))
+                painter.setOpacity(opacity * phase.intensity * (1.0 - (strip + 0.5) / self.GLOW_EDGE_FEATHER_STEPS))
                 painter.drawImage(QRectF(left, target.top(), step, target.height()), sprite, source)
         painter.restore()
 
@@ -7466,6 +7523,28 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                     emphasis_unread_color, 0, 0,
                 )
             glow_queued = True
+        if not glow_queued:
+            # Asides have no sparse-duration gate. Prepare their character
+            # halos through the same one-unit-per-tick budget as main lyrics.
+            for candidate in range(max(0, active - 1), min(len(layouts), active + 3)):
+                for layer, layer_text, layer_font in (
+                    (self._song_parenthetical_layouts[candidate], parenthetical_lines[candidate], parenthetical_font),
+                    (self._song_parenthetical_translation_layouts[candidate], parenthetical_translation_lines[candidate], secondary_font),
+                ):
+                    if layer is None or not layer_text or (layer_font is secondary_font and not self._translation_setting):
+                        continue
+                    if self._lyric_emphasis_assets_ready(layer_text, layer_font, row_widths[candidate], layer[0], "scatter_glow", emphasis_unread_color):
+                        continue
+                    token = (self._song_layout_key, ("aside", candidate, layer_text, layer_font.toString()))
+                    if self._pending_glow_prewarm is None or self._pending_glow_prewarm[0] != token:
+                        self._pending_glow_prewarm = (
+                            token, layer_text, layer_font, row_widths[candidate], layer[0],
+                            "scatter_glow", emphasis_unread_color, 0, 0,
+                        )
+                    glow_queued = True
+                    break
+                if glow_queued:
+                    break
         if reading_candidate is None:
             candidate = active + 1
             if (
@@ -7639,7 +7718,12 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 and index == active_pair_first and index < active
                 and current_position < paired_end
             )
-            if index in (active, visual_active) or paired_continuation:
+            aside_window = self._parenthetical_read_window(index, timed) if (
+                timed and outgoing_lyrics is None and parenthetical_factors[index] > 0.
+            ) else None
+            aside_reading = bool(aside_window is not None and current_position < aside_window.end_seconds)
+            aside_settling = bool(aside_window is not None and current_position < aside_window.end_seconds + .18)
+            if index in (active, visual_active) or paired_continuation or aside_settling:
                 ink_left = min(
                     (row.left() + layout.lineAt(line_index).x() for line_index in range(layout.lineCount())),
                     default=row.left(),
@@ -7722,6 +7806,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 painter.drawRoundedRect(row.adjusted(-4, 2, 4, -2), 12, 12)
             text = paint_lines[index]
             painter.save()
+            row_base_opacity = painter.opacity()
             if (not manual_view and blur_level > 0.0
                     and pair_first_by_row.get(index, index) != focus_index):
                 painter.setOpacity(painter.opacity() * (
@@ -8092,7 +8177,16 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                         opacity, slide = 1.0, 0.0
                     if opacity > 0.001:
                         painter.save()
-                        painter.setOpacity(painter.opacity() * opacity)
+                        # Keep the continued aside clear, then return its
+                        # opacity with the same settle as its ordinary blur.
+                        # Holding the undimmed row opacity forever would leave
+                        # completed asides brighter than their parent row.
+                        annotation_opacity = painter.opacity()
+                        if aside_window is not None and current_position < aside_window.end_seconds + .18:
+                            settle = max(0., min(1., (current_position - aside_window.end_seconds) / .18))
+                            settle = settle * settle * (3. - 2. * settle)
+                            annotation_opacity = row_base_opacity + (annotation_opacity - row_base_opacity) * settle
+                        painter.setOpacity(annotation_opacity * opacity)
                         bracket_progress = 0.0 if (annotation_waiting or not reading_focused) else row_progress
                         if showing and reading_focused and not annotation_waiting and row_plan.has_reading_timing and row_source_offsets is not None:
                             source_front = display_row_reading_front(
@@ -8106,12 +8200,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                         # its reading front runs only during the last fifth
                         # of the visible primary sentence. Both annotation
                         # layers share this exact fraction.
-                        bracket_progress = max(
-                            0.0, min(1.0, (bracket_progress - 0.8) / 0.2),
+                        bracket_progress = (
+                            aside_window.progress(current_position) if aside_window is not None else
+                            max(0.0, min(1.0, (bracket_progress - 0.8) / 0.2))
                         )
-                        if showing:
+                        if showing or aside_settling:
                             self._parenthetical_read_progress[index] = bracket_progress
-                        else:
+                        elif completed:
                             bracket_progress = 1.0
                         for layer, layer_text, layer_font in (
                             (parenthetical, parenthetical_lines[index], parenthetical_font),
@@ -8135,20 +8230,23 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                 painter.translate(0.0, obo_active_primary_lift - layer_lift)
                             layer_origin = QPointF(row.left(), row.top() + layer_top + slide)
                             layer_offsets = (combined_offsets[-1] if combined_offsets else 0.0,) * annotation_layout.lineCount()
-                            if completed:
+                            if completed and not aside_reading:
+                                annotation_blur = blur_level
+                                if aside_window is not None:
+                                    blur_phase = max(0., min(1., (current_position - aside_window.end_seconds) / .18))
+                                    annotation_blur *= blur_phase * blur_phase * (3. - 2. * blur_phase)
                                 self._draw_sprung_cached_wrapped_layout(
                                     painter, annotation_layout, layer_origin, layer_text,
                                     layer_font, row_width, layer_height,
-                                    QColor(255, 255, 255) if is_translation else QColor(220, 220, 220),
-                                    layer_offsets, blur_level=blur_level,
+                                    QColor(255, 255, 255),
+                                    layer_offsets, blur_level=annotation_blur,
                                 )
                             else:
-                                self._paint_wrapped_lifted_lyric(
+                                self._paint_parenthetical_highlight(
                                     painter,
                                     QRectF(layer_origin.x(), layer_origin.y(), row_width, layer_height),
                                     layer_text, layer_font, annotation_layout, bracket_progress,
                                     line_offsets=layer_offsets,
-                                    **({"read_color": QColor(220, 220, 220)} if not is_translation else {}),
                                 )
                             if layer_lift:
                                 painter.translate(0.0, layer_lift - obo_active_primary_lift)
@@ -8368,7 +8466,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return shape.contains(point)
 
     def _surface_glass_backdrop(self) -> QImage:
-        """Keep the same scene through control prewarm and its idle exit."""
+        """Live visible glass, with a separate stable snapshot for exit blur."""
+        prewarm = getattr(self, "_glass_prewarm_backdrop", None)
+        if prewarm is not None:
+            return prewarm
         now = time.monotonic()
         reveal = self._control_reveal_at(now)
         if .001 < reveal < .999 and not self._glass_idle_backdrop.isNull():
@@ -8381,7 +8482,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         if key != self._glass_idle_backdrop_key:
             self._glass_idle_backdrop = QImage(self._background_cache)
             self._glass_idle_backdrop_key = key
-        return self._glass_idle_backdrop
+        return self._background_cache
 
     def _surface_glass_source_rect(self, target: QRectF, image: QImage) -> QRectF:
         sx, sy = image.width() / max(1, self.width()), image.height() / max(1, self.height())
@@ -8446,25 +8547,35 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         key = (image.cacheKey(), veil.rgba())
         if key != self._scene_control_ink_key:
             columns, rows = min(32, image.width()), min(18, image.height())
-            black_area = white_area = 0.0
-            # Equal black/white contrast occurs at this linear luminance.
-            crossover = math.sqrt(.05 * 1.05) - .05
-            for row in range(rows):
-                y = min(image.height() - 1, int((row + .5) * image.height() / rows))
-                for column in range(columns):
-                    x = min(image.width() - 1, int((column + .5) * image.width() / columns))
-                    color = image.pixelColor(x, y)
-                    color = QColor(*(round(a * (1. - veil.alphaF()) + b * veil.alphaF())
-                                     for a, b in zip(color.getRgb()[:3], veil.getRgb()[:3])), color.alpha())
-                    if self._relative_luminance(color) > crossover:
-                        black_area += color.alphaF()
-                    else:
-                        white_area += color.alphaF()
+            black_area, white_area = self._scene_control_ink_areas(image, veil, columns, rows)
             # White is the deterministic tie-breaker, so crossing an exact
             # half split cannot depend on the caller or on a control's bounds.
             self._scene_control_ink_cache = QColor("black" if black_area > white_area else "white")
             self._scene_control_ink_key = key
         return self._interpolated_control_color("scene", self._scene_control_ink_cache)
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _srgb_luminance_table():
+        values = np.arange(256, dtype=np.float64) / 255.
+        table = np.where(values <= .04045, values / 12.92, ((values + .055) / 1.055) ** 2.4)
+        table.flags.writeable = False
+        return table
+
+    @classmethod
+    def _scene_control_ink_areas(cls, image, veil, columns=32, rows=18):
+        """The same equal-area vote without hundreds of Python QColor calls."""
+        rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        pixels = np.frombuffer(rgba.constBits(), dtype=np.uint8).reshape(rgba.height(), rgba.bytesPerLine() // 4, 4)
+        xs = np.minimum(rgba.width() - 1, ((np.arange(columns) + .5) * rgba.width() / columns).astype(np.intp))
+        ys = np.minimum(rgba.height() - 1, ((np.arange(rows) + .5) * rgba.height() / rows).astype(np.intp))
+        samples = pixels[ys[:, None], xs]
+        rgb = np.rint(samples[..., :3] * (1. - veil.alphaF()) + np.asarray(veil.getRgb()[:3]) * veil.alphaF()).astype(np.uint8)
+        linear = cls._srgb_luminance_table()[rgb]
+        luminance = linear @ np.asarray((.2126, .7152, .0722))
+        black = luminance > math.sqrt(.05 * 1.05) - .05
+        weights = samples[..., 3].astype(np.float64) / 255.
+        return float(weights[black].sum()), float(weights[~black].sum())
 
     def _surface_glass_ink(self, target: QRectF, *, active=False, live=False) -> QColor:
         # Preserve the existing shared caller contract, including the voice
@@ -8480,7 +8591,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                            backdrop=image, backdrop_rect=self._surface_glass_source_rect(target, image),
                            cache_token=id(self), material_owner=self, material_role=role,
                            material_scene=self._visual_track_identity,
-                           material_dirty=painter.worldTransform().mapRect(target))
+                           material_dirty=painter.worldTransform().mapRect(target),
+                           material_transition=.1)
 
     def _paint_library_back(self, painter: QPainter, rect: QRectF):
         if not self._library_back_available():
@@ -9310,7 +9422,21 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                         ink_key, self._surface_glass_level())
         cache_key = cache_key + (material_key,)
         if prewarm_default is not None:
-            prewarm_default = (prewarm_default[0] + (material_key,), prewarm_default[1])
+            # Exit templates must stay stable while the live face keeps
+            # following the ambient scene. Do not repeatedly blur new scene
+            # pixels on the GUI thread merely to warm a hidden template.
+            backdrop = self._glass_idle_backdrop if not self._glass_idle_backdrop.isNull() else scene
+            frozen_key = (self._surface_glass_light(), backdrop.cacheKey(), self.width(), self.height(),
+                          ink_key, self._surface_glass_level())
+            default_draw = prewarm_default[1]
+            def draw_frozen(layer):
+                previous = getattr(self, "_glass_prewarm_backdrop", None)
+                self._glass_prewarm_backdrop = backdrop
+                try:
+                    default_draw(layer)
+                finally:
+                    self._glass_prewarm_backdrop = previous
+            prewarm_default = (prewarm_default[0] + (frozen_key,), draw_frozen)
         painter.save()
         scale = self._surface_scale()
         transform = painter.deviceTransform()
@@ -9558,7 +9684,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                   backdrop_rect=self._surface_glass_source_rect(posed_connection, self._surface_glass_backdrop()),
                                   material_owner=self, material_role="audio-connection",
                                   material_scene=self._visual_track_identity,
-                                  material_dirty=painter.worldTransform().mapRect(posed_connection))
+                                  material_dirty=painter.worldTransform().mapRect(posed_connection),
+                                  material_transition=.1)
             painter.restore()
 
     @staticmethod
@@ -9595,7 +9722,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return path
 
     def _paint_transport_icon(self, painter: QPainter, rect: QRectF, command: str, color: QColor,
-                              *, hovered: bool = False, pressed: bool = False):
+                              *, hovered: bool = False, pressed: bool = False,
+                              scene_ink: QColor | None = None):
         painter.save()
         shape = QPainterPath()
         cx, cy = rect.center().x(), rect.center().y()
@@ -9631,15 +9759,34 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # Pause bars, triangles, stems and broad pointer targets stay intact.
         image = self._surface_glass_backdrop()
         level = self._surface_glass_level()
+        # A fine contact shadow and opposing reflections give transparent
+        # glyphs a readable edge on both bright and dark moving pigments.
+        # The center remains the same neutral transmitted glass as buttons.
+        edge_width = max(.85, min(1.5, size * .045))
+        painter.setPen(QPen(QColor(0, 0, 0, 48), edge_width * 1.35))
+        painter.setBrush(QColor(0, 0, 0, 26))
+        painter.drawPath(shape.translated(0., edge_width * .75))
+        opal = QColor(scene_ink if scene_ink is not None else self._scene_control_ink())
+        opal.setAlphaF(min(.78, .64 * math.sqrt(level / 100.) + (.10 if hovered else 0.)))
         paint_liquid_glass(painter, shape.boundingRect(), path=shape,
                            light=self._surface_glass_light(), refractive=True,
                            hovered=hovered, pressed=pressed,
-                           material_level=level, backdrop=image,
+                           material_level=level, backdrop=image, base_color=opal, face_opacity=1.,
                            backdrop_rect=self._surface_glass_source_rect(shape.boundingRect(), image),
                            cache_token=(id(self), "transport", command),
                            material_owner=self, material_role=("transport", command),
                            material_scene=self._visual_track_identity,
-                           material_dirty=painter.worldTransform().mapRect(shape.boundingRect()))
+                           material_dirty=painter.worldTransform().mapRect(shape.boundingRect()),
+                           material_transition=.1)
+        painter.setClipPath(shape, Qt.ClipOperation.IntersectClip)
+        reflection = QLinearGradient(shape.boundingRect().topLeft(), shape.boundingRect().bottomRight())
+        reflection.setColorAt(0., QColor(255, 255, 255, 188 if hovered else 152))
+        reflection.setColorAt(.42, QColor(255, 255, 255, 32))
+        reflection.setColorAt(.65, QColor(0, 0, 0, 62))
+        reflection.setColorAt(1., QColor(0, 0, 0, 118))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(reflection, edge_width))
+        painter.drawPath(shape)
         painter.restore()
 
     @staticmethod
@@ -9814,7 +9961,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 )
                 self._paint_transport_icon(layer, icon_rect, command, icon_color,
                                            hovered=hovered_command == command,
-                                           pressed=pressed_command == command)
+                                           pressed=pressed_command == command,
+                                           scene_ink=accent)
 
         def draw_default(layer: QPainter):
             draw(layer, hovered_command="", pressed_command="", animated_commands=(), use_hover_pose=False)
@@ -9854,7 +10002,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             painter.translate(-icon_rect.center())
             self._paint_transport_icon(painter, icon_rect, command, icon_color,
                                        hovered=self._hovered_media_command == command,
-                                       pressed=self._pressed_media_command == command)
+                                       pressed=self._pressed_media_command == command,
+                                       scene_ink=accent)
             painter.restore()
 
     def _edge_set(self, point: QPointF) -> set[str]:

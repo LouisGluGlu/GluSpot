@@ -54,7 +54,7 @@ class CollectionGlassButton(GlassPushButton):
                 refractive=True, backdrop=image,
                 backdrop_rect=self.surface._surface_glass_source_rect(target, image),
                 hovered=self.underMouse(), pressed=self.isDown(), cache_token=id(self),
-                material_owner=self, material_role='collection-row',
+                material_owner=self, material_role='collection-row', material_transition=.1,
                 material_scene=self.surface._visual_track_identity)
             ink = self.surface._scene_control_ink()
             if not self.isEnabled():
@@ -286,6 +286,7 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
 
     def _tick(self):
         self._sync_ink()
+        self.update()
         for button in (self.more, self.close_button, *self._row_buttons.values()):
             if button.isVisible():
                 button.update()
@@ -320,7 +321,7 @@ class SongPlaylistPanel(GlassCaptureMixin, QWidget):
                               refractive=True, backdrop=image,
                               backdrop_rect=self.surface._surface_glass_source_rect(target, image),
                               cache_token=id(self), material_owner=self, material_role='playlist-panel',
-                              material_scene=self.surface._visual_track_identity)
+                              material_scene=self.surface._visual_track_identity, material_transition=.1)
 
 
 class MusicSongCollectionMixin:
@@ -428,7 +429,7 @@ class MusicSongCollectionMixin:
                           backdrop_rect=self._surface_glass_source_rect(face, image), cache_token=(id(self), "collection"),
                           material_owner=self, material_role='collection',
                           material_scene=self._visual_track_identity,
-                          material_dirty=painter.worldTransform().mapRect(face))
+                          material_dirty=painter.worldTransform().mapRect(face), material_transition=.1)
         for key, target in self._song_collection_rects(rect, now).items():
             painter.save()
             started = self._song_collection_clicks.get(key)

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import time
 import weakref
 
+from PIL import Image
 from PySide6.QtCore import QEvent, QObject, QRectF, Slot
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
@@ -38,6 +39,7 @@ class _Request:
     render: object
     dirty: tuple
     interval: float
+    transition: float = 0.
     ready_callback: object = None
 
 
@@ -49,6 +51,8 @@ class _Ready:
     serial: int
     image: QImage
     at: float
+    previous: QImage | None = None
+    transition: float = 0.
 
 
 @dataclass(frozen=True)
@@ -148,8 +152,12 @@ class GlassPixelTasks(QObject):
         return uid, state
 
     def request(self, owner, role, scene, domain, stamp, payload, render, dirty,
-                *, byte_count, interval=.1, ready_callback=None):
-        """GUI-only request; return the current compatible raster or None."""
+                *, byte_count, interval=.1, ready_callback=None, transition=0.):
+        """GUI-only request; return compatible presentation pixels or None.
+
+        A nonzero transition requires the owner's existing animation clock;
+        no timer is created here. Callbacks still receive the raw ready frame.
+        """
         if self.closed or not self._live(owner):
             return None
         bound = self._bind(owner, scene)
@@ -172,22 +180,22 @@ class GlassPixelTasks(QObject):
         now = time.monotonic()
         if compatible and (ready.stamp == stamp or now - ready.at < max(0., interval)):
             self.hits += 1
-            return ready.image
+            return self._present(ready, now)
         self.misses += 1
         previous = self.latest.get(slot)
         desired = (state.generation, domain, stamp)
         if self.failed.get(slot) == desired:
-            return ready.image if compatible else None
+            return self._present(ready, now) if compatible else None
         if previous is not None and (previous.generation, previous.domain, previous.stamp) == desired:
             if slot in self.pending or (self.active is not None and self.active.serial == previous.serial):
-                return ready.image if compatible else None
+                return self._present(ready, now) if compatible else None
         self._serial += 1
         rect = QRectF(dirty)
         callback = weakref.WeakMethod(ready_callback) if ready_callback is not None else None
         request = _Request(slot, state.generation, domain, stamp, self._serial, payload,
                            max(0, int(byte_count)), render,
                            (rect.x(), rect.y(), rect.width(), rect.height()),
-                           max(0., interval), callback)
+                           max(0., interval), min(.25, max(0., float(transition))), callback)
         self.failed.pop(slot, None)
         self.latest[slot] = _Desired(request.generation, domain, stamp, request.serial)
         self.latest.move_to_end(slot)
@@ -206,7 +214,36 @@ class GlassPixelTasks(QObject):
             if not self.pending:
                 break
         self._start()
-        return ready.image if compatible else None
+        return self._present(ready, now) if compatible else None
+
+    @staticmethod
+    def _present(ready, now):
+        """Blend only the bounded material; the owner supplies its paint clock."""
+        if ready.previous is None or ready.transition <= 0.:
+            return ready.image
+        fraction = min(1., max(0., (now - ready.at) / ready.transition))
+        if fraction >= 1.:
+            return ready.image
+        if fraction <= 0.:
+            return ready.previous
+        fraction = fraction * fraction * (3. - 2. * fraction)
+        source = ready.previous.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        target = ready.image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+        size = (source.width(), source.height())
+        # Blend premultiplied bytes, including alpha, with the same weights.
+        # Applying QPainter opacity to Plus composition has different opaque
+        # fast paths and can reduce coverage even for two opaque sources.
+        first = Image.frombytes('RGBA', size, source.constBits().tobytes(),
+                                'raw', 'RGBA', source.bytesPerLine())
+        second = Image.frombytes('RGBA', size, target.constBits().tobytes(),
+                                 'raw', 'RGBA', target.bytesPerLine())
+        pixels = Image.blend(first, second, fraction).tobytes()
+        return QImage(pixels, *size, size[0] * 4, QImage.Format.Format_ARGB32_Premultiplied).copy()
+
+    @staticmethod
+    def _ready_bytes(ready):
+        return int(ready.image.sizeInBytes()) + (
+            int(ready.previous.sizeInBytes()) if ready.previous is not None else 0)
 
     @property
     def input_bytes(self):
@@ -286,10 +323,18 @@ class GlassPixelTasks(QObject):
                 and image.sizeInBytes() <= self.MAX_CACHE_BYTES
                 and (previous is None or previous.serial < request.serial)):
             self.prepare_seconds = value[1]
+            accepted_at = time.monotonic()
+            source = None
+            if (request.transition > 0. and previous is not None
+                    and (previous.generation, previous.domain) == (request.generation, request.domain)
+                    and previous.image.size() == image.size()):
+                source = self._present(previous, accepted_at)
+                if source.sizeInBytes() + image.sizeInBytes() > self.MAX_CACHE_BYTES:
+                    source = None
             self._drop_ready(request.slot)
             self.cache[request.slot] = _Ready(request.generation, request.domain, request.stamp,
-                                             request.serial, image, time.monotonic())
-            self.cache_bytes += int(image.sizeInBytes())
+                                             request.serial, image, accepted_at, source, request.transition)
+            self.cache_bytes += self._ready_bytes(self.cache[request.slot])
             while len(self.cache) > self.MAX_SLOTS or self.cache_bytes > self.MAX_CACHE_BYTES:
                 self._drop_ready(next(iter(self.cache)))
             callback = request.ready_callback() if request.ready_callback is not None else None
@@ -307,7 +352,7 @@ class GlassPixelTasks(QObject):
     def _drop_ready(self, slot):
         ready = self.cache.pop(slot, None)
         if ready is not None:
-            self.cache_bytes -= int(ready.image.sizeInBytes())
+            self.cache_bytes -= self._ready_bytes(ready)
 
     def _invalidate(self, uid):
         state = self.owners.get(uid)

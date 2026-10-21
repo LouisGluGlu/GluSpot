@@ -9,7 +9,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QImage
 
 from local.music_surface_background import AlbumFlowBackgroundRenderer
-from local.music_surface_palette import future_lyric_color, relative_luminance, single_hue_background_colors
+from local.music_surface_palette import balanced_background_colors, future_lyric_color, relative_luminance, single_hue_background_colors
 
 
 def _pixels(image: QImage) -> Image.Image:
@@ -61,6 +61,43 @@ class AlbumFlowBackgroundTests(unittest.TestCase):
         roles = single_hue_background_colors(colors, weights=(1.0,))
         slots = AlbumFlowBackgroundRenderer._palette_slots(colors, (1.0,))
         self.assertEqual(slots[:4], tuple(AlbumFlowBackgroundRenderer._bounded_luminance(color) for color in roles))
+
+    def test_balanced_pigments_use_a_quiet_foundation_and_all_source_domain_support(self):
+        colors = (QColor(34, 34, 254), QColor(88, 10, 115), QColor(150, 150, 150), QColor(188, 145, 102))
+        weights = (.62, .17, .18, .03)
+        original = tuple(color.rgba() for color in colors)
+        mapped = balanced_background_colors(colors, weights=weights)
+        self.assertTrue(mapped)
+        slots = AlbumFlowBackgroundRenderer._palette_slots(colors, weights)
+        self.assertEqual(slots[:len(mapped)], tuple(AlbumFlowBackgroundRenderer._bounded_luminance(color) for color in mapped))
+        self.assertEqual(slots[len(mapped):], (slots[0],) * (7 - len(mapped)))
+        strengths = AlbumFlowBackgroundRenderer._domain_strengths(colors, weights)
+        self.assertEqual(strengths[:3], (1., 1., 1.))
+        self.assertAlmostEqual(strengths[3], (.03 / .08) ** .5)
+        self.assertEqual(tuple(color.rgba() for color in colors), original)
+        self.assertTrue(all(relative_luminance(color) <= AlbumFlowBackgroundRenderer.MAX_LUMINANCE + 1e-9
+                            for color in slots))
+
+    def test_balanced_red_white_cyan_motion_reduces_wash_and_retains_color_domains(self):
+        colors = (QColor(235, 31, 20), QColor(235, 235, 235), QColor(16, 135, 164))
+        weights = (.65, .23, .12)
+        renderer = AlbumFlowBackgroundRenderer()
+        slots = renderer._palette_slots(colors, weights)
+        strengths = renderer._domain_strengths(colors, weights)
+        with patch('local.music_surface_background.balanced_background_colors', return_value=()):
+            ordinary = renderer._palette_slots(colors, weights)
+            ordinary_strengths = renderer._domain_strengths(colors, weights)
+        balanced_saturation, ordinary_saturation, reds, cyans = [], [], [], []
+        for seconds in range(0, 61, 5):
+            actual = np.asarray(_pixels(renderer._paint_field_pixels(QSize(256, 144), slots, strengths, seconds))).astype(float)
+            previous = np.asarray(_pixels(renderer._paint_field_pixels(QSize(256, 144), ordinary, ordinary_strengths, seconds))).astype(float)
+            for pixels, target in ((actual, balanced_saturation), (previous, ordinary_saturation)):
+                target.append(np.mean((pixels.max(2) - pixels.min(2)) / np.maximum(pixels.max(2), 1.)))
+            reds.append(np.mean((actual[:, :, 0] > actual[:, :, 2] * 1.4) & (actual[:, :, 0] > 65)))
+            cyans.append(np.mean((actual[:, :, 2] > actual[:, :, 0] * 1.3) & (actual[:, :, 1] > actual[:, :, 0] * 1.2)))
+        self.assertLess(np.mean(balanced_saturation), np.mean(ordinary_saturation))
+        self.assertGreater(max(reds), .01)
+        self.assertGreater(max(cyans), .01)
 
     def test_purity_compression_enters_continuously_and_retains_source_color_objects(self):
         sources = tuple(QColor.fromHsv(240, saturation, 254) for saturation in range(170, 256))

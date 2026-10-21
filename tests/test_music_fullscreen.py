@@ -4749,10 +4749,10 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             icon_scales = []
             original = self.window._paint_transport_icon
 
-            def inspect_icon(painter, rect, command, color, *, hovered=False, pressed=False):
+            def inspect_icon(painter, rect, command, color, *, hovered=False, pressed=False, scene_ink=None):
                 if command == "previous":
                     icon_scales.append(painter.worldTransform().m11())
-                original(painter, rect, command, color, hovered=hovered, pressed=pressed)
+                original(painter, rect, command, color, hovered=hovered, pressed=pressed, scene_ink=scene_ink)
 
             with (
                 patch("local.music_surface_window.time.monotonic", return_value=at),

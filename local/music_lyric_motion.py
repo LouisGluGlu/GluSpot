@@ -55,6 +55,69 @@ class LyricEmphasisPlan:
 
 
 @dataclass(frozen=True)
+class ParentheticalReadingWindow:
+    """Display-only interval for an aside attached to its preceding lyric."""
+
+    start_seconds: float
+    end_seconds: float
+
+    def progress(self, position: float) -> float:
+        """Sample the window from the current media position without state."""
+        try:
+            current = float(position)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        if not math.isfinite(current):
+            return 0.0
+        return max(
+            0.0,
+            min(1.0, (current - self.start_seconds) / (self.end_seconds - self.start_seconds)),
+        )
+
+
+def parenthetical_reading_window(
+    main_start: float,
+    main_end: float,
+    next_start: float | None = None,
+    next_end: float | None = None,
+) -> ParentheticalReadingWindow | None:
+    """Build the aside's last-fifth-to-next-first-quarter display interval.
+
+    Main and next bounds are display timing inputs; this helper does not
+    alter source timestamps or establish interlude evidence. When the next
+    row has no safe finite interval, the aside's interval ends with the main
+    row instead of inventing a continuation time.
+    """
+    try:
+        beginning = float(main_start)
+        ending = float(main_end)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(beginning) or not math.isfinite(ending) or ending <= beginning:
+        return None
+
+    window_start = beginning + 0.8 * (ending - beginning)
+    window_end = ending
+    try:
+        following_start = None if next_start is None else float(next_start)
+        following_end = None if next_end is None else float(next_end)
+    except (TypeError, ValueError, OverflowError):
+        following_start = following_end = None
+    if (
+        following_start is not None and following_end is not None
+        and math.isfinite(following_start) and math.isfinite(following_end)
+        and following_end > following_start
+    ):
+        candidate_end = following_start + 0.25 * (following_end - following_start)
+        if math.isfinite(candidate_end) and candidate_end > window_start:
+            window_end = candidate_end
+
+    if not math.isfinite(window_start) or not math.isfinite(window_end) or window_end <= window_start:
+        return None
+    return ParentheticalReadingWindow(window_start, window_end)
+
+
+@dataclass(frozen=True)
 class LyricGlowPhase:
     """One frame of the sparse-line scatter glow.
 

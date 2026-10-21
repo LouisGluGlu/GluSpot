@@ -240,7 +240,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
             if text == "echo":
                 captured.append((row.top(), font.weight(), progress))
 
-        with patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture):
+        with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
             for instant in (100.0, 100.10, 100.30, 100.60):
                 with patch("local.music_surface_window.time.monotonic", return_value=instant):
                     self._render()
@@ -262,7 +262,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
             if text in {"echo", "回声"}:
                 captured[text] = (row.top(), font.weight(), progress)
 
-        with patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture):
+        with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
             with patch("local.music_surface_window.time.monotonic", return_value=100.0):
                 self._render()
             with patch("local.music_surface_window.time.monotonic", return_value=100.6):
@@ -273,7 +273,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertEqual(captured["回声"][1], QFont.Weight.Normal)
         self.assertAlmostEqual(captured["echo"][2], captured["回声"][2])
 
-    def test_line_timed_bracket_and_translation_read_during_primary_final_fifth(self):
+    def test_line_timed_bracket_and_translation_continue_through_next_first_quarter(self):
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")
         self.owner.media_position_source = "local-seek"
         self.owner.media_position_seconds = 1.0
@@ -290,35 +290,31 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
                 if text in {"echo", "回声"}:
                     painted[text] = progress
 
-            with patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture):
+            with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
                 with patch("local.music_surface_window.time.monotonic", return_value=now):
                     self._render()
             self.assertEqual(set(painted), {"echo", "回声"})
             self.assertAlmostEqual(painted["echo"], painted["回声"])
             plan = self.window._display_row_timings[0]
             self.assertEqual(plan.quality, "estimated")
-            layers = self.window._visual_lyric_layers_for_rows(
-                *self.window._display_lyrics(), outgoing=False,
-            )[0]
-            offsets = self.window._visible_primary_source_offsets(plan.text, layers)
-            source_front = display_row_reading_front(
-                plan, position, range(len(plan.text) + 1),
-            )
-            visible = self.window._project_source_front(source_front, offsets) / len(layers.primary_text)
+            # A's display interval is [0,19], C's [20,39]. The aside
+            # reads [15.2,24.75], without changing either source onset.
+            self.assertEqual(plan.end_seconds, 19.0)
             self.assertAlmostEqual(
-                painted["echo"], max(0.0, min(1.0, (visible - 0.8) / 0.2)), places=5,
+                painted["echo"], max(0.0, min(1.0, (position - 15.2) / 9.55)), places=5,
             )
             return painted["echo"]
 
-        # Word-weighted display estimates keep the one-second preview. The
-        # annotation follows the visible primary, excluding its own source
-        # parentheses, rather than assuming a uniform whole-row clock.
+        # Display estimates retain their one-second preview; only the aside
+        # gets the requested continuation into the following sentence.
         self.assertEqual(progress_at(15.0, 100.0), 0.0)
         self.assertGreater(progress_at(16.0, 101.0), 0.0)
         self.assertLess(progress_at(18.0, 102.0), 1.0)
-        self.assertGreater(progress_at(19.99, 103.0), 0.99)
+        self.assertAlmostEqual(progress_at(19.99, 103.0), 4.79 / 9.55)
+        self.assertGreater(progress_at(24.74, 104.0), .99)
+        self.assertEqual(self.owner.timed_lyrics[1][0], 20.0)
 
-    def test_real_unit_bracket_read_uses_visible_primary_progress(self):
+    def test_real_unit_bracket_continuation_preserves_source_units(self):
         source = "Shine (echo) on me"
         self._four_rows(source + "\n翻译：照耀（回声）我")
         self.owner.timed_lyric_units[0] = tuple(
@@ -347,23 +343,20 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
                     if text in {"echo", "回声"}:
                         painted[text] = progress
 
-                with patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=capture):
+                with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
                     with patch("local.music_surface_window.time.monotonic", return_value=101.0 + step):
                         self._render()
-                front = timed_unit_reading_front(
-                    source, self.owner.timed_lyric_units[0],
-                    self.window._lyric_motion.last_position,
-                    range(len(source) + 1), line_end=20.0,
-                )
-                visible = self.window._project_source_front(front, offsets) / len(layers.primary_text)
-                expected = max(0.0, min(1.0, (visible - 0.8) / 0.2))
+                # 18 genuine one-second units keep their real [0,18]
+                # interval. B runs [14.4,24.75]; C remains at 20 seconds.
+                self.assertEqual(len(self.owner.timed_lyric_units[0]), 18)
+                self.assertEqual(self.window._display_row_timings[0].end_seconds, 18.)
+                expected = max(0.0, min(1.0, (position - 14.4) / 10.35))
                 self.assertEqual(set(painted), {"echo", "回声"})
                 self.assertAlmostEqual(painted["echo"], expected, places=5)
                 self.assertAlmostEqual(painted["回声"], expected, places=5)
-                if position == 15.7:
-                    self.assertEqual(expected, 0.0)
-                elif position == 17.99:
-                    self.assertGreater(expected, 0.99)
+                self.assertGreater(expected, 0.)
+                self.assertLess(expected, .5)
+                self.assertEqual(self.owner.timed_lyric_units[0][-1].end_seconds, 18.)
 
     def test_sentence_gap_increases_without_widening_wrapped_line_spacing(self):
         self._four_rows("A long sentence " * 8)

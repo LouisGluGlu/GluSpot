@@ -134,10 +134,10 @@ class MusicGlassLevelTests(unittest.TestCase):
                 window._paint_transport_icon(painter, QRectF(80, 20, 80, 80), 'toggle_play_pause', QColor('white'))
             left, right = target.pixelColor(99, 60), target.pixelColor(141, 60)
             for color in (left, right):
-                # The neutral material carries the teal scene's pigment
-                # without an independent foreground-colored face.
-                self.assertGreater(color.blue(), color.red() + 35)
-                self.assertGreater(color.green(), color.red() + 25)
+                # Contrast opal remains inside the silhouette and still
+                # transmits the teal scene rather than becoming solid ink.
+                self.assertGreater(color.blue(), color.red() + 15)
+                self.assertGreater(color.green(), color.red() + 12)
                 self.assertGreater(color.alpha(), 160)
             self.assertEqual(target.pixelColor(120, 60).alpha(), 0)
             self.assertEqual(target.pixelColor(81, 60).alpha(), 0)
@@ -212,17 +212,14 @@ class MusicGlassLevelTests(unittest.TestCase):
                 self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
                 self.assertEqual(image.pixelColor(81, 60).alpha(), 0)
             center = [image.pixelColor(99, 60).lightness() for image in images]
-            # The same neutral sheen as the circular controls is visible
-            # inside the original silhouette.
+            # Hover still brightens transmitted opal inside the silhouette.
             self.assertGreater(center[1], center[0] + 8)
             self.assertLess(center[2], center[1])
-            # Boundary is a quiet reflection, not a bright white wire frame.
-            self.assertLess(images[0].pixelColor(98, 24).lightness(), center[0] + 18)
         finally:
             window.shutdown()
             owner.close()
 
-    def test_all_transport_materials_match_circle_reference_across_themes_and_levels(self):
+    def test_transport_materials_keep_scene_chroma_and_common_ink_across_levels(self):
         owner = _TransitionOwner()
         values = {'v2_theme_mode': 'light', 'v2_music_glass_level': 50}
         owner.settings_getter = lambda key, default=None: values.get(key, default)
@@ -237,6 +234,7 @@ class MusicGlassLevelTests(unittest.TestCase):
                     window._background_cache.fill(QColor(background))
                     for level in (0, 50, 100):
                         values['v2_music_glass_level'] = level
+                        window._control_color_transitions.clear()
                         for hovered, pressed in ((False, False), (True, False), (True, True)):
                             for command, playing, sample_x in (
                                     ('previous', False, 120), ('toggle_play_pause', False, 120),
@@ -245,30 +243,97 @@ class MusicGlassLevelTests(unittest.TestCase):
                                                   hovered=hovered, pressed=pressed,
                                                   command=command, playing=playing):
                                     outputs = []
-                                    # Caller ink is deliberately opposite for the two renders:
-                                    # it must not recolor the requested glass material.
+                                    # All silhouettes use the shared scene decision,
+                                    # including when callers pass opposite legacy ink.
                                     for ink in (QColor('black'), QColor('white')):
                                         image = QImage(240, 120, QImage.Format.Format_ARGB32_Premultiplied)
                                         image.fill(Qt.GlobalColor.transparent)
-                                        reference_image = QImage(image)
                                         with QPainter(image) as painter, \
                                                 patch('local.music_surface_window.time.monotonic', return_value=100.), \
                                                 patch.object(window, '_display_playing_state', return_value=playing):
                                             window._paint_transport_icon(painter, QRectF(80, 20, 80, 80),
                                                 command, ink, hovered=hovered, pressed=pressed)
-                                        with QPainter(reference_image) as painter, \
-                                                patch('local.music_surface_window.time.monotonic', return_value=100.):
-                                            window._paint_surface_glass(painter, QRectF(80, 20, 80, 80),
-                                                hovered=hovered, pressed=pressed)
                                         outputs.append(image)
-                                        actual, reference = image.pixelColor(sample_x, 60), reference_image.pixelColor(120, 60)
-                                        self.assertEqual(actual, reference)
+                                        actual = image.pixelColor(sample_x, 60)
                                         self.assertEqual(image.pixelColor(81, 21).alpha(), 0)
                                         if level > 0:
                                             self.assertGreater(actual.alpha(), 160)
+                                            if background == '#168ba8':
+                                                self.assertGreater(actual.blue(), actual.red() + 8)
+                                                self.assertGreater(actual.green(), actual.red() + 6)
                                         if command == 'toggle_play_pause' and playing:
                                             self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
                                     self.assertEqual(outputs[0], outputs[1])
+        finally:
+            window.shutdown()
+            owner.close()
+
+    def test_transport_opacity_follows_level_while_scene_still_changes_glyph_pixels(self):
+        owner = _TransitionOwner()
+        values = {'v2_theme_mode': 'dark', 'v2_music_glass_level': 50}
+        owner.settings_getter = lambda key, default=None: values.get(key, default)
+        window = MusicSurfaceWindow(owner)
+        window.resize(240, 120)
+        window._reset_control_idle(now=100.)
+        try:
+            scene_colors = {}
+            for scene_index, background in enumerate(('#168ba8', '#a88b16')):
+                window._background_cache = QImage(240, 120, QImage.Format.Format_RGB32)
+                window._background_cache.fill(QColor(background))
+                colors = []
+                for level in (0, 25, 50, 75, 100):
+                    values['v2_music_glass_level'] = level
+                    window._control_color_transitions.clear()
+                    image = QImage(240, 120, QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(Qt.GlobalColor.transparent)
+                    with QPainter(image) as painter, \
+                            patch('local.music_surface_window.time.monotonic', return_value=100. + scene_index), \
+                            patch.object(window, '_display_playing_state', return_value=True):
+                        window._paint_transport_icon(painter, QRectF(80, 20, 80, 80),
+                                                     'toggle_play_pause', QColor('white'))
+                    colors.append(image.pixelColor(99, 60))
+                    self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
+                    self.assertEqual(image.pixelColor(81, 60).alpha(), 0)
+                alpha = [color.alpha() for color in colors]
+                self.assertEqual(alpha, sorted(alpha))
+                self.assertGreater(alpha[-1], alpha[0] + 160)
+                scene_colors[background] = colors
+            for index in range(1, 5):
+                teal = scene_colors['#168ba8'][index]
+                warm = scene_colors['#a88b16'][index]
+                self.assertGreater(teal.blue() - teal.red(), 8)
+                self.assertGreater(warm.red() - warm.blue(), 8)
+                self.assertGreater(abs(teal.blue() - warm.blue()), 8)
+        finally:
+            window.shutdown()
+            owner.close()
+
+    def test_transport_opal_uses_shared_scene_decision_even_with_opposite_caller_ink(self):
+        owner = _TransitionOwner()
+        owner.settings_getter = lambda key, default=None: 'dark' if key == 'v2_theme_mode' else default
+        window = MusicSurfaceWindow(owner)
+        window.resize(240, 120)
+        window._reset_control_idle(now=100.)
+        window._background_cache = QImage(240, 120, QImage.Format.Format_RGB32)
+        window._background_cache.fill(QColor('#168ba8'))
+        try:
+            centers = []
+            for shared in (QColor('black'), QColor('white')):
+                outputs = []
+                for caller in (QColor('black'), QColor('white')):
+                    image = QImage(240, 120, QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(Qt.GlobalColor.transparent)
+                    with QPainter(image) as painter, \
+                            patch('local.music_surface_window.time.monotonic', return_value=100.), \
+                            patch.object(window, '_display_playing_state', return_value=True), \
+                            patch.object(window, '_scene_control_ink', return_value=shared) as ink:
+                        window._paint_transport_icon(painter, QRectF(80, 20, 80, 80),
+                                                     'toggle_play_pause', caller)
+                    ink.assert_called_once_with()
+                    outputs.append(image)
+                self.assertEqual(outputs[0], outputs[1])
+                centers.append(outputs[0].pixelColor(99, 60).lightness())
+            self.assertGreater(centers[1], centers[0] + 30)
         finally:
             window.shutdown()
             owner.close()

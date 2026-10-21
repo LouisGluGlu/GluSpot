@@ -162,6 +162,25 @@ class LiquidGlassBackdropTests(unittest.TestCase):
         self.assertFalse(glass._glass_material_cache)
         self.assertFalse(glass._glass_material_slots)
 
+    def test_rim_geometry_is_readonly_bounded_and_shared_across_scene_changes(self):
+        first = self.scene(QColor('red'))
+        second = self.scene(QColor('blue'))
+        self.render(first)
+        before = glass._glass_rim_samples.cache_info()
+        self.render(second)
+        after = glass._glass_rim_samples.cache_info()
+        self.assertEqual(after.misses, before.misses)
+        self.assertEqual(after.hits, before.hits + 1)
+        x, y = glass._glass_rim_samples(40, 40, 10, 20., 1.)
+        self.assertFalse(x.flags.writeable)
+        self.assertFalse(y.flags.writeable)
+        self.assertLessEqual(x.nbytes + y.nbytes, 2 * 160 * 160 * 4)
+        for side in range(30, 50):
+            glass._glass_rim_samples(side, side, 10, 20., 1.)
+        self.assertEqual(glass._glass_rim_samples.cache_info().currsize, 8)
+        glass.clear_glass_cache()
+        self.assertEqual(glass._glass_rim_samples.cache_info().currsize, 0)
+
     def test_material_restores_painter_state_and_foreground_ink_stays_sharp(self):
         image = QImage(200, 100, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)

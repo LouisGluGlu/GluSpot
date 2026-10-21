@@ -150,6 +150,26 @@ class GlassPixelTaskTests(unittest.TestCase):
         self.assertEqual(next(iter(self.store.cache.values())).stamp, 3)
         self.assertEqual(self.store.discarded, 1)
 
+    def test_destination_motion_reuses_material_but_source_motion_is_strict(self):
+        image = self.owner.scene_image
+        sample = QRectF(7., 3., 74., 42.)
+        with patch('local.liquid_glass_tasks.glass_pixel_tasks', return_value=self.store):
+            first = QRectF(5., 5., 90., 50.)
+            glass._live_glass_material(self.owner, 'face', self.owner.current_scene,
+                                       first, image, sample, first, 15., 50)
+            self.store.tasks.finish()
+            domain = self.store.cache[(1, 'face')].domain
+            moved = first.translated(12., 9.)
+            reused = glass._live_glass_material(self.owner, 'face', self.owner.current_scene,
+                                                moved, image, sample, moved, 15., 50)
+            self.assertIsNotNone(reused)
+            self.assertEqual(self.store.submitted, 1)
+            self.assertEqual(self.store.cache[(1, 'face')].domain, domain)
+            self.assertIsNone(glass._live_glass_material(
+                self.owner, 'face', self.owner.current_scene, moved, image,
+                sample.translated(1., 0.), moved, 15., 50))
+            self.assertEqual(self.store.submitted, 2)
+
     def test_queued_live_refresh_rechecks_fresh_result_interval_before_starting(self):
         image = self.image()
         def request(stamp, domain='geometry', interval=.1):
@@ -192,6 +212,67 @@ class GlassPixelTaskTests(unittest.TestCase):
             self.assertEqual(self.store.submitted, 4)
             self.store.tasks.finish()
             self.assertEqual(next(iter(self.store.cache.values())).stamp, 4)
+
+    def test_live_transition_interpolates_delivery_and_rebases_from_visible_pixels(self):
+        def request(stamp, color, domain='geometry'):
+            image = self.image(color)
+            return self.store.request(
+                self.owner, 'face', self.owner.current_scene, domain, stamp, QImage(image),
+                lambda value: value, QRectF(self.owner.rect()), byte_count=int(image.sizeInBytes()),
+                interval=0., transition=.1)
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.):
+            request(1, 'red')
+            self.store.tasks.finish()
+            red = QImage(self.store.cache[(1, 'face')].image)
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.2):
+            request(2, 'blue')
+            self.store.tasks.finish()
+            self.assertEqual(request(2, 'blue'), red)
+            self.assertEqual(self.store.cache_bytes, red.sizeInBytes() * 2)
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.25):
+            middle = request(2, 'blue')
+            color = middle.pixelColor(5, 5)
+            self.assertAlmostEqual(color.red(), 127, delta=2)
+            self.assertAlmostEqual(color.blue(), 127, delta=2)
+            self.assertEqual(color.alpha(), 255)
+            # An arriving third frame begins at the actual presented blend,
+            # rather than snapping to the previous blue delivery.
+            request(3, 'green')
+            self.store.tasks.finish()
+            self.assertEqual(request(3, 'green'), middle)
+            self.assertEqual(red.pixelColor(5, 5), QColor('red'))
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.36):
+            self.assertEqual(request(3, 'green').pixelColor(5, 5), QColor('green'))
+            # Strict crop changes do not borrow the previous domain's pixels.
+            self.assertIsNone(request(4, 'white', domain='new-crop'))
+            self.store.tasks.finish()
+            self.assertIsNone(self.store.cache[(1, 'face')].previous)
+
+    def test_material_transition_counts_both_frames_and_preserves_translucent_alpha(self):
+        def submit(stamp, color):
+            image = QImage(20, 20, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(color)
+            self.store.request(self.owner, 'face', self.owner.current_scene, 'geometry', stamp,
+                               image, lambda value: value, QRectF(self.owner.rect()),
+                               byte_count=int(image.sizeInBytes()), interval=0., transition=.1)
+            self.store.tasks.finish()
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.):
+            submit(1, QColor(255, 0, 0, 80))
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.2):
+            submit(2, QColor(0, 0, 255, 160))
+        ready = self.store.cache[(1, 'face')]
+        self.assertEqual(self.store.cache_bytes, ready.image.sizeInBytes() + ready.previous.sizeInBytes())
+        color = self.store._present(ready, 10.25).pixelColor(5, 5)
+        self.assertAlmostEqual(color.alpha(), 120, delta=2)
+        self.assertAlmostEqual(color.red(), 85, delta=3)
+        self.assertAlmostEqual(color.blue(), 170, delta=3)
+        self.store.MAX_CACHE_BYTES = 2000
+        with patch('local.liquid_glass_tasks.time.monotonic', return_value=10.3):
+            submit(3, QColor('green'))
+        self.assertLessEqual(self.store.cache_bytes, self.store.MAX_CACHE_BYTES)
+        self.assertIsNone(self.store.cache[(1, 'face')].previous)
+        self.store.clear()
+        self.assertEqual(self.store.cache_bytes, 0)
 
     def test_pending_count_input_bytes_ready_bytes_and_slots_remain_bounded(self):
         self.store.MAX_PENDING = 3
@@ -317,6 +398,19 @@ class GlassPixelTaskTests(unittest.TestCase):
             self.app.processEvents()
             self.assertNotIn(True, self.owner.live_modes)
             self.assertEqual(self.store.submitted, 0)
+
+    def test_explicit_live_canvas_can_prepare_pixels_but_capture_guard_stays_sync(self):
+        with patch('local.liquid_glass_tasks.glass_pixel_tasks', return_value=self.store):
+            for capture in (False, True):
+                target = self.image(side=100)
+                self.owner._glass_capture_depth = int(capture)
+                with QPainter(target) as painter:
+                    glass.paint_liquid_glass(
+                        painter, QRectF(5, 5, 90, 50), refractive=True, backdrop=self.owner.scene_image,
+                        material_owner=self.owner, material_role='canvas', material_scene=self.owner.current_scene,
+                        material_layer=True, material_transition=.1)
+                self.assertEqual(self.store.submitted, 1)
+            self.owner._glass_capture_depth = 0
 
     def test_real_worker_is_off_gui_and_result_callback_is_on_gui(self):
         self.store.close()
