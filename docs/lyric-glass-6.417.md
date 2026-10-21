@@ -62,6 +62,6 @@
 
 便携 ZIP 的 8,399 项全部通过 CRC、逐文件 SHA-256、路径及文件集合检查；配置、账号和运行缓存未混入分发包。安装程序绑定审计时的 8,397 个程序文件；便携版另外附带构建信息和使用说明。630 个源码及构建输入在构建前后不变，6.416 两份旧程序包哈希保持原值，旧源码 bundle 也已备份到 E 盘。
 
-本轮仅制作本地测试包。当前分支及任务清单已在侧栏文件持续更新；GitHub 上的已发布 6.416 保留。
+安装程序、便携包及各自 SHA-256 文件发布于 [GitHub v6.417](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.417)。源码同步 main；旧分支及未提交旧代码按[归档索引](branch-archive-6.417.md)保留，历史 Release 不删除。发布文档更新不改变上表包字节或已测试的 630 个构建／源码输入。
 
 离线证据保存在 ignored `logs/lyric-glass-*`、`tmp/lyric-fluidity/` 和 `.runtime/lyric-glass-2026-10-21/`；运行产物不进入源码控制。

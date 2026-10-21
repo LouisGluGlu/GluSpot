@@ -2,14 +2,14 @@
 
 Windows 桌面音乐悬浮岛，让歌词、专辑和播放状态融入桌面。
 
-[发行记录](https://github.com/LouisGluGlu/GluSpot/releases) · [6.417 本地安装程序、便携版及验收](docs/lyric-glass-6.417.md) · [6.416 性能与验收清单](docs/animation-performance-6.416.md)
+[发行记录](https://github.com/LouisGluGlu/GluSpot/releases) · [下载 6.417 安装程序与便携版](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.417) · [验收与旧分支归档](docs/branch-archive-6.417.md) · [6.416 性能与验收清单](docs/animation-performance-6.416.md)
 
 - **音乐与歌词**：网易云、QQ 音乐库及 Windows SMTC，支持逐词读亮、翻译和可靠前奏／间奏提示。
 - **桌面显示**：Free、Top 和沉浸栏，搭配 Liquid Glass 控件与专辑取色背景。
 - **播放布局**：封面、封面内歌词、封面外歌词和播放列表，随窗口宽度切换。
 - **音频输出**：本机与兼容 AirPlay 设备，可组合多设备同步播放。
 
-适用于 **Windows 10 1809+／Windows 11 x64**。安装版支持原目录覆盖升级并保留配置；便携版需完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。当前 **6.417 为本地未签名测试版**，设备兼容与验证边界见本版报告。
+适用于 **Windows 10 1809+／Windows 11 x64**。安装版支持原目录覆盖升级并保留配置；便携版需完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。当前 **6.417 为未签名测试版**，设备兼容与验证边界见本版报告。
 
 源码入口为 `local/main.py`。开发环境运行 `setup-env.bat` 后使用 `launch.bat`；完整测试为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
 
@@ -19,6 +19,8 @@ Windows 桌面音乐悬浮岛，让歌词、专辑和播放状态融入桌面。
 This README is the canonical product, implementation, release-readiness, and pending-work document for the current branch.
 
 ## Current Status
+
+- 2026-10-22：6.417 发布与主线整理。应用及构建输入保持已验收字节，仅更新发布说明；旧分支与未提交旧源码通过[归档索引](docs/branch-archive-6.417.md)保留 GitHub 记录。分支清理须在 Release 附件完整性和 main／开发分支一致性确认后执行，最终保留 main，版本为 6.417。
 
 - 2026-10-21：`codex/lyric-glass-fluidity` 完成 **6.417 本地测试版**：括号词高光及跨句清晰保留、译文／岛态字形缓存复用、玻璃连续跟色和控件对比、失真封面的背景配色。**5,773 项／318.684 秒**回归、双 DPR 各 **165 检查**、425 项包审计及 10 个隔离安装场景通过；8,399 个 ZIP 项通过 CRC／逐文件 SHA-256。安装程序与便携包在本工作区及 `E:/gpt-island/release` 双份保存，6.416 源码及程序保留。物理屏幕流畅度与真实播放仍待验；高 DPI 重场景稳定 60Hz 尚未达标。清单、文件及哈希见[本轮报告](docs/lyric-glass-6.417.md)。
 
@@ -35,7 +37,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 - 6.413 improves whole-song source coverage and shared per-row reading, repairs invisible search text and packages all accumulated desktop/playback changes. Final verification passed **5518 Python tests / 297.018 seconds**, 12 native suites, 2447 production-render checks at each DPR 1/2, 401 package checks, frozen EXE diagnostics, 14 offline adapter checks, 19 QRC fallback checks and ten isolated installer scenarios. All 8399 portable entries passed CRC/per-file SHA-256; 594 frozen inputs and previous distribution files remained unchanged. [Download the modern x64 Setup and portable ZIP](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.413); see [source, artifact hashes and verification limits](docs/lyric-word-timing-6.413.md). Real account coverage, physical-display smoothness and hardware listening remain unverified.
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.417`. Its local Setup and portable ZIP passed verification; the published 6.416 packages and source remain retained. See [the lyric/glass report](docs/lyric-glass-6.417.md).
+- Current test-build version: `6.417`. Its Setup and portable ZIP passed verification and are published on GitHub; earlier packages and source remain retained. See [the lyric/glass report](docs/lyric-glass-6.417.md).
 - The October 19 lyric release packages the new credit cleanup, reliable interlude dots, QQ QRC and trusted-ID AMLL fallback in the modern Windows x64 Setup and portable ZIP. A packaging review corrected QQ's fallback to the pinned SDK's real `request` interface and verified it with the actual packaged dependency over loopback. Final verification passed **5443 Python tests / 287.814 seconds**, 12 native suites, 274 package checks, frozen EXE acceptance, 14 offline adapter checks and ten isolated installer scenarios; all 8399 ZIP entries passed CRC and per-file SHA-256. All 421 frozen source/build inputs remained unchanged, and previous dated releases are retained. See [artifacts, verification and usage](docs/windows-release-lyrics-2026-10-19.md). Real account coverage, physical-display smoothness and listening remain unverified.
 - The October 19 lyric-pipeline source follow-up expands evidence-based credit cleanup, adds display-only middle-gap dots from reliable real word endings, and obtains QQ QRC plus bounded trusted-ID AMLL TTML fallback without a new dependency. Raw lyrics, translation/romanization provenance, identity/version guards and existing provider/cache boundaries are retained. Final native Windows verification passed **5442 Python tests in 288.230 seconds**, 904 follow-up checks at each DPR 1/2 and 364 production-renderer frames per scale; all 386 frozen source files remained unchanged. Public fixed-ID QQ and AMLL read-only probes succeeded, while the existing QQ search entry missed the sample; account playback, long-session listening and physical-display smoothness remain unverified. Version and existing packages are unchanged. See [staged implementation, evidence and limits](docs/lyric-pipeline-2026-10-19.md).
 - The October 19 window-visibility release restores a proportionate **960 × 540 (16:9)** first player window, with 4:3 fallback for narrow work areas, while preserving manually resized windows and the **330 × 400** minimum. Completed compression clears inherited fullscreen/bar hiding state and restores the native island before aligning it to the cached preview, including formerly minimized windows. The production-credit cleanup/countdown option is removed and fixed on, including legacy disabled settings. Final verification passed **5310 Python tests in 276.895 seconds**, 542 related tests at each DPR 1/2, and six isolated native window lifecycle scenarios with 14 visible, non-minimized checkpoints. The new dated window-visibility Setup and portable ZIP passed 249 package checks, frozen EXE acceptance, 12 native suites, 14 offline runtime checks, ten isolated installer scenarios and all 8399 ZIP entries' CRC/per-file SHA-256 checks. All 397 frozen Python sources remained unchanged through packaging; the previous window-resize release is preserved. See [fixes, artifacts and verification](docs/window-visibility-and-release-2026-10-19.md).
@@ -119,7 +121,7 @@ The combined directory has its own Python environment and native HomePod helper 
 
 ## Windows Test Build
 
-The 6.417 local test packages use the PyInstaller `onedir` build. The dated lyric/glass Setup and portable ZIP are saved in `release`; published downloads remain 6.416. The layout keeps Qt plugins, fonts, icons, data files, and local lyrics beside the executable.
+The 6.417 test packages use the PyInstaller `onedir` build. The dated lyric/glass Setup and portable ZIP are saved in `release` and published in GitHub Release v6.417. The layout keeps Qt plugins, fonts, icons, data files, and local lyrics beside the executable.
 
 The modern runtime targets **Windows 10 1809 or later, x64** (or Windows 11). Its existing packages do not support Windows 7/8.1. A separate **Windows 7 SP1 x64 compatibility candidate** uses Python 3.8 / Qt 5 and program playback only, with unavailable SMTC capture/publication and default local output. Its build, OS-update prerequisites and actual acceptance limits are recorded in the [Windows 7 report](docs/windows-7-compatibility-2026-10-17.md). An installer that opens on an older system does not establish that its application can run there.
 
