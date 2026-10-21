@@ -435,7 +435,28 @@ class _CollectionShelf(QWidget):
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.Wheel:
             pixels = event.pixelDelta()
-            delta = pixels.x() or pixels.y() or event.angleDelta().x() or event.angleDelta().y()
+            angles = event.angleDelta()
+            # Horizontal trackpad/wheel deltas stay horizontal. A vertical
+            # wheel moves this shelf only when the user holds Shift; otherwise
+            # let the enclosing library page handle its natural vertical scroll.
+            delta = pixels.x() or angles.x()
+            vertical = pixels.y() or angles.y()
+            if not delta and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                delta = vertical
+            if not delta:
+                if vertical:
+                    # The nested QScrollArea can consume vertical wheel events
+                    # despite its vertical bar being disabled. Apply the same
+                    # pixel/per-notch movement to the library's page bar here.
+                    bar = self.owner.scroll.verticalScrollBar()
+                    step = -pixels.y() if pixels.y() else int(-angles.y() / 120 * 62)
+                    if step and bar.maximum() > bar.minimum():
+                        bar.setValue(bar.value() + step)
+                        event.accept()
+                        return True
+                    event.ignore()
+                    return True
+                return super().eventFilter(watched, event)
             bar = self.scroll.horizontalScrollBar();bar.setValue(bar.value()-delta)
             event.accept();return True
         return super().eventFilter(watched,event)

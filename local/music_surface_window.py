@@ -9626,17 +9626,12 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                     QRectF(line_x - stem / 2.0, cy - half_height, stem, half_height * 2.0),
                     stem * 0.30, stem * 0.30,
                 )
-        # Glass occupies the original glyph itself, without adding a control
-        # plate or changing its broad pointer target. Keep scene pigments in
-        # both pause bars, the play triangle and the next/previous stems.
+        # Use the window-mode button's neutral glass inside the existing
+        # silhouette. Foreground ink must not add a dark/white face over it.
+        # Pause bars, triangles, stems and broad pointer targets stay intact.
         image = self._surface_glass_backdrop()
         level = self._surface_glass_level()
-        face = QColor(color)
-        # The glyph must remain readable after its heavy outline is removed.
-        # Keep one shared ink within the silhouette, over the translucent
-        # scene material; this does not create an enclosing button plate.
-        face.setAlpha(round((160 + level * .30) * color.alphaF()))
-        paint_liquid_glass(painter, shape.boundingRect(), path=shape, base_color=face,
+        paint_liquid_glass(painter, shape.boundingRect(), path=shape,
                            light=self._surface_glass_light(), refractive=True,
                            hovered=hovered, pressed=pressed,
                            material_level=level, backdrop=image,
