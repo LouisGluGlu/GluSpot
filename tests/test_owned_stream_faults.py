@@ -324,7 +324,7 @@ class OwnedStreamFaultTests(unittest.TestCase):
                 self.assertEqual(self.owned.index, 1)
                 self.assertEqual(self.owned.status, "loading_stream")
 
-    def test_fm_waiting_prefetch_pauses_drained_stream_and_accepts_only_one_new_batch(self):
+    def test_fm_waiting_prefetch_retires_drained_stream_and_accepts_only_one_new_batch(self):
         self.service.personal_fm = lambda source: self.songs
         self.owned.play_personal_fm()
         token, action = self.tasks.jobs[-1]
@@ -341,7 +341,9 @@ class OwnedStreamFaultTests(unittest.TestCase):
         self.assertEqual(self.owned.index, 2)
         self.assertTrue(self.owned._fm_advance_pending)
         self.assertEqual(self.owned.status, "loading_catalog")
-        self.assertEqual(self.qt.playbackState(), QMediaPlayer.PlaybackState.PausedState)
+        self.assertEqual(self.qt.playbackState(), QMediaPlayer.PlaybackState.StoppedState)
+        self.assertTrue(self.qt.source().isEmpty())
+        self.assertEqual(self.owned._stream_epoch, 0)
         self.assertFalse(self.owned.track.is_playing)
         self.assertIsNone(self.owned._stream_fault)
         self.check(500)

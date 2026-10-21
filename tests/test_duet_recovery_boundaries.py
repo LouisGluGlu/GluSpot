@@ -12,6 +12,7 @@ from api.lyrics import LocalLyricsStore
 from api.models import TimedLyricLine, TimedLyricUnit
 from local.island_stack_visual import IslandStackVisual
 from local.lyric_unit_timing import duet_estimated_read_start
+from local.music_lyric_motion import LyricEmphasisPlan
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
@@ -69,8 +70,13 @@ class DuetRecoveryBoundaryTests(unittest.TestCase):
 
         image = QImage(960, 540, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(0)
-        with patch.object(surface, "_paint_wrapped_lifted_lyric", side_effect=capture), patch(
-            "local.music_surface_window.time.monotonic", return_value=100.0,
+        # This suite inspects ordinary reading fronts and original source
+        # boundaries. Highlight classification is covered independently.
+        with (
+            patch.object(surface, "_paint_wrapped_lifted_lyric", side_effect=capture),
+            patch("local.music_surface_window.time.monotonic", return_value=100.0),
+            patch("local.music_surface_window.lyric_emphasis_plan", return_value=LyricEmphasisPlan()),
+            patch("local.music_surface_window.explicit_slow_unit_groups", return_value=()),
         ):
             surface.render(image)
         return surface, painted

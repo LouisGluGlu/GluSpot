@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 import os
 import shutil
 import tempfile
@@ -251,16 +252,20 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         manifest = self.modules / "@yakult-green-tea/qq-music-api/package.json"
         manifest.parent.mkdir(parents=True)
         manifest.write_text('{"version":"3.1.4"}')
-        self.script("process.stdin.resume();setInterval(()=>{},1000);")
+        self.script(r'''const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin});
+          rl.on('line',line=>{const r=JSON.parse(line);fs.writeFileSync(r.params.marker,'pending');});
+          setInterval(()=>{},1000);''')
         self.backend.timeout_seconds = 18
         failures = []
-        def request(source, operation):
+        def request(source, operation, marker):
             try:
-                self.backend.request(source, operation, {})
+                self.backend.request(source, operation, {"marker": str(marker)})
             except OnlineMusicError as error:
                 failures.append(error.code)
-        workers = [threading.Thread(target=request, args=args) for args in (
-            ("netease", "lyrics"), ("netease", "begin_login"), ("qq", "begin_login"))]
+        requests = (("netease", "lyrics"), ("netease", "begin_login"), ("qq", "begin_login"))
+        markers = [self.root / f"pending-{source}-{operation}" for source, operation in requests]
+        workers = [threading.Thread(target=request, args=(*args, marker))
+            for args, marker in zip(requests, markers)]
         for worker in workers:
             worker.start()
             self.addCleanup(worker.join, 3)
@@ -268,18 +273,67 @@ class OnlineMusicBridgeTests(unittest.TestCase):
         while time.monotonic() < deadline:
             processes = [self.backend._process]
             processes.extend(lane._process for lane in self.backend._authentication_backends.values())
-            if len(processes) == 3 and all(process is not None for process in processes):
+            # A Popen assignment precedes stdin.write/flush. Wait until every
+            # child has actually read its request before testing a pending wait.
+            if (len(processes) == 3 and all(process is not None for process in processes)
+                    and all(marker.exists() for marker in markers)):
                 break
             time.sleep(.005)
         self.assertEqual(len(processes), 3)
         self.assertTrue(all(process is not None for process in processes))
-        before = time.monotonic()
-        self.backend.close()
-        self.assertLess(time.monotonic() - before, .15)
-        for worker in workers:
-            worker.join(2)
-            self.assertFalse(worker.is_alive())
-        self.assertEqual(failures, ["runtime"] * 3)
+        self.assertTrue(all(marker.exists() for marker in markers))
+        allow_reaping = threading.Event()
+        wait_entered = [threading.Event() for _ in processes]
+        wait_finished = [threading.Event() for _ in processes]
+        waiting_threads = [None] * len(processes)
+        close_returned = threading.Event()
+        close_errors = []
+
+        def gated_wait(index, original_wait):
+            def wait(*args, **kwargs):
+                waiting_threads[index] = threading.current_thread()
+                wait_entered[index].set()
+                allow_reaping.wait()
+                try:
+                    return original_wait(*args, **kwargs)
+                finally:
+                    wait_finished[index].set()
+            return wait
+
+        def close():
+            try:
+                self.backend.close()
+            except Exception as error:
+                close_errors.append(error)
+            finally:
+                close_returned.set()
+
+        # Prove causal ordering instead of a 150 ms wall-clock budget, which
+        # also measures OS thread scheduling under concurrent packaging load.
+        # Real child waits are deliberately held until close has returned and
+        # all pending request threads have observed their runtime interruption.
+        with ExitStack() as patches:
+            for index, process in enumerate(processes):
+                patches.enter_context(patch.object(process, "wait",
+                    new=gated_wait(index, process.wait)))
+            closer = threading.Thread(target=close, daemon=True)
+            try:
+                closer.start()
+                self.assertTrue(close_returned.wait(3), "close waited for pending I/O or child reaping")
+                self.assertFalse(close_errors)
+                for entered in wait_entered:
+                    self.assertTrue(entered.wait(3), "a child was not handed to its reaper")
+                self.assertTrue(all(thread is not None and thread is not closer for thread in waiting_threads))
+                self.assertFalse(any(finished.is_set() for finished in wait_finished))
+                for worker in workers:
+                    worker.join(2)
+                    self.assertFalse(worker.is_alive())
+                self.assertEqual(failures, ["runtime"] * 3)
+            finally:
+                allow_reaping.set()
+                closer.join(3)
+            self.assertFalse(closer.is_alive())
+            self.assertTrue(all(finished.wait(3) for finished in wait_finished))
         for process in processes:
             process.wait(timeout=3)
             self.assertIsNotNone(process.poll())
@@ -307,6 +361,50 @@ class OnlineMusicBridgeTests(unittest.TestCase):
             self.assertEqual(response["data"], {"ready": True})
             self.assertIsNone(response["credential"])
         self.assertEqual(len(self.backend._authentication_backends), 3)
+        self.assertIsNone(self.backend._process)
+
+    def test_netease_preparation_initializes_cold_cache_before_request_module_import(self):
+        no_call = "module.exports=()=>{throw new Error('offline preparation called a network or QR function')};"
+        self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
+            "util/request.js": r'''const fs=require('fs'),os=require('os'),path=require('path');
+              if(fs.readFileSync(path.join(os.tmpdir(),'anonymous_token'),'utf8')!=='')
+                throw new Error('cold cache was not initialized before import');
+              module.exports=()=>{throw new Error('network function called during preparation')};''',
+            "module/login_qr_key.js": no_call,
+            "module/login_qr_create.js": no_call,
+        })
+        token = self.root / "GluSpot" / "cache" / "online-music-bridge" / "anonymous_token"
+        self.assertFalse(token.exists())
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)}):
+            response = self.backend.request("netease", "prepare_login", {},
+                {"cookie": {"MUSIC_U": "synthetic-must-not-be-consumed"}})
+        self.assertEqual(response["data"], {"ready": True})
+        self.assertIsNone(response["credential"])
+        self.assertEqual(token.read_bytes(), b"")
+        self.assertIsNone(self.backend._process)
+
+    def test_netease_preparation_preserves_existing_anonymous_token_and_mtime(self):
+        no_call = "module.exports=()=>{throw new Error('offline preparation called a network or QR function')};"
+        self.write_modules("@neteasecloudmusicapienhanced/api", "4.41.1", {
+            "util/request.js": r'''const fs=require('fs'),os=require('os'),path=require('path');
+              if(fs.readFileSync(path.join(os.tmpdir(),'anonymous_token'),'utf8')!=='synthetic-anonymous-fixture')
+                throw new Error('existing anonymous token was replaced before import');
+              module.exports=()=>{throw new Error('network function called during preparation')};''',
+            "module/login_qr_key.js": no_call,
+            "module/login_qr_create.js": no_call,
+        })
+        token = self.root / "GluSpot" / "cache" / "online-music-bridge" / "anonymous_token"
+        token.parent.mkdir(parents=True)
+        token.write_bytes(b"synthetic-anonymous-fixture")
+        os.utime(token, ns=(1_600_000_000_000_000_000, 1_600_000_000_000_000_000))
+        mtime_ns = token.stat().st_mtime_ns
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)}):
+            response = self.backend.request("netease", "prepare_login", {},
+                {"cookie": {"MUSIC_U": "synthetic-must-not-be-consumed"}})
+        self.assertEqual(response["data"], {"ready": True})
+        self.assertIsNone(response["credential"])
+        self.assertEqual(token.read_bytes(), b"synthetic-anonymous-fixture")
+        self.assertEqual(token.stat().st_mtime_ns, mtime_ns)
         self.assertIsNone(self.backend._process)
 
     def test_constructor_and_availability_do_not_start_login_children(self):

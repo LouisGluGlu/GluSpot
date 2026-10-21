@@ -82,6 +82,10 @@ class FakeWindow(QObject):
     def show_choices(self):
         self.page = "modes"
 
+    def show_choices_from(self, origin):
+        self.page = "modes"
+        self.choices_origin = QRect(origin)
+
     def show_login(self):
         self.page = "sources"
         self.selected_source = ""
@@ -261,6 +265,46 @@ class PlaybackEntryControllerTests(unittest.TestCase):
         self.assertEqual(self.service.calls, [])
         self.assertEqual(self.system.calls, 0)
 
+    def test_installer_handoff_only_reveals_choices_for_fresh_directory(self):
+        handoff = QRect(790, 12, 340, 52)
+        self.make_controller().start(installer_handoff=handoff)
+        self.assertEqual(self.window.choices_origin, handoff)
+        self.assertFalse(self.settings.get(COMPLETED_KEY))
+        self.assertEqual(self.tasks.jobs, [])
+        self.make_controller(completed=True, saved=("qq",)).start(installer_handoff=handoff)
+        self.assertFalse(hasattr(self.window, "choices_origin"))
+        self.assertEqual(self.tasks.jobs[-1][0][0], "accounts")
+
+    def test_system_only_uses_validated_finder_bar_without_overriding_its_anchor(self):
+        self.make_controller()
+        self.island._finder_bar_available = lambda: True
+        self.island._current_main_target_global_rect = lambda: QRect(760, 0, 400, 26)
+        self.controller.accept_selection(False, True)
+        self.assertEqual(self.island.location, "finder")
+        self.assertIsNone(self.island.preset)
+        self.assertEqual(self.island.shown, 1)
+
+    def test_close_login_restores_system_waiting_island_and_cancels_request(self):
+        self.make_controller().accept_selection(True, True)
+        pending = self.tasks.latest("sources")
+        self.window.close()
+        self.tasks.run(pending)
+        self.assertEqual(self.island.shown, 1)
+        self.assertFalse(self.window.visible)
+        self.assertFalse(self.controller._poll_timer.isActive())
+        self.assertFalse(self.controller._probe_timer.isActive())
+
+    def test_player_login_navigation_consumes_actual_origin_and_cancels_on_close(self):
+        self.make_controller()
+        frame = object()
+        self.controller._library_origin = frame
+        with patch("local.playback_entry_controller.MusicNavigationTransition") as transition:
+            self.controller.show_login()
+        self.assertIsNone(self.controller._library_origin)
+        transition.return_value.start.assert_called_once_with(frame, self.window)
+        self.window.close()
+        self.assertTrue(transition.return_value.cancel.called)
+
     def test_no_mode_selection_is_rejected_without_persistence(self):
         self.make_controller().accept_selection(False, False)
         self.assertEqual(self.settings.saved, 0)
@@ -284,15 +328,17 @@ class PlaybackEntryControllerTests(unittest.TestCase):
         self.assertEqual(self.tasks.jobs, [])
         self.assertEqual(self.system.calls, 0)
 
-    def test_first_dual_mode_uses_current_system_playback_without_waiting_for_accounts(self):
+    def test_first_dual_mode_opens_login_even_with_current_system_playback(self):
         self.make_controller(playing=True).accept_selection(True, True)
-        self.assertEqual(self.island.shown, 1)
+        self.assertEqual(self.island.shown, 0)
+        self.assertEqual(self.window.page, "sources")
+        self.assertEqual(self.system.calls, 0)
+        self.assertEqual(self.tasks.jobs[-1][0][0], "sources")
         self.assertFalse(self.controller._probe_timer.isActive())
 
     def test_first_dual_mode_without_system_playback_goes_to_login(self):
         self.make_controller().accept_selection(True, True)
         self.assertEqual(self.island.shown, 0)
-        self.tasks.run(self.tasks.latest("accounts"))
         self.assertEqual(self.window.page, "sources")
         self.assertFalse(self.controller._probe_timer.isActive())
 
@@ -318,19 +364,19 @@ class PlaybackEntryControllerTests(unittest.TestCase):
 
     def test_cancelled_route_cannot_reopen_login_after_system_only_selection(self):
         self.make_controller().accept_selection(True, True)
-        old_accounts = self.tasks.latest("accounts")
+        old_sources = self.tasks.latest("sources")
         self.controller.accept_selection(False, True)
-        self.tasks.completed.emit(old_accounts[0], False, None)
+        self.tasks.completed.emit(old_sources[0], self.service.sources, None)
         with patch("local.playback_entry_controller.time.monotonic", return_value=10**10):
             self.controller._probe()
         self.assertEqual(self.island.shown, 1)
         self.assertFalse(self.window.visible)
         self.assertFalse(self.controller._probe_timer.isActive())
 
-    def test_expired_first_route_is_bounded_when_account_task_is_pending(self):
+    def test_first_owned_route_opens_login_without_waiting_for_system_or_accounts(self):
         self.make_controller(status="starting").accept_selection(True, True)
-        with patch("local.playback_entry_controller.time.monotonic", return_value=10**10):
-            self.controller._probe()
+        self.assertEqual(self.system.calls, 0)
+        self.assertEqual([job[0][0] for job in self.tasks.jobs], ["sources"])
         self.assertEqual(self.window.page, "sources")
         self.assertFalse(self.controller._probe_timer.isActive())
 

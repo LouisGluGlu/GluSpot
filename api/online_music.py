@@ -143,7 +143,7 @@ class _LoginAttempt:
 
 class OnlineMusicService:
     _names = (("netease", "网易云音乐"), ("kugou", "酷狗音乐"), ("qq", "QQ音乐"), ("qishui", "汽水音乐"))
-    _capabilities = {"netease": ("qr_login", "playlist", "daily", "personal_fm", "personal_dj", "stream", "lyrics", "search"), "qq": ("qr_login", "playlist", "stream", "search"), "kugou": ("qr_login", "playlist", "stream", "search"), "qishui": ()}
+    _capabilities = {"netease": ("qr_login", "playlist", "recommendations", "daily", "personal_fm", "personal_dj", "stream", "lyrics", "search", "favorite", "playlist_write"), "qq": ("qr_login", "playlist", "recommendations", "stream", "search"), "kugou": ("qr_login", "playlist", "stream", "search"), "qishui": ()}
 
     def __init__(self, backend: OnlineBackend | None = None, credential_store: ProtectedCredentialStore | None = None, *, clock=time.time):
         if backend is None:
@@ -158,7 +158,18 @@ class OnlineMusicService:
         self._attempts: dict[str, _LoginAttempt] = {}
         self._generations = {source: 0 for source, _ in self._names}
         self._dj_voice_catalogs: dict[str, tuple[int, tuple[PersonalDjVoice, ...]]] = {}
+        # Only the two NetEase entry cards use this cache. A preview keeps its
+        # real batch for the next playback call instead of throwing away FM's
+        # advancing recommendation window just to acquire a picture.
+        self._recommendation_locks = {kind: threading.Lock() for kind in ("daily", "fm")}
+        self._recommendation_previews: dict[str, tuple[int, float, tuple[OnlineSong, ...]]] = {}
+        self._recommendation_covers: dict[str, tuple[int, float, str]] = {}
         self._closed = False
+
+    def _clear_recommendation_previews(self, source_id):
+        if source_id == "netease":
+            self._recommendation_previews.clear()
+            self._recommendation_covers.clear()
 
     def list_sources(self) -> tuple[MusicSource, ...]:
         sources = []
@@ -256,6 +267,7 @@ class OnlineMusicService:
         self._check_source(source_id)
         with self._lock:
             self._generations[source_id] += 1
+            self._clear_recommendation_previews(source_id)
             generation = self._generations[source_id]
             for attempt in self._attempts.values():
                 if attempt.snapshot.source_id == source_id and attempt.snapshot.state not in {"confirmed", "expired", "cancelled", "error"}:
@@ -335,6 +347,7 @@ class OnlineMusicService:
                     self._credentials[source_id] = credential
                     self._accounts[source_id] = account
                     self._dj_voice_catalogs.pop(source_id, None)
+                    self._clear_recommendation_previews(source_id)
                 attempt.snapshot = self._snapshot_state(snapshot, state, messages[state], account)
                 return attempt.snapshot
         except OnlineMusicError as error:
@@ -352,6 +365,7 @@ class OnlineMusicService:
                 return
             source_id = attempt.snapshot.source_id
             self._generations[source_id] += 1
+            self._clear_recommendation_previews(source_id)
             attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
 
     def invalidate_source_login(self, source_id: str) -> None:
@@ -360,6 +374,7 @@ class OnlineMusicService:
             if source_id not in self._generations:
                 return
             self._generations[source_id] += 1
+            self._clear_recommendation_previews(source_id)
             for attempt in self._attempts.values():
                 if attempt.snapshot.source_id == source_id and attempt.snapshot.state in {"waiting", "scanned"}:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
@@ -406,6 +421,7 @@ class OnlineMusicService:
                         self._accounts[source_id] = AccountSnapshot(source_id, state="error", message="本机加密保存失败，请重新登录")
                 if not self._accounts[source_id].logged_in:
                     self._dj_voice_catalogs.pop(source_id, None)
+                    self._clear_recommendation_previews(source_id)
                 return self._accounts[source_id]
             return self._accounts[source_id]
 
@@ -417,6 +433,7 @@ class OnlineMusicService:
             self._accounts[source_id] = AccountSnapshot(source_id)
             self._credentials.pop(source_id, None)
             self._dj_voice_catalogs.pop(source_id, None)
+            self._clear_recommendation_previews(source_id)
             for attempt in self._attempts.values():
                 if attempt.snapshot.source_id == source_id:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
@@ -461,6 +478,7 @@ class OnlineMusicService:
             with self._lock:
                 self._accounts[source_id] = AccountSnapshot(source_id, state="expired", message="登录已过期，请重新登录")
                 self._dj_voice_catalogs.pop(source_id, None)
+                self._clear_recommendation_previews(source_id)
             raise OnlineMusicError("auth_required", source_id, "登录已过期，请重新登录")
         return data
 
@@ -559,6 +577,102 @@ class OnlineMusicService:
         has_more = next_offset < total if total is not None else bool(data.get("more") or len(raw) == limit)
         return CatalogPage(items, next_offset, has_more and bool(raw), total)
 
+    def _favorite_account(self, source_id: str, expected_user_id: str = "") -> tuple[AccountSnapshot, int]:
+        """Capture the existing account authority before any favorite operation.
+
+        These methods run on the caller's worker, like the catalog methods. The
+        UI may pass the displayed account ID so an old dialog cannot write to a
+        newly signed-in account. Unsupported adapters never make a fake local
+        favorite or send a guessed platform write.
+        """
+        self._check_source(source_id)
+        if source_id != "netease":
+            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持收藏或添加到歌单")
+        if not isinstance(expected_user_id, str):
+            raise OnlineMusicError("argument", source_id, "无效的账号标识")
+        with self._lock:
+            generation = self._generations[source_id]
+        account = self.account_status(source_id)
+        if not account.logged_in:
+            account = self.account_status(source_id, refresh=True)
+        with self._lock:
+            if self._closed or generation != self._generations[source_id]:
+                raise OnlineMusicError("cancelled", source_id, "账号已变化，请重试")
+            if not account.logged_in:
+                raise OnlineMusicError("auth_required", source_id, account.message or "请先登录此音乐来源")
+            if expected_user_id and expected_user_id != account.user_id:
+                raise OnlineMusicError("cancelled", source_id, "账号已变化，请重试")
+        return account, generation
+
+    @staticmethod
+    def _favorite_id(source_id: str, value: str) -> str:
+        if source_id != "netease":
+            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持收藏或添加到歌单")
+        if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,19}", value):
+            raise OnlineMusicError("argument", source_id, "无效的歌曲或歌单标识")
+        return value
+
+    def favorite_status(self, source_id: str, song_id: str, *, expected_user_id: str = "") -> bool:
+        """Read confirmed service state; an unavailable status is never false."""
+        song_id = self._favorite_id(source_id, song_id)
+        account, generation = self._favorite_account(source_id, expected_user_id)
+        data = self._catalog(source_id, "favorite_status", {"song_id": song_id, "user_id": account.user_id},
+                             expected_generation=generation)
+        if not isinstance(data.get("liked"), bool):
+            raise OnlineMusicError("response", source_id, "收藏状态暂不可用，请重试")
+        return data["liked"]
+
+    def set_favorite(self, source_id: str, song_id: str, liked: bool, *, expected_user_id: str = "") -> bool:
+        """Set an explicit target, without retrying an uncertain account write."""
+        song_id = self._favorite_id(source_id, song_id)
+        if not isinstance(liked, bool):
+            raise OnlineMusicError("argument", source_id, "无效的收藏状态")
+        account, generation = self._favorite_account(source_id, expected_user_id)
+        data = self._catalog(source_id, "set_favorite", {"song_id": song_id, "user_id": account.user_id, "liked": liked},
+                             expected_generation=generation)
+        if data.get("ok") is not True or data.get("liked") is not liked:
+            raise OnlineMusicError("response", source_id, "收藏操作未确认，请刷新后重试")
+        return liked
+
+    def writable_playlists(self, source_id: str, limit: int = 100, offset: int = 0, *, expected_user_id: str = "") -> CatalogPage:
+        """Owned lists only; subscribed/recommended lists cannot be destinations."""
+        account, generation = self._favorite_account(source_id, expected_user_id)
+        limit, offset = self._page_bounds(limit, offset)
+        limit = min(100, limit)
+        data = self._catalog(source_id, "writable_playlists", {"user_id": account.user_id, "limit": limit, "offset": offset},
+                             expected_generation=generation)
+        if data.get("code") != 200 or not isinstance(data.get("playlist"), list):
+            raise OnlineMusicError("response", source_id, "可收藏歌单暂不可用，请重试")
+        raw = data["playlist"][:limit]
+        items, seen = [], set()
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            creator = row.get("creator")
+            if (not isinstance(creator, dict) or str(creator.get("userId", "")) != account.user_id
+                    or row.get("subscribed") is True):
+                continue
+            playlist = self._playlist(source_id, row)
+            if (not re.fullmatch(r"[1-9][0-9]{0,19}", playlist.playlist_id)
+                    or not playlist.title.strip() or playlist.playlist_id in seen):
+                continue
+            seen.add(playlist.playlist_id)
+            items.append(playlist)
+        next_offset = offset + len(raw)
+        # Offset consumes original rows, including subscribed lists, so an
+        # empty owned page does not strand later genuine owned playlists.
+        return CatalogPage(tuple(items), next_offset, data.get("more") is True and bool(raw), None)
+
+    def add_song_to_playlist(self, source_id: str, song_id: str, playlist_id: str, *, expected_user_id: str = "") -> None:
+        """The bridge rechecks the selected playlist's actual creator before writing."""
+        song_id, playlist_id = self._favorite_id(source_id, song_id), self._favorite_id(source_id, playlist_id)
+        account, generation = self._favorite_account(source_id, expected_user_id)
+        data = self._catalog(source_id, "add_song_to_playlist",
+                             {"song_id": song_id, "playlist_id": playlist_id, "user_id": account.user_id},
+                             expected_generation=generation)
+        if data.get("ok") is not True:
+            raise OnlineMusicError("response", source_id, "添加歌单操作未确认，请刷新后重试")
+
     def search(self, source_id: str, query: str, kind: str = "songs", limit: int = 30, offset: int = 0) -> CatalogPage:
         self._check_source(source_id)
         if not isinstance(query, str) or not query.strip() or len(query) > 200 or any(ord(char) < 32 for char in query) or kind not in {"songs", "playlists"}:
@@ -579,6 +693,33 @@ class OnlineMusicService:
         has_more = data.get("has_more") is True and next_offset > offset
         return CatalogPage(items, max(offset, next_offset), has_more, total)
 
+    def recommended_playlists(self, source_id: str, *, limit: int = 30, offset: int = 0) -> CatalogPage:
+        """Read the platform's finite recommendation shelf, independently of owned lists.
+
+        The pinned endpoints return a complete shelf rather than a server-side
+        cursor. The bridge bounds it to 100 entries and slices that real shelf;
+        QQ supplies editorial hot playlists, not a personalized daily mix.
+        """
+        self._check_source(source_id)
+        if source_id not in {"netease", "qq"}:
+            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持推荐歌单")
+        limit, offset = self._page_bounds(limit, offset)
+        limit = min(100, limit)
+        data = self._catalog(source_id, "recommended_playlists", {"limit": limit, "offset": offset})
+        if not isinstance(data.get("items"), list):
+            raise OnlineMusicError("response", source_id, "推荐歌单返回的数据无效")
+        items = []
+        seen = set()
+        for raw in self._list(data, "items")[:limit]:
+            item = self._playlist(source_id, raw)
+            if item.playlist_id and item.title.strip() and item.playlist_id not in seen:
+                seen.add(item.playlist_id)
+                items.append(item)
+        next_offset = min(offset + limit, max(offset, self._nonnegative_int(data.get("next_offset"))))
+        total = min(100, self._nonnegative_int(data["total"])) if data.get("total") is not None else None
+        has_more = data.get("has_more") is True and next_offset > offset and (total is None or next_offset < total)
+        return CatalogPage(tuple(items), next_offset, has_more, total)
+
     def playlist_tracks(self, source_id: str, playlist_id: str, limit: int = 100, offset: int = 0) -> CatalogPage:
         limit, offset = self._page_bounds(limit, offset)
         if source_id == "qq":
@@ -593,18 +734,67 @@ class OnlineMusicService:
         return CatalogPage(items, offset + len(raw), bool(data.get("more") or len(raw) == limit), None)
 
     def daily_recommendations(self, source_id: str = "netease") -> tuple[OnlineSong, ...]:
-        if source_id != "netease":
-            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持每日推荐")
-        data = self._catalog(source_id, "daily_recommendations", {})
-        raw = self._list(data, "dailySongs", "recommend", "songs")
-        return tuple(song for item in raw if (song := self._song(source_id, item)).song_id and song.title)
+        return self._recommendation_songs("daily", source_id)
 
     def personal_fm(self, source_id: str = "netease") -> tuple[OnlineSong, ...]:
+        return self._recommendation_songs("fm", source_id)
+
+    def recommendation_artwork(self, kind: str, source_id: str = "netease") -> str:
+        """Acquire real entry artwork while preserving the batch for playback.
+
+        This worker-only path shares the same per-kind lock with actual playback.
+        A simultaneous play therefore takes the prepared songs once, or supplies
+        the cover from its own request; neither ordering skips a radio batch.
+        """
+        if kind not in {"daily", "fm"}:
+            raise OnlineMusicError("argument", source_id, "无效的推荐入口")
+        return self._recommendation_songs(kind, source_id, preview=True)
+
+    def _recommendation_songs(self, kind, source_id, *, preview=False):
         if source_id != "netease":
-            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持私人漫游")
-        data = self._catalog(source_id, "personal_fm", {})
-        raw = data.get("data") if isinstance(data.get("data"), list) else self._list(data, "songs")
-        return tuple(song for item in raw if isinstance(item, dict) and (song := self._song(source_id, item)).song_id and song.title)
+            raise OnlineMusicError("unsupported", source_id, "此来源暂不支持此推荐入口")
+        self._check_source(source_id)
+        with self._recommendation_locks[kind]:
+            with self._lock:
+                generation = self._generations[source_id]
+                now = self._clock()
+                if not self._accounts[source_id].logged_in:
+                    self._clear_recommendation_previews(source_id)
+                cover = self._recommendation_covers.get(kind)
+                if preview and cover is not None and cover[0] == generation and now < cover[1]:
+                    return cover[2]
+                pending = self._recommendation_previews.get(kind)
+                # Daily picks may refresh after five minutes. An unread FM
+                # batch deliberately survives this TTL: refetching it for a
+                # picture would discard music. At most one batch per kind is
+                # retained, bounded by the transport's existing 8 MiB response.
+                if pending is not None and pending[0] == generation and (kind == "fm" or now < pending[1]):
+                    songs = pending[2]
+                    if not preview:
+                        self._recommendation_previews.pop(kind, None)
+                    return next((song.artwork_url for song in songs if song.artwork_url), "") if preview else songs
+                self._recommendation_previews.pop(kind, None)
+            operation = "daily_recommendations" if kind == "daily" else "personal_fm"
+            data = self._catalog(source_id, operation, {}, expected_generation=generation)
+            raw = (self._list(data, "dailySongs", "recommend", "songs") if kind == "daily" else
+                   data.get("data") if isinstance(data.get("data"), list) else self._list(data, "songs"))
+            songs = tuple(song for item in raw if isinstance(item, dict)
+                          and (song := self._song(source_id, item)).song_id and song.title)
+            artwork = next((song.artwork_url for song in songs if song.artwork_url), "")
+            with self._lock:
+                if self._closed or generation != self._generations[source_id]:
+                    raise OnlineMusicError("cancelled", source_id, "音乐请求已取消")
+                # Another recommendation may expire this account without
+                # changing its login generation while this request is in
+                # flight. A successful old response cannot restore that cache.
+                if not self._accounts[source_id].logged_in:
+                    self._clear_recommendation_previews(source_id)
+                    raise OnlineMusicError("auth_required", source_id, "请先登录此音乐来源")
+                expires = self._clock() + 300.0
+                self._recommendation_covers[kind] = (generation, expires, artwork)
+                if preview and songs:
+                    self._recommendation_previews[kind] = (generation, expires, songs)
+            return artwork if preview else songs
 
     def personal_dj_voices_cached(self, source_id: str = "netease") -> tuple[PersonalDjVoice, ...]:
         """Current account-generation snapshot, without network or account data."""
@@ -805,6 +995,8 @@ class OnlineMusicService:
                     attempt.snapshot = self._snapshot_state(attempt.snapshot, "cancelled", "登录已取消")
             self._credentials.clear()
             self._dj_voice_catalogs.clear()
+            self._recommendation_previews.clear()
+            self._recommendation_covers.clear()
         self.backend.close()
 
 

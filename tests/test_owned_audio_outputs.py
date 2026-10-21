@@ -41,6 +41,9 @@ class Bridge:
     def set_direct(self, enabled, epoch, token=None):
         self.calls.append(("direct", enabled, epoch))
         return token is None or token == self.token
+    def prepare_direct(self, epoch, token=None):
+        self.calls.append(("prepare", epoch))
+        return token is None or token == self.token
 
 
 class Backend:

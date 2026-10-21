@@ -177,6 +177,34 @@ class AudioOutputPanelRedesignTests(unittest.TestCase):
         self.assertFalse(inactive.details_visible)
         self.assertEqual(inactive.name_font_size, 14)
 
+    def test_track_endpoints_align_with_text_and_dispatch_only_volume(self):
+        row = self._open()
+        with patch.object(row, "_paint_name") as painted_name:
+            self._row_image(row)
+        name_rect = painted_name.call_args.args[1]
+        slider = row.volume_slider
+        self.assertEqual(slider.x() + 8, name_rect.left())
+        self.assertEqual(slider.x() + slider.width() - 8, row.width() - 14)
+        self.assertFalse(slider.geometry().intersects(row.solo_button.geometry()))
+        # Send events to the visible row, not directly to the slider: native
+        # child routing must agree with the track that the user sees.
+        for x, expected in ((name_rect.left(), 0.), (row.width() - 14, 1.)):
+            self.provider.calls.clear()
+            QTest.mouseClick(row, Qt.MouseButton.LeftButton,
+                             pos=QPoint(round(x), slider.geometry().center().y()))
+            self.assertTrue(self.provider.calls)
+            self.assertTrue(all(call[0] == "volume" for call in self.provider.calls))
+            self.assertEqual(self.provider.calls[-1], ("volume", "speaker", expected))
+
+    def test_short_confirmed_percentage_leaves_room_for_device_name(self):
+        name = "AirPods Pro - Wireless"
+        self.provider.update_device("speaker", name=name, volume=.58)
+        row = self._open()
+        with patch.object(row, "_paint_name") as painted_name:
+            self._row_image(row)
+        self.assertEqual(painted_name.call_args.args[2], name)
+        self.assertEqual(row.volume_text, "58%")
+
     def test_pending_volume_is_labelled_target_without_fabricating_actual_readback(self):
         row = self._open()
         self.assertEqual(row.volume_text, "14%")

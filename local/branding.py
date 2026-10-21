@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import sys
 from pathlib import Path
 
 
@@ -16,12 +17,25 @@ CUSTOM_ICON_PNG_NAME = "custom-icon.png"
 CUSTOM_ICON_ICO_NAME = "custom-icon.ico"
 
 
+def is_packaged_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def program_dir() -> Path:
+    """Writable per-user installs and portable copies keep their own state."""
+    return Path(sys.executable).resolve().parent if is_packaged_app() else ROOT_DIR
+
+
 def app_data_dir(base_dir: str | os.PathLike[str] | None = None) -> str:
+    if base_dir is None and is_packaged_app():
+        return str(program_dir() / APP_NAME)
     root = str(base_dir or os.environ.get("APPDATA") or ROOT_DIR)
     return os.path.join(root, APP_NAME)
 
 
 def local_app_data_dir(base_dir: str | os.PathLike[str] | None = None) -> str:
+    if base_dir is None and is_packaged_app():
+        return str(program_dir() / APP_NAME)
     root = str(base_dir or os.environ.get("LOCALAPPDATA") or ROOT_DIR)
     return os.path.join(root, APP_NAME)
 
@@ -31,6 +45,10 @@ def settings_file_for(base_dir: str | os.PathLike[str] | None = None) -> str:
 
 
 def legacy_app_data_dirs(base_dir: str | os.PathLike[str] | None = None) -> list[str]:
+    if base_dir is None and is_packaged_app():
+        # A newly extracted directory is a new installation. An old user's
+        # AppData must not silently complete this copy's first-run choices.
+        return []
     root = str(base_dir or os.environ.get("APPDATA") or ROOT_DIR)
     return [os.path.join(root, name) for name in LEGACY_APP_NAMES]
 

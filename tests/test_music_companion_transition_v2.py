@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.models import TimedLyricUnit
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_lyric_motion import LyricEmphasisPlan
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
 
@@ -36,8 +37,14 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Keep this suite on the ordinary reading path it measures; sparse
+        # highlight dispatch is covered independently and is now fixed at .8s.
+        for name, value in (("lyric_emphasis_plan", LyricEmphasisPlan()),
+                            ("explicit_slow_unit_groups", ())):
+            classifier = patch("local.music_surface_window." + name, return_value=value)
+            classifier.start()
+            self.addCleanup(classifier.stop)
         self.owner = _LayerOwner()
-        self.owner.music_sparse_highlight_seconds_per_unit = 2.0
         self.owner.music_surface_reading_lift_level = 0
         self.owner.media_position_source = "local-seek"
         self.owner.media_position_sampled_at = 100.0

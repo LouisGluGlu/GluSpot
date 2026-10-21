@@ -102,6 +102,32 @@ class SimplifiedSettingsDefaultsTests(unittest.TestCase):
             self.assertEqual(loaded.get("v2_location_mode"), "top")
             self.assertEqual(loaded.get("v2_stack_center_ratio"), settings_store.DEFAULT_SETTINGS["v2_stack_center_ratio"])
 
+    def test_bar_hide_follow_is_a_persisted_boolean_independent_of_fixed_position_defaults(self):
+        self.assertTrue(settings_store.DEFAULT_SETTINGS["v2_bar_hide_follow_enabled"])
+        self.assertNotIn("v2_bar_hide_follow_enabled", settings_store.FIXED_DEFAULT_SETTING_KEYS)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            with patch.object(settings_store, "APP_DATA_DIR", directory), patch.object(settings_store, "SETTINGS_FILE", str(path)):
+                manager = settings_store.SettingsManager()
+                manager.set("v2_bar_hide_follow_enabled", False)
+                manager.save_now()
+                self.assertFalse(settings_store.SettingsManager().get("v2_bar_hide_follow_enabled"))
+                for invalid in (None, 0, 1, "false", []):
+                    manager.set("v2_bar_hide_follow_enabled", invalid)
+                    self.assertIs(manager.get("v2_bar_hide_follow_enabled"), False)
+                for invalid in (None, 0, 1, "false", []):
+                    path.write_text(json.dumps({"v2_bar_hide_follow_enabled": invalid}), encoding="utf-8")
+                    loaded = settings_store.SettingsManager()
+                    self.assertIs(loaded.get("v2_bar_hide_follow_enabled"), True)
+                    self.assertTrue(loaded._dirty)
+
+    def test_mydockfinder_monitor_defaults_and_normalization_only_admit_main_runtimes(self):
+        self.assertEqual(settings_store.MYDOCKFINDER_LISTEN_PROCESS_CHOICES, (("dock.exe", "dock.exe"), ("dock_64.exe", "Dock_64.exe")))
+        self.assertEqual(settings_store.DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES, ("dock.exe", "dock_64.exe"))
+        self.assertEqual(settings_store.DEFAULT_SETTINGS["v2_mydockfinder_listener_process_names"], ["dock.exe", "dock_64.exe"])
+        self.assertEqual(settings_store.normalize_mydockfinder_listener_process_names(
+            ["Dock.EXE", "dock_64.exe", "myfinder.exe", "mydockfinder.exe"]), ("dock.exe", "dock_64.exe"))
+
     def test_invalid_finder_values_migrate_while_explicit_listener_choices_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
@@ -120,6 +146,35 @@ class SimplifiedSettingsDefaultsTests(unittest.TestCase):
                 self.assertEqual(saved["v2_finder_bar_style"], "transparent")
                 self.assertEqual(saved["v2_finder_bar_center_ratio"], .5)
                 self.assertEqual(saved["v2_mydockfinder_listener_process_names"], ["dock.exe"])
+
+    def test_discovered_runtime_visual_save_preserves_retired_listener_data_on_disk(self):
+        from api.providers import EmptyIslandDataProvider, empty_visual_data
+        from local.app import LocalIslandApp
+        from local.island_stack_visual import IslandStackVisual
+
+        legacy = {"v2_mydockfinder_path": "C:/Old/MyDockFinder.exe",
+                  "v2_mydockfinder_listener_process_names": ["dock.exe"]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            with patch.object(settings_store, "APP_DATA_DIR", directory), patch.object(settings_store, "SETTINGS_FILE", str(path)):
+                manager = settings_store.SettingsManager()
+                visual = IslandStackVisual(EmptyIslandDataProvider(empty_visual_data()))
+                visual.timer.stop()
+                try:
+                    visual.set_mydockfinder_path("F:/Actual/MyFinder.exe", notify=False)
+                    visual.set_mydockfinder_listener_process_names(settings_store.DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES, notify=False)
+                    controller = SimpleNamespace(settings=manager, window=visual)
+                    LocalIslandApp._save_visual_state(controller, visual.settings_snapshot())
+                    LocalIslandApp._flush_visual_state_now(controller)
+                    saved = json.loads(path.read_text(encoding="utf-8"))
+                    for key, value in legacy.items():
+                        self.assertEqual(manager.get(key), value)
+                        self.assertEqual(saved[key], value)
+                finally:
+                    visual.close()
+                    visual.deleteLater()
+                    self.app.processEvents()
 
     def test_session_translation_reaches_lyric_parser_without_changing_next_launch_default(self):
         from api.lyrics import LocalLyricsStore

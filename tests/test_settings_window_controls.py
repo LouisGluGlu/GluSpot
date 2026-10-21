@@ -128,7 +128,13 @@ class SettingsWindowControlTests(unittest.TestCase):
         self.assertEqual([button._reveal for button in self.traffic.buttons], [1.] * 3)
 
     def test_pointer_crosses_children_and_capsule_gaps_without_collapsing(self):
+        # An unrelated desktop window can overlap this fixture during the
+        # test. Its HWND must not intercept the fixture's native moves.
+        self.owner.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._show()
+        # Activation can precede the Windows show/position animation. Moves
+        # issued during it may never be routed again for a stationary pointer.
+        QTest.qWait(500)
         QTest.mouseMove(self.owner, QPoint(285, 95))
         QTest.qWait(30)
         first = self.traffic.buttons[0]
@@ -139,6 +145,13 @@ class SettingsWindowControlTests(unittest.TestCase):
             if self.traffic._hovered:
                 break
             QTest.qWait(20)
+        for _ in range(5):
+            if self.traffic._hovered:
+                break
+            QTest.mouseMove(self.owner, QPoint(285, 95))
+            QTest.qWait(40)
+            QTest.mouseMove(first, first.rect().center())
+            QTest.qWait(80)
         self.assertTrue(self.traffic._hovered)
         self._finish()
         for index, button in enumerate(self.traffic.buttons):

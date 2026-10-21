@@ -39,6 +39,7 @@ from api.message_detector import WindowsMessageDetector
 from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, TrackData
 from api.netease_position import NeteasePositionReader, QQPositionReader
 from api.plugin_provider import RealPluginProvider
+from local.runtime_platform import owned_playback_only
 
 
 PlaybackCommand = Literal["previous", "toggle_play_pause", "next"]
@@ -84,8 +85,8 @@ def empty_visual_data(title: str = "暂无媒体", detail: str = "打开音乐�
             title=title,
             artist=detail,
             lyrics=("暂无歌词",),
-            album_color=ColorToken(58, 68, 88),
-            secondary_color=ColorToken(34, 44, 62),
+            album_color=ColorToken(52, 52, 52),
+            secondary_color=ColorToken(28, 28, 28),
             audio_frames=(),
             source_app=source_app,
             is_playing=False,
@@ -94,6 +95,10 @@ def empty_visual_data(title: str = "暂无媒体", detail: str = "打开音乐�
             timed_lyrics=(),
             lyrics_source="",
             track_id=hashlib.sha1(key_raw.encode("utf-8", errors="ignore")).hexdigest()[:16],
+            # Explicit provider authority for true absence of media. Paused
+            # songs keep their ordinary position source and artwork identity.
+            position_source="none",
+            position_confidence=0.0,
         ),
         messages=(),
         plugins=(),
@@ -213,7 +218,7 @@ class PlaybackSourceProvider:
         return bool(self.settings_getter("v2_owned_playback_enabled", True)) and self.owned.track is not None
 
     def _system_enabled(self):
-        return bool(self.settings_getter("v2_system_capture_enabled", False))
+        return not owned_playback_only() and bool(self.settings_getter("v2_system_capture_enabled", False))
 
     def _owned_output_mode(self):
         return self._owned_active() or (bool(self.settings_getter("v2_owned_playback_enabled", True)) and not self._system_enabled())
@@ -270,6 +275,35 @@ class PlaybackSourceProvider:
 
     def get_owned_playback_modes(self):
         return self.owned.available_playback_modes() if self._owned_active() else ()
+
+    def get_owned_playback_queue(self):
+        """(Opaque version token, current row, immutable ordinary-song tuple).
+
+        This is a memory-only view through the V2 source authority. DJ speech
+        stays private to the player and does not become a selectable song row.
+        """
+        if not self._owned_active():
+            return None, -1, ()
+        return (self.owned.playback_queue_token(), self.owned.playback_queue_index(),
+            self.owned.playback_queue_snapshot())
+
+    def select_owned_queue_index(self, index, expected_queue_token=None):
+        if not self._owned_active():
+            return False
+        return self.owned.select_queue_index(index, expected_queue_token)
+
+    def get_owned_queue_artwork(self, song):
+        """Read an owned queue thumbnail only from the player's memory cache."""
+        return self.owned.playback_queue_artwork(song) if self._owned_active() else b""
+
+    def prefetch_owned_queue_artwork(self, indices, expected_queue_token=None):
+        """Schedule a bounded visible queue window away from paint callbacks."""
+        return (self.owned.prefetch_queue_artwork(indices, expected_queue_token)
+                if self._owned_active() else False)
+
+    def get_owned_queue_artwork_changed_signal(self):
+        """GUI-thread notification after a valid queue cover enters memory."""
+        return self.owned.queueArtworkChanged
 
     def get_owned_personal_dj_enabled(self):
         if not self.is_owned_personal_fm() or not self.owned.personal_dj_available():
@@ -392,6 +426,8 @@ class PlaybackSourceProvider:
 
 def _ensure_winsdk_loaded() -> bool:
     global MediaManager, PlaybackStatus, Buffer, DataReader, InputStreamOptions, WINSdk_IMPORT_ATTEMPTED, WINSdk_IMPORT_ERROR
+    if owned_playback_only():
+        return False
     if WINSdk_IMPORT_ATTEMPTED:
         return MediaManager is not None
     WINSdk_IMPORT_ATTEMPTED = True
@@ -514,7 +550,10 @@ class WindowsMediaProvider:
         self._audio_route_controller = None
         self._audio_route_init_lock = threading.Lock()
         self._audio_route_closed = False
-        self._start_loop()
+        if owned_playback_only():
+            self._provider_status = "unsupported_os"
+        else:
+            self._start_loop()
 
     def start_audio_outputs(self):
         """Start passive endpoint monitoring; mDNS starts when the chooser opens."""
@@ -1988,10 +2027,11 @@ class WindowsMediaProvider:
     def _queue_art_disk_path(url: str) -> Path | None:
         root = str(os.environ.get("GLUSPOT_ALBUM_ART_CACHE_DIR", "") or "").strip()
         if not root:
+            from local.branding import is_packaged_app, local_app_data_dir
             local_root = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
-            if not local_root:
+            if not local_root and not is_packaged_app():
                 return None
-            root = str(Path(local_root) / "GluSpot" / "cache" / "album_art")
+            root = str(Path(local_app_data_dir()) / "cache" / "album_art")
         return Path(root) / f"{hashlib.sha256(str(url).encode('utf-8', errors='ignore')).hexdigest()}.img"
 
     def _persist_queue_art(self, url: str, content: bytes) -> None:
@@ -2334,6 +2374,16 @@ class WindowsMediaProvider:
         return sessions
 
     async def _select_media_session(self, current_session, sessions: list[object]):
+        # Our explicit desktop AppUserModelID identifies the source-less SMTC
+        # control session. Never capture it back as an external player, even
+        # while Windows briefly retains a stopped/disabled session. Do not
+        # filter generic python.exe identities shared by unrelated programs.
+        def external(session):
+            return str(getattr(session, "source_app_user_model_id", "") or "").casefold() != "gluspot"
+
+        if current_session is not None and not external(current_session):
+            current_session = None
+        sessions = [session for session in sessions if external(session)]
         candidates: list[object] = []
         if current_session is not None:
             candidates.append(current_session)
@@ -2397,9 +2447,6 @@ class WindowsMediaProvider:
                 score += 25.0
         except Exception:
             pass
-        source_hint = raw_source.casefold()
-        if any(token in source_hint for token in ("cloudmusic", "netease", "qqmusic", "spotify", "kugou", "kuwo", "douyin", "qishui")):
-            score += 14.0
         if is_current:
             score += 28.0
         label_title = title or "-"
@@ -2437,17 +2484,15 @@ class WindowsMediaProvider:
         raw_source_app = str(getattr(session, "source_app_user_model_id", "") or "")
         source_app = self._source_app_name(session)
         read_at = time.monotonic()
-        source_app_foreground = self._is_source_app_foreground(source_app, raw_source_app)
-        player_adapter = self._music_player_adapter_for(source_app, raw_source_app)
-        player_position_reader = self._player_position_reader_for(player_adapter)
-        if source_app_foreground:
-            self._source_app_foreground_at = read_at
-        source_app_interactive = source_app_foreground or (
-            self._source_app_foreground_at > 0.0 and read_at - self._source_app_foreground_at <= 3.5
-        )
-        adapter_interactive = self._supports_player_position_adapter(player_adapter) and source_app_interactive
-        raw_timeline_interactive = adapter_interactive and source_app_foreground
-        foreground_metadata = self._foreground_track_metadata(player_adapter, source_app_foreground)
+        # External playback has one authority: the Windows media session.
+        # Never inspect player processes, windows, UIA or saved app profiles.
+        source_app_foreground = False
+        player_adapter = "system"
+        player_position_reader = None
+        source_app_interactive = False
+        adapter_interactive = False
+        raw_timeline_interactive = False
+        foreground_metadata = None
         player_window_track = None
         if foreground_metadata is not None:
             foreground_title, foreground_artist = foreground_metadata
@@ -2457,7 +2502,7 @@ class WindowsMediaProvider:
             player_window_track = self._player_window_track_metadata(player_adapter, player_position_reader, title, artist)
             if player_window_track is not None and not self._track_object_matches_metadata(player_window_track, title, artist):
                 player_window_track = None
-        else:
+        elif player_position_reader is not None:
             player_window_track = self._player_window_track_metadata(player_adapter, player_position_reader, title, artist)
             if player_window_track is not None:
                 player_title = str(getattr(player_window_track, "title", "") or "").strip()
@@ -3019,6 +3064,7 @@ class WindowsMediaProvider:
             return b""
         if Buffer is None or DataReader is None:
             return b""
+        stream = None
         try:
             stream = await thumbnail.open_read_async()
             if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
@@ -3027,23 +3073,58 @@ class WindowsMediaProvider:
             if size <= 0 or size > 12_000_000:
                 return b""
             cache_key = self._thumbnail_cache_key(track_key, thumbnail, size)
-            if cache_key in self._art_cache:
-                return self._art_cache[cache_key]
-            if hasattr(stream, "seek"):
-                stream.seek(0)
-            buffer = Buffer(size)
-            options = InputStreamOptions.READ_AHEAD if InputStreamOptions is not None else 0
-            filled = await stream.read_async(buffer, size, options)
-            actual = int(getattr(filled, "length", 0) or 0)
-            if actual <= 0:
-                return b""
-            reader = DataReader.from_buffer(filled)
-            data = self._reader_bytes(reader, actual)
-            if not self._is_valid_image_bytes(data):
-                return b""
             lock = getattr(self, "_queue_art_lock", None)
             if lock is None:
                 lock = self._queue_art_lock = threading.Lock()
+            with lock:
+                if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
+                    return b""
+                cached = self._art_cache.get(cache_key, b"")
+                if cached:
+                    if len(cached) == size and self._is_valid_image_bytes(cached):
+                        return cached
+                    # Earlier single-read attempts could cache a decodable
+                    # prefix. The advertised size proves it is incomplete.
+                    if self._art_cache.get(cache_key) is cached:
+                        self._art_cache.pop(cache_key, None)
+            if hasattr(stream, "seek"):
+                stream.seek(0)
+            options = InputStreamOptions.READ_AHEAD if InputStreamOptions is not None else 0
+            content = bytearray()
+            # READ_AHEAD may return fewer bytes than requested. A permissive
+            # image decoder can accept that prefix, so publish only after the
+            # complete bounded stream arrives. The caller owns the existing
+            # total read deadline; zero progress is a failed attempt.
+            while len(content) < size:
+                if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
+                    return b""
+                requested = min(64 * 1024, size - len(content))
+                filled = await stream.read_async(Buffer(requested), requested, options)
+                if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
+                    return b""
+                actual = int(getattr(filled, "length", 0) or 0)
+                if actual <= 0 or actual > requested:
+                    return b""
+                reader = DataReader.from_buffer(filled)
+                try:
+                    chunk = self._reader_bytes(reader, actual)
+                finally:
+                    close_reader = getattr(reader, "close", None)
+                    if callable(close_reader):
+                        try:
+                            close_reader()
+                        except Exception:
+                            pass
+                if len(chunk) != actual:
+                    return b""
+                content.extend(chunk)
+                if len(content) < size:
+                    # Let the total deadline/cancellation run even when a
+                    # stream completes tiny reads synchronously.
+                    await asyncio.sleep(0)
+            data = bytes(content)
+            if not self._is_valid_image_bytes(data):
+                return b""
             with lock:
                 if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
                     return b""
@@ -3053,6 +3134,13 @@ class WindowsMediaProvider:
             return data
         except Exception:
             return b""
+        finally:
+            close_stream = getattr(stream, "close", None)
+            if callable(close_stream):
+                try:
+                    close_stream()
+                except Exception:
+                    pass
 
     async def _thumbnail_for_track(self, properties, track_key: str, expected_epoch: int | None = None) -> bytes:
         epoch = int(getattr(self, "_artwork_cache_epoch", 0)) if expected_epoch is None else expected_epoch
@@ -3557,14 +3645,14 @@ class WindowsMediaProvider:
         return bool(process_name and process_name == basename)
 
     def _lyric_offset_seconds_for_adapter(self, service: str) -> float:
-        profile = self._music_app_profile(service)
-        if profile is None:
+        getter = getattr(self, "settings_getter", None)
+        if not callable(getter):
             return 0.0
         try:
-            offset = float(profile.get("lyric_offset_seconds", 0.0) or 0.0)
+            offset = float(getter("v2_system_lyric_offset_seconds", 0.0) or 0.0)
         except (TypeError, ValueError):
             offset = 0.0
-        return max(-12.0, min(12.0, offset))
+        return max(-12.0, min(12.0, offset)) if math.isfinite(offset) else 0.0
 
     def _dual_line_lyrics_enabled(self) -> bool:
         settings_getter = getattr(self, "settings_getter", None)

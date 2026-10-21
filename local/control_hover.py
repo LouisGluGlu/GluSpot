@@ -13,7 +13,7 @@ import time
 import weakref
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QCursor, QImage, QMouseEvent, QPainter, QRegion, QWheelEvent
+from PySide6.QtGui import QCursor, QEnterEvent, QHelpEvent, QImage, QMouseEvent, QPainter, QRegion, QWheelEvent
 from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QAbstractSpinBox, QApplication,
                               QComboBox, QLineEdit, QSlider, QStyledItemDelegate, QStyleOptionViewItem, QWidget)
 from shiboken6 import isValid
@@ -177,6 +177,7 @@ class WidgetHoverGroup(QObject):
         self.pressed: _Control | None = None
         self.pressed_widget = None
         self.pressed_visual = None
+        self.hovered_descendants = ()
         self._forwarding = False
         self._last_tick = time.monotonic()
         self._dirty = QRectF()
@@ -191,10 +192,20 @@ class WidgetHoverGroup(QObject):
         self._capturing = False
 
     def add(self, widget):
+        self._prune_controls()
         record = next((item for item in self.controls if item.widget() is widget), None)
         if record is None:
-            record = _Control(weakref.ref(widget))
+            widget_ref, group_ref = weakref.ref(widget), weakref.ref(self)
+            record = _Control(widget_ref)
             self.controls.append(record)
+            # Rows can disappear while the group is idle. Its animation timer
+            # must not be required to release callbacks bound to a dead row.
+            # The destruction hook holds only weak references to both peers.
+            def release_control(_destroyed=None):
+                group = group_ref()
+                if group is not None and isValid(group):
+                    group._forget_control(widget_ref)
+            widget.destroyed.connect(release_control)
             widget.setMouseTracking(True)
             widget.installEventFilter(self)
             # The parent's paint must clear beneath moved translucent pixels.
@@ -204,6 +215,33 @@ class WidgetHoverGroup(QObject):
                 child.installEventFilter(self)
                 child.setMouseTracking(True)
         return record
+
+    def _forget_control(self, widget_ref):
+        removed = [item for item in self.controls if item.widget is widget_ref]
+        if not removed:
+            return
+        self.controls = [item for item in self.controls if item.widget is not widget_ref]
+        active_removed = any(item is self.active for item in removed)
+        held_removed = any(item is self.pressed for item in removed)
+        if active_removed:
+            self.active = None
+            self.hovered_descendants = ()
+        if held_removed:
+            self.pressed = self.pressed_widget = self.pressed_visual = None
+        for item in removed:
+            item.menu_callback = item.enabled_when = item.bounds_provider = None
+            item.image, item.image_key = None, None
+        # Do not call a dying control or repaint synchronously from destroyed.
+        # Existing neighbors still finish their normal spring on the next tick.
+        if (active_removed or held_removed) and isValid(self.host) and self.host.isVisible():
+            self._last_tick = time.monotonic()
+            self.timer.start()
+
+    def _prune_controls(self):
+        for item in tuple(self.controls):
+            widget = item.widget()
+            if widget is None or not isValid(widget):
+                self._forget_control(item.widget)
 
     def _valid(self, record):
         widget = record.widget()
@@ -220,6 +258,15 @@ class WidgetHoverGroup(QObject):
 
     def _base(self, record):
         return QRectF(record.widget().geometry())
+
+    def _composed_record(self, widget):
+        """Find the registered control that owns a descendant's pixels."""
+        while isinstance(widget, QWidget) and widget is not self.host:
+            record = next((item for item in self.controls if item.widget() is widget), None)
+            if record is not None:
+                return record
+            widget = widget.parentWidget()
+        return None
 
     def visual_rect(self, record, now=None):
         if record is self.pressed and self.pressed_visual is not None:
@@ -267,6 +314,7 @@ class WidgetHoverGroup(QObject):
     def _set_active(self, record, now):
         if self.active is record:
             return
+        self._set_descendant_hover(None, QPointF(QCursor.pos()))
         previous, self.active = self.active, record
         if previous is not None:
             previous.motion.set_hovered(False, now)
@@ -313,7 +361,7 @@ class WidgetHoverGroup(QObject):
         now = time.monotonic()
         elapsed = min(.05, max(0., now - self._last_tick))
         self._last_tick = now
-        self.controls = [item for item in self.controls if item.widget() is not None and isValid(item.widget())]
+        self._prune_controls()
         if self.active is not None and (not self._valid(self.active) or not self.active.widget().isEnabled()):
             self._set_active(None, now)
         active = self.active
@@ -333,7 +381,8 @@ class WidgetHoverGroup(QObject):
                        abs(item.velocity.x()) + abs(item.velocity.y()) > .01)
             if not self._moving(item, now):
                 item.image, item.image_key = None, None
-        if active and active.menu_callback and not active.menu_fired and active.hovered_at is not None:
+        if (active and active.menu_callback and not active.menu_fired
+                and active.hovered_at is not None and self.pressed is None):
             if now - active.hovered_at >= MENU_HOVER_DELAY_MS / 1000.:
                 active.menu_fired = True
                 active.menu_callback()
@@ -391,6 +440,68 @@ class WidgetHoverGroup(QObject):
         self.pressed_visual = None
         self._repaint()
 
+    def _control_position(self, record, global_position):
+        local_host = QPointF(self.host.mapFromGlobal(global_position.toPoint()))
+        visual, base = self.visual_rect(record), self._base(record)
+        # Retain the native target as well as the moving visual target.
+        if not visual.contains(local_host) and base.contains(local_host):
+            return local_host - base.topLeft()
+        return (local_host - visual.topLeft()) / (visual.width() / max(1., base.width()))
+
+    def _set_descendant_hover(self, record, global_position):
+        """Child hover feedback follows the same composed pose as clicks."""
+        descendants = []
+        if record is not None:
+            root = record.widget()
+            local = self._control_position(record, global_position)
+            child = root.childAt(local.toPoint())
+            while child is not None and child is not root:
+                descendants.append(child)
+                child = child.parentWidget()
+            descendants.reverse()
+        previous = [ref() for ref in self.hovered_descendants if ref() is not None and isValid(ref())]
+        shared = 0
+        while shared < min(len(previous), len(descendants)) and previous[shared] is descendants[shared]:
+            shared += 1
+        forwarding = self._forwarding
+        self._forwarding = True
+        try:
+            for child in reversed(previous[shared:]):
+                child.setAttribute(Qt.WidgetAttribute.WA_UnderMouse, False)
+                QApplication.sendEvent(child, QEvent(QEvent.Type.Leave))
+                child.update()
+            for child in descendants[shared:]:
+                child.setAttribute(Qt.WidgetAttribute.WA_UnderMouse, True)
+                child_local = QPointF(child.mapFrom(root, local.toPoint()))
+                window_local = QPointF(child.window().mapFromGlobal(global_position.toPoint()))
+                QApplication.sendEvent(child, QEnterEvent(child_local, window_local, global_position))
+                child.update()
+        finally:
+            self._forwarding = forwarding
+        self.hovered_descendants = tuple(weakref.ref(child) for child in descendants)
+
+    def _route_help(self, event):
+        position = QPointF(event.globalPos())
+        record = self._at(position)
+        if record is None:
+            return False
+        widget = record.widget()
+        local = self._control_position(record, position)
+        destination = widget.childAt(local.toPoint()) or widget
+        # Native tooltip lookup falls back through controls without a tooltip.
+        while destination is not widget and not destination.toolTip():
+            destination = destination.parentWidget()
+        if destination is not widget:
+            local = QPointF(destination.mapFrom(widget, local.toPoint()))
+        mapped = QHelpEvent(event.type(), local.toPoint(), event.globalPos())
+        self._forwarding = True
+        try:
+            QApplication.sendEvent(destination, mapped)
+        finally:
+            self._forwarding = False
+        event.setAccepted(mapped.isAccepted())
+        return True
+
     def _route_pointer(self, watched, event):
         kind = event.type()
         record = self.pressed or self._at(event.globalPosition())
@@ -399,19 +510,12 @@ class WidgetHoverGroup(QObject):
             record = None
         if kind == QEvent.Type.MouseMove:
             self._set_active(self.pressed or self._at(event.globalPosition()), time.monotonic())
+            self._set_descendant_hover(record, event.globalPosition())
         if record is None:
             return False
         widget = record.widget()
-        local_host = QPointF(self.host.mapFromGlobal(event.globalPosition().toPoint()))
         visual = self.visual_rect(record)
-        base = self._base(record)
-        # The retained original hit area uses ordinary coordinates; expanded
-        # overflow and moved pixels use inverse scale/translation coordinates.
-        if not visual.contains(local_host) and base.contains(local_host):
-            local = local_host - base.topLeft()
-        else:
-            scale = visual.width() / max(1., base.width())
-            local = (local_host - visual.topLeft()) / scale
+        local = self._control_position(record, event.globalPosition())
         held = self.pressed_widget() if self.pressed_widget is not None else None
         destination = held if held is not None and isValid(held) else widget.childAt(local.toPoint()) or widget
         if destination.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents):
@@ -424,6 +528,10 @@ class WidgetHoverGroup(QObject):
         else:
             mapped = QMouseEvent(kind, local, event.globalPosition(), event.button(), event.buttons(), event.modifiers())
         if kind == QEvent.Type.MouseButtonPress:
+            # An explicit click owns this entry. A delayed menu opening during
+            # the held press would compete with the native release/click.
+            if record.menu_callback is not None:
+                record.menu_fired, record.hovered_at = True, None
             self.pressed_visual = QRectF(visual)
             self.pressed = record
             self.pressed_widget = weakref.ref(destination)
@@ -446,23 +554,49 @@ class WidgetHoverGroup(QObject):
         record = next((item for item in self.controls if item.widget() is watched), None)
         if record is not None and not _control_hover_allowed(watched):
             return False
-        if kind == QEvent.Type.Paint and record and self._moving(record, time.monotonic()):
-            origin = QPointF(self.host.mapTo(self.overlay.parentWidget(), QPoint()))
-            self.overlay.update(self.visual_rect(record).translated(origin).adjusted(-2, -2, 2, 2).toAlignedRect())
-            return True
+        if kind == QEvent.Type.Paint:
+            owner = record or self._composed_record(watched)
+            if owner and self._valid(owner) and self._moving(owner, time.monotonic()):
+                if watched is not owner.widget():
+                    # DrawChildren is already part of the moving snapshot.
+                    # Letting a child also paint in its native rectangle leaves
+                    # a second slider/track underneath that composed image.
+                    owner.image, owner.image_key = None, None
+                origin = QPointF(self.host.mapTo(self.overlay.parentWidget(), QPoint()))
+                self.overlay.update(self.visual_rect(owner).translated(origin).adjusted(-2, -2, 2, 2).toAlignedRect())
+                return True
+        if kind == QEvent.Type.ToolTip:
+            return self._route_help(event)
         if kind in {QEvent.Type.Enter, QEvent.Type.Leave}:
             position = event.globalPosition() if hasattr(event, "globalPosition") else QPointF(QCursor.pos())
-            self._set_active(self._at(position), time.monotonic())
+            hovered = self._at(position)
+            self._set_active(hovered, time.monotonic())
+            self._set_descendant_hover(hovered, position)
+            if hovered is not None:
+                hovered.widget().setAttribute(Qt.WidgetAttribute.WA_UnderMouse, True)
+            owner = record or self._composed_record(watched)
+            if owner is not None and self._valid(owner) and watched is not owner.widget():
+                # Native child boundaries describe the unchanged layout; the
+                # mapped descendant chain has already emitted the real change.
+                watched.setAttribute(Qt.WidgetAttribute.WA_UnderMouse,
+                                     any(ref() is watched for ref in self.hovered_descendants))
+                return True
         elif kind in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
                       QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel}:
             return self._route_pointer(watched, event)
         elif kind in {QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show, QEvent.Type.EnabledChange,
                       QEvent.Type.LayoutRequest, QEvent.Type.StyleChange, QEvent.Type.FontChange, QEvent.Type.PaletteChange}:
-            if record:
-                record.image, record.image_key = None, None
+            owner = record or self._composed_record(watched)
+            if owner:
+                owner.image, owner.image_key = None, None
             if self.overlay.isVisible():
                 self._repaint()
         elif kind in {QEvent.Type.Hide, QEvent.Type.ParentChange}:
+            owner = record or self._composed_record(watched)
+            if owner:
+                owner.image, owner.image_key = None, None
+            if any(ref() is watched for ref in self.hovered_descendants):
+                self._set_descendant_hover(None, QPointF(QCursor.pos()))
             if record:
                 record.motion.reset()
                 record.offset, record.velocity = QPointF(), QPointF()
@@ -474,6 +608,7 @@ class WidgetHoverGroup(QObject):
             if watched is self.host:
                 self.timer.stop()
                 self.overlay.hide()
+                self._set_descendant_hover(None, QPointF(QCursor.pos()))
                 self.active = None
                 self.cancel_pointer_capture()
         return False

@@ -115,7 +115,8 @@ class SurfaceEdgeAndFrameTests(unittest.TestCase):
     def test_edge_mask_cache_is_small_reused_and_fullscreen_remains_opaque(self):
         self.render()
         cache = self.window._surface_edge_alpha_cache
-        self.assertLess(sum(image.sizeInBytes() for image in cache[1]), 20000)
+        logical_bytes = sum(image.sizeInBytes() / image.devicePixelRatio() ** 2 for image in cache[1])
+        self.assertLess(logical_bytes, 20000)
         self.render()
         self.assertIs(self.window._surface_edge_alpha_cache, cache)
         self.window._fullscreen = True

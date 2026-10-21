@@ -71,7 +71,7 @@ class TopNotchAnchorTests(unittest.TestCase):
     def test_surface_return_reapplies_top_anchor_before_raising_island(self):
         self.visual._music_surface_active = True
         self.visual._island_visible_before_music_surface = True
-        self.visual.music_fullscreen_overlay = SimpleNamespace(hide=Mock())
+        self.visual.music_fullscreen_overlay = SimpleNamespace(hide=Mock(), isVisible=lambda: False)
         self.visual._restore_island_from_music_surface()
         self.app.processEvents()
         self._assert_attached()
@@ -104,10 +104,13 @@ class TopNotchAnchorTests(unittest.TestCase):
         for flag in ("drag_candidate", "dragging", "_music_surface_active"):
             with self.subTest(flag=flag):
                 setattr(self.visual, flag, True)
+                if flag == "_music_surface_active":
+                    self.visual.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
                 self.visual.move(505, 79)
                 self.assertFalse(self.visual._refresh_top_notch_position())
                 self.assertEqual(self.visual.y(), 79)
                 setattr(self.visual, flag, False)
+                self.visual.music_fullscreen_overlay = None
                 self.assertTrue(self.visual._refresh_top_notch_position())
                 self._assert_attached()
 

@@ -109,6 +109,47 @@ class OwnedAudioBridgeHandoffTests(unittest.TestCase):
         self.assertTrue(self.bridge.set_direct(False, 10))
         self.assertFalse(self.owner.audio.isMuted())
 
+    def test_prepare_holds_decoder_and_mutes_before_any_native_input(self):
+        holds = []
+        self.owner.set_output_preparing = holds.append
+        self.assertTrue(self.bridge.prepare_direct(10, self.token))
+        self.assertTrue(self.owner.audio.isMuted())
+        self.assertEqual(holds, [True])
+        self.bridge._buffer(self.buffer())
+        self.assertEqual(self.controller.packets, [])
+        self.assertTrue(self.bridge.set_direct(True, 10, self.token))
+        self.assertTrue(self.owner.audio.isMuted())
+        self.assertEqual(holds, [True, False])
+        self.bridge._buffer(self.buffer())
+        self.assertEqual(len(self.controller.packets), 1)
+        self.assertFalse(any(not muted for muted, _ in self.owner.audio.calls))
+        self.assertTrue(self.bridge.set_direct(False, 10))
+        self.assertFalse(self.owner.audio.isMuted())
+
+    def test_source_change_holds_synchronously_and_replacement_never_unmutes(self):
+        holds = []
+        self.owner.set_output_preparing = holds.append
+        self.assertTrue(self.bridge.set_direct(True, 10))
+        self.owner.audio.calls.clear()
+        self.owner._epoch += 1
+        self.owner.track = SimpleNamespace(track_id="second-song")
+        self.owner.changed.emit()
+        self.assertTrue(holds[-1])
+        self.assertTrue(self.bridge._restarting)
+        self.assertTrue(self.bridge.prepare_direct(11))
+        self.assertFalse(self.bridge.set_direct(False, 10))
+        self.assertTrue(self.bridge.set_direct(True, 11))
+        self.assertTrue(self.owner.audio.isMuted())
+        self.assertFalse(any(not muted for muted, _ in self.owner.audio.calls))
+
+    def test_preparation_cancel_restores_private_output_and_decoder_hold(self):
+        holds = []
+        self.owner.set_output_preparing = holds.append
+        self.assertTrue(self.bridge.prepare_direct(10))
+        self.assertTrue(self.bridge.set_direct(False, 10))
+        self.assertEqual(holds, [True, False])
+        self.assertFalse(self.owner.audio.isMuted())
+
     def test_preexisting_or_user_mute_during_prefill_is_not_restored_by_bridge(self):
         for before_feed, commit in ((True, False), (True, True), (False, False), (False, True)):
             with self.subTest(before_feed=before_feed, commit=commit):
@@ -167,7 +208,7 @@ class OwnedAudioBridgeHandoffTests(unittest.TestCase):
                 self.assertFalse(self.bridge.commit_direct_mute(10))
                 self.bridge._buffer(self.buffer())
                 self.assertEqual(self.controller.packets, [])
-                self.assertFalse(self.owner.audio.isMuted())
+                self.assertEqual(self.owner.audio.isMuted(), change == "track")
                 self.assertTrue(self.controller.changes)
                 self.assertTrue(self.bridge.set_direct(False, 10))
 
@@ -192,7 +233,7 @@ class OwnedAudioBridgeHandoffTests(unittest.TestCase):
         self.bridge._buffer(self.buffer())
         self.assertEqual(self.controller.packets, [])
         self.assertEqual(self.controller.changes[-1][0], self.bridge.media_token())
-        self.assertFalse(self.owner.audio.isMuted())
+        self.assertTrue(self.owner.audio.isMuted())
 
     def test_native_pcm_rejection_during_prefill_does_not_mute_qt(self):
         self.assertTrue(self.bridge.set_direct(True, 10, muted=False))

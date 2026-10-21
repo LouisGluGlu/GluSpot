@@ -3023,9 +3023,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.mydockfinder_running = False
         visual.manual_finder_available = True
 
-        self.assertFalse(visual._taskbar_auto_hide_enabled_for_screen(object()))
+        self.assertTrue(visual._taskbar_auto_hide_enabled_for_screen(object()))
 
-    def test_taskbar_preview_hides_when_finder_or_manual_mydockfinder_is_enabled(self):
+    def test_taskbar_preview_uses_live_dock_evidence_and_ignores_legacy_manual_flag(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.finder_mode = True
         visual.manual_finder_available = False
@@ -3039,6 +3039,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.location_mode = "free"
         visual.manual_finder_available = True
 
+        self.assertTrue(visual._taskbar_allowed())
+        visual.mydockfinder_running = True
         self.assertFalse(visual._taskbar_allowed())
 
     def test_accepting_taskbar_drop_sets_tasker_location_mode(self):
@@ -4267,13 +4269,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.set_mydockfinder_running(True, notify=False)
 
         self.assertEqual(visual.location_mode, "free")
-        self.assertEqual(visual.available_location_modes(), ["free"])
+        self.assertEqual(visual.available_location_modes(), ["top", "free"])
 
         visual.set_mydockfinder_running(False, notify=False)
 
         self.assertEqual(visual.available_location_modes(), ["top", "free", "tasker"])
 
-    def test_edge_location_modes_are_canonical_only_without_mydockfinder(self):
+    def test_edge_location_modes_follow_dock_and_live_finder_availability(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.mydockfinder_running = False
         visual.manual_finder_available = False
@@ -4284,9 +4286,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         visual.mydockfinder_running = True
 
-        self.assertEqual(visual._canonical_location_mode("top"), "free")
+        self.assertEqual(visual._canonical_location_mode("top"), "top")
         self.assertEqual(visual._canonical_location_mode("tasker"), "free")
         self.assertEqual(visual._canonical_location_mode("stick"), "free")
+        visual.finder_bar_enabled = True
+        visual.finder_bar_rect = QRectF(0.0, 0.0, 1920.0, 24.0)
+        self.assertEqual(visual._canonical_location_mode("top"), "free")
+        self.assertEqual(visual._canonical_location_mode("finder"), "finder")
 
     def test_set_location_mode_stick_refreshes_above_taskbar_position_immediately(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -4331,7 +4337,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(visual.manual_finder_available)
         self.assertFalse(visual.mydockfinder_running)
         self.assertEqual(visual.location_mode, "free")
-        self.assertEqual(visual.available_location_modes(), ["free"])
+        self.assertEqual(visual.available_location_modes(), ["top", "free", "tasker"])
 
     def test_last_position_snapshot_does_not_store_mode(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -4945,20 +4951,37 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             AssertionError("Scene suppression probe should stay throttled")
         )
 
-        visual._update_scene_state(10.39)
+        visual._update_scene_state(10.09)
 
         self.assertEqual(visual.scene_checked_at, 10.0)
+        with self.assertRaisesRegex(AssertionError, "Scene suppression probe should stay throttled"):
+            visual._update_scene_state(10.101)
+
+    def test_scene_state_probe_checks_immersive_owner_at_sixteen_milliseconds(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.scene_checked_at = 10.0
+        visual._detect_scene_suppression = lambda: (_ for _ in ()).throw(AssertionError("Owner probe requested"))
+        visual._update_scene_state(10.015)
+        self.assertEqual(visual.scene_checked_at, 10.0)
+        with self.assertRaisesRegex(AssertionError, "Owner probe requested"):
+            visual._update_scene_state(10.017)
 
     def test_tasker_scene_suppression_ignores_fullscreen_foreground(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "tasker"
         visual.scene_checked_at = -10.0
         visual.scene_suppressed = False
+        visual.scene_reason = ""
         visual.scene_transition_mode = ""
         visual.hovered_key = "music"
         visual.hover_armed_key = "music"
         visual.left_stack_at = 1.0
         visual.group_frame_mask_path = None
+        visual.mydockfinder_running = False
+        visual.taskbar_follow_last_hidden = False
+        visual._navigation_surface_blocks_island = lambda: False
+        visual._force_super_topmost = lambda: None
         visual._detect_scene_suppression = lambda: (True, "fullscreen")
         visual._set_input_passthrough = lambda _enabled: (_ for _ in ()).throw(AssertionError("Tasker should not passthrough on fullscreen"))
         visual.clearMask = lambda: None
@@ -5197,7 +5220,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertNotEqual(visible.window_pos.y(), hidden.window_pos.y())
         self.assertTrue(hidden.hidden_autohide)
 
-    def test_tasker_autohide_binary_follow_uses_follow_animation(self):
+    def test_tasker_autohide_binary_follow_uses_owner_position_without_second_animation(self):
         class FakeScreen:
             def geometry(self):
                 return QRect(0, 0, 1920, 1080)
@@ -5236,8 +5259,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
             self.assertTrue(visual._refresh_taskbar_follow_position())
 
-        self.assertEqual(immediate_moves, [])
-        self.assertTrue(animations)
+        self.assertTrue(immediate_moves)
+        self.assertEqual(animations, [])
 
     def test_taskbar_follow_animation_duration_stays_responsive(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -6014,12 +6037,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(visual.finder_hover_rect.width(), target_rect.width())
         self.assertAlmostEqual(visual.finder_hover_rect.center().x(), target_rect.center().x(), delta=28.0)
 
-    def test_manual_finder_toggle_resets_stale_tasker_frame_and_transition(self):
+    def test_live_dock_toggle_resets_stale_tasker_frame_and_transition(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.location_mode = "tasker"
         visual.finder_mode = False
         visual.attach_to_real_finder = False
         visual.manual_finder_available = False
+        visual.mydockfinder_running = False
         visual.taskbar_fusion_mode = "compact"
         visual.taskbar_preview_visible = True
         visual.taskbar_selected_drop_zone = QRectF(100.0, 100.0, 300.0, 40.0)
@@ -6043,7 +6067,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.update = lambda: None
         visual.clearMask = lambda: None
 
-        visual.set_manual_finder_available(True, notify=False)
+        visual.set_mydockfinder_running(True, notify=False)
 
         self.assertEqual(visual.location_mode, "free")
         self.assertFalse(visual.finder_mode)
@@ -6061,8 +6085,25 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual.hover_armed_key, "")
         self.assertEqual(visual.drag_detach_global_rects, {})
 
-    def test_finder_attach_disallowed_when_manual_finder_is_off(self):
+    def test_legacy_manual_finder_toggle_does_not_change_live_tasker_placement(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.location_mode = "tasker"
+        visual.finder_mode = False
+        visual.mydockfinder_running = False
+        visual.manual_finder_available = False
+        visual._reset_location_runtime_state = lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("A legacy preference is not a Dock process transition")
+        )
+        visual.update = lambda: None
+        visual.set_manual_finder_available(True, notify=False)
+        self.assertTrue(visual.manual_finder_available)
+        self.assertFalse(visual._mydockfinder_available())
+        self.assertEqual(visual.location_mode, "tasker")
+        self.assertEqual(visual.available_location_modes(), ["top", "free", "tasker"])
+
+    def test_finder_attach_requires_live_dock_and_enabled_finder_bar(self):
+        visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.mydockfinder_running = False
         visual.manual_finder_available = False
         visual.finder_material = FinderGlassMaterial(
             top_color=QColor(31, 32, 36, 235),
@@ -6084,6 +6125,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertFalse(visual._finder_attach_allowed())
         visual.finder_bar_enabled = True
         visual.finder_bar_rect = QRectF(0, 0, 1920, 24)
+        self.assertFalse(visual._finder_attach_allowed())
+        visual.mydockfinder_running = True
         self.assertTrue(visual._finder_attach_allowed())
 
     def test_taskbar_left_handle_stays_visible_for_three_seconds_after_hover(self):
@@ -6745,7 +6788,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             now["value"] = 100.9
             self.assertTrue(visual._taskbar_autohide_hidden_for_screen(FakeScreen(), taskbar))
 
-    def test_autohide_follow_click_on_taskbar_holds_visible_until_outside_click(self):
+    def test_autohide_follow_click_does_not_reveal_or_pin_island_without_owner(self):
         class FakeScreen:
             def geometry(self):
                 return QRect(0, 0, 1920, 1080)
@@ -6756,7 +6799,11 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.taskbar_windows_snapshot_cache = {}
         visual.taskbar_follow_base_rect = QRectF()
         taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
-        visual._windows_taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1078.0, 1920.0, 2.0)
+        owner = {"rect": QRectF(0.0, 1078.0, 1920.0, 2.0)}
+        visual._windows_taskbar_rect_for_screen = lambda _screen: QRectF(owner["rect"])
+        visual._taskbar_autohide_interaction_keeps_visible = lambda *_args: (_ for _ in ()).throw(
+            AssertionError("Passive owner following must not query independent hover holds")
+        )
         visual._windows_taskbar_appbar_state_for_screen = lambda _screen: {
             "auto_hide": True,
             "rect": QRectF(taskbar),
@@ -6770,27 +6817,30 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             patch("local.island_stack_visual.QGuiApplication.mouseButtons", side_effect=lambda: buttons["value"]),
         ):
             follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
-            self.assertFalse(hidden)
-            self.assertEqual(follow, taskbar)
+            self.assertTrue(hidden)
+            self.assertEqual(follow, QRectF(0.0, 1080.0, 1920.0, 40.0))
 
             cursor["pos"] = QPoint(960, 1050)
             buttons["value"] = Qt.MouseButton.LeftButton
+            owner["rect"] = QRectF(taskbar)
             follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
             self.assertFalse(hidden)
             self.assertEqual(follow, taskbar)
 
             cursor["pos"] = QPoint(960, 980)
             buttons["value"] = Qt.MouseButton.NoButton
+            owner["rect"] = QRectF(0.0, 1060.0, 1920.0, 40.0)
             follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
             self.assertFalse(hidden)
-            self.assertEqual(follow, taskbar)
+            self.assertEqual(follow, owner["rect"])
 
             buttons["value"] = Qt.MouseButton.LeftButton
+            owner["rect"] = QRectF(0.0, 1080.0, 1920.0, 40.0)
             follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
             self.assertTrue(hidden)
             self.assertEqual(follow, QRectF(0.0, 1080.0, 1920.0, 40.0))
 
-    def test_autohide_follow_waits_half_second_after_cursor_leaves_taskbar_area(self):
+    def test_autohide_follow_uses_owner_immediately_without_cursor_exit_delay(self):
         class FakeScreen:
             def geometry(self):
                 return QRect(0, 0, 1920, 1080)
@@ -6801,7 +6851,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.taskbar_windows_snapshot_cache = {}
         visual.taskbar_follow_base_rect = QRectF()
         taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
-        visual._windows_taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1078.0, 1920.0, 2.0)
+        owner = {"rect": QRectF(taskbar)}
+        visual._windows_taskbar_rect_for_screen = lambda _screen: QRectF(owner["rect"])
         visual._windows_taskbar_appbar_state_for_screen = lambda _screen: {
             "auto_hide": True,
             "rect": QRectF(taskbar),
@@ -6820,20 +6871,23 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             self.assertEqual(follow, taskbar)
 
             cursor["pos"] = QPoint(960, 1000)
-            now["value"] = 100.5
+            now["value"] = 100.016
+            owner["rect"] = QRectF(0.0, 1060.0, 1920.0, 40.0)
             follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
             self.assertFalse(hidden)
-            self.assertEqual(follow, taskbar)
+            self.assertEqual(follow, owner["rect"])
 
-            now["value"] = 100.9
-            follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
-            self.assertFalse(hidden)
-            self.assertEqual(follow, taskbar)
-
-            now["value"] = 101.1
+            now["value"] = 100.032
+            owner["rect"] = QRectF(0.0, 1080.0, 1920.0, 40.0)
             follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
             self.assertTrue(hidden)
             self.assertEqual(follow, QRectF(0.0, 1080.0, 1920.0, 40.0))
+
+            now["value"] = 100.048
+            owner["rect"] = QRectF(taskbar)
+            follow, hidden = visual._taskbar_follow_rect_for_current_visibility(FakeScreen(), taskbar)
+            self.assertFalse(hidden)
+            self.assertEqual(follow, taskbar)
 
     def test_autohide_reveal_edge_ignores_island_dragging(self):
         class FakeScreen:
@@ -13552,7 +13606,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         main_bottom = moves[-1].y() + 600.0 + 48.0
         self.assertLessEqual(main_bottom, 1080.0 - visual._u(6.0))
 
-    def test_bottom_drag_release_snaps_above_taskbar_when_autohide_enabled_without_entering_tasker(self):
+    def test_bottom_drag_release_enters_tasker_with_same_dock_animation_when_autohide_enabled(self):
         class FakeScreen:
             def geometry(self):
                 return QRect(0, 0, 1920, 1080)
@@ -13581,6 +13635,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._main_size_for_kind = lambda _kind, _stack_w: (420.0, 48.0)
         visual._main_top_for_direction = lambda _kind, _main_h, direction: 72.0 if direction >= 0 else 600.0
         visual._expanded_stack_height = lambda _kind, _main_h, include_popups=False: 120.0
+        visual.set_location_mode = lambda mode, notify=True: setattr(visual, "location_mode", str(mode))
+        dock_calls = []
+        def dock(**kwargs):
+            self.assertTrue(visual.taskbar_dock_animation_requested)
+            dock_calls.append(kwargs)
+            return True
+        visual._dock_to_taskbar_task_area = dock
         visual.save_last_position = lambda _pos: None
         moves: list[QPoint] = []
         visual.move = lambda pos: moves.append(QPoint(pos))
@@ -13589,11 +13650,12 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
             self.assertTrue(visual._settle_standalone_drag_release(anchor, QPoint(920, 1078)))
 
-        self.assertEqual(visual.location_mode, "stick")
-        self.assertTrue(visual.taskbar_above_follow_active)
-        self.assertTrue(moves)
-        main_bottom = moves[-1].y() + 600.0 + 48.0
-        self.assertAlmostEqual(main_bottom, 1040.0 - visual._stick_taskbar_above_gap(QRectF(0.0, 1040.0, 1920.0, 40.0)), delta=1.0)
+        self.assertEqual(visual.location_mode, "tasker")
+        self.assertFalse(visual.taskbar_above_follow_active)
+        self.assertEqual(len(dock_calls), 1)
+        self.assertEqual(dock_calls[0]["target_center_x"], anchor.center().x())
+        self.assertEqual(dock_calls[0]["target_taskbar_rect"], QRectF(0.0, 1040.0, 1920.0, 40.0))
+        self.assertFalse(visual.taskbar_dock_animation_requested)
 
     def test_stick_drag_release_away_from_bottom_returns_to_free(self):
         class FakeScreen:
@@ -13671,7 +13733,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertTrue(moves)
         self.assertAlmostEqual(moves[-1].y() + 72.0, 0.0, delta=1.0)
 
-    def test_top_drag_release_is_disabled_when_mydockfinder_is_available(self):
+    def test_top_drag_release_with_dock_follows_live_finder_availability(self):
         class FakeScreen:
             def geometry(self):
                 return QRect(0, 0, 1920, 1080)
@@ -13680,10 +13742,31 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.mydockfinder_running = True
         visual.manual_finder_available = False
         visual._u = lambda value: float(value)
+        visual.location_mode = "free"
+        visual.finder_mode = False
+        visual.width = lambda: 940
+        visual._main_kind = lambda: IslandKind.MUSIC
+        visual._stack_target_width = lambda _kind: 420.0
+        visual._standalone_width_limit_for_global_center = lambda _center, _geo, target_width=None: float(target_width)
+        visual._main_size_for_kind = lambda _kind, _width: (420.0, 48.0)
+        visual._main_top_for_direction = lambda *_args: 72.0
+        visual._clear_taskbar_preview_runtime = lambda: None
+        visual._force_super_topmost = lambda: None
+        visual._restore_motion_global_rects_after_move = lambda: None
+        visual.save_last_position = lambda _pos: None
+        moves = []
+        visual.move = lambda pos: moves.append(QPoint(pos))
 
         anchor = QRectF(400.0, 6.0, 420.0, 48.0)
 
+        self.assertTrue(visual._should_snap_top_notch_for_release(anchor, QPoint(610, 2), FakeScreen()))
+        self.assertTrue(visual._settle_standalone_top_notch(anchor, FakeScreen()))
+        self.assertEqual(visual.location_mode, "top")
+        self.assertEqual(moves[-1].y() + 72.0, 0.0)
+        visual.finder_bar_enabled = True
+        visual.finder_bar_rect = QRectF(0.0, 0.0, 1920.0, 24.0)
         self.assertFalse(visual._should_snap_top_notch_for_release(anchor, QPoint(610, 2), FakeScreen()))
+        self.assertIsNone(visual._standalone_top_notch_target_for_screen(anchor, FakeScreen()))
 
     def test_bottom_drag_release_enters_tasker_when_autohide_disabled(self):
         class FakeScreen:
@@ -14226,7 +14309,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._set_taskbar_follow_hidden = lambda _hidden: None
         visual._force_super_topmost = lambda: None
         moves: list[QPoint] = []
-        visual._animate_taskbar_follow_to_pos = lambda pos: moves.append(QPoint(pos)) or True
+        visual._move_taskbar_window_if_needed = lambda pos: moves.append(QPoint(pos)) or True
 
         with patch("local.island_stack_visual.QGuiApplication.screenAt", return_value=FakeScreen()):
             self.assertTrue(visual._refresh_taskbar_follow_position())
@@ -14254,7 +14337,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual._taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1000.0, 1920.0, 80.0)
         visual._taskbar_track_rect_for_screen = lambda _screen, taskbar: QRectF(taskbar)
         visual._windows_taskbar_appbar_state_for_screen = lambda _screen: {"auto_hide": True, "rect": QRectF(0.0, 1000.0, 1920.0, 80.0), "edge": "bottom"}
-        visual._windows_taskbar_rect_for_screen = lambda _screen: None
+        visual._windows_taskbar_rect_for_screen = lambda _screen: QRectF(0.0, 1000.0, 1920.0, 80.0)
         visual._taskbar_autohide_hidden_for_screen = lambda *_args: False
         visual._taskbar_auto_hide_enabled_for_screen = lambda _screen: True
         visual._current_main_target_global_rect = lambda: QRectF(710.0, 940.0, 420.0, 48.0)

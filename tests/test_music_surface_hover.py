@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from local.music_surface_window import MusicSurfaceWindow
@@ -45,14 +45,8 @@ class MusicSurfaceHoverTests(unittest.TestCase):
         self.window._hovered_window_button = key
         self.window._hovered_media_command = command
         self.window._set_control_hover(key, command, now)
-        self.window._control_hover_menu_timer.stop()
 
-    def _advance(self, start=100.0, end=100.5):
-        steps = max(1, round((end - start) / .01))
-        for index in range(1, steps + 1):
-            self.window._advance_control_neighbor_motion(start + (end - start) * index / steps)
-
-    def test_every_top_control_grows_in_half_second_and_hit_matches_paint(self):
+    def test_window_and_fullscreen_function_controls_keep_fixed_hit_and_paint_bounds(self):
         rect = QRectF(self.window.rect())
         for fullscreen in (False, True):
             self.window._fullscreen = fullscreen
@@ -61,43 +55,29 @@ class MusicSurfaceHoverTests(unittest.TestCase):
                 with self.subTest(fullscreen=fullscreen, key=key):
                     self.window._reset_control_hover(100.0)
                     self._hover(key)
-                    midway = self.window._hover_control_rect(key, base, group, 100.1)
-                    end = self.window._hover_control_rect(key, base, group, 100.5)
-                    self.assertGreater(midway.width(), base.width())
-                    self.assertAlmostEqual(end.width(), base.width() * 1.10)
-                    early_growth = midway.width() - base.width()
-                    late_growth = end.width() - self.window._hover_control_rect(key, base, group, 100.4).width()
-                    self.assertGreater(early_growth, late_growth)
+                    for now in (100.1, 100.5, 105.0):
+                        self.assertEqual(self.window._hover_control_rect(key, base, group, now), base)
                     with patch("local.music_surface_window.time.monotonic", return_value=100.5):
                         self.window._sync_window_control_rects()
-                        self.assertEqual(self.window._button_rects[key], end)
-                        newly_visible = QPointF(end.right() - .01, end.center().y())
-                        self.assertFalse(base.contains(newly_visible))
-                        self.assertTrue(self.window._window_control_contains(key, end, newly_visible))
+                        self.assertEqual(self.window._button_rects[key], base)
+                        self.assertTrue(self.window._window_control_contains(key, base, base.center()))
 
-    def test_neighbor_spring_moves_away_with_distance_decay_and_settles_back(self):
-        self._hover("playback_mode")
+    def test_hover_does_not_shift_neighbor_buttons(self):
         group = self.window._top_control_hover_group(QRectF(self.window.rect()))
-        self._advance()
-        near = self.window._hover_control_rect("translation", group["translation"], group, 100.5)
-        far = self.window._hover_control_rect("return", group["return"], group, 100.5)
-        self.assertGreater(near.center().x(), group["translation"].center().x())
-        self.assertGreater(far.center().x(), group["return"].center().x())
-        self.assertGreater(near.center().x() - group["translation"].center().x(),
-                           far.center().x() - group["return"].center().x())
-        self.assertLessEqual(near.center().x() - group["translation"].center().x(), 12.5)
-        self._hover(now=100.5)
-        continuous = self.window._hover_control_rect("translation", group["translation"], group, 100.5)
-        self.assertEqual(continuous, near)
-        self._advance(100.5, 101.5)
-        restored = self.window._hover_control_rect("translation", group["translation"], group, 101.5)
-        self.assertAlmostEqual(restored.center().x(), group["translation"].center().x(), delta=.01)
+        self._hover("playback_mode")
+        for now in (100.1, 100.5, 101.5):
+            self.window._update_control_animation_regions(now)
+            for key, base in group.items():
+                self.assertEqual(self.window._hover_control_rect(key, base, group, now), base)
+        self.assertEqual(self.window._control_hover_motions, {})
+        self.assertTrue(self.window.property("controlHoverDisabled"))
 
-    def test_transport_icons_and_click_slots_share_the_enlarged_pose(self):
+    def test_transport_icons_and_hit_slots_stay_stationary_on_hover(self):
         panel = QRectF(20, 350, 270, 48)
         image = QImage(960, 540, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
-        for command in ("previous", "toggle_play_pause", "next"):
+        baseline = None
+        for command in ("", "previous", "toggle_play_pause", "next"):
             with self.subTest(command=command):
                 self.window._reset_control_hover(100.0)
                 self._hover(command=command)
@@ -106,11 +86,10 @@ class MusicSurfaceHoverTests(unittest.TestCase):
                     with QPainter(image) as painter:
                         self.window._paint_media_controls(painter, panel, QColor("white"), QColor("gray"))
                 drawn = {call.args[2]: call.args[1] for call in paint_icon.call_args_list}
-                hit = self.window._media_button_rects[command]
-                self.assertEqual(drawn[command].center(), hit.center())
-                self.assertAlmostEqual(hit.height(), min(panel.height(), self.window.TRANSPORT_PANEL_HEIGHT * self.window._surface_scale()) * 1.10)
-                baseline = next(value for key, value in drawn.items() if key != command)
-                self.assertAlmostEqual(drawn[command].width() / baseline.width(), 1.10)
+                hits = dict(self.window._media_button_rects)
+                if baseline is None:
+                    baseline = (drawn, hits)
+                self.assertEqual((drawn, hits), baseline)
 
     def test_library_circle_and_expanded_label_use_the_enlarged_hit_shape(self):
         self._hover("library")
@@ -124,51 +103,70 @@ class MusicSurfaceHoverTests(unittest.TestCase):
                 self.assertTrue(self.window._window_control_contains("library", shown, shown.center()))
                 self.assertFalse(self.window._window_control_contains("library", shown, shown.topLeft()))
 
-    def test_device_hover_requires_continuous_half_second_and_click_still_toggles(self):
+    def test_device_hover_never_opens_panel_and_click_still_toggles(self):
         self._hover("audio_output")
-        with patch.object(self.window, "isVisible", return_value=True), \
-                patch.object(self.window, "_open_audio_output_panel") as open_panel:
-            with patch("local.music_surface_window.time.monotonic", return_value=100.3):
-                self.window._check_control_hover_menu()
+        with patch.object(self.window, "_open_audio_output_panel") as open_panel:
+            for now in (100.3, 100.5, 103.0):
+                with patch("local.music_surface_window.time.monotonic", return_value=now):
+                    self.window._update_control_animation_regions(now)
             open_panel.assert_not_called()
-            self.window._control_hover_menu_timer.stop()
-            with patch("local.music_surface_window.time.monotonic", return_value=100.5):
-                self.window._sync_window_control_rects()
-                position = self.window.mapToGlobal(self.window._button_rects["audio_output"].center().toPoint())
-                with patch("local.music_surface_window.QCursor.pos", return_value=position):
-                    self.window._check_control_hover_menu()
-                    self.window._check_control_hover_menu()
+            self.window._toggle_audio_output_panel()
             open_panel.assert_called_once_with()
-        self._hover("audio_output", now=101.0)
-        self._hover("", now=101.2)
-        self.assertFalse(self.window._control_hover_menu_timer.isActive())
-        self.assertEqual(self.window._control_hover_menu_key, "")
         self.window._audio_output_panel = Mock()
         self.window._audio_output_panel.isVisible.return_value = True
         self.window._toggle_audio_output_panel()
         self.window._audio_output_panel.dismiss.assert_called_once_with(immediate=False)
         self.window._audio_output_panel = None
 
-    def test_dj_half_second_hover_opens_caption_without_toggling_music(self):
+    def test_dj_hover_stays_compact_and_click_opens_voice_choices(self):
         callback = Mock()
         self.owner._personal_dj_voice_hover_callback = callback
         self._hover("personal_dj")
-        with patch.object(self.window, "isVisible", return_value=True), \
-                patch("local.music_surface_window.time.monotonic", return_value=100.5):
-            self.window._sync_window_control_rects()
-            position = self.window.mapToGlobal(self.window._button_rects["personal_dj"].center().toPoint())
-            # The compact icon is elliptical; its actual center owns hover.
-            with patch("local.music_surface_window.QCursor.pos", return_value=position):
-                self.window._check_control_hover_menu()
-            self.assertTrue(self.window._dj_voice_selector_active)
-            callback.assert_called_once_with(self.window, True)
-            self.assertEqual(self.provider.calls, [])
-        icon, caption = self.window._personal_dj_geometry(QRectF(self.window.rect()), 101.0)
-        self.assertGreater(caption.width(), caption.height() * 4)
-        self.assertGreater(icon.height(), 44 * self.window._surface_scale())
+        rect = QRectF(self.window.rect())
+        baseline = self.window._personal_dj_geometry(rect, 100.0)
+        for now in (100.3, 100.5, 103.0):
+            self.window._update_control_animation_regions(now)
+            self.assertEqual(self.window._personal_dj_geometry(rect, now), baseline)
+        self.assertFalse(self.window._dj_voice_selector_active)
+        callback.assert_not_called()
+        with patch("local.music_surface_window.time.monotonic", return_value=103.0):
+            self.window._activate_personal_dj(baseline[0].center(), toggle_ready=False)
+        self.assertTrue(self.window._dj_voice_selector_active)
+        callback.assert_called_once_with(self.window, True)
+        self.assertEqual(self.provider.calls, [])
         self.assertEqual(self.window._control_reveal_at(120.0), 1.0)
 
-    def test_expanded_hover_has_speech_glyph_placement_without_icon_ball_or_speech_backdrop(self):
+    def test_held_menu_press_dispatches_once_on_release(self):
+        for key in ("audio_output", "personal_dj"):
+            with self.subTest(key=key):
+                self.window._reset_control_idle(100.)
+                self._hover(key)
+                with patch("local.music_surface_window.time.monotonic", return_value=100.1):
+                    self.window._sync_window_control_rects()
+                    point = self.window._button_rects[key].center()
+                    global_point = self.window.mapToGlobal(point.toPoint())
+                    press = QMouseEvent(QEvent.Type.MouseButtonPress, point, QPointF(global_point),
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+                    self.window.mousePressEvent(press)
+                self.assertEqual(self.window._pressed_window_button, key)
+                with patch.object(self.window, "_toggle_audio_output_panel") as output_click, \
+                        patch.object(self.window, "_activate_personal_dj") as dj_click, \
+                        patch("local.music_surface_window.time.monotonic", return_value=100.7):
+                    self.window._update_control_animation_regions(100.7)
+                    output_click.assert_not_called()
+                    dj_click.assert_not_called()
+                    self.window._sync_window_control_rects()
+                    point = self.window._button_rects[key].center()
+                    release = QMouseEvent(QEvent.Type.MouseButtonRelease, point,
+                        QPointF(self.window.mapToGlobal(point.toPoint())), Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+                    self.window.mouseReleaseEvent(release)
+                    (output_click if key == "audio_output" else dj_click).assert_called_once()
+                self.window._set_control_hover("", "", 100.8)
+                self.window._set_control_hover(key, "", 101.)
+                self.assertFalse(self.window._dj_voice_selector_active)
+
+    def test_click_expanded_selector_has_speech_glyph_placement_without_icon_ball_or_speech_backdrop(self):
         self.owner._personal_dj_voice_hover_callback = Mock()
         self.window._open_dj_voice_selector(100.0)
         rect = QRectF(self.window.rect())

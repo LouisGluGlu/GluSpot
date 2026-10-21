@@ -157,8 +157,15 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                   for x in range(0, material.width(), 8)]
         self.assertTrue(all(color.alpha() == 255 for color in pixels))
         self.assertGreater(max(max(color.getRgb()[:3]) - min(color.getRgb()[:3]) for color in pixels), 3)
-        self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(panel._ink, panel._background), 4.5)
-        self.assertGreaterEqual(MusicSurfaceWindow._contrast_ratio(panel._muted, panel._background), 4.5)
+        # The user's whole-scene decision supersedes independent local
+        # inversion, including this panel's average crop. Check the shared
+        # authority at the same instant rather than demanding a new local ink.
+        with patch("local.music_surface_window.time.monotonic", return_value=102.0):
+            panel._sync_surface_style()
+            decided = self.window._scene_control_ink()
+        self.assertEqual(panel._ink, decided)
+        self.assertEqual(panel._muted, decided)
+        self.assertTrue(all(row.ink == decided for row in panel._rows.values()))
         marker.hide()
 
     def test_displayed_backdrop_refreshes_material_without_repainting_lyrics(self):
@@ -195,9 +202,14 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 self.window._fullscreen = fullscreen
                 self.window._reset_control_idle(now=100.0)
                 closed_page = self._render_page(100.0)
+                closed_controls = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                closed_controls.fill(Qt.GlobalColor.transparent)
+                with QPainter(closed_controls) as painter, patch(
+                        "local.music_surface_window.time.monotonic", return_value=100.0):
+                    self.window._paint_window_controls(painter, QRectF(self.window.rect()))
                 panel = self._open_with_pointer(fullscreen)
                 buttons = self.window._button_rects
-                self.assertEqual(set(buttons), {"audio_output", "translation",
+                self.assertEqual(set(buttons), {"audio_output", "content_layout", "translation",
                                                 "mode" if fullscreen else "return"})
                 output, translation = buttons["audio_output"], buttons["translation"]
                 self.assertAlmostEqual(output.width(), output.height())
@@ -225,12 +237,28 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 native_panel.fill(Qt.GlobalColor.transparent)
                 panel.render(native_panel)
                 row_face = QPoint(row.width() // 2, row.height() - 7)
-                actual = open_page.pixelColor(row.mapTo(self.window, row_face))
-                expected = native_panel.pixelColor(row.mapTo(panel, row_face))
-                self.assertEqual(actual, expected)
+                page_point = row.mapTo(self.window, row_face)
+                actual = open_page.pixelColor(page_point)
+                # The native panel is translucent. Compare its composition
+                # over the same displayed page. The additional layout button
+                # moves the chooser above artwork/lyrics at some sizes, so a
+                # background-only raster is no longer the entire underlay.
+                background = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                background.fill(Qt.GlobalColor.transparent)
+                with patch("local.music_surface_window.time.monotonic", return_value=100.5):
+                    self.window.render(background, renderFlags=QWidget.RenderFlag.DrawWindowBackground)
+                with QPainter(background) as painter:
+                    painter.drawImage(panel.pos(), native_panel)
+                expected = background.pixelColor(page_point)
+                self.assertEqual(actual.alpha(), 255)
+                self.assertLess(native_panel.pixelColor(row.mapTo(panel, row_face)).alpha(), 255)
+                for channel in ("red", "green", "blue"):
+                    self.assertAlmostEqual(getattr(actual, channel)(), getattr(expected, channel)(), delta=1)
                 self.assertTrue(row.isChecked())
                 self.assertTrue(row.volume_slider.isVisible())
-                self.assertGreater(closed_face.pixelColor(closed_face.width() // 2, 3).lightness(), 200)
+                face = closed_controls.pixelColor(round(output.center().x()), round(output.top()) + 3)
+                self.assertGreater(face.alpha(), 180)
+                self.assertLess(face.alpha(), 245)
                 self.assertGreater(sum(controls.pixelColor(x, y).alpha() > 0
                     for y in range(round(translation.top()), round(translation.bottom()))
                     for x in range(round(translation.left()), round(translation.right()))), 100)

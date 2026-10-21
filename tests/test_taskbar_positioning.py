@@ -49,6 +49,7 @@ from local.taskbar_positioning import (
     drag_main_offset_for_press,
     empty_bar_orientation,
     empty_bar_size,
+    fullscreen_placement_mode,
     extend_taskbar_left_handle_visible_until,
     expanded_stack_height,
     fallback_taskbar_task_area_rect,
@@ -163,6 +164,18 @@ class TaskbarPositioningTests(unittest.TestCase):
     def test_available_location_modes_follow_finder_availability(self):
         self.assertEqual(available_location_modes_for_state(mydockfinder_available=True), ["free", "finder"])
         self.assertEqual(available_location_modes_for_state(mydockfinder_available=False), ["top", "free", "tasker"])
+        self.assertEqual(
+            available_location_modes_for_state(mydockfinder_available=True, finder_bar_available=True),
+            ["free", "finder"],
+        )
+        self.assertEqual(
+            available_location_modes_for_state(mydockfinder_available=True, finder_bar_available=False),
+            ["top", "free"],
+        )
+        self.assertEqual(
+            available_location_modes_for_state(mydockfinder_available=False, finder_bar_available=True),
+            ["top", "free", "tasker"],
+        )
 
     def test_canonical_location_mode_maps_legacy_values(self):
         self.assertEqual(canonical_location_mode("off", mydockfinder_available=False), "free")
@@ -178,6 +191,56 @@ class TaskbarPositioningTests(unittest.TestCase):
         self.assertEqual(canonical_location_mode("tasker", mydockfinder_available=True), "free")
         self.assertEqual(canonical_location_mode("stick", mydockfinder_available=True), "free")
         self.assertEqual(canonical_location_mode("finder", mydockfinder_available=True), "finder")
+
+    def test_canonical_location_mode_allows_top_only_when_dock_has_no_finder(self):
+        for mode, expected in (("top", "top"), ("free", "free"), ("finder", "free"), ("tasker", "free"), ("stick", "free")):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    canonical_location_mode(mode, mydockfinder_available=True, finder_bar_available=False),
+                    expected,
+                )
+
+    def test_fullscreen_placement_follows_each_visible_immersive_owner(self):
+        for dock, finder, expected in ((False, False, "tasker"), (False, True, "tasker"), (True, True, "finder")):
+            for follow in (False, True):
+                with self.subTest(dock=dock, finder=finder, follow=follow):
+                    self.assertEqual(
+                        fullscreen_placement_mode(
+                            mydockfinder_available=dock,
+                            finder_bar_available=finder,
+                            owner_bar_hidden=False,
+                            hide_follow_enabled=follow,
+                        ),
+                        (expected, False),
+                    )
+
+    def test_fullscreen_placement_follows_hidden_owner_or_uses_visible_top(self):
+        for dock, finder, expected in ((False, False, "tasker"), (False, True, "tasker"), (True, True, "finder")):
+            for follow in (False, True):
+                with self.subTest(dock=dock, finder=finder, follow=follow):
+                    self.assertEqual(
+                        fullscreen_placement_mode(
+                            mydockfinder_available=dock,
+                            finder_bar_available=finder,
+                            owner_bar_hidden=True,
+                            hide_follow_enabled=follow,
+                        ),
+                        (expected, True) if follow else ("top", False),
+                    )
+
+    def test_fullscreen_placement_with_dock_without_finder_uses_top_and_option_visibility(self):
+        for owner_hidden in (False, True):
+            for follow in (False, True):
+                with self.subTest(owner_hidden=owner_hidden, follow=follow):
+                    self.assertEqual(
+                        fullscreen_placement_mode(
+                            mydockfinder_available=True,
+                            finder_bar_available=False,
+                            owner_bar_hidden=owner_hidden,
+                            hide_follow_enabled=follow,
+                        ),
+                        ("top", follow),
+                    )
 
     def test_canonical_location_mode_rejects_stick_when_autohide_disabled(self):
         self.assertEqual(
@@ -1439,6 +1502,86 @@ class TaskbarPositioningTests(unittest.TestCase):
                 auto_hide=True,
             )
         )
+
+    def test_translating_full_taskbar_stays_visible_until_one_pixel_at_every_monitor_edge(self):
+        for unit in (1.0, 1.5, 2.0):
+            for origin in (QPointF(0.0, 0.0), QPointF(-660.0, -360.0)):
+                screen = QRectF(origin.x(), origin.y(), 660.0 * unit, 360.0 * unit)
+                thickness = 40.0 * unit
+                for edge in ("bottom", "top", "left", "right"):
+                    def shell_with_visible_remainder(remainder):
+                        if edge == "bottom":
+                            return QRectF(screen.left(), screen.bottom() - remainder, screen.width(), thickness)
+                        if edge == "top":
+                            return QRectF(screen.left(), screen.top() + remainder - thickness, screen.width(), thickness)
+                        if edge == "left":
+                            return QRectF(screen.left() + remainder - thickness, screen.top(), thickness, screen.height())
+                        return QRectF(screen.right() - remainder, screen.top(), thickness, screen.height())
+
+                    appbar = shell_with_visible_remainder(thickness)
+                    for remainder in (thickness, 20.0, 10.0, 2.0, 1.01, 1.0, 0.0, -4.0):
+                        with self.subTest(unit=unit, origin=origin, edge=edge, remainder=remainder):
+                            self.assertEqual(
+                                taskbar_shell_rect_is_hidden_autohide(
+                                    shell_with_visible_remainder(remainder),
+                                    appbar,
+                                    auto_hide=True,
+                                    unit=unit,
+                                    screen_geometry=screen,
+                                ),
+                                remainder <= 1.0,
+                            )
+
+    def test_screen_aware_shell_check_keeps_existing_thin_sensor_and_disabled_rules(self):
+        screen = QRectF(-660.0, 0.0, 660.0, 360.0)
+        appbar = QRectF(-660.0, 320.0, 660.0, 40.0)
+        self.assertTrue(
+            taskbar_shell_rect_is_hidden_autohide(
+                QRectF(-660.0, 358.0, 660.0, 2.0),
+                appbar,
+                auto_hide=True,
+                screen_geometry=screen,
+            )
+        )
+        self.assertFalse(
+            taskbar_shell_rect_is_hidden_autohide(
+                QRectF(-660.0, 360.0, 660.0, 40.0),
+                appbar,
+                auto_hide=False,
+                screen_geometry=screen,
+            )
+        )
+
+    def test_full_taskbar_offscreen_hidden_plan_uses_owning_monitor_intersection(self):
+        screen = QRectF(-660.0, 0.0, 660.0, 360.0)
+        appbar = QRectF(-660.0, 320.0, 660.0, 40.0)
+        for y, hidden in ((320.0, False), (350.0, False), (358.0, False), (359.0, True), (360.0, True)):
+            with self.subTest(y=y):
+                plan = build_taskbar_autohide_hidden_plan(
+                    taskbar_rect=appbar,
+                    appbar_rect=appbar,
+                    shell_rect=QRectF(-660.0, y, 660.0, 40.0),
+                    detected_auto_hide=True,
+                    screen_geometry=screen,
+                )
+                self.assertTrue(plan.auto_hide)
+                self.assertEqual(plan.hidden, hidden)
+
+    def test_taskbar_resolver_returns_base_after_full_shell_moves_out_of_monitor(self):
+        screen = QRectF(-660.0, 0.0, 660.0, 360.0)
+        appbar = QRectF(-660.0, 320.0, 660.0, 40.0)
+        for y, expected in ((350.0, QRectF(-660.0, 350.0, 660.0, 40.0)), (360.0, appbar)):
+            with self.subTest(y=y):
+                self.assertEqual(
+                    resolve_taskbar_rect_for_screen(
+                        screen_geometry=screen,
+                        available_geometry=screen,
+                        appbar_auto_hide=True,
+                        appbar_rect=appbar,
+                        shell_rect=QRectF(-660.0, y, 660.0, 40.0),
+                    ),
+                    expected,
+                )
 
     def test_taskbar_autohide_probe_prefers_taskbar_then_appbar_then_shell(self):
         taskbar = QRectF(0.0, 1040.0, 1920.0, 40.0)
@@ -3245,6 +3388,22 @@ class TaskbarPositioningTests(unittest.TestCase):
             )
         )
 
+    def test_top_release_with_dock_without_finder_uses_screen_local_edge(self):
+        screen = QRectF(-1920.0, 120.0, 1920.0, 1080.0)
+        for dock, finder, expected in ((False, False, True), (True, False, True), (True, True, False)):
+            with self.subTest(dock=dock, finder=finder):
+                self.assertEqual(
+                    should_snap_top_notch_for_release(
+                        QRectF(-900.0, 200.0, 420.0, 48.0),
+                        QPoint(-700, 122),
+                        screen,
+                        mydockfinder_available=dock,
+                        finder_bar_available=finder,
+                        finder_mode=False,
+                    ),
+                    expected,
+                )
+
     def test_standalone_release_decision_prioritizes_top_notch(self):
         decision = decide_standalone_release_action(
             QRectF(710.0, 4.0, 420.0, 48.0),
@@ -3275,7 +3434,7 @@ class TaskbarPositioningTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "tasker")
 
-    def test_standalone_release_decision_routes_autohide_taskbar_to_stick(self):
+    def test_standalone_release_decision_routes_autohide_taskbar_to_tasker(self):
         decision = decide_standalone_release_action(
             QRectF(710.0, 1018.0, 420.0, 48.0),
             QPoint(920, 1078),
@@ -3288,7 +3447,42 @@ class TaskbarPositioningTests(unittest.TestCase):
             taskbar_compact_active=False,
         )
 
-        self.assertEqual(decision.action, "stick")
+        self.assertEqual(decision.action, "tasker")
+
+    def test_standalone_release_with_dock_never_attaches_to_windows_taskbar(self):
+        for finder in (False, True):
+            for auto_hide in (False, True):
+                with self.subTest(finder=finder, auto_hide=auto_hide):
+                    decision = decide_standalone_release_action(
+                        QRectF(710.0, 1018.0, 420.0, 48.0),
+                        QPoint(920, 1078),
+                        QRectF(0.0, 0.0, 1920.0, 1080.0),
+                        QRectF(0.0, 1040.0, 1920.0, 40.0),
+                        taskbar_allowed=True,
+                        auto_hide_enabled=auto_hide,
+                        mydockfinder_available=True,
+                        finder_bar_available=finder,
+                        finder_mode=False,
+                        taskbar_compact_active=False,
+                    )
+                    self.assertEqual(decision.action, "free")
+
+    def test_standalone_release_with_dock_without_finder_attaches_only_to_top(self):
+        for finder, expected in ((False, "top"), (True, "free")):
+            with self.subTest(finder=finder):
+                decision = decide_standalone_release_action(
+                    QRectF(710.0, 4.0, 420.0, 48.0),
+                    QPoint(920, 2),
+                    QRectF(0.0, 0.0, 1920.0, 1080.0),
+                    QRectF(0.0, 1040.0, 1920.0, 40.0),
+                    taskbar_allowed=False,
+                    auto_hide_enabled=False,
+                    mydockfinder_available=True,
+                    finder_bar_available=finder,
+                    finder_mode=False,
+                    taskbar_compact_active=False,
+                )
+                self.assertEqual(decision.action, expected)
 
     def test_standalone_release_decision_returns_free_with_edge_notch_exit(self):
         decision = decide_standalone_release_action(
@@ -3903,6 +4097,38 @@ class TaskbarPositioningTests(unittest.TestCase):
         self.assertEqual(target.zone_rect.center().y(), 1056.0)
         self.assertEqual(target.window_pos.y() + 10.0, 1039.0)
 
+    def test_taskbar_follow_target_keeps_owner_offset_across_hidden_boundary(self):
+        screen = QRectF(-660.0, -360.0, 660.0, 360.0)
+        appbar = QRectF(-660.0, -40.0, 660.0, 40.0)
+        previous = None
+        for offset in range(41):
+            shell = appbar.translated(0.0, float(offset))
+            hidden = offset >= 39
+            target = build_taskbar_follow_target(
+                screen=object(),
+                visible_taskbar=appbar,
+                follow_taskbar=shell,
+                track_rect=appbar,
+                screen_geometry=screen,
+                window_width=500.0,
+                main_kind="music",
+                stack_width=300.0,
+                main_width=300.0,
+                main_height=30.0,
+                main_top=10.0,
+                direction=-1,
+                auto_hide_follow=True,
+                hidden_autohide=hidden,
+                visible_follow_lift=4.0,
+                bottom_extension=40.0,
+            )
+            with self.subTest(offset=offset, hidden=hidden):
+                self.assertEqual(target.zone_rect.center().y() - shell.center().y(), -4.0)
+                if previous is not None:
+                    self.assertEqual(target.window_pos.y() - previous.window_pos.y(), 1)
+                    self.assertEqual(target.zone_rect.top() - previous.zone_rect.top(), 1.0)
+            previous = target
+
     def test_build_taskbar_follow_target_marks_partial_shell_follow(self):
         target = build_taskbar_follow_target(
             screen=object(),
@@ -3954,7 +4180,7 @@ class TaskbarPositioningTests(unittest.TestCase):
         self.assertFalse(plan.animate_follow)
         self.assertFalse(plan.refresh_material)
 
-    def test_taskbar_follow_refresh_plan_animates_binary_autohide_follow(self):
+    def test_taskbar_follow_refresh_plan_follows_binary_owner_without_second_easing(self):
         target = build_taskbar_follow_target(
             screen=object(),
             visible_taskbar=QRectF(0.0, 1040.0, 1920.0, 40.0),
@@ -3984,7 +4210,7 @@ class TaskbarPositioningTests(unittest.TestCase):
         )
 
         self.assertTrue(plan.valid)
-        self.assertTrue(plan.animate_follow)
+        self.assertFalse(plan.animate_follow)
         self.assertFalse(plan.refresh_material)
 
     def test_taskbar_follow_refresh_plan_skips_partial_shell_animation_and_throttles_material(self):
@@ -4096,7 +4322,11 @@ class TaskbarPositioningTests(unittest.TestCase):
     def test_taskbar_follow_refresh_due_respects_interval_floor(self):
         self.assertTrue(taskbar_follow_refresh_due(now=10.0, last_refresh_at=0.0, interval=0.28))
         self.assertFalse(taskbar_follow_refresh_due(now=10.005, last_refresh_at=10.0, interval=0.0))
-        self.assertTrue(taskbar_follow_refresh_due(now=10.012, last_refresh_at=10.0, interval=0.0))
+        self.assertFalse(taskbar_follow_refresh_due(now=10.007, last_refresh_at=10.0, interval=0.0))
+        self.assertTrue(taskbar_follow_refresh_due(now=10.0081, last_refresh_at=10.0, interval=0.0))
+        self.assertTrue(taskbar_follow_refresh_due(now=10.0 + 1.0 / 120.0, last_refresh_at=10.0, interval=0.008))
+        self.assertFalse(taskbar_follow_refresh_due(now=10.010, last_refresh_at=10.0, interval=0.020))
+        self.assertTrue(taskbar_follow_refresh_due(now=10.021, last_refresh_at=10.0, interval=0.020))
 
     def test_taskbar_follow_force_visible_active_checks_deadline(self):
         self.assertFalse(taskbar_follow_force_visible_active(now=10.0, force_visible_until=0.0))

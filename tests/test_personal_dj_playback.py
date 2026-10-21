@@ -497,8 +497,8 @@ class DJPlaybackTests(unittest.TestCase):
     def test_pause_during_intro_preparation_stays_ready_until_user_resumes(self):
         self.start()
         self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
-        self.owned.send_playback_command("next")
+        # Pause the selected second song's pending preparation. Another Next
+        # here would skip it and wait for a new catalog, not prepare song 2.
         self.owned.send_playback_command("toggle_play_pause")
         self.run_latest(self.tasks, "stream")
         self.assertEqual(self.qt.state, QMediaPlayer.PlaybackState.PausedState)
@@ -582,8 +582,6 @@ class DJPlaybackTests(unittest.TestCase):
         self.start()
         self.owned._end_current_stream()
         self.run_latest(self.tasks, "stream")
-        self.owned.send_playback_command("next")
-        self.run_latest(self.tasks, "stream")
         preferences = {"marker": "old"}
         self.owned._lyrics_preferences_snapshot = lambda: dict(preferences)
         def parse(payload, values):
@@ -596,8 +594,9 @@ class DJPlaybackTests(unittest.TestCase):
         preferences["marker"] = "new"
         self.owned.refresh_lyrics()
         before = len([call for call in self.calls if call == ("lyrics", "song-2")])
-        self.owned._end_current_stream()
-        self.run_latest(self.tasks, "stream")
+        # The independent speech decoder finishes; music retains this song
+        # and its pending preference parse throughout the overlay handoff.
+        self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
         self.run_latest(self.tasks, "lyrics_refresh")
         self.assertEqual(self.owned.track.lyrics, ("new",))
         self.assertEqual(len([call for call in self.calls if call == ("lyrics", "song-2")]), before)

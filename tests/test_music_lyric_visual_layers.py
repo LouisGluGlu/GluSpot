@@ -5,11 +5,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from PySide6.QtGui import QFont, QImage
+from PySide6.QtGui import QColor, QFont, QImage
 from PySide6.QtWidgets import QApplication, QWidget
 
 from local.lyric_unit_timing import timed_unit_reading_front
 from local.music_lyric_presentation import split_display_layers
+from local.music_lyric_motion import LyricEmphasisPlan
 from local.music_surface_window import MusicSurfaceWindow
 
 
@@ -40,6 +41,14 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # These fixtures exercise the ordinary primary/companion layers.
+        # Highlight dispatch has its own integration suites; a historical
+        # per-owner threshold can no longer suppress it after the fixed cue.
+        for name, value in (("lyric_emphasis_plan", LyricEmphasisPlan()),
+                            ("explicit_slow_unit_groups", ())):
+            classifier = patch("local.music_surface_window." + name, return_value=value)
+            classifier.start()
+            self.addCleanup(classifier.stop)
         self.owner = _LayerOwner()
         self.window = MusicSurfaceWindow(self.owner)
         self.window.resize(960, 540)
@@ -60,6 +69,107 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         ]
         self.owner.timed_lyric_units = [(), (), (), ()]
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
+
+    def _reading_lane_lyrics(self):
+        self.owner.music_surface_reading_strategy = "low_perception"
+        self.owner.media_position_seconds = 25.0
+        self.owner.timed_lyrics = [
+            (0.0, "Past line\n翻译：过去"),
+            (20.0, "Current line\n翻译：当前"),
+            (40.0, "Future line\n翻译：未来"),
+            (60.0, "Later line\n翻译：稍后"),
+        ]
+        self.owner.timed_lyric_units = [()] * 4
+        self.owner.timed_lyric_timing_kinds = ["line"] * 4
+        self.owner.album_art = QImage(32, 32, QImage.Format.Format_RGB32)
+        self.owner.album_art.fill(QColor("#d87954"))
+
+    def _reading_lane_ink(self):
+        opacities = {}
+        draw_past = self.window._draw_sprung_cached_wrapped_layout
+        draw_future = self.window._draw_future_wrapped_layout
+
+        def capture(draw, painter, layout, origin, text, *args, **kwargs):
+            opacities[text] = max(opacities.get(text, 0.0), painter.opacity())
+            return draw(painter, layout, origin, text, *args, **kwargs)
+
+        dpr = self.window.devicePixelRatioF()
+        image = QImage(round(self.window.width() * dpr), round(self.window.height() * dpr),
+                       QImage.Format.Format_RGB32)
+        image.setDevicePixelRatio(dpr)
+        with (
+            patch("local.music_surface_window.time.monotonic", return_value=100.0),
+            patch.object(self.window, "_draw_sprung_cached_wrapped_layout",
+                         side_effect=lambda *args, **kwargs: capture(draw_past, *args, **kwargs)),
+            patch.object(self.window, "_draw_future_wrapped_layout",
+                         side_effect=lambda *args, **kwargs: capture(draw_future, *args, **kwargs)),
+        ):
+            self.window.render(image)
+        return opacities
+
+    def test_visible_title_subdues_surrounding_primary_and_translation_ink_only(self):
+        self._reading_lane_lyrics()
+        for width, height, fullscreen in ((640, 360, False), (1920, 1080, True)):
+            with self.subTest(fullscreen=fullscreen):
+                self.window.resize(width, height)
+                self.window._fullscreen = fullscreen
+                self.owner.track_title = ""
+                without_title = self._reading_lane_ink()
+                ambience = QImage(self.window._background_cache)
+                hit_rows = dict(self.window._lyric_hit_rects)
+                self.owner.track_title = "Visual layers"
+                with_title = self._reading_lane_ink()
+                for text in ("Past line", "过去", "Future line", "未来"):
+                    self.assertAlmostEqual(without_title[text], 1.0)
+                    self.assertGreater(with_title[text], 0.0)
+                    self.assertLess(with_title[text], without_title[text])
+                for text in ("Current line", "当前"):
+                    self.assertAlmostEqual(with_title[text], without_title[text])
+                    self.assertAlmostEqual(with_title[text], 1.0)
+                self.assertEqual(self.window._background_cache, ambience)
+                self.assertEqual(self.window._lyric_hit_rects, hit_rows)
+
+    def test_surrounding_ink_follows_actual_title_fade_during_cover_travel(self):
+        self._reading_lane_lyrics()
+        ratios = []
+        for fraction in (0.0, 0.5, 0.65):
+            with patch.object(self.window, "_cover_layout_fraction_at", return_value=fraction):
+                ink = self._reading_lane_ink()
+            ratios.append(ink["Future line"] / ink["Current line"])
+            self.assertAlmostEqual(ink["Current line"], 1.0 - fraction)
+            self.assertAlmostEqual(ink["当前"], ink["Current line"])
+        # Both title layouts are absent halfway through the travel. Their
+        # gradual return subdues surrounding ink without changing lyric fade.
+        self.assertLess(ratios[0], ratios[2])
+        self.assertLess(ratios[2], ratios[1])
+        self.assertAlmostEqual(ratios[1], 1.0)
+        blur_follow = self.window._lyric_blur_follow_levels
+
+        def half_blur(*args, **kwargs):
+            levels, moving = blur_follow(*args, **kwargs)
+            return tuple(level * 0.5 for level in levels), moving
+
+        with patch.object(self.window, "_lyric_blur_follow_levels", side_effect=half_blur):
+            partial_blur = self._reading_lane_ink()
+        self.assertAlmostEqual(partial_blur["Current line"], 1.0)
+        self.assertGreater(partial_blur["Future line"], ratios[0])
+        self.assertLess(partial_blur["Future line"], 1.0)
+
+    def test_idle_keeps_title_lane_width_and_browsing_restores_full_lyric_ink(self):
+        self._reading_lane_lyrics()
+        with patch.object(self.window, "_control_reveal_at", return_value=1.0):
+            revealed = self._reading_lane_ink()
+            lane_width = self.window._metadata_hit_rects["title"].width()
+        with patch.object(self.window, "_control_reveal_at", return_value=0.0):
+            idle = self._reading_lane_ink()
+            self.assertEqual(self.window._metadata_hit_rects["title"].width(), lane_width)
+        for text in ("Past line", "过去", "Future line", "未来", "Current line", "当前"):
+            self.assertAlmostEqual(idle[text], revealed[text])
+        self.window._browse_index = 1.0
+        self.window._browse_until = 110.0
+        browsing = self._reading_lane_ink()
+        for text in ("Past line", "过去", "Future line", "未来", "Current line", "当前"):
+            self.assertAlmostEqual(browsing[text], 1.0)
 
     def test_render_builds_independent_small_regular_translation_and_parenthesis_layouts(self):
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")

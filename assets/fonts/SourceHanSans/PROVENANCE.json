@@ -1,0 +1,10 @@
+{
+  "upstream": "https://github.com/adobe-fonts/source-han-sans",
+  "commit": "a4f7cf94edfb9d7ffbdfc4841de276358bd7e0f2",
+  "font_url": "https://raw.githubusercontent.com/adobe-fonts/source-han-sans/a4f7cf94edfb9d7ffbdfc4841de276358bd7e0f2/OTF/SimplifiedChinese/SourceHanSansSC-Heavy.otf",
+  "license_url": "https://raw.githubusercontent.com/adobe-fonts/source-han-sans/a4f7cf94edfb9d7ffbdfc4841de276358bd7e0f2/LICENSE.txt",
+  "license": "SIL Open Font License 1.1",
+  "retrieved": "2026-10-16",
+  "font_sha256": "6374b11bc4c2cd4bd7be1a1d64cf5047906c8a6a025c64e023c6792e50ba985e",
+  "purpose": "Exact requested finish slogan raster; no system font installation"
+}

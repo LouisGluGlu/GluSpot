@@ -164,7 +164,9 @@ def connection_capsule_rect(circle: QRectF, pose: ConnectionPose,
 def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPose,
                           font: QFont, *, available_left: float = 16.0,
                           backdrop: QImage | None = None,
-                          backdrop_rect: QRectF | None = None) -> None:
+                          backdrop_rect: QRectF | None = None,
+                          refractive: bool = False, light: bool = False,
+                          ink: QColor | None = None) -> None:
     """Direct vector transforms avoid caching a whole control row each frame."""
     painter.save()
     base_opacity = painter.opacity()
@@ -175,12 +177,16 @@ def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPos
     # stroke. Its glass edge follows the existing capsule, never a new plate.
     face = QColor(round(248 - 193 * p), round(249 - 193 * p), round(250 - 193 * p), 245)
     stroke = QColor(round(168 - 93 * p), round(170 - 94 * p), round(172 - 95 * p))
+    material_options = dict(refractive=True, light=light, backdrop=backdrop,
+                            backdrop_rect=backdrop_rect) if refractive else {}
     paint_liquid_glass(painter, capsule, radius=circle.height() / 2,
-                       base_color=face, border_color=stroke)
+                       base_color=None if refractive else face,
+                       border_color=None if refractive else stroke,
+                       **material_options)
     shape = QPainterPath()
     shape.addRoundedRect(capsule.adjusted(1, 1, -1, -1), circle.height() / 2, circle.height() / 2)
     painter.setClipPath(shape)
-    grey = QColor(44, 46, 48)
+    grey = QColor(ink) if refractive and ink is not None else QColor(44, 46, 48)
     blue = QColor(0, 175, 228)
     def scaled(rect, factor):
         side = rect.width() * factor
@@ -195,9 +201,10 @@ def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPos
                    round(grey.blue() + (blue.blue() - grey.blue()) * pose.blue))
     # On expansion the glyph travels to the pill's left cap; text is revealed
     # by the growing capsule and does not move the other three controls.
-    color = QColor(round(color.red() + (232 - color.red()) * p),
-                   round(color.green() + (233 - color.green()) * p),
-                   round(color.blue() + (234 - color.blue()) * p))
+    expanded_ink = grey if refractive else QColor(232, 233, 234)
+    color = QColor(round(color.red() + (expanded_ink.red() - color.red()) * p),
+                   round(color.green() + (expanded_ink.green() - color.green()) * p),
+                   round(color.blue() + (expanded_ink.blue() - color.blue()) * p))
     glyph_circle = QRectF(circle)
     glyph_circle.moveLeft(capsule.left())
     glyph = scaled(glyph_circle, .72 * pose.new_scale)
@@ -229,7 +236,7 @@ def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPos
     if p > 0:
         painter.setOpacity(base_opacity * pose.new_opacity * p)
         painter.setFont(font)
-        painter.setPen(QColor(235, 236, 238))
+        painter.setPen(grey if refractive else QColor(235, 236, 238))
         full_capsule = connection_capsule_rect(circle, replace(pose, capsule=1.0), font, available_left)
         text_rect = QRectF(capsule.left() + circle.width() * .98, capsule.top(),
                            max(0.0, full_capsule.width() - circle.width() * 1.23), capsule.height())

@@ -115,7 +115,7 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
 
         self.window._finish_mode_transition()
         self.assertTrue(self.window._geometry_transition_snapshot.isNull())
-        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
         self._render()
         final_cache_size = len(self.window._lyric_layout_cache)
         self.assertEqual(final_cache_size, len(self.owner.timed_lyrics))
@@ -151,11 +151,11 @@ class MusicSurfaceTransitionTests(unittest.TestCase):
     def test_only_contextual_window_button_is_painted_and_window_title_double_clicks(self):
         self.window._fullscreen = True
         self._render()
-        self.assertEqual(set(self.window._button_rects), {"mode", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"mode", "translation", "content_layout"})
 
         self.window._fullscreen = False
         self._render()
-        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
 
         accepted = []
         title_double_click = SimpleNamespace(

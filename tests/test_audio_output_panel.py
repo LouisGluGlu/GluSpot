@@ -313,10 +313,13 @@ class AudioOutputPanelTests(unittest.TestCase):
     def test_reorder_waits_for_volume_drag_release_and_preserves_focus_and_request(self):
         self.provider.snapshot = replace(self.provider.snapshot, active_id="bluetooth")
         self._open()
+        self.owner.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.owner, 1000))
         self.app.processEvents()
         rows = dict(self.panel._rows)
         slider = rows["bluetooth"].volume_slider
         slider.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.assertIs(self.app.focusWidget(), slider)
         slider.setSliderDown(True)
         slider.setValue(79)
         request_until = rows["bluetooth"]._request_until

@@ -105,7 +105,7 @@ class LyricRecoveryTests(unittest.TestCase):
         surface._toggle_translation()
         self.assertTrue(owner.enable_dual_line_lyrics)
 
-    def test_enabled_translation_text_is_a_transparent_hole_in_pale_button(self):
+    def test_enabled_translation_keeps_readable_ink_over_translucent_glass(self):
         owner = _LayerOwner()
         surface = MusicSurfaceWindow(owner)
         surface.resize(1190, 666)
@@ -120,8 +120,8 @@ class LyricRecoveryTests(unittest.TestCase):
         inner = button.adjusted(13, 9, -13, -9).toRect()
         pixels = [image.pixelColor(x, y) for x in range(inner.left(), inner.right())
                   for y in range(inner.top(), inner.bottom())]
-        self.assertGreater(sum(pixel.alpha() == 0 for pixel in pixels), 10)
-        self.assertGreater(sum(pixel.alpha() > 180 and pixel.red() > 245 for pixel in pixels), 10)
+        self.assertGreater(sum(pixel.alpha() > 240 for pixel in pixels), 10)
+        self.assertGreater(sum(0 < pixel.alpha() < 240 for pixel in pixels), 10)
 
 
 class ArtworkRecoveryTests(unittest.TestCase):

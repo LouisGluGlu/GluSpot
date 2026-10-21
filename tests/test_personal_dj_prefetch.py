@@ -366,6 +366,172 @@ class PersonalDjPrefetchTests(unittest.TestCase):
                 self.owned._retry_dj_prefetch()
                 self.assertTrue(self.owned._fm_prefetch_pending)
 
+    def test_transient_catalog_failure_retries_without_any_surface_poll(self):
+        self.choose((segments(1)[1],))
+        self.music_ready()
+        old_source, old_epoch = self.qt.source(), self.owned._epoch
+        failed, _ = self.job("fm_prefetch", self.catalogs)
+        self.catalogs.completed.emit(failed, None, "network")
+        self.assertTrue(self.owned._dj_prefetch_timer.isActive())
+        self.owned._retry_dj_prefetch()
+        retry, action = self.job("fm_prefetch", self.catalogs)
+        self.assertNotEqual(retry, failed)
+        self.catalogs.completed.emit(retry, action(), None)
+        self.assertEqual(self.perform("dj_prefetch").stream.song_id, "dj:voice-7")
+        self.assertEqual((self.qt.source(), self.owned._epoch), (old_source, old_epoch))
+
+    def test_catalog_transient_retries_are_bounded_and_per_new_queue_tail(self):
+        self.choose((segments(1)[1],))
+        for _ in range(3):
+            token, _ = self.job("fm_prefetch", self.catalogs)
+            self.catalogs.completed.emit(token, None, "timeout")
+            self.owned._retry_dj_prefetch()
+        self.assertEqual(len(self.catalogs.jobs), 3)
+        self.assertFalse(self.owned._fm_prefetch_pending)
+        self.choose((segments(2)[1],))
+        token, _ = self.job("fm_prefetch", self.catalogs)
+        self.catalogs.completed.emit(token, None, "network")
+        self.owned._retry_dj_prefetch()
+        self.assertEqual(len(self.catalogs.jobs), 5)
+
+    def test_old_catalog_completion_cannot_append_or_finish_new_retry(self):
+        self.choose((segments(1)[1],))
+        old, old_action = self.job("fm_prefetch", self.catalogs)
+        stale = old_action()
+        self.catalogs.completed.emit(old, None, "network")
+        self.owned._retry_dj_prefetch()
+        retry, _ = self.job("fm_prefetch", self.catalogs)
+        self.catalogs.completed.emit(old, stale, None)
+        self.assertEqual(self.owned.queue, (segments(1)[1],))
+        self.assertTrue(self.owned._fm_prefetch_pending)
+        self.assertEqual(self.job("fm_prefetch", self.catalogs)[0], retry)
+
+    def test_auth_or_schema_catalog_failure_does_not_retry(self):
+        for error, result in (("auth_required", None), ("response", None), (None, ())):
+            with self.subTest(error=error):
+                self.choose((segments(1)[1],))
+                token, _ = self.job("fm_prefetch", self.catalogs)
+                count = len(self.catalogs.jobs)
+                self.catalogs.completed.emit(token, result, error)
+                self.owned._retry_dj_prefetch()
+                self.assertEqual(len(self.catalogs.jobs), count)
+
+    def test_manual_next_waiting_for_catalog_stops_old_music_and_introduction(self):
+        self.choose(segments(1))
+        self.music_ready()
+        self.perform("dj_stream", self.tasks)
+        self.perform("dj_audio")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+        self.assertTrue(self.owned.send_playback_command("next"))
+        self.assertEqual(self.qt.playbackState(), QMediaPlayer.PlaybackState.StoppedState)
+        self.assertEqual(self.dj_qt.playbackState(), QMediaPlayer.PlaybackState.StoppedState)
+        self.assertTrue(self.qt.source().isEmpty())
+        self.assertTrue(self.dj_qt.source().isEmpty())
+        self.assertFalse(self.owned.is_personal_dj_speaking())
+        self.perform("fm_prefetch", self.catalogs)
+        self.music_ready()
+        voice = self.owned._dj_overlay_voices[0]
+        pending = self.owned._dj_prefetch_requests[voice]
+        _, action = next(job for job in self.downloads.jobs if job[0] == pending)
+        self.downloads.completed.emit(pending, action(), None)
+        self.assertEqual(self.owned.track.track_id, "owned:netease:song-7")
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+
+    def test_old_multipart_download_cannot_restart_skipped_song_during_catalog_wait(self):
+        with patch.object(self.owned, "_prefetch_fm"):
+            self.choose(parts(1, 2))
+            self.music_ready()
+            self.perform("dj_stream", self.tasks)
+            self.perform("dj_audio")
+            old, action = self.job("dj_prefetch")
+            prepared = action()
+            self.dj_qt.mediaStatusChanged.emit(QMediaPlayer.MediaStatus.EndOfMedia)
+            self.assertFalse(self.owned._dj_source_ready)
+            self.assertTrue(self.owned.send_playback_command("next"))
+        self.downloads.completed.emit(old, prepared, None)
+        self.assertIn(prepared.lease, self.cache.released)
+        self.assertFalse(self.owned._dj_overlay_voices)
+        self.assertTrue(self.qt.source().isEmpty())
+        self.assertTrue(self.dj_qt.source().isEmpty())
+        self.assertEqual(self.qt.playbackState(), QMediaPlayer.PlaybackState.StoppedState)
+
+    def test_next_decoder_stop_cannot_override_reentrant_stop_or_source_selection(self):
+        for action in ("stop", "replace"):
+            with self.subTest(action=action):
+                self.choose((segments(1)[1],))
+                self.music_ready()
+                epoch = self.owned._epoch
+                catalogs = len([job for job in self.tasks.jobs if job[0][0] == "catalog"])
+                replacement = []
+
+                def replace_owner():
+                    if (self.owned._epoch == epoch or
+                            self.qt.playbackState() != QMediaPlayer.PlaybackState.StoppedState):
+                        return
+                    self.owned.changed.disconnect(replace_owner)
+                    if action == "stop":
+                        self.owned.stop()
+                    else:
+                        self.owned.play_queue((segments(9)[1],))
+                        replacement.append(self.music_ready())
+
+                self.owned.changed.connect(replace_owner)
+                self.owned.send_playback_command("next")
+                self.assertEqual(len([job for job in self.tasks.jobs if job[0][0] == "catalog"]), catalogs)
+                if action == "stop":
+                    self.assertEqual(self.owned.status, "idle")
+                    self.assertFalse(self.owned.queue)
+                    self.assertTrue(self.qt.source().isEmpty())
+                else:
+                    self.assertEqual(self.owned.track.track_id, "owned:netease:song-9")
+                    self.assertEqual(self.qt.playbackState(), QMediaPlayer.PlaybackState.PlayingState)
+                    self.assertFalse(self.qt.source().isEmpty())
+                    self.assertIs(self.owned._prepared_audio, replacement[0])
+                    self.assertNotIn(replacement[0].lease, self.cache.released)
+
+    def test_promoted_busy_future_download_uses_bounded_current_preparation_retry(self):
+        self.choose()
+        old, _ = self.job("dj_prefetch")
+        self.owned.send_playback_command("next")
+        self.downloads.completed.emit(old, None, "busy")
+        self.assertTrue(self.owned._dj_overlay_voices)
+        self.assertTrue(self.owned._dj_prefetch_timer.isActive())
+        self.owned._retry_dj_prefetch()
+        self.perform("dj_stream", self.tasks)
+        self.perform("dj_audio")
+        self.music_ready()
+        self.assertTrue(self.owned.is_personal_dj_speaking())
+
+    def test_catalog_retry_timer_cannot_fetch_old_fm_during_replacement_catalog(self):
+        self.choose((segments(1)[1],))
+        failed, _ = self.job("fm_prefetch", self.catalogs)
+        self.catalogs.completed.emit(failed, None, "network")
+        self.service.daily_recommendations = lambda source: (segments(9)[1],)
+        self.owned.play_daily()
+        count = len(self.catalogs.jobs)
+        self.owned._retry_dj_prefetch()
+        self.assertEqual(len(self.catalogs.jobs), count)
+        self.assertEqual(self.service.personal_dj.call_count, 0)
+
+    def test_pausing_during_catalog_retry_wait_does_not_revive_skipped_music(self):
+        self.choose((segments(1)[1],))
+        self.music_ready()
+        self.owned.send_playback_command("next")
+        failed, _ = self.job("fm_prefetch", self.catalogs)
+        self.catalogs.completed.emit(failed, None, "network")
+        self.owned.send_playback_command("toggle_play_pause")
+        self.assertTrue(self.qt.source().isEmpty())
+        self.owned._retry_dj_prefetch()
+        self.perform("fm_prefetch", self.catalogs)
+        self.music_ready()
+        voice = self.owned._dj_overlay_voices[0]
+        pending = self.owned._dj_prefetch_requests[voice]
+        _, action = next(job for job in self.downloads.jobs if job[0] == pending)
+        self.downloads.completed.emit(pending, action(), None)
+        self.assertFalse(self.owned.track.is_playing)
+        self.assertFalse(self.owned.is_personal_dj_speaking())
+        self.assertEqual(self.qt.playbackState(), QMediaPlayer.PlaybackState.PausedState)
+
 
 if __name__ == "__main__":
     unittest.main()

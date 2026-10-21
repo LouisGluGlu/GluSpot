@@ -18,7 +18,8 @@ from local.audio_output_panel_pose import output_panel_pose
 from local.music_lyric_motion import MotionSimulationClock
 from local.music_surface_palette import relative_luminance
 from local.no_wheel_widgets import NoWheelSlider
-from local.liquid_glass import GlassPushButton, paint_liquid_glass
+from local.liquid_glass import GlassPushButton, glass_material_tint, paint_liquid_glass, widget_glass_backdrop
+from local.ui_theme import app_dark_mode
 from local.control_hover import control_local_position, install_control_hover
 
 
@@ -236,7 +237,7 @@ class _OutputRow(QAbstractButton):
 
     @property
     def name_font_size(self):
-        return 14 - 2 * self.details_progress
+        return 14 if self.property("fixedDetailsTypography") else 14 - 2 * self.details_progress
 
     @property
     def displayed_volume(self):
@@ -343,9 +344,12 @@ class _OutputRow(QAbstractButton):
         return "蓝牙音频" if self.device.is_bluetooth else "本地音频"
 
     def _layout_volume(self):
-        self.volume_slider.setGeometry(52, max(26, self.height() - 29),
-                                       max(1, self.width() - 66), 26)
-        self.solo_button.setGeometry(1, 1, 47, max(1, self.height() - 2))
+        # The slider reserves eight pixels for its thumb at each end. Align
+        # its painted track with the name/status column and the value's right
+        # edge, rather than aligning the invisible widget margin with text.
+        self.volume_slider.setGeometry(44, max(26, self.height() - 29),
+                                       max(1, self.width() - 50), 26)
+        self.solo_button.setGeometry(1, 1, 47, min(42, max(1, self.height() - 2)))
         self.join_button.setGeometry(max(0, self.width() - 44), 1, 43, max(1, self.height() - 2))
 
     def set_row_height(self, height):
@@ -387,8 +391,17 @@ class _OutputRow(QAbstractButton):
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         light = self.ink.lightness() < 128
         face = QColor(0, 0, 0, round(14 * self.progress)) if light else QColor(255, 255, 255, round(29 * self.progress))
+        refractive = bool(self.property("glassRefractive"))
+        if self.property("sharedPanelGlass"):
+            # The parent already owns one blurred scene and theme veil. A row
+            # adds only its state pigment/rim, never a second grey glass layer.
+            refractive = False
+            face = QColor(self.ink)
+            face.setAlpha(round(10 * self.progress) + (9 if self.isDown() else 5 if self.underMouse() else 0))
+        backdrop, sample = widget_glass_backdrop(self, bounds) if refractive else (None, None)
         paint_liquid_glass(painter, bounds, radius=18, base_color=face,
                           light=light, active=self.progress > .5,
+                          refractive=refractive, backdrop=backdrop, backdrop_rect=sample, cache_token=id(self),
                           hovered=self.underMouse(), pressed=self.isDown(),
                           opacity=1.0 if self.isEnabled() else .48)
         if self.hasFocus():
@@ -417,7 +430,7 @@ class _OutputRow(QAbstractButton):
         value_font = QFont(font)
         value_font.setPixelSize(12)
         value_font.setWeight(QFont.Weight.DemiBold)
-        value_width = max(50, math.ceil(QFontMetricsF(value_font).horizontalAdvance(self.volume_text)) + 3)
+        value_width = max(28, math.ceil(QFontMetricsF(value_font).horizontalAdvance(self.volume_text)) + 3)
         right_space = value_width + 41 if active else 46 if self.state == "available" else 32
         name_rect = QRectF(52, 7 if active else 9,
                            max(1, self.width() - 52 - right_space), 21)
@@ -515,6 +528,11 @@ class AudioOutputPanel(QWidget):
 
     def __init__(self, provider, parent=None):
         super().__init__(parent)
+        self._song_page = callable(getattr(parent, "_paint_surface_glass", None))
+        self._theme_light = False
+        if self._song_page:
+            # Opt out before native buttons/rows register their hover helpers.
+            self.setProperty("controlHoverDisabled", True)
         self.provider = provider
         self._snapshot: AudioRouteSnapshot | None = None
         self._interaction_owner = None
@@ -671,12 +689,18 @@ class AudioOutputPanel(QWidget):
         self._hover_row_id = self._hover_volume_id = ""
 
     def _reveal_hover_details(self):
+        if self._song_page:
+            return
         if (self.isVisible() and self._native_content_ready()
                 and (row := self._rows.get(self._hover_row_id)) and row.isEnabled()
                 and row.state == "active"):
             row.set_details_visible(True)
 
     def _update_volume_hover(self, global_position, now):
+        if self._song_page:
+            self._hover_detail_timer.stop()
+            self._hover_row_id = self._hover_volume_id = ""
+            return self._volume_row_at(global_position)
         hovered = self._row_at(global_position)
         hovered_id = hovered.device.id if hovered else ""
         if hovered_id != self._hover_row_id:
@@ -695,6 +719,11 @@ class AudioOutputPanel(QWidget):
 
     def eventFilter(self, watched, event):
         kind = event.type()
+        if (self._song_page and kind in {QEvent.Type.MouseButtonPress, QEvent.Type.FocusIn}
+                and self._native_content_ready()):
+            row = watched.parentWidget() if isinstance(watched, _VolumeSlider) else None
+            if isinstance(row, _OutputRow):
+                row.set_details_visible(True)
         if kind == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             self._discard_pointer_until_release = False
         elif self._discard_pointer_until_release and kind in {QEvent.Type.MouseMove, QEvent.Type.MouseButtonRelease}:
@@ -716,10 +745,12 @@ class AudioOutputPanel(QWidget):
         if kind in {QEvent.Type.MouseMove, QEvent.Type.Enter} and hasattr(event, "globalPosition"):
             self._update_volume_hover(event.globalPosition(), time.monotonic())
         elif kind == QEvent.Type.Leave:
-            # Time spent outside the row cannot arm its volume control.
-            # Moving between the row and its join target keeps one dwell.
+            # Native boundaries can change while the same moving capsule
+            # still contains the pointer. Its mapped row owns the dwell.
             if watched is self or watched is self.scroll.viewport() or isinstance(watched, _OutputRow):
-                self._clear_row_hover()
+                hovered = self._row_at(QPointF(QCursor.pos()))
+                if hovered is None or hovered.device.id != self._hover_row_id:
+                    self._clear_row_hover()
         elif kind == QEvent.Type.Wheel and self.isVisible():
             self._handle_wheel(event)
             return True
@@ -784,18 +815,41 @@ class AudioOutputPanel(QWidget):
         sample = getattr(parent, "_background_sample_colors", None)
         colors = sample(QRectF(self.geometry())) if callable(sample) else (QColor(30, 30, 32),)
         backdrop = QColor(*(round(sum(color.getRgb()[i] for color in colors) / len(colors)) for i in range(3)))
-        light = relative_luminance(backdrop) > .45
+        light = (not app_dark_mode(getattr(getattr(parent, "owner", None), "settings_getter", None))
+                 if self._song_page else relative_luminance(backdrop) > .45)
+        self._theme_light = light
         target = QColor(248, 248, 250) if light else QColor(43, 43, 46)
-        background = QColor(*(round(a * .22 + b * .78) for a, b in zip(backdrop.getRgb()[:3], target.getRgb()[:3])))
+        if self._song_page:
+            veil = glass_material_tint(light=light)
+            background = QColor(*(round(a * (1. - veil.alphaF()) + b * veil.alphaF())
+                for a, b in zip(backdrop.getRgb()[:3], veil.getRgb()[:3])))
+        else:
+            background = QColor(*(round(a * .22 + b * .78) for a, b in zip(backdrop.getRgb()[:3], target.getRgb()[:3])))
         factory = getattr(parent, "_surface_font", None)
         font = factory(13, QFont.Weight.Normal) if callable(factory) else self._label_font
-        key = (background.rgba(), light, font.toString())
+        scene_ink = getattr(parent, "_scene_control_ink", None)
+        shared_ink = scene_ink() if self._song_page and callable(scene_ink) else None
+        key = (background.rgba(), light, font.toString(), shared_ink.rgba() if shared_ink is not None else None)
         if key == self._style_key:
             return
         self._style_key = key
         self._background, self._label_font = background, QFont(font)
-        self._ink = QColor(30, 30, 34) if light else QColor(246, 246, 248)
-        self._muted = QColor(89, 89, 96) if light else QColor(190, 190, 198)
+        if self._song_page:
+            def contrast(ink):
+                first, second = relative_luminance(ink), relative_luminance(background)
+                return (max(first, second) + .05) / (min(first, second) + .05)
+            self._ink = (QColor(shared_ink) if shared_ink is not None else
+                         max((QColor(25, 28, 34), QColor(250, 251, 253)), key=contrast))
+            self._muted = QColor(self._ink)
+            for fraction in (() if shared_ink is not None else (.18, .12, .06)):
+                candidate = QColor(*(round(a * (1. - fraction) + b * fraction)
+                    for a, b in zip(self._ink.getRgb()[:3], background.getRgb()[:3])))
+                if contrast(candidate) >= 4.5:
+                    self._muted = candidate
+                    break
+        else:
+            self._ink = QColor(30, 30, 34) if light else QColor(246, 246, 248)
+            self._muted = QColor(89, 89, 96) if light else QColor(190, 190, 198)
         self._accent = QColor(self._ink)
         self.setFont(font)
         title_font = QFont(font)
@@ -822,12 +876,16 @@ class AudioOutputPanel(QWidget):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
         for button in (self.refresh_button, self.add_button, self.close_button, self.stop_button):
-            button.setGlassLight(light)
+            button.setGlassLight(self._ink.lightness() < 128)
+            button.setProperty("glassRefractive", False if self._song_page else callable(getattr(parent, "_paint_surface_glass", None)))
             button.setProperty("glassRadius", 14.0)
         for row in self._rows.values():
             self._style_row(row)
 
     def _style_row(self, row):
+        row.setProperty("glassRefractive", False if self._song_page else callable(getattr(self.parentWidget(), "_paint_surface_glass", None)))
+        row.setProperty("sharedPanelGlass", self._song_page)
+        row.setProperty("fixedDetailsTypography", self._song_page)
         row.set_row_height(self._row_height)
         row.ink, row.muted, row.accent = self._ink, self._muted, self._accent
         row.label_font = self._label_font
@@ -877,9 +935,16 @@ class AudioOutputPanel(QWidget):
                 # Omitting DrawChildren prevents recursive popup capture.
                 parent.render(painter, QPoint(), QRegion(region), QWidget.RenderFlag.DrawWindowBackground)
         bitmap = Image.frombytes("RGBA", (source.width(), source.height()), bytes(source.constBits()), "raw", "RGBA", source.bytesPerLine())
-        bitmap = ImageEnhance.Color(bitmap).enhance(.35).filter(ImageFilter.GaussianBlur(9))
-        light = relative_luminance(self._background) > .45
-        veil = (248, 248, 250, 188) if light else (43, 43, 46, 176)
+        if self._song_page:
+            # Keep actual album pigments. The old desaturation plus 70% grey
+            # veil made even green/blue scenes look like an opaque grey card.
+            bitmap = bitmap.filter(ImageFilter.GaussianBlur(7))
+            tint = glass_material_tint(light=self._theme_light)
+            veil = tint.getRgb()
+        else:
+            bitmap = ImageEnhance.Color(bitmap).enhance(.35).filter(ImageFilter.GaussianBlur(9))
+            light = relative_luminance(self._background) > .45
+            veil = (248, 248, 250, 188) if light else (43, 43, 46, 176)
         bitmap = Image.alpha_composite(bitmap, Image.new("RGBA", bitmap.size, veil))
         blurred = QImage(bitmap.tobytes(), bitmap.width, bitmap.height, bitmap.width * 4, QImage.Format.Format_RGBA8888).copy()
         offset = geometry.topLeft() - region.topLeft()
@@ -959,15 +1024,27 @@ class AudioOutputPanel(QWidget):
             pose = self.render_pose
             shape = self._pose_path()
             painter.setClipPath(shape)
-            painter.fillRect(pose.shell_rect, self._background)
+            if not self._song_page or self._material.isNull():
+                fallback = QColor(self._background)
+                if self._song_page:
+                    fallback.setAlpha(72)
+                painter.fillRect(pose.shell_rect, fallback)
             if not self._material.isNull():
+                painter.save()
+                if self._song_page:
+                    painter.setOpacity(.88)
                 painter.drawImage(QRectF(self.rect()), self._material)
+                painter.restore()
             if self._scroll_opacity.opacity() < 1:
                 self._paint_unfolding_rows(painter, pose)
             painter.setClipping(False)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor(255, 255, 255, 65), 1))
-            painter.drawPath(shape)
+            if self._song_page:
+                paint_liquid_glass(painter, pose.shell_rect, radius=pose.radius,
+                                   light=self._theme_light)
+            else:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(255, 255, 255, 65), 1))
+                painter.drawPath(shape)
 
     def _fit_to_content(self):
         visible = [self.rows_layout.itemAt(i) for i in range(self.rows_layout.count())

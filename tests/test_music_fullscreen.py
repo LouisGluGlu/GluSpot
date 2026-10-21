@@ -195,11 +195,11 @@ class MusicLyricMotionTests(unittest.TestCase):
         self.assertEqual(lyric_emphasis_plan("one two three four five six", 0.0, 20.0).mode, "character_lift")
         self.assertEqual(lyric_emphasis_plan("last", 0.0, None).mode, "none")
 
-    def test_sparse_line_includes_exactly_one_and_a_half_seconds_per_unit(self):
+    def test_sparse_line_includes_exactly_eight_tenths_seconds_per_unit(self):
         self.assertEqual(lyric_emphasis_plan("别走", 10.0, 13.0).mode, "scatter_glow")
         self.assertEqual(lyric_emphasis_plan("Hold me", 10.0, 13.0).mode, "character_lift")
-        self.assertEqual(lyric_emphasis_plan("你在何方", 10.0, 16.0).mode, "scatter_glow")
-        self.assertEqual(lyric_emphasis_plan("你在何方", 10.0, 15.99).mode, "none")
+        self.assertEqual(lyric_emphasis_plan("你在何方", 10.0, 13.2).mode, "scatter_glow")
+        self.assertEqual(lyric_emphasis_plan("你在何方", 10.0, 13.19).mode, "none")
         self.assertEqual(lyric_emphasis_plan("别走", 10.0, 12.99).mode, "none")
 
     def test_apostrophe_words_are_single_units_and_motion_line_respects_threshold(self):
@@ -210,21 +210,21 @@ class MusicLyricMotionTests(unittest.TestCase):
         self.assertAlmostEqual(plan.duration, 5.98)
         self.assertAlmostEqual(plan.seconds_per_unit, 5.98 / 6)
         self.assertEqual(plan.mode, "character_lift")
-        self.assertEqual(lyric_emphasis_plan(text, 64.55, 70.53).mode, "none")
-        self.assertEqual(lyric_emphasis_plan(text, 64.55, 70.53, min_seconds_per_unit=1.0).mode, "none")
+        self.assertEqual(lyric_emphasis_plan(text, 64.55, 70.53).mode, "character_lift")
+        self.assertEqual(lyric_emphasis_plan(text, 64.55, 70.53, min_seconds_per_unit=1.0).mode, "character_lift")
 
     def test_sparse_threshold_bounds_preserve_duration_without_unit_count_limit(self):
         self.assertEqual(lyric_emphasis_plan("你在何方", 0.0, 4.0, min_seconds_per_unit=1.0).mode, "scatter_glow")
-        self.assertEqual(lyric_emphasis_plan("你在何方", 0.0, 4.0, min_seconds_per_unit=2.0).mode, "none")
+        self.assertEqual(lyric_emphasis_plan("你在何方", 0.0, 4.0, min_seconds_per_unit=2.0).mode, "scatter_glow")
         self.assertEqual(lyric_emphasis_plan("别走", 0.0, 3.0, min_seconds_per_unit=1.5).mode, "scatter_glow")
         self.assertEqual(lyric_emphasis_plan("别走", 0.0, 2.99, min_seconds_per_unit=1.0).mode, "none")
         self.assertEqual(lyric_emphasis_plan("one two three four five six", 0.0, 20.0, min_seconds_per_unit=1.0).mode, "character_lift")
         self.assertEqual(lyric_emphasis_plan("last", 0.0, None, min_seconds_per_unit=1.0).mode, "none")
 
     def test_sparse_threshold_normalization_handles_corrupt_values(self):
-        cases = ((None, 1.5), ("bad", 1.5), (float("nan"), 1.5),
-                 (float("inf"), 1.5), (True, 1.5), ([], 1.5),
-                 (0.2, 0.8), (3.0, 2.0), ("1.7", 1.7))
+        cases = ((None, 0.8), ("bad", 0.8), (float("nan"), 0.8),
+                 (float("inf"), 0.8), (True, 0.8), ([], 0.8),
+                 (0.2, 0.8), (3.0, 0.8), ("1.7", 0.8))
         for supplied, expected in cases:
             with self.subTest(supplied=supplied):
                 self.assertEqual(normalize_sparse_seconds_per_unit(supplied), expected)
@@ -811,8 +811,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
     def test_low_perception_keeps_line_spring_but_skips_estimated_word_reading(self):
         self.owner.timed_lyrics = [
-            (0.0, "第一句歌词"), (4.0, "第二句歌词"),
-            (8.0, "第三句歌词"), (12.0, "第四句歌词"),
+            (0.0, "第一句歌词"), (3.0, "第二句歌词"),
+            (6.0, "第三句歌词"), (9.0, "第四句歌词"),
         ]
         self.owner.timed_lyric_units = [()] * 4
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
@@ -1059,7 +1059,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             image.fill(Qt.GlobalColor.transparent)
             with QPainter(image) as painter, patch("local.music_surface_window.time.monotonic", return_value=100.0):
                 self.window._paint_window_controls(painter, QRectF(self.window.rect()))
-            self.assertEqual(set(self.window._button_rects), {"mode" if fullscreen else "return", "translation"})
+            self.assertEqual(set(self.window._button_rects), {"mode" if fullscreen else "return", "translation", "content_layout"})
             lines, timed = self.window._display_lyrics()
             self.assertTrue(self.window._has_genuine_obo_timing(lines, timed))
             genuine = bytes(image.constBits())
@@ -1095,7 +1095,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         image = QImage(self.window.size(), QImage.Format.Format_RGB32)
         with patch.object(self.window, "_paint_wrapped_lifted_lyric") as reading:
             self.window.render(image)
-        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
         reading.assert_not_called()
 
     def test_line_timed_gold_and_low_perception_share_badge_free_controls(self):
@@ -1120,7 +1120,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             controls.append(dict(self.window._button_rects))
         self.assertEqual(rendered[0], rendered[1])
         self.assertEqual(controls[0], controls[1])
-        self.assertEqual(set(controls[0]), {"return", "translation"})
+        self.assertEqual(set(controls[0]), {"return", "translation", "content_layout"})
 
     def test_passionfruit_style_start_only_word_marker_has_no_badge_or_sparse_glow(self):
         self.owner.track_title = "Passionfruit"
@@ -1143,7 +1143,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         image = QImage(self.window.size(), QImage.Format.Format_RGB32)
         with patch.object(self.window, "_paint_sparse_glyph_run") as glow:
             self.window.render(image)
-        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
         glow.assert_not_called()
         self.assertEqual(self.window._last_lyric_emphasis_mode, "none")
         self.assertIsNone(self.window._pending_glow_prewarm)
@@ -2867,16 +2867,16 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertFalse(flags & Qt.WindowType.WindowStaysOnTopHint)
         self.assertFalse(self.window._timer.isActive())
 
-    def test_island_sparse_threshold_setter_clamps_and_persists_snapshot(self):
+    def test_island_sparse_threshold_setter_migrates_and_persists_fixed_snapshot(self):
         island = IslandStackVisual()
         try:
-            self.assertEqual(island.music_sparse_highlight_seconds_per_unit, 1.5)
+            self.assertEqual(island.music_sparse_highlight_seconds_per_unit, 0.8)
             island.set_music_sparse_highlight_seconds_per_unit(0.5, notify=False)
             self.assertEqual(island.settings_snapshot()["v2_music_sparse_highlight_seconds_per_unit"], 0.8)
             island.set_music_sparse_highlight_seconds_per_unit(3.0, notify=False)
-            self.assertEqual(island.settings_snapshot()["v2_music_sparse_highlight_seconds_per_unit"], 2.0)
+            self.assertEqual(island.settings_snapshot()["v2_music_sparse_highlight_seconds_per_unit"], 0.8)
             island.set_music_sparse_highlight_seconds_per_unit(float("nan"), notify=False)
-            self.assertEqual(island.settings_snapshot()["v2_music_sparse_highlight_seconds_per_unit"], 1.5)
+            self.assertEqual(island.settings_snapshot()["v2_music_sparse_highlight_seconds_per_unit"], 0.8)
         finally:
             island.close()
 
@@ -2980,7 +2980,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         user32 = SimpleNamespace(SetWindowPos=Mock())
         try:
             island._music_surface_active = True
-            island.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: False)
+            island.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
             island.topmost_reinforced_at = 0.0
             with (
                 patch("local.island_stack_visual.sys.platform", "win32"),
@@ -3081,6 +3081,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         with (
             patch.object(self.window, "screen", return_value=SimpleNamespace(refreshRate=lambda: 144.0)),
             patch("local.music_surface_window.time.monotonic", return_value=100.016),
+            # This case specifies an affordable tick. Wall-clock scheduling
+            # under high-DPI suites must not turn it into the slow-tick case.
+            patch("local.music_surface_window.time.perf_counter", return_value=100.0),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -3259,19 +3262,19 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertAlmostEqual(default.width() / default.height(), MUSIC_WINDOW_ASPECT_RATIO, delta=0.01)
         self.assertTrue(QRect(100, 50, 800, 600).contains(default))
 
-    def test_all_edges_and_corners_resize_with_locked_ratio(self):
+    def test_all_edges_and_corners_resize_independently_for_responsive_content(self):
         self.window._available_geometry = lambda: QRect(0, 0, 3840, 2160)
         self.window._minimum_window_size = lambda: QSize(320, 180)
         original = QRect(400, 300, 960, 540)
         cases = (
-            ("left", QPointF(0, 270), QPointF(-160, 0), {"left"}, QRect(240, 300, 1120, 630)),
-            ("right", QPointF(959, 270), QPointF(160, 0), {"right"}, QRect(400, 300, 1120, 630)),
-            ("top", QPointF(480, 0), QPointF(0, -90), {"top"}, QRect(400, 210, 1120, 630)),
-            ("bottom", QPointF(480, 539), QPointF(0, 90), {"bottom"}, QRect(400, 300, 1120, 630)),
-            ("top-left", QPointF(0, 0), QPointF(-160, 0), {"left", "top"}, QRect(240, 210, 1120, 630)),
-            ("top-right", QPointF(959, 0), QPointF(0, -90), {"right", "top"}, QRect(400, 210, 1120, 630)),
-            ("bottom-left", QPointF(0, 539), QPointF(0, 90), {"left", "bottom"}, QRect(240, 300, 1120, 630)),
-            ("bottom-right", QPointF(959, 539), QPointF(160, 0), {"right", "bottom"}, QRect(400, 300, 1120, 630)),
+            ("left", QPointF(0, 270), QPointF(-160, 0), {"left"}, QRect(240, 300, 1120, 540)),
+            ("right", QPointF(959, 270), QPointF(160, 0), {"right"}, QRect(400, 300, 1120, 540)),
+            ("top", QPointF(480, 0), QPointF(0, -90), {"top"}, QRect(400, 210, 960, 630)),
+            ("bottom", QPointF(480, 539), QPointF(0, 90), {"bottom"}, QRect(400, 300, 960, 630)),
+            ("top-left", QPointF(0, 0), QPointF(-160, 0), {"left", "top"}, QRect(240, 300, 1120, 540)),
+            ("top-right", QPointF(959, 0), QPointF(0, -90), {"right", "top"}, QRect(400, 210, 960, 630)),
+            ("bottom-left", QPointF(0, 539), QPointF(0, 90), {"left", "bottom"}, QRect(400, 300, 960, 630)),
+            ("bottom-right", QPointF(959, 539), QPointF(160, 0), {"right", "bottom"}, QRect(400, 300, 1120, 540)),
         )
         for label, local_point, delta, expected_edges, expected_geometry in cases:
             with self.subTest(edge=label):
@@ -3287,11 +3290,6 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                     )
                 )
                 self.assertEqual(self.window.geometry(), expected_geometry)
-                self.assertAlmostEqual(
-                    self.window.width() / self.window.height(),
-                    MUSIC_WINDOW_ASPECT_RATIO,
-                    delta=0.01,
-                )
 
     def test_timed_lyrics_advance_in_rendered_music_surface(self):
         self.owner.timed_lyrics = [(0.0, "FIRST LINE"), (2.0, "SECOND LINE"), (4.0, "THIRD LINE")]
@@ -3310,7 +3308,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._lyric_motion.frame(self.owner.timed_lyrics, 2.6, 101.0, "test-track").active_index, 1)
 
     def test_apple_lift_renders_and_reuses_shaped_glyphs(self):
-        self.owner.timed_lyrics = [(0.0, "Hello 世界 👩‍💻"), (3.0, "next")]
+        self.owner.timed_lyrics = [(0.0, "Hello 世界 👩‍💻"), (2.5, "next")]
         self.owner.media_position_seconds = 1.5
         self.owner._estimated_media_position = lambda _now: self.owner.media_position_seconds
         self.window.resize(960, 540)
@@ -3333,7 +3331,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window.render(image)
         self.assertEqual(self.window._last_lyric_emphasis_mode, "scatter_glow")
 
-    def test_sparse_threshold_reconfigures_active_effect_without_restart(self):
+    def test_historical_sparse_threshold_cannot_reconfigure_fixed_active_effect(self):
         self.owner.timed_lyrics = [(0.0, "别再走"), (4.5, "普通下一句")]
         self.owner.media_position_seconds = 2.0
         self.owner._estimated_media_position = lambda _now: self.owner.media_position_seconds
@@ -3344,9 +3342,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._last_lyric_emphasis_mode, "scatter_glow")
         self.owner.music_sparse_highlight_seconds_per_unit = 2.0
         self.window.render(image)
-        self.assertEqual(self.window._last_lyric_emphasis_mode, "none")
+        self.assertEqual(self.window._last_lyric_emphasis_mode, "scatter_glow")
 
-    def test_next_line_prewarm_uses_current_sparse_threshold(self):
+    def test_next_line_prewarm_ignores_historical_sparse_threshold(self):
         self.owner.timed_lyrics = [
             (0.0, "ordinary line with many spoken words"),
             (4.0, "别再走"),
@@ -3358,7 +3356,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         image = QImage(self.window.size(), QImage.Format.Format_RGB32)
         self.owner.music_sparse_highlight_seconds_per_unit = 2.0
         self.window.render(image)
-        self.assertIsNone(self.window._pending_glow_prewarm)
+        self.assertEqual(self.window._pending_glow_prewarm[1], "别再走")
         self.owner.music_sparse_highlight_seconds_per_unit = 1.0
         self.window.render(image)
         self.assertEqual(self.window._pending_glow_prewarm[1], "别再走")
@@ -3705,13 +3703,18 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         font.setWeight(QFont.Weight.Black)
         color = QColor(245, 250, 255, 218)
         layout, height = self.window._wrapped_lyric_layout(text, font, 360.0)
-        origin = QPointF(20.25, 24.5)
+        dpr = self.window.devicePixelRatioF()
+        # Compare the same physical pixel phase: live glyph shaping and a
+        # translated image use different Qt samplers at fractional pixels.
+        origin = QPointF(round(20.25 * dpr) / dpr, round(24.5 * dpr) / dpr)
 
-        direct = QImage(520, 220, QImage.Format.Format_ARGB32_Premultiplied)
+        direct = QImage(round(520 * dpr), round(220 * dpr), QImage.Format.Format_ARGB32_Premultiplied)
+        direct.setDevicePixelRatio(dpr)
         direct.fill(Qt.GlobalColor.transparent)
         with QPainter(direct) as painter:
             self.window._draw_wrapped_layout(painter, layout, origin, color)
         cached = QImage(direct.size(), direct.format())
+        cached.setDevicePixelRatio(dpr)
         cached.fill(Qt.GlobalColor.transparent)
         with QPainter(cached) as painter:
             self.window._draw_cached_wrapped_layout(
@@ -3951,13 +3954,13 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         ]
         self.owner.enable_dual_line_lyrics = True
         lines, timed = self.window._display_lyrics()
-        self.assertEqual(timed, [(0.0, "· · ·"), (5.0, "Shine\n闪耀"), (10.0, "作曲：乙\nNext\n下一句")])
+        self.assertEqual(timed, [(0.0, "· · ·"), (5.0, "Shine\n闪耀"), (10.0, "Next\n下一句")])
         self.assertEqual(lines[1], "Shine\u2028闪耀")
         self.owner.enable_dual_line_lyrics = False
         self.window._display_lyrics()  # Start the companion's elastic exit.
         with patch("local.music_surface_window.time.monotonic", return_value=self.window._translation_exit_at + 0.5):
             _lines, hidden = self.window._display_lyrics()
-        self.assertEqual(hidden, [(0.0, "· · ·"), (5.0, "Shine"), (10.0, "作曲：乙\nNext")])
+        self.assertEqual(hidden, [(0.0, "· · ·"), (5.0, "Shine"), (10.0, "Next")])
 
     def test_same_timestamp_unlabeled_intro_credit_does_not_displace_translation(self):
         self.owner.music_intro_cleanup_enabled = True
@@ -4604,7 +4607,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertLess(cover_origin.y(), panel.top())
 
         background = QColor(22, 27, 34)
-        unread = QColor(225, 125, 132, 242)
+        unread = QColor("white")
         controls = QRectF(8.0, 15.0, 350.0, 60.0)
 
         def paint(hovered="", pressed="", playing=True):
@@ -4613,7 +4616,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.window._pressed_media_command = pressed
             image = QImage(380, 90, QImage.Format.Format_RGB32)
             image.fill(background)
-            with patch.object(self.window, "_future_lyric_color", return_value=unread) as tone:
+            with patch.object(self.window, "_scene_control_ink", return_value=unread) as tone:
                 with patch.object(self.window, "_paint_transport_icon", wraps=self.window._paint_transport_icon) as draw:
                     with QPainter(image) as painter:
                         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -4621,7 +4624,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                             painter, controls, self.owner.album_color, self.owner.secondary_color,
                         )
                 colors = [call.args[3] for call in draw.call_args_list]
-            tone.assert_called_once_with(self.window._media_control_panel_rect)
+            tone.assert_called_once_with()
             return image, colors
 
         normal, colors = paint()
@@ -5391,7 +5394,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window.resize(1190, 666)
         self.window._fullscreen = False
         self.window._sync_window_control_rects()
-        self.assertEqual(set(self.window._button_rects), {"return", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
         windowed_rect = self.window._button_rects["return"]
         self.assertEqual((windowed_rect.width(), windowed_rect.height()), (44.0, 44.0))
 
@@ -5403,7 +5406,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
         self.window._fullscreen = True
         self.window._sync_window_control_rects()
-        self.assertEqual(set(self.window._button_rects), {"mode", "translation"})
+        self.assertEqual(set(self.window._button_rects), {"mode", "translation", "content_layout"})
         self.assertEqual(self.window._button_rects["mode"], half_rect)
 
     def test_fullscreen_controls_hide_after_five_seconds_and_restore_on_pointer_move(self):
@@ -6247,6 +6250,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         island = _LifecycleIsland()
         try:
             island._music_surface_active = True
+            island.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: True, isMinimized=lambda: False)
             island.taskbar_hidden_by_follow = True
             island.lifecycle_events.clear()
             island._set_taskbar_follow_hidden(False)
@@ -6255,6 +6259,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.assertNotIn(("island_show", True), island.lifecycle_events)
         finally:
             island._music_surface_active = False
+            island.music_fullscreen_overlay = None
             island.close()
 
     def test_music_surface_tick_keeps_media_and_lyrics_without_retired_extras_or_island_frame_work(self):
@@ -6425,27 +6430,22 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         seek_to_lyric.assert_not_called()
         self.assertEqual(self.window._pressed_media_command, "")
 
-    def test_tray_double_click_focuses_active_music_surface_instead_of_island(self):
-        class TrayWindow:
-            _music_surface_active = True
-
-            def __init__(self):
-                self.focus_calls = 0
-
-            def _focus_active_music_surface(self):
-                self.focus_calls += 1
-                return True
-
-            def isVisible(self):
-                raise AssertionError("tray must not inspect or toggle island visibility")
-
+    def test_tray_double_click_hides_active_surface_and_restores_minimum_island(self):
+        from unittest.mock import Mock
         class TrayHarness:
             toggle_window = LocalIslandApp.toggle_window
-
         harness = TrayHarness()
-        harness.window = TrayWindow()
+        harness.window = Mock(_tray_hidden=False)
+        harness.settings_window = Mock()
+        harness._sync_tray_status = Mock()
         LocalIslandApp._on_tray_activated(harness, QSystemTrayIcon.ActivationReason.DoubleClick)
-        self.assertEqual(harness.window.focus_calls, 1)
+        self.assertTrue(harness.window._tray_hidden)
+        harness.window.music_fullscreen_overlay.hide.assert_called_once()
+        harness.window.hide.assert_called_once()
+        self.assertFalse(harness.window._music_surface_active)
+        LocalIslandApp._on_tray_activated(harness, QSystemTrayIcon.ActivationReason.DoubleClick)
+        self.assertFalse(harness.window._tray_hidden)
+        harness.window.ensure_minimum_surface.assert_called_once()
 
     def test_tasker_cover_can_open_surface_without_stealing_media_button(self):
         island = IslandStackVisual()

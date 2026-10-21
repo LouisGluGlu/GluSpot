@@ -149,6 +149,15 @@ class OwnedAudioBridge(QObject):
     def set_direct(self, enabled, epoch, token=None, *, muted=True):
         return self._invoke("direct", (bool(enabled), epoch, bool(muted)), token=token)
 
+    def prepare_direct(self, epoch, token=None):
+        """Reserve the owned outputs and decoder clock before receiver setup."""
+        return self._invoke("prepare", epoch, token=token)
+
+    def _hold_decoder(self, preparing):
+        hold = getattr(self.owned, "set_output_preparing", None)
+        if callable(hold):
+            hold(preparing)
+
     def commit_direct_mute(self, epoch, token=None):
         """Mute the Qt output after this exact feeding session can present PCM."""
         return self._invoke("commit_mute", epoch, token=token)
@@ -260,6 +269,16 @@ class OwnedAudioBridge(QObject):
                 request[5] = (self.endpoint_id(audio.device()).casefold() == value.casefold()
                     and (voice_audio is None or not hasattr(voice_audio, "device")
                          or self.endpoint_id(voice_audio.device()).casefold() == value.casefold()))
+            elif operation == "prepare":
+                if not self.supported or not self.owned.track or not hasattr(audio, "setMuted"):
+                    return
+                if not self._commit_outputs_mute(audio):
+                    return
+                self._epoch, self._direct, self._direct_token = value, True, token
+                self._last_buffer_end = None
+                self._restarting = True
+                self._hold_decoder(True)
+                request[5] = True
             elif operation == "direct":
                 enabled, epoch, muted = value
                 if enabled:
@@ -277,6 +296,7 @@ class OwnedAudioBridge(QObject):
                     self._direct_token = token
                     self._last_buffer_end = None
                     self._restarting = False
+                    self._hold_decoder(False)
                 else:
                     # A stop for an older session cannot unmute its replacement.
                     if self._direct and epoch not in {0, self._epoch}:
@@ -292,6 +312,7 @@ class OwnedAudioBridge(QObject):
                     self._voice_intervals.clear()
                     self._hold_paused_music = False
                     self.owned._dj_pcm_clock_floor = 0.0
+                    self._hold_decoder(False)
                 request[5] = True
             elif operation == "commit_mute":
                 if (not self._direct or self._restarting or value != self._epoch
@@ -318,6 +339,12 @@ class OwnedAudioBridge(QObject):
             self._hold_paused_music = False
             self.owned._dj_pcm_clock_floor = 0.0
             self._restarting = self._direct
+            if self._direct:
+                # Do this synchronously on the source change, before the route
+                # worker tears down/re-authenticates. The next decoder may be
+                # loaded from a prefetched file in this same Qt turn.
+                self._commit_outputs_mute(self.owned.audio)
+                self._hold_decoder(True)
             if self._controller is not None:
                 self._controller.media_changed(token)
         voice_token = getattr(self.owned, "personal_dj_audio_token", None)
@@ -384,6 +411,7 @@ class OwnedAudioBridge(QObject):
         if milliseconds < old_position - 500 or milliseconds - old_position > expected + 800:
             self._restarting = True
             self._last_buffer_end = None
+            self._hold_decoder(True)
             self._controller.media_changed(self.media_token(), force=True)
 
     @Slot(object)
@@ -412,6 +440,7 @@ class OwnedAudioBridge(QObject):
             # the old delayed history. Ordinary contiguous chunks retain it.
             self._last_buffer_end = None
             self._restarting = True
+            self._hold_decoder(True)
             self._controller.media_changed(self.media_token(), force=True)
             return
         self._last_buffer_end = start + buffer.duration() if start >= 0 else None

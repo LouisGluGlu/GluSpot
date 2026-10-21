@@ -13,21 +13,44 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Sequence
 
+from api.lyrics import is_structured_lyric_metadata
+
 
 INTRO_COUNTDOWN_TEXT = "· · ·"
 INTRO_COUNTDOWN_MIN_START_SECONDS = 5.0
 
 _CREDIT_LABEL = (
-    r"(?:作词|填词|词曲|作曲|编曲|制作人|音乐制作人|联合制作人|配唱制作人|"
-    r"监制|录音(?:师|工程师|室)?|混音(?:师|工程师|室|助理)?|母带(?:制作|处理|工程师)?|"
-    r"和声(?:编写)?|人声编辑|音频编辑|出品(?:人)?|发行|策划|统筹|企划|"
-    r"演唱|原唱|翻译|译者|封面设计|版权|专辑|"
-    r"album|lyrics?|lyricist|composer|composition|music|arrangement|arranger|"
-    r"producer|production|recording|mixing|mix|mastering|master|"
+    r"(?:作词|填词|词曲|作曲|编曲|制作(?:人|团队|统筹)?|音乐制作人|联合制作人|配唱制作人|"
+    r"监制|音乐总监|录音(?:师|工程师|室|棚)?|混音(?:师|工程师|室|助理)?|母带(?:制作|处理|工程师)?|"
+    r"和声(?:编写|编配|设计)?|人声编辑|音频编辑|音频制作|弦乐(?:编写|编配|监制|录音)?|"
+    r"吉他|贝斯|贝司|鼓|钢琴|键盘|管弦乐|乐器演奏|乐团|出品(?:人|公司)?|发行(?:公司)?|策划|统筹|企划|"
+    r"演唱|原唱|翻译|译者|封面(?:设计|制作)?|版权|专辑|"
+    r"album|lyrics?|lyricist|composer|composition|music(?:\s+director)?|arrangement|arranger|"
+    r"(?:(?:executive|vocal|co)[ -]+)?producer|production|recording(?:\s+engineer)?|"
+    r"mixing(?:\s+engineer)?|mix|mastering(?:\s+engineer)?|master|"
+    r"guitars?|bass|drums?|keyboards?|piano|strings?|programming|backing\s+vocals?|"
     r"translation|translator|copyright|op|sp)"
 )
 _CREDIT_LINE_RE = re.compile(
-    rf"^\s*{_CREDIT_LABEL}(?:\s*[/＆&、]\s*{_CREDIT_LABEL})*\s*[:：]\s*\S",
+    rf"^\s*{_CREDIT_LABEL}(?:\s*[/＆&、+＋]\s*{_CREDIT_LABEL})*\s*[:：=]\s*\S",
+    re.I,
+)
+# Space/dash-separated role listings occur in plain LRC as well. Restrict
+# this form to unmistakable production roles, rather than broad lyric words
+# such as 'music', 'master' or 'strings'.
+_CREDIT_ROLE_LIST_RE = re.compile(
+    r"^\s*(?:作词|填词|词曲|作曲|编曲|制作人|音乐制作人|联合制作人|配唱制作人|"
+    r"监制|音乐总监|录音师|录音工程师|混音师|混音工程师|母带工程师|"
+    r"和声编写|和声编配|人声编辑|音频编辑|封面设计|"
+    r"lyricist|composer|arranger|(?:executive|vocal|co)[ -]+producer|"
+    r"(?:recording|mixing|mastering)\s+engineer)"
+    r"(?:\s+|\s*[—–-]\s*)\S",
+    re.I,
+)
+_COPYRIGHT_NOTICE_RE = re.compile(
+    r"^\s*(?:[©℗]\s*(?:\d{4}\b\s*)?\S|all\s+rights\s+reserved\b|"
+    r"未经(?:著作权人|版权方|许可|授权).{0,24}(?:不得|禁止)|"
+    r"本(?:歌曲|作品|录音).{0,16}(?:版权|著作权)(?:归|由|属))",
     re.I,
 )
 _CREDIT_BY_RE = re.compile(
@@ -35,6 +58,10 @@ _CREDIT_BY_RE = re.compile(
     r"recorded|translated)\s+by\s*[:：]?\s*\S",
     re.I,
 )
+# These nouns are also plausible sung subjects. An exact repeated row is
+# lyric evidence for them; concrete roles such as Producer/作词 remain credits
+# even when the source repeats its production block.
+_AMBIGUOUS_CREDIT_LABELS = frozenset(("music", "master", "strings"))
 _LRC_METADATA_RE = re.compile(r"^\s*\[(?:ar|al|ti|by|offset|length)\s*:[^\]]*\]\s*$", re.I)
 _VERSE_TAG_RE = re.compile(
     r"[\[【［(（]\s*verse\s+\d+(?:\s*[:：]\s*[^\]】］)）]+)?\s*[\]】］)）]",
@@ -428,7 +455,23 @@ def analyze_duet_lyric_rows(
 
 
 def _is_credit_line(text: str) -> bool:
-    return bool(_CREDIT_LINE_RE.match(text) or _CREDIT_BY_RE.match(text) or _LRC_METADATA_RE.match(text))
+    value = str(text or "").strip()
+    # Older cached/provider snapshots can still carry NetEase's JSON header
+    # rows. They are metadata in every layout, regardless of intro cleanup.
+    if is_structured_lyric_metadata(value):
+        return True
+    # An enclosing pair is commonly used for an entire credit, but an
+    # ordinary sung parenthesis remains untouched when its content has no
+    # explicit production evidence.
+    for left, right in (("[", "]"), ("【", "】"), ("［", "］"), ("(", ")"), ("（", "）")):
+        if value.startswith(left) and value.endswith(right):
+            value = value[1:-1].strip()
+            break
+    return bool(
+        _CREDIT_LINE_RE.match(value) or _CREDIT_BY_RE.match(value)
+        or _CREDIT_ROLE_LIST_RE.match(value) or _COPYRIGHT_NOTICE_RE.match(value)
+        or _LRC_METADATA_RE.match(text)
+    )
 
 
 def _colon_prefix(text: str) -> str | None:
@@ -573,8 +616,9 @@ def present_timed_lyric_rows(
 ) -> list[tuple[float, str]]:
     """Prepare display rows without rewriting provider text or unit clocks.
 
-    Only removable note/credit runs at the song's beginning and end are
-    discarded. Numeric colons, repeated rows or speaker labels, verified
+    Explicit production rows are removed wherever they occur; unknown note
+    labels are removed only in the song's beginning/end runs. Numeric colons,
+    repeated sung rows or speaker labels, verified
     singers, actual translations and colons within lyric phrases survive.
     A standalone parenthetical vocal joins the immediately preceding sung
     display row, retaining the latter's start and unchanged primary source
@@ -628,12 +672,25 @@ def present_timed_lyric_rows(
             if (body or parenthetical) in companions:
                 translated_subrows.add((row_index, part_index))
 
+    def repeated_lyric(flat_index: int) -> bool:
+        part = flat[flat_index][2]
+        normalized = " ".join(part.replace("：", ":").split()).casefold()
+        return row_counts[normalized] > 1 and (
+            not _is_credit_line(part) or labels[flat_index] in _AMBIGUOUS_CREDIT_LABELS
+        )
+
     def removable(flat_index: int) -> bool:
         row_index, part_index, part = flat[flat_index]
-        normalized = " ".join(part.replace("：", ":").split()).casefold()
+        if repeated_lyric(flat_index):
+            return False
         if (
-            row_counts[normalized] > 1
-            or re.search(r"\d\s*[:：]\s*\d", part)
+            (row_index, part_index) not in translated_subrows
+            and not _TRANSLATION_LABEL_RE.match(part)
+            and _is_credit_line(part)
+        ):
+            return True
+        if (
+            re.search(r"\d\s*[:：]\s*\d", part)
             or (row_index, part_index) in translated_subrows
             or _PARENTHETICAL_LABEL_RE.match(part)
             or _line_singer_prefix(part, singer_aliases) is not None
@@ -660,6 +717,15 @@ def present_timed_lyric_rows(
         return True
 
     removed: set[int] = set()
+    # Strongly identified production/rights metadata must not leak into a
+    # coalesced sung row or reappear merely because the service repeats it.
+    # Translations are recognized first and keep their existing toggle.
+    removed.update(
+        index for index, (row_index, part_index, part) in enumerate(flat)
+        if (row_index, part_index) not in translated_subrows
+        and not _TRANSLATION_LABEL_RE.match(part) and _is_credit_line(part)
+        and not repeated_lyric(index)
+    )
     for positions in (range(len(flat)), range(len(flat) - 1, -1, -1)):
         for flat_index in positions:
             if not removable(flat_index):

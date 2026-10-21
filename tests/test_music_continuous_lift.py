@@ -90,6 +90,18 @@ class ContinuousReadingLiftTests(unittest.TestCase):
         self.assertTrue(all(sparse_glyph_frame(0.0, index, 5).read_fraction == 0.0 for index in range(5)))
         self.assertTrue(all(sparse_glyph_frame(1.0, index, 5).glow == 0.0 for index in range(5)))
 
+    def test_highlight_uses_same_overlapping_rise_at_character_granularity(self):
+        for count in (2, 5, 17, 48):
+            overlap_seen = False
+            for tick in range(257):
+                progress = tick / 256.0
+                heights = [sparse_glyph_frame(progress, index, count).lift for index in range(count)]
+                for index, height in enumerate(heights):
+                    self.assertAlmostEqual(height, GLYPH_FLOAT_LIFT * continuous_read_lift(progress, index, count))
+                overlap_seen |= any(0.0 < follower <= lead < GLYPH_FLOAT_LIFT
+                                    for lead, follower in zip(heights, heights[1:]))
+            self.assertTrue(overlap_seen)
+
 
 class MusicSurfaceContinuousLiftTests(unittest.TestCase):
     @classmethod
@@ -403,6 +415,37 @@ class MusicSurfaceContinuousLiftTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(states[trailing_glyph].highlighted)
                 self.assertEqual(states[trailing_glyph].read_fraction, 1.0)
+
+    def test_real_highlight_counts_combining_letters_as_one_grapheme_across_wraps(self):
+        text = "a\u0301bcdefghijklmnop"
+        units = (TimedLyricUnit(10.0, 18.0, text),)
+        groups = explicit_slow_unit_groups(text, units)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0].source_text, text)
+        layout, _height = self.window._wrapped_lyric_layout(text, self.font, 160.0)
+        runs = self.window._wrapped_lyric_runs(text, self.font, layout, "character")
+        self.assertGreater(layout.lineCount(), 1)
+        whole = self.window._real_sparse_glyph_states(text, self.font, 0, groups, 0.2, 12.0)
+        self.assertEqual(len(whole), len(text) - 1)
+        wrapped = []
+        for index, (segment, *_rest) in enumerate(runs):
+            offset = len(self.window._utf16_slice(text, 0, layout.lineAt(index).textStart()))
+            wrapped.extend(self.window._real_sparse_glyph_states(segment, self.font, offset, groups, 0.2, 12.0))
+        self.assertEqual(tuple(wrapped), whole)
+        for index, state in enumerate(whole):
+            self.assertAlmostEqual(state.lift, GLYPH_FLOAT_LIFT * continuous_read_lift(0.25, index, len(whole)))
+
+    def test_projection_retains_grapheme_source_for_highlight_after_singer_prefix(self):
+        text = "a\u0301bcde"
+        source = "Alex：" + text
+        group = explicit_slow_unit_groups(source, (
+            TimedLyricUnit(9.0, 9.3, "Alex："), TimedLyricUnit(10.0, 15.0, text),
+        ))
+        self.assertEqual(len(group), 1)
+        prefix = len("Alex：")
+        projected = self.window._project_highlight_groups(group, tuple(range(prefix, len(source) + 1)))
+        self.assertEqual(projected[0].source_text, text)
+        self.assertEqual((projected[0].start_offset, projected[0].end_offset), (0, len(text)))
 
     def test_real_group_does_not_emit_halo_until_that_glyph_is_white(self):
         text = "shine"

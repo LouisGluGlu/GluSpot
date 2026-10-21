@@ -119,6 +119,7 @@ class TimedHighlightGroup:
     end_seconds: float
     unit_starts: tuple[float, ...] = ()
     unit_ends: tuple[float, ...] = ()
+    source_text: str = ""
 
 
 def timed_highlight_wave_progress(group: TimedHighlightGroup, position: float) -> float:
@@ -310,9 +311,13 @@ def explicit_slow_unit_groups(
     text: str,
     units: Sequence[object],
     *,
-    min_duration: float = 1.0,
+    min_duration: float = 0.8,
 ) -> tuple[TimedHighlightGroup, ...]:
-    """Select slow timed characters and Latin words with attached punctuation."""
+    """Select measured characters/words lasting at least the fixed 0.8 s cue.
+
+    ``min_duration`` remains accepted for historical callers; it no longer
+    changes the product's highlight threshold.
+    """
     offsets = _aligned_offsets(str(text), units)
     if offsets is None:
         return ()
@@ -344,6 +349,10 @@ def explicit_slow_unit_groups(
         latin_letters = tuple(character.isalpha() and ord(character) < 0x2E80 for character in core)
         alphabetic_word = bool(core) and all(
             latin_letters[position] or (
+                unicodedata.category(character).startswith("M")
+                and position > 0
+                and (latin_letters[position - 1] or unicodedata.category(core[position - 1]).startswith("M"))
+            ) or (
                 character in connectors
                 and position > 0 and position + 1 < len(core)
                 and latin_letters[position - 1]
@@ -355,7 +364,7 @@ def explicit_slow_unit_groups(
         eligible = (
             spoken_characters
             and end is not None and math.isfinite(start) and math.isfinite(end)
-            and end - start > float(min_duration)
+            and end - start >= 0.8 - 1e-9
             and offsets[index + 1] - offsets[index] == len(token)
         )
         if not eligible:
@@ -369,6 +378,7 @@ def explicit_slow_unit_groups(
                 max(current.end_seconds, end),
                 current.unit_starts + (start,) * len(spoken),
                 current.unit_ends + (end,) * len(spoken),
+                current.source_text + spoken,
             )
         else:
             if current is not None:
@@ -376,6 +386,7 @@ def explicit_slow_unit_groups(
             current = TimedHighlightGroup(
                 spoken_start, spoken_end, start, end,
                 (start,) * len(spoken), (end,) * len(spoken),
+                spoken,
             )
     if current is not None:
         result.append(current)

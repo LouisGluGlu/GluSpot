@@ -104,6 +104,38 @@ TRADITIONAL_TO_SIMPLIFIED_FALLBACK = str.maketrans(
 SIMPLIFIED_TO_TRADITIONAL_FALLBACK = str.maketrans({value: key for key, value in TRADITIONAL_TO_SIMPLIFIED_FALLBACK.items()})
 
 
+def is_structured_lyric_metadata(text: str) -> bool:
+    """Recognize NetEase's structured header rows without treating JSON as vocals.
+
+    These rows carry a millisecond marker and text fragments for credits or
+    source annotations. They are neither LRC lines nor timed YRC words. Keep
+    the schema narrow so ordinary sung braces and unrelated JSON remain text.
+    """
+    value = str(text or "").strip()
+    if not (value.startswith("{") and value.endswith("}")):
+        return False
+    try:
+        row = json.loads(value)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(row, dict) or set(row) != {"t", "c"}:
+        return False
+    timestamp = row["t"]
+    if (
+        isinstance(timestamp, bool)
+        or not isinstance(timestamp, (int, float))
+        or isinstance(timestamp, float) and not math.isfinite(timestamp)
+    ):
+        return False
+    fragments = row["c"]
+    return bool(fragments) and isinstance(fragments, list) and all(
+        isinstance(fragment, dict)
+        and set(fragment) == {"tx"}
+        and isinstance(fragment["tx"], str)
+        for fragment in fragments
+    )
+
+
 @dataclass(frozen=True)
 class LyricsMatch:
     timed_lyrics: tuple[TimedLyricLine, ...]
@@ -166,6 +198,9 @@ class LocalLyricsStore:
         override = str(os.environ.get(cls.GENERATED_CACHE_DIR_ENV, "") or "").strip()
         if override:
             return Path(override)
+        from local.branding import is_packaged_app, local_app_data_dir
+        if is_packaged_app():
+            return Path(local_app_data_dir()) / "lyrics-cache"
         base_dir = str(os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or "").strip()
         if base_dir:
             return Path(base_dir) / "GluSpot" / "lyrics-cache"
@@ -963,14 +998,14 @@ class LocalLyricsStore:
                 break
         for raw_line in raw_lines:
             line = raw_line.strip()
-            if not line or METADATA_RE.match(line):
+            if not line or METADATA_RE.match(line) or is_structured_lyric_metadata(line):
                 continue
             yrc_match = YRC_LINE_RE.match(raw_line.strip())
             if yrc_match:
                 timestamp = max(0.0, int(yrc_match.group(1)) / 1000.0 + offset_seconds)
                 raw_content = yrc_match.group(3)
                 content = self._clean_timed_lyric_content(raw_content)
-                if content:
+                if content and not is_structured_lyric_metadata(content):
                     line_start_ms = int(yrc_match.group(1))
                     line_duration_ms = int(yrc_match.group(2))
                     if KRC_UNIT_RE.search(raw_content):
@@ -993,6 +1028,10 @@ class LocalLyricsStore:
                 content_start = match.end()
             raw_content = raw_line[content_start:]
             content = self._clean_timed_lyric_content(raw_content)
+            # Old generated caches may already wrap a structured header in
+            # an LRC timestamp; it remains metadata after removing that tag.
+            if is_structured_lyric_metadata(content):
+                continue
             if leading_times and content:
                 for match in leading_times:
                     timestamp = self._lrc_time_seconds(match, offset_seconds)
@@ -1841,7 +1880,11 @@ class LocalLyricsStore:
         best_candidate: dict[str, Any] | None = None
         for candidate in candidates:
             candidate_title, candidate_artist, candidate_album = text_resolver(candidate)
-            source = str(getattr(text_resolver, "__name__", "")).removeprefix("_").removesuffix("_candidate_text")
+            source = str(getattr(text_resolver, "__name__", ""))
+            if source.startswith("_"):
+                source = source[1:]
+            if source.endswith("_candidate_text"):
+                source = source[:-len("_candidate_text")]
             if not self._candidate_identity_matches(
                 title, artist, candidate_title, candidate_artist, duration_seconds,
                 self._candidate_duration_seconds(candidate, source),

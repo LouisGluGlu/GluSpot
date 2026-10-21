@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from bisect import bisect_right
 from dataclasses import dataclass
 import math
-from typing import Sequence
+from typing import Sequence, Tuple
 import unicodedata
 
 
@@ -144,7 +143,7 @@ class LyricTimelineDiagnostics:
         }
 
 
-TimedLineLike = tuple[float, str]
+TimedLineLike = Tuple[float, str]
 
 
 def active_index_for_position(
@@ -155,7 +154,16 @@ def active_index_for_position(
     if not timed_lyrics:
         return 0
     position = max(0.0, float(position_seconds)) + max(0.0, float(lead_seconds))
-    index = bisect_right(timed_lyrics, position, key=_line_time) - 1
+    # bisect's key argument was added in Python 3.10. Keep the same rightmost
+    # equal timestamp and logarithmic lookup on the Python 3.8 legacy runtime.
+    low, high = 0, len(timed_lyrics)
+    while low < high:
+        middle = (low + high) // 2
+        if position < _line_time(timed_lyrics[middle]):
+            high = middle
+        else:
+            low = middle + 1
+    index = low - 1
     return max(0, min(len(timed_lyrics) - 1, index))
 
 
