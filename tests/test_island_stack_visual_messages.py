@@ -8090,7 +8090,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         layout = LyricLayout("one", ("one",), (24.0,), 24.0, ())
         renderer = LyricReadingRenderer()
         fonts = []
-        renderer.paint = lambda _painter, _rect, _x, _text, font, *_args: fonts.append(font.family())
+        renderer.paint = lambda _painter, _rect, _x, _text, font, *_args, **_kwargs: fonts.append(font.family())
         visual._wave_reading_renderer = renderer
 
         visual._paint_wave_stream_lyric_chunks(

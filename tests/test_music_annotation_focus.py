@@ -66,16 +66,16 @@ class MusicAnnotationFocusTests(unittest.TestCase):
         self.owner.media_position_observed_seconds = position
         image = image if image is not None else self._image()
         captured = {}
-        original = self.window._paint_wrapped_lifted_lyric
+        original = self.window._paint_parenthetical_highlight
 
-        def record(painter, row, text, font, layout, progress, *args, **kwargs):
+        def record(painter, row, text, font, layout, progress, *, line_offsets=()):
             if text in {"echo", "回声"}:
                 captured[text] = (progress, painter.opacity(), QRect(row.toAlignedRect()))
-            return original(painter, row, text, font, layout, progress, *args, **kwargs)
+            return original(painter, row, text, font, layout, progress, line_offsets=line_offsets)
 
         with (
             patch("local.music_surface_window.time.monotonic", return_value=now),
-            patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=record),
+            patch.object(self.window, "_paint_parenthetical_highlight", side_effect=record),
         ):
             if region is None:
                 self.window.render(image)

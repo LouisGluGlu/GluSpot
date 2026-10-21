@@ -126,7 +126,7 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
             visual._lyric_phase = lambda _now: {"progress": 0.5, "whole_row": True, "whole_block_progress": 0.35}
             visual._wave_stream_font = lambda size, *_args, **_kwargs: QFont("Arial", int(size))
             calls = []
-            visual._wave_reading_renderer.paint_whole_block = lambda _p, rows, progress: calls.append((rows, progress))
+            visual._wave_reading_renderer.paint_whole_block = lambda _p, rows, progress, **_kw: calls.append((rows, progress))
             self._render(visual, False)
             self.assertEqual(len(calls), 1)
             self.assertEqual(len(calls[0][0]), 2)

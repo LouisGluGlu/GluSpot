@@ -121,16 +121,23 @@ class MusicSurfaceGlassTests(unittest.TestCase):
         self.assertEqual(self.window._scene_control_ink(), QColor("black"))
 
     def test_scene_sampling_is_bounded_and_reused_for_all_control_targets(self):
-        with patch.object(self.window, "_relative_luminance", wraps=self.window._relative_luminance) as luminance:
+        with patch.object(self.window, "_scene_control_ink_areas", wraps=self.window._scene_control_ink_areas) as vote:
             first = self.window._scene_control_ink()
-            count = luminance.call_count
+            self.assertEqual(vote.call_count, 1)
+            self.assertEqual(vote.call_args.args[2:], (32, 18))
             for target in (QRectF(0, 0, 44, 44), QRectF(850, 450, 44, 44)):
                 self.assertEqual(self.window._surface_glass_ink(target, live=True), first)
-            self.assertEqual(luminance.call_count, count)
-            self.assertLessEqual(count, 32 * 18)
+            self.assertEqual(vote.call_count, 1)
             self.window._background_cache.fill(QColor("white"))
             self.window._scene_control_ink()
-            self.assertGreater(luminance.call_count, count)
+            self.assertEqual(vote.call_count, 2)
+            self.window._background_cache = QImage(7, 5, QImage.Format.Format_RGB32)
+            self.window._background_cache.fill(QColor("black"))
+            self.window._scene_control_ink()
+            self.assertEqual(vote.call_count, 3)
+            self.assertEqual(vote.call_args.args[2:], (7, 5))
+            self.assertTrue(all(call.args[2] * call.args[3] <= 32 * 18
+                                for call in vote.call_args_list))
 
     def test_shared_decided_ink_smoothly_retargets_between_songs_and_mid_transition(self):
         self.window._background_cache.fill(QColor("black"))

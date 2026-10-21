@@ -74,6 +74,7 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
             self.owner.media_position_sampled_at = now
         painted: list[_PaintedCompanion] = []
         original_read = self.window._paint_wrapped_lifted_lyric
+        original_aside = self.window._paint_parenthetical_highlight
         original_whole = self.window._draw_sprung_cached_wrapped_layout
         original_future = self.window._draw_future_wrapped_layout
         original_block = self.window._draw_low_perception_block_wipe
@@ -100,6 +101,13 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
             observe(painter, row.topLeft(), layout, text, kwargs.get("line_offsets", ()), progress,
                     color=kwargs.get("read_color"), real_progresses=kwargs.get("real_progresses"))
             return original_read(painter, row, text, font, layout, progress, *args, **kwargs)
+
+        def aside(painter, row, text, font, layout, progress, *, line_offsets=()):
+            # This renderer mixes unread ink, white reading ink and bloom;
+            # it has no single read_color argument to report.
+            observe(painter, row.topLeft(), layout, text, line_offsets, progress)
+            return original_aside(painter, row, text, font, layout, progress,
+                                  line_offsets=line_offsets)
 
         def whole(painter, layout, origin, text, font, width, height, color, offsets, *args, **kwargs):
             nonlocal whole_depth
@@ -138,6 +146,7 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
 
         with (
             patch.object(self.window, "_paint_wrapped_lifted_lyric", side_effect=read),
+            patch.object(self.window, "_paint_parenthetical_highlight", side_effect=aside),
             patch.object(self.window, "_draw_sprung_cached_wrapped_layout", side_effect=whole),
             patch.object(self.window, "_draw_future_wrapped_layout", side_effect=future),
             patch.object(self.window, "_draw_low_perception_block_wipe", side_effect=block),
@@ -244,19 +253,28 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         before_frame = self._render(100.6, 18.6)
         before = self._paint(before_frame, "echo")
         regular_translation = self._paint(before_frame, "月光继续歌唱")
-        self.assertGreater(before.progress, 0.5)
-        self.assertEqual(before.color, (220, 220, 220, 255))
+        # A's estimated read end is 19.0; the aside reads from 15.2 until
+        # C's first quarter at 24.75 (C's own estimate is 20..39).
+        self.assertAlmostEqual(before.progress, (18.6 - 15.2) / (24.75 - 15.2))
+        self.assertIsNone(before.color)
         self.assertAlmostEqual(before.pixel_size / 2, regular_translation.pixel_size, delta=0.5)
         self.assertEqual(before.pixel_size, round((self.window.LYRIC_PIXEL_SIZE - 6) * self.window._surface_scale()))
         self.assertEqual(before.weight, int(QFont.Weight.Bold))
         self.assertEqual(regular_translation.weight, int(QFont.Weight.Normal))
         self._render(100.7, 20.2)
-        completed = self._render(101.3, 20.8)
+        held = self._render(101.3, 20.8)
+        self.assertAlmostEqual(self._paint(held, "echo").progress,
+                               (20.8 - 15.2) / (24.75 - 15.2))
+        self.assertEqual(self._paint(held, "echo").blur, 0.0)
+        self.assertEqual(self._paint(held, "回声").blur, 0.0)
+        # It stays attached and clear over C's opening, then joins A's blur.
+        self._render(105.25, 24.75)
+        completed = self._render(105.6, 25.1)
         main_paint = self._paint(completed, main)
         aside = self._paint(completed, "echo")
         translated_aside = self._paint(completed, "回声")
         self.assertIsNone(aside.progress)
-        self.assertEqual(aside.color, (220, 220, 220, 255))
+        self.assertEqual(aside.color, (255, 255, 255, 255))
         self.assertEqual(main_paint.color, (255, 255, 255, 255))
         self.assertEqual(translated_aside.color, (255, 255, 255, 255))
         self.assertAlmostEqual(aside.opacity, main_paint.opacity)

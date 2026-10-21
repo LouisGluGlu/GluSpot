@@ -7,10 +7,11 @@ import math
 import re
 import unicodedata
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTextBoundaryFinder
-from PySide6.QtGui import QBrush, QColor, QFont, QFontInfo, QGuiApplication, QImage, QLinearGradient, QPainter, QPen, QTextCharFormat, QTextLayout
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTextBoundaryFinder
+from PySide6.QtGui import QBrush, QColor, QFont, QFontInfo, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextCharFormat, QTextLayout
 
-from local.music_lyric_motion import GLYPH_FLOAT_LIFT, continuous_read_lift
+from local.music_lyric_motion import GLYPH_FLOAT_LIFT, continuous_read_lift, sparse_glyph_frame
+from local.music_lyric_presentation import present_lyric_text, split_display_layers
 from local.lyric_unit_timing import timed_unit_reading_front
 
 
@@ -227,12 +228,60 @@ class LyricReadingRun:
     unit_boundaries: tuple[float, ...] = ()
 
 
+def parenthetical_display_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    """Source character ranges approved by the shared display classifier.
+
+    Only matching top-level round brackets qualify. Nesting, malformed pairs
+    and production metadata keep their ordinary source ink and timing.
+    """
+    ranges = []
+    stack = []
+    nested = False
+    pairs = {')': '(', '）': '（'}
+    for index, character in enumerate(text):
+        if character in '(（':
+            if stack:
+                nested = True
+            else:
+                nested = False
+            stack.append((character, index))
+        elif character in pairs:
+            if not stack:
+                continue
+            opening, start = stack.pop()
+            if opening != pairs[character]:
+                nested = True
+            if stack or nested:
+                continue
+            candidate = text[start:index + 1]
+            if not present_lyric_text(candidate):
+                continue
+            layers = split_display_layers(candidate, show_translation=False)
+            if layers.primary_text or not layers.parenthetical_text:
+                continue
+            first, last = start + 1, index
+            while first < last and text[first].isspace():
+                first += 1
+            while last > first and text[last - 1].isspace():
+                last -= 1
+            if first < last:
+                ranges.append((first, last))
+    return tuple(ranges)
+
+
 class LyricReadingRenderer:
     """Small-surface reading wave with native-size, device-resolution text layers."""
 
     CACHE_MAX_ENTRIES = 64
     CACHE_MAX_BYTES = 8 * 1024 * 1024
-    TINT_CACHE_MAX_ENTRIES = 128
+    # Original/translated CJK rows can hold more than 128 visible source/color
+    # pairs, especially while adjacent rows overlap. Recoloring that working
+    # set on every paint defeated the byte budget even below two MiB.
+    TINT_CACHE_MAX_ENTRIES = 512
+    PARENTHETICAL_CACHE_MAX_ENTRIES = 32
+    PARENTHETICAL_CACHE_MAX_BYTES = 2 * 1024 * 1024
+    HALO_CACHE_MAX_ENTRIES = 128
+    HALO_CACHE_MAX_BYTES = 2 * 1024 * 1024
 
     def __init__(self):
         self.runs: OrderedDict[tuple[object, ...], LyricReadingRun] = OrderedDict()
@@ -240,6 +289,118 @@ class LyricReadingRenderer:
         self.whole_lines: OrderedDict[tuple[str, str], QTextLayout] = OrderedDict()
         self.run_bytes = 0
         self.tint_bytes = 0
+        self.parentheticals = OrderedDict()
+        self.parenthetical_bytes = 0
+        self.halos = OrderedDict()
+        self.halo_bytes = 0
+
+    def _parenthetical_glyphs(self, text, font, dpr, run):
+        key = (text, font.toString(), dpr)
+        cached = self.parentheticals.get(key)
+        if cached is not None:
+            self.parentheticals.move_to_end(key)
+            return cached[0]
+        ranges = parenthetical_display_ranges(text)
+        glyphs = []
+        if not ranges or not run.units:
+            return ranges, ()
+        # The ordinary run uses a left-to-right reading front. Do not mask a
+        # bidirectional row until it has a front/placement model of its own.
+        if any(right < left for left, right in zip(run.char_boundaries, run.char_boundaries[1:])):
+            return ranges, ()
+        whole_line = self.whole_line(text, font).lineAt(0)
+        pixel_size = _font_pixel_size(font)
+        horizontal_bleed = max(2.0, pixel_size * .20)
+        # Graphemes preserve combining accents and supplementary characters.
+        finder = QTextBoundaryFinder(QTextBoundaryFinder.BoundaryType.Grapheme, text)
+        offsets = [0]
+        while (boundary := finder.toNextBoundary()) >= 0:
+            offsets.append(int(boundary))
+        python_at = {utf16_offset(text, index): index for index in range(len(text) + 1)}
+        for first, last in ranges:
+            selected = [(python_at[start], python_at[end]) for start, end in zip(offsets, offsets[1:])
+                        if start in python_at and end in python_at
+                        and first <= python_at[start] < python_at[end] <= last
+                        and not text[python_at[start]:python_at[end]].isspace()]
+            for ordinal, (start, end) in enumerate(selected):
+                left, right = run.char_boundaries[start], run.char_boundaries[end]
+                if right <= left:
+                    continue
+                unit = max(0, min(len(run.units) - 1,
+                                 bisect_right(run.unit_boundaries, (left + right) / 2.) - 1))
+                cluster = text[start:end]
+                cluster_layout = QTextLayout(cluster, font)
+                apply_cjk_letter_spacing(cluster_layout, cluster, font, resolve_point_size=True)
+                cluster_layout.beginLayout()
+                line = cluster_layout.createLine()
+                cluster_layout.endLayout()
+                if not line.isValid():
+                    continue
+                line.setPosition(QPointF(horizontal_bleed,
+                                         run.vertical_bleed + max(0., whole_line.ascent() - line.ascent())))
+                image = QImage(
+                    max(1, math.ceil((max(right - left, line.naturalTextWidth()) + 2. * horizontal_bleed) * dpr)),
+                    max(1, math.ceil((max(run.line_height,
+                                          line.y() - run.vertical_bleed + line.height())
+                                      + 2. * run.vertical_bleed) * dpr)),
+                    QImage.Format.Format_ARGB32_Premultiplied,
+                )
+                image.setDevicePixelRatio(dpr)
+                image.fill(Qt.GlobalColor.transparent)
+                with QPainter(image) as layer:
+                    layer.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                    layer.setPen(Qt.GlobalColor.white)
+                    cluster_layout.draw(layer, QPointF())
+                glyphs.append((image, left - horizontal_bleed, unit, first, last, ordinal, len(selected)))
+        result = (ranges, tuple(glyphs))
+        size = len(text.encode('utf-16-le')) + sum(image.sizeInBytes() for image, *_rest in glyphs)
+        if size <= self.PARENTHETICAL_CACHE_MAX_BYTES:
+            self.parentheticals[key] = (result, size)
+            self.parenthetical_bytes += size
+            while (len(self.parentheticals) > self.PARENTHETICAL_CACHE_MAX_ENTRIES
+                   or self.parenthetical_bytes > self.PARENTHETICAL_CACHE_MAX_BYTES):
+                _key, (_result, retired_bytes) = self.parentheticals.popitem(last=False)
+                self.parenthetical_bytes -= retired_bytes
+        return result
+
+    def _parenthetical_halo(self, source, size_scale):
+        key = source.cacheKey()
+        cached = self.halos.get(key)
+        if cached is not None:
+            self.halos.move_to_end(key)
+            return cached
+        dpr = max(1., source.devicePixelRatio())
+        padding = max(12. * size_scale, source.height() / dpr * .28)
+        width, height = source.width() / dpr + padding * 2., source.height() / dpr + padding * 2.
+        reduction = .35
+        small = QSize(max(1, math.ceil(width * reduction * dpr)), max(1, math.ceil(height * reduction * dpr)))
+        ink = QImage(small, QImage.Format.Format_ARGB32_Premultiplied)
+        ink.setDevicePixelRatio(dpr)
+        ink.fill(Qt.GlobalColor.transparent)
+        with QPainter(ink) as painter:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.scale(reduction, reduction)
+            painter.drawImage(QPointF(padding, padding), source)
+        scattered = QImage(small, QImage.Format.Format_ARGB32_Premultiplied)
+        scattered.setDevicePixelRatio(dpr)
+        scattered.fill(Qt.GlobalColor.transparent)
+        with QPainter(scattered) as painter:
+            for stride, opacity in ((2, .012), (1, .037)):
+                painter.setOpacity(opacity)
+                for y in range(-2, 3):
+                    for x in range(-2, 3):
+                        painter.drawImage(QPointF(x * stride, y * stride), ink)
+        halo = scattered.scaled(QSize(math.ceil(width * dpr), math.ceil(height * dpr)),
+                                Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        halo.setDevicePixelRatio(dpr)
+        result = halo, padding
+        if halo.sizeInBytes() <= self.HALO_CACHE_MAX_BYTES:
+            self.halos[key] = result
+            self.halo_bytes += halo.sizeInBytes()
+            while len(self.halos) > self.HALO_CACHE_MAX_ENTRIES or self.halo_bytes > self.HALO_CACHE_MAX_BYTES:
+                _key, (retired, _padding) = self.halos.popitem(last=False)
+                self.halo_bytes -= retired.sizeInBytes()
+        return result
 
     def whole_line(self, text: str, font: QFont) -> QTextLayout:
         """Reuse Qt's shaped line while its shared block pen moves."""
@@ -263,6 +424,7 @@ class LyricReadingRenderer:
         self, painter: QPainter,
         rows: tuple[tuple[QRectF, float, str, QFont, QColor, QColor], ...],
         progress: float,
+        *, highlight_parentheticals: bool = False,
     ) -> None:
         """Read all displayed original/translation lines with one static shape."""
         prepared = []
@@ -276,16 +438,28 @@ class LyricReadingRenderer:
             ink = line.naturalTextRect().translated(origin)
             if ink.isValid():
                 bounds = bounds.united(ink) if bounds.isValid() else ink
-            prepared.append((rect, line, origin, unread, read))
+            prepared.append((rect, line, origin, unread, read, text, font))
         if not bounds.isValid():
             return
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        for rect, line, origin, unread, read in prepared:
+        for rect, line, origin, unread, read, text, font in prepared:
             painter.save()
             painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
             painter.setPen(QPen(QBrush(whole_block_reading_gradient(bounds, progress, unread, read)), 1.0))
             line.draw(painter, origin)
+            if highlight_parentheticals and 0. < progress < 1.:
+                device = painter.device()
+                dpr = device.devicePixelRatioF() if device is not None else 1.
+                run = self.run(text, font, dpr)
+                if run.units:
+                    _ranges, glyphs = self._parenthetical_glyphs(text, font, dpr, run)
+                    positions = [(source, left, QPointF(origin.x() + left, origin.y() - run.vertical_bleed))
+                                 for source, left in run.units]
+                    front, feather = reading_front(progress, run.width, font, size_scale=run.size_scale,
+                                                    resolve_point_size=True)
+                    self._paint_parenthetical_glyphs(painter, run, glyphs, positions, origin.x(), front, feather,
+                                                      progress, unread, read, painter.opacity(), halo_only=True)
             painter.restore()
         painter.restore()
 
@@ -401,6 +575,7 @@ class LyricReadingRenderer:
         timed_line_end: float | None = None,
         timed_character_front: float | None = None,
         whole_row: bool = False,
+        highlight_parentheticals: bool = False,
     ):
         device = painter.device()
         dpr = device.devicePixelRatioF() if device is not None else 1.0
@@ -465,8 +640,25 @@ class LyricReadingRenderer:
             lift = GLYPH_FLOAT_LIFT * continuous_read_lift(lift_progress, index, count)
             position = QPointF(x + left, top + (GLYPH_FLOAT_LIFT - lift) * run.size_scale)
             placed_units.append((source, left, position))
+        ranges, parenthetical_glyphs = (self._parenthetical_glyphs(text, font, dpr, run)
+                                       if highlight_parentheticals else ((), ()))
+        current = progress * run.width if hard_front is None else hard_front
+        ranges = tuple((first, last) for first, last in ranges
+                       if run.char_boundaries[first] < current < run.char_boundaries[last])
+        parenthetical_glyphs = tuple(glyph for glyph in parenthetical_glyphs if (glyph[3], glyph[4]) in ranges)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        if ranges and parenthetical_glyphs:
+            painter.save()
+            ordinary = QPainterPath()
+            ordinary.setFillRule(Qt.FillRule.OddEvenFill)
+            bleed = max(source.height() / source.devicePixelRatio() for source, _left in run.units) + 2.
+            ordinary.addRect(QRectF(x - bleed, top - bleed, run.width + bleed * 2., run.line_height + bleed * 3.))
+            for first, last in ranges:
+                ordinary.addRect(QRectF(x + run.char_boundaries[first], top - bleed,
+                                       run.char_boundaries[last] - run.char_boundaries[first],
+                                       run.line_height + bleed * 3.))
+            painter.setClipPath(ordinary, Qt.ClipOperation.IntersectClip)
         # Isolated words/graphemes have a little horizontal ink bleed. Draw
         # every unread layer first: otherwise the next unit's unread edge can
         # cover the preceding unit's already-white trailing stroke.
@@ -481,7 +673,48 @@ class LyricReadingRenderer:
                 self._draw_subpixel_image(painter, position, read_wipe_image_at_front(
                     self.tinted(source, read_color), front=front, feather=feather, x_offset=left,
                 ))
+        if ranges and parenthetical_glyphs:
+            painter.restore()
+            self._paint_parenthetical_glyphs(
+                painter, run, parenthetical_glyphs, placed_units, x, front, feather,
+                progress, unread_color, read_color, base_opacity,
+                hard_front=hard_front,
+            )
         painter.restore()
+
+    def _paint_parenthetical_glyphs(self, painter, run, glyphs, placed_units, x, front, feather,
+                                   progress, unread, read, opacity, *, hard_front=None, halo_only=False):
+        """Use the shared bloom wave without advancing the source read front."""
+        current = progress * run.width if hard_front is None else hard_front
+        for source, left, unit, first, last, ordinal, count in glyphs:
+            start, end = run.char_boundaries[first], run.char_boundaries[last]
+            local_progress = max(0., min(1., (current - start) / max(1e-9, end - start)))
+            state = sparse_glyph_frame(local_progress, ordinal, count)
+            # Preserve the existing word/grapheme baseline propagation. Only
+            # the letters inside the display mark get temporary growth/light.
+            position = QPointF(x + left, placed_units[unit][2].y())
+            width = source.width() / source.devicePixelRatio()
+            center = position + QPointF(width * .5, source.height() / source.devicePixelRatio() * .65)
+            painter.save()
+            painter.translate(center)
+            painter.scale(1. if halo_only else state.scale, 1. if halo_only else state.scale)
+            origin = position - center
+            if state.glow > .001:
+                halo, padding = self._parenthetical_halo(source, run.size_scale)
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+                painter.setOpacity(opacity * read.alphaF() * state.glow)
+                self._draw_subpixel_image(painter, origin - QPointF(padding, padding),
+                                         read_wipe_image_at_front(halo, front=front, feather=feather,
+                                                                  x_offset=left - padding))
+                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            if not halo_only and front < left + width + feather:
+                painter.setOpacity(opacity * unread.alphaF())
+                self._draw_subpixel_image(painter, origin, self.tinted(source, unread))
+            if not halo_only and front > left:
+                painter.setOpacity(opacity * read.alphaF())
+                self._draw_subpixel_image(painter, origin, read_wipe_image_at_front(
+                    self.tinted(source, read), front=front, feather=feather, x_offset=left))
+            painter.restore()
 
     @staticmethod
     def _draw_subpixel_image(painter: QPainter, origin: QPointF, image: QImage) -> None:

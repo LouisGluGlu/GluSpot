@@ -17,7 +17,7 @@ from PySide6.QtCore import QPointF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 
 from local.music_lyric_motion import MotionSimulationClock
-from local.music_surface_palette import relative_luminance, single_hue_background_colors
+from local.music_surface_palette import balanced_background_colors, relative_luminance, single_hue_background_colors
 
 
 def _render_background_snapshot(snapshot) -> QImage:
@@ -127,6 +127,13 @@ class AlbumFlowBackgroundRenderer:
         if tonal_layers:
             layers = tuple(cls._bounded_luminance(color) for color in tonal_layers)
             return (*layers, *(QColor(layers[0]) for _ in range(cls.MAX_COLORS + 1 - len(layers))))
+        balanced = balanced_background_colors(colors, weights=weights)
+        if balanced:
+            # These display colors already have the shared perceptual
+            # mapping. Keep the foundation quiet and every source pigment
+            # in its own moving domain; only enforce the ink envelope here.
+            layers = tuple(cls._bounded_luminance(color) for color in balanced)
+            return (*layers, *(QColor(layers[0]) for _ in range(cls.MAX_COLORS + 1 - len(layers))))
         pigments = [cls._ambient_color(color) for color in colors]
         if not pigments:
             pigments = [QColor(44, 44, 44)]
@@ -165,7 +172,8 @@ class AlbumFlowBackgroundRenderer:
             return (1.0,) * cls.MAX_COLORS
         # Cover support controls occupied area, not a global transparency
         # wash. Genuine small details still retain a concentrated core.
-        source_weights = weights[:cls.MAX_COLORS] if cls._has_dark_chromatic_base(colors) else weights[1:cls.MAX_COLORS]
+        all_domains = cls._has_dark_chromatic_base(colors) or bool(balanced_background_colors(colors, weights=weights))
+        source_weights = weights[:cls.MAX_COLORS] if all_domains else weights[1:cls.MAX_COLORS]
         result = [min(1.0, max(0.18, math.sqrt(max(0.0, float(weight)) / 0.08)))
                   for weight in source_weights]
         result += [1.0] * (cls.MAX_COLORS - len(result))

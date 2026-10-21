@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from contextlib import contextmanager
+from functools import lru_cache
 import math
 import time
 
@@ -84,6 +85,7 @@ def clear_glass_cache() -> None:
     global _glass_material_cache_bytes
     _glass_material_cache.clear()
     _glass_material_slots.clear()
+    _glass_rim_samples.cache_clear()
     _glass_material_cache_bytes = 0
     from local.liquid_glass_tasks import glass_pixel_tasks
     service = glass_pixel_tasks(create=False)
@@ -148,6 +150,29 @@ def _sample_rgba(pixels: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray
     return top
 
 
+@lru_cache(maxsize=8)
+def _glass_rim_samples(core_width, core_height, padding, radius, scale):
+    """Immutable shape coordinates shared by successive backdrop frames.
+
+    The two float32 maps retain at most 8 * 2 * 160 * 160 * 4 bytes. Only
+    geometry is retained; scene pixels, widgets and song identity stay out.
+    functools keeps concurrent GUI capture and worker cache access coherent.
+    """
+    yy, xx = np.mgrid[:core_height, :core_width].astype(np.float32)
+    dx, dy = xx + .5 - core_width / 2., yy + .5 - core_height / 2.
+    corner = min(radius * scale, core_width / 2., core_height / 2.)
+    qx, qy = np.abs(dx) - (core_width / 2. - corner), np.abs(dy) - (core_height / 2. - corner)
+    distance = np.hypot(np.maximum(qx, 0.), np.maximum(qy, 0.)) + np.minimum(np.maximum(qx, qy), 0.) - corner
+    band = np.clip(1. + distance / max(1.5, 5. * scale), 0., 1.) ** 2
+    length = np.maximum(1., np.hypot(dx, dy))
+    displacement = max(.18, .9 * scale) * band
+    x = xx + padding + dx / length * displacement
+    y = yy + padding + dy / length * displacement
+    x.setflags(write=False)
+    y.setflags(write=False)
+    return x, y
+
+
 def _render_glass_material(backdrop: QImage, source_rect: QRectF,
                            width: float, height: float, radius: float,
                            material_level: int = MUSIC_GLASS_DEFAULT_LEVEL) -> QImage:
@@ -176,16 +201,8 @@ def _render_glass_material(backdrop: QImage, source_rect: QRectF,
     ys = source.top() + (np.arange(work_height, dtype=np.float32) - padding + .5) * source.height() / core_height - .5
     sampled = _sample_rgba(pixels, xs[None, :], ys[:, None]).round().astype(np.uint8)
     blurred = np.asarray(Image.fromarray(sampled).filter(GaussianBlur(blur * scale)))
-    yy, xx = np.mgrid[:core_height, :core_width].astype(np.float32)
-    dx, dy = xx + .5 - core_width / 2., yy + .5 - core_height / 2.
-    corner = min(radius * scale, core_width / 2., core_height / 2.)
-    qx, qy = np.abs(dx) - (core_width / 2. - corner), np.abs(dy) - (core_height / 2. - corner)
-    distance = np.hypot(np.maximum(qx, 0.), np.maximum(qy, 0.)) + np.minimum(np.maximum(qx, qy), 0.) - corner
-    band = np.clip(1. + distance / max(1.5, 5. * scale), 0., 1.) ** 2
-    length = np.maximum(1., np.hypot(dx, dy))
-    displacement = max(.18, .9 * scale) * band
-    refracted = _sample_rgba(blurred, xx + padding + dx / length * displacement,
-                             yy + padding + dy / length * displacement).round().astype(np.uint8)
+    rim_x, rim_y = _glass_rim_samples(core_width, core_height, padding, radius, scale)
+    refracted = _sample_rgba(blurred, rim_x, rim_y).round().astype(np.uint8)
     raw = refracted.tobytes()
     return QImage(raw, core_width, core_height, core_width * 4, QImage.Format.Format_RGBA8888).copy()
 
@@ -239,7 +256,8 @@ def _render_glass_request(payload):
     return _render_glass_material(image, QRectF(*sample), width, height, radius, level)
 
 
-def _live_glass_material(owner, role, scene, dirty, backdrop, source_rect, rect, radius, level):
+def _live_glass_material(owner, role, scene, dirty, backdrop, source_rect, rect, radius, level,
+                         transition=0.):
     from local.liquid_glass_tasks import glass_pixel_tasks
     service = glass_pixel_tasks()
     if service is None:
@@ -247,15 +265,18 @@ def _live_glass_material(owner, role, scene, dirty, backdrop, source_rect, rect,
     sample = tuple(float(value) for value in (
         source_rect.x(), source_rect.y(), source_rect.width(), source_rect.height()))
     geometry = tuple(round(value, 4) for value in (
-        *sample, rect.x(), rect.y(), rect.width(), rect.height(), radius, float(level),
+        *sample, rect.width(), rect.height(), radius, float(level),
         float(backdrop.width()), float(backdrop.height())))
+    # The material is local to its destination. Moving an already sampled
+    # face (for example inside a control layer) changes only dirty coverage;
+    # the source crop and shape above remain the strict pixel identity.
     # An independent implicitly shared wrapper is safe for read-only worker
     # use; any writer detaches. No deep copy is claimed or required here.
     snapshot = QImage(backdrop)
     payload = (snapshot, sample, rect.width(), rect.height(), radius, level)
     return service.request(owner, role, scene, geometry, backdrop.cacheKey(), payload,
                            _render_glass_request, dirty, byte_count=int(snapshot.sizeInBytes()),
-                           interval=GLASS_MATERIAL_FRAME_SECONDS)
+                           interval=GLASS_MATERIAL_FRAME_SECONDS, transition=transition)
 
 
 def widget_glass_backdrop(widget, rect: QRectF | None = None) -> tuple[QImage | None, QRectF | None]:
@@ -285,7 +306,8 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
                        material_level: int = MUSIC_GLASS_DEFAULT_LEVEL,
                        path: QPainterPath | None = None,
                        material_owner=None, material_role=None, material_scene=None,
-                       material_dirty: QRectF | None = None) -> None:
+                       material_dirty: QRectF | None = None,
+                       material_layer: bool = False, material_transition: float = 0.) -> None:
     """Keep the supplied face and add an inset rim; ``None`` paints only a rim.
 
     Original alpha is multiplied by ``face_opacity``. Selection and hover never
@@ -295,6 +317,9 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
     opt-in: sample ``backdrop_rect`` in native backdrop pixels, blur that crop,
     and add a mild theme veil before the same sharp edge. No widget capture or
     timer is involved, and glyphs remain the caller's independent next layer.
+    ``material_layer`` explicitly permits a transient QImage canvas belonging
+    to a live owner; captures remain synchronous. ``material_transition`` is
+    for owners whose existing animation clock continues to paint the blend.
     """
     if rect.isEmpty() or opacity <= 0:
         return
@@ -314,11 +339,13 @@ def paint_liquid_glass(painter: QPainter, rect: QRectF, *, radius: float | None 
         if material_level > 0 and isinstance(backdrop, QImage) and not backdrop.isNull():
             sample = QRectF(backdrop_rect) if backdrop_rect is not None else QRectF(backdrop.rect())
             if sample.isValid() and not sample.isEmpty():
-                if material_role is not None and live_glass_paint(painter, material_owner):
+                live_layer = (material_layer and isinstance(painter.device(), QImage)
+                              and glass_owner_is_live(material_owner))
+                if material_role is not None and (live_layer or live_glass_paint(painter, material_owner)):
                     material = _live_glass_material(
                         material_owner, material_role, material_scene,
                         rect if material_dirty is None else material_dirty,
-                        backdrop, sample, rect, radius, material_level)
+                        backdrop, sample, rect, radius, material_level, material_transition)
                 else:
                     material = _glass_material(backdrop, sample, rect, radius, cache_token, material_level)
                 if material is not None:

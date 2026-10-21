@@ -168,7 +168,7 @@ def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPos
                           refractive: bool = False, light: bool = False,
                           ink: QColor | None = None, material_level: int = 50,
                           material_owner=None, material_role=None, material_scene=None,
-                          material_dirty: QRectF | None = None) -> None:
+                          material_dirty: QRectF | None = None, material_transition: float = 0.) -> None:
     """Direct vector transforms avoid caching a whole control row each frame."""
     painter.save()
     base_opacity = painter.opacity()
@@ -182,7 +182,8 @@ def paint_connection_pose(painter: QPainter, circle: QRectF, pose: ConnectionPos
     material_options = dict(refractive=True, light=light, backdrop=backdrop,
                             backdrop_rect=backdrop_rect, material_level=material_level,
                             material_owner=material_owner, material_role=material_role,
-                            material_scene=material_scene, material_dirty=material_dirty) if refractive else {}
+                            material_scene=material_scene, material_dirty=material_dirty,
+                            material_transition=material_transition) if refractive else {}
     paint_liquid_glass(painter, capsule, radius=circle.height() / 2,
                        base_color=None if refractive else face,
                        border_color=None if refractive else stroke,

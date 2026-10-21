@@ -252,12 +252,22 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
         owner.media_position_seconds = position
         owner.media_position_sampled_at = now
         ink = {}
+        original_read = window._paint_wrapped_lifted_lyric
+        original_aside = window._paint_parenthetical_highlight
 
-        def capture(_painter, _row, text, _font, _layout, progress, **_kwargs):
+        def capture(painter, row, text, font, layout, progress, *args, **kwargs):
             ink[text] = progress
+            return original_read(painter, row, text, font, layout, progress, *args, **kwargs)
+
+        def capture_aside(painter, row, text, font, layout, progress, *, line_offsets=()):
+            ink[text] = progress
+            return original_aside(painter, row, text, font, layout, progress,
+                                  line_offsets=line_offsets)
 
         with patch("local.music_surface_window.time.monotonic", return_value=now), patch.object(
             window, "_paint_wrapped_lifted_lyric", side_effect=capture,
+        ), patch.object(
+            window, "_paint_parenthetical_highlight", side_effect=capture_aside,
         ), patch("local.music_surface_window.timed_unit_reading_front", wraps=timed_unit_reading_front) as fronts:
             window.render(QImage(960, 540, QImage.Format.Format_RGB32))
         return ink, fronts.call_args_list
@@ -276,8 +286,10 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
                          if call.args[0] == "春風" and "line_end" in call.kwargs]
             self.assertTrue(used_ends)
             self.assertEqual(set(used_ends), {2.0})
-            self.assertAlmostEqual(ink["echo"], 0.5)
-            self.assertAlmostEqual(ink["回声"], 0.5)
+            # A ends at its attached source boundary 2.0. The aside starts
+            # at 1.6 and reaches C's first quarter at 6.75 (C reads 6..9).
+            self.assertAlmostEqual(ink["echo"], (1.8 - 1.6) / (6.75 - 1.6))
+            self.assertAlmostEqual(ink["回声"], ink["echo"])
             self.assertEqual(owner.timed_lyric_units[0], units)
             self.assertIsNone(units[-1].end_seconds)
         finally:
@@ -303,7 +315,10 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
                     self._sample_boundary(window, owner, 100.0, 0.0)
                     ink, _fronts = self._sample_boundary(window, owner, 100.7, 0.9)
                     self.assertAlmostEqual(ink["春風"], expected)
-                    self.assertAlmostEqual(ink["echo"], 0.5)
+                    # The aside has not begun at 0.9; its independent display
+                    # clock starts at 80% of A's 0..2 source boundary.
+                    self.assertEqual(ink["echo"], 0.0)
+                    self.assertEqual(ink["回声"], 0.0)
                     self.assertEqual(window._display_timed_read_ends[0], 2.0)
                     self.assertEqual(owner.timed_lyrics[1][0], 2.0)
                     self.assertEqual(window._display_row_timings[0].end_seconds, shared.end_seconds)
