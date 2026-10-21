@@ -105,10 +105,40 @@ class GroupedLibraryFlowTests(unittest.TestCase):
         for target in (shelf.scroll.viewport(),shelf.body,shelf.tiles[0][1],shelf.labels[0]):
             before=shelf.scroll.horizontalScrollBar().value()
             event=QWheelEvent(QPointF(20,20),QPointF(100,260),QPoint(0,-35),QPoint(),Qt.MouseButton.NoButton,
-                Qt.KeyboardModifier.NoModifier,Qt.ScrollPhase.NoScrollPhase,False)
+                Qt.KeyboardModifier.ShiftModifier,Qt.ScrollPhase.NoScrollPhase,False)
             self.app.sendEvent(target,event);self.assertGreater(shelf.scroll.horizontalScrollBar().value(),before)
         self.assertEqual(shelf.pos(),title_pos)
         self.assertEqual(self.window.scroll.verticalScrollBar().value(),vertical)
+
+    def test_horizontal_trackpad_wheel_moves_collection_strip_without_shift(self):
+        more=tuple(LibraryCollection(f'rec-{i}','playlist',f'推荐{i}','','id-'+str(i),group='recommended') for i in range(10))
+        self.window.set_collections(self.catalog+more);self.window._expand_group('recommended');self.settle()
+        shelf=self.window._shelves[0]
+        before=shelf.scroll.horizontalScrollBar().value()
+        event=QWheelEvent(QPointF(20,20),QPointF(100,260),QPoint(-35,0),QPoint(),Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,Qt.ScrollPhase.NoScrollPhase,False)
+        self.app.sendEvent(shelf.scroll.viewport(),event)
+        self.assertGreater(shelf.scroll.horizontalScrollBar().value(),before)
+
+    def test_unmodified_vertical_wheel_from_shelf_children_scrolls_library_page(self):
+        more=tuple(LibraryCollection(f'rec-{i}','playlist',f'推荐{i}','','id-'+str(i),group='recommended') for i in range(10))
+        self.window.resize(520,300)
+        self.window.set_collections(self.catalog+more);self.window._expand_group('recommended');self.settle()
+        shelf=self.window._shelves[0]
+        page_bar=self.window.scroll.verticalScrollBar()
+        self.assertGreater(page_bar.maximum(),0)
+        targets=(shelf.scroll.viewport(),shelf.body,shelf.tiles[0][1],shelf.labels[0])
+        deltas=((QPoint(0,-35),QPoint()),(QPoint(),QPoint(0,-120)))
+        for target in targets:
+            for pixels,angles in deltas:
+                page_bar.setValue(0)
+                horizontal_before=shelf.scroll.horizontalScrollBar().value()
+                position=QPointF(target.rect().center())
+                event=QWheelEvent(position,QPointF(target.mapToGlobal(position.toPoint())),pixels,angles,
+                    Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier,Qt.ScrollPhase.NoScrollPhase,False)
+                self.app.sendEvent(target,event)
+                self.assertGreater(page_bar.value(),0,(type(target).__name__,pixels,angles))
+                self.assertEqual(shelf.scroll.horizontalScrollBar().value(),horizontal_before)
 
     def test_only_one_visible_platform_action_and_compact_targets_stay_contained(self):
         self.window.resize(520,360)

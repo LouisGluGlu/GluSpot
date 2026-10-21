@@ -134,8 +134,8 @@ class MusicGlassLevelTests(unittest.TestCase):
                 window._paint_transport_icon(painter, QRectF(80, 20, 80, 80), 'toggle_play_pause', QColor('white'))
             left, right = target.pixelColor(99, 60), target.pixelColor(141, 60)
             for color in (left, right):
-                # Stronger neutral ink keeps the softened glyph readable;
-                # its interior must still carry the teal scene's pigment.
+                # The neutral material carries the teal scene's pigment
+                # without an independent foreground-colored face.
                 self.assertGreater(color.blue(), color.red() + 35)
                 self.assertGreater(color.green(), color.red() + 25)
                 self.assertGreater(color.alpha(), 160)
@@ -212,8 +212,8 @@ class MusicGlassLevelTests(unittest.TestCase):
                 self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
                 self.assertEqual(image.pixelColor(81, 60).alpha(), 0)
             center = [image.pixelColor(99, 60).lightness() for image in images]
-            # The readable neutral face leaves less headroom for a light
-            # sheen than the old faint glyph, but it must visibly brighten.
+            # The same neutral sheen as the circular controls is visible
+            # inside the original silhouette.
             self.assertGreater(center[1], center[0] + 8)
             self.assertLess(center[2], center[1])
             # Boundary is a quiet reflection, not a bright white wire frame.
@@ -222,7 +222,7 @@ class MusicGlassLevelTests(unittest.TestCase):
             window.shutdown()
             owner.close()
 
-    def test_light_transport_hover_retains_black_glyph_visibility_at_glass_extremes(self):
+    def test_all_transport_materials_match_circle_reference_across_themes_and_levels(self):
         owner = _TransitionOwner()
         values = {'v2_theme_mode': 'light', 'v2_music_glass_level': 50}
         owner.settings_getter = lambda key, default=None: values.get(key, default)
@@ -230,27 +230,45 @@ class MusicGlassLevelTests(unittest.TestCase):
         window.resize(240, 120)
         window._reset_control_idle(now=100.)
         try:
-            for background in ('#e6e6e6', '#ffffff'):
-                window._background_cache = QImage(240, 120, QImage.Format.Format_RGB32)
-                window._background_cache.fill(QColor(background))
-                for level in (0, 50, 100):
-                    values['v2_music_glass_level'] = level
-                    samples = []
-                    for hovered in (False, True):
-                        image = QImage(240, 120, QImage.Format.Format_RGB32)
-                        image.fill(QColor(background))
-                        with QPainter(image) as painter, \
-                                patch('local.music_surface_window.time.monotonic', return_value=100.), \
-                                patch.object(window, '_display_playing_state', return_value=True):
-                            window._paint_transport_icon(painter, QRectF(80, 20, 80, 80),
-                                'toggle_play_pause', QColor('black'), hovered=hovered)
-                        samples.append(image.pixelColor(99, 60).lightness())
-                        self.assertEqual(image.pixelColor(120, 60), QColor(background))
-                        self.assertEqual(image.pixelColor(81, 60), QColor(background))
-                    self.assertGreater(samples[1], samples[0])
-                    self.assertGreaterEqual(QColor(background).lightness() - samples[1], 55)
-                    self.assertGreaterEqual(window._contrast_ratio(QColor(samples[1], samples[1], samples[1]),
-                                                                   QColor(background)), 3.)
+            for theme in ('dark', 'light'):
+                values['v2_theme_mode'] = theme
+                for background in ('#168ba8', '#e6e6e6', '#202020'):
+                    window._background_cache = QImage(240, 120, QImage.Format.Format_RGB32)
+                    window._background_cache.fill(QColor(background))
+                    for level in (0, 50, 100):
+                        values['v2_music_glass_level'] = level
+                        for hovered, pressed in ((False, False), (True, False), (True, True)):
+                            for command, playing, sample_x in (
+                                    ('previous', False, 120), ('toggle_play_pause', False, 120),
+                                    ('toggle_play_pause', True, 99), ('next', False, 120)):
+                                with self.subTest(theme=theme, background=background, level=level,
+                                                  hovered=hovered, pressed=pressed,
+                                                  command=command, playing=playing):
+                                    outputs = []
+                                    # Caller ink is deliberately opposite for the two renders:
+                                    # it must not recolor the requested glass material.
+                                    for ink in (QColor('black'), QColor('white')):
+                                        image = QImage(240, 120, QImage.Format.Format_ARGB32_Premultiplied)
+                                        image.fill(Qt.GlobalColor.transparent)
+                                        reference_image = QImage(image)
+                                        with QPainter(image) as painter, \
+                                                patch('local.music_surface_window.time.monotonic', return_value=100.), \
+                                                patch.object(window, '_display_playing_state', return_value=playing):
+                                            window._paint_transport_icon(painter, QRectF(80, 20, 80, 80),
+                                                command, ink, hovered=hovered, pressed=pressed)
+                                        with QPainter(reference_image) as painter, \
+                                                patch('local.music_surface_window.time.monotonic', return_value=100.):
+                                            window._paint_surface_glass(painter, QRectF(80, 20, 80, 80),
+                                                hovered=hovered, pressed=pressed)
+                                        outputs.append(image)
+                                        actual, reference = image.pixelColor(sample_x, 60), reference_image.pixelColor(120, 60)
+                                        self.assertEqual(actual, reference)
+                                        self.assertEqual(image.pixelColor(81, 21).alpha(), 0)
+                                        if level > 0:
+                                            self.assertGreater(actual.alpha(), 160)
+                                        if command == 'toggle_play_pause' and playing:
+                                            self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
+                                    self.assertEqual(outputs[0], outputs[1])
         finally:
             window.shutdown()
             owner.close()

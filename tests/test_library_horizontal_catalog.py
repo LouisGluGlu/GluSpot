@@ -157,12 +157,12 @@ class LibraryHorizontalCatalogTests(unittest.TestCase):
         self.assertEqual(queued.at(0),[row])
         self.assertEqual(self.window._shelves,[])
 
-    def test_vertical_wheel_scrolls_horizontal_collection_strip(self):
+    def test_shift_wheel_scrolls_horizontal_collection_strip(self):
         self.window._expand_group('recommended');self.settle()
         shelf=self.window._shelves[0]
         self.assertGreater(shelf.scroll.horizontalScrollBar().maximum(),0)
         event=QWheelEvent(QPointF(35,35),QPointF(shelf.mapToGlobal(shelf.rect().center())),
             QPoint(),QPoint(0,-120),
-            Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier,Qt.ScrollPhase.NoScrollPhase,False)
+            Qt.MouseButton.NoButton,Qt.KeyboardModifier.ShiftModifier,Qt.ScrollPhase.NoScrollPhase,False)
         QApplication.sendEvent(shelf.scroll.viewport(),event)
         self.assertGreater(shelf.scroll.horizontalScrollBar().value(),0)
