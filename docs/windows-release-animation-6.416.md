@@ -24,7 +24,7 @@
 - [x] 安装器惰性载荷隔离 10 场景通过；编译前后 8,397 个载荷文件的完整 SHA 清单一致。
 - [x] 便携 ZIP 的 8,399 项全部通过 CRC、逐文件 SHA-256、唯一路径与完整文件集检查；原载荷未改动。
 - [x] 当前工作区与 `E:/gpt-island/release` 双份安装程序、便携包及 SHA 文件哈希一致。
-- [ ] main 同步、GitHub 版本标签与安装／便携附件回读（本地验证后执行）。
+- [x] main 已同步、GitHub `v6.416` 及四份附件已发布；平台返回的大小与 SHA-256 均与本地一致，仓库可见性保持不变。
 
 上一版 6.415 的源码、程序与发行附件保留。新文件同时存于当前工作区 `release/` 与 `E:/gpt-island/release`：
 
@@ -36,6 +36,10 @@
 [GitHub 6.416 发行入口](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.416)。远端发布及附件可用状态以该入口为准。本地证据位于 ignored `logs/animation-6.416-*` 及 `.runtime/animation-6.416-package-audit-final/result.json`，不混入源码或包内运行状态。
 
 便携版附带 `BUILD-INFO.json` 和使用说明，安装器分发同一已审计载荷，不安装这两份便携版专用记录。625 个冻结输入在完整测试、构建、审计及打包前后保持一致。性能数值属于两项小 UI 改动之前的候选，不冒充本次包的新增性能实测。
+
+`v6.416` 固定在构建源码提交 `8bc9d48`；后续 main 只补充 README 和本发行状态文档，两者的 625 个冻结源码／构建输入一致。旧 8,439 个本地发行文件及 E 盘旧四件备份重算未变，6.415 源码 bundle 继续保留。
+
+首次附件传输未完成，已保留失败日志；随后在同一草稿内用证书校验通过的上传路径重传并核对四份摘要，未替换已发布附件，也未修改系统 DNS 或仓库可见性。发布记录与最后回读为 `logs/animation-6.416-github-publication.json`、`logs/animation-6.416-final-github-readback.json`。
 
 ## 使用
 

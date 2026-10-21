@@ -2,14 +2,14 @@
 
 Windows 桌面音乐悬浮岛，让歌词、专辑和播放状态融入桌面。
 
-[发行记录](https://github.com/LouisGluGlu/GluSpot/releases) · [6.415 安装程序与便携版说明](docs/windows-release-ui-login-6.415.md) · [6.416 性能源码与验收清单](docs/animation-performance-6.416.md)
+[发行记录](https://github.com/LouisGluGlu/GluSpot/releases) · [6.416 安装程序与便携版说明](docs/windows-release-animation-6.416.md) · [6.416 性能与验收清单](docs/animation-performance-6.416.md)
 
 - **音乐与歌词**：网易云、QQ 音乐库及 Windows SMTC，支持逐词读亮、翻译和可靠前奏／间奏提示。
 - **桌面显示**：Free、Top 和沉浸栏，搭配 Liquid Glass 控件与专辑取色背景。
 - **播放布局**：封面、封面内歌词、封面外歌词和播放列表，随窗口宽度切换。
 - **音频输出**：本机与兼容 AirPlay 设备，可组合多设备同步播放。
 
-适用于 **Windows 10 1809+／Windows 11 x64**。安装版支持原目录覆盖升级并保留配置；便携版需完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。当前 **6.415 为未签名测试版**，设备兼容与验证边界见本版报告。
+适用于 **Windows 10 1809+／Windows 11 x64**。安装版支持原目录覆盖升级并保留配置；便携版需完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。当前 **6.416 为未签名测试版**，设备兼容与验证边界见本版报告。
 
 源码入口为 `local/main.py`。开发环境运行 `setup-env.bat` 后使用 `launch.bat`；完整测试为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
 
@@ -20,7 +20,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
-- 2026-10-21：6.416 本轮完成音乐库普通滚轮上下、Shift＋滚轮横向，以及上一首／播放暂停／下一首同款玻璃材质。累积性能和返回错层修复一并构建，**5,733 项／346.447s** 回归、DPR 1／2 各 **165 检查**及 **425 项包审计**通过。安装程序与便携包已在工作区及 E 盘 release 双份保存，main 与 GitHub 发布进行中；完整清单、哈希及性能未达标边界见[发行记录](docs/windows-release-animation-6.416.md)。
+- 2026-10-21：6.416 本轮完成音乐库普通滚轮上下、Shift＋滚轮横向，以及上一首／播放暂停／下一首同款玻璃材质。累积性能和返回错层修复一并构建，**5,733 项／346.447s** 回归、DPR 1／2 各 **165 检查**及 **425 项包审计**通过。已同步 main，安装程序与便携包已双份本地保存并上传 [GitHub 6.416](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.416)，附件大小及 SHA-256 一致；完整清单、哈希及性能未达标边界见[发行记录](docs/windows-release-animation-6.416.md)。
 
 - 2026-10-21：6.416 源码修复返回音乐库时错层移动：临时位置不再污染共享矩形，过渡期间提前保护目标原生窗口位置，兼容屏幕／DPI变化、用户输入、同步取消及反向切换；材质出队复用既有刷新间隔。最终 **5,731 项／362.141s** 完整回归、DPR 1／2 各 **165 项、53 阶段**窗口生命周期通过，六轮独立返回的 123 个目标可见采样无位移。20 进程前后性能对照收益混合，保留高 DPI 长帧及回归，稳定 60Hz 尚未达标。修改、任务清单与数值见[返回与材质队列跟进](docs/animation-return-followup-2026-10-21.md)。上一版源码及程序保留，本轮只交付 6.416 源码，未构建发行包。
 
@@ -33,7 +33,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 - 6.413 improves whole-song source coverage and shared per-row reading, repairs invisible search text and packages all accumulated desktop/playback changes. Final verification passed **5518 Python tests / 297.018 seconds**, 12 native suites, 2447 production-render checks at each DPR 1/2, 401 package checks, frozen EXE diagnostics, 14 offline adapter checks, 19 QRC fallback checks and ten isolated installer scenarios. All 8399 portable entries passed CRC/per-file SHA-256; 594 frozen inputs and previous distribution files remained unchanged. [Download the modern x64 Setup and portable ZIP](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.413); see [source, artifact hashes and verification limits](docs/lyric-word-timing-6.413.md). Real account coverage, physical-display smoothness and hardware listening remain unverified.
 
 - Product name: `GluSpot`.
-- Current test-build version: `6.416`. Local Setup and portable builds are verified; GitHub publication is in progress. The previous published distribution is 6.415.
+- Current test-build version: `6.416`. Setup and portable builds are verified, backed up locally and published on GitHub. The previous 6.415 source and distributions are retained.
 - The October 19 lyric release packages the new credit cleanup, reliable interlude dots, QQ QRC and trusted-ID AMLL fallback in the modern Windows x64 Setup and portable ZIP. A packaging review corrected QQ's fallback to the pinned SDK's real `request` interface and verified it with the actual packaged dependency over loopback. Final verification passed **5443 Python tests / 287.814 seconds**, 12 native suites, 274 package checks, frozen EXE acceptance, 14 offline adapter checks and ten isolated installer scenarios; all 8399 ZIP entries passed CRC and per-file SHA-256. All 421 frozen source/build inputs remained unchanged, and previous dated releases are retained. See [artifacts, verification and usage](docs/windows-release-lyrics-2026-10-19.md). Real account coverage, physical-display smoothness and listening remain unverified.
 - The October 19 lyric-pipeline source follow-up expands evidence-based credit cleanup, adds display-only middle-gap dots from reliable real word endings, and obtains QQ QRC plus bounded trusted-ID AMLL TTML fallback without a new dependency. Raw lyrics, translation/romanization provenance, identity/version guards and existing provider/cache boundaries are retained. Final native Windows verification passed **5442 Python tests in 288.230 seconds**, 904 follow-up checks at each DPR 1/2 and 364 production-renderer frames per scale; all 386 frozen source files remained unchanged. Public fixed-ID QQ and AMLL read-only probes succeeded, while the existing QQ search entry missed the sample; account playback, long-session listening and physical-display smoothness remain unverified. Version and existing packages are unchanged. See [staged implementation, evidence and limits](docs/lyric-pipeline-2026-10-19.md).
 - The October 19 window-visibility release restores a proportionate **960 × 540 (16:9)** first player window, with 4:3 fallback for narrow work areas, while preserving manually resized windows and the **330 × 400** minimum. Completed compression clears inherited fullscreen/bar hiding state and restores the native island before aligning it to the cached preview, including formerly minimized windows. The production-credit cleanup/countdown option is removed and fixed on, including legacy disabled settings. Final verification passed **5310 Python tests in 276.895 seconds**, 542 related tests at each DPR 1/2, and six isolated native window lifecycle scenarios with 14 visible, non-minimized checkpoints. The new dated window-visibility Setup and portable ZIP passed 249 package checks, frozen EXE acceptance, 12 native suites, 14 offline runtime checks, ten isolated installer scenarios and all 8399 ZIP entries' CRC/per-file SHA-256 checks. All 397 frozen Python sources remained unchanged through packaging; the previous window-resize release is preserved. See [fixes, artifacts and verification](docs/window-visibility-and-release-2026-10-19.md).
