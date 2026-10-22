@@ -1,17 +1,90 @@
-# GluSpot
+<div align="center">
+  <img src="assets/brand/gluspot-glu.svg" width="88" height="88" alt="GluSpot 标志" />
+  <h1>GluSpot</h1>
+  <p><strong>桌面上的一座音乐岛。</strong></p>
+  <p>从小岛到全屏，从耳机到多台音响。<br />让专辑、歌词和正在播放的音乐，融入你的 Windows 桌面。</p>
+  <p>
+    <a href="https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.417">下载 6.417 · 安装程序 / 便携版</a>
+    &nbsp; · &nbsp;
+    <a href="https://github.com/LouisGluGlu/GluSpot/releases">发行记录</a>
+  </p>
+</div>
 
-Windows 桌面音乐悬浮岛，让歌词、专辑和播放状态融入桌面。
+<!-- GIF 01：安装循环动画。将 GIF 上传至仓库后，在此插入图片。 -->
 
-[发行记录](https://github.com/LouisGluGlu/GluSpot/releases) · [下载 6.417 安装程序与便携版](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.417) · [验收与旧分支归档](docs/branch-archive-6.417.md) · [6.416 性能与验收清单](docs/animation-performance-6.416.md)
+## 一座音乐岛，多种形态
 
-- **音乐与歌词**：网易云、QQ 音乐库及 Windows SMTC，支持逐词读亮、翻译和可靠前奏／间奏提示。
-- **桌面显示**：Free、Top 和沉浸栏，搭配 Liquid Glass 控件与专辑取色背景。
-- **播放布局**：封面、封面内歌词、封面外歌词和播放列表，随窗口宽度切换。
-- **音频输出**：本机与兼容 AirPlay 设备，可组合多设备同步播放。
+让音乐留在视线里，也给桌面留出空间。
 
-适用于 **Windows 10 1809+／Windows 11 x64**。安装版支持原目录覆盖升级并保留配置；便携版需完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。当前 **6.417 为未签名测试版**，设备兼容与验证边界见本版报告。
+- **Free**：可自由拖动的悬浮岛，放在顺手的位置。
+- **Top**：贴合屏幕顶部，展开查看歌词与播放状态。
+- **沉浸栏**：融入任务栏，或与 MyDockFinder 的 Finder 栏配合显示。
 
-源码入口为 `local/main.py`。开发环境运行 `setup-env.bat` 后使用 `launch.bat`；完整测试为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
+封面、歌词和状态在小岛中呈现，随使用场景切换形态。
+
+<!-- GIF 02：岛模式。建议展示 Free、Top、沉浸栏的展开与收拢。 -->
+
+## 窗口或全屏，四种听歌方式
+
+想看封面，或想跟着歌词唱，都可以换一种布局。
+
+| 样式 | 展示内容 |
+| --- | --- |
+| **专辑封面** | 把画面留给当前专辑 |
+| **封面内歌词** | 歌词叠映在专辑封面中 |
+| **封面外歌词** | 左侧专辑，右侧歌词 |
+| **播放列表** | 左侧专辑，右侧播放列表 |
+
+四种样式用于窗口与全屏，随可用宽度适配。Liquid Glass 控件搭配专辑取色动态背景，逐词读亮、译文与括号和声也有各自的呈现。
+
+<!-- GIF 03：窗口 / 全屏。建议展示四种布局切换、歌词与动态背景。 -->
+
+## 多台设备，一起播放
+
+支持**兼容 AirPlay 的 Wi-Fi 音频设备**，也可与电脑本机、有线或蓝牙输出组合，进行多设备同步播放。在设备面板中选择参与播放的设备，分别调整音量。
+
+设备兼容性与实际同步效果因设备组合和网络环境而异。
+
+<!-- GIF 04：多设备同步。建议展示设备加入、退出及独立音量调整。 -->
+
+## 选择你的播放来源
+
+### 程序内播放
+
+在 GluSpot 中登录、浏览音乐库、搜索歌曲并播放，目前已支持：
+
+| 音乐平台 | 当前跟进状态 |
+| --- | --- |
+| **网易云音乐** | 全程跟进测试，持续改进 |
+| **QQ 音乐** | 已支持，后续按需跟进与改进 |
+| **酷狗音乐** | 已支持，后续按需跟进与改进 |
+
+目前仅网易云音乐经过全程跟进测试，其他平台的实际体验仍需继续验证与完善。
+
+### 系统音频抓取
+
+继续使用你习惯的播放器，由 GluSpot 跟随系统音频与播放信息，展示封面、歌词和播放状态。该模式依赖外部播放器的系统媒体支持，整体体验略逊于程序内播放。
+
+<!-- GIF 05：播放来源。建议展示平台选择、登录及音乐库。 -->
+
+## 私人漫游，也有私人 DJ
+
+**网易云音乐私人漫游已适配私人 DJ 功能。** 开启后，歌曲与播报随漫游播放衔接，让听歌多一点陪伴。
+
+<!-- GIF 06：私人 DJ。建议展示私人漫游中的播报及状态反馈。 -->
+
+## 开始听歌
+
+适用于 **Windows 10 1809+ / Windows 11 x64**。
+
+- **安装版**：运行安装程序，支持原目录覆盖升级并保留配置。
+- **便携版**：完整解压后运行 `GluSpot.exe`，配置默认保存在程序旁的 `GluSpot` 文件夹。
+
+[下载 GluSpot 6.417](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.417) · [本版改进与验证记录](docs/lyric-glass-6.417.md) · [历史源码归档](docs/branch-archive-6.417.md)
+
+当前为 **6.417 未签名测试版**，已知限制与验证范围见本版记录。
+
+开发与维护信息见下方折叠文档。源码入口为 `local/main.py`；使用 `setup-env.bat` 准备环境、`launch.bat` 启动，完整测试命令为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
 
 <details>
 <summary>维护者文档：产品规则、架构、构建与历史验证</summary>
