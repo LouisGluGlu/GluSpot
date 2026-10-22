@@ -30,6 +30,7 @@
 
 想看封面，或想跟着歌词唱，都可以换一种布局。
 
+
 | 样式 | 展示内容 |
 | --- | --- |
 | **专辑封面** | 把画面留给当前专辑 |
@@ -38,6 +39,7 @@
 | **播放列表** | 左侧专辑，右侧播放列表 |
 
 四种样式用于窗口与全屏，随可用宽度适配。Liquid Glass 控件搭配专辑取色动态背景，逐词读亮、译文与括号和声也有各自的呈现。
+<img width="960" height="548" alt="GluSpot-install-loop" src="https://github.com/user-attachments/assets/2c4e174c-7232-4e25-a006-f2adc14838fc" />
 
 <!-- GIF 03：窗口 / 全屏。建议展示四种布局切换、歌词与动态背景。 -->
 
@@ -61,6 +63,11 @@
 | **QQ 音乐** | 已支持，后续按需跟进与改进 |
 | **酷狗音乐** | 已支持，后续按需跟进与改进 |
 
+<!-- Login screenshot omitted: contained an authentication QR code. -->
+
+<img width="918" height="371" alt="image" src="https://github.com/user-attachments/assets/f5233698-0521-48d7-9c3e-c4c9a1eff8f0" />
+
+
 目前仅网易云音乐经过全程跟进测试，其他平台的实际体验仍需继续验证与完善。
 
 ### 系统音频抓取
@@ -70,6 +77,10 @@
 <!-- GIF 05：播放来源。建议展示平台选择、登录及音乐库。 -->
 
 ## 私人漫游，也有私人 DJ
+
+<img width="205" height="207" alt="image" src="https://github.com/user-attachments/assets/03e63be3-bba1-4f5f-8409-8826fae5372d" />
+<img width="207" height="199" alt="image" src="https://github.com/user-attachments/assets/e7f64fce-e8db-49b9-9703-d2c24ef995be" />
+
 
 **网易云音乐私人漫游已适配私人 DJ 功能。** 开启后，歌曲与播报随漫游播放衔接，让听歌多一点陪伴。
 
