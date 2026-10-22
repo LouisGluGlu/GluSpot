@@ -23,7 +23,7 @@
 封面、歌词和状态在小岛中呈现，随使用场景切换形态。
 
 <!-- GIF 02：岛模式。建议展示 Free、Top、沉浸栏的展开与收拢。 -->
-<img width="700" height="112" alt="GluSpot-install-loop" src="https://github.com/user-attachments/assets/5ddf12ca-184e-4ce5-85d6-8234300dfc82" />
+<img width="700" height="112" alt="GluSpot-install-loop" src="docs/media/installer-loop.gif" />
 
 
 ## 窗口或全屏，四种听歌方式
@@ -39,7 +39,7 @@
 | **播放列表** | 左侧专辑，右侧播放列表 |
 
 四种样式用于窗口与全屏，随可用宽度适配。Liquid Glass 控件搭配专辑取色动态背景，逐词读亮、译文与括号和声也有各自的呈现。
-<img width="960" height="548" alt="GluSpot-install-loop" src="https://github.com/user-attachments/assets/2c4e174c-7232-4e25-a006-f2adc14838fc" />
+<img width="960" height="548" alt="GluSpot-install-loop" src="docs/media/player-layouts.gif" />
 
 <!-- GIF 03：窗口 / 全屏。建议展示四种布局切换、歌词与动态背景。 -->
 
@@ -65,7 +65,7 @@
 
 <!-- Login screenshot omitted: contained an authentication QR code. -->
 
-<img width="918" height="371" alt="image" src="https://github.com/user-attachments/assets/f5233698-0521-48d7-9c3e-c4c9a1eff8f0" />
+<img width="918" height="371" alt="image" src="docs/media/music-library.png" />
 
 
 目前仅网易云音乐经过全程跟进测试，其他平台的实际体验仍需继续验证与完善。
@@ -78,8 +78,8 @@
 
 ## 私人漫游，也有私人 DJ
 
-<img width="205" height="207" alt="image" src="https://github.com/user-attachments/assets/03e63be3-bba1-4f5f-8409-8826fae5372d" />
-<img width="207" height="199" alt="image" src="https://github.com/user-attachments/assets/e7f64fce-e8db-49b9-9703-d2c24ef995be" />
+<img width="205" height="207" alt="image" src="docs/media/personal-dj-ready.png" />
+<img width="207" height="199" alt="image" src="docs/media/personal-dj-active.png" />
 
 
 **网易云音乐私人漫游已适配私人 DJ 功能。** 开启后，歌曲与播报随漫游播放衔接，让听歌多一点陪伴。
@@ -98,6 +98,12 @@
 当前为 **6.417 未签名测试版**，已知限制与验证范围见本版记录。
 
 开发与维护信息见下方折叠文档。源码入口为 `local/main.py`；使用 `setup-env.bat` 准备环境、`launch.bat` 启动，完整测试命令为 `python -m unittest discover tests -v`，Windows 构建使用 `build-exe.bat` 和 `packaging/windows/build-installer.ps1`。
+
+## 开源许可
+
+GluSpot 自有代码与文档采用 [MIT License](LICENSE)，允许在保留版权及许可声明的前提下使用、修改和分发。第三方组件、字体与展示素材保留各自授权，详见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+
+公开历史已做个人路径脱敏；[开源准备记录](docs/open-source-2026-10-22.md) 与 [历史提交映射](docs/source-history-map.md) 保留验证和追溯方式。账号配置、日志及原始私有备份不随源码发布。
 
 <details>
 <summary>维护者文档：产品规则、架构、构建与历史验证</summary>

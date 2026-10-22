@@ -23,3 +23,12 @@ credentials/
 *.p12
 id_rsa
 id_ed25519
+
+# Directory-local runtime state, optional private QA screenshots and databases.
+/GluSpot/
+/DynamicIsland/
+tests/.private-reference/
+*.dpapi
+*.sqlite
+*.sqlite3
+*.db

@@ -1,0 +1,15 @@
+Alibaba PuHuiTi Bold / Heavy, Version 1.10
+Copyright (c) 2019 Alibaba (China) Co., Ltd. All rights reserved.
+Copyright (c) 2019 阿里巴巴（中国）有限公司，版权所有。
+Font manufacturer: Alibaba Design; Hanyi Fonts.
+
+These original font files retain Alibaba's own font-use terms. They are not
+relicensed under GluSpot's MIT License. GluSpot does not modify, sell, or claim
+ownership of these font files.
+
+Official font source and terms:
+https://www.alibabafonts.com/
+https://alibabafont.taobao.com/wow/alibabafont/act/alifont
+
+阿里巴巴普惠体适用原厂字体授权，不能将项目的 MIT 许可理解为字体的转授权。
+在单独提取、修改或再分发字体前，请先核对原厂使用条款。

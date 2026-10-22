@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 
@@ -570,7 +571,10 @@ class MusicSurfacePaletteTests(unittest.TestCase):
     def test_reference_cover_roles_are_not_blue_when_reference_is_available(self):
         # The attachment is user-local, so this comparison is a no-op on CI
         # while still guarding the actual reference cover during desktop QA.
-        path = Path(r"C:\Users\USER\AppData\Local\Temp\codex-clipboard-06a9def4-3775-4603-bab8-3b43bcb9bf9c.png")
+        reference = os.environ.get("GLUSPOT_PALETTE_PURPLE_REFERENCE")
+        if not reference:
+            self.skipTest("optional local reference screenshot is not configured")
+        path = Path(reference)
         if not path.is_file():
             self.skipTest("local reference screenshot is not available")
         screenshot = QImage(str(path))
@@ -584,7 +588,10 @@ class MusicSurfacePaletteTests(unittest.TestCase):
         self.assertFalse(palette.uses_primary_fallback)
 
     def test_dark_red_reference_cover_does_not_collapse_to_gray_when_available(self):
-        path = Path(r"C:\Users\USER\AppData\Local\Temp\codex-clipboard-13974a43-079e-45a2-a18c-2407d6edecf8.png")
+        reference = os.environ.get("GLUSPOT_PALETTE_DARK_RED_REFERENCE")
+        if not reference:
+            self.skipTest("optional local reference screenshot is not configured")
+        path = Path(reference)
         if not path.is_file():
             self.skipTest("local reference screenshot is not available")
         screenshot = QImage(str(path))
