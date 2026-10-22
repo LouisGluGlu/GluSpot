@@ -23,6 +23,8 @@
 封面、歌词和状态在小岛中呈现，随使用场景切换形态。
 
 <!-- GIF 02：岛模式。建议展示 Free、Top、沉浸栏的展开与收拢。 -->
+<img width="700" height="112" alt="GluSpot-install-loop" src="https://github.com/user-attachments/assets/5ddf12ca-184e-4ce5-85d6-8234300dfc82" />
+
 
 ## 窗口或全屏，四种听歌方式
 
