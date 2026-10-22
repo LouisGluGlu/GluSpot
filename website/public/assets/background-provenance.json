@@ -1,0 +1,130 @@
+{
+  "description": "Production album-flow renderer sampled offline; sampled FPS describes generated frames, not screen FPS.",
+  "video_exported": true,
+  "ffmpeg_version": "ffmpeg version 9.0.1-essentials_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+  "assets": [
+    {
+      "tone": "chace",
+      "still": {
+        "file": "chace-background-still.webp",
+        "sha256": "997ef03be9006773ff79b5597cac4e42544466f0802a6c3f75d7741087bf657f",
+        "bytes": 514
+      },
+      "legacy_webp_fallback": {
+        "file": "chace-background.webp",
+        "sha256": "bd9c5fc80f8b256bfe2dc88da5d4349ecedb2ffb53d8b90244c37b5af3c94923",
+        "bytes": 33148,
+        "sampled_fps": 8,
+        "forward_samples": 96,
+        "loop_frames": 190
+      },
+      "video": {
+        "file": "chace-background.mp4",
+        "sampled_fps": 60,
+        "forward_samples": 361,
+        "unique_forward_samples": 361,
+        "loop_frames": 720,
+        "loop_duration_seconds": 12.0,
+        "source_size": [
+          256,
+          144
+        ],
+        "size": [
+          960,
+          540
+        ],
+        "codec": "H.264 (libx264), yuv420p",
+        "color_range": "tv",
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "sha256": "3f1514d6134218769558fcb1d116822cabfced3f92f15ef29b563356bfa8b330",
+        "bytes": 177354,
+        "render_seconds": 1.084,
+        "encode_seconds": 1.083
+      },
+      "source": "local/music_surface_background.py::AlbumFlowBackgroundRenderer.render"
+    },
+    {
+      "tone": "alicks",
+      "still": {
+        "file": "alicks-background-still.webp",
+        "sha256": "8195ef6774a596f3f4876217e4d8a2e7504515bc34ee21da17e733719292484b",
+        "bytes": 604
+      },
+      "legacy_webp_fallback": {
+        "file": "alicks-background.webp",
+        "sha256": "39ed253e36b0f716e313f13850d47cab7148cf58d79c2226e317c64633392ead",
+        "bytes": 63136,
+        "sampled_fps": 8,
+        "forward_samples": 96,
+        "loop_frames": 190
+      },
+      "video": {
+        "file": "alicks-background.mp4",
+        "sampled_fps": 60,
+        "forward_samples": 361,
+        "unique_forward_samples": 361,
+        "loop_frames": 720,
+        "loop_duration_seconds": 12.0,
+        "source_size": [
+          256,
+          144
+        ],
+        "size": [
+          960,
+          540
+        ],
+        "codec": "H.264 (libx264), yuv420p",
+        "color_range": "tv",
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "sha256": "a911cfaacf899887f0924fccf50f54458e12e9356f8f1763f5bd1e7c23379772",
+        "bytes": 163532,
+        "render_seconds": 1.556,
+        "encode_seconds": 1.26
+      },
+      "source": "local/music_surface_background.py::AlbumFlowBackgroundRenderer.render"
+    },
+    {
+      "tone": "noah",
+      "still": {
+        "file": "noah-background-still.webp",
+        "sha256": "84d53759e86b4f5ee01553c0772f536f3742c7a3be082f79feaa3f07f763c631",
+        "bytes": 634
+      },
+      "legacy_webp_fallback": {
+        "file": "noah-background.webp",
+        "sha256": "37d7b9e6f51c2845f3832cd0ceca02f3b03ea34412dc663aba4ef8f08c5bd70d",
+        "bytes": 77562,
+        "sampled_fps": 8,
+        "forward_samples": 96,
+        "loop_frames": 190
+      },
+      "video": {
+        "file": "noah-background.mp4",
+        "sampled_fps": 60,
+        "forward_samples": 361,
+        "unique_forward_samples": 361,
+        "loop_frames": 720,
+        "loop_duration_seconds": 12.0,
+        "source_size": [
+          256,
+          144
+        ],
+        "size": [
+          960,
+          540
+        ],
+        "codec": "H.264 (libx264), yuv420p",
+        "color_range": "tv",
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "sha256": "8aac0d3ecaad7d167fee2ccefd48ead4d2d354a23f1f4ee5846f8bd6f711a022",
+        "bytes": 253601,
+        "render_seconds": 1.325,
+        "encode_seconds": 0.949
+      },
+      "source": "local/music_surface_background.py::AlbumFlowBackgroundRenderer.render"
+    }
+  ]
+}

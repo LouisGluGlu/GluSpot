@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.qa/
+.vite/
+*.log
+.taste-skill/
+.wrangler/
+.dev.vars
+.dev.vars.*

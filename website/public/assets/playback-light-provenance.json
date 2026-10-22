@@ -1,0 +1,37 @@
+{
+  "description": "OpenAI ImageGen generated a neutral white playback indicator overlay for the listening-room illustration.",
+  "source": "OpenAI ImageGen",
+  "prompt": "Shallow neutral white playback indicator, genuinely transparent, no rainbow/Siri effect, no object/text",
+  "assets": [
+    {
+      "file": "speaker-playback-light.png",
+      "format": "PNG",
+      "size": [
+        2172,
+        724
+      ],
+      "mode": "RGBA",
+      "alpha_extrema": [
+        0,
+        253
+      ],
+      "bytes": 356072,
+      "sha256": "1e00f603ece72342495da6ed32dffce0950d5c552f69326b57f5ca2173717006"
+    },
+    {
+      "file": "speaker-playback-light.webp",
+      "format": "WebP",
+      "size": [
+        2172,
+        724
+      ],
+      "mode": "RGBA",
+      "alpha_extrema": [
+        0,
+        253
+      ],
+      "bytes": 201526,
+      "sha256": "356eb39ddccd2df247ed7731a79c958e36804c636025f507f7fe09adc5c0e831"
+    }
+  ]
+}

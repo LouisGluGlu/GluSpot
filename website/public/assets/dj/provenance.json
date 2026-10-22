@@ -1,0 +1,196 @@
+{
+  "description": "Actual GluSpot painter with inert fixtures; no account, network, audio, or user desktop",
+  "status_colors": {
+    "loading": "#248eea",
+    "ready": "#16c777",
+    "failed": "#ec373f"
+  },
+  "assets": [
+    {
+      "file": "chace-speaking.webp",
+      "still_file": "chace-speaking-still.webp",
+      "state": "speaking",
+      "sample_rate_fps": 24,
+      "sampled_frames": 60,
+      "encoded_frames": 45,
+      "encoded_duration_ms": 2500,
+      "size": [
+        360,
+        360
+      ],
+      "pixel_alpha_verification": {
+        "verified": true,
+        "all_four_corners_transparent_in_every_frame": true,
+        "transparent_pixels": 5492373,
+        "total_pixels": 5832000,
+        "transparent_fraction": 0.941765,
+        "union_alpha_bounds": [
+          97,
+          98,
+          262,
+          262
+        ]
+      },
+      "cover_palette": {
+        "primary": "#383838",
+        "secondary": "#52412e"
+      },
+      "source": "local/music_surface_window.py::_paint_personal_dj_control"
+    },
+    {
+      "file": "chace-ready.webp",
+      "still_file": "chace-ready-still.webp",
+      "state": "ready",
+      "sample_rate_fps": 24,
+      "sampled_frames": 60,
+      "encoded_frames": 58,
+      "encoded_duration_ms": 2500,
+      "size": [
+        173,
+        173
+      ],
+      "pixel_alpha_verification": {
+        "verified": true,
+        "all_four_corners_transparent_in_every_frame": true,
+        "transparent_pixels": 1068974,
+        "total_pixels": 1735882,
+        "transparent_fraction": 0.61581,
+        "union_alpha_bounds": [
+          22,
+          22,
+          170,
+          173
+        ]
+      },
+      "cover_palette": {
+        "primary": "#383838",
+        "secondary": "#52412e"
+      },
+      "source": "local/music_surface_window.py::_paint_personal_dj_control"
+    },
+    {
+      "file": "alicks-speaking.webp",
+      "still_file": "alicks-speaking-still.webp",
+      "state": "speaking",
+      "sample_rate_fps": 24,
+      "sampled_frames": 60,
+      "encoded_frames": 46,
+      "encoded_duration_ms": 2500,
+      "size": [
+        360,
+        360
+      ],
+      "pixel_alpha_verification": {
+        "verified": true,
+        "all_four_corners_transparent_in_every_frame": true,
+        "transparent_pixels": 5614595,
+        "total_pixels": 5961600,
+        "transparent_fraction": 0.941793,
+        "union_alpha_bounds": [
+          97,
+          98,
+          262,
+          262
+        ]
+      },
+      "cover_palette": {
+        "primary": "#5a5a5a",
+        "secondary": "#674540"
+      },
+      "source": "local/music_surface_window.py::_paint_personal_dj_control"
+    },
+    {
+      "file": "alicks-ready.webp",
+      "still_file": "alicks-ready-still.webp",
+      "state": "ready",
+      "sample_rate_fps": 24,
+      "sampled_frames": 60,
+      "encoded_frames": 58,
+      "encoded_duration_ms": 2500,
+      "size": [
+        173,
+        173
+      ],
+      "pixel_alpha_verification": {
+        "verified": true,
+        "all_four_corners_transparent_in_every_frame": true,
+        "transparent_pixels": 1068974,
+        "total_pixels": 1735882,
+        "transparent_fraction": 0.61581,
+        "union_alpha_bounds": [
+          22,
+          22,
+          170,
+          173
+        ]
+      },
+      "cover_palette": {
+        "primary": "#5a5a5a",
+        "secondary": "#674540"
+      },
+      "source": "local/music_surface_window.py::_paint_personal_dj_control"
+    },
+    {
+      "file": "noah-speaking.webp",
+      "still_file": "noah-speaking-still.webp",
+      "state": "speaking",
+      "sample_rate_fps": 24,
+      "sampled_frames": 60,
+      "encoded_frames": 45,
+      "encoded_duration_ms": 2500,
+      "size": [
+        360,
+        360
+      ],
+      "pixel_alpha_verification": {
+        "verified": true,
+        "all_four_corners_transparent_in_every_frame": true,
+        "transparent_pixels": 5492373,
+        "total_pixels": 5832000,
+        "transparent_fraction": 0.941765,
+        "union_alpha_bounds": [
+          97,
+          98,
+          262,
+          262
+        ]
+      },
+      "cover_palette": {
+        "primary": "#5a5a5a",
+        "secondary": "#db9767"
+      },
+      "source": "local/music_surface_window.py::_paint_personal_dj_control"
+    },
+    {
+      "file": "noah-ready.webp",
+      "still_file": "noah-ready-still.webp",
+      "state": "ready",
+      "sample_rate_fps": 24,
+      "sampled_frames": 60,
+      "encoded_frames": 58,
+      "encoded_duration_ms": 2500,
+      "size": [
+        173,
+        173
+      ],
+      "pixel_alpha_verification": {
+        "verified": true,
+        "all_four_corners_transparent_in_every_frame": true,
+        "transparent_pixels": 1068974,
+        "total_pixels": 1735882,
+        "transparent_fraction": 0.61581,
+        "union_alpha_bounds": [
+          22,
+          22,
+          170,
+          173
+        ]
+      },
+      "cover_palette": {
+        "primary": "#5a5a5a",
+        "secondary": "#db9767"
+      },
+      "source": "local/music_surface_window.py::_paint_personal_dj_control"
+    }
+  ]
+}

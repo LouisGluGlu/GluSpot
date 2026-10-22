@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gluspot-website",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-22",
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+  },
+  "routes": [{ "pattern": "gluspot.top", "custom_domain": true }],
+}

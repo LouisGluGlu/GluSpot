@@ -1,0 +1,141 @@
+.room-section {
+  height: 710px;
+}
+.room-copy {
+  top: 45px;
+}
+.device-demo {
+  position: absolute;
+  left: max(6%, calc((100% - 1100px) / 2));
+  bottom: 35px;
+  width: 325px;
+  border-radius: 22px;
+  padding: 17px;
+  background: #20282be0;
+  backdrop-filter: blur(22px);
+}
+.device-demo-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 3px 12px;
+  font-size: 12px;
+}
+.device-demo-title small {
+  color: #8e9b9f;
+  font-size: 9px;
+}
+.device-demo-rows {
+  display: grid;
+  gap: 7px;
+}
+.device-demo-row {
+  border-radius: 13px;
+  background: #ffffff0a;
+  padding: 9px 11px;
+  color: #9ba7ab;
+}
+.device-demo-row.selected {
+  background: #e6e9e9;
+  color: #161c20;
+}
+.device-demo-row button {
+  width: 100%;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font-size: 11px;
+}
+.device-demo-row button:hover {
+  background: transparent;
+}
+.device-demo-row button > span {
+  flex: 1;
+}
+.device-demo-row img {
+  width: 25px;
+  height: 25px;
+  object-fit: contain;
+  filter: invert(1);
+}
+.device-demo-row.selected img {
+  filter: none;
+}
+.device-demo-row input {
+  display: block;
+  width: calc(100% - 35px);
+  height: 11px;
+  margin: 6px 0 0 35px;
+  accent-color: #2589fa;
+  cursor: pointer;
+}
+.device-demo-row input:disabled {
+  opacity: 0.2;
+}
+.device-demo > p {
+  color: #92a5ab;
+  font-size: 9px;
+  padding-top: 11px;
+  text-align: center;
+}
+.bar-variants {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.bar-variants button {
+  background: transparent;
+  color: #8d9b9f;
+  font-size: 11px;
+  padding: 7px 14px;
+  border-radius: 20px;
+}
+.bar-variants button[aria-pressed="true"] {
+  color: #e1ebed;
+  background: #ffffff13;
+}
+.finder-preview .desktop-bar {
+  bottom: auto;
+  top: 0;
+  height: 30px;
+}
+.mode-bar.finder-preview .stage-native {
+  top: 15px;
+  width: 360px;
+}
+@media (max-width: 580px) {
+  .room-section {
+    height: auto;
+    min-height: 970px;
+    padding-bottom: 320px;
+    display: flex;
+    flex-direction: column;
+  }
+  .room-copy {
+    position: relative;
+    left: auto;
+    right: auto;
+    top: auto;
+    margin: 35px 25px 0;
+  }
+  .room-image {
+    position: absolute;
+    bottom: 0;
+    height: 320px;
+    width: 100%;
+    object-position: 86% center;
+    mask-image: linear-gradient(transparent, #000 20%, #000 85%, transparent);
+  }
+  .device-demo {
+    position: relative;
+    left: auto;
+    bottom: auto;
+    width: calc(100% - 50px);
+    max-width: 360px;
+    margin: 24px auto 0;
+  }
+}

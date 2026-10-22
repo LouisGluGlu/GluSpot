@@ -1,0 +1,222 @@
+{
+  "renderer": "local.music_surface_window.MusicSurfaceWindow._paint_surface_frame",
+  "application_version": "6.417",
+  "source": "user-provided screenshot lyric excerpts",
+  "timing": "Synthetic display clock with line intervals; production estimated word interpolation. Not audio aligned.",
+  "native_timing_kinds": "line (no supplied source word times)",
+  "loop_context": "For the three-row Alicks excerpt, the first supplied row repeats at 12 seconds as next-loop context. Production centers artwork at <=3 rows; no invented lyric was added.",
+  "rendering": "Offscreen Qt; actual production lyric layout/read lift/blur, background and controls omitted; alpha square crop at DPR 2",
+  "playback": "Silent visual demonstration; no audio, live account, network, or desktop capture",
+  "songs": {
+    "chace": [
+      "The Rain Song",
+      "Chace",
+      "chace-belated-suffocation.jpg",
+      [
+        [
+          "It’s been the same old thing",
+          "一成不变"
+        ],
+        [
+          "Since it ended",
+          "自结束时"
+        ],
+        [
+          "Since you left me",
+          "自你离我而去"
+        ],
+        [
+          "Since I moved on",
+          "自我继续前行"
+        ]
+      ]
+    ],
+    "alicks": [
+      "Ibuprofen",
+      "Alicks",
+      "alicks-unwritten.jpg",
+      [
+        [
+          "I get high and I get low",
+          "我的意识在天空中翱翔"
+        ],
+        [
+          "It only matters which way we go",
+          "我只关心往哪里走,不曾停留"
+        ],
+        [
+          "If I sigh or if I float",
+          "我曾因世态炎凉而叹息,也曾漂浮于梦境"
+        ]
+      ]
+    ]
+  },
+  "exports": [
+    {
+      "song": "chace",
+      "translated": false,
+      "animation": "chace-original.webp",
+      "video": {
+        "file": "chace-original.webm",
+        "bytes": 378173,
+        "sha256": "4374ce7fdce0f78e4b69f16417e698acfd254bae2c6d4ee2874938aa337d3251",
+        "codec": "VP9",
+        "alpha_mode": 1,
+        "decoded_alpha_extrema": [
+          0,
+          255
+        ],
+        "decoded_frame_count": 360,
+        "duration_seconds": 12.0,
+        "encoding": "libvpx-vp9, yuva420p, auto-alt-ref=0, crf=26, b:v=0, threads=2"
+      },
+      "poster": "chace-original.png",
+      "frames": 360,
+      "fps": 30,
+      "duration_seconds": 12.0,
+      "dimensions": [
+        480,
+        480
+      ],
+      "encoded_frames": 270,
+      "logical_dimensions": [
+        240,
+        240
+      ],
+      "active_indexes": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "unique_frames": 270,
+      "animation_bytes": 1630706,
+      "sha256": "4492b95ad4b4eacd549d1d5d78b3dd9357c3555ddde3674d804ab9fcba209762",
+      "export_seconds": 15.29
+    },
+    {
+      "song": "chace",
+      "translated": true,
+      "animation": "chace-translated.webp",
+      "video": {
+        "file": "chace-translated.webm",
+        "bytes": 466184,
+        "sha256": "80cc32b3100c314789ecd857a366225ff8cb2f4e69068b86f7f69402a775eb78",
+        "codec": "VP9",
+        "alpha_mode": 1,
+        "decoded_alpha_extrema": [
+          0,
+          255
+        ],
+        "decoded_frame_count": 360,
+        "duration_seconds": 12.0,
+        "encoding": "libvpx-vp9, yuva420p, auto-alt-ref=0, crf=26, b:v=0, threads=2"
+      },
+      "poster": "chace-translated.png",
+      "frames": 360,
+      "fps": 30,
+      "duration_seconds": 12.0,
+      "dimensions": [
+        480,
+        480
+      ],
+      "encoded_frames": 270,
+      "logical_dimensions": [
+        240,
+        240
+      ],
+      "active_indexes": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "unique_frames": 270,
+      "animation_bytes": 2122062,
+      "sha256": "33a7db8fc19343e7f0cf1aff8c946a8468ef65d586509c04e69a0262d4159f21",
+      "export_seconds": 18.61
+    },
+    {
+      "song": "alicks",
+      "translated": false,
+      "animation": "alicks-original.webp",
+      "video": {
+        "file": "alicks-original.webm",
+        "bytes": 381412,
+        "sha256": "bada05d240d0dd9ec0b880ecf61a1ecc1b17217683a633225fe0fbe7dd4b83db",
+        "codec": "VP9",
+        "alpha_mode": 1,
+        "decoded_alpha_extrema": [
+          0,
+          255
+        ],
+        "decoded_frame_count": 360,
+        "duration_seconds": 12.0,
+        "encoding": "libvpx-vp9, yuva420p, auto-alt-ref=0, crf=26, b:v=0, threads=2"
+      },
+      "poster": "alicks-original.png",
+      "frames": 360,
+      "fps": 30,
+      "duration_seconds": 12.0,
+      "dimensions": [
+        480,
+        480
+      ],
+      "encoded_frames": 271,
+      "logical_dimensions": [
+        240,
+        240
+      ],
+      "active_indexes": [
+        0,
+        1,
+        2
+      ],
+      "unique_frames": 271,
+      "animation_bytes": 1797050,
+      "sha256": "35ae8c7e58ba56a3b1d6858ab4a5f6d26394f823ada3e0664fcdbc1a4de63088",
+      "export_seconds": 15.21
+    },
+    {
+      "song": "alicks",
+      "translated": true,
+      "animation": "alicks-translated.webp",
+      "video": {
+        "file": "alicks-translated.webm",
+        "bytes": 532917,
+        "sha256": "39adfde9cc2d6d92392748eed5045a1e15a934d84c6f437a842c261aa1b7648e",
+        "codec": "VP9",
+        "alpha_mode": 1,
+        "decoded_alpha_extrema": [
+          0,
+          255
+        ],
+        "decoded_frame_count": 360,
+        "duration_seconds": 12.0,
+        "encoding": "libvpx-vp9, yuva420p, auto-alt-ref=0, crf=26, b:v=0, threads=2"
+      },
+      "poster": "alicks-translated.png",
+      "frames": 360,
+      "fps": 30,
+      "duration_seconds": 12.0,
+      "dimensions": [
+        480,
+        480
+      ],
+      "encoded_frames": 271,
+      "logical_dimensions": [
+        240,
+        240
+      ],
+      "active_indexes": [
+        0,
+        1,
+        2
+      ],
+      "unique_frames": 271,
+      "animation_bytes": 2661822,
+      "sha256": "ddc354176039e8a674904e5c2e73ac9ce1898ffb9992a637fb2beca1ea922544",
+      "export_seconds": 18.74
+    }
+  ]
+}

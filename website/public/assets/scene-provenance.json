@@ -1,0 +1,79 @@
+[
+  {
+    "file": "desktop-wallpaper.webp",
+    "size": [
+      1586,
+      992
+    ],
+    "mode": "RGB",
+    "sha256": "bc5d84e57e8dcbc463d0d8db19eec9677e632f45ea4e7f05ee5621dd87e23738",
+    "source_sha256": "97a578bb670fb903cf9725b031f3ce28fec4bc458255b9cde00c104ebbc5f4a1",
+    "description": "Generated website illustration; no user desktop or personal data"
+  },
+  {
+    "file": "room-devices-off.webp",
+    "size": [
+      1774,
+      887
+    ],
+    "mode": "RGB",
+    "sha256": "8505fdd419bccda424bb1dbe7eb697f4b0063c8f827e06707ae1d375f3867f91",
+    "source_sha256": "e216bf080654dffcd969b9859884ab4a93aeab62cf9cc156439b888da365094a",
+    "description": "Generated website illustration; no user desktop or personal data"
+  },
+  {
+    "file": "room-small-on.webp",
+    "size": [
+      1774,
+      887
+    ],
+    "mode": "RGB",
+    "sha256": "145280504528d9220728dbe161709f5bc011c334621123b196e68e799f22e3ad",
+    "source_sha256": "258ed8af38a66da6e52082123ed3849a3369e69314895d0121af51ac56f71cf6",
+    "description": "Generated website illustration; no user desktop or personal data"
+  },
+  {
+    "file": "room-large-on.webp",
+    "size": [
+      1774,
+      887
+    ],
+    "mode": "RGB",
+    "sha256": "33f558589f815e9db122d0f9a29f1e3b177699e9c11aa0410d1d9fc6cad95d5f",
+    "source_sha256": "8de5d7c1cd2443ad437e985fe1fe4ba857c1c4ebf805b938431f3d58d3597bd7",
+    "description": "Generated website illustration; no user desktop or personal data"
+  },
+  {
+    "file": "room-devices-on.webp",
+    "size": [
+      1774,
+      887
+    ],
+    "mode": "RGB",
+    "sha256": "31dbe1b225bca6e7b9be7e5e42ab0fc30ab555c29a14cc908f6ef59ea943d994",
+    "source_sha256": "9eedb0ff4a6584839adb77daf86cc382b5ab1ca3fdecf6df95892ce2118ac533",
+    "description": "Generated website illustration; no user desktop or personal data"
+  },
+  {
+    "file": "speaker-waves.webp",
+    "size": [
+      1774,
+      887
+    ],
+    "mode": "RGBA",
+    "sha256": "df833b0e222479a2dfb47b2a168973ddbad6c262511c6dc74994720342e40071",
+    "source_sha256": "ef31d4fbdca5354d29a0aaef3dafbe089ca44de98e20fde6d1b1c3f80305f071",
+    "description": "Generated website illustration; no user desktop or personal data"
+  },
+  {
+    "file": "speaker-top-light.webp",
+    "size": [
+      2172,
+      724
+    ],
+    "mode": "RGBA",
+    "sha256": "f914823067c0446eecf7247ba0001aca02e56ad718de7d0f631606896d813566",
+    "source_sha256": "ade7f1f427f120e16274db78805e4188a029aca18bfb2564c0ae3779afc5d88f",
+    "description": "Generated website illustration; no user desktop or personal data"
+  }
+]

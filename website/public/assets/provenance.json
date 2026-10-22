@@ -1,0 +1,26 @@
+{
+  "assets": [
+    {
+      "artwork_url": "https://f4.bcbits.com/img/a1256702574_10.jpg",
+      "song": "Ibuprofen",
+      "album": "Unwritten",
+      "source_page_url": "https://alicks14.bandcamp.com/track/ibuprofen",
+      "width": 1200,
+      "height": 1200,
+      "artist": "Alicks",
+      "file": "alicks-unwritten.jpg",
+      "rights": "All rights reserved; artwork remains copyrighted by its artist/rightsholder."
+    },
+    {
+      "artwork_url": "https://linkstorage.linkfire.com/medialinks/images/b628dd0b-17c9-4151-8ed5-39f21fb1bb1f/artwork-440x440.jpg",
+      "song": "The Rain Song",
+      "album": "Belated Suffocation",
+      "source_page_url": "https://chace.lnk.to/BelatedSuffocation",
+      "width": 440,
+      "height": 440,
+      "artist": "Chace",
+      "file": "chace-belated-suffocation.jpg",
+      "rights": "Artwork remains copyrighted by its artist/rightsholder."
+    }
+  ]
+}

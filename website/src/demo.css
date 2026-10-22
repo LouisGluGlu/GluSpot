@@ -1,0 +1,404 @@
+/* Product demonstrations stay inside the page; the page itself is solid. */
+.site {
+  background: #090b0d;
+}
+.hero-backdrop {
+  display: none;
+}
+.hero {
+  padding-bottom: 65px;
+}
+.player-wrap {
+  width: min(930px, 100%);
+}
+.player-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 500px;
+}
+.player {
+  width: min(840px, 100%);
+  flex-shrink: 0;
+  transform-origin: top left;
+  background: #262a2b;
+}
+.player-ambience {
+  opacity: 1;
+}
+.player-ambience img {
+  filter: blur(3px);
+  object-fit: fill;
+  transform: none;
+  animation: none !important;
+}
+.player-tools .icon-button {
+  width: 34px;
+  height: 34px;
+}
+.view-fullscreen {
+  width: 100%;
+  height: 500px;
+  border-radius: 12px;
+  border-color: #ffffff18;
+}
+.view-fullscreen .player-content {
+  inset: 68px 72px 32px;
+}
+.view-fullscreen .album-block {
+  width: 290px;
+}
+.view-fullscreen .outside-panel {
+  padding-left: 25px;
+}
+.view-fullscreen .layout-album .album-block {
+  width: 310px;
+}
+.native-island {
+  display: block;
+  background: none;
+  border: 0;
+  padding: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+.native-island img {
+  width: 100%;
+  height: auto;
+  display: block;
+  object-fit: contain;
+}
+.native-island:hover {
+  transform: scale(1.025);
+}
+.native-island:active {
+  transform: scale(0.98);
+}
+.hero-native-island {
+  display: none;
+  width: 360px;
+  max-width: 100%;
+}
+.view-island {
+  width: 360px;
+  max-width: 100%;
+  height: 46px;
+  border-radius: 24px;
+  background: transparent;
+  border: 0;
+  backdrop-filter: none;
+  box-shadow: none;
+  overflow: visible;
+}
+.view-island:after {
+  display: none;
+}
+.view-island .player-topline,
+.view-island .player-content,
+.view-island .player-ambience {
+  display: none;
+}
+.view-island .hero-native-island {
+  display: block;
+}
+.island-open-hint {
+  position: absolute;
+  top: calc(50% + 42px);
+  font-size: 11px;
+  color: #8a9599;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s 0.25s;
+}
+.island-open-hint.shown {
+  opacity: 1;
+}
+.story-controls {
+  display: flex;
+  gap: 17px;
+  align-items: center;
+  width: min(620px, 100%);
+  margin: 0 auto 24px;
+  --story-progress: 0;
+}
+.story-steps {
+  display: flex;
+  flex: 1;
+  gap: 15px;
+}
+.story-steps button {
+  background: transparent;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 0;
+  font-size: 10px;
+  color: #768186;
+  text-align: left;
+  white-space: nowrap;
+}
+.story-steps span {
+  display: block;
+  margin-bottom: 9px;
+}
+.story-steps i {
+  display: block;
+  position: relative;
+  height: 3px;
+  background: #293034;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.story-steps i:after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #eef2f1;
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.story-steps .active {
+  color: #eef1f0;
+}
+.story-steps .active i:after {
+  transform: scaleX(var(--story-progress));
+}
+.story-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  color: #d5dddd;
+  background: #242a2e;
+}
+.story-toggle:hover {
+  background: #363e42;
+}
+.layout-control {
+  margin-top: 0;
+}
+.song-switch {
+  gap: 23px;
+}
+.song-switch button {
+  min-height: 30px;
+}
+.floating-native {
+  width: 265px;
+  position: absolute;
+  right: 24px;
+  bottom: 117px;
+}
+.room-section {
+  margin-top: -20px;
+}
+.room-image {
+  mask-image: linear-gradient(transparent, #000 12%, #000 82%, transparent);
+}
+.online-options {
+  display: flex;
+  gap: 23px;
+  margin-top: 29px;
+  color: #d1d9dc;
+}
+.online-options > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.island-stage {
+  background: #151b1d;
+}
+.island-stage > .ambience {
+  opacity: 0.1;
+}
+.stage-native {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 360px;
+  max-width: calc(100% - 28px);
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  transition:
+    top 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.7s;
+}
+.stage-native:hover {
+  transform: translate(-50%, -50%) scale(1.02);
+}
+.mode-top .stage-native {
+  top: 31px;
+}
+.mode-bar .stage-native {
+  top: calc(100% - 25px);
+  width: 300px;
+}
+.desktop-bar {
+  background: #273033;
+}
+.scroll-reveal {
+  opacity: 0;
+  transform: translateY(26px);
+  transition:
+    opacity 0.8s,
+    transform 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.scroll-reveal.revealed {
+  opacity: 1;
+  transform: none;
+}
+.hero-copy {
+  animation: hero-arrive 1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes hero-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (max-width: 1100px) {
+  .floating-native {
+    width: 220px;
+    bottom: 145px;
+  }
+  .view-fullscreen .player-content {
+    inset-inline: 42px;
+  }
+  .view-fullscreen .album-block {
+    width: 260px;
+  }
+  .view-fullscreen .outside-panel {
+    padding-left: 12px;
+  }
+}
+@media (max-width: 800px) {
+  .floating-native {
+    display: none;
+  }
+  .player-stage {
+    height: 435px;
+  }
+  .view-fullscreen {
+    height: 435px;
+  }
+  .view-fullscreen .player-content {
+    inset: 65px 30px 30px;
+  }
+  .view-fullscreen .album-block {
+    width: 220px;
+  }
+  .view-fullscreen .outside-panel {
+    padding-left: 0;
+  }
+  .story-controls {
+    gap: 10px;
+  }
+  .story-steps {
+    gap: 10px;
+  }
+  .story-steps button {
+    font-size: 9px;
+  }
+}
+@media (max-width: 580px) {
+  .player-stage {
+    height: 480px;
+  }
+  .player {
+    width: 100%;
+  }
+  .view-fullscreen {
+    height: 480px;
+    border-radius: 8px;
+  }
+  .view-fullscreen .player-content {
+    inset: 58px 22px 20px;
+  }
+  .view-fullscreen .album-block {
+    width: 235px;
+    max-width: 100%;
+  }
+  .view-island {
+    height: auto;
+    width: 360px;
+  }
+  .view-island .hero-native-island {
+    width: 100%;
+  }
+  .player-tools {
+    gap: 5px;
+  }
+  .player-tools .icon-button {
+    width: 29px;
+    height: 29px;
+  }
+  .demo-tag {
+    font-size: 7px;
+  }
+  .story-controls {
+    margin-bottom: 18px;
+    gap: 12px;
+  }
+  .story-steps {
+    gap: 7px;
+  }
+  .story-steps button {
+    font-size: 8px;
+    text-align: center;
+  }
+  .story-steps span {
+    margin-bottom: 9px;
+  }
+  .story-toggle {
+    width: 31px;
+    height: 31px;
+  }
+  .song-switch {
+    gap: 18px;
+  }
+  .song-switch button {
+    font-size: 10px;
+  }
+  .song-title-small {
+    display: none;
+  }
+  .hero-download {
+    margin-top: 24px;
+  }
+  .stage-native {
+    width: 300px;
+  }
+  .mode-top .stage-native {
+    top: 26px;
+  }
+  .mode-bar .stage-native {
+    width: 220px;
+  }
+  .online-options {
+    gap: 20px;
+  }
+  .online-options > span {
+    font-size: 12px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scroll-reveal {
+    opacity: 1;
+    transform: none;
+  }
+  .hero-copy {
+    animation: none;
+  }
+  .stage-native {
+    transition: none;
+  }
+}

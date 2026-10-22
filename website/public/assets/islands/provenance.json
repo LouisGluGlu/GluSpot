@@ -1,0 +1,125 @@
+{
+  "description": "Production Qt painter; supplied public artwork and silent fixed lyric position; no account/audio/network/desktop capture",
+  "assets": [
+    {
+      "file": "chace-free.png",
+      "logical_size": [
+        360,
+        46
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "chace-top.png",
+      "logical_size": [
+        360,
+        62
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "chace-tasker.png",
+      "logical_size": [
+        300,
+        40
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "chace-finder.png",
+      "logical_size": [
+        360,
+        30
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "alicks-free.png",
+      "logical_size": [
+        360,
+        46
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "alicks-top.png",
+      "logical_size": [
+        360,
+        62
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "alicks-tasker.png",
+      "logical_size": [
+        300,
+        40
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "alicks-finder.png",
+      "logical_size": [
+        360,
+        30
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "noah-free.png",
+      "logical_size": [
+        360,
+        46
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "noah-top.png",
+      "logical_size": [
+        360,
+        62
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "noah-tasker.png",
+      "logical_size": [
+        300,
+        40
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    },
+    {
+      "file": "noah-finder.png",
+      "logical_size": [
+        360,
+        30
+      ],
+      "dpr": 2,
+      "ambience_style": "solid_album",
+      "source": "local/island_stack_visual.py::_paint_music"
+    }
+  ]
+}
