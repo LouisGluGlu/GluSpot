@@ -136,4 +136,29 @@ README 已写明时间、天气、日程、消息通知、插件提醒、弹幕�
 （两种音乐界面每帧都刷新媒体数据和歌词），按规则应修改而非删除——已恢复为
 `RetiredIslandRuntimeTests.test_live_tick_keeps_media_and_lyric_work_on_both_music_surfaces`，只去掉对已删除方法的断言。
 
-**待做**：真机观察——动画是否更顺、长时间运行内存是否稳定（需要启动源码版，会在屏幕上出现第二个岛）。
+**真机测量**（2026-10-23，源码版各跑 15 分钟，播放音乐、MyDockFinder 在运行；工具 `_claude/live_probe.py`，
+不改产品代码，16ms 探针定时器测主线程延迟，卡顿 >35ms 时采样主线程调用栈；日志 `_claude/results/live_*.log/json`）。
+以下为启动 60 秒之后的数据：
+
+| | 新方式（调度器） | 旧方式（自动 GC） |
+| --- | ---: | ---: |
+| 在工作线程上发生的 GC（崩溃根因） | **0** | 68 |
+| 第 2 代回收次数 / 总耗时 | 7 次 / 4.0s | 13 次 / 6.4s |
+| 第 0/1 代回收总耗时 | 3.3s | 3.6s |
+| 主线程卡顿 >33ms 次数 / 总时长 | 3,360 / 152s | 3,503 / 170s |
+| 由 GC 造成的卡顿 | 8 | 18 |
+| 内存（工作集）开始 → 15 分钟 | 369 → 1,090 MB | 353 → 1,030 MB |
+
+结论：
+1. 调度器达到目的：GC 不再发生在工作线程上；GC 总耗时和由 GC 造成的卡顿都减少。
+2. **内存泄漏是原有问题，与本次改动无关**：两种方式都以约 45–48 MB/分钟增长；存活对象越来越多，第 2 代回收的
+   单次停顿随之从约 130ms 涨到 1 秒以上（两种方式都是）。已安装的 GluSpot 运行中占用约 2 GB，与此一致。
+3. **动画抽搐的主因不是 GC**：约 2/3 的卡顿采样落在 `mydockfinder.py`——岛跟随 MyDockFinder 条时，
+   `_refresh_finder_bar_follow_position` 每 250ms 在主线程调用 `read_finder_material`：`grabWindow` 截取整屏宽度，
+   再由 `_average_strip/_average_area` 用纯 Python 逐像素 `pixelColor` 取色，每次约 35–50ms，即每秒约 4 次掉帧。
+   其次是 `_poll_mydockfinder_presence` / `refresh_live_finder_bar` 中的窗口枚举。
+
+**待做（需确认后再改）**：
+- A. 查内存泄漏：用 tracemalloc / 对象类型计数在真机上定位增长来源。泄漏不修，第 2 代回收迟早变成秒级卡顿。
+- B. MyDockFinder 取色移出主线程热路径：先缩小采样（Qt 在 C++ 里缩放后再取色，或按块取样），降低频率或只在条移动/变色时取。
+
