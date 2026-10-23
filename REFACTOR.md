@@ -160,7 +160,7 @@ README 已写明时间、天气、日程、消息通知、插件提醒、弹幕�
 
 **待做（需确认后再改）**：
 - A. 查内存泄漏：已完成，见下“内存泄漏修复”。
-- B. MyDockFinder 取色移出主线程热路径：先缩小采样（Qt 在 C++ 里缩放后再取色，或按块取样），降低频率或只在条移动/变色时取。
+- B. MyDockFinder 取色移出主线程热路径：已完成，见下“MyDockFinder 取色卡顿修复”。
 
 ## 内存泄漏修复
 
@@ -194,3 +194,21 @@ ctypes 把每个 `POINTER(cls)` 永久缓存在 `ctypes._pointer_type_cache` 里
 
 注：这次源码版在 15 分钟时没有按计划自动退出（`QApplication.quit()` 未生效，前两次运行正常），手动结束。
 主线程卡顿（每 30 秒约 110–130 次 >33ms）依旧，主因是 MyDockFinder 主线程取色，见上方待做 B。
+
+## MyDockFinder 取色卡顿修复
+
+**分解测量**（`_claude/finder_sample_profile.py`，与岛上 250ms 刷新相同的调用）：每次 `read_finder_material` 约 31ms——
+逐像素取色约 12ms、`detect_mydockfinder` 完整进程快照约 12ms、截图约 6ms。
+
+**修复**（提交 `775c66a`，结果不变）：
+- `_average_area`：从图像缓冲区一次读出相同的采样点（隔 2 行、隔 5 列，跳过 alpha=0），用 numpy 做完全相同的计算
+  （逐通道中位数、加权距离、75 分位半径、整数平均）。`tests/test_finder_average_area.py` 保留原逐像素实现作为对照，
+  在 3 种像素格式的随机图像（含透明像素）和一张真实截图上逐一比对。
+- `_running_mydockfinder_process`：记住上次找到的 Dock 进程 pid，先只核对它（仍在运行、映像名不变）；
+  已退出或 pid 被复用时回到原来的完整扫描。`tests/test_dock_process_fast_path.py` 用真实进程验证三种情况。
+
+**效果**：每次刷新 31ms → 11ms（进程检测 12 → 0.2ms，取色约 12 → <1ms，截图不变）。真机 6 分钟（`live_finderfix`）：
+主线程 >33ms 卡顿每 30 秒约 110 次 → 约 12 次；全量 5,409 通过 / 0 失败。
+
+**剩余**：约 12 次/30 秒（每次 50–60ms）几乎全部来自 `app._poll_mydockfinder_presence` →
+`read_live_finder_bars` → `_native_finder_bar_window_snapshots`：每次轮询都完整枚举窗口和进程。可以用同样的方法优化。
