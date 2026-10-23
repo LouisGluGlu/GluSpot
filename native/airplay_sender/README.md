@@ -312,9 +312,21 @@ connected client's exact PID against a retained process handle/creation token.
 The client also verifies the helper identity. Each message uses a 24-byte
 little-endian `<4sQQI>` header: `GPCM`, epoch, sequence starting at one, frames.
 Payload is 44.1 kHz stereo PCM16; frames must be 1..16384 and sequence contiguous.
-EOF, wrong identity/header or bounded-ring overflow terminates the session.
+EOF, wrong identity/header or sustained bounded-ring overflow terminates the session.
 The ring's power-of-two storage holds at most 65536 stereo frames (about 1.486 s).
 Overlapped connection/read cancellation is drained before releasing its storage.
+
+In 6.418, a full ring waits for downstream capacity for up to two seconds,
+with cancellation and parent-liveness checks. The coordinator transfers only
+the shared conditioner's remaining capacity. A GUI scheduling stall can
+therefore catch up without dropping or reordering PCM. The parent retains at
+most four seconds (705600 bytes) of pending audio, independent of decoder
+buffer sizes; it reports queue high-water counts without retaining audio in
+diagnostics. Persistent congestion still terminates the session. The
+`tools/smoke_owned_pcm_stall.py` fixture exercises real muted Qt decoding and
+the native pipe against a local authenticated receiver, including an injected
+2.6-second GUI stall after 95 seconds in a 180-second run. This verifies the
+transport, not physical HomePod listening.
 
 Direct input skips source-endpoint and endpoint-mute guards entirely; the Qt
 bridge controls only its own audio output mute. It keeps the shared conditioner,

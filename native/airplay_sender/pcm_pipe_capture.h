@@ -125,8 +125,17 @@ private:
                 const auto header = parsePcmPipeHeader(bytes, epoch_, sequence);
                 std::vector<int16_t> pcm(header.frames * 2);
                 if (!readExact({reinterpret_cast<uint8_t*>(pcm.data()), pcm.size() * sizeof(int16_t)})) return;
-                if (!ring_.tryPush(pcm)) {
-                    droppedSamples += pcm.size(); throw std::runtime_error("Direct PCM queue overran");
+                // Qt can deliver a burst after its GUI thread was stalled.
+                // Keep this packet intact and let the pipe apply pressure to
+                // its writer while the coordinator drains the bounded ring.
+                // Stop/parent death must still interrupt a full-ring wait.
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (!ring_.tryPush(pcm)) {
+                    if (WaitForSingleObject(stop_, 2) == WAIT_OBJECT_0) return;
+                    if (!process_.alive()) throw std::runtime_error("Direct PCM parent ended");
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        droppedSamples += pcm.size(); throw std::runtime_error("Direct PCM queue overran");
+                    }
                 }
                 frames += header.frames;
                 signal_.recordAccepted(pcm, captureNowMs());

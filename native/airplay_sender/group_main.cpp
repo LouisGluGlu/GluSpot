@@ -663,7 +663,11 @@ int runGroupHelper(int argc, wchar_t** argv) {
                 int burst = 0;
                 while (nextFrame <= dueFrame && burst++ < 8) {
                     std::array<int16_t, 704> pcm{};
-                    const auto take = std::min<size_t>(44100 * 2, capture.ring().availableRead() & ~size_t(1));
+                    // A decoder catch-up burst may fill the capture ring.
+                    // Transfer only the conditioner's remaining capacity;
+                    // unread PCM stays ordered in the ring/pipe, never drops.
+                    const auto room = size_t(44100) - conditioner.queuedFrames();
+                    const auto take = std::min(room * 2, capture.ring().availableRead() & ~size_t(1));
                     if (take) {
                         std::vector<int16_t> captured(take);
                         if (!capture.ring().tryPop(captured) || !conditioner.feed(captured)) {

@@ -680,7 +680,8 @@ class OwnedPcmTransportTests(unittest.TestCase):
     def test_backpressure_fails_closed_instead_of_unbounded_growth(self):
         self.sender._process = self.process
         self.sender._pcm_epoch = 1
-        for _ in range(5): self.assertTrue(self.sender.submit_pcm(b"x" * 65536, 1))
+        for _ in range(self.sender.MAX_QUEUED_BYTES // 65536):
+            self.assertTrue(self.sender.submit_pcm(b"x" * 65536, 1))
         self.assertFalse(self.sender.submit_pcm(b"x" * 65536, 1))
         self.assertEqual(self.sender.pcm_error(), "backpressure")
         self.assertLessEqual(self.sender._pcm_bytes, self.sender.MAX_QUEUED_BYTES)

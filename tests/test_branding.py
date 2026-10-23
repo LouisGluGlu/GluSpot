@@ -14,7 +14,7 @@ class BrandingTests(unittest.TestCase):
         from local.branding import APP_ICON_PATH, APP_NAME, APP_VERSION, TRAY_ICON_PATH
 
         self.assertEqual(APP_NAME, "GluSpot")
-        self.assertEqual(APP_VERSION, "6.417")
+        self.assertEqual(APP_VERSION, "6.418")
         self.assertEqual(APP_ICON_PATH.name, "gluspot-glu.ico")
         self.assertEqual(TRAY_ICON_PATH, APP_ICON_PATH)
         self.assertTrue(APP_ICON_PATH.exists())

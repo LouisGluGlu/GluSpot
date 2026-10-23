@@ -115,7 +115,10 @@ class _WindowsPcmPipe:
 class OwnedPcmProcess(AirPlayGroupProcess):
     """The process-mode PID/session guards remain entirely outside this path."""
     MAX_PACKET_FRAMES = 16384
-    MAX_QUEUED_BYTES = 352800  # At most two seconds of stereo 44.1 kHz PCM.
+    # A measured 2.59-second GUI stall delivers more than two seconds of Qt
+    # callbacks together. Four seconds bounds that catch-up burst to 705600
+    # bytes; a persistently stalled consumer still fails closed.
+    MAX_QUEUED_BYTES = 705600
     HEADER = struct.Struct("<4sQQI")
 
     def __init__(self, *args, identity_reader=None, pipe_factory=None, **kwargs):
@@ -123,10 +126,13 @@ class OwnedPcmProcess(AirPlayGroupProcess):
         self._parent_identity_reader = identity_reader or (lambda: _WindowsAudioSessionAdapter().process_identity(os.getpid()))
         self._pipe_factory = pipe_factory or _WindowsPcmPipe
         self._pcm_epoch = 0
-        self._pcm_queue = queue.Queue(maxsize=64)
+        self._pcm_queue = queue.Queue(maxsize=self.MAX_QUEUED_BYTES // 4)
         self._pcm_lock = threading.Lock()
         self._pcm_bytes = 0
         self._pcm_error = ""
+        self._pcm_high_water_bytes = 0
+        self._pcm_high_water_buffers = 0
+        self._pcm_backpressure_reason = ""
         self._pcm_stop = threading.Event()
         self._pcm_thread = None
         self._pcm_pipe = None
@@ -215,8 +221,13 @@ class OwnedPcmProcess(AirPlayGroupProcess):
         self.needs_local_output_restore = False
         self._pcm_epoch = epoch
         self._pcm_stop = threading.Event()
-        self._pcm_queue = queue.Queue(maxsize=64)
+        # Decoder buffer sizes vary. Bound descriptors by the smallest valid
+        # stereo frame; the byte budget below remains the audio-time limit.
+        # A separate 64-buffer cap rejected just 640 ms of 10 ms buffers.
+        self._pcm_queue = queue.Queue(maxsize=self.MAX_QUEUED_BYTES // 4)
         self._pcm_bytes, self._pcm_error = 0, ""
+        self._pcm_high_water_bytes = self._pcm_high_water_buffers = 0
+        self._pcm_backpressure_reason = ""
         kwargs = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1)
         if os.name == "nt":
@@ -351,15 +362,21 @@ class OwnedPcmProcess(AirPlayGroupProcess):
             # waiting for the lock. Never append audio back into a retired queue.
             if self._pcm_stop.is_set() or epoch != self._pcm_epoch or self._process is None:
                 return False
-            if self._pcm_error or self._pcm_bytes + len(content) > self.MAX_QUEUED_BYTES:
+            if self._pcm_error:
+                return False
+            if self._pcm_bytes + len(content) > self.MAX_QUEUED_BYTES:
                 self._pcm_error = "backpressure"
+                self._pcm_backpressure_reason = "byte_budget"
                 return False
             try:
                 self._pcm_queue.put_nowait(content)
             except queue.Full:
                 self._pcm_error = "backpressure"
+                self._pcm_backpressure_reason = "buffer_count"
                 return False
             self._pcm_bytes += len(content)
+            self._pcm_high_water_bytes = max(self._pcm_high_water_bytes, self._pcm_bytes)
+            self._pcm_high_water_buffers = max(self._pcm_high_water_buffers, self._pcm_queue.qsize())
         return True
 
     def _write_pcm(self, name, process, epoch, pending, stopped):
@@ -508,4 +525,9 @@ class OwnedPcmProcess(AirPlayGroupProcess):
     def diagnostics(self):
         result = super().diagnostics()
         result.update(pcm_epoch=self._pcm_epoch, pcm_error=self.pcm_error(), capture_scope="owned-player")
+        with self._pcm_lock:
+            result["pcm_queue"] = {"queued_bytes": self._pcm_bytes, "queued_buffers": self._pcm_queue.qsize(),
+                "max_queued_bytes": self.MAX_QUEUED_BYTES, "high_water_bytes": self._pcm_high_water_bytes,
+                "high_water_buffers": self._pcm_high_water_buffers,
+                "backpressure_reason": self._pcm_backpressure_reason}
         return result

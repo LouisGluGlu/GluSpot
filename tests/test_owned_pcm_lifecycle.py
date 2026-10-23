@@ -58,6 +58,34 @@ class OwnedPcmLifecycleTests(unittest.TestCase):
         self.assertFalse(writer.is_alive())
         self.assertTrue(all(pipe.closed and pipe.disposed for pipe in self.created_pipes))
 
+    def test_short_decoder_buffers_use_the_audio_byte_budget(self):
+        self.start()
+        # One second in 10 ms decoder buffers must not hit an unrelated
+        # descriptor-count limit while the pipe worker is being scheduled.
+        for index in range(100):
+            self.assertTrue(self.sender.submit_pcm(b"\x10\x00" * 882, 1), index)
+        self.assertEqual(self.sender._pcm_bytes, 176400)
+        self.assertEqual(self.sender.pcm_error(), "")
+
+    def test_observed_gui_stall_burst_is_bounded_and_retains_failure_evidence(self):
+        self.start()
+        content = b"\x10\x00" * 882
+        # Native Finder monitoring stalled the real GUI for 2.59 seconds.
+        # A burst of 260 ten-millisecond buffers must retain every byte.
+        for index in range(260):
+            self.assertTrue(self.sender.submit_pcm(content, 1), index)
+        self.assertEqual(self.sender._pcm_bytes, 458640)
+        for _ in range(140):
+            self.assertTrue(self.sender.submit_pcm(content, 1))
+        self.assertEqual(self.sender._pcm_bytes, self.sender.MAX_QUEUED_BYTES)
+        self.assertFalse(self.sender.submit_pcm(content, 1))
+        self.sender.stop()
+        evidence = self.sender.diagnostics()["pcm_queue"]
+        self.assertEqual(evidence["queued_bytes"], 0)
+        self.assertEqual(evidence["high_water_bytes"], self.sender.MAX_QUEUED_BYTES)
+        self.assertEqual(evidence["high_water_buffers"], 400)
+        self.assertEqual(evidence["backpressure_reason"], "byte_budget")
+
     def test_stop_revokes_active_member_references_but_preserves_terminal_diagnostics(self):
         self.start()
         self.sender._membership_evidence = {"pcm_epoch": 1, "confirmed_ids": (self.one.id,)}

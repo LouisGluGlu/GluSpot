@@ -320,6 +320,29 @@ int captureChild(int argc, char** argv) {
             require(pcm[index] == (index % 2 ? -sample : sample), "Fragmented PCM order changed");
         }
         require(capture->signal().meaningfulSamples == pcm.size(), "Only accepted PCM may prove meaningful signal");
+    } else if (scenario == "burst") {
+        eventually([&] { return capture->frames.load() == 65536 || !capture->error().empty(); },
+            "Burst did not reach the full capture ring");
+        Sleep(100);
+        require(capture->error().empty() && capture->droppedSamples == 0,
+            "Temporary full ring was treated as dropped audio");
+        std::vector<int16_t> first(32768);
+        require(capture->ring().tryPop(first), "Cannot release burst capacity");
+        eventually([&] { return capture->frames.load() == 81920 || !capture->error().empty(); },
+            "Pending burst did not resume after drain");
+        require(capture->error().empty() && capture->droppedSamples == 0 && capture->frames == 81920,
+            "Burst recovery lost PCM or stopped capture");
+        std::vector<int16_t> rest(131072);
+        require(capture->ring().tryPop(rest) && capture->ring().availableRead() == 0,
+            "Recovered burst count changed");
+        for (size_t index = 0; index < rest.size(); ++index) {
+            const int16_t sample = index < 98304 ? 3000 : 9000;
+            require(rest[index] == (index % 2 ? -sample : sample), "Recovered burst PCM order changed");
+        }
+    } else if (scenario == "cancel-full") {
+        eventually([&] { return capture->frames.load() == 65536 || !capture->error().empty(); },
+            "Cancellation did not reach the full ring");
+        require(capture->error().empty(), "Full-ring wait failed before cancellation");
     } else if (scenario == "overrun") {
         eventually([&] { return !capture->error().empty(); }, "Bounded queue did not fail");
         require(capture->error() == "Direct PCM queue overran" && capture->frames == 65536 &&
@@ -373,10 +396,11 @@ void realPipeLifecycle() {
         }
         child.command("verify"); child.finish();
     }
-    {
-        const auto name = newPipeName(); Child child(hostArguments(name, "overrun", created)); child.ready();
+    for (const std::string scenario : {"burst", "cancel-full", "overrun"}) {
+        const auto name = newPipeName(); Child child(hostArguments(name, scenario, created)); child.ready();
         Handle pipe; connectPipe(pipe, name);
-        for (uint64_t sequence = 1; sequence <= 5; ++sequence) writeBytes(pipe.value, packet(epoch, sequence, 16384, 3000));
+        for (uint64_t sequence = 1; sequence <= 5; ++sequence)
+            writeBytes(pipe.value, packet(epoch, sequence, 16384, scenario == "burst" && sequence == 5 ? 9000 : 3000));
         child.command("verify"); child.finish();
     }
     {
