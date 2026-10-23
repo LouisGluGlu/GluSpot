@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage
 
@@ -786,10 +787,45 @@ def _process_entry32w_type():
     return PROCESSENTRY32W
 
 
+_last_dock_process: tuple[int, str] | None = None
+
+
+def _still_running_dock_process(kernel32, pid: int, name: str) -> bool:
+    """True only if pid is alive and its image is still that Dock executable."""
+    PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE = 0x1000, 259
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != STILL_ACTIVE:
+            return False
+        buffer, size = ctypes.create_unicode_buffer(32768), ctypes.c_ulong(32768)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return False
+        return os.path.basename(buffer.value).casefold() == name.casefold()
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _running_mydockfinder_process() -> str | None:
+    global _last_dock_process
     if sys.platform != "win32":
         return None
     try:
+        # A full process snapshot costs ~12ms and this runs on every 250ms Finder
+        # material refresh. Re-check the Dock found last time first; a dead or
+        # reused pid falls through to the same full scan as before.
+        if _last_dock_process is not None:
+            pid, name = _last_dock_process
+            if _still_running_dock_process(ctypes.WinDLL("kernel32", use_last_error=True), pid, name):
+                return name
+            _last_dock_process = None
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         TH32CS_SNAPPROCESS = 0x00000002
         INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -814,6 +850,7 @@ def _running_mydockfinder_process() -> str | None:
             while True:
                 name = entry.szExeFile
                 if name.lower() in MYDOCKFINDER_PROCESS_NAMES:
+                    _last_dock_process = (int(entry.th32ProcessID), name)
                     return name
                 if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
                     break
@@ -908,29 +945,41 @@ def _average_row(image: QImage, y: int) -> QColor | None:
     return _average_area(image, y, y + 1)
 
 
+def _sampled_rgb(image: QImage, y0: int, y1: int) -> np.ndarray:
+    """Every 2nd row and 5th column of [y0, y1) as non-premultiplied RGB, alpha > 0 only."""
+    width, height = image.width(), image.height()
+    y0, y1 = max(0, y0), min(height, y1)
+    if width <= 0 or y1 <= y0:
+        return np.empty((0, 3), dtype=np.int64)
+    if image.format() != QImage.Format.Format_ARGB32:
+        image = image.convertToFormat(QImage.Format.Format_ARGB32)
+    rows = np.frombuffer(image.constBits(), dtype=np.uint8, count=image.sizeInBytes())
+    rows = rows.reshape(height, image.bytesPerLine())[y0:y1:2, :width * 4]
+    bgra = rows.reshape(rows.shape[0], width, 4)[:, ::5].reshape(-1, 4)
+    bgra = bgra[bgra[:, 3] > 0]
+    return bgra[:, 2::-1].astype(np.int64)
+
+
 def _average_area(image: QImage, y0: int, y1: int) -> QColor | None:
-    pixels: list[QColor] = []
-    for y in range(y0, y1, 2):
-        for x in range(0, image.width(), 5):
-            pixel = image.pixelColor(x, y)
-            if pixel.alpha() > 0:
-                pixels.append(pixel)
-    if not pixels:
+    # The same sampling and arithmetic as one pixelColor() per pixel, done in
+    # numpy: this runs nine times per 250ms Finder refresh on the GUI thread.
+    pixels = _sampled_rgb(image, y0, y1)
+    if not len(pixels):
         return None
     # Finder can turn almost black or white when a window maximizes. A fixed
     # HSV value band excluded those actual backgrounds and promoted foreground
     # letters/icons instead. The central background cluster includes both
     # extremes, while the bounded distance rejects sparse foreground details.
     middle = len(pixels) // 2
-    center = QColor(
-        sorted(pixel.red() for pixel in pixels)[middle],
-        sorted(pixel.green() for pixel in pixels)[middle],
-        sorted(pixel.blue() for pixel in pixels)[middle],
-    )
-    distances = sorted(_color_distance(pixel, center) for pixel in pixels)
-    radius = max(18.0, min(48.0, distances[min(len(distances) - 1, int(len(distances) * 0.75))] * 1.5))
-    background = [pixel for pixel in pixels if _color_distance(pixel, center) <= radius]
-    return _average_colors(background) or center
+    center = np.sort(pixels, axis=0)[middle]
+    delta = pixels - center
+    distances = np.sqrt(delta[:, 0] ** 2 * 0.24 + delta[:, 1] ** 2 * 0.54 + delta[:, 2] ** 2 * 0.22)
+    ranked = np.sort(distances)
+    radius = max(18.0, min(48.0, float(ranked[min(len(ranked) - 1, int(len(ranked) * 0.75))]) * 1.5))
+    background = pixels[distances <= radius]
+    if not len(background):
+        return QColor(*(int(value) for value in center))
+    return QColor(*(int(value) for value in background.sum(axis=0) // len(background)))
 
 
 def _average_colors(colors: list[QColor | None]) -> QColor | None:
