@@ -646,30 +646,13 @@ class ProviderStateTests(unittest.TestCase):
             def __init__(self):
                 calls["qq"] += 1
 
-        class QuietAuxProvider:
-            def __init__(self, *_args, **_kwargs):
-                pass
-
-            def plugins(self):
-                return ()
-
-            def messages(self):
-                return ()
-
-            def diagnostics(self):
-                return {}
-
         original_audio = providers_module.LiveAudioAnalyzer
         original_netease = providers_module.NeteasePositionReader
         original_qq = providers_module.QQPositionReader
-        original_plugins = providers_module.RealPluginProvider
-        original_messages = providers_module.WindowsMessageDetector
         original_start_loop = WindowsMediaProvider._start_loop
         providers_module.LiveAudioAnalyzer = CountingAudioAnalyzer
         providers_module.NeteasePositionReader = CountingNeteaseReader
         providers_module.QQPositionReader = CountingQQReader
-        providers_module.RealPluginProvider = QuietAuxProvider
-        providers_module.WindowsMessageDetector = QuietAuxProvider
         WindowsMediaProvider._start_loop = lambda self: None
         try:
             provider = WindowsMediaProvider(settings_getter=lambda key, default=None: {
@@ -684,8 +667,6 @@ class ProviderStateTests(unittest.TestCase):
             providers_module.LiveAudioAnalyzer = original_audio
             providers_module.NeteasePositionReader = original_netease
             providers_module.QQPositionReader = original_qq
-            providers_module.RealPluginProvider = original_plugins
-            providers_module.WindowsMessageDetector = original_messages
             WindowsMediaProvider._start_loop = original_start_loop
 
         self.assertEqual(calls, {"audio": 0, "netease": 0, "qq": 0})
@@ -961,8 +942,6 @@ class ProviderStateTests(unittest.TestCase):
         )
         provider._last_ready_at = 100.0
         provider._provider_status = "no_session"
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.has_live_audio = lambda: False
 
         retained = provider._cached_or_status_visual(106.0)
@@ -1275,8 +1254,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -1334,8 +1311,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -1728,8 +1703,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -1781,8 +1754,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -2038,8 +2009,6 @@ class ProviderStateTests(unittest.TestCase):
         provider.qq_position = None
         provider._music_player_adapter_for = lambda _source_app, _raw_source_app="": "netease"
         provider._player_position_reader_for = lambda _adapter: reader
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -2098,8 +2067,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2155,8 +2122,6 @@ class ProviderStateTests(unittest.TestCase):
             duration_for_track=lambda *_args: 220.0,
         )
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2198,8 +2163,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = None
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda _key, default=None: default
         provider._is_source_app_foreground = lambda *_args: False
         provider._read_thumbnail = lambda _properties, _track_key: asyncio.sleep(0, result=b"")
@@ -2272,8 +2235,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2343,8 +2304,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2390,8 +2349,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._queue_art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -2434,8 +2391,6 @@ class ProviderStateTests(unittest.TestCase):
                 provider._last_raw_timeline_position = provider._local_seek_position_seconds = None
                 provider._last_raw_timeline_at = provider._local_seek_at = 0.0
                 provider._art_cache = provider._queue_art_cache = {}
-                provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-                provider.message_detector = SimpleNamespace(messages=lambda: ())
                 provider.settings_getter = lambda key, default=None: {
                     "v2_enable_player_progress_plugin": True,
                     "v2_player_progress_auto_detect": True,
@@ -2682,8 +2637,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -2730,8 +2683,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = FakePositionReader()
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -3343,8 +3294,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = None
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -3421,8 +3370,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = FakePositionReader()
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -3502,8 +3449,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = None
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease",
             "v2_enable_player_progress_plugin": False,
@@ -3643,8 +3588,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._art_cache = {}
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -3711,8 +3654,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._player_anchor_fast_refresh_until = 0.0
         provider.netease_position = reader
         provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": True,
             "v2_player_progress_auto_detect": True,
@@ -3786,8 +3727,6 @@ class ProviderStateTests(unittest.TestCase):
         provider._netease_upcoming_prefetch_keys = set()
         provider.netease_position = None
         provider.qq_position = reader
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False,
@@ -3937,8 +3876,6 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         provider._last_raw_timeline_at = provider._local_seek_at = 0.0
         provider._art_cache = {}
         provider.netease_position = provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease", "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False, "v2_enable_dual_line_lyrics": False,

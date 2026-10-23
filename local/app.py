@@ -480,7 +480,6 @@ class LocalIslandApp:
         self.window.position_preset = str(saved_setting("v2_position_preset", "last") or "last")
         self.window.music_playing = bool(saved_setting("v2_music_playing", True))
         self.window.music_auto_detect = bool(saved_setting("v2_music_auto_detect", False))
-        self.window.persistent_plugin = False
         self.window.set_super_topmost(bool(saved_setting("v2_super_topmost", True)), notify=False)
         if hasattr(self.window, "set_finder_bar_style"):
             self.window.set_finder_bar_style(self.settings.get("v2_finder_bar_style", "transparent"), notify=False)
@@ -515,16 +514,12 @@ class LocalIslandApp:
         self.window.set_taskbar_left_handle_color(str(saved_setting("v2_taskbar_left_handle_color", "#8E8E93")), notify=False)
         self.window.expanded = bool(saved_setting("v2_expanded", False))
         self.window.show_seconds = bool(saved_setting("v2_show_seconds", True))
-        self.window.enabled_plugin_ids = set()
-        self.window.enabled_plugin_count = 0
         self.window.side_island_style = str(saved_setting("v2_side_island_style", "standard") or "standard")
-        self.window.plugin_island_style = str(saved_setting("v2_plugin_island_style", "standard") or "standard")
         self.window.music_island_style = str(saved_setting("v2_music_island_style", "standard") or "standard")
         self.window.set_music_expanded_layout_style(
             str(saved_setting("v2_music_expanded_layout_style", "standard") or "standard"),
             notify=False,
         )
-        self.window.time_alarm_side_display = str(saved_setting("v2_time_alarm_side_display", "note") or "note")
         ambience_style = str(saved_setting("v2_music_ambience_style", "sea_level") or "sea_level")
         if ambience_style not in DEFAULT_MUSIC_AMBIENCE_VALUES:
             ambience_style = "sea_level"
@@ -616,7 +611,6 @@ class LocalIslandApp:
         self.window.set_no_lyrics_text(str(saved_setting("v2_no_lyrics_text", "暂无歌词")), notify=False)
         position_preset = str(saved_setting("v2_position_preset", "last") or "last")
         self.window.apply_position_preset(position_preset, notify=False)
-        self.window._set_plugin_focus(min(self.window.plugin_focus_target, max(0, self.window.enabled_plugin_count - 1)), immediate=True)
         # The general placement preset may recenter the standalone surface.
         # Attach only after every saved setting has finished applying.
         if hasattr(self.window, "set_finder_bar_presence"):

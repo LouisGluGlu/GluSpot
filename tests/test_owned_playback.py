@@ -1111,8 +1111,6 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.player.play_queue(self.songs)
         external = EmptyIslandDataProvider()
         external.get_visual_data = lambda: self.fail("external poll while owned")
-        external.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        external.message_detector = SimpleNamespace(messages=lambda: ())
         provider = PlaybackSourceProvider(external, self.player, lambda key, default: default)
         self.assertEqual(provider.get_visual_data().track.track_id, "owned:netease:1")
         self.assertIsNone(provider.get_audio_frame())

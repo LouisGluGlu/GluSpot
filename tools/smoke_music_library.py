@@ -64,8 +64,6 @@ class FixtureSystem(EmptyIslandDataProvider):
     """An empty source injected through the established provider boundary."""
     def __init__(self, output, **_kwargs):
         super().__init__()
-        self.message_detector = SimpleNamespace(messages=lambda: ())
-        self.plugin_provider = SimpleNamespace(plugins=lambda: ())
         self.lyrics_store = LocalLyricsStore(root=output / "lyrics")
         self.suspensions = 0
         self.closed = False

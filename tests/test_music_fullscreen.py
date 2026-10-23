@@ -6342,15 +6342,10 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         island = IslandStackVisual()
         try:
             island.music_fullscreen_overlay = VisibleSurface()
-            island.barrage_clock = 2.0
-            hover_plan = SimpleNamespace(hovered=True, clock_delta=0.25)
             with (
                 patch("local.island_stack_visual.time.monotonic", return_value=12.0),
                 patch.object(island, "_refresh_media_data", return_value=True) as refresh_media,
                 patch.object(island, "_update_scene_state") as update_scene,
-                patch.object(island, "_prune_expired_messages") as prune_messages,
-                patch.object(island, "_handle_fullscreen_overlay_sync") as sync_overlays,
-                patch.object(island, "_barrage_hover_clock_plan", return_value=hover_plan) as barrage_plan,
                 patch.object(island, "_handle_music_lyric_tick", return_value=True) as lyric_tick,
                 patch.object(island, "_handle_tick_follow_refresh") as follow_refresh,
                 patch.object(island, "_handle_tick_overlay_clock_and_topmost") as topmost_tick,
@@ -6362,17 +6357,12 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
             refresh_media.assert_called_once_with(12.0)
             update_scene.assert_called_once_with(12.0)
-            prune_messages.assert_not_called()
-            sync_overlays.assert_not_called()
-            barrage_plan.assert_not_called()
             lyric_tick.assert_called_once_with(12.0, island._animation_speed_factor())
             follow_refresh.assert_not_called()
             topmost_tick.assert_not_called()
             frame_execution.assert_not_called()
             force_topmost.assert_not_called()
             island_update.assert_not_called()
-            self.assertFalse(island.barrage_hovered)
-            self.assertEqual(island.barrage_clock, 2.0)
         finally:
             island.music_fullscreen_overlay = None
             island.close()

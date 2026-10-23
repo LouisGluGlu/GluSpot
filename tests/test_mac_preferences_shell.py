@@ -157,24 +157,6 @@ class MacPreferencesShellTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_plugin_manager_uses_same_mac_preferences_shell_regions(self):
-        source = self._source("local/plugin_manager_window.py")
-
-        self.assertIn("mac_preferences_stylesheet", source)
-        self.assertIn("mac_traffic_lights(self)", source)
-        self.assertIn("mac_sidebar_icon(", source)
-        self.assertIn("FramelessWindowHint", source)
-        self.assertNotIn("WindowCloseButtonHint", source)
-        self.assertNotIn("WindowMinimizeButtonHint", source)
-        self.assertNotIn("WindowMaximizeButtonHint", source)
-        self.assertIn('setObjectName("MacSidebar")', source)
-        self.assertIn('setObjectName("MacSearch")', source)
-        self.assertIn('setObjectName("MacSidebarList")', source)
-        self.assertIn('setObjectName("MacTitleBar")', source)
-        self.assertIn('setObjectName("MacTitle")', source)
-        self.assertIn('setObjectName("MacContentScroll")', source)
-        self.assertIn('setObjectName("MacCard")', source)
-
     def test_about_diagnostics_can_export_support_payload(self):
         from local.settings_window import SettingsWindow
 
@@ -197,23 +179,6 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("_empty_bar_color", thin_bar_source)
         self.assertNotIn("self._animation_speed_factor()", thin_bar_source)
         self.assertNotIn("_empty_bar_colors", thin_bar_source)
-
-    def test_plugin_click_no_longer_opens_plugin_settings_window(self):
-        source = self._source("local/island_stack_visual.py")
-
-        activate_start = source.index("def _activate_key")
-        activate_end = source.index("def _open_plugin_manager", activate_start)
-        activate_source = source[activate_start:activate_end]
-        self.assertNotIn("_open_plugin_manager", activate_source)
-
-    def test_plugin_manager_has_real_controls_for_three_plugins(self):
-        source = self._source("local/plugin_manager_window.py")
-
-        self.assertIn("v2_weather_use_location", source)
-        self.assertIn("v2_weather_manual_location", source)
-        self.assertIn("v2_schedule_reminder_minutes", source)
-        self.assertIn("v2_alarm_rows", source)
-        self.assertIn("课表读取录入", source)
 
     def test_music_background_preview_uses_three_current_styles_and_system_theme(self):
         from local.settings_window import MusicAmbiencePreview, SettingsWindow
@@ -963,30 +928,6 @@ class MacPreferencesShellTests(unittest.TestCase):
                     window.deleteLater()
                     self.app.processEvents()
 
-    def test_plugin_timer_start_button_aligns_with_its_minutes_input(self):
-        from PySide6.QtWidgets import QPushButton
-        from local.mac_style import mac_preferences_theme
-        from local.plugin_manager_window import PluginManagerWindow
-
-        for dark in (False, True):
-            with self.subTest(dark=dark), mock.patch(
-                "local.plugin_manager_window.mac_preferences_theme", return_value=mac_preferences_theme(dark),
-            ):
-                window = PluginManagerWindow("TIME")
-                try:
-                    window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
-                    window.show()
-                    start = next(button for button in window.findChildren(QPushButton) if button.text() == "开始")
-                    for width, height in ((680, 560), (860, 620)):
-                        window.resize(width, height)
-                        self.app.processEvents()
-                        self.assertEqual(start.geometry().top(), window.minutes_input.geometry().top())
-                        self.assertEqual(start.geometry().bottom(), window.minutes_input.geometry().bottom())
-                finally:
-                    window.close()
-                    window.deleteLater()
-                    self.app.processEvents()
-
     def test_retired_effects_have_no_settings_search_entry(self):
         from local.settings_window import SettingsWindow
 
@@ -1248,18 +1189,6 @@ class MacPreferencesShellTests(unittest.TestCase):
 
         self.assertEqual(app.settings.values["v2_last_window_position"], {"x": 432, "y": 210})
         self.assertTrue(app.settings.saved)
-
-    def test_path_settings_expose_file_picker_buttons(self):
-        source = self._source("local/settings_window.py")
-
-        self.assertIn("_path_picker_row", source)
-        self.assertNotIn("_browse_mydockfinder_path", source)
-        self.assertIn("_browse_music_app_profile_path", source)
-        self.assertIn("_browse_betterncm_path", source)
-        self.assertIn("_browse_schedule_json_path", source)
-        self.assertIn("_browse_schedule_ics_path", source)
-        self.assertIn("getOpenFileName", source)
-        self.assertIn("getExistingDirectory", source)
 
     def test_disabled_settings_options_are_visually_gray(self):
         style = self._source("local/mac_style.py")

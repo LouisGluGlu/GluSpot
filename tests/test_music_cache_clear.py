@@ -90,8 +90,6 @@ class MusicCacheClearTests(unittest.TestCase):
         provider._last_refresh_at = 100.0
         provider._source_app_foreground_at = 0.0
         provider.netease_position = provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease", "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False, "v2_enable_dual_line_lyrics": False,

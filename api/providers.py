@@ -34,12 +34,8 @@ from api.artwork_sources import (
 )
 from api.lyrics import LocalLyricsStore
 from api.lyric_timeline import has_sufficient_word_timing
-# Compatibility imports for older callers/tests; active providers never
-# construct these retired collectors.
-from api.message_detector import WindowsMessageDetector
 from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData, TrackData
 from api.netease_position import NeteasePositionReader, QQPositionReader
-from api.plugin_provider import RealPluginProvider
 from local.runtime_platform import owned_playback_only
 
 
@@ -543,11 +539,6 @@ class WindowsMediaProvider:
         self._audio_analyzer_last_error = ""
         self.netease_position: NeteasePositionReader | None = None
         self.qq_position: QQPositionReader | None = None
-        # Preserve the old accessors for diagnostics/callers without creating
-        # collectors. Retired settings cannot start UIA/notification polling,
-        # weather HTTP threads, timers or agenda-file work.
-        self.plugin_provider = EmptyIslandDataProvider()
-        self.message_detector = self.plugin_provider
         self._audio_route_controller = None
         self._audio_route_init_lock = threading.Lock()
         self._audio_route_closed = False
@@ -1371,8 +1362,6 @@ class WindowsMediaProvider:
             "audio": self._audio_diagnostics(),
             "netease_position": self.netease_position.diagnostics() if self.netease_position is not None else self._cold_attachment_diagnostics("netease"),
             "qq_position": self.qq_position.diagnostics() if self.qq_position is not None else self._cold_attachment_diagnostics("qq"),
-            "plugins": self.plugin_provider.diagnostics(),
-            "messages": self.message_detector.diagnostics(),
         }
 
     def _music_cache_diagnostics(self) -> dict[str, object]:

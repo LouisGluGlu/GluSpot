@@ -563,8 +563,6 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         provider._last_raw_timeline_at = provider._local_seek_at = 0.0
         provider._art_cache = {}
         provider.netease_position = provider.qq_position = None
-        provider.plugin_provider = SimpleNamespace(plugins=lambda: ())
-        provider.message_detector = SimpleNamespace(messages=lambda: ())
         provider.settings_getter = lambda key, default=None: {
             "v2_music_player_mode": "netease", "v2_enable_player_progress_plugin": False,
             "v2_player_progress_auto_detect": False, "v2_enable_dual_line_lyrics": False,

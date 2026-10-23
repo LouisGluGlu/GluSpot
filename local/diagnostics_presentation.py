@@ -57,28 +57,8 @@ DIAGNOSTIC_FIELD_ROWS: tuple[tuple[str, str], ...] = (
     ("visual_frame_long_frames", "渲染慢帧"),
     ("visual_paint_hot_groups", "绘制耗时分组"),
     ("visual_paint_hot_sections", "绘制耗时热点"),
-    ("message_cached", "消息缓存"),
-    ("message_notification_access", "通知权限"),
-    ("message_notification_apps", "通知应用"),
-    ("message_detection_enabled", "消息识别总开关"),
-    ("wechat_notification_enabled", "微信新消息通知"),
-    ("wechat_detail_notification_enabled", "微信详细消息通知"),
-    ("qq_notification_enabled", "QQ 消息"),
-    ("dingtalk_notification_enabled", "钉钉消息"),
-    ("message_wechat", "微信 UIA"),
-    ("message_wechat_native", "微信窗口句柄"),
-    ("message_wechat_items", "微信会话样本"),
-    ("message_wechat_error", "微信识别错误"),
-)
-
-
-DIAGNOSTIC_FIELD_ROWS = (
-    DIAGNOSTIC_FIELD_ROWS[:48]
-    + (
-        ("runtime_experiment_plan", "运行实验"),
-        ("runtime_experiment_compare", "实验对比"),
-    )
-    + DIAGNOSTIC_FIELD_ROWS[48:]
+    ("runtime_experiment_plan", "运行实验"),
+    ("runtime_experiment_compare", "实验对比"),
 )
 
 
@@ -108,7 +88,6 @@ def format_settings_diagnostics(
     audio = _mapping(data.get("audio"))
     netease_position = _mapping(data.get("netease_position"))
     qq_position = _mapping(data.get("qq_position"))
-    messages = _mapping(data.get("messages"))
     mydockfinder = _mapping(data.get("mydockfinder_diagnostics"))
     position_confidence = data.get("position_confidence", data.get("visible_position_confidence", 0.0))
     mode_labeler = music_player_mode_label or _default_mode_label
@@ -172,26 +151,6 @@ def format_settings_diagnostics(
         "visual_paint_hot_sections": format_visual_paint_hot_sections(
             _mapping(data.get("visual_paint_section_diagnostics"))
         ),
-        "message_cached": messages.get("cached_messages", 0),
-        "message_notification_access": messages.get("notification_access") or "-",
-        "message_notification_apps": _join_sequence(messages.get("last_notification_apps"), separator=" / ") or "-",
-        "message_detection_enabled": _enabled_text(messages.get("message_detection_enabled")),
-        "wechat_notification_enabled": _enabled_text(messages.get("wechat_notification_enabled")),
-        "wechat_detail_notification_enabled": _enabled_text(messages.get("wechat_detail_notification_enabled")),
-        "qq_notification_enabled": _enabled_text(messages.get("qq_notification_enabled")),
-        "dingtalk_notification_enabled": _enabled_text(messages.get("dingtalk_notification_enabled")),
-        "message_wechat": (
-            f"{messages.get('wechat_backend') or '-'} / "
-            f"{messages.get('wechat_window_count', 0)} UIA 窗口 / "
-            f"{messages.get('wechat_session_count', 0)} 会话 / "
-            f"{messages.get('wechat_total_unread_count', messages.get('wechat_unread_count', 0))} 总未读"
-        ),
-        "message_wechat_native": (
-            f"{messages.get('wechat_native_window_count', 0)} 窗口 / "
-            + (_join_sequence(messages.get("wechat_native_windows"), separator=" | ") or "-")
-        ),
-        "message_wechat_items": _join_sequence(messages.get("wechat_debug_items"), separator=" | ") or "-",
-        "message_wechat_error": messages.get("wechat_error") or "-",
     }
 
 
