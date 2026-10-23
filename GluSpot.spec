@@ -15,6 +15,8 @@ if not (DISCOVERY_LICENSES / "SOURCE.json").is_file():
     raise RuntimeError("Run packaging/windows/prepare-audio-licenses.py before packaging")
 
 datas = [
+    (str(ROOT / "LICENSE"), "."),
+    (str(ROOT / "THIRD_PARTY_NOTICES.md"), "."),
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "data"), "data"),
     (str(ROOT / "lyrics"), "lyrics"),
