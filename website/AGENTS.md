@@ -2,6 +2,16 @@
 
 ## Approved product direction
 
+- The bottom pill and first native island are the same persistent DOM element. As the page scrolls it grows along an upward arc, then settles downward into its desktop position. It must reverse along the same path when scrolling back; do not replace it with a separately appearing island or enlarge it against the bottom edge.
+- Tasker and Finder use the application's no-background bar style, with no colored strip behind their cover and lyrics. Keep the simulated desktop wallpaper legible through a light blur; avoid the previous heavy gray fog treatment.
+- Wheel input advances both finite chapters at one ninth of the earlier sensitivity, with a short continuous frame interpolation instead of jumps. Both retain the same mandatory timeline completion rule. DJ state classes must remain distinct from the old `.dj-ready` status helper to prevent a horizontal flex collapse.
+
+- 2026-10-23 storyboard supersedes the old first-screen player: opening logo, GluSpot and tagline hold for 5 seconds or until the first downward gesture; then collapse into the header and a headline-only hero with a visible next-section edge. A persistent bottom pill becomes the actual album-colored island.
+- The next pinned chapter autoplays Free, Top, Tasker and Finder, each with 3-second holds and 0.5-second transitions. Each uses a different supplied lyric line. Finder is labelled MyDockFinder adaptation. Wheel/touch direction scrubs the story; downward exit unlocks at its end.
+- Then show island/window/fullscreen transitions with an autoplay/scrub progress strip, followed by continuous native highlighting of the user-authored phrase “音乐高光，感知清晰！” and the multi-device room. Keep the other product information, DJ and downloads afterward. Reduced motion and keyboard access must remain usable.
+- The three user storyboard screenshots are the current visual authority; use native source assets instead of reproducing their placeholder boxes. Keep the base page solid dark; restrained artwork-derived glow behind the headline is allowed.
+- Keep the already published website commit as the preceding version. Do not deploy this new storyboard until it has passed a fresh visual and interaction check.
+
 - Selected concept: the second dark immersive landing page, centered Chinese headline, glass player and four-layout selector.
 - The brand mark begins centered, then shrinks into the page header. Keep the product window demonstration at 700 × 380.
 - Traffic-light controls appear only in settings, never in the player or island.

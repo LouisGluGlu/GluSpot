@@ -1,0 +1,89 @@
+{
+  "phrase": "音乐高光，感知清晰！",
+  "application_version": "6.417",
+  "video": {
+    "file": "music-highlight.webm",
+    "bytes": 348232,
+    "sha256": "196028c6150d61218429e388e5ae870a75af4257b8d48186ba06cbf58a3221e0",
+    "alpha_mode": 1,
+    "decoded_alpha_extrema": [
+      0,
+      255
+    ],
+    "decoded_frames": 240
+  },
+  "poster": "music-highlight.png",
+  "dimensions": [
+    960,
+    300
+  ],
+  "frames": 240,
+  "fps": 30,
+  "duration_seconds": 8,
+  "unique_frames": 240,
+  "native_strategy": "gold",
+  "native_lift_level": 4,
+  "native_mode": [
+    "scatter_glow"
+  ],
+  "native_dispatch": "_paint_surface_frame -> explicit_slow_unit_groups -> _real_sparse_glyph_states -> _paint_sparse_glyph_run",
+  "native_effect": "Production eight-stage glyph lift/scale/glow plus continuous read front",
+  "timing": "Explicitly authored synthetic character clocks for this user-authored marketing phrase; not measured or aligned to music.",
+  "authored_clocks": [
+    {
+      "text": "音",
+      "start": 0,
+      "end": 0.9
+    },
+    {
+      "text": "乐",
+      "start": 0.9,
+      "end": 1.8
+    },
+    {
+      "text": "高",
+      "start": 1.8,
+      "end": 2.7
+    },
+    {
+      "text": "光",
+      "start": 2.7,
+      "end": 3.6
+    },
+    {
+      "text": "，",
+      "start": 3.6,
+      "end": 3.8
+    },
+    {
+      "text": "感",
+      "start": 3.8,
+      "end": 4.7
+    },
+    {
+      "text": "知",
+      "start": 4.7,
+      "end": 5.6
+    },
+    {
+      "text": "清",
+      "start": 5.6,
+      "end": 6.5
+    },
+    {
+      "text": "晰",
+      "start": 6.5,
+      "end": 7.4
+    },
+    {
+      "text": "！",
+      "start": 7.4,
+      "end": 7.6
+    }
+  ],
+  "palette": "Production artwork_surface_palette from the existing Chace artwork; white read text and native artwork-derived unread tone",
+  "isolation": "Non-active rows and non-lyric decoration omitted; native glyph renderer unchanged; 1:1 DPR2 pixel crop recentered as one group, no glyph scaling after render",
+  "loop": "8-second clip replays the authored reading demonstration; end-to-start reset is intentional",
+  "provenance": "User literal wording, actual production Qt renderer. No audio, account, network or desktop capture.",
+  "integration": "Contains the entire phrase: use as visible headline, with accessible text/alt to avoid duplicate visible DOM wording. video loop muted playsInline; pause preserves currentTime; PNG for reduced motion."
+}

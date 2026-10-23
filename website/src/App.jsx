@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  ArrowDown,
   ArrowRight,
   ArrowUpRight,
   Check,
@@ -25,6 +24,8 @@ import {
   WindowsLogo,
   X,
 } from "@phosphor-icons/react";
+import { OpeningHero, IslandStory, SurfaceStory, HighlightStory } from "./StoryExperience.jsx";
+import { storyDuration } from "./storyTimeline.js";
 
 const ASSET = "/assets/";
 const REPO = "https://github.com/LouisGluGlu/GluSpot";
@@ -57,11 +58,6 @@ const SONGS = [
     translation: "goodboy noah",
     tone: "noah",
   },
-];
-const STORIES = [
-  { label: "音乐岛", view: "island" },
-  { label: "窗口", view: "window" },
-  { label: "全屏", view: "fullscreen" },
 ];
 const LAYOUTS = [
   { id: "album", label: "专辑封面", icon: Disc },
@@ -138,21 +134,49 @@ function Ambience({ songIndex, motion = true, className = "" }) {
   );
 }
 function IntroLogo({ onComplete }) {
-  const logo = useRef(null);
+  const logo = useRef(null), host = useRef(null);
   useLayoutEffect(() => {
     const node = logo.current;
     const target = document.querySelector(".site-header .brand img");
     if (!node || !target) { onComplete(); return; }
-    const from = node.getBoundingClientRect(), to = target.getBoundingClientRect();
-    const animation = node.animate([
-      { transform: "translate(0,0) scale(1)", offset: 0 },
-      { transform: "translate(0,0) scale(1)", offset: 0.28 },
-      { transform: `translate(${to.left-from.left}px,${to.top-from.top}px) scale(${to.width/from.width})`, offset: 1 },
-    ], { duration: 1600, easing: "cubic-bezier(.65,0,.22,1)", fill: "forwards" });
-    animation.onfinish = onComplete;
-    return () => animation.cancel();
+    let started = false, touchY = null, animations = [];
+    const previousOverflow = document.body.style.overflow;
+    window.scrollTo({ top: 0, behavior: "instant" });
+    document.body.style.overflow = "hidden";
+    host.current?.focus({ preventScroll: true });
+    const begin = () => {
+      if (started) return;
+      started = true;
+      window.scrollTo({ top: 0, behavior: "instant" });
+      const from = node.getBoundingClientRect(), to = target.getBoundingClientRect();
+      host.current?.classList.add("leaving");
+      const animation = node.animate([
+        { transform: "translate(0,0) scale(1)" },
+        { transform: `translate(${to.left-from.left}px,${to.top-from.top}px) scale(${to.width/from.width})` },
+      ], { duration: 1000, easing: "cubic-bezier(.65,0,.22,1)", fill: "forwards" });
+      animations.push(animation);
+      animation.onfinish = onComplete;
+    };
+    const timer = window.setTimeout(begin, 5000);
+    const wheel = event => { if (event.deltaY > 0) { event.preventDefault(); begin(); } };
+    const touchStart = event => { touchY = event.touches[0]?.clientY; };
+    const touchMove = event => { if (touchY !== null && event.touches[0]?.clientY < touchY) { event.preventDefault(); begin(); } };
+    const key = event => { if (event.key === "Tab") event.preventDefault(); if (["ArrowDown", "PageDown", " ", "Enter", "Escape"].includes(event.key)) { event.preventDefault(); begin(); } };
+    document.addEventListener("wheel", wheel, { passive: false });
+    document.addEventListener("touchstart", touchStart, { passive: true });
+    document.addEventListener("touchmove", touchMove, { passive: false });
+    document.addEventListener("keydown", key);
+    return () => {
+      clearTimeout(timer);
+      animations.forEach(animation => animation.cancel());
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("wheel", wheel);
+      document.removeEventListener("touchstart", touchStart);
+      document.removeEventListener("touchmove", touchMove);
+      document.removeEventListener("keydown", key);
+    };
   }, [onComplete]);
-  return <div className="intro-logo" aria-hidden="true"><div className="intro-veil" /><img ref={logo} src={`${ASSET}gluspot.svg`} alt="" /></div>;
+  return <div ref={host} className="intro-logo" role="dialog" aria-modal="true" tabIndex="-1" aria-label="GluSpot 欢迎画面，5 秒后进入，也可按回车或 Escape 继续"><div className="intro-veil" /><img ref={logo} src={`${ASSET}gluspot.svg`} alt="GluSpot" /><div className="intro-wordmark"><strong>GluSpot</strong><span>让音乐，融入桌面</span></div></div>;
 }
 function Lyric({ song, playing, translated, motion = true, clock }) {
   const player = useRef(null);
@@ -547,7 +571,7 @@ function PersonalDjDemo({ song, motion, onNext }) {
   }, [speaking, motion, visible, song.tone]);
   const state = speaking ? "speaking" : "ready";
   return (
-    <div ref={card} className={`dj-card glass dj-${state}`}>
+    <div ref={card} className={`dj-card glass dj-state-${state}`}>
       <span className="dj-eyebrow">
         <img src={`${ASSET}personal-fm.svg`} alt="" width="25" height="25" />
         私人漫游 · PRIVATE DJ
@@ -593,13 +617,14 @@ function PersonalDjDemo({ song, motion, onNext }) {
     </div>
   );
 }
-function NativeIsland({ song, mode = "free", className = "", onClick }) {
+function NativeIsland({ song, mode = "free", className = "", onClick, tabIndex = 0 }) {
   return (
     <button
       className={`native-island ${className}`}
       onClick={onClick}
       aria-label="点击音乐岛展开播放界面"
       title="点击展开播放界面"
+      tabIndex={tabIndex}
     >
       <img
         src={`${ASSET}islands/${song.tone}-${mode}.png`}
@@ -630,84 +655,37 @@ export function App() {
     [motion, setMotion] = useState(
       () => !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     ),
-    [islandMode, setIslandMode] = useState("free"),
-    [barKind, setBarKind] = useState("tasker"),
-    [presentation, setPresentation] = useState("window"),
-    [storyIndex, setStoryIndex] = useState(1),
-    [autoPlay, setAutoPlay] = useState(
-      () => !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-    ),
-    [pageVisible, setPageVisible] = useState(!document.hidden),
-    [demoVisible, setDemoVisible] = useState(true);
+    [presentation, setPresentation] = useState("island"),
+    [pageVisible, setPageVisible] = useState(!document.hidden);
   const playerRef = useRef(null),
-    stageRef = useRef(null),
-    storyRef = useRef(null);
+    surfaceController = useRef(null);
   const lyricClock = useRef({ tone: SONGS[0].tone, time: 0 });
-  const beforeRect = useRef(null),
-    elapsed = useRef(0);
-  const STORY_MS = 7500;
-  const changePresentation = (next) => {
-    if (next === presentation) return;
-    beforeRect.current = playerRef.current?.getBoundingClientRect();
-    playerRef.current?.getAnimations().forEach((a) => a.cancel());
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash || hash === "#top") return;
+    const frame = requestAnimationFrame(() => document.getElementById(hash.slice(1))?.scrollIntoView({ behavior: "instant", block: "start" }));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  const manualView = (next) => {
+    const index = next === "island" ? 0 : next === "fullscreen" ? 2 : 1;
+    surfaceController.current?.seek(index * 3500 / storyDuration(3));
     setPresentation(next);
   };
-  const showStory = (index) => {
-    const item = STORIES[index];
-    elapsed.current = 0;
-    storyRef.current?.style.setProperty("--story-progress", "0");
-    setStoryIndex(index);
-    changePresentation(item.view);
-  };
-  const manualView = (next) => {
-    elapsed.current = 0;
-    setStoryIndex(next === "island" ? 0 : next === "fullscreen" ? 2 : 1);
-    changePresentation(next);
-  };
   const manualLayout = (next) => {
-    elapsed.current = 0;
     const current = playerRef.current?.querySelector(".native-lyric-demo video");
     if (current) lyricClock.current.time = current.currentTime;
     setLayout(next);
-    if (presentation === "island") changePresentation("window");
+    if (presentation === "island") manualView("window");
   };
   const manualSong = (next) => {
-    elapsed.current = 0;
     if (next !== songIndex) lyricClock.current = { tone: SONGS[next].tone, time: 0 };
     setSongIndex(next);
   };
-  useLayoutEffect(() => {
-    const node = playerRef.current,
-      from = beforeRect.current;
-    beforeRect.current = null;
-    if (!node || !from || !motion) return;
-    const to = node.getBoundingClientRect();
-    const animation = node.animate(
-      [
-        {
-          transform: `translate(${from.left - to.left}px,${from.top - to.top}px) scale(${from.width / to.width},${from.height / to.height})`,
-        },
-        { transform: "translate(0,0) scale(1,1)" },
-      ],
-      {
-        duration: 740,
-        easing: "cubic-bezier(.22,.85,.2,1)",
-        transformOrigin: "top left",
-      },
-    );
-    return () => animation.cancel();
-  }, [presentation, motion]);
   useEffect(() => {
     const visibility = () => setPageVisible(!document.hidden);
     document.addEventListener("visibilitychange", visibility);
-    const observer = new IntersectionObserver(
-      (entries) => setDemoVisible(entries[0].isIntersecting),
-      { threshold: 0.12 },
-    );
-    if (stageRef.current) observer.observe(stageRef.current);
     return () => {
       document.removeEventListener("visibilitychange", visibility);
-      observer.disconnect();
     };
   }, []);
   useEffect(() => {
@@ -730,42 +708,6 @@ export function App() {
     });
     return () => observer.disconnect();
   }, []);
-  useEffect(() => {
-    if (
-      !autoPlay ||
-      !motion ||
-      !pageVisible ||
-      !demoVisible ||
-      settings === "open" ||
-      settings === "expanded"
-    )
-      return;
-    let frame = 0,
-      previous = null;
-    const tick = (now) => {
-      if (previous !== null) elapsed.current += Math.min(100, now - previous);
-      previous = now;
-      storyRef.current?.style.setProperty(
-        "--story-progress",
-        `${Math.min(1, elapsed.current / STORY_MS)}`,
-      );
-      if (elapsed.current >= STORY_MS) {
-        showStory((storyIndex + 1) % STORIES.length);
-        return;
-      }
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [
-    autoPlay,
-    motion,
-    pageVisible,
-    demoVisible,
-    settings,
-    storyIndex,
-    presentation,
-  ]);
   useEffect(() => {
     const active = settings === "open" || settings === "expanded";
     if (!active) return;
@@ -790,12 +732,12 @@ export function App() {
       style={glassStyle}
     >
       {!introDone && <IntroLogo onComplete={finishIntro} />}
-      <a className="skip-link" href="#player">
+      <a className="skip-link" href="#player-story" inert={!introDone}>
         跳到互动演示
       </a>
       <header
         className="site-header"
-        inert={settings === "open" || settings === "expanded"}
+        inert={!introDone || settings === "open" || settings === "expanded"}
       >
         <a className="brand" href="#top" aria-label="GluSpot 首页">
           <img src={`${ASSET}gluspot.svg`} alt="" width="50" height="50" />
@@ -803,7 +745,7 @@ export function App() {
         </a>
         <nav aria-label="主导航">
           <a href="#island">音乐岛</a>
-          <a href="#experience">播放体验</a>
+          <a href="#player-story">播放体验</a>
           <a href="#download">下载</a>
         </nav>
         <a
@@ -818,32 +760,27 @@ export function App() {
           <ArrowUpRight className="github-arrow" size={14} />
         </a>
       </header>
-      <main inert={settings === "open" || settings === "expanded"}>
-        <section className="hero" aria-labelledby="hero-title">
-          <div className="hero-copy">
-            <h1 id="hero-title">
-              让音乐
-              <br />
-              融入桌面。
-            </h1>
-            <p>一座音乐岛，四种听歌方式。</p>
-          </div>
+      <main inert={!introDone || settings === "open" || settings === "expanded"}>
+        <OpeningHero />
+        <IslandStory backdrop={DesktopBackdrop} motion={motion} opening={!introDone} />
+        <SurfaceStory onPresentation={setPresentation} controller={surfaceController} motion={motion} enabled={settings === "closed"}>
           <div
             className={`player-wrap presentation-${presentation}`}
             id="player"
           >
-            <div ref={stageRef} className="player-stage">
+            <div className="player-stage">
               <DesktopBackdrop />
               <article
                 ref={playerRef}
-                className={`player glass layout-${layout} view-${presentation}`}
+                className={`player glass surface-morph layout-${layout} view-window`}
+                data-presentation={presentation}
                 aria-label="GluSpot 互动播放器演示"
               >
                 <NativeIsland
                   song={song}
                   className="hero-native-island"
+                  tabIndex={presentation === "island" ? 0 : -1}
                   onClick={() => {
-                    elapsed.current = 0;
                     manualView("window");
                   }}
                 />
@@ -852,7 +789,7 @@ export function App() {
                   motion={motion && pageVisible && presentation !== "island"}
                   className="player-ambience"
                 />
-                <div className="player-topline">
+                <div className="player-topline" inert={presentation === "island"}>
                   <span className="demo-tag">
                     GLUSPOT <span>／ 交互演示 · 无音频</span>
                   </span>
@@ -874,7 +811,6 @@ export function App() {
                     <IconButton
                       label="收拢为音乐岛"
                       onClick={() => {
-                        elapsed.current = 0;
                         manualView("island");
                       }}
                     >
@@ -887,7 +823,6 @@ export function App() {
                           : "切换到全屏展示"
                       }
                       onClick={() => {
-                        elapsed.current = 0;
                         manualView(
                           presentation === "fullscreen"
                             ? "window"
@@ -912,7 +847,7 @@ export function App() {
                     </IconButton>
                   </div>
                 </div>
-                <div className="player-content">
+                <div className="player-content" inert={presentation === "island"}>
                   <div className="album-block">
                     <div className="cover-frame">
                       <div className="cover-stack">
@@ -1027,38 +962,6 @@ export function App() {
                 点击音乐岛，展开播放界面
               </span>
             </div>
-            <div className="story-controls" ref={storyRef}>
-              <div
-                className="story-steps"
-                role="group"
-                aria-label="自动演示章节"
-              >
-                {STORIES.map((item, index) => (
-                  <button
-                    key={item.label}
-                    aria-label={`演示：${item.label}`}
-                    aria-pressed={storyIndex === index}
-                    className={storyIndex === index ? "active" : ""}
-                    onClick={() => showStory(index)}
-                  >
-                    <span>{item.label}</span>
-                    <i aria-hidden="true" />
-                  </button>
-                ))}
-              </div>
-              <button
-                className="story-toggle"
-                disabled={!motion}
-                aria-label={autoPlay ? "暂停自动演示" : "播放自动演示"}
-                onClick={() => setAutoPlay((x) => !x)}
-              >
-                {autoPlay ? (
-                  <Pause size={17} weight="fill" />
-                ) : (
-                  <Play size={17} weight="fill" />
-                )}
-              </button>
-            </div>
             <div className="song-switch" role="group" aria-label="演示歌曲">
               {SONGS.map((item, i) => (
                 <button
@@ -1076,111 +979,9 @@ export function App() {
               ))}
             </div>
           </div>
-          <div className="hero-download">
-            <a
-              className="primary-button"
-              href={RELEASE}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <WindowsLogo size={25} weight="fill" />
-              <span>下载 Windows 版</span>
-              <ArrowUpRight size={22} />
-            </a>
-            <p>
-              Windows 10 / 11 x64 <span>·</span> 6.417
-            </p>
-            <div className="hero-meta-links">
-              <button onClick={() => setSettings("open")}>
-                <GearSix size={17} />
-                试试外观设置
-              </button>
-              <span />
-              <a href={REPO} target="_blank" rel="noreferrer">
-                <GithubLogo size={17} />
-                开源项目 <ArrowUpRight size={13} />
-              </a>
-            </div>
-          </div>
-        </section>
+        </SurfaceStory>
+        <HighlightStory motion={motion && pageVisible} />
         <RoomExperience motion={motion && pageVisible} />
-        <section
-          className="island-section section-shell"
-          id="island"
-          aria-labelledby="island-title"
-        >
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">小小一座岛，刚刚好的存在</span>
-              <h2 id="island-title">
-                留一点空间，
-                <br />
-                给喜欢的歌。
-              </h2>
-            </div>
-            <p>
-              自由悬浮，贴合顶部，或融入桌面栏。
-              <br />
-              封面、歌词和播放状态，始终触手可及。
-            </p>
-          </div>
-          <div
-            className={`island-stage mode-${islandMode} ${islandMode === "bar" && barKind === "finder" ? "finder-preview" : ""}`}
-          >
-            <DesktopBackdrop />
-            <span className="desktop-label">YOUR DESKTOP, YOUR MUSIC.</span>
-            <NativeIsland
-              song={song}
-              mode={islandMode === "bar" ? barKind : islandMode}
-              className="stage-native"
-              onClick={() => {
-                manualView("window");
-                document.getElementById("player")?.scrollIntoView({
-                  behavior: motion ? "smooth" : "instant",
-                  block: "center",
-                });
-              }}
-            />
-            <div className="desktop-bar">
-              <img src={`${ASSET}gluspot.svg`} width="24" height="24" alt="" />
-              <span>音乐，正在发生。</span>
-              <span>GluSpot</span>
-            </div>
-          </div>
-          {islandMode === "bar" && (
-            <div className="bar-variants" role="group" aria-label="沉浸栏环境">
-              <button
-                aria-pressed={barKind === "tasker"}
-                onClick={() => setBarKind("tasker")}
-              >
-                任务栏
-              </button>
-              <button
-                aria-pressed={barKind === "finder"}
-                onClick={() => setBarKind("finder")}
-              >
-                Finder 栏
-              </button>
-            </div>
-          )}
-          <div className="island-selector" role="group" aria-label="音乐岛形态">
-            {[
-              ["free", "Free", "自由悬浮"],
-              ["top", "Top", "贴合顶部"],
-              ["bar", "沉浸栏", "融入桌面栏"],
-            ].map(([id, name, hint]) => (
-              <button
-                key={id}
-                aria-pressed={islandMode === id}
-                onClick={() => setIslandMode(id)}
-              >
-                <strong>{name}</strong>
-                <span>{hint}</span>
-                {islandMode === id && <Check size={16} />}
-              </button>
-            ))}
-          </div>
-        </section>
         <section
           className="sources-section section-shell"
           aria-labelledby="sources-title"
@@ -1250,7 +1051,7 @@ export function App() {
       </main>
       <footer
         className="site-footer section-shell"
-        inert={settings === "open" || settings === "expanded"}
+        inert={!introDone || settings === "open" || settings === "expanded"}
       >
         <div className="footer-main">
           <a className="brand" href="#top">

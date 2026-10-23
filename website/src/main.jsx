@@ -5,6 +5,7 @@ import "./styles.css";
 import "./demo.css";
 import "./devices.css";
 import "./scene.css";
+import "./story.css";
 
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>

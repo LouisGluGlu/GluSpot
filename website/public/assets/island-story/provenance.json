@@ -1,0 +1,202 @@
+{
+  "description": "Four native GluSpot island modes exported offscreen from fixed Chace source rows; silent demo, no account/network/audio/desktop capture.",
+  "source_renderer": "local/island_stack_visual.py::IslandStackVisual._paint_music",
+  "application_version": "6.417",
+  "source_artwork": "chace-belated-suffocation.jpg",
+  "source_lyrics": [
+    {
+      "lyric": "It's been the same old thing",
+      "translation": "一成不变"
+    },
+    {
+      "lyric": "Since it ended",
+      "translation": "自结束时"
+    },
+    {
+      "lyric": "Since you left me",
+      "translation": "自你离我而去"
+    },
+    {
+      "lyric": "Since I moved on",
+      "translation": "自我继续前行"
+    }
+  ],
+  "assets": [
+    {
+      "file": "chace-free.png",
+      "mode": "free",
+      "logical_size": [
+        360,
+        46
+      ],
+      "dpr": 2,
+      "pixel_size": [
+        720,
+        92
+      ],
+      "ambience_style": "solid_album",
+      "native_bar_style": null,
+      "source_cover": "chace-belated-suffocation.jpg",
+      "lyric_source": "user-provided Chace excerpt",
+      "lyric": "It's been the same old thing",
+      "translation": "一成不变",
+      "dual_line_enabled": true,
+      "native_geometry_note": "The native painter decides whether the translation fits at this mode's fixed height.",
+      "demonstration_clock": "Fixed offscreen paint instant; no original lyric timestamps supplied or fabricated.",
+      "palette": {
+        "primary": "#383838",
+        "secondary": "#52412e"
+      },
+      "alpha_verification": {
+        "verified": true,
+        "extrema": [
+          0,
+          255
+        ],
+        "transparent_pixels": 1660,
+        "total_pixels": 66240,
+        "transparent_fraction": 0.02506,
+        "bounds_pixels": [
+          0,
+          0,
+          720,
+          92
+        ],
+        "bounds_within_image": true
+      },
+      "source": "local/island_stack_visual.py::IslandStackVisual._paint_music"
+    },
+    {
+      "file": "chace-top.png",
+      "mode": "top",
+      "logical_size": [
+        360,
+        62
+      ],
+      "dpr": 2,
+      "pixel_size": [
+        720,
+        124
+      ],
+      "ambience_style": "solid_album",
+      "native_bar_style": null,
+      "source_cover": "chace-belated-suffocation.jpg",
+      "lyric_source": "user-provided Chace excerpt",
+      "lyric": "Since it ended",
+      "translation": "自结束时",
+      "dual_line_enabled": true,
+      "native_geometry_note": "The native painter decides whether the translation fits at this mode's fixed height.",
+      "demonstration_clock": "Fixed offscreen paint instant; no original lyric timestamps supplied or fabricated.",
+      "palette": {
+        "primary": "#383838",
+        "secondary": "#52412e"
+      },
+      "alpha_verification": {
+        "verified": true,
+        "extrema": [
+          0,
+          255
+        ],
+        "transparent_pixels": 382,
+        "total_pixels": 89280,
+        "transparent_fraction": 0.004279,
+        "bounds_pixels": [
+          0,
+          0,
+          720,
+          124
+        ],
+        "bounds_within_image": true
+      },
+      "source": "local/island_stack_visual.py::IslandStackVisual._paint_music"
+    },
+    {
+      "file": "chace-tasker.png",
+      "mode": "tasker",
+      "logical_size": [
+        300,
+        40
+      ],
+      "dpr": 2,
+      "pixel_size": [
+        600,
+        80
+      ],
+      "ambience_style": "solid_album",
+      "native_bar_style": "transparent",
+      "source_cover": "chace-belated-suffocation.jpg",
+      "lyric_source": "user-provided Chace excerpt",
+      "lyric": "Since you left me",
+      "translation": "自你离我而去",
+      "dual_line_enabled": true,
+      "native_geometry_note": "The native painter decides whether the translation fits at this mode's fixed height.",
+      "demonstration_clock": "Fixed offscreen paint instant; no original lyric timestamps supplied or fabricated.",
+      "palette": {
+        "primary": "#383838",
+        "secondary": "#52412e"
+      },
+      "alpha_verification": {
+        "verified": true,
+        "extrema": [
+          0,
+          255
+        ],
+        "transparent_pixels": 41642,
+        "total_pixels": 48000,
+        "transparent_fraction": 0.867542,
+        "bounds_pixels": [
+          12,
+          14,
+          464,
+          66
+        ],
+        "bounds_within_image": true
+      },
+      "source": "local/island_stack_visual.py::IslandStackVisual._paint_music"
+    },
+    {
+      "file": "chace-finder.png",
+      "mode": "finder",
+      "logical_size": [
+        360,
+        30
+      ],
+      "dpr": 2,
+      "pixel_size": [
+        720,
+        60
+      ],
+      "ambience_style": "solid_album",
+      "native_bar_style": "transparent",
+      "source_cover": "chace-belated-suffocation.jpg",
+      "lyric_source": "user-provided Chace excerpt",
+      "lyric": "Since I moved on",
+      "translation": "自我继续前行",
+      "dual_line_enabled": true,
+      "native_geometry_note": "The native painter decides whether the translation fits at this mode's fixed height.",
+      "demonstration_clock": "Fixed offscreen paint instant; no original lyric timestamps supplied or fabricated.",
+      "palette": {
+        "primary": "#383838",
+        "secondary": "#52412e"
+      },
+      "alpha_verification": {
+        "verified": true,
+        "extrema": [
+          0,
+          255
+        ],
+        "transparent_pixels": 36949,
+        "total_pixels": 43200,
+        "transparent_fraction": 0.855301,
+        "bounds_pixels": [
+          12,
+          4,
+          523,
+          56
+        ],
+        "bounds_within_image": true
+      },
+      "source": "local/island_stack_visual.py::IslandStackVisual._paint_music"
+    }
+  ]
+}
