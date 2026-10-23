@@ -6,6 +6,7 @@ import threading
 import time
 import traceback
 import ctypes
+from functools import lru_cache
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
@@ -72,6 +73,26 @@ def _mydockfinder_candidate_process_names(configured_path: str, listener_process
     return set(_mydockfinder_listener_process_names(listener_process_names))
 
 
+@lru_cache(maxsize=None)
+def _process_entry32w_type():
+    """Define once: ctypes caches POINTER(cls) forever, so a class defined per call leaked on every call."""
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    return PROCESSENTRY32W
+
+
 def _running_process_snapshots_for_names(names: set[str]) -> list[tuple[str, str]]:
     if sys.platform != "win32" or not names:
         return []
@@ -81,19 +102,7 @@ def _running_process_snapshots_for_names(names: set[str]) -> list[tuple[str, str
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
         INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-        class PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", ctypes.c_ulong),
-                ("cntUsage", ctypes.c_ulong),
-                ("th32ProcessID", ctypes.c_ulong),
-                ("th32DefaultHeapID", ctypes.c_void_p),
-                ("th32ModuleID", ctypes.c_ulong),
-                ("cntThreads", ctypes.c_ulong),
-                ("th32ParentProcessID", ctypes.c_ulong),
-                ("pcPriClassBase", ctypes.c_long),
-                ("dwFlags", ctypes.c_ulong),
-                ("szExeFile", ctypes.c_wchar * 260),
-            ]
+        PROCESSENTRY32W = _process_entry32w_type()
 
         kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
         kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]

@@ -159,6 +159,38 @@ README 已写明时间、天气、日程、消息通知、插件提醒、弹幕�
    其次是 `_poll_mydockfinder_presence` / `refresh_live_finder_bar` 中的窗口枚举。
 
 **待做（需确认后再改）**：
-- A. 查内存泄漏：用 tracemalloc / 对象类型计数在真机上定位增长来源。泄漏不修，第 2 代回收迟早变成秒级卡顿。
+- A. 查内存泄漏：已完成，见下“内存泄漏修复”。
 - B. MyDockFinder 取色移出主线程热路径：先缩小采样（Qt 在 C++ 里缩放后再取色，或按块取样），降低频率或只在条移动/变色时取。
 
+## 内存泄漏修复
+
+**定位**（`_claude/leak_probe.py`，真机 10 分钟：每分钟按类型统计 GC 追踪对象 + tracemalloc 分配位置）：
+增长的几乎全是 ctypes 类型对象——`PyCStructType` 与 `PyCPointerType` 各 +10,830，以及它们附带的 `CField`、
+`StgDict`、`getset_descriptor`、tuple/list/weakref。tracemalloc 增长最多的行正是函数体内的 `class ...(ctypes.Structure)`
+定义和 `ctypes.POINTER(...)` 调用。
+
+**根因**：3 个高频函数每次调用都在函数体内重新定义 `ctypes.Structure` 子类，并用 `ctypes.POINTER(cls)` 设置 argtypes；
+ctypes 把每个 `POINTER(cls)` 永久缓存在 `ctypes._pointer_type_cache` 里，于是每次调用都永久留下一个结构体类型和一个指针类型：
+- `mydockfinder._native_finder_bar_window_snapshots`（`ProcessEntry`、`MonitorInfo`）——跟随 MyDockFinder 条时频繁调用
+- `mydockfinder._running_mydockfinder_process`（`PROCESSENTRY32W`）
+- `app._running_process_snapshots_for_names`（`PROCESSENTRY32W`）
+
+每分钟约 6,600 个类型、每个约 7KB，与实测约 46 MB/分钟一致；存活对象越来越多，第 2 代回收也越来越慢。
+
+**修复**：结构体改由 `@lru_cache` 的工厂函数只定义一次（`_native_window_structs`、`_process_entry32w_type`），
+仍在原 `try` 内调用，非 Windows 上仍不在导入时加载 `wintypes`。结构体字段和调用行为不变。
+`island_stack_visual` 里的 `APPBARDATA` 也是函数内定义，但只用 `byref`、不进 `POINTER` 缓存，可被回收，未改。
+
+**测试**：新增 `tests/test_native_struct_leak.py`：反复调用这 3 个函数，`ctypes._pointer_type_cache` 不得增长。
+修复后通过；用原版 gpt-island 代码运行同一测试失败（断言失败）。全量：**5,401 通过 / 3 跳过 / 0 失败 / 0 崩溃模块**。
+
+**真机验证**（同样 `live_probe.py`、新 GC 方式、MyDockFinder 在运行）：
+
+| | 修复前（15 分钟） | 修复后（22 分钟） |
+| --- | ---: | ---: |
+| 工作集内存 | 369 → 1,090 MB | 330 → 271 MB，平稳 |
+| 提交内存 | 665 → 1,495 MB | 633 → 670 MB |
+| 第 2 代回收单次停顿 | 131ms → 1,029ms，逐次变长 | 4–6ms |
+
+注：这次源码版在 15 分钟时没有按计划自动退出（`QApplication.quit()` 未生效，前两次运行正常），手动结束。
+主线程卡顿（每 30 秒约 110–130 次 >33ms）依旧，主因是 MyDockFinder 主线程取色，见上方待做 B。

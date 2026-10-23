@@ -7,6 +7,7 @@ import sys
 from io import StringIO
 from configparser import ConfigParser
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -274,6 +275,25 @@ def finder_bar_screen_mapping(snapshot: dict[str, object], screens) -> tuple[obj
     return candidates[0] if len(candidates) == 1 else None
 
 
+@lru_cache(maxsize=None)
+def _native_window_structs():
+    """Define once: ctypes caches POINTER(cls) forever, so a class defined per call leaked on every call."""
+    from ctypes import wintypes as w
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", w.DWORD), ("cntUsage", w.DWORD), ("th32ProcessID", w.DWORD),
+            ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", w.DWORD),
+            ("cntThreads", w.DWORD), ("th32ParentProcessID", w.DWORD),
+            ("pcPriClassBase", w.LONG), ("dwFlags", w.DWORD), ("szExeFile", w.WCHAR * 260),
+        ]
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [("cbSize", w.DWORD), ("rcMonitor", w.RECT), ("rcWork", w.RECT), ("dwFlags", w.DWORD), ("szDevice", w.WCHAR * 32)]
+
+    return ProcessEntry, MonitorInfo
+
+
 def _native_finder_bar_window_snapshots(matched_name: str, matched_path: str, *, _cached_snapshot=None) -> list[dict[str, object]]:
     if sys.platform != "win32":
         return []
@@ -289,16 +309,7 @@ def _native_finder_bar_window_snapshots(matched_name: str, matched_path: str, *,
         except (OSError, AttributeError):
             dwmapi = None
 
-        class ProcessEntry(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", w.DWORD), ("cntUsage", w.DWORD), ("th32ProcessID", w.DWORD),
-                ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", w.DWORD),
-                ("cntThreads", w.DWORD), ("th32ParentProcessID", w.DWORD),
-                ("pcPriClassBase", w.LONG), ("dwFlags", w.DWORD), ("szExeFile", w.WCHAR * 260),
-            ]
-
-        class MonitorInfo(ctypes.Structure):
-            _fields_ = [("cbSize", w.DWORD), ("rcMonitor", w.RECT), ("rcWork", w.RECT), ("dwFlags", w.DWORD), ("szDevice", w.WCHAR * 32)]
+        ProcessEntry, MonitorInfo = _native_window_structs()
 
         enum_type = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
         user32.EnumWindows.argtypes = [enum_type, w.LPARAM]
@@ -755,6 +766,26 @@ def _known_roots(root: Path) -> list[Path]:
     return unique
 
 
+@lru_cache(maxsize=None)
+def _process_entry32w_type():
+    """Define once: ctypes caches POINTER(cls) forever, so a class defined per call leaked on every call."""
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    return PROCESSENTRY32W
+
+
 def _running_mydockfinder_process() -> str | None:
     if sys.platform != "win32":
         return None
@@ -765,19 +796,7 @@ def _running_mydockfinder_process() -> str | None:
         kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
         kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
 
-        class PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", ctypes.c_ulong),
-                ("cntUsage", ctypes.c_ulong),
-                ("th32ProcessID", ctypes.c_ulong),
-                ("th32DefaultHeapID", ctypes.c_void_p),
-                ("th32ModuleID", ctypes.c_ulong),
-                ("cntThreads", ctypes.c_ulong),
-                ("th32ParentProcessID", ctypes.c_ulong),
-                ("pcPriClassBase", ctypes.c_long),
-                ("dwFlags", ctypes.c_ulong),
-                ("szExeFile", ctypes.c_wchar * 260),
-            ]
+        PROCESSENTRY32W = _process_entry32w_type()
 
         snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
         if snapshot == INVALID_HANDLE_VALUE:
