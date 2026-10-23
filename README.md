@@ -112,6 +112,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-10-23：官网下载入口改为自动跟随 GitHub 最新公开 Windows Release，包含测试版；版本文字和两个下载链接共享结果。跳过草稿、纯源码与附件未传完的版本，查询失败时转到发行列表。当前为 6.418，旧演示素材的 6.417 来源记录保留。网站验证与部署记录见 [website/DEPLOYMENT.md](website/DEPLOYMENT.md)。
+
 - 2026-10-23：6.418 修复程序内同步输出的 PCM 拥塞断连。故障诊断确认由本地 `backpressure` 停止同步组，停止前 HomePod 的 34 次保活全部成功。取消与音频字节预算冲突的 64 块限制，采用四秒／705,600 字节有界待发队列；原生命名管道及共享 conditioner 逐级等待容量。最终 Qt 6.12 完整回归 5,775 项／378.497 秒完成（2 项可选截图未配置而跳过），12 项原生测试、215 项包审计和 10 个隔离安装场景通过。180.016 秒连续测试及第 95 秒注入的 2.6 秒 GUI 停顿通过，ZIP 全部 8,401 项通过 CRC／逐文件 SHA-256。安装版与便携包见 [v6.418](https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.418)，6.417 保留。物理 HomePod 长时间听感与上游 Finder 卡顿仍待验。见[诊断、修复、文件哈希及验证记录](docs/homepod-pcm-backpressure-6.418.md)。
 
 - 2026-10-22：6.417 发布与主线整理。应用及构建输入保持已验收字节，仅更新发布说明；旧分支与未提交旧源码通过[归档索引](docs/branch-archive-6.417.md)保留 GitHub 记录。分支清理须在 Release 附件完整性和 main／开发分支一致性确认后执行，最终保留 main，版本为 6.417。

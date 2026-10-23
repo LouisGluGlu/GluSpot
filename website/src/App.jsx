@@ -26,10 +26,9 @@ import {
 } from "@phosphor-icons/react";
 import { OpeningHero, IslandStory, SurfaceStory, HighlightStory } from "./StoryExperience.jsx";
 import { storyDuration } from "./storyTimeline.js";
+import { REPO, RELEASE_FALLBACK, loadLatestRelease } from "./releases.js";
 
 const ASSET = "/assets/";
-const REPO = "https://github.com/LouisGluGlu/GluSpot";
-const RELEASE = `${REPO}/releases/tag/v6.417`;
 const SONGS = [
   {
     title: "The Rain Song",
@@ -644,6 +643,16 @@ function NativeIsland({ song, mode = "free", className = "", onClick, tabIndex =
   );
 }
 export function App() {
+  const [release, setRelease] = useState(RELEASE_FALLBACK);
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 5000);
+    loadLatestRelease({ signal: controller.signal }).then(latest => {
+      clearTimeout(timer);
+      if (!controller.signal.aborted) setRelease(latest);
+    });
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, []);
   const [introDone, setIntroDone] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches || !["", "#top"].includes(window.location.hash));
   const finishIntro = useCallback(() => setIntroDone(true), []);
   const [songIndex, setSongIndex] = useState(0),
@@ -1032,7 +1041,7 @@ export function App() {
           <p>一座岛，一整个音乐世界。</p>
           <a
             className="primary-button"
-            href={RELEASE}
+            href={release.url}
             target="_blank"
             rel="noreferrer"
           >
@@ -1041,8 +1050,8 @@ export function App() {
             <ArrowUpRight size={21} />
           </a>
           <div className="release-details">
-            <a href={RELEASE} target="_blank" rel="noreferrer">
-              6.417 未签名测试版 <ArrowUpRight size={12} />
+            <a href={release.url} target="_blank" rel="noreferrer">
+              {release.version ?? "最新版本"} · 未签名测试版 <ArrowUpRight size={12} />
             </a>
             <span>安装版 & 便携版</span>
             <span>Windows 10 1809+ / 11 x64</span>

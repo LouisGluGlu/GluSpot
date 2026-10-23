@@ -1,6 +1,6 @@
 {
   "name": "gluspot-website",
-  "version": "6.417.0",
+  "version": "6.418.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test:sites": "node --test tests/sites-worker.test.mjs",
     "test:story": "node --test tests/story-timeline.test.mjs",
+    "test:releases": "node --test tests/releases.test.mjs",
     "deploy": "wrangler deploy",
     "check:deploy": "wrangler deploy --dry-run"
   },
