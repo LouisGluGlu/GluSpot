@@ -3,6 +3,7 @@
 - 当前产品版本：6.418；网站包版本：6.418.0。
 - 下载规则：通过公开 GitHub Releases API 选择最高数字版本，包含测试版，要求安装版和便携版均已上传完成；链接与版本文字同步。API 不可用时转到发行列表，不固定旧版。
 - 本轮下载修复验证（2026-10-23）：正式构建、23 项网站测试（5 项发行选择、14 项时间线、4 项路由／打包）及 Wrangler dry-run 通过。公开 API 实测选出 `v6.418`；本地正式构建在浏览器中确认两个下载入口均为 `v6.418`，版本文字同步显示 `6.418`。未改动桌面程序及既有发行附件。
+- 下载修复源码：`d80ade6a32e3df4f00814ceba1be848f85b4911c`；[Cloudflare Pages 部署检查](https://github.com/LouisGluGlu/GluSpot/runs/120444690682) 于 2026-10-23 13:38:02 UTC 成功。部署后刷新 `https://gluspot.top/#download`，线上加载 `index-BgeHY898.js`，两个入口均解析为 `https://github.com/LouisGluGlu/GluSpot/releases/tag/v6.418`，版本文字为 `6.418 · 未签名测试版`；已检查并本地保存下载区截图。
 - 目标仓库：LouisGluGlu/GluSpot，`main`，目录 `website/`。
 - 当前托管：Cloudflare Pages，项目 `gluspot-website`，通过现有 GitHub 集成自动构建与部署。
 - 构建配置：生产分支 `main`；根目录 `website`；构建命令 `npm run build`；输出目录 `dist/client`。
