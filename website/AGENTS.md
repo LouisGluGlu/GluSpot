@@ -25,6 +25,7 @@
 - Preserve the simulated desktop as a blurred, dimmed website illustration. The listening room uses the all-off scene as its base plus a generated neutral-white playback LED and low wave layer. Preserve the four generated rainbow illumination plates as unused source assets; playback light and waves respond to the device demo.
 - The silent Personal DJ preview lets playback/pause trigger a next-song speaking preview that automatically finishes after 6.5 seconds. Render five clean rings through the production `paint_personal_dj_icon` helper using the original cover palette; ready is `#16c777`. Preserve the animation and still exports with their provenance.
 - Application and releases remain 6.417. The user explicitly authorized syncing website/ to main and deploying/binding gluspot.top on Cloudflare after verification.
+- Deployment state, 2026-10-23: the canonical website is https://gluspot.top/, served by Cloudflare Pages at https://gluspot-website.pages.dev. The custom domain is active with SSL enabled, and HTTPS loading of the new intro and storyboard was verified. The verified production deployment uses source commit `e6402ea1f09f5bc3a7e95b08600ff7eb6ea27815`. The existing GitHub integration builds `main` with root `website`, command `npm run build`, and output `dist/client`; subsequent pushes trigger automatic deployment. Keep the Workers/Sites alternative configuration intact.
 
 Run the local server yourself and open the preview in the browser available to this environment. Do not give the user server-start instructions when you can run it.
 

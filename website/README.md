@@ -13,7 +13,7 @@ npm run test:story
 npm run check:deploy
 ```
 
-构建后的静态文件位于 `dist/client/`。`worker/index.js` 与现有 Sites 构建接口保持兼容；Cloudflare 配置见 `wrangler.jsonc`。
+构建后的静态文件位于 `dist/client/`。线上使用 Cloudflare Pages 的 GitHub 集成自动构建；`worker/index.js` 与现有 Sites 构建接口保持兼容，`wrangler.jsonc` 保留为 Workers 部署方案。
 
 ## 内容与交互
 
@@ -33,9 +33,11 @@ npm run check:deploy
 
 ## Cloudflare
 
-`npm run deploy` 发布静态资源与轻量资源路由，并绑定 `gluspot.top`。登录通过 Wrangler 官方 OAuth 流程完成；凭据不属于仓库或网页构建输入。
+官网地址为 [gluspot.top](https://gluspot.top/)，Cloudflare Pages 项目地址为 [gluspot-website.pages.dev](https://gluspot-website.pages.dev)。2026-10-23 已验证官网 HTTPS 访问、开场动画与新分镜页面；Cloudflare 显示自定义域名活动、SSL 已启用。Pages 连接 `LouisGluGlu/GluSpot` 仓库的 `main` 分支，根目录为 `website`，构建命令为 `npm run build`，输出目录为 `dist/client`；后续推送到 `main` 会触发自动构建与部署。
 
-如启用 Cloudflare Workers Builds，连接本仓库的 `main`，根目录为 `website`，构建命令为 `npm run build`，部署命令为 `npm run deploy`。此处是配置说明，实际连接状态以部署记录为准。
+`gluspot.top` 通过 CNAME 指向 Pages 项目，域名注册保留在阿里云。已验证的源码版本与部署结果见 [部署记录](DEPLOYMENT.md)。
+
+`wrangler.jsonc` 与 `npm run deploy` 保留为 Workers Static Assets 的备选方案。该命令使用 Wrangler 发布静态资源与轻量资源路由，并包含自定义域名配置；Pages 的 GitHub 自动部署不使用此命令。若改用 Workers Builds，根目录同样为 `website`，构建命令为 `npm run build`，部署命令为 `npm run deploy`。Wrangler 登录使用官方 OAuth 流程，凭据不属于仓库或网页构建输入。
 
 ## 素材与复现
 
