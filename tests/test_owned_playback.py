@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import tempfile
 import threading
 import time
@@ -34,7 +35,9 @@ class Tasks(QObject):
         return self.accepted
 
     def close(self):
+        # Like MusicTasks.close(): drop queued work so its callbacks stop holding the player.
         self.closed = True
+        self.jobs.clear()
 
 
 class Player(QObject):
@@ -103,6 +106,8 @@ class OwnedPlaybackTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Collect Qt-holding cycles here, between tests, not mid-way through the next one.
+        self.addCleanup(gc.collect)
         self.temp = tempfile.TemporaryDirectory()
         self.tasks = Tasks()
         self.artwork_tasks = Tasks()
@@ -1139,6 +1144,7 @@ class OwnedControlThreadTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        self.addCleanup(gc.collect)
         self.temp = tempfile.TemporaryDirectory()
         self.qt_player = ThreadRecordingPlayer()
         self.tasks, self.artwork_tasks = Tasks(), Tasks()

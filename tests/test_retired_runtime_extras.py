@@ -8,10 +8,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from PySide6.QtWidgets import QApplication
 
 from api.fake_dataset import FAKE_MESSAGES, FAKE_PLUGINS
 from api.fake_provider import FakeIslandDataProvider
+from api.models import TimedLyricLine, TimedLyricUnit
 from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider, empty_visual_data
+from local.island_stack_visual import IslandStackVisual
 from tests.test_provider_state import FakeLyricsStore, FakeManager, FakeSession
 
 
@@ -93,6 +96,39 @@ class RetiredRuntimeExtrasTests(unittest.TestCase):
                 self.assertTrue(provider.has_live_audio())
         forbidden.assert_not_called()
 
+
+class RetiredIslandRuntimeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        data = empty_visual_data("Song", "Artist", "fixture.music")
+        self.data = replace(data, messages=FAKE_MESSAGES, plugins=FAKE_PLUGINS,
+            track=replace(data.track, track_id="first", duration_seconds=120,
+                timed_lyrics=(TimedLyricLine(0, "歌词", (TimedLyricUnit(0, 2, "歌词"),), "word"),)))
+        self.provider = SimpleNamespace(get_visual_data=lambda: self.data)
+        with patch("local.island_stack_visual.read_finder_material", return_value=SimpleNamespace(available=False)):
+            self.visual = IslandStackVisual(self.provider)
+        self.visual.timer.stop()
+        self.addCleanup(self.visual.close)
+
+    def test_live_tick_keeps_media_and_lyric_work_on_both_music_surfaces(self):
+        visual = self.visual
+        visual._refresh_media_data = Mock(return_value=False)
+        visual._update_scene_state = Mock()
+        visual._handle_music_lyric_tick = Mock(return_value=False)
+        visual._sync_music_background_to_theme = Mock(return_value=False)
+        visual._handle_tick_follow_refresh = Mock()
+        visual._handle_scene_suppressed_tick = Mock()
+        visual._topmost_reinforcement_due = Mock(return_value=False)
+        visual.scene_suppressed = True
+        visual._tick()
+        visual.music_fullscreen_overlay = SimpleNamespace(isVisible=lambda: True)
+        visual._tick()
+        visual.music_fullscreen_overlay = None
+        self.assertEqual(visual._refresh_media_data.call_count, 2)
+        self.assertEqual(visual._handle_music_lyric_tick.call_count, 2)
 
 
 if __name__ == "__main__":

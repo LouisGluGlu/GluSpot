@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QStyle, 
 
 from api.providers import PlaybackSourceProvider, WindowsMediaProvider
 from api.online_music import make_online_music_service
+from local.gc_scheduler import install_gc_scheduler
 from local.owned_music_player import OwnedMusicPlayer
 from local.windows_smtc import WindowsSmtcBridge
 from local.playback_entry_controller import PlaybackEntryController
@@ -283,6 +284,7 @@ class LocalIslandApp:
         self.app.setApplicationName(APP_NAME)
         self.app.setQuitOnLastWindowClosed(False)
         self.watchdog = MainThreadWatchdog(self.app)
+        self.gc_scheduler = install_gc_scheduler(self.app, busy=self._visual_animation_busy)
 
         self.settings = SettingsManager()
         self.icon_paths = resolve_icon_paths(self.settings.get("v2_custom_icon_path", ""))
@@ -826,6 +828,11 @@ class LocalIslandApp:
             self._installer_gate = start_synchronized_handoff(
                 self.app, start, (self.window, self.playback_entry.window, self.music_library.window), events)
         return self.app.exec()
+
+    def _visual_animation_busy(self) -> bool:
+        window = getattr(self, "window", None)
+        return bool(getattr(window, "_visual_animation_active", False)
+                    or getattr(window, "_music_surface_active", False))
 
     def _logical_installer_handoff(self, values):
         """Resolve physical Windows installer bounds using Qt's monitor origin."""

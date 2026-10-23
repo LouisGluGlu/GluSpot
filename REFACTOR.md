@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | 0 | 建立工作区、按模块分进程的 Windows 测试基线 | 完成 |
 | 1 | 删除已下线功能（插件/时间/天气/日程/消息/弹幕/设备到达弹窗）的代码与测试 | 完成，见下 |
-| 2 | 修复基线里的原生崩溃（Python 循环 GC 在任意时刻回收 Qt 对象，见下） | 已定位，待你确认方案 |
+| 2 | 修复基线里的原生崩溃（Python 循环 GC 在任意时刻回收 Qt 对象，见下） | 完成（真机观察待做），见下 |
 | 3 | 删除产品代码中不可达的方法（`IslandStackVisual` 约 190 个、`SettingsWindow` 约 100 个），需确认 Gelv/Ember 歌词样式已废弃 | 待确认 |
 | 4 | 移除 `IslandVisualData.messages/plugins` 字段、presentation/positioning 模块里只服务下线功能的函数 | 待做 |
 | 5 | 拆分 `IslandStackVisual`：任务栏/位置跟随 → 歌词 → 绘制 → 动画状态，每次一个职责，抽成纯逻辑类 | 待做 |
@@ -73,7 +73,8 @@ README 已写明时间、天气、日程、消息通知、插件提醒、弹幕�
 | 步骤 1 之后 | 5,331* | 3 | 0 | 1 个模块（与基线同一处） |
 
 \* 基线 5,675 − 删除的 284 个只测下线功能的测试 = 5,391。差额来自 `test_owned_playback` 在第 14 个测试处崩溃、后面 61 个没跑到；该模块单独重跑 75/75 通过。
-所有消失的测试都能在 `.refactor/removed_tests_step1.txt` 里找到；没有任何原本通过的测试变成失败。
+没有任何原本通过的测试变成失败。（更正：第 1 步当时只按文件记录了 4 个整文件删除的测试模块，另有 1 个活代码测试被误删；
+已在步骤 2 中补全清单并恢复该测试，见下。）
 
 ## 步骤 2 记录：原生崩溃定位
 
@@ -100,3 +101,39 @@ README 已写明时间、天气、日程、消息通知、插件提醒、弹幕�
 - B. 定点：`OwnedMusicPlayer.close()` 等关闭路径主动断开信号、`deleteLater()` 子对象，打破引用环；
   测试 `tearDown` 中主线程 `gc.collect()`。风险小，但只覆盖已知对象。
 - 建议先做 B 让测试稳定，再用 A 作为应用级兜底并在真机上观察内存。
+
+## 步骤 2 记录：GC 时机修复
+
+采用 B（测试）+ A（应用）两部分。
+
+**测试端**（`tests/test_owned_playback.py`）：
+- 假 `Tasks.close()` 像真 `MusicTasks.close()` 一样清空排队任务，排队回调不再持有播放器形成引用环。
+- `OwnedPlaybackTests`、`OwnedControlThreadTests` 在 `setUp` 中 `self.addCleanup(gc.collect)`：在测试之间、主线程上回收，
+  而不是在下一个测试中途。
+
+**应用端**（新增 `local/gc_scheduler.py`，在 `LocalIslandApp.__init__` 中安装）：
+- 启动即 `gc.disable()`；主线程 QTimer 每 250ms 检查一次，按 Python 原阈值（700/10）执行第 0/1 代回收。
+- 第 2 代（实测每次停顿约 39ms）只在没有动画时执行（距上次 ≥30s），或距上次 ≥120s 时强制执行。
+  “有动画”= 岛的帧定时器处于动画档（`_retune_frame_timer` 记录 `_visual_animation_active`）或全屏音乐界面打开。
+- 启动 5 秒后 `gc.collect()` + `gc.freeze()`，把启动期的长寿对象移出之后的全量扫描，降低每次第 2 代回收的成本。
+- 单元测试：`tests/test_gc_scheduler.py`（注入假 gc 与时钟，6 个用例）。
+
+**验证**（Windows，`_claude/module_loop.py`，每次新进程）：
+
+| | 运行次数 | 崩溃 |
+| --- | ---: | ---: |
+| `test_owned_playback`，修复后 | 15 | 0 |
+| `test_owned_playback`，原版 gpt-island | 15 | 8（0xC0000005） |
+| `test_owned_queue_artwork`，第 1 步后（未改） | 15 | 0 |
+| `test_music_fullscreen`，第 1 步后（未改） | 15 | 0 |
+
+全量（按模块分进程，264 个模块）：**5,399 通过 / 3 跳过 / 0 失败 / 0 个崩溃模块**；与基线相比无回归。
+另恢复 1 个测试后该模块单独运行 5/5 通过。
+
+**清单更正**：第 1 步只记录了逐条删除的 284 个测试，整文件删除的 4 个测试模块（92 个测试）未逐条列出，现已补进
+`.refactor/removed_tests_step1.txt`。另有 3 个测试是改名（新测试在跑并通过），1 个测试
+（`test_live_tick_skips_extra_polling_and_overlay_work_on_both_music_surfaces`）同时断言了活行为
+（两种音乐界面每帧都刷新媒体数据和歌词），按规则应修改而非删除——已恢复为
+`RetiredIslandRuntimeTests.test_live_tick_keeps_media_and_lyric_work_on_both_music_surfaces`，只去掉对已删除方法的断言。
+
+**待做**：真机观察——动画是否更顺、长时间运行内存是否稳定（需要启动源码版，会在屏幕上出现第二个岛）。

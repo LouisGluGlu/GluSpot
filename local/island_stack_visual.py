@@ -1644,6 +1644,7 @@ class IslandStackVisual(QWidget):
         return max(0.001, interval_ms / 1000.0)
 
     def _retune_frame_timer(self, active_animation: bool, now: float | None = None):
+        self._visual_animation_active = bool(active_animation)
         timer = getattr(self, "timer", None)
         if timer is None:
             return
