@@ -212,3 +212,28 @@ ctypes 把每个 `POINTER(cls)` 永久缓存在 `ctypes._pointer_type_cache` 里
 
 **剩余**：约 12 次/30 秒（每次 50–60ms）几乎全部来自 `app._poll_mydockfinder_presence` →
 `read_live_finder_bars` → `_native_finder_bar_window_snapshots`：每次轮询都完整枚举窗口和进程。可以用同样的方法优化。
+
+## 海平面背景新设计 + 真实频段驱动
+
+用户要求（2026-10-23 14:30）：“之所以叫海平面，就应该要有海的特性，之前我想做音乐频段识别跟随波动，
+但是后面一直没实现。现在我想补回来。同时，海平面的显色变为（现有你所展示的样式，下半部分也是黑色的，
+中间留特点色的水纹）”。
+
+**改动**
+- `music_background_renderer.py`：`_paint_xiaomi_duotone_ambience` 改为深色天空（`SEA_SKY`）+ 水面以下按
+  封面色过渡到 `SEA_DEEP` 再到黑；`_paint_xiaomi_duotone_wave` 改为一条浅色水线。两者共用
+  `_sea_level_surface()`，保证水面和亮线逐点对齐；水线颜色由 `_sea_level_colors()` 从封面色提亮得到。
+  删掉原海平面的多层流动光晕与顶部黑色渐隐。
+- `owned_audio_bridge.py`：新增 `_music_frames` 时间轴和 `get_music_audio_frame()`，在解码回调里按
+  50ms 分块做频段分析（与私人 DJ 同一条 `_append_band_frames` 路径），按播放位置返回对应帧。
+- `providers.py`：程序内播放时 `get_audio_frame()` / `has_live_audio()` 改用它自己的解码 PCM，
+  不再回落到系统采集。
+- `island_stack_visual.py`：海平面样式下无条件启用反应式背景（设置里的开关已不再显示）。
+- 测试：新增 `tests/test_owned_music_bands.py`（频段归类、解码提前不驱动当前画面、换曲丢弃旧时间轴、
+  DJ 静音不挡音乐频段）；`tests/test_music_background_renderer.py` 的水纹区域坐标和运动阈值随水面上移调整。
+
+**测试**：全量 5,416 通过 / 3 跳过 / 0 失败 / 268 个模块 0 崩溃（`_claude/results/sealevel2.*`）。
+`test_music_background_renderer` 另外连跑 5 次全通过。
+
+**备注**：真机观感由用户确认（2026-10-24 09:05 启动源码版看水纹随音乐波动）；设置里没有对应开关是
+原有行为，本次未新增设置项。

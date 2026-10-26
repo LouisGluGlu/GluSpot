@@ -1060,6 +1060,47 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
             alpha = int(max(0, min(118, (0.155 + pulse * 0.042 + band * 0.026) * 255.0 * intensity * opacity_boost)))
             self._paint_background_blob(painter, center, rx, ry, mixed_color, alpha)
 
+    SEA_SKY = QColor(12, 12, 12)
+    SEA_DEEP = QColor(34, 34, 34)
+
+    def _sea_level_surface(self, context: MusicBackgroundRenderContext, rect: QRectF, expanded: bool) -> list[QPointF]:
+        """The moving water line shared by the sea body and its highlight.
+
+        It sits at the middle of the island; music bands raise its swell
+        through sea_level_wave_paint_plan, and it lies almost flat in silence.
+        """
+        plan = sea_level_wave_paint_plan(
+            context.response("sea_level"),
+            bands=context.bands,
+            flow=context.tuning.flow_amount,
+            expanded=expanded,
+            media_is_playing=context.media_is_playing,
+        )
+        phase = context.ambient_phase * plan.phase_ambient_rate + time.monotonic() * plan.phase_time_rate
+        center_y = rect.top() + rect.height() * 0.5 + self._u(plan.center_band_units)
+        amplitude = self._u(plan.amplitude_units) * 0.45
+        points = []
+        count = 48
+        for index in range(count + 1):
+            pos = index / count
+            soft_peak = math.sin(pos * math.pi)
+            swell = math.sin(pos * math.tau * 1.16 + phase)
+            ripple = math.sin(pos * math.tau * 2.35 - phase * 0.58)
+            surface = math.sin(pos * math.tau * 4.20 + phase * 0.34)
+            level = swell * 0.58 + ripple * 0.29 + surface * 0.13
+            points.append(QPointF(rect.left() + rect.width() * pos,
+                                  center_y - amplitude * level * (0.46 + soft_peak * 0.54)))
+        return points
+
+    @staticmethod
+    def _sea_level_colors(context: MusicBackgroundRenderContext) -> tuple[QColor, QColor]:
+        """The cover tone (same as the solid background) and its light water-line tint."""
+        sea = QColor(context.palette.solid_album_background)
+        sea.setAlpha(255)
+        line = QColor(round(sea.red() + (255 - sea.red()) * 0.62), round(sea.green() + (255 - sea.green()) * 0.62),
+                      round(sea.blue() + (255 - sea.blue()) * 0.62))
+        return sea, line
+
     def _paint_background_blob(self, painter: QPainter, center: QPointF, radius_x: float, radius_y: float, color: QColor, alpha: int):
         if alpha <= 0:
             return
@@ -1078,6 +1119,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         painter.restore()
 
     def _paint_xiaomi_duotone_ambience(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
+        """Sea level: a dark sky, the cover tone just under the water line, deepening to black."""
         painter.save()
         inset = self._u(1.4)
         bleed = self._u(1.0)
@@ -1085,83 +1127,25 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         clip_rect = rect.adjusted(inset - bleed, inset - bleed, -inset + bleed, -inset + bleed)
         painter.setClipPath(self._music_shell_path(clip_rect, max(1.0, radius - inset + bleed), expanded))
         painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillRect(paint_rect, self.SEA_SKY)
 
         context = self.render_context("sea_level", expanded=expanded)
-        main, accent, bridge = context.palette.sea_level_palette()
-        low, mid, high = context.bands
-        now = time.monotonic()
-        intensity, boost, size_boost, opacity_boost = context.tuning.ambient_boost
-        flow = context.tuning.flow_amount
-        reactive = context.response("sea_level")
-        motion = background_motion_plan("sea_level", reactive).sea_level
-        if motion is None:
-            painter.restore()
-            return
-        if not context.media_is_playing:
-            intensity *= 0.80
-            flow *= 0.45
-        main = self._boost_mist_color(main, boost * 0.72 + reactive["color_boost"] * 0.82)
-        accent = self._boost_mist_color(accent, reactive["color_boost"] * 0.22)
-        bridge = self._boost_mist_color(bridge, boost * 0.42 + reactive["color_boost"] * 0.45)
-
-        split = paint_rect.top() + paint_rect.height() * ((0.34 if expanded else 0.38) + reactive["split_shift"])
-        body = QLinearGradient(0, paint_rect.top(), 0, paint_rect.bottom())
-        body.setColorAt(0.00, QColor(0, 0, 0, 0))
-        body.setColorAt(0.22, QColor(accent.red(), accent.green(), accent.blue(), self._mist_alpha(0.044 * opacity_boost, intensity)))
-        body.setColorAt(0.36, QColor(accent.red(), accent.green(), accent.blue(), self._mist_alpha(0.096 * opacity_boost + mid * 0.020, intensity)))
-        body.setColorAt(0.52, QColor(bridge.red(), bridge.green(), bridge.blue(), self._mist_alpha((0.150 + reactive["energy"] * 0.018) * opacity_boost + high * 0.026, intensity)))
-        body.setColorAt(0.76, QColor(main.red(), main.green(), main.blue(), self._mist_alpha((0.245 * reactive["lower_alpha"]) * opacity_boost + low * 0.040, intensity)))
-        body.setColorAt(1.00, QColor(main.red(), main.green(), main.blue(), self._mist_alpha((0.225 * reactive["lower_alpha"]) * opacity_boost + mid * 0.034, intensity)))
-        painter.fillRect(paint_rect, body)
-
-        def wave(duration: float, delay: float, offset: float = 0.0) -> float:
-            return math.sin(((now + delay) / duration) * math.tau + offset)
-
-        def breathe(duration: float, delay: float, offset: float = 0.0) -> float:
-            return 0.5 + 0.5 * wave(duration, delay, offset)
-
-        flows = (
-            (accent, 19.0, 0.0, 0.30, 0.34, 34.0, 13.0, 0.82, 0.28, 0.115, 0.074, mid, 0.0),
-            (main, 15.5, -3.0, 0.70, 0.72, 42.0, 16.0, 1.08, 0.44, 0.230, 0.126, low, 1.1),
-            (bridge, 22.0, -7.0, 0.48, 0.58, 38.0, 15.0, 1.12, 0.38, 0.172, 0.104, high, 2.4),
-            (main, 28.0, -11.0, 0.22, 0.82, 26.0, 10.0, 0.72, 0.26, 0.140, 0.082, mid, 3.5),
-            (accent, 31.0, -14.0, 0.78, 0.42, 24.0, 9.0, 0.58, 0.20, 0.070, 0.050, high, 4.4),
-        )
-        for color, duration, delay, x_ratio, y_ratio, drift_x, drift_y, width_ratio, height_ratio, base_opacity, opacity_span, band, offset in flows:
-            breath = breathe(duration, delay, offset)
-            shimmer = breathe(duration * 1.6, delay * 0.7, offset + 1.8)
-            lower_weight = max(0.0, min(1.0, (y_ratio - 0.42) / 0.40))
-            native_alpha = 1.0 + (reactive["lower_alpha"] - 1.0) * lower_weight
-            native_scale = 1.0 + (reactive["lower_scale"] - 1.0) * lower_weight
-            center = QPointF(
-                rect.left() + rect.width() * x_ratio + self._u(drift_x) * flow * wave(duration, delay, offset + 0.6),
-                rect.top() + rect.height() * (y_ratio + reactive["split_shift"] * lower_weight + motion.center_shift * lower_weight)
-                + self._u(drift_y) * flow * wave(duration, delay, offset + 2.0),
-            )
-            alpha = self._mist_alpha((base_opacity + opacity_span * shimmer + band * 0.030) * native_alpha, intensity)
-            rx = rect.width() * (width_ratio * size_boost * native_scale + breath * 0.08 + band * 0.016)
-            ry = rect.height() * (height_ratio * size_boost * native_scale + breath * 0.042 + band * 0.012)
-            self._paint_mist_ellipse(painter, center, rx * 1.35, ry * 1.30, color, int(alpha * 0.34))
-            self._paint_mist_ellipse(painter, center, rx, ry, color, alpha)
-
-        join = QLinearGradient(0, split - rect.height() * 0.18, 0, split + rect.height() * 0.34)
-        join.setColorAt(0.00, QColor(accent.red(), accent.green(), accent.blue(), 0))
-        join.setColorAt(0.38, QColor(accent.red(), accent.green(), accent.blue(), self._mist_alpha(0.054 * opacity_boost, intensity)))
-        join.setColorAt(0.56, QColor(bridge.red(), bridge.green(), bridge.blue(), self._mist_alpha(0.092 * opacity_boost + high * 0.018, intensity)))
-        join.setColorAt(0.78, QColor(main.red(), main.green(), main.blue(), self._mist_alpha(0.050 * (reactive["lower_alpha"] - 1.0) * opacity_boost, intensity)))
-        join.setColorAt(1.00, QColor(main.red(), main.green(), main.blue(), 0))
-        painter.fillRect(QRectF(paint_rect.left(), split - paint_rect.height() * 0.18, paint_rect.width(), paint_rect.height() * 0.56), join)
-
-        top_fade = QLinearGradient(0, paint_rect.top(), 0, paint_rect.bottom())
-        guard = reactive["top_guard"]
-        top_fade.setColorAt(0.00, QColor(0, 0, 0, min(250, (238 if expanded else 230) + int(guard * 42))))
-        top_fade.setColorAt(0.17, QColor(0, 0, 0, min(224, (206 if expanded else 190) + int(guard * 38))))
-        top_fade.setColorAt(0.30, QColor(0, 0, 0, min(134, (116 if expanded else 104) + int(guard * 24))))
-        top_fade.setColorAt(0.43, QColor(0, 0, 0, min(40, 30 + int(guard * 16))))
-        top_fade.setColorAt(0.62, QColor(0, 0, 0, 0))
-        top_fade.setColorAt(1.00, QColor(0, 0, 0, 0))
-        painter.fillRect(paint_rect, top_fade)
-
+        sea, _line = self._sea_level_colors(context)
+        points = self._sea_level_surface(context, rect, expanded)
+        water = QPainterPath(QPointF(paint_rect.left(), points[0].y()))
+        for point in points:
+            water.lineTo(point)
+        water.lineTo(QPointF(paint_rect.right(), points[-1].y()))
+        water.lineTo(paint_rect.bottomRight())
+        water.lineTo(paint_rect.bottomLeft())
+        water.closeSubpath()
+        top = min(point.y() for point in points)
+        depth = QLinearGradient(0, top, 0, paint_rect.bottom())
+        depth.setColorAt(0.00, sea)
+        depth.setColorAt(0.16, self._mix_color(sea, self.SEA_DEEP, 0.72))
+        depth.setColorAt(0.34, self.SEA_DEEP)
+        depth.setColorAt(1.00, QColor(0, 0, 0))
+        painter.fillPath(water, depth)
         painter.restore()
 
     def _music_wave_path(self, rect: QRectF, center_y: float, amplitude: float, thickness: float, phase: float) -> QPainterPath:
@@ -1214,97 +1198,21 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         return path
 
     def _paint_xiaomi_duotone_wave(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
+        """The thin light water line on top of the sea body."""
         painter.save()
         inset = self._u(1.4)
         painter.setClipPath(self._music_shell_path(rect.adjusted(inset, inset, -inset, -inset), max(1.0, radius - inset), expanded))
-        painter.setPen(Qt.PenStyle.NoPen)
-
         context = self.render_context("sea_level", expanded=expanded)
-        main, accent, bridge = context.palette.sea_level_palette()
-        low, mid, high = context.bands
-        intensity, boost, _size_boost, opacity_boost = context.tuning.ambient_boost
-        reactive = context.response("sea_level")
-        wave_plan = sea_level_wave_paint_plan(
-            reactive,
-            bands=context.bands,
-            flow=context.tuning.flow_amount,
-            expanded=expanded,
-            media_is_playing=context.media_is_playing,
-        )
-        flow = wave_plan.flow
-        if not context.media_is_playing:
-            intensity *= 0.70
-        main = self._boost_mist_color(main, boost * 0.60 + reactive["color_boost"] * 0.86)
-        accent = self._boost_mist_color(accent, reactive["color_boost"] * 0.20)
-        bridge = self._boost_mist_color(bridge, boost * 0.38 + reactive["color_boost"] * 0.48)
-
-        now = time.monotonic()
-        phase = context.ambient_phase * wave_plan.phase_ambient_rate + now * wave_plan.phase_time_rate
-        center_y = rect.top() + rect.height() * wave_plan.center_y_ratio
-        center_y += self._u(wave_plan.center_flow_units) * math.sin(phase * 0.68) + self._u(wave_plan.center_band_units)
-        center_y += rect.height() * wave_plan.center_shift_ratio
-
-        glow_h = rect.height() * wave_plan.glow_height_ratio + self._u(wave_plan.glow_flow_units)
-        glow_rect = QRectF(rect.left(), center_y - glow_h * 0.38, rect.width(), glow_h * 1.48)
-        wash = QLinearGradient(0, glow_rect.top(), 0, glow_rect.bottom())
-        wash.setColorAt(0.00, QColor(accent.red(), accent.green(), accent.blue(), 0))
-        wash.setColorAt(0.22, QColor(accent.red(), accent.green(), accent.blue(), self._mist_alpha(0.026 * opacity_boost + high * 0.008, intensity)))
-        wash.setColorAt(0.50, QColor(bridge.red(), bridge.green(), bridge.blue(), self._mist_alpha(0.090 * opacity_boost + mid * 0.020, intensity)))
-        wash.setColorAt(0.78, QColor(main.red(), main.green(), main.blue(), self._mist_alpha(0.170 * opacity_boost * reactive["lower_alpha"] + low * 0.034, intensity)))
-        wash.setColorAt(1.00, QColor(main.red(), main.green(), main.blue(), 0))
-        painter.fillRect(glow_rect, wash)
-
-        horizontal = QLinearGradient(rect.left(), 0, rect.right(), 0)
-        horizontal.setColorAt(0.00, QColor(accent.red(), accent.green(), accent.blue(), 0))
-        horizontal.setColorAt(0.18, QColor(accent.red(), accent.green(), accent.blue(), self._mist_alpha(0.076 * opacity_boost + high * 0.018, intensity)))
-        horizontal.setColorAt(0.45, QColor(bridge.red(), bridge.green(), bridge.blue(), self._mist_alpha(0.132 * opacity_boost + mid * 0.028, intensity)))
-        horizontal.setColorAt(0.74, QColor(main.red(), main.green(), main.blue(), self._mist_alpha(0.188 * opacity_boost * reactive["lower_alpha"] + low * 0.036, intensity)))
-        horizontal.setColorAt(1.00, QColor(main.red(), main.green(), main.blue(), 0))
-
-        amplitude = self._u(wave_plan.amplitude_units)
-        thickness = self._u(wave_plan.thickness_units)
-        main_path = self._sea_level_wave_path(rect.adjusted(self._u(5.0), 0, -self._u(5.0), 0), center_y, amplitude, thickness, phase)
-        painter.fillPath(main_path, QBrush(horizontal))
-
-        counter = QLinearGradient(rect.left(), 0, rect.right(), 0)
-        counter.setColorAt(0.00, QColor(main.red(), main.green(), main.blue(), 0))
-        counter.setColorAt(0.32, QColor(main.red(), main.green(), main.blue(), self._mist_alpha(0.060 * opacity_boost * reactive["lower_alpha"] + low * 0.014, intensity)))
-        counter.setColorAt(0.58, QColor(accent.red(), accent.green(), accent.blue(), self._mist_alpha(0.066 * opacity_boost + high * 0.016, intensity)))
-        counter.setColorAt(1.00, QColor(accent.red(), accent.green(), accent.blue(), 0))
-        counter_path = self._sea_level_wave_path(
-            rect.adjusted(self._u(16.0), 0, -self._u(16.0), 0),
-            center_y - self._u(wave_plan.counter_y_offset_units),
-            amplitude * wave_plan.counter_amplitude_scale,
-            thickness * wave_plan.counter_thickness_scale,
-            phase + 2.2,
-            layer=1.0,
-        )
-        painter.fillPath(counter_path, QBrush(counter))
-
-        crest = QPainterPath()
-        values = context.wave_values
-        count = max(2, len(values))
-        for i, value in enumerate(values):
-            pos = i / (count - 1)
-            x = rect.left() + self._u(10.0) + (rect.width() - self._u(20.0)) * pos
-            soft_peak = math.sin(pos * math.pi)
-            swell = math.sin(pos * math.tau * 1.16 + phase) * 0.54
-            ripple = math.sin(pos * math.tau * 2.35 - phase * 0.58) * 0.30
-            surface = math.sin(pos * math.tau * 4.20 + phase * 0.34) * 0.12
-            y = center_y - amplitude * (swell + ripple + surface) * (0.46 + soft_peak * 0.54)
-            if i == 0:
-                crest.moveTo(x, y)
-            else:
-                crest.lineTo(x, y)
-
-        crest_gradient = QLinearGradient(rect.left(), 0, rect.right(), 0)
-        crest_gradient.setColorAt(0.00, QColor(accent.red(), accent.green(), accent.blue(), 0))
-        crest_gradient.setColorAt(0.26, QColor(bridge.red(), bridge.green(), bridge.blue(), self._mist_alpha((0.026 + flow * 0.018) * opacity_boost * wave_plan.crest_alpha_scale, intensity)))
-        crest_gradient.setColorAt(0.55, QColor(main.red(), main.green(), main.blue(), self._mist_alpha(((0.034 + flow * 0.026) * opacity_boost * reactive["lower_alpha"] + mid * 0.008) * wave_plan.crest_alpha_scale, intensity)))
-        crest_gradient.setColorAt(0.84, QColor(accent.red(), accent.green(), accent.blue(), self._mist_alpha((0.022 + flow * 0.016) * opacity_boost * wave_plan.crest_alpha_scale, intensity)))
-        crest_gradient.setColorAt(1.00, QColor(main.red(), main.green(), main.blue(), 0))
+        _sea, line = self._sea_level_colors(context)
+        points = self._sea_level_surface(context, rect, expanded)
+        path = QPainterPath(points[0])
+        for point in points[1:]:
+            path.lineTo(point)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QBrush(crest_gradient), self._u(1.7 if expanded else 1.1), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        painter.drawPath(crest)
-
+        glow = QColor(line)
+        glow.setAlpha(46)
+        painter.setPen(QPen(glow, self._u(3.2 if expanded else 2.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(path)
+        painter.setPen(QPen(line, self._u(1.1 if expanded else 0.8), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(path)
         painter.restore()

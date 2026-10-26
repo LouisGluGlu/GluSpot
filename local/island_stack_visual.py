@@ -3817,7 +3817,9 @@ class IslandStackVisual(QWidget):
             provider = getattr(self, "data_provider", None)
             return input_snapshot(
                 now=now,
-                reactive_enabled=bool(getattr(self, "music_reactive_background_enabled", False)),
+                # The settings switch is no longer shown; the sea-level water line always follows real audio.
+                reactive_enabled=bool(getattr(self, "music_reactive_background_enabled", False)
+                                      or self._effective_music_ambience_style() == "sea_level"),
                 live_frame_reader=lambda: getattr(provider, "get_audio_frame", lambda: None)(),
                 live_audio_probe=lambda: bool(getattr(provider, "has_live_audio", lambda: False)()),
                 audio_frames=getattr(self, "audio_frames", []),

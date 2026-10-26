@@ -452,8 +452,8 @@ class MusicBackgroundRendererTests(unittest.TestCase):
         reactive_image = self._paint_image(
             lambda painter, rect, radius: NativeMusicBackgroundRenderer(reactive).paint_sea_level_wave(painter, rect, radius, expanded=False)
         )
-        upper_guard = self._image_region_difference(quiet_image, reactive_image, QRectF(24.0, 14.0, 212.0, 22.0))
-        water_band = self._image_region_difference(quiet_image, reactive_image, QRectF(24.0, 54.0, 212.0, 30.0))
+        upper_guard = self._image_region_difference(quiet_image, reactive_image, QRectF(24.0, 14.0, 212.0, 16.0))
+        water_band = self._image_region_difference(quiet_image, reactive_image, QRectF(24.0, 34.0, 212.0, 28.0))
 
         self.assertGreater(water_band, 1800)
         self.assertGreater(water_band, upper_guard * 2)
@@ -483,7 +483,7 @@ class MusicBackgroundRendererTests(unittest.TestCase):
             lambda painter, rect, radius: NativeMusicBackgroundRenderer(reactive).paint_sea_level_wave(
                 painter, rect, radius, expanded=False
             ),
-            minimum_long_change=12000,
+            minimum_long_change=4000,
             maximum_short_ratio=0.45,
         )
 
@@ -515,8 +515,8 @@ class MusicBackgroundRendererTests(unittest.TestCase):
         driven_image = self._paint_image(
             lambda painter, rect, radius: NativeMusicBackgroundRenderer(driven).paint_sea_level_wave(painter, rect, radius, expanded=False)
         )
-        upper_guard = self._image_region_difference(quiet_image, driven_image, QRectF(24.0, 14.0, 212.0, 22.0))
-        water_band = self._image_region_difference(quiet_image, driven_image, QRectF(24.0, 54.0, 212.0, 30.0))
+        upper_guard = self._image_region_difference(quiet_image, driven_image, QRectF(24.0, 14.0, 212.0, 16.0))
+        water_band = self._image_region_difference(quiet_image, driven_image, QRectF(24.0, 34.0, 212.0, 28.0))
 
         self.assertGreater(water_band, 700)
         self.assertGreater(water_band, upper_guard * 1.8)

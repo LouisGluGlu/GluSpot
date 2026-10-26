@@ -243,10 +243,15 @@ class PlaybackSourceProvider:
         return empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot")
 
     def get_audio_frame(self):
-        return self.system.get_audio_frame() if self._system_enabled() and not self._owned_active() else None
+        # Owned music is analyzed from its own decoded PCM, never from external capture.
+        if self._owned_active():
+            return self._owned_audio_bridge.get_music_audio_frame()
+        return self.system.get_audio_frame() if self._system_enabled() else None
 
     def has_live_audio(self):
-        return self._system_enabled() and not self._owned_active() and self.system.has_live_audio()
+        if self._owned_active():
+            return self._owned_audio_bridge.get_music_audio_frame() is not None
+        return self._system_enabled() and self.system.has_live_audio()
 
     def get_audio_route_snapshot(self):
         if self._owned_output_mode():
