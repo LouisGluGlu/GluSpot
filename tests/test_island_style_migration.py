@@ -17,13 +17,15 @@ class IslandStyleMigrationTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def test_retired_choices_migrate_and_reset_fine_controls_without_losing_other_settings(self):
-        for background, expected in (("duotone_full", "sea_level"), ("pure_black", "system"), ("pure_white", "system")):
-            with self.subTest(background=background), tempfile.TemporaryDirectory() as directory:
+        for background, expected, lyric_style in ((background, expected, lyric_style)
+                for background, expected in (("duotone_full", "sea_level"), ("pure_black", "system"), ("pure_white", "system"))
+                for lyric_style in ("ember_fade", "gelv_songscatter")):
+            with self.subTest(background=background, lyric_style=lyric_style), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "settings.json"
                 path.write_text(json.dumps({
                     "v2_music_ambience_style": background,
                     "v2_music_background_follow_previous_style": "duotone_full",
-                    "v2_lyric_flow_style": "ember_fade",
+                    "v2_lyric_flow_style": lyric_style,
                     "v2_album_island_secondary_style": "shrink_dim",
                     "v2_music_ambience_values": {background: {"ambient_intensity": 0.31}},
                     "v2_lyric_font_size": 21,
@@ -42,10 +44,34 @@ class IslandStyleMigrationTests(unittest.TestCase):
                     self.assertEqual(manager.get("v2_music_player_mode"), "system")
                     manager.save_now()
                     saved = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertEqual(saved["v2_lyric_flow_style"], "wave_stream")
                     self.assertEqual(saved["custom_future_setting"], {"keep": True})
                     self.assertEqual(saved["v2_music_ambience_style"], expected)
                     self.assertEqual(set(saved["v2_music_ambience_values"]), {"sea_level", "solid_album", "system"})
                     manager.deleteLater()
+
+    def test_imported_gelv_choice_is_saved_canonically_and_reload_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "legacy"
+            legacy.mkdir()
+            (legacy / "settings.json").write_text(json.dumps({
+                "v2_lyric_flow_style": "gelv_songscatter",
+                "custom_future_setting": {"keep": True},
+            }), encoding="utf-8")
+            current = root / "current"
+            path = current / "settings.json"
+            with mock.patch.object(settings_store, "APP_DATA_DIR", str(current)), mock.patch.object(settings_store, "SETTINGS_FILE", str(path)), mock.patch.object(settings_store, "legacy_app_data_dirs", return_value=[str(legacy)]):
+                manager = settings_store.SettingsManager()
+                self.assertEqual(manager.get("v2_lyric_flow_style"), "wave_stream")
+                manager.save_now()
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(saved["v2_lyric_flow_style"], "wave_stream")
+                self.assertEqual(saved["custom_future_setting"], {"keep": True})
+                with mock.patch.object(manager, "save") as save:
+                    manager.load()
+                save.assert_not_called()
+                manager.deleteLater()
 
     def test_selected_legacy_values_win_but_canonical_values_take_precedence(self):
         raw = {"pure_white": {"ambient_intensity": 0.1}, "pure_black": {"ambient_intensity": 0.7}}
@@ -62,7 +88,13 @@ class IslandStyleMigrationTests(unittest.TestCase):
             with mock.patch.object(settings_store, "APP_DATA_DIR", directory), mock.patch.object(settings_store, "SETTINGS_FILE", str(Path(directory) / "settings.json")), mock.patch.object(settings_store, "legacy_app_data_dirs", return_value=[]):
                 manager = settings_store.SettingsManager()
                 manager.set("v2_music_ambience_style", "pure_white")
-                manager.set("v2_lyric_flow_style", "ember_fade")
+                for style in ("ember_fade", "gelv_songscatter", [], "unknown"):
+                    with self.subTest(style=style):
+                        manager.set("v2_lyric_flow_style", "album_island")
+                        manager.set("v2_lyric_flow_style", style)
+                        self.assertEqual(manager.get("v2_lyric_flow_style"), "wave_stream")
+                        manager.save_now()
+                        self.assertEqual(json.loads(Path(settings_store.SETTINGS_FILE).read_text(encoding="utf-8"))["v2_lyric_flow_style"], "wave_stream")
                 manager.set("v2_album_island_secondary_style", "shrink_dim")
                 self.assertEqual(manager.get("v2_music_ambience_style"), "system")
                 self.assertEqual(manager.get("v2_lyric_flow_style"), "wave_stream")

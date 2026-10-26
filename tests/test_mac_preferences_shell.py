@@ -934,9 +934,9 @@ class MacPreferencesShellTests(unittest.TestCase):
         window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
         try:
             indexed = " ".join(" ".join(entry["terms"]) for entry in window._settings_search_entries)
-            for label in ("明灭余烬", "歌词炫彩", "双色占比", "初始字词间距", "平排"):
+            for label in ("格律宋散", "明灭余烬", "歌词炫彩", "双色占比", "初始字词间距", "平排"):
                 self.assertNotIn(label, indexed, label)
-            for label in ("格律宋散", "波光逐流", "系统"):
+            for label in ("波光逐流", "系统"):
                 self.assertIn(label, indexed, label)
         finally:
             window.close()
@@ -944,18 +944,20 @@ class MacPreferencesShellTests(unittest.TestCase):
     def test_retired_ember_selection_reopens_as_usable_shared_reader(self):
         from local.settings_window import SettingsWindow
 
-        island = FakeIslandWidget()
-        island.lyric_flow_style = "ember_fade"
-        settings = FakeSettingsManager()
-        settings.values["v2_lyric_flow_style"] = "ember_fade"
-        window = SettingsWindow(island, settings)
-        try:
-            self.assertEqual(window.lyric_flow_style.currentData(), "wave_stream")
-            window.sync_from_widget()
-            self.assertEqual(window.lyric_flow_style.findData("ember_fade"), -1)
-            self.assertFalse(hasattr(window, "_ember_controls"))
-        finally:
-            window.close()
+        for style in ("ember_fade", "gelv_songscatter"):
+            with self.subTest(style=style):
+                island = FakeIslandWidget()
+                island.lyric_flow_style = style
+                settings = FakeSettingsManager()
+                settings.values["v2_lyric_flow_style"] = style
+                window = SettingsWindow(island, settings)
+                try:
+                    self.assertEqual(window.lyric_flow_style.currentData(), "wave_stream")
+                    window.sync_from_widget()
+                    self.assertEqual(window.lyric_flow_style.findData(style), -1)
+                    self.assertFalse(hasattr(window, "_ember_controls"))
+                finally:
+                    window.close()
 
     def test_retired_back_layer_controls_are_absent_on_all_backgrounds(self):
         from local.settings_window import SettingsWindow
@@ -1683,8 +1685,8 @@ class MacPreferencesShellTests(unittest.TestCase):
         window = SettingsWindow(island, settings)
         try:
             self.assertEqual([window.lyric_flow_style.itemData(i) for i in range(window.lyric_flow_style.count())],
-                             ["wave_stream", "gelv_songscatter", "album_island"])
-            for style in ("wave_stream", "gelv_songscatter", "album_island"):
+                             ["wave_stream", "album_island"])
+            for style in ("wave_stream", "album_island"):
                 window._set_combo_data(window.lyric_flow_style, style)
                 window._set_lyric_flow_style()
                 self.assertEqual(island.lyric_flow_style, style)

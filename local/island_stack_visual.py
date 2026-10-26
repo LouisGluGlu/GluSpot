@@ -500,7 +500,7 @@ class IslandStackVisual(QWidget):
     COLOR_FILL_BLOCKED_AMBIENCE_STYLES = {"sea_level", "solid_album"}
     EMBER_COLOR_FILL_AMBIENCE_STYLES = ("pure_black", "pure_white")
     EMBER_COLOR_BACK_GRAY_AMBIENCE_STYLES = ("sea_level", "duotone_full", "solid_album")
-    LYRIC_FLOW_STYLES = ("wave_stream", "gelv_songscatter", "album_island")
+    LYRIC_FLOW_STYLES = ("wave_stream", "album_island")
     ALBUM_ISLAND_SECONDARY_STYLES = ("perspective_dim",)
     # The island reuses a scaled cache, while the music window needs enough
     # source pixels for a 4K desktop. Keep the decoded source bounded, but do
@@ -3099,7 +3099,7 @@ class IslandStackVisual(QWidget):
 
     def set_lyric_flow_style(self, style: str, notify: bool = True):
         style = str(style or "wave_stream").strip()
-        # Removed Ember Fade selections reopen with the canonical reader.
+        # Retired lyric styles reopen with the canonical reader.
         if style not in self.LYRIC_FLOW_STYLES:
             style = "wave_stream"
         self.lyric_flow_style = style
@@ -13684,59 +13684,6 @@ class IslandStackVisual(QWidget):
             self._paint_live_lyric_text(painter, rect, text, compact_size, base_text, live_text, True, phase, centered=True, centered_scroll=True)
         painter.restore()
 
-    def _paint_gelv_compact_lyrics(self, painter: QPainter, rect: QRectF):
-        if self._paint_island_lyric_gap(painter, rect):
-            return
-        now = time.monotonic()
-        progress = self._gelv_spacing_progress(now)
-        for row in self._gelv_line_rects(rect, expanded=False, now=now):
-            opacity = max(0.0, min(1.0, float(row.get("opacity", 1.0))))
-            if opacity <= 0.01:
-                continue
-            painter.save()
-            painter.setOpacity(opacity)
-            self._paint_gelv_line(
-                painter,
-                row["rect"],
-                str(row["text"]),
-                float(row["size"]),
-                float(row.get("scroll_progress", progress)),
-                active=bool(row["active"]),
-                color_fill=bool(row.get("color_fill", False)),
-                progress_fill=bool(row.get("progress_fill", False)),
-                spacing_percent=row.get("spacing_percent"),
-                allow_word_fill=bool(row.get("allow_word_fill", bool(row["active"]))),
-                word_backplate=bool(row["active"]),
-            )
-            painter.restore()
-
-    def _paint_gelv_expanded_lyrics(self, painter: QPainter, rect: QRectF):
-        if self._paint_island_lyric_gap(painter, rect):
-            return
-        now = time.monotonic()
-        progress = self._gelv_spacing_progress(now)
-        inner = rect.adjusted(self._u(18.0), self._u(16.0), -self._u(18.0), -self._u(16.0))
-        for row_index, row in enumerate(self._gelv_line_rects(inner, expanded=True, now=now)):
-            opacity = max(0.0, min(1.0, float(row.get("opacity", 1.0))))
-            if opacity <= 0.01:
-                continue
-            painter.save()
-            painter.setOpacity(opacity)
-            self._paint_gelv_line(
-                painter,
-                row["rect"],
-                str(row["text"]),
-                float(row["size"]),
-                float(row.get("scroll_progress", progress)),
-                active=bool(row["active"]),
-                color_fill=bool(row.get("color_fill", False)),
-                progress_fill=bool(row.get("progress_fill", False)),
-                spacing_percent=row.get("spacing_percent"),
-                allow_word_fill=bool(row.get("allow_word_fill", row_index == 0)),
-                word_backplate=False,
-            )
-            painter.restore()
-
     def _paint_ember_lyrics(self, painter: QPainter, rect: QRectF, expanded: bool = False):
         if self._paint_island_lyric_gap(painter, rect):
             return
@@ -13975,105 +13922,6 @@ class IslandStackVisual(QWidget):
                 painter.drawText(token_rect, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter, chunk)
             x += width
         painter.restore()
-
-    def _paint_gelv_line(
-        self,
-        painter: QPainter,
-        rect: QRectF,
-        text: str,
-        size: float,
-        progress: float,
-        active: bool,
-        color_fill: bool = True,
-        progress_fill: bool = False,
-        spacing_percent: int | None = None,
-        allow_word_fill: bool = True,
-        word_backplate: bool = False,
-    ):
-        if not text:
-            return
-        spacing = int(spacing_percent) if spacing_percent is not None else self._gelv_spacing_percent(progress)
-        layout = self._gelv_layout(text, size, spacing_percent=spacing)
-        x = self._gelv_line_x(rect, text, size, progress, spacing_percent=spacing)
-        gelv_color_theme_active = color_fill and self._gelv_color_theme_enabled()
-        gelv_word_fill_active = (
-            bool(allow_word_fill) and bool(progress_fill or self._gelv_word_fill_enabled())
-            and not self._island_whole_row_reading()
-        )
-        if self._pure_white_music_active() or self._solid_album_music_active():
-            neutral_base = self._music_lyric_base_text_color(128 if active else 82)
-            neutral_live = self._music_lyric_text_color(245 if active else 156)
-            if gelv_color_theme_active:
-                live = self._gelv_fill_color()
-                live.setAlpha(250 if active else 178)
-                base = neutral_base if gelv_word_fill_active else QColor(live)
-            elif gelv_word_fill_active:
-                base = neutral_base
-                live = neutral_live
-            else:
-                base = QColor(neutral_live)
-                live = QColor(neutral_live)
-        else:
-            neutral_base = QColor(255, 255, 255, 128 if active else 82)
-            neutral_live = QColor(255, 255, 255, 245 if active else 156)
-            if gelv_color_theme_active:
-                live = self._gelv_fill_color()
-                live.setAlpha(250 if active else 178)
-                base = neutral_base if gelv_word_fill_active else QColor(live)
-            elif gelv_word_fill_active:
-                base = neutral_base
-                live = neutral_live
-            else:
-                base = QColor(neutral_live)
-                live = QColor(neutral_live)
-        previous_backplate = getattr(self, "_current_word_backplate_enabled", False)
-        previous_word_fill = getattr(self, "_current_gelv_word_fill_enabled", True)
-        self._current_word_backplate_enabled = bool(word_backplate)
-        self._current_gelv_word_fill_enabled = bool(gelv_word_fill_active)
-        try:
-            self._paint_gelv_songscatter_chunks(painter, rect, x, layout, size, base, live, progress, active)
-        finally:
-            self._current_word_backplate_enabled = previous_backplate
-            self._current_gelv_word_fill_enabled = previous_word_fill
-
-    def _paint_gelv_songscatter_chunks(
-        self,
-        painter: QPainter,
-        rect: QRectF,
-        x: float,
-        layout: LyricLayout,
-        size: float,
-        base_color: QColor,
-        live_color: QColor,
-        progress: float,
-        active: bool,
-    ):
-        chunks = layout.chunks
-        if not chunks:
-            return
-        progress = max(0.0, min(1.0, float(progress)))
-        live_width = max(0.0, min(layout.total_width, self._lyric_progress_width(layout, progress)))
-        word_fill = bool(getattr(self, "_current_gelv_word_fill_enabled", True))
-        font = self._gelv_font(size, QFont.Weight.Normal)
-        painter.setFont(font)
-        cursor = x
-        for index, chunk in enumerate(chunks):
-            width = layout.widths[index]
-            if width <= 0.0:
-                cursor += width
-                continue
-            sung_amount = 1.0
-            if word_fill:
-                sung_amount = max(0.0, min(1.0, (live_width - (cursor - x)) / max(1.0, width)))
-            chunk_color = self._mix_alpha_color(base_color, live_color, sung_amount)
-            token_rect = QRectF(cursor, rect.top(), width, rect.height())
-            painter.setPen(chunk_color)
-            painter.drawText(
-                token_rect,
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter,
-                chunk,
-            )
-            cursor += width
 
     def _paint_album_island(self, painter: QPainter, rect: QRectF):
         painter.save()

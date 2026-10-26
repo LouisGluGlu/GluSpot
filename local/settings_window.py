@@ -794,7 +794,6 @@ class SettingsWindow(QDialog):
 
     LYRIC_FLOW_STYLES = (
         ("波光逐流", "wave_stream"),
-        ("格律宋散", "gelv_songscatter"),
         ("专辑岛", "album_island"),
     )
 

@@ -232,11 +232,13 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
         visual.update = lambda: None
         visual.ember_show_cover = False
         visual.compact_lyric_show_cover = True
-        visual.set_lyric_flow_style("ember_fade", notify=False)
-        self.assertEqual(visual.lyric_flow_style, "wave_stream")
-        self.assertNotIn("ember_fade", visual.LYRIC_FLOW_STYLES)
-        self.assertTrue(visual._compact_lyric_cover_enabled())
-        self.assertFalse(visual._active_lyric_color_fill_enabled())
+        for style in ("ember_fade", "gelv_songscatter"):
+            with self.subTest(style=style):
+                visual.set_lyric_flow_style(style, notify=False)
+                self.assertEqual(visual.lyric_flow_style, "wave_stream")
+                self.assertNotIn(style, visual.LYRIC_FLOW_STYLES)
+                self.assertTrue(visual._compact_lyric_cover_enabled())
+                self.assertFalse(visual._active_lyric_color_fill_enabled())
 
 
 if __name__ == "__main__":

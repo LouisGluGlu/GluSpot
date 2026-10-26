@@ -237,3 +237,53 @@ ctypes 把每个 `POINTER(cls)` 永久缓存在 `ctypes._pointer_type_cache` 里
 
 **备注**：真机观感由用户确认（2026-10-24 09:05 启动源码版看水纹随音乐波动）；设置里没有对应开关是
 原有行为，本次未新增设置项。
+## 删除格律歌词样式
+
+**范围**：移除设置窗口 `LYRIC_FLOW_STYLES` 中的“格律宋散”，并从设置存储和
+`IslandStackVisual.LYRIC_FLOW_STYLES` 的合法值中移除 `gelv_songscatter`。
+保留 `wave_stream`、`album_island` 以及历史设置键；不改版本，不涉及海平面和音频 provider 改动。
+
+**删除的绘制方法**（`local/island_stack_visual.py`）：
+- `_paint_gelv_compact_lyrics`
+- `_paint_gelv_expanded_lyrics`
+- `_paint_gelv_line`
+- `_paint_gelv_songscatter_chunks`
+
+可达性仅用 `git grep` 核对属性名、字符串和动态分发：前两个入口在产品代码中没有调用；
+`_paint_gelv_line` 只由这两个入口调用，`_paint_gelv_songscatter_chunks` 只由 `_paint_gelv_line` 调用。
+`getattr(widget, f"set_{attr}")` 对应设置器，不会分发到这些绘制方法。
+本次保留启动代码仍调用的 `set_gelv_font_family`、历史设置器、字体及布局辅助方法，其他死代码另行处理。
+
+**迁移**：复用现有非法值回退，不另加专用迁移路径。当前配置读取和旧目录配置导入都进入
+`SettingsManager.load()`，将旧样式归一为 `wave_stream` 并标记保存；
+`SettingsManager.set()` 在通知、保存之前同样归一，运行时 `set_lyric_flow_style()` 也通过合法值表回退。
+因此旧选择不会通过这些公开入口再次写入配置。回归覆盖读取、持久化、迟到写入、旧目录导入和重复加载。
+
+**测试变更**：删除 7 个只测已删绘制方法的用例，完整 ID 见 `.refactor/removed_tests_gelv.txt`；
+与 HEAD 的文本测试清单逐条比较，消失的测试恰好是这 7 个，且全部存在于 `sealevel2.json` 的成功记录中。
+新增 1 个旧目录导入与重复加载回归；其余现存行为用例只调整或扩展断言，未改名、未删除。
+保留了双色背景关闭填色、波光绘制入口、设置搜索与样式切换、旧样式运行时回退的测试。
+
+**验证状态：未完成全量验证，不能作为已验收交付。** 所有 Python 调用均设置 `PYTHONDONTWRITEBYTECODE=1`。
+已尝试用户指定命令：
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+E:\gpt-island\.venv\Scripts\python.exe E:\Claude-spot\_claude\testrun.py gelv
+```
+
+虚拟环境启动器报 `Unable to create process using ...Python312\python.exe`；
+直接执行该基础解释器返回“拒绝访问”。基础解释器文件存在，是当前受限会话的访问权限阻塞；
+未改动原工作区或其虚拟环境，也未替换测试运行器，故没有新的通过/跳过/失败数字。
+用户给定基线为 5,416 通过 / 3 跳过 / 0 失败；现存 `sealevel2.json` 实际记录为
+5,416 个测试合计（5,413 个 `ok`、3 个 `skip`），两种统计口径需在重新运行后明确区分。
+本次测试方法净减少 6 个（删除 7、新增 1），不将预计数字当作实测结果。
+
+已通过：7 个改动 Python 文件的无字节码语法编译、所有改动文件的 CRLF 检查、
+删除测试清单精确对照和 `git diff --check`。指定不改动的 `api/providers.py`、
+`local/music_background_renderer.py`、`local/owned_audio_bridge.py` 与 HEAD 完全一致。
+未启动 GluSpot 本体，未弹出窗口。
+
+**提交状态**：尚未提交。按请求暂存上述文件时，Git 无法创建
+`E:/Claude-spot/GluSpot/.git/index.lock`，报 `Permission denied`。
+当前会话无法写入 Git 元数据，未切分支、未 push；需恢复解释器执行与 Git 元数据写入权限后完成全量验证和提交。

@@ -517,7 +517,7 @@ class SettingsManager(QObject):
             ambience_values = self._settings.get("v2_music_ambience_values")
             self._settings["v2_music_ambience_values"] = normalize_music_ambience_values(ambience_values, original_style)
             migrated = migrated or ambience_values != self._settings["v2_music_ambience_values"]
-            if str(self._settings.get("v2_lyric_flow_style")) not in {"wave_stream", "gelv_songscatter", "album_island"}:
+            if str(self._settings.get("v2_lyric_flow_style")) not in {"wave_stream", "album_island"}:
                 self._settings["v2_lyric_flow_style"] = "wave_stream"
                 migrated = True
             if self._settings.get("v2_album_island_secondary_style") != "perspective_dim":
@@ -602,7 +602,7 @@ class SettingsManager(QObject):
             value = normalize_music_ambience_style(value) if value or key == "v2_music_ambience_style" else ""
         if key == "v2_music_ambience_values":
             value = normalize_music_ambience_values(value)
-        if key == "v2_lyric_flow_style" and str(value) not in {"wave_stream", "gelv_songscatter", "album_island"}:
+        if key == "v2_lyric_flow_style" and str(value) not in {"wave_stream", "album_island"}:
             value = "wave_stream"
         if key == "v2_album_island_secondary_style":
             value = "perspective_dim"

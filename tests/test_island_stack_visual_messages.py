@@ -6270,107 +6270,14 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual(visual._ember_base_font_size(expanded=False, line_count=1), 21)
         self.assertEqual(visual._ember_base_font_size(expanded=True, line_count=1), 21)
 
-    def test_system_light_legacy_gelv_helper_keeps_black_base_and_allows_word_fill(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.music_ambience_style = "system"
-        visual._music_system_dark = False
-        visual.gelv_color_fill_enabled = True
-        visual.gelv_word_fill_enabled = True
-        visual.album_color = QColor("#00D7FF")
-        visual._gelv_layout = lambda *_args, **_kwargs: LyricLayout("hello", ("hello",), (42.0,), 42.0, ())
-        visual._gelv_line_x = lambda *_args, **_kwargs: 0.0
-        visual._gelv_spacing_percent = lambda _progress: 100
-        captured: list[tuple[QColor, QColor]] = []
-        visual._paint_gelv_songscatter_chunks = (
-            lambda _painter, _rect, _x, _layout, _size, base, live, *_args, **_kwargs:
-            captured.append((QColor(base), QColor(live)))
-        )
-        image = QImage(220, 80, QImage.Format.Format_ARGB32)
-        image.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(image)
-
-        visual._paint_gelv_line(painter, QRectF(10.0, 10.0, 180.0, 36.0), "hello", 16.0, 0.5, True, color_fill=True)
-        painter.end()
-
-        self.assertEqual(captured[0][0].black(), 255)
-        self.assertLess(captured[0][1].red(), 20)
-        self.assertGreater(captured[0][1].green(), 180)
-        self.assertGreater(captured[0][1].blue(), 240)
-
-    def test_gelv_songscatter_theme_matrix_splits_color_and_word_fill(self):
-        def capture(color_theme: bool, word_fill: bool) -> dict[str, object]:
-            visual = IslandStackVisual.__new__(IslandStackVisual)
-            visual.music_ambience_style = "system"
-            visual._music_system_dark = False
-            visual.gelv_color_fill_enabled = color_theme
-            visual.gelv_word_fill_enabled = word_fill
-            visual.album_color = QColor("#00D7FF")
-            visual._gelv_layout = lambda *_args, **_kwargs: LyricLayout("one two", ("one", "two"), (20.0, 20.0), 40.0, ())
-            visual._gelv_line_x = lambda *_args, **_kwargs: 0.0
-            visual._gelv_spacing_percent = lambda _progress: 100
-            captured: list[dict[str, object]] = []
-            visual._paint_gelv_songscatter_chunks = (
-                lambda _painter, _rect, _x, _layout, _size, base, live, *_args, **_kwargs:
-                captured.append(
-                    {
-                        "base": QColor(base),
-                        "live": QColor(live),
-                        "word_fill": bool(getattr(visual, "_current_gelv_word_fill_enabled", True)),
-                    }
-                )
-            )
-
-            visual._paint_gelv_line(None, QRectF(0.0, 0.0, 160.0, 36.0), "one two", 18.0, 0.5, True, color_fill=True)
-
-            return captured[0]
-
-        plain_line = capture(False, False)
-        self.assertFalse(plain_line["word_fill"])
-        self.assertEqual(plain_line["base"].getRgb()[:3], (0, 0, 0))
-        self.assertEqual(plain_line["live"].getRgb()[:3], (0, 0, 0))
-        self.assertEqual(plain_line["base"].alpha(), plain_line["live"].alpha())
-
-        colorful_line = capture(True, False)
-        self.assertFalse(colorful_line["word_fill"])
-        self.assertEqual(colorful_line["base"].getRgb()[:3], colorful_line["live"].getRgb()[:3])
-        self.assertLess(colorful_line["live"].red(), 20)
-        self.assertGreater(colorful_line["live"].green(), 180)
-        self.assertGreater(colorful_line["live"].blue(), 240)
-
-        monochrome_word = capture(False, True)
-        self.assertTrue(monochrome_word["word_fill"])
-        self.assertEqual(monochrome_word["base"].getRgb()[:3], (0, 0, 0))
-        self.assertEqual(monochrome_word["live"].getRgb()[:3], (0, 0, 0))
-        self.assertLess(monochrome_word["base"].alpha(), monochrome_word["live"].alpha())
-
-        colorful_word = capture(True, True)
-        self.assertTrue(colorful_word["word_fill"])
-        self.assertEqual(colorful_word["base"].getRgb()[:3], (0, 0, 0))
-        self.assertLess(colorful_word["live"].red(), 20)
-        self.assertGreater(colorful_word["live"].green(), 180)
-        self.assertGreater(colorful_word["live"].blue(), 240)
-
     def test_duotone_full_gelv_line_disables_word_color_fill(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.lyric_flow_style = "gelv_songscatter"
+        visual.lyric_flow_style = "wave_stream"
         visual.music_ambience_style = "duotone_full"
         visual.gelv_color_fill_enabled = True
         visual.gelv_word_fill_enabled = True
-        visual.album_color = QColor(255, 0, 0)
-        visual._gelv_layout = lambda *_args, **_kwargs: LyricLayout("hello", ("hello",), (42.0,), 42.0, ())
-        visual._gelv_line_x = lambda *_args, **_kwargs: 0.0
-        visual._gelv_spacing_percent = lambda _progress: 100
-        captured: list[tuple[QColor, QColor]] = []
-        visual._paint_gelv_songscatter_chunks = (
-            lambda _painter, _rect, _x, _layout, _size, base, live, *_args, **_kwargs:
-            captured.append((QColor(base), QColor(live)))
-        )
 
         self.assertFalse(visual._active_lyric_color_fill_enabled())
-        visual._paint_gelv_line(None, QRectF(10.0, 10.0, 180.0, 36.0), "hello", 16.0, 0.5, True, color_fill=True)
-
-        self.assertEqual(captured[0][1].getRgb()[:3], (255, 255, 255))
-        self.assertNotEqual(captured[0][1].name().upper(), "#00D7FF")
 
     def test_expanded_sea_level_and_duotone_disable_word_backplates(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -6385,34 +6292,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         for style in ("pure_black", "pure_white", "solid_album"):
             visual.music_ambience_style = style
             self.assertFalse(visual._expanded_word_backplate_enabled())
-
-    def test_gelv_songscatter_chunks_do_not_paint_progress_backlight(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual._gelv_font = lambda size, weight: QFont("Arial", int(size), int(weight))
-        visual._lyric_progress_width = IslandStackVisual._lyric_progress_width.__get__(visual, IslandStackVisual)
-        visual._mix_alpha_color = IslandStackVisual._mix_alpha_color.__get__(visual, IslandStackVisual)
-        visual._expanded_word_backplate_enabled = lambda: True
-        visual._current_word_backplate_enabled = True
-        calls = []
-        visual._paint_gelv_line_backlight = lambda *_args: calls.append("line")
-
-        image = QImage(260, 90, QImage.Format.Format_ARGB32)
-        painter = QPainter(image)
-        visual._paint_gelv_songscatter_chunks(
-            painter,
-            QRectF(0.0, 0.0, 240.0, 40.0),
-            0.0,
-            LyricLayout("one two three", ("one", "two", "three"), (30.0, 30.0, 30.0), 90.0, ()),
-            18.0,
-            QColor(255, 255, 255, 120),
-            QColor(255, 255, 255, 240),
-            0.7,
-            True,
-        )
-        painter.end()
-
-        self.assertEqual(calls, [])
 
     def test_expanded_wave_stream_lyrics_do_not_paint_progress_pulse(self):
         class FakePainter:
@@ -6561,46 +6440,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         painter.end()
 
         self.assertEqual(calls, [])
-
-    def test_expanded_gelv_lyrics_do_not_use_word_backplates(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual._u = lambda value: float(value)
-        visual._gelv_spacing_progress = lambda _now: 0.5
-        visual._lyric_phase = lambda _now: {"progress": 0.5, "confidence": 1.0}
-        visual._gelv_line_rects = lambda *_args, **_kwargs: [
-            {
-                "rect": QRectF(0.0, 0.0, 240.0, 30.0),
-                "text": "upper words",
-                "size": 18.0,
-                "active": True,
-                "opacity": 1.0,
-                "color_fill": True,
-                "progress_fill": False,
-                "spacing_percent": None,
-            },
-            {
-                "rect": QRectF(0.0, 36.0, 240.0, 26.0),
-                "text": "lower words",
-                "size": 14.0,
-                "active": True,
-                "opacity": 1.0,
-                "color_fill": False,
-                "progress_fill": True,
-                "spacing_percent": None,
-            },
-        ]
-        calls = []
-        visual._paint_gelv_line = (
-            lambda _painter, _rect, text, *_args, word_backplate=False, **_kwargs:
-            calls.append((text, bool(word_backplate)))
-        )
-
-        image = QImage(260, 90, QImage.Format.Format_ARGB32)
-        painter = QPainter(image)
-        visual._paint_gelv_expanded_lyrics(painter, QRectF(0.0, 0.0, 240.0, 80.0))
-        painter.end()
-
-        self.assertEqual(calls, [("upper words", False), ("lower words", False)])
 
     def test_congested_taskbar_slot_shrinks_music_to_cover_only_size(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -8167,57 +8006,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_wave_stream_and_gelv_use_sibling_chunk_painters(self):
         self.assertTrue(hasattr(IslandStackVisual, "_paint_wave_stream_lyric_chunks"))
-        self.assertTrue(hasattr(IslandStackVisual, "_paint_gelv_songscatter_chunks"))
-
-    def test_gelv_songscatter_chunks_do_not_scale_focused_words(self):
-        class FakePainter:
-            def __init__(self):
-                self.scale_calls = []
-
-            def setFont(self, *_args):
-                pass
-
-            def save(self):
-                pass
-
-            def translate(self, *_args):
-                pass
-
-            def scale(self, x, y):
-                self.scale_calls.append((x, y))
-
-            def setPen(self, *_args):
-                pass
-
-            def drawText(self, *_args):
-                pass
-
-            def restore(self):
-                pass
-
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        layout = LyricLayout(
-            text="one two three",
-            chunks=("one", "two", "three"),
-            widths=(24.0, 24.0, 24.0),
-            total_width=72.0,
-            font_key=(),
-        )
-        painter = FakePainter()
-
-        visual._paint_gelv_songscatter_chunks(
-            painter,
-            QRectF(0.0, 0.0, 120.0, 28.0),
-            0.0,
-            layout,
-            18,
-            QColor(255, 255, 255, 120),
-            QColor(255, 255, 255, 250),
-            0.5,
-            True,
-        )
-
-        self.assertEqual(painter.scale_calls, [])
+        self.assertFalse(hasattr(IslandStackVisual, "_paint_gelv_songscatter_chunks"))
 
     def test_gelv_transition_animates_without_vertical_float_or_size_shift(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
@@ -8265,45 +8054,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertGreater(moving_current["rect"].top(), final_current["rect"].top() + 1.0)
         self.assertLess(moving_current["rect"].top(), final_next["rect"].top())
 
-    def test_gelv_transition_out_row_keeps_previous_scroll_progress_without_word_fill(self):
-        class FakePainter:
-            def save(self):
-                pass
-
-            def restore(self):
-                pass
-
-            def setOpacity(self, _opacity):
-                pass
-
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.location_mode = "free"
-        visual.lyric_changed_at = 10.0
-        visual.prev_lyric_index = 0
-        visual.lyric_index = 1
-        visual.lyrics = [
-            "previous long lyric line that had already scrolled",
-            "current long lyric line entering now",
-            "next lyric line",
-        ]
-        visual.enable_dual_line_lyrics = False
-        visual.gelv_primary_font_size = 24
-        visual.gelv_secondary_font_size = 12
-        visual.gelv_dual_line_font_size = 17
-        visual.gelv_word_fill_enabled = False
-        visual._u = lambda value: float(value)
-        visual._gelv_spacing_progress = lambda _now=None: 0.0
-        calls: list[tuple[str, float]] = []
-        visual._paint_gelv_line = lambda _painter, _rect, text, _size, progress, **_kwargs: calls.append((str(text), float(progress)))
-
-        with patch("local.island_stack_visual.time.monotonic", return_value=10.08):
-            visual._paint_gelv_compact_lyrics(FakePainter(), QRectF(0.0, 0.0, 320.0, 58.0))
-
-        previous = next(progress for text, progress in calls if text.startswith("previous"))
-        current = next(progress for text, progress in calls if text.startswith("current"))
-        self.assertAlmostEqual(previous, 1.0)
-        self.assertAlmostEqual(current, 0.0)
-
     def test_gelv_color_fill_marks_only_primary_row(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
         visual.enable_dual_line_lyrics = True
@@ -8350,47 +8100,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         self.assertEqual([row["text"] for row in rows], ["A prayer for you my friend", "为你祈祷我的朋友"])
         self.assertIsNone(rows[1]["spacing_percent"])
         self.assertFalse(rows[1]["progress_fill"])
-
-    def test_gelv_dual_line_secondary_paint_ignores_progress_fill(self):
-        visual = IslandStackVisual.__new__(IslandStackVisual)
-        visual.gelv_color_fill_enabled = True
-        visual.gelv_word_fill_enabled = True
-        visual.album_color = QColor(255, 0, 0)
-        calls = []
-        visual._gelv_layout = lambda text, size, spacing_percent: LyricLayout(
-            text=text,
-            chunks=("one", "two"),
-            widths=(20.0, 20.0),
-            total_width=40.0,
-            font_key=(),
-        )
-        visual._gelv_line_x = lambda *_args, **_kwargs: 0.0
-        visual._paint_gelv_songscatter_chunks = (
-            lambda _painter, _rect, _x, _layout, _size, base, live, _progress, _active: calls.append(
-                {
-                    "base": QColor(base),
-                    "live": QColor(live),
-                    "word_fill": bool(getattr(visual, "_current_gelv_word_fill_enabled", True)),
-                }
-            )
-        )
-
-        visual._paint_gelv_line(
-            None,
-            QRectF(0.0, 0.0, 120.0, 28.0),
-            "one two",
-            18.0,
-            0.5,
-            active=True,
-            color_fill=False,
-            progress_fill=True,
-            allow_word_fill=False,
-        )
-
-        self.assertEqual(calls[0]["base"].getRgb()[:3], (255, 255, 255))
-        self.assertEqual(calls[0]["live"].getRgb()[:3], (255, 255, 255))
-        self.assertEqual(calls[0]["base"].alpha(), calls[0]["live"].alpha())
-        self.assertFalse(calls[0]["word_fill"])
 
     def test_wave_stream_read_word_keeps_live_highlight_neutral(self):
         class FakePainter:
