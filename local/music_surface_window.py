@@ -6683,15 +6683,20 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         painter.restore()
 
     def paintEvent(self, _event):
+        previous_geometry = getattr(self, "_frame_geometry_cache", None)
+        self._frame_geometry_cache = {}
         previous = getattr(self, "_frame_lyric_cache", None)
         previous_light = self._frame_glass_light
         previous_color_at = self._frame_control_color_at
         self._frame_glass_light = not app_dark_mode(getattr(self.owner, "settings_getter", None))
         self._frame_control_color_at = time.monotonic()
+        self._clear_control_renderer.begin_frame(self._frame_control_color_at)
         self._frame_lyric_cache = {}
         try:
             self._paint_surface_frame(_event)
         finally:
+            self._clear_control_renderer.end_frame()
+            self._frame_geometry_cache = previous_geometry
             self._frame_lyric_cache = previous
             self._frame_glass_light = previous_light
             self._frame_control_color_at = previous_color_at
@@ -8806,6 +8811,16 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return bounds
 
     def _personal_dj_geometry(self, rect: QRectF, now: float, *, expansion: float | None = None, posed=True):
+        cache = getattr(self, "_frame_geometry_cache", None)
+        key = ("dj", rect.x(), rect.y(), rect.width(), rect.height(), now, expansion, posed)
+        if cache is not None and key in cache:
+            return tuple(QRectF(value) for value in cache[key])
+        result = self._personal_dj_geometry_uncached(rect, now, expansion=expansion, posed=posed)
+        if cache is not None:
+            cache[key] = tuple(QRectF(value) for value in result)
+        return result
+
+    def _personal_dj_geometry_uncached(self, rect: QRectF, now: float, *, expansion: float | None = None, posed=True):
         if self._owned_personal_dj_enabled is None and self._song_collection_state().track_id:
             return QRectF(), QRectF()
         scale = self._surface_scale(rect)

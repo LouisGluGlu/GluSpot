@@ -362,6 +362,17 @@ class MusicSongCollectionMixin:
         self.update()
 
     def _song_collection_geometry(self, rect, now=None, *, shifted=True):
+        now = time.monotonic() if now is None else now
+        cache = getattr(self, "_frame_geometry_cache", None)
+        key = ("collection", rect.x(), rect.y(), rect.width(), rect.height(), now, shifted)
+        if cache is not None and key in cache:
+            return QRectF(cache[key])
+        result = self._song_collection_geometry_uncached(rect, now, shifted=shifted)
+        if cache is not None:
+            cache[key] = QRectF(result)
+        return result
+
+    def _song_collection_geometry_uncached(self, rect, now=None, *, shifted=True):
         if not self._song_collection_state().track_id:
             return QRectF()
         now = time.monotonic() if now is None else now

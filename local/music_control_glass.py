@@ -317,14 +317,34 @@ class GlassControlRenderer:
     def __init__(self):
         self.patches = OrderedDict()
         self.bytes = 0
+        self.refresh_roles = None
+        self.seen_roles = set()
+        self.frame_roles = None
+
+    def begin_frame(self, now):
+        # Reserve refreshes for the oldest eligible patches, independent of paint order.
+        eligible = ((entry[2], role) for role, entry in self.patches.items()
+                    if role in self.seen_roles and now - entry[2] >= GLASS_MATERIAL_FRAME_SECONDS)
+        self.refresh_roles = {role for _, role in sorted(eligible, key=lambda item: item[0])[:2]}
+        self.frame_roles = set()
+
+    def end_frame(self):
+        self.seen_roles = self.frame_roles or set()
+        self.frame_roles = None
+        self.refresh_roles = None
 
     def clear(self):
         self.patches.clear()
         self.bytes = 0
+        self.refresh_roles = None
+        self.seen_roles.clear()
+        self.frame_roles = None
 
     def paint(self, painter, rect, *, scene, scene_bounds, ink, now, role,
               state=None, hover=0., path=None, kind="circle", level=50,
               selected=False, hover_clip=None, hover_segments=None):
+        if self.frame_roles is not None:
+            self.frame_roles.add(role)
         spec = (GLASS_GLYPH if kind == "path" else GLASS_DJ if kind == "dj" else GLASS_CLEAR).at_level(level)
         dpr = max(CONTROL_COMPOSITE_DPR, min(3., painter.device().devicePixelRatioF()))
         rect = QRectF(rect)
@@ -348,7 +368,8 @@ class GlassControlRenderer:
         previous = self.patches.get(role)
         moving = state is not None and state.active(now)
         if (previous is None or previous[0] != pose or
-                (previous[1] != scene.cacheKey() and (moving or now - previous[2] >= GLASS_MATERIAL_FRAME_SECONDS))):
+                (previous[1] != scene.cacheKey() and (moving or (now - previous[2] >= GLASS_MATERIAL_FRAME_SECONDS and
+                            (self.refresh_roles is None or role in self.refresh_roles))))):
             image = _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint)
             if previous is not None:
                 self.bytes -= previous[3].sizeInBytes()
@@ -359,6 +380,11 @@ class GlassControlRenderer:
                 self.bytes -= self.patches.popitem(last=False)[1][3].sizeInBytes()
         else:
             image = previous[3]
+            # A selected patch that already matches the scene must yield its
+            # place to older stale patches on subsequent frames.
+            if (self.refresh_roles is not None and role in self.refresh_roles
+                    and previous[1] == scene.cacheKey()):
+                self.patches[role] = (previous[0], previous[1], now, image)
         lift = state.lift if state is not None else 0.
         grown = QRectF(rect)
         if kind == "capsule" or kind == "dj" and rect.width() > rect.height() * 1.2:

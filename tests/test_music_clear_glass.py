@@ -233,6 +233,81 @@ class ClearRenderTests(unittest.TestCase):
         self.scene.fill(QColor("blue"))
         self.assertNotEqual(draw(100.12, ControlMotion(held=True)), last)
 
+    def test_stationary_refresh_is_staggered_and_invisible_roles_do_not_block(self):
+        renderer = GlassControlRenderer()
+        rect = QRectF(80, 60, 35, 35)
+        def frame(now, roles, moving=()):
+            renderer.begin_frame(now)
+            image = self.image()
+            with QPainter(image) as p:
+                for role in roles:
+                    renderer.paint(p, rect, scene=self.scene, scene_bounds=QRectF(self.window.rect()),
+                                   ink=QColor("white"), now=now, role=role,
+                                   state=ControlMotion(held=True) if role in moving else None)
+            renderer.end_frame()
+        frame(100., ("a", "b", "c", "hidden"))
+        self.scene.fill(QColor("red"))
+        frame(100.11, ("a", "b", "c"))
+        self.assertEqual([renderer.patches[r][2] for r in ("a", "b", "c")], [100.11, 100.11, 100.])
+        frame(100.13, ("a", "b", "c"))
+        self.assertEqual(renderer.patches["c"][2], 100.13)
+        self.scene.fill(QColor("blue"))
+        frame(100.14, ("a", "b", "c"), moving=("b",))
+        self.assertEqual(renderer.patches["b"][2], 100.14)
+
+    def test_current_scene_patch_yields_refresh_slot(self):
+        renderer = GlassControlRenderer()
+        rect = QRectF(80, 60, 35, 35)
+        image = self.image()
+        with QPainter(image) as p:
+            renderer.paint(p, rect, scene=self.scene, scene_bounds=QRectF(self.window.rect()),
+                           ink=QColor("white"), now=100., role="current")
+            self.scene.fill(QColor("red"))
+            for role in ("stale1", "stale2"):
+                renderer.paint(p, rect, scene=self.scene, scene_bounds=QRectF(self.window.rect()),
+                               ink=QColor("white"), now=100.01, role=role)
+            self.scene.fill(QColor("blue"))
+            # Make the oldest patch current while the others remain stale.
+            renderer.patches["current"] = (renderer.patches["current"][0], self.scene.cacheKey(),
+                                           100., renderer.patches["current"][3])
+            renderer.seen_roles = {"current", "stale1", "stale2"}
+            for now in (100.11, 100.13):
+                renderer.begin_frame(now)
+                for role in ("current", "stale1", "stale2"):
+                    renderer.paint(p, rect, scene=self.scene, scene_bounds=QRectF(self.window.rect()),
+                                   ink=QColor("white"), now=now, role=role)
+                renderer.end_frame()
+            self.assertEqual(renderer.patches["stale2"][1], self.scene.cacheKey())
+
+    def test_paint_event_opens_and_closes_geometry_cache(self):
+        self.window._frame_geometry_cache = None
+        seen = []
+        with patch.object(self.window, "_paint_surface_frame", side_effect=lambda event: seen.append(self.window._frame_geometry_cache)):
+            self.window.paintEvent(None)
+        self.assertEqual(seen, [{}])
+        self.assertIsNone(self.window._frame_geometry_cache)
+        self.assertIsNone(self.window._clear_control_renderer.refresh_roles)
+
+    def test_geometry_cache_is_scoped_to_frame_and_keys_inputs(self):
+        rect = QRectF(self.window.rect())
+        self.window._frame_geometry_cache = {}
+        with patch.object(self.window, "_personal_dj_geometry_uncached", wraps=self.window._personal_dj_geometry_uncached) as dj, \
+             patch.object(self.window, "_song_collection_geometry_uncached", wraps=self.window._song_collection_geometry_uncached) as collection:
+            first = self.window._personal_dj_geometry(rect, 100.)
+            first[0].translate(500, 0)
+            again = self.window._personal_dj_geometry(rect, 100.)
+            self.assertNotEqual(first[0], again[0])
+            self.window._personal_dj_geometry(rect, 100., posed=False)
+            self.assertEqual(dj.call_count, 2)
+            self.window._song_collection_geometry(rect, 100.)
+            self.window._song_collection_geometry(rect, 100.)
+            self.window._song_collection_geometry(rect, 101.)
+            self.assertEqual(collection.call_count, 2)
+            self.window._frame_geometry_cache = {}
+            self.window._personal_dj_geometry(rect, 100.)
+            self.assertEqual(dj.call_count, 3)
+        self.window._frame_geometry_cache = None
+
     def test_mouse_press_triggers_before_release_and_hit_rects_stay_at_rest(self):
         with patch("local.music_surface_window.time.monotonic", return_value=100.):
             self.window._sync_window_control_rects()
