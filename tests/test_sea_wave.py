@@ -19,10 +19,20 @@ class SeaWaveTests(unittest.TestCase):
         state.update((0, 0, 0), 0)
         state.update((.2, .2, .2), .03)
         self.assertGreater(state.bands[0], .30)
-        state.update((0, 0, 0), .06)
-        self.assertGreater(state.bands[0], .4)
+        # The 50 ms attack half-life reaches half of the normalized input.
+        state.update((.2, .2, .2), .05)
+        peak = state.bands[0]
+        self.assertAlmostEqual(peak, .5, delta=.01)
+        state.update((0, 0, 0), .08)
+        held = state.bands[0]
+        # Release is slower (220 ms): retain over 90% after 30 ms.
+        self.assertGreater(held, peak * .90)
+        self.assertLess(held, peak)
+        state.update((0, 0, 0), .27)
+        self.assertLess(state.bands[0], held)
+        self.assertAlmostEqual(state.bands[0], peak * .5, delta=.01)
         for n in range(1, 400):
-            state.update((0, 0, 0), .06 + n / 60)
+            state.update((0, 0, 0), .27 + n / 60)
         self.assertLess(state.bands[0], .001)
         self.assertLess(abs(state.displacement(.5, 0, 'strong')), .1)
 
