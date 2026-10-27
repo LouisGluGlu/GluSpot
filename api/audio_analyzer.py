@@ -41,13 +41,25 @@ def analyze_frequency_block(block, sample_rate: int, np, smooth) -> AudioFrame |
         smooth[index] = smooth[index] * 0.52 + compressed * 0.48
         normalized.append(smooth[index])
     vocal_mask = (freqs >= 300) & (freqs < 3400)
-    vocal_spectrum = spectrum[vocal_mask]
+    center_spectrum = spectrum
     if side is not None:
         side_spectrum = np.abs(np.fft.rfft((side - float(np.mean(side))) * np.hanning(len(side))))
-        vocal_spectrum = np.maximum(0.0, vocal_spectrum - side_spectrum[vocal_mask])
+        center_spectrum = np.maximum(0.0, spectrum - side_spectrum)
+    vocal_spectrum = center_spectrum[vocal_mask]
     vocal_energy = float(np.sqrt(np.mean(np.square(vocal_spectrum))) / max(1.0, len(spectrum))) if vocal_spectrum.size else 0.0
     vocal = max(0.0, min(1.0, math.log1p(vocal_energy * 96.0) / math.log1p(96.0)))
-    return AudioFrame(*normalized, vocal=vocal)
+    def log_bands(magnitudes, lower, upper):
+        # Interpolate narrow low-frequency bands that contain no FFT bin.
+        edges = np.geomspace(lower, min(upper, sample_rate / 2), 25)
+        result = []
+        for low, high in zip(edges, edges[1:]):
+            mask = (freqs >= low) & (freqs < high)
+            value = float(np.max(magnitudes[mask])) if np.any(mask) else float(np.interp((low * high) ** .5, freqs, magnitudes))
+            result.append(max(0.0, value / max(1.0, len(spectrum))))
+        return tuple(result)
+    return AudioFrame(*normalized, vocal=vocal,
+                      spectrum=log_bands(spectrum, 50, 10000),
+                      vocal_spectrum=log_bands(center_spectrum, 200, 4000))
 
 
 class LiveAudioAnalyzer:
@@ -236,7 +248,7 @@ class LiveAudioAnalyzer:
         return self._last_real_frame_at > 0 and time.monotonic() - self._last_real_frame_at < 1.2
 
     def _dampen(self, frame: AudioFrame) -> AudioFrame:
-        return AudioFrame(frame.low * 0.18, frame.mid * 0.14, frame.high * 0.10, frame.vocal * 0.14)
+        return AudioFrame(frame.low * 0.18, frame.mid * 0.14, frame.high * 0.10, frame.vocal * 0.14, tuple(x * .14 for x in frame.spectrum), tuple(x * .14 for x in frame.vocal_spectrum))
 
     def _estimated_frame(self, is_playing: bool, position_seconds: float) -> AudioFrame:
         if not is_playing:
