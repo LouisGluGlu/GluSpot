@@ -23,7 +23,10 @@ def analyze_frequency_block(block, sample_rate: int, np, smooth) -> AudioFrame |
     data = np.asarray(block, dtype=np.float32)
     if data.size == 0:
         return None
+    side = None
     if len(data.shape) > 1:
+        if data.shape[1] >= 2:
+            side = (data[:, 0] - data[:, 1]) * 0.5
         data = data.mean(axis=1)
     data = data - float(np.mean(data))
     if not np.isfinite(data).all() or float(np.max(np.abs(data))) < 0.00008:
@@ -37,7 +40,14 @@ def analyze_frequency_block(block, sample_rate: int, np, smooth) -> AudioFrame |
         compressed = max(0.0, min(1.0, math.log1p(value * 96.0) / math.log1p(96.0)))
         smooth[index] = smooth[index] * 0.52 + compressed * 0.48
         normalized.append(smooth[index])
-    return AudioFrame(*normalized)
+    vocal_mask = (freqs >= 300) & (freqs < 3400)
+    vocal_spectrum = spectrum[vocal_mask]
+    if side is not None:
+        side_spectrum = np.abs(np.fft.rfft((side - float(np.mean(side))) * np.hanning(len(side))))
+        vocal_spectrum = np.maximum(0.0, vocal_spectrum - side_spectrum[vocal_mask])
+    vocal_energy = float(np.sqrt(np.mean(np.square(vocal_spectrum))) / max(1.0, len(spectrum))) if vocal_spectrum.size else 0.0
+    vocal = max(0.0, min(1.0, math.log1p(vocal_energy * 96.0) / math.log1p(96.0)))
+    return AudioFrame(*normalized, vocal=vocal)
 
 
 class LiveAudioAnalyzer:
@@ -226,7 +236,7 @@ class LiveAudioAnalyzer:
         return self._last_real_frame_at > 0 and time.monotonic() - self._last_real_frame_at < 1.2
 
     def _dampen(self, frame: AudioFrame) -> AudioFrame:
-        return AudioFrame(frame.low * 0.18, frame.mid * 0.14, frame.high * 0.10)
+        return AudioFrame(frame.low * 0.18, frame.mid * 0.14, frame.high * 0.10, frame.vocal * 0.14)
 
     def _estimated_frame(self, is_playing: bool, position_seconds: float) -> AudioFrame:
         if not is_playing:

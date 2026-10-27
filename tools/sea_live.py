@@ -1,6 +1,7 @@
 """Live, isolated preview of the real expanded music island.
 
 Space pauses cover rotation; 1-4 select a cover; S toggles simulated sound.
+Q/W/E select wave intensity and R selects the vocal drive.
 """
 from __future__ import annotations
 import argparse
@@ -170,7 +171,8 @@ class Scene:
         else:
             self.frame = AudioFrame(.25 + .65 * math.exp(-beat * 6),
                 .30 + .25 * (.5 + .5 * math.sin(t * 1.7)),
-                .18 + .30 * math.exp(-((beat + .5) % 1) * 9)) if sound else AudioFrame(0, 0, 0)
+                .18 + .30 * math.exp(-((beat + .5) % 1) * 9),
+                vocal=.04 + .12 * (.5 + .5 * math.sin(t * 2.3))) if sound else AudioFrame(0, 0, 0)
         self.visual.media_is_playing = True
         self.visual.media_no_audio = False
         self.visual.ambient_phase = t * .6
@@ -253,8 +255,10 @@ class Window(QWidget):
             source = self.scene.audio.source if self.scene.audio else "simulated"
             record = {"time": now - self.start, "source": source,
                       "bands": self.scene.visual.current_audio_bands,
+                      "vocal": getattr(self.scene.visual, "_sea_vocal_sample", 0.0),
                       "intensity": sea_intensity(getattr(self.scene.visual, "sea_wave_intensity", None)),
-                      "impulse": getattr(getattr(self.scene.visual, "_sea_wave_state", None), "impulse", 0.0),
+                      "impulse": getattr(getattr(self.scene.visual, "_sea_wave_state", None),
+                                         "vocal_impulse" if sea_intensity(getattr(self.scene.visual, "sea_wave_intensity", None)) == "vocal" else "impulse", 0.0),
                       "water_y": [points[i].y() for i in (0, len(points)//4, len(points)//2, 3*len(points)//4, len(points)-1)]}
             self.log.write(json.dumps(record, ensure_ascii=False) + "\n")
             self.log.flush()
@@ -268,6 +272,8 @@ class Window(QWidget):
             self.last_switch = time.monotonic()
         elif key in (Qt.Key.Key_Q, Qt.Key.Key_W, Qt.Key.Key_E):
             self.scene.visual.sea_wave_intensity = {Qt.Key.Key_Q: "gentle", Qt.Key.Key_W: "medium", Qt.Key.Key_E: "strong"}[key]
+        elif key == Qt.Key.Key_R:
+            self.scene.visual.sea_wave_intensity = "vocal"
         elif key == Qt.Key.Key_S:
             self.sound = not self.sound
         elif Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
@@ -282,7 +288,7 @@ def main():
     parser.add_argument("--grab", type=Path)
     parser.add_argument("--audio", type=Path)
     parser.add_argument("--log", type=Path)
-    parser.add_argument("--intensity", choices=("gentle", "medium", "strong"))
+    parser.add_argument("--intensity", choices=("gentle", "medium", "strong", "vocal"))
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     scene = Scene(app)

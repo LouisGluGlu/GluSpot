@@ -64,6 +64,18 @@ class SeaWaveTests(unittest.TestCase):
         self.assertEqual(stats['center_jump_p99'], 2)
         self.assertAlmostEqual(stats['corr_impulse_center_rise'], 1)
 
+    def test_vocal_response_follows_voice_not_bass_and_settles(self):
+        vocal = SeaWaveState()
+        bass = SeaWaveState()
+        for n in range(120):
+            vocal.update((0.0, 0.0, 0.0), n / 60, vocal=0.1)
+            bass.update((0.3, 0.0, 0.0), n / 60, vocal=0.0)
+        self.assertGreater(vocal.displacement(.5, 0, 'vocal'), 20)
+        self.assertEqual(bass.displacement(.5, 0, 'vocal'), 0)
+        for n in range(1, 400):
+            vocal.update((0.0, 0.0, 0.0), 2 + n / 60, vocal=0.0)
+        self.assertLess(abs(vocal.displacement(.5, 0, 'vocal')), .01)
+
     def test_intensity_and_limit(self):
         state = SeaWaveState()
         for n in range(60):
