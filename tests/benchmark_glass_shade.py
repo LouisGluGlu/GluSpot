@@ -21,19 +21,28 @@ from tests import glass_shade_reference
 
 def benchmark(function, module):
     source = inspect.getsource(function)
-    markers = [("crop_and_conversion", "    if not isinstance(pixels, Image.Image):"),
-               ("format", "    pixels = np.asarray(pixels.filter("),
-               ("blur", "    flat = pixels.reshape(-1)"),
-               ("sampling", "    lum = "),
-               ("color", "    np.clip(rgb," if function is glass._shade else "    rgb = np.clip("),
-               ("light", "    rgba = np.empty("),
-               ("pack", "    return QImage(")]
+    # The fixture stays inside the scene: time Qt crop/scale separately from
+    # Pillow's RGB conversion, blur, and NumPy float conversion.
+    source = source.replace(
+        "    pixels = np.asarray(pixels.filter(GaussianBlur(spec.blur * dpr * ratio)), dtype=np.float32)",
+        "    pixels = pixels.filter(GaussianBlur(spec.blur * dpr * ratio))\n"
+        "    pixels = np.asarray(pixels, dtype=np.float32)")
+    markers = [("crop_scale", "        raw_format =", 8),
+               ("format_to_pil", "    if not isinstance(pixels, Image.Image):", 4),
+               ("pre_blur", "    pixels = pixels.filter(", 4),
+               ("blur", "    pixels = np.asarray(pixels, dtype=np.float32)", 4),
+               ("format_to_float", "    flat = pixels.reshape(-1)", 4),
+               ("sampling", "    lum = ", 4),
+               ("color", "    np.clip(rgb," if function is glass._shade else "    rgb = np.clip(", 4),
+               ("light", "    rgba = np.empty(", 4),
+               ("pack", "    return QImage(", 4)]
     source = source.replace("    geometry = control_geometry(*geometry_key)",
                             "    _start = _last = time.perf_counter()\n    geometry = control_geometry(*geometry_key)", 1)
-    for name, marker in markers:
+    for name, marker, indent in markers:
         if marker not in source:
             raise RuntimeError("missing stage marker: " + marker)
-        source = source.replace(marker, f"    _now = time.perf_counter(); _times[{name!r}].append((_now - _last) * 1000); _last = _now\n" + marker, 1)
+        timing = " " * indent + f"_now = time.perf_counter(); _times[{name!r}].append((_now - _last) * 1000); _last = _now\n"
+        source = source.replace(marker, timing + marker, 1)
     source = source.replace("    return QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()",
                             "    result = QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()\n    _now = time.perf_counter(); _times['qimage'].append((_now - _last) * 1000); _times['total'].append((_now - _start) * 1000)\n    return result")
     namespace = dict(vars(module), time=time, _times=defaultdict(list))
