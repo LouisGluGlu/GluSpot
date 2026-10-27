@@ -1066,30 +1066,43 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
     def _sea_level_surface(self, context: MusicBackgroundRenderContext, rect: QRectF, expanded: bool) -> list[QPointF]:
         """The moving water line shared by the sea body and its highlight.
 
-        It sits at the middle of the island; music bands raise its swell
-        through sea_level_wave_paint_plan, and it lies almost flat in silence.
+        The sea-only audio state shapes the line and settles in silence.
+        Hosts without that state retain the legacy rendering fallback.
         """
-        plan = sea_level_wave_paint_plan(
-            context.response("sea_level"),
-            bands=context.bands,
-            flow=context.tuning.flow_amount,
-            expanded=expanded,
-            media_is_playing=context.media_is_playing,
-        )
-        phase = context.ambient_phase * plan.phase_ambient_rate + time.monotonic() * plan.phase_time_rate
-        center_y = rect.top() + rect.height() * 0.5 + self._u(plan.center_band_units)
-        amplitude = self._u(plan.amplitude_units) * 0.45
+        from local.sea_wave import sea_intensity
+        state = getattr(self.host, "_sea_wave_state", None)
+        if state is None:
+            plan = sea_level_wave_paint_plan(
+                context.response("sea_level"),
+                bands=context.bands,
+                flow=context.tuning.flow_amount,
+                expanded=expanded,
+                media_is_playing=context.media_is_playing,
+            )
+            phase = context.ambient_phase * plan.phase_ambient_rate + time.monotonic() * plan.phase_time_rate
+            center_y = rect.top() + rect.height() * 0.5 + self._u(plan.center_band_units)
+            amplitude = self._u(plan.amplitude_units) * 0.45
+            points = []
+            count = 48
+            for index in range(count + 1):
+                pos = index / count
+                soft_peak = math.sin(pos * math.pi)
+                swell = math.sin(pos * math.tau * 1.16 + phase)
+                ripple = math.sin(pos * math.tau * 2.35 - phase * 0.58)
+                surface = math.sin(pos * math.tau * 4.20 + phase * 0.34)
+                level = swell * 0.58 + ripple * 0.29 + surface * 0.13
+                points.append(QPointF(rect.left() + rect.width() * pos,
+                                      center_y - amplitude * level * (0.46 + soft_peak * 0.54)))
+            return points
+        intensity = sea_intensity(getattr(self.host, "sea_wave_intensity", None))
+        phase = context.ambient_phase * 1.15
+        scale = rect.height() / 200.0
         points = []
-        count = 48
-        for index in range(count + 1):
-            pos = index / count
-            soft_peak = math.sin(pos * math.pi)
-            swell = math.sin(pos * math.tau * 1.16 + phase)
-            ripple = math.sin(pos * math.tau * 2.35 - phase * 0.58)
-            surface = math.sin(pos * math.tau * 4.20 + phase * 0.34)
-            level = swell * 0.58 + ripple * 0.29 + surface * 0.13
-            points.append(QPointF(rect.left() + rect.width() * pos,
-                                  center_y - amplitude * level * (0.46 + soft_peak * 0.54)))
+        for index in range(49):
+            pos = index / 48
+            displacement = state.displacement(pos, phase, intensity)
+            y = rect.top() + rect.height() * 0.495 - scale * displacement
+            points.append(QPointF(rect.left() + rect.width() * pos, y))
         return points
 
     @staticmethod

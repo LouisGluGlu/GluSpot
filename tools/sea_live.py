@@ -35,6 +35,7 @@ from api.audio_analyzer import LiveAudioAnalyzer
 from local.owned_audio_bridge import OwnedAudioBridge
 from api.providers import empty_visual_data
 from local.island_stack_visual import IslandStackVisual
+from local.sea_wave import sea_intensity, INTENSITY_LABELS
 
 COVERS = [("深蓝", (28, 52, 110)), ("暖橙", (196, 108, 52)),
           ("墨绿", (30, 74, 58)), ("浅粉", (222, 170, 186))]
@@ -228,7 +229,7 @@ class Window(QWidget):
         color = self.scene.visual._solid_album_background_color().getRgb()[:3]
         source = self.scene.audio.source if self.scene.audio else "simulated"
         low, mid, high = self.scene.visual.current_audio_bands
-        self.setWindowTitle(f"GluSpot 海平面预览 | {source} | {low:.2f} {mid:.2f} {high:.2f} | {self.fps:.1f} fps")
+        self.setWindowTitle(f"GluSpot 海平面预览 · {INTENSITY_LABELS[sea_intensity(getattr(self.scene.visual, 'sea_wave_intensity', None))]} | {source} | {low:.2f} {mid:.2f} {high:.2f} | {self.fps:.1f} fps")
         self.update()
 
     def paintEvent(self, event):
@@ -252,6 +253,8 @@ class Window(QWidget):
             source = self.scene.audio.source if self.scene.audio else "simulated"
             record = {"time": now - self.start, "source": source,
                       "bands": self.scene.visual.current_audio_bands,
+                      "intensity": sea_intensity(getattr(self.scene.visual, "sea_wave_intensity", None)),
+                      "impulse": getattr(getattr(self.scene.visual, "_sea_wave_state", None), "impulse", 0.0),
                       "water_y": [points[i].y() for i in (0, len(points)//4, len(points)//2, 3*len(points)//4, len(points)-1)]}
             self.log.write(json.dumps(record, ensure_ascii=False) + "\n")
             self.log.flush()
@@ -263,6 +266,8 @@ class Window(QWidget):
         elif key == Qt.Key.Key_Space:
             self.rotate = not self.rotate
             self.last_switch = time.monotonic()
+        elif key in (Qt.Key.Key_Q, Qt.Key.Key_W, Qt.Key.Key_E):
+            self.scene.visual.sea_wave_intensity = {Qt.Key.Key_Q: "gentle", Qt.Key.Key_W: "medium", Qt.Key.Key_E: "strong"}[key]
         elif key == Qt.Key.Key_S:
             self.sound = not self.sound
         elif Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
@@ -277,9 +282,11 @@ def main():
     parser.add_argument("--grab", type=Path)
     parser.add_argument("--audio", type=Path)
     parser.add_argument("--log", type=Path)
+    parser.add_argument("--intensity", choices=("gentle", "medium", "strong"))
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     scene = Scene(app)
+    scene.visual.sea_wave_intensity = sea_intensity(args.intensity)
     if args.audio:
         if not args.audio.is_file():
             parser.error(f"audio file does not exist: {args.audio}")
