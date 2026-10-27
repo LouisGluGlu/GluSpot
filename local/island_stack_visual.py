@@ -14656,6 +14656,8 @@ class IslandStackVisual(QWidget):
         )
         gap = self._u(7.0 if len(active_lines) > 1 else 9.0)
         center_row = QRectF(rect.left(), rect.center().y() - active_h / 2.0, rect.width(), active_h)
+        if self._effective_music_ambience_style() == "sea_level":
+            center_row.translate(0.0, -self._u(10.0))
         is_seek_transition = (
             getattr(self, "lyric_transition_kind", "") == "seek"
             and self.prev_lyric_index != self.lyric_index
@@ -14735,15 +14737,19 @@ class IslandStackVisual(QWidget):
             is_active = idx == active_index
             row_h = active_h if is_active else side_h
             size = active_size if is_active else side_size
-            alpha = 246 if is_active else (70 if idx < active_index else 76)
+            sea_future = self._effective_music_ambience_style() == "sea_level" and idx == active_index + 1
+            if sea_future:
+                size = active_size
+            alpha = 246 if is_active else (70 if idx < active_index else (132 if sea_future else 76))
             row = QRectF(center_row)
             row.moveTop(spring_frame.positions[idx])
             row.setHeight(row_h)
             if row.bottom() < rect.top() + self._u(2) or row.top() > rect.bottom() - self._u(2):
                 continue
             painter.save()
-            painter.setOpacity(max(0.0, min(1.0, alpha / 255.0)))
-            self._paint_expanded_lyric_row(painter, row, self.lyrics[idx], size, alpha, is_active, is_active, active_phase)
+            if not sea_future:
+                painter.setOpacity(max(0.0, min(1.0, alpha / 255.0)))
+            self._paint_expanded_lyric_row(painter, row, self.lyrics[idx], size, alpha, is_active or sea_future, is_active, active_phase)
             painter.restore()
         painter.restore()
 

@@ -659,7 +659,7 @@ class IslandPresentationTests(unittest.TestCase):
         plan = music_background_layer_paint_plan(expanded=False, ambience_style="sea_level")
 
         self.assertEqual(plan.ambience_style, "sea_level")
-        self.assertEqual(plan.steps, ("glass_body", "bottom_ambience", "blur_mask", "light_wave"))
+        self.assertEqual(plan.steps, ("glass_body", "bottom_ambience", "light_wave"))
         self.assertNotIn("reactive_overlay", plan.steps)
         self.assertNotIn("surface_transition", plan.steps)
         self.assertNotIn("compact_content", plan.steps)
@@ -694,7 +694,6 @@ class IslandPresentationTests(unittest.TestCase):
             (
                 "glass_body",
                 "bottom_ambience",
-                "blur_mask",
                 "light_wave",
                 "reactive_overlay",
                 "surface_transition",
