@@ -16,7 +16,7 @@ for name in ("HOME", "APPDATA", "LOCALAPPDATA"):
     os.environ[name] = SANDBOX.name
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QTextLayout
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QTextLayout
 from PySide6.QtWidgets import QApplication
 
 from api.models import ColorToken
@@ -45,8 +45,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.mode = "lyrics"
         self.cover_index = 0
         self.song_index = 0
+        self.liked_songs = set()
         self.shelf = False
         self.footer_hover = False
+        self.hovered_glass = ""
         self.hints = True
         self.freeze_clock = False
         self.samples = []
@@ -79,15 +81,36 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.owner.album_art = image
         self.update()
 
+    def select_song(self, index):
+        self.song_index = index % len(SONGS)
+        self.owner.track_title, self.owner.artist = SONGS[self.song_index]
+        self.owner.media_track_id = f"owned:netease:{self.song_index + 1}"
+        self.owner.media_position_seconds = 0
+        self.set_cover(self.song_index % len(COVERS))
+
     def tick(self):
         now = time.monotonic()
         if self.owner.media_is_playing and not self.freeze_clock:
             self.owner.media_position_seconds = (self.owner.media_position_seconds + now - self.last_tick) % 32
         self.last_tick = now
+        self._glass_feedback.advance(self.glass_groups(), self.hovered_glass, now)
         self.update()
         names = {"A": "安静", "B": "一行", "C": "居中"}
         fps = len([t for t in self.frame_times if now - t < 1.0])
         self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
+
+    def glass_groups(self):
+        layout = NarrowLayout(self.width(), self.height())
+        top_keys = ("content_layout", "audio_output", "playback_mode", "translation", "return")
+        top = {key: rect for key, rect in zip(top_keys, layout.top)}
+        if not self.shelf:
+            top = {"content_layout": layout.top[0]}
+        return [top, {"library": layout.back},
+                {"media:toggle_play_pause": layout.play, "collection": layout.favorite}]
+
+    def posed_rect(self, key, rect):
+        state = self._glass_feedback.state(key)
+        return rect.translated(state.offset) if state else rect
 
     def resizeEvent(self, event):
         ratio = self.width() / max(1, self.height())
@@ -124,10 +147,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights)
         layout = NarrowLayout(self.width(), self.height())
         self.paint_header(painter, layout)
-        if self.mode == "lyrics":
-            self.paint_lyrics(painter, layout)
-        else:
-            self.paint_list(painter, layout)
+        self.paint_fading_content(painter, layout)
         self.paint_controls(painter, layout)
         if self.hints:
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
@@ -136,6 +156,37 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                              "L 歌词  P 列表  N/W 窄/宽  1–4 封面  H 隐藏")
         painter.end()
         self._clear_control_renderer.end_frame()
+
+    def paint_fading_content(self, painter, layout):
+        ratio = self.devicePixelRatioF()
+        image = QImage(round(self.width() * ratio), round(self.height() * ratio),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(ratio)
+        image.fill(Qt.GlobalColor.transparent)
+        layer = QPainter(image)
+        layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+        layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        if self.mode == "lyrics":
+            self.paint_lyrics(layer, layout)
+            area = layout.viewport
+            fade = 32
+        else:
+            self.paint_list(layer, layout)
+            area = QRectF(0, 218, self.width(), self.height() - 314)
+            fade = 28
+        layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        gradient = QLinearGradient(0, area.top(), 0, area.bottom())
+        edge = min(.5, fade / area.height())
+        gradient.setColorAt(0, QColor(255, 255, 255, 0))
+        gradient.setColorAt(edge, QColor(255, 255, 255, 255))
+        gradient.setColorAt(1 - edge, QColor(255, 255, 255, 255))
+        gradient.setColorAt(1, QColor(255, 255, 255, 0))
+        if self.mode == "playlist":
+            # Preserve the heading above the list's faded viewport.
+            layer.fillRect(QRectF(0, 0, self.width(), area.top()), QColor("white"))
+        layer.fillRect(area, gradient)
+        layer.end()
+        painter.drawImage(QPointF(0, 0), image)
 
     def paint_header(self, painter, layout):
         cover = layout.cover
@@ -216,14 +267,18 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.restore()
 
     def paint_controls(self, painter, layout):
-        self._paint_surface_glass(painter, layout.back, role="library")
+        back = self.posed_rect("library", layout.back)
+        self._paint_surface_glass(painter, back, role="library")
         ink = self._scene_control_ink()
-        paint_music_source_icon(painter, layout.back.adjusted(8, 8, -8, -8), "library_back", tint=ink)
-        self._paint_surface_glass(painter, layout.top[0], role="content-layout")
-        self._paint_content_layout_icon(painter, layout.top[0].adjusted(7, 7, -7, -7))
+        paint_music_source_icon(painter, back.adjusted(8, 8, -8, -8), "library_back", tint=ink)
+        content = self.posed_rect("content_layout", layout.top[0])
+        self._paint_surface_glass(painter, content, role="content-layout")
+        self._paint_content_layout_icon(painter, content.adjusted(7, 7, -7, -7))
         if self.shelf:
             roles = ("audio-output", "playback-mode", "translation", "window-mode")
-            for rect, role in zip(layout.top[1:], roles):
+            keys = ("audio_output", "playback_mode", "translation", "return")
+            for rect, role, key in zip(layout.top[1:], roles, keys):
+                rect = self.posed_rect(key, rect)
                 self._paint_surface_glass(painter, rect, role=role)
                 icon = rect.adjusted(8, 8, -8, -8)
                 if role == "audio-output":
@@ -253,10 +308,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         elapsed = f"{position // 60}:{position % 60:02d}"
         painter.drawText(QRectF(20, y - 20, 80, 18), Qt.AlignmentFlag.AlignLeft, elapsed)
         painter.drawText(QRectF(self.width() - 100, y - 20, 80, 18), Qt.AlignmentFlag.AlignRight, "0:32")
-        self._paint_transport_icon(painter, layout.play, "toggle_play_pause", ink)
-        self._paint_surface_glass(painter, layout.favorite, role="collection")
-        paint_music_source_icon(painter, QRectF(layout.favorite.x() + 8, layout.favorite.y() + 5, 20, 20), "heart_outline", tint=ink)
-        paint_music_source_icon(painter, QRectF(layout.favorite.x() + 43, layout.favorite.y() + 5, 20, 20), "playlist_add", tint=ink)
+        play = self.posed_rect("media:toggle_play_pause", layout.play)
+        favorite = self.posed_rect("collection", layout.favorite)
+        self._paint_transport_icon(painter, play, "toggle_play_pause", ink)
+        self._paint_surface_glass(painter, favorite, role="collection")
+        heart = "heart_filled" if self.song_index in self.liked_songs else "heart_outline"
+        paint_music_source_icon(painter, QRectF(favorite.x() + 8, favorite.y() + 5, 20, 20), heart, tint=ink)
+        paint_music_source_icon(painter, QRectF(favorite.x() + 43, favorite.y() + 5, 20, 20), "playlist_add", tint=ink)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -274,8 +332,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.set_content_layout(self.mode, animate=False)
             self._finish_content_layout()
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-            self.song_index = (self.song_index + (1 if key == Qt.Key.Key_Right else -1)) % len(SONGS)
-            self.owner.track_title, self.owner.artist = SONGS[self.song_index]
+            self.select_song(self.song_index + (1 if key == Qt.Key.Key_Right else -1))
         elif Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
             self.set_cover(key - Qt.Key.Key_1)
         elif key == Qt.Key.Key_Space:
@@ -290,7 +347,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if not self.narrow:
             super().mouseMoveEvent(event)
             return
+        self._glass_feedback.move(event.position())
         self.shelf = event.position().y() < 56
+        self.hovered_glass = ""
+        for group in self.glass_groups():
+            for key, rect in group.items():
+                if rect.contains(event.position()):
+                    self.hovered_glass = key
         self.footer_hover = event.position().y() >= self.height() - 120
         self.update()
 
@@ -299,13 +362,45 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             super().mousePressEvent(event)
             return
         layout = NarrowLayout(self.width(), self.height())
-        if layout.top[0].contains(event.position()):
+        footer_visible = (self.footer_visibility == "always" or self.footer_hover) and not (
+            self.shelf and self.mode == "playlist"
+        )
+        for group in self.glass_groups():
+            for key, rect in group.items():
+                if rect.contains(event.position()):
+                    self._glass_feedback.press(key, event.position(), time.monotonic())
+        if layout.back.contains(event.position()):
+            self.resize(960, 540)
+        elif layout.top[0].contains(event.position()):
             self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
             self.set_content_layout(self.mode, animate=False)
             self._finish_content_layout()
-        elif layout.play.contains(event.position()):
+        elif footer_visible and layout.play.contains(event.position()):
             self.owner.media_is_playing = not self.owner.media_is_playing
+        elif (footer_visible and layout.favorite.contains(event.position())
+              and event.position().x() < layout.favorite.center().x()):
+            if self.song_index in self.liked_songs:
+                self.liked_songs.remove(self.song_index)
+            else:
+                self.liked_songs.add(self.song_index)
+        elif self.mode == "playlist" and 218 <= event.position().y() < self.height() - 96:
+            index = int((event.position().y() - 218) // 56)
+            if index < len(SONGS):
+                self.select_song(index)
         self.update()
+
+    def mouseReleaseEvent(self, event):
+        if not self.narrow:
+            super().mouseReleaseEvent(event)
+            return
+        self._glass_feedback.release()
+        self.update()
+
+    def leaveEvent(self, event):
+        self.hovered_glass = ""
+        self.shelf = False
+        self.footer_hover = False
+        super().leaveEvent(event)
 
 
 def make_owner():
