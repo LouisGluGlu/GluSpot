@@ -92,3 +92,14 @@ class SpectrumSeaTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SeaProductDefaultTests(unittest.TestCase):
+    def test_product_defaults_are_spectrum_and_medium(self):
+        import os
+        from unittest.mock import patch
+        from local import sea_wave
+        self.assertEqual(sea_wave.SEA_SHAPE_MODE, "spectrum")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GLUSPOT_SEA_INTENSITY", None)
+            self.assertEqual(sea_wave.sea_intensity(None), "medium")

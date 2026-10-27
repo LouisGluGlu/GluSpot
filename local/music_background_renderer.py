@@ -1097,7 +1097,8 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         intensity = sea_intensity(getattr(self.host, "sea_wave_intensity", None))
         phase = context.ambient_phase * 1.15
         scale = rect.height() / 200.0
-        shape_mode = getattr(self.host, "sea_shape_mode", "spectrum")
+        from local.sea_wave import SEA_SHAPE_MODE
+        shape_mode = getattr(self.host, "sea_shape_mode", SEA_SHAPE_MODE)
         cache_key = (state.updated_at, intensity, shape_mode, round(float(context.ambient_phase), 6), rect.x(), rect.y(), rect.width(), rect.height())
         cached = getattr(state, "_surface_cache", None)
         if cached is not None and cached[0] == cache_key:
