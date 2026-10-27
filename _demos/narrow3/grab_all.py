@@ -1,4 +1,4 @@
-"""Capture all three narrow studies and a production reference into one sheet."""
+"""Capture both narrow studies and a production reference into one sheet."""
 import argparse
 import os
 from pathlib import Path
@@ -26,13 +26,13 @@ def make_overview(output):
     font = QFont("Microsoft YaHei UI") if "Microsoft YaHei UI" in QFontDatabase.families() else app.font()
     font.setPixelSize(20)
     font.setBold(True)
-    sheet = QImage(1800, 1140, QImage.Format.Format_RGB32)
+    sheet = QImage(1200, 1140, QImage.Format.Format_RGB32)
     sheet.fill(QColor("#20242a"))
     painter = QPainter(sheet)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     painter.setFont(font)
     painter.setPen(Qt.GlobalColor.white)
-    for column, (variant, label) in enumerate((("A", "方案 A · 安静"), ("B", "方案 B · 一行"), ("C", "方案 C · 居中"))):
+    for column, (variant, label) in enumerate((("A", "方案 A · 静态"), ("B", "方案 B · 悬停"))):
         left = column * 600
         painter.drawText(QRectF(left, 10, 600, 35), Qt.AlignmentFlag.AlignCenter, label)
         for row, name in enumerate(("narrow_lyrics", "narrow_list")):
@@ -55,7 +55,7 @@ def main():
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    for variant, script in (("A", "demo_quiet.py"), ("B", "demo_row.py"), ("C", "demo_center.py")):
+    for variant, script in (("A", "demo_quiet.py"), ("B", "demo_row.py")):
         run_step(variant, [sys.executable, "-X", "utf8", str(HERE / script), "--grab", str(args.out)])
     run_step("production reference", [sys.executable, "-X", "utf8", str(HERE / "ref_real_window.py"),
              "--cover", str(HERE / "covers" / "night_sea.jpg"), "--out", str(args.out),

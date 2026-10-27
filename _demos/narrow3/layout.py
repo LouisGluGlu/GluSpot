@@ -39,7 +39,15 @@ class NarrowLayout:
 
     @property
     def play(self):
+        return QRectF(60, self.height - 56, 32, 32)
+
+    @property
+    def previous(self):
         return QRectF(20, self.height - 56, 32, 32)
+
+    @property
+    def next(self):
+        return QRectF(100, self.height - 56, 32, 32)
 
     @property
     def favorite(self):

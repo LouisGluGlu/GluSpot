@@ -25,37 +25,21 @@ class Fade:
 
 
 class Visibility:
-    def __init__(self, footer_always):
+    def __init__(self, enabled):
+        self.enabled = enabled
         self.top = [Fade() for _ in range(4)]
-        self.footer = Fade(float(footer_always))
+        self.footer = Fade()
         self.top_enter = None
-        self.top_leave = None
-        self.bottom_leave = None
-        self.footer_always = footer_always
 
     def advance(self, now, top_hover, bottom_hover, playlist):
-        if top_hover:
-            if self.top_enter is None:
-                self.top_enter = now
-            self.top_leave = None
-        else:
-            if self.top_enter is not None:
-                self.top_leave = now
+        active = self.enabled and (top_hover or bottom_hover)
+        if active and self.top_enter is None:
+            self.top_enter = now
+        if not active:
             self.top_enter = None
-        if bottom_hover:
-            self.bottom_leave = None
-        elif self.bottom_leave is None:
-            self.bottom_leave = now
-        top_requested = top_hover or (self.top_leave is not None and now - self.top_leave < .9)
-        footer_requested = self.footer_always or bottom_hover or (self.bottom_leave is not None and now - self.bottom_leave < .9 and self.footer.target > 0)
-        # In list mode the footer must be gone before any secondary button appears.
-        if playlist and (top_requested or any(fade.value(now) > .001 for fade in self.top)):
-            footer_requested = False
-        self.footer.retarget(float(footer_requested), now, .16 if footer_requested else .18)
-        footer_clear = self.footer.value(now) <= .001
+        self.footer.retarget(float(active), now, .16 if active else .18)
         for index, fade in enumerate(self.top):
-            ready = self.top_enter is not None and now - self.top_enter >= .14 + index * .02
-            show = top_requested and (ready or fade.target > 0) and (not playlist or footer_clear)
+            show = active and now - self.top_enter >= .14 + index * .02
             fade.retarget(float(show), now, .16 if show else .18)
 
     def settled(self, now):

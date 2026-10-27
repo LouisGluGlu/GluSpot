@@ -49,10 +49,9 @@ COVERS = ("night_sea.jpg", "sunset_city.jpg", "pink_forest.jpg", "clip.jpg")
 
 
 class NarrowStudyWindow(MusicSurfaceWindow):
-    def __init__(self, owner, variant, footer_visibility, lyrics_alignment):
+    def __init__(self, owner, variant, lyrics_alignment):
         super().__init__(owner)
         self.variant = variant
-        self.footer_visibility = footer_visibility
         self.lyrics_alignment = lyrics_alignment
         self.narrow = True
         self.mode = "lyrics"
@@ -61,7 +60,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.liked_songs = set()
         self.shelf = False
         self.footer_hover = False
-        self.visibility = Visibility(footer_visibility == "always")
+        self.visibility = Visibility(variant == "B")
         self.hovered_glass = ""
         self.hints = True
         self.freeze_clock = False
@@ -115,7 +114,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.visibility.advance(now, self.shelf, self.footer_hover, self.mode == "playlist")
         self._glass_feedback.advance(self.glass_groups(), self.hovered_glass, now)
         self.update()
-        names = {"A": "安静", "B": "一行", "C": "居中"}
+        names = {"A": "静态", "B": "悬停"}
         fps = len([t for t in self.frame_times if now - t < 1.0])
         self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
 
@@ -126,7 +125,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         now = time.monotonic()
         top = {key: rect for index, (key, rect) in enumerate(top.items())
                if index == 0 or self.visibility.top[index - 1].value(now) > .001}
-        footer = {"media:toggle_play_pause": layout.play, "collection": layout.favorite}
+        footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
+                  "media:next": layout.next, "collection": layout.favorite}
         if self.visibility.footer.value(now) <= .001:
             footer = {}
         return [top, {"library": layout.back}, footer]
@@ -317,51 +317,40 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         content = self.posed_rect("content_layout", layout.top[0])
         self._paint_surface_glass(painter, content, role="content-layout")
         self._paint_content_layout_icon(painter, content.adjusted(7, 7, -7, -7))
-        if self.mode != "playlist" or self.visibility.footer.value(time.monotonic()) <= .001:
-            roles = ("audio-output", "playback-mode", "translation", "window-mode")
-            keys = ("audio_output", "playback_mode", "translation", "return")
-            for index, (rect, role, key) in enumerate(zip(layout.top[1:], roles, keys)):
-                opacity = self.visibility.top[index].value(time.monotonic())
-                if opacity <= .001:
-                    continue
+        roles = ("audio-output", "playback-mode", "translation", "window-mode")
+        keys = ("audio_output", "playback_mode", "translation", "return")
+        for index, (rect, role, key) in enumerate(zip(layout.top[1:], roles, keys)):
+            opacity = self.visibility.top[index].value(time.monotonic())
+            if opacity <= .001:
+                continue
+            painter.save()
+            painter.setOpacity(opacity)
+            rect = self.posed_rect(key, rect)
+            self._paint_surface_glass(painter, rect, role=role)
+            icon = rect.adjusted(8, 8, -8, -8)
+            if role == "audio-output":
+                paint_audio_output_status(painter, rect, (), ink, count=0)
+            elif role == "playback-mode":
+                paint_music_source_icon(painter, icon, "sequence", tint=ink)
+            elif role == "translation":
                 painter.save()
-                painter.setOpacity(opacity)
-                rect = self.posed_rect(key, rect)
-                self._paint_surface_glass(painter, rect, role=role)
-                icon = rect.adjusted(8, 8, -8, -8)
-                if role == "audio-output":
-                    paint_audio_output_status(painter, rect, (), ink, count=0)
-                elif role == "playback-mode":
-                    paint_music_source_icon(painter, icon, "sequence", tint=ink)
-                elif role == "translation":
-                    painter.save()
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(ink)
-                    painter.drawPath(self._translation_symbol_path(icon))
-                    painter.restore()
-                else:
-                    self._paint_window_mode_icon(painter, icon, self._fullscreen, ink)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(ink)
+                painter.drawPath(self._translation_symbol_path(icon))
                 painter.restore()
+            else:
+                self._paint_window_mode_icon(painter, icon, self._fullscreen, ink)
+            painter.restore()
         footer = self.visibility.footer.value(time.monotonic())
         if footer <= .001:
             return
         painter.save()
         painter.setOpacity(footer)
-        y = self.height() - 88
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 31))
-        painter.drawRoundedRect(QRectF(20, y, self.width() - 40, 2), 1, 1)
-        painter.setBrush(QColor("white"))
-        painter.drawRoundedRect(QRectF(20, y, (self.width() - 40) * self.owner.media_position_seconds / 32, 2), 1, 1)
-        painter.setFont(self._surface_font(12, QFont.Weight.Medium))
-        painter.setPen(QColor(255, 255, 255, 115))
-        position = int(self.owner.media_position_seconds)
-        elapsed = f"{position // 60}:{position % 60:02d}"
-        painter.drawText(QRectF(20, y - 20, 80, 18), Qt.AlignmentFlag.AlignLeft, elapsed)
-        painter.drawText(QRectF(self.width() - 100, y - 20, 80, 18), Qt.AlignmentFlag.AlignRight, "0:32")
-        play = self.posed_rect("media:toggle_play_pause", layout.play)
+        for command, rect in (("previous", layout.previous),
+                              ("toggle_play_pause", layout.play), ("next", layout.next)):
+            rect = self.posed_rect("media:" + command, rect)
+            self._paint_transport_icon(painter, rect, command, ink)
         favorite = self.posed_rect("collection", layout.favorite)
-        self._paint_transport_icon(painter, play, "toggle_play_pause", ink)
         self._paint_surface_glass(painter, favorite, role="collection")
         heart = "heart_filled" if self.song_index in self.liked_songs else "heart_outline"
         paint_music_source_icon(painter, QRectF(favorite.x() + 8, favorite.y() + 5, 20, 20), heart, tint=ink)
@@ -400,13 +389,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             super().mouseMoveEvent(event)
             return
         self._glass_feedback.move(event.position())
-        self.shelf = event.position().y() < 56
+        self.shelf = True
         self.hovered_glass = ""
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(event.position()):
                     self.hovered_glass = key
-        self.footer_hover = event.position().y() >= self.height() - 120
+        self.footer_hover = True
         self.update()
 
     def mousePressEvent(self, event):
@@ -425,6 +414,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
             self.set_content_layout(self.mode, animate=False)
             self._finish_content_layout()
+        elif footer_visible and layout.previous.contains(event.position()):
+            self.select_song(self.song_index - 1)
+        elif footer_visible and layout.next.contains(event.position()):
+            self.select_song(self.song_index + 1)
         elif footer_visible and layout.play.contains(event.position()):
             self.owner.media_is_playing = not self.owner.media_is_playing
         elif (footer_visible and layout.favorite.contains(event.position())
@@ -472,7 +465,7 @@ def make_owner():
     return owner
 
 
-def main(variant, footer_visibility="always", lyrics_alignment="left"):
+def main(variant, lyrics_alignment="left"):
     parser = argparse.ArgumentParser()
     parser.add_argument("--grab", type=Path)
     parser.add_argument("--seconds", type=float)
@@ -480,7 +473,7 @@ def main(variant, footer_visibility="always", lyrics_alignment="left"):
     args = parser.parse_args()
     app = QApplication.instance() or QApplication([])
     owner = make_owner()
-    window = NarrowStudyWindow(owner, variant, footer_visibility, lyrics_alignment)
+    window = NarrowStudyWindow(owner, variant, lyrics_alignment)
     window.show()
     window._timer.stop()
     if args.grab:
@@ -488,8 +481,8 @@ def main(variant, footer_visibility="always", lyrics_alignment="left"):
         window.hints = False
         window.freeze_clock = True
         window.owner.media_position_seconds = 5.6
-        jobs = [("narrow_lyrics", "lyrics", False, 0, False),
-                ("narrow_list", "playlist", False, 0, False),
+        jobs = [("narrow_lyrics", "lyrics", variant == "B", 0, False),
+                ("narrow_list", "playlist", variant == "B", 0, False),
                 ("narrow_lyrics_hover", "lyrics", True, 0, False),
                 ("wide_lyrics", "lyrics", False, 0, True)]
         jobs.extend((f"cover{i + 1}", "lyrics", False, i, False) for i in range(4))
@@ -525,10 +518,7 @@ def main(variant, footer_visibility="always", lyrics_alignment="left"):
                 ready = window.visibility.settled(now)
                 if shelf and now - started < .4:
                     ready = False
-                if not shelf and window.visibility.top_leave is not None:
-                    if any(fade.value(now) > .001 for fade in window.visibility.top):
-                        ready = False
-                if footer_visibility == "bottom_hover" and not shelf:
+                if not shelf:
                     if window.visibility.footer.value(now) > .001:
                         ready = False
                 if not ready:
