@@ -24,6 +24,21 @@ class SpectrumSeaTests(unittest.TestCase):
             right_peak = max(state.spectrum_displacement(i / 48, 0, 'medium') for i in range(33, 49))
             self.assertGreater(left_peak if left else right_peak, right_peak if left else left_peak)
 
+    def test_separated_spectral_peaks_remain_distinct_and_scale(self):
+        state = SeaWaveState()
+        spectrum = [0.0] * 24
+        spectrum[5] = spectrum[15] = 1.0
+        for i in range(60):
+            state.update((0.4, 0.4, 0.4), i / 60, spectrum=spectrum)
+        for mode in ("gentle", "medium", "strong"):
+            heights = [state.spectrum_displacement(i / 23, 0, mode) for i in (5, 10, 15)]
+            self.assertGreater(min(heights[0], heights[2]), heights[1] + 5)
+        heights = [state.spectrum_displacement(5 / 23, 0, mode)
+                   for mode in ("gentle", "medium", "strong")]
+        self.assertLess(heights[0], heights[1])
+        self.assertLess(heights[1], heights[2])
+        self.assertLess(max(heights), 48)
+
     def test_latest_spectrum_survives_cached_band_sampling(self):
         from local.island_stack_visual import IslandStackVisual
         first = self.analyze_tone(100)

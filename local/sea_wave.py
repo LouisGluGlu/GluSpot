@@ -86,8 +86,9 @@ class SeaWaveState:
                 self.spectrum[i] = _follow(self.spectrum[i], target, dt, .04 if target > self.spectrum[i] else .20)
         else:
             self.spectrum = [_follow(v, 0.0, dt, .20) for v in self.spectrum]
-        self.spread_spectrum = [max(self.spectrum[j] * (0.52 ** abs(i-j))
-                                    for j in range(max(0, i-4), min(24, i+5)))
+        # Keep nearby band peaks distinct instead of spreading one peak across the surface.
+        self.spread_spectrum = [max(self.spectrum[j] * (0.30 ** abs(i-j))
+                                    for j in range(max(0, i-2), min(24, i+3)))
                                 for i in range(24)]
         # Relative onset against recent mean, exciting an underdamped 4 Hz mode.
         relative = vocal / max(self.vocal_peak * .5, .008) if active_vocal else low / max(self.average, .05)
@@ -136,8 +137,8 @@ class SeaWaveState:
         a, b = smooth[i], smooth[min(i + 1, len(smooth) - 1)]
         # cosine interpolation has zero slope at band centers
         shape = a + (b-a) * (0.5 - 0.5 * math.cos(math.pi*f))
-        strength = {'gentle': .7, 'medium': 1.0, 'strong': 1.4, 'vocal': 1.0}[mode]
-        wave = 1.2 * math.sin(pos * math.tau * 2.2 - self._time * 2.5) * max(values)
+        strength = {'gentle': 1.15, 'medium': 1.75, 'strong': 3.0, 'vocal': 1.0}[mode]
+        wave = 3.35 * math.sin(pos * math.tau * 3.0 - self._time * 2.5) * max(values)
         vibration = self.vibration * (0.75 + .25 * math.cos(pos * math.tau))
         motion = (shape * 25.0 + wave + vibration) * strength
         return (48.0 * math.tanh(motion / 48.0) if motion >= 0.0
@@ -170,11 +171,12 @@ class SeaWaveState:
         travelling += ripple * (1.0 + 0.35 * onset) + local_onset
         if mode == "vocal":
             travelling += onset * 5.0 * math.sin(pos * math.tau * 1.45 - self._time * 3.2)
-        lift = self.water_level_lift
+        # Strong travelling waves already carry more energy; restrain their shared lift.
+        lift = self.water_level_lift * (0.4 if mode == "strong" else 1.0)
         if mode == "vocal":
             lift = max(lift, self.vocal * 20.0)
         else:
-            lift = max(lift, low * 16.0 * INTENSITIES[mode] * 0.55)
+            lift = max(lift, low * 16.0 * INTENSITIES[mode] * (0.25 if mode == "strong" else 0.55))
         total = lift + travelling
         if total >= 0.0:
             limit = 49.0 if mode != "vocal" else 44.0

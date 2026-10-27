@@ -1112,7 +1112,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         # preserving the travelling-wave silhouette. It is pure for this cache
         # key, so repeated paints at one timestamp are identical.
         smoothed = points[:]
-        for _ in range(10):
+        for _ in range(14 if shape_mode == "spectrum" else 10):
             smoothed = [QPointF(point.x(), point.y()) for point in smoothed]
             for index in range(1, len(smoothed) - 1):
                 y = (smoothed[index - 1].y() + 2.0 * smoothed[index].y() + smoothed[index + 1].y()) / 4.0
