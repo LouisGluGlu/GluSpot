@@ -256,6 +256,20 @@ def _sampling_maps(geometry_key, pad, sw, sh):
     return tuple(maps)
 
 
+@lru_cache(maxsize=32)
+def _sampling_lookup(geometry_key, pad, sw, sh):
+    """Interleaved RGB corner indices and bilinear weights for one take."""
+    mappings = _sampling_maps(geometry_key, pad, sw, sh)
+    indices, weights = [], []
+    for channel, (index, width, fx, fy) in enumerate(mappings):
+        fx, fy = fx.astype(np.float32), fy.astype(np.float32)
+        index = index * 3 + channel
+        indices.extend((index, index + 3, index + width * 3, index + width * 3 + 3))
+        weights.extend(((1. - fx) * (1. - fy), fx * (1. - fy),
+                        (1. - fx) * fy, fx * fy))
+    return np.stack(indices), np.stack(weights)
+
+
 def _sample_cached(channel, mapping):
     index, width, fx, fy = mapping
     flat = np.ascontiguousarray(channel).reshape(-1)
@@ -305,22 +319,27 @@ def _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint):
         pixels = Image.fromarray(pixels)
     pixels = np.asarray(pixels.filter(GaussianBlur(spec.blur * dpr * ratio)), dtype=np.float32)
     flat = pixels.reshape(-1)
-    rgb_channels = []
-    for c, (index, width, fx, fy) in enumerate(_sampling_maps(geometry_key, pad, sw, sh)):
-        index = index * 3 + c
-        top = flat[index] * (1. - fx) + flat[index + 3] * fx
-        bottom = flat[index + width * 3] * (1. - fx) + flat[index + width * 3 + 3] * fx
-        rgb_channels.append(top * (1. - fy) + bottom * fy)
-    rgb = np.stack(rgb_channels, axis=-1)
+    indices, weights = _sampling_lookup(geometry_key, pad, sw, sh)
+    sampled = np.take(flat, indices)
+    np.multiply(sampled, weights, out=sampled)
+    rgb = np.empty((h, w, 3), np.float32)
+    for c in range(3):
+        np.add(sampled[4*c], sampled[4*c+1], out=rgb[..., c])
+        np.add(rgb[..., c], sampled[4*c+2], out=rgb[..., c])
+        np.add(rgb[..., c], sampled[4*c+3], out=rgb[..., c])
     lum = rgb @ np.array([.2126, .7152, .0722], np.float32)
-    rgb = lum[..., None] + (rgb - lum[..., None]) * spec.sat
+    np.subtract(rgb, lum[..., None], out=rgb)
+    np.multiply(rgb, spec.sat, out=rgb)
+    np.add(rgb, lum[..., None], out=rgb)
     if spec.veil:
         dark = float(lum.mean()) / 255. < .55
         amount = spec.veil * (1. if dark else 1.6)
-        rgb = rgb * (1. - amount) + (255. if dark else 0.) * amount
+        np.multiply(rgb, 1. - amount, out=rgb)
+        np.add(rgb, (255. if dark else 0.) * amount, out=rgb)
     if spec.tint_alpha:
-        rgb = rgb * (1. - spec.tint_alpha) + np.array(tint, np.float32) * spec.tint_alpha
-    rgb = np.clip(rgb, 0., 255.)
+        np.multiply(rgb, 1. - spec.tint_alpha, out=rgb)
+        np.add(rgb, np.array(tint, np.float32) * spec.tint_alpha, out=rgb)
+    np.clip(rgb, 0., 255., out=rgb)
     rgb += (255. - rgb) * light
     rgba = np.empty((h, w, 4), np.uint8)
     rgba[..., :3], rgba[..., 3] = rgb, alpha * 255.
