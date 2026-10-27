@@ -19,19 +19,32 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QTextLayout
 from PySide6.QtWidgets import QApplication
 
-from api.models import ColorToken
+from api.models import ColorToken, TimedLyricLine, TimedLyricUnit
 from api.online_music import OnlineSong
 from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_lyric_reading import LyricReadingRenderer
 from test_music_surface_transition import _TransitionOwner
 from test_owned_playback_surface import _Provider
 from test_song_collection_surface import Collection
 from layout import NarrowLayout
+from motion import Visibility
 
 SONGS = [("夜航的信", "林间电台"), ("晚风经过", "陈小雨"), ("云与海之间", "南方来信"), ("星光落下来", "木子"), ("慢慢的旅程", "夏日回声"), ("下一站黎明", "白昼乐队"), ("你听见了吗", "无名旅人"), ("再见之前", "海边房间")]
 LYRICS = ["在夜色中慢慢走", "把心事交给晚风", "那些没有说完的话", "会在星光里重逢", "让时间轻轻流过", "我们还在这条路上", "等天边亮起微光", "再一起迎接远方"]
+# Explicit timings belong to the synthetic demo lyrics only.
+TIMED_LYRICS = tuple(
+    TimedLyricLine(
+        index * 4.0, text,
+        tuple(TimedLyricUnit(index * 4.0 + offset * 3.6 / len(text),
+                             index * 4.0 + (offset + 1) * 3.6 / len(text), character)
+              for offset, character in enumerate(text)),
+        "word",
+    )
+    for index, text in enumerate(LYRICS)
+)
 COVERS = ("night_sea.jpg", "sunset_city.jpg", "pink_forest.jpg", "clip.jpg")
 
 
@@ -48,10 +61,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.liked_songs = set()
         self.shelf = False
         self.footer_hover = False
+        self.visibility = Visibility(footer_visibility == "always")
         self.hovered_glass = ""
         self.hints = True
         self.freeze_clock = False
+        self.cover_images = [QImage(str(Path(__file__).parent / "covers" / name)) for name in COVERS]
+        self.reading_renderer = LyricReadingRenderer()
         self.samples = []
+        self.bench_phase = None
+        self.bench_samples = {name: [] for name in ("steady", "press", "visibility")}
+        self.cold_paint = None
         self.last_tick = time.monotonic()
         self.frame_times = []
         self.setMinimumSize(320, 400)
@@ -93,6 +112,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if self.owner.media_is_playing and not self.freeze_clock:
             self.owner.media_position_seconds = (self.owner.media_position_seconds + now - self.last_tick) % 32
         self.last_tick = now
+        self.visibility.advance(now, self.shelf, self.footer_hover, self.mode == "playlist")
         self._glass_feedback.advance(self.glass_groups(), self.hovered_glass, now)
         self.update()
         names = {"A": "安静", "B": "一行", "C": "居中"}
@@ -103,10 +123,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         layout = NarrowLayout(self.width(), self.height())
         top_keys = ("content_layout", "audio_output", "playback_mode", "translation", "return")
         top = {key: rect for key, rect in zip(top_keys, layout.top)}
-        if not self.shelf:
-            top = {"content_layout": layout.top[0]}
-        return [top, {"library": layout.back},
-                {"media:toggle_play_pause": layout.play, "collection": layout.favorite}]
+        now = time.monotonic()
+        top = {key: rect for index, (key, rect) in enumerate(top.items())
+               if index == 0 or self.visibility.top[index - 1].value(now) > .001}
+        footer = {"media:toggle_play_pause": layout.play, "collection": layout.favorite}
+        if self.visibility.footer.value(now) <= .001:
+            footer = {}
+        return [top, {"library": layout.back}, footer]
 
     def posed_rect(self, key, rect):
         state = self._glass_feedback.state(key)
@@ -129,7 +152,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         now = time.monotonic()
         self.frame_times = [t for t in self.frame_times if now - t < 1.0]
         self.frame_times.append(now)
-        self.samples.append((time.perf_counter() - start) * 1000)
+        elapsed = (time.perf_counter() - start) * 1000
+        if self.cold_paint is None:
+            self.cold_paint = elapsed
+        elif self.bench_phase is not None:
+            self.bench_samples[self.bench_phase].append(elapsed)
+        self.samples.append(elapsed)
         self.samples = self.samples[-2000:]
 
     def paint_narrow(self):
@@ -208,28 +236,41 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def paint_lyrics(self, painter, layout):
         viewport = layout.viewport
-        focus = min(len(LYRICS) - 1, int(self.owner.media_position_seconds // 4))
+        position = self.owner.media_position_seconds
+        focus = min(len(TIMED_LYRICS) - 1, int(position // 4))
+        elapsed = position - focus * 4.0
+        transition = min(1.0, max(0.0, elapsed / .42))
+        eased = 1.0 - (1.0 - transition) ** 3
+        visual_focus = focus - (1.0 - eased) if focus else 0.0
         anchor = viewport.top() + viewport.height() * .38
         font = self._surface_font(22)
         painter.save()
         painter.setClipRect(viewport.adjusted(-18, 0, 18, 0))
-        for index in range(max(0, focus - 3), min(len(LYRICS), focus + 4)):
-            text = LYRICS[index]
-            y = anchor + (index - focus) * 44 - 22
-            color = QColor(255, 255, 255) if index <= focus else self._future_lyric_color(viewport)
-            text_layout = QTextLayout(text, font)
-            text_layout.beginLayout()
-            line = text_layout.createLine()
-            line.setLineWidth(viewport.width())
-            text_layout.endLayout()
-            width = line.naturalTextWidth()
+        for index in range(max(0, focus - 3), min(len(TIMED_LYRICS), focus + 4)):
+            line = TIMED_LYRICS[index]
+            y = anchor + (index - visual_focus) * 44 - 22
+            width = QFontMetricsF(font).horizontalAdvance(line.text)
             x = viewport.left()
             if self.lyrics_alignment == "center":
                 x += (viewport.width() - width) / 2
-            image, padding = self._lyric_raster(text, font, viewport.width(), 30, text_layout, color)
-            level = self._lyric_group_blur_level(index, focus)
-            image = self._blurred_lyric_raster(image, level, color)
-            painter.drawImage(QPointF(x - padding, y - padding), image)
+            if index != focus:
+                text_layout = QTextLayout(line.text, font)
+                text_layout.beginLayout()
+                text_layout.createLine().setLineWidth(viewport.width())
+                text_layout.endLayout()
+                color = QColor(255, 255, 255) if index < focus else self._future_lyric_color(viewport)
+                image, padding = self._lyric_raster(line.text, font, viewport.width(), 30, text_layout, color)
+                level = self._lyric_group_blur_level(index, focus)
+                image = self._blurred_lyric_raster(image, level, color)
+                painter.drawImage(QPointF(x - padding, y - padding), image)
+                continue
+            self.reading_renderer.paint(
+                painter, QRectF(x, y, viewport.width(), 30), x, line.text, font,
+                max(0.0, min(1.0, (position - line.time_seconds) / 4.0)),
+                self._future_lyric_color(viewport), QColor(255, 255, 255),
+                timed_units=line.units, timed_position=position,
+                timed_line_end=line.time_seconds + 4.0,
+            )
         painter.restore()
 
     def paint_list(self, painter, layout):
@@ -246,7 +287,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 row = QRectF(12, y + 2, self.width() - 24, 52)
                 self._clear_control_renderer.paint(painter, row, scene=self._surface_glass_backdrop(),
                     scene_bounds=QRectF(self.rect()), ink=ink, now=time.monotonic(), role="queue-selection",
-                    kind="capsule", selected=True, level=self._surface_glass_level())
+                    kind="capsule", selected=True, level=self._surface_glass_level(),
+                    state=self._glass_feedback.state("queue-selection"),
+                    hover=self._glass_feedback.hover.get("queue-selection", 0.0))
                 row_ink = QColor("#0b0c0e")
             else:
                 row_ink = QColor(ink)
@@ -255,7 +298,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             clip = QPainterPath()
             clip.addRoundedRect(art, 5, 5)
             painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
-            painter.drawImage(art, self.owner.album_art)
+            painter.drawImage(art, self.cover_images[index % len(COVERS)])
             painter.restore()
             painter.setPen(row_ink)
             painter.setFont(self._surface_font(15, QFont.Weight.DemiBold))
@@ -274,10 +317,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         content = self.posed_rect("content_layout", layout.top[0])
         self._paint_surface_glass(painter, content, role="content-layout")
         self._paint_content_layout_icon(painter, content.adjusted(7, 7, -7, -7))
-        if self.shelf:
+        if self.mode != "playlist" or self.visibility.footer.value(time.monotonic()) <= .001:
             roles = ("audio-output", "playback-mode", "translation", "window-mode")
             keys = ("audio_output", "playback_mode", "translation", "return")
-            for rect, role, key in zip(layout.top[1:], roles, keys):
+            for index, (rect, role, key) in enumerate(zip(layout.top[1:], roles, keys)):
+                opacity = self.visibility.top[index].value(time.monotonic())
+                if opacity <= .001:
+                    continue
+                painter.save()
+                painter.setOpacity(opacity)
                 rect = self.posed_rect(key, rect)
                 self._paint_surface_glass(painter, rect, role=role)
                 icon = rect.adjusted(8, 8, -8, -8)
@@ -293,9 +341,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                     painter.restore()
                 else:
                     self._paint_window_mode_icon(painter, icon, self._fullscreen, ink)
-        footer = (self.footer_visibility == "always" or self.footer_hover) and not (self.shelf and self.mode == "playlist")
-        if not footer:
+                painter.restore()
+        footer = self.visibility.footer.value(time.monotonic())
+        if footer <= .001:
             return
+        painter.save()
+        painter.setOpacity(footer)
         y = self.height() - 88
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(255, 255, 255, 31))
@@ -315,6 +366,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         heart = "heart_filled" if self.song_index in self.liked_songs else "heart_outline"
         paint_music_source_icon(painter, QRectF(favorite.x() + 8, favorite.y() + 5, 20, 20), heart, tint=ink)
         paint_music_source_icon(painter, QRectF(favorite.x() + 43, favorite.y() + 5, 20, 20), "playlist_add", tint=ink)
+        painter.restore()
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -362,9 +414,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             super().mousePressEvent(event)
             return
         layout = NarrowLayout(self.width(), self.height())
-        footer_visible = (self.footer_visibility == "always" or self.footer_hover) and not (
-            self.shelf and self.mode == "playlist"
-        )
+        footer_visible = self.visibility.footer.value(time.monotonic()) > .001
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(event.position()):
@@ -460,28 +510,85 @@ def main(variant, footer_visibility="always", lyrics_alignment="left"):
             window.set_content_layout(mode, animate=False)
             window._finish_content_layout()
             window.update()
+            started = time.monotonic()
 
             def save():
                 name = f"narrow3_{variant}_{label}.png"
                 window.grab().save(str(args.grab / name))
-                count = 2 + 4 * int(shelf) + int(mode == "playlist")
-                count += 2 * int((footer_visibility == "always" or shelf) and not (shelf and mode == "playlist"))
+                count = len(window._clear_control_renderer.seen_roles)
                 print(f"saved {name} mode={mode} narrow={window.narrow} cover={cover + 1} glass_count={count}", flush=True)
                 state["index"] += 1
                 QTimer.singleShot(10, grab_next)
 
-            QTimer.singleShot(1000, save)
+            def wait_until_settled():
+                now = time.monotonic()
+                ready = window.visibility.settled(now)
+                if shelf and now - started < .4:
+                    ready = False
+                if not shelf and window.visibility.top_leave is not None:
+                    if any(fade.value(now) > .001 for fade in window.visibility.top):
+                        ready = False
+                if footer_visibility == "bottom_hover" and not shelf:
+                    if window.visibility.footer.value(now) > .001:
+                        ready = False
+                if not ready:
+                    QTimer.singleShot(33, wait_until_settled)
+                    return
+                window.repaint()
+                window.repaint()
+                save()
+
+            QTimer.singleShot(33, wait_until_settled)
         QTimer.singleShot(100, grab_next)
-    if args.seconds:
+    if args.seconds and not args.bench:
         QTimer.singleShot(round(args.seconds * 1000), lambda: app.exit(0))
     if args.bench:
+        phases = ("steady", "press", "visibility")
+        bench = {"index": 0, "started": time.monotonic(), "pressed": False}
+        window.study_timer.setInterval(10)
+
+        def drive_bench():
+            index = bench["index"]
+            if index >= len(phases):
+                app.exit(0)
+                return
+            phase = phases[index]
+            if window.bench_phase != phase:
+                window.bench_phase = phase
+                bench["started"] = time.monotonic()
+                window.shelf = False
+                window.footer_hover = False
+                window._glass_feedback.release()
+            elapsed = time.monotonic() - bench["started"]
+            if phase == "press":
+                held = elapsed % .8 < .35
+                if held and not bench["pressed"]:
+                    rect = NarrowLayout(window.width(), window.height()).top[0]
+                    window._glass_feedback.press("content_layout", rect.center(), time.monotonic())
+                elif not held and bench["pressed"]:
+                    window._glass_feedback.release()
+                bench["pressed"] = held
+            elif phase == "visibility":
+                window.shelf = elapsed % 2.2 < 1.0
+                window.footer_hover = window.shelf
+            window.tick()
+            window.repaint()
+            if len(window.bench_samples[phase]) >= args.bench:
+                bench["index"] += 1
+            QTimer.singleShot(0, drive_bench)
+
         def report():
-            samples = sorted(window.samples[-args.bench:])
-            if samples:
-                print(f"paint (mixed; incomplete benchmark): median={samples[len(samples)//2]:.2f} ms "
-                      f"p95={samples[int((len(samples) - 1) * .95)]:.2f} ms n={len(samples)} "
-                      f"first={window.samples[0]:.2f} ms", flush=True)
+            print(f"cold first paint={window.cold_paint:.2f} ms", flush=True)
+            for phase in phases:
+                samples = sorted(window.bench_samples[phase])
+                if samples:
+                    print(f"{phase}: median={samples[len(samples)//2]:.2f} ms "
+                          f"p95={samples[int((len(samples) - 1) * .95)]:.2f} ms n={len(samples)}", flush=True)
+            print("wide/narrow animation: unavailable; no samples", flush=True)
+            print("bench overrides --seconds until sample collection finishes", flush=True)
+
         app.aboutToQuit.connect(report)
+        QTimer.singleShot(0, drive_bench)
     app.exec()
     window.shutdown()
     owner.close()

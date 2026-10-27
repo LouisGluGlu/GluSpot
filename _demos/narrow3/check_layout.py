@@ -3,6 +3,7 @@ import itertools
 import sys
 
 from layout import NarrowLayout
+from motion import Visibility
 
 
 def distance(a, b):
@@ -11,12 +12,12 @@ def distance(a, b):
     return (dx * dx + dy * dy) ** 0.5
 
 
-def check(variant, width, mode, expanded):
+def check(variant, width, mode, expanded, footer_hover=False):
     layout = NarrowLayout(width, 640)
     controls = [layout.back, layout.top[0]]
     if expanded:
         controls.extend(layout.top[1:])
-    footer = variant != "A" and not (expanded and mode == "playlist")
+    footer = (variant != "A" or footer_hover) and not (expanded and mode == "playlist")
     if footer:
         controls.extend((layout.play, layout.favorite))
     errors = []
@@ -42,7 +43,28 @@ def main():
         errors = check(variant, width, mode, expanded)
         failures += bool(errors)
         print(f"{'FAIL' if errors else 'PASS'} {variant} {width} {mode} expanded={expanded}: {', '.join(errors) or 'static geometry'}")
-    print("NOTE: Static geometry only; press expansion, animated frames, text metrics and footer hover are not verified.")
+    for width, mode, expanded in itertools.product((320, 360, 480), ("lyrics", "playlist"), (False, True)):
+        errors = check("A", width, mode, expanded, footer_hover=True)
+        failures += bool(errors)
+        print(f"{'FAIL' if errors else 'PASS'} A {width} {mode} expanded={expanded} footer_hover: {', '.join(errors) or 'static geometry'}")
+    for variant, mode in itertools.product("ABC", ("lyrics", "playlist")):
+        visibility = Visibility(variant != "A")
+        maximum = 0
+        for frame in range(240):
+            now = frame / 60
+            top = 0.5 <= now < 2.0
+            bottom = now < 0.4 or now >= 2.2
+            visibility.advance(now, top, bottom, mode == "playlist")
+            footer = visibility.footer.value(now) > .001
+            secondary = sum(fade.value(now) > .001 for fade in visibility.top)
+            if mode == "playlist" and footer:
+                secondary = 0
+            count = 2 + secondary + 2 * footer + (mode == "playlist")
+            maximum = max(maximum, count)
+        errors = maximum > 8
+        failures += errors
+        print(f"{'FAIL' if errors else 'PASS'} {variant} {mode} visibility budget max={maximum}")
+    print("NOTE: Press expansion, wide/narrow animation and text ink remain unverified.")
     return int(failures != 0)
 
 
