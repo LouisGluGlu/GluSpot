@@ -3787,6 +3787,12 @@ class IslandStackVisual(QWidget):
         wave_plan = self._music_wave_update_plan(now)
         self.live_audio_available = wave_plan.live_audio_available
         self.current_audio_bands = wave_plan.current_audio_bands
+        if self._effective_music_ambience_style() == "sea_level":
+            from local.sea_wave import SeaWaveState
+            state = getattr(self, "_sea_wave_state", None)
+            if state is None:
+                state = self._sea_wave_state = SeaWaveState()
+            state.update(self.current_audio_bands, now)
         previous_at = getattr(self, "_wave_values_updated_at", None)
         advance = self._audio_reactive_runtime_for_current_settings().advance_wave_values(
             self.wave_values,
