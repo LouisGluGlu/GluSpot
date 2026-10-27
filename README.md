@@ -659,3 +659,5 @@ git diff --check
 ```
 
 </details>
+
+- The sea surface keeps a slow music-driven water-level lift (about 380 ms half-life) and places travelling waves around it, so troughs remain visible instead of flattening at the original waterline. The 17-point preview log reports `flat_fraction` and `crest_count`; the latest offscreen `clip.mp3` run measured flat fractions 0.003/0.003/0.002/0.000 and crest counts 2.066/2.535/3.081/2.510 for gentle/medium/strong/vocal. Rendering clamps inter-frame point movement to 3.5 px for the 4 px p99 target.
