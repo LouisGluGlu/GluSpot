@@ -19,6 +19,7 @@ class AudioFrame:
     low: float
     mid: float
     high: float
+    vocal: float = 0.0
 
 
 @dataclass(frozen=True)

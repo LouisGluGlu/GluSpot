@@ -3792,7 +3792,7 @@ class IslandStackVisual(QWidget):
             state = getattr(self, "_sea_wave_state", None)
             if state is None:
                 state = self._sea_wave_state = SeaWaveState()
-            state.update(self.current_audio_bands, now)
+            state.update(self.current_audio_bands, now, vocal=getattr(self, "_sea_vocal_sample", 0.0) if self.media_is_playing else 0.0)
         previous_at = getattr(self, "_wave_values_updated_at", None)
         advance = self._audio_reactive_runtime_for_current_settings().advance_wave_values(
             self.wave_values,
@@ -3821,12 +3821,17 @@ class IslandStackVisual(QWidget):
         input_snapshot = getattr(runtime, "input_snapshot", None)
         if callable(input_snapshot):
             provider = getattr(self, "data_provider", None)
+            def read_live_frame():
+                self._sea_vocal_sample = 0.0
+                frame = getattr(provider, "get_audio_frame", lambda: None)()
+                self._sea_vocal_sample = getattr(frame, "vocal", 0.0) or 0.0
+                return frame
             return input_snapshot(
                 now=now,
                 # The settings switch is no longer shown; the sea-level water line always follows real audio.
                 reactive_enabled=bool(getattr(self, "music_reactive_background_enabled", False)
                                       or self._effective_music_ambience_style() == "sea_level"),
-                live_frame_reader=lambda: getattr(provider, "get_audio_frame", lambda: None)(),
+                live_frame_reader=read_live_frame,
                 live_audio_probe=lambda: bool(getattr(provider, "has_live_audio", lambda: False)()),
                 audio_frames=getattr(self, "audio_frames", []),
                 audio_started_at=getattr(self, "audio_started_at", now),
