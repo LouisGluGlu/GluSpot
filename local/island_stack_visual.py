@@ -3821,6 +3821,13 @@ class IslandStackVisual(QWidget):
         input_snapshot = getattr(runtime, "input_snapshot", None)
         if callable(input_snapshot):
             provider = getattr(self, "data_provider", None)
+            # Read the latest capture frame even when the shared band sampler
+            # serves its 50 ms cached bands; vocal is a separate feature.
+            try:
+                latest = getattr(provider, "get_audio_frame", lambda: None)()
+                self._sea_vocal_sample = getattr(latest, "vocal", 0.0) or 0.0
+            except Exception:
+                self._sea_vocal_sample = 0.0
             def read_live_frame():
                 self._sea_vocal_sample = 0.0
                 frame = getattr(provider, "get_audio_frame", lambda: None)()
