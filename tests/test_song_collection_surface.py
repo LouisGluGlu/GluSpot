@@ -323,6 +323,7 @@ class SongCollectionSurfaceTests(unittest.TestCase):
         with patch("local.music_surface_window.paint_music_source_icon") as paint:
             self.window._paint_library_back
             self.window._control_layer_cache.clear()
+            self.window._visible_control_layers.clear()
             self.render()
         self.assertTrue(any(call.args[2] == "login" for call in paint.call_args_list))
         self.assertTrue(self.window.return_to_library())

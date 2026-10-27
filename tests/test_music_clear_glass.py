@@ -176,6 +176,107 @@ class ClearRenderTests(unittest.TestCase):
         image.fill(Qt.GlobalColor.transparent)
         return image
 
+    def test_visible_layer_cache_invalidation_and_filtered_feedback(self):
+        window = self.window
+        renderer = window._clear_control_renderer
+        window._glass_feedback.controls["library"] = ControlMotion()
+        window._glass_feedback.controls["media:next"] = ControlMotion()
+        rect = QRectF(70, 60, 35, 35)
+        now = [100.]
+        material = {"ink": QColor("white"), "level": 50, "light": True}
+        calls = []
+        def draw(painter):
+            calls.append(1)
+            renderer.paint(painter, rect, scene=self.scene, scene_bounds=QRectF(window.rect()),
+                           ink=material["ink"], now=now[0], role="library",
+                           state=window._glass_feedback.state("library"), level=material["level"])
+        def paint(reveal=1., bounds=None, shift=QPointF(), key=("library",)):
+            output = self.image()
+            renderer.begin_frame(now[0])
+            try:
+                with QPainter(output) as painter:
+                    window._paint_control_layer(painter, bounds or rect, reveal, shift, key, draw)
+            finally:
+                renderer.end_frame()
+            return output
+        with patch("local.music_surface_window.time.monotonic", new=lambda: now[0]), \
+                patch.object(window, "_surface_glass_backdrop", new=lambda: self.scene), \
+                patch.object(window, "_scene_control_ink", new=lambda: material["ink"]), \
+                patch.object(window, "_surface_glass_level", new=lambda: material["level"]), \
+                patch.object(window, "_surface_glass_light", new=lambda: material["light"]):
+            first = paint()
+            self.assertEqual(paint(), first)
+            self.assertEqual(len(calls), 1)
+            # Other groups must not invalidate this layer.
+            window._glass_feedback.controls["media:next"].glow = .7
+            window._glass_feedback.hover["media:next"] = .4
+            self.assertEqual(paint(), first)
+            self.assertEqual(len(calls), 1)
+            for change in (
+                lambda: window._glass_feedback.hover.__setitem__("library", .5),
+                lambda: setattr(window._glass_feedback.controls["library"], "lift", .2),
+                lambda: setattr(window._glass_feedback.controls["library"], "glow", .6),
+                lambda: material.__setitem__("ink", QColor("black")),
+                lambda: material.__setitem__("level", 70),
+                lambda: material.__setitem__("light", False),
+            ):
+                old = len(calls)
+                change()
+                paint()
+                self.assertEqual(len(calls), old + 1)
+            old = len(calls)
+            paint(bounds=rect.adjusted(0, 0, 1, 0))
+            paint(shift=QPointF(.125, .25))
+            paint(reveal=.9995)
+            self.assertEqual(len(calls), old + 3)
+            # Scene changes alone wait for the existing patch schedule.
+            window._glass_feedback.controls["library"] = ControlMotion()
+            paint()
+            old = len(calls)
+            self.scene.fill(QColor("red"))
+            now[0] += .01
+            paint()
+            self.assertEqual(len(calls), old)
+            now[0] += 1.
+            paint()
+            self.assertEqual(len(calls), old + 1)
+            version = renderer.versions["library"]
+            # A patch updated by another caller invalidates this layer.
+            other_image = self.image()
+            with QPainter(other_image) as painter:
+                renderer.paint(painter, rect.adjusted(1, 0, 1, 0), scene=self.scene,
+                               scene_bounds=QRectF(window.rect()), ink=material["ink"],
+                               now=now[0], role="library", level=material["level"])
+            self.assertGreater(renderer.versions["library"], version)
+            paint()
+            self.assertEqual(len(calls), old + 2)
+            paint(reveal=.7)
+            self.assertEqual(len(calls), old + 3)
+
+    def test_cached_layer_touches_selected_patch_and_records_seen_role(self):
+        renderer = self.window._clear_control_renderer
+        rect = QRectF(70, 60, 35, 35)
+        calls = []
+        now = [100.]
+        def draw(p):
+            calls.append(1)
+            renderer.paint(p, rect, scene=self.scene, scene_bounds=QRectF(self.window.rect()),
+                           ink=QColor("white"), now=now[0], role="library")
+        def frame():
+            renderer.begin_frame(now[0])
+            output = self.image()
+            with QPainter(output) as painter:
+                self.window._paint_control_layer(painter, rect, 1., QPointF(), ("library",), draw)
+            renderer.end_frame()
+        with patch("local.music_surface_window.time.monotonic", new=lambda: now[0]), \
+                patch.object(self.window, "_surface_glass_backdrop", return_value=self.scene):
+            frame()
+            now[0] += 1.
+            frame()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(renderer.seen_roles, {"library"})
+            self.assertEqual(renderer.patches["library"][2], now[0])
+
     def test_original_transport_path_has_no_pixels_outside_silhouette(self):
         for playing in (False, True):
             for command in ("previous", "toggle_play_pause", "next"):

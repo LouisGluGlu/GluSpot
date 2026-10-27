@@ -199,6 +199,7 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                 # Exercise the real direct drawing path for each theme and
                 # presentation; material reuse must not change glyph ink.
                 self.window._control_layer_cache.clear()
+                self.window._visible_control_layers.clear()
                 self.window._control_layer_cache_bytes = 0
                 with self.subTest(mode=mode, fullscreen=fullscreen), \
                         patch("local.music_surface_window.time.monotonic", return_value=100.), \
@@ -230,7 +231,7 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                     calls_before = (source.call_count, output.call_count, transport.call_count)
                     self.assertEqual(paint_controls(), cold)
                     self.assertEqual((source.call_count, output.call_count, transport.call_count),
-                                     tuple(2 * count for count in calls_before))
+                                     calls_before)
                     self.assertEqual({key: image.cacheKey() for key, image in self.window._control_layer_cache.items()}, cache_before)
                     self.assertLessEqual(len(cache_before), 48)
                     self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)
