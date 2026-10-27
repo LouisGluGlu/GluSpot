@@ -1,4 +1,4 @@
-"""Sea-only audio envelopes and bounded, frequency-shaped water motion."""
+"""Sea-only audio envelopes, travelling waves, and local ripple propagation."""
 from __future__ import annotations
 
 import math
@@ -19,22 +19,30 @@ def _follow(current, target, dt, half_life):
 
 
 class SeaWaveState:
-    def __init__(self):
+    """A small one-dimensional water surface updated at the audio tick."""
+
+    def __init__(self, point_count=49):
+        self.point_count = point_count
         self.peaks = [0.0] * 3
         self.bands = [0.0] * 3
         self.average = 0.0
         self.impulse = 0.0
-        self.swell = 0.0
-        self.velocity = 0.0
         self.updated_at = None
         self.vocal_peak = 0.0
         self.vocal = 0.0
         self.vocal_average = 0.0
         self.vocal_impulse = 0.0
+        self.swell = 0.0  # compatibility diagnostic; surface is now a chain
+        self.surface = [0.0] * point_count
+        self.velocity = [0.0] * point_count
+        self._onset_at = -10.0
+        self._onset_index = point_count // 2
+        self._time = 0.0
 
     def update(self, bands, now, vocal=0.0):
         dt = 1 / 60 if self.updated_at is None else max(0.0, min(0.25, now - self.updated_at))
         self.updated_at = now
+        self._time += dt
         for i, raw in enumerate(bands):
             raw = max(0.0, min(1.0, float(raw)))
             self.peaks[i] = max(raw, self.peaks[i] * 2 ** (-dt / 3.0))
@@ -48,40 +56,62 @@ class SeaWaveState:
         self.vocal_average = _follow(self.vocal_average, self.vocal, dt, 0.4)
         self.vocal_impulse = max(excess_vocal, self.vocal_impulse * 2 ** (-dt / 0.13))
         low = self.bands[0]
-        # Continuous positive flux above the slow baseline; no refractory
-        # interval, so closely spaced drum hits are not silently discarded.
         excess = max(0.0, low - self.average * 1.15 - 0.08)
         self.average = _follow(self.average, low, dt, 0.45)
         self.impulse = max(excess, self.impulse * 2 ** (-dt / 0.16))
-        # Stable damped spring, subdivided to avoid frame-rate-dependent instability.
-        steps = max(1, math.ceil(dt / 0.008))
+
+        # A new onset drops a local disturbance into alternating positions. The
+        # refractory period is short enough for syllables, but prevents chatter.
+        drive = max(self.vocal_impulse, self.impulse)
+        if drive > 0.055 and self._time - self._onset_at > 0.12:
+            self._onset_index = (self._onset_index + (13 if self._onset_index % 2 else -17)) % self.point_count
+            self.velocity[self._onset_index] -= 22.0 * drive
+            self._onset_at = self._time
+
+        # Damped spring chain. Neighbor spread makes the disturbance travel;
+        # substeps keep the result stable and independent of display cadence.
+        steps = max(1, math.ceil(dt / 0.006))
         step = dt / steps
         for _ in range(steps):
-            target = self.impulse
-            self.velocity += (45.0 * (target - self.swell) - 12.0 * self.velocity) * step
-            self.swell += self.velocity * step
+            old = self.surface
+            next_surface = old[:]
+            for i in range(self.point_count):
+                left = old[i - 1] if i else old[1]
+                right = old[i + 1] if i + 1 < self.point_count else old[-2]
+                acceleration = (-18.0 * old[i] - 3.8 * self.velocity[i]
+                                + 30.0 * (left + right - 2.0 * old[i]))
+                self.velocity[i] += acceleration * step
+                next_surface[i] = old[i] + self.velocity[i] * step
+            self.surface = next_surface
 
     def displacement(self, pos, phase, intensity):
-        low, mid, high = self.bands
-        if sea_intensity(intensity) == "vocal":
-            # Vocal energy lifts the whole line; a rounded mid-scale crest
-            # moves gently across it without coupling to bass.
-            crest = math.cos((pos - 0.5) * math.tau + 0.25 * math.sin(phase * 0.3))
-            motion = self.vocal * (17.0 + 22.0 * crest) + self.vocal_impulse * 9.0
-            if motion >= 0:
-                return 49.0 * math.tanh(motion / 49.0) * (0.3 + 0.7 * self.vocal)
-            return 3.0 * math.tanh(motion / 3.0)
-        strength = INTENSITIES[sea_intensity(intensity)]
-        # Low frequencies make broad swells, mids shape shorter waves and highs
-        # add fine ripples. The upward bias keeps the crest clear of lyric ink.
-        broad = math.sin(pos * math.tau * 1.1 + phase)
-        middle = math.sin(pos * math.tau * 2.3 - phase * 0.7)
-        fine = math.sin(pos * math.tau * 4.1 + phase * 0.4)
-        motion = (low * (7.0 + 13.0 * broad) + mid * 4.0 * middle
-                  + high * 1.5 * fine + self.swell * 18.0
-                  + self.impulse * 12.0) * strength
-        if motion >= 0.0:
-            # A low-band envelope keeps the breadth responsive even where
-            # the strong setting approaches the upper soft limit.
-            return 49.0 * math.tanh(motion / 49.0) * (0.35 + 0.65 * low)
-        return 3.0 * math.tanh(motion / 3.0)
+        mode = sea_intensity(intensity)
+        if mode == "vocal":
+            low, mid, high = self.bands
+            envelope = self.vocal
+            onset = self.vocal_impulse
+            amplitudes = (18.0 * envelope, 12.0 * envelope, 4.0 * envelope)
+        else:
+            low, mid, high = self.bands
+            strength = INTENSITIES[mode]
+            amplitudes = (11.0 * low * strength, 7.0 * mid * strength, 2.8 * high * strength)
+            onset = self.impulse
+        # Long waves run faster than short waves: a compact dispersion-inspired
+        # set of phase speeds creates visible horizontal motion.
+        travelling = (
+            amplitudes[0] * math.sin(pos * math.tau * 0.85 - self._time * 2.95 + phase * 0.4)
+            + amplitudes[1] * math.sin(pos * math.tau * 1.75 - self._time * 4.4 - phase * 0.3)
+            + amplitudes[2] * math.sin(pos * math.tau * 3.7 - self._time * 6.3 + phase * 0.2)
+        )
+        point_index = int(round(max(0.0, min(1.0, pos)) * (self.point_count - 1)))
+        ripple = self.surface[point_index]
+        local_onset = onset * 8.0 * math.exp(-((point_index - self._onset_index) / 5.0) ** 2)
+        # Only a small mean lift is shared by all points; the spring chain and
+        # travelling waves provide the visible surface motion.
+        travelling += ripple * (1.0 + 0.35 * onset) + local_onset
+        if mode == "vocal":
+            travelling += onset * 5.0 * math.sin(pos * math.tau * 1.45 - self._time * 3.8)
+        if travelling >= 0.0:
+            limit = 49.0 if mode != "vocal" else 44.0
+            return limit * math.tanh(travelling / limit)
+        return 3.0 * math.tanh(travelling / 3.0)

@@ -259,7 +259,8 @@ class Window(QWidget):
                       "intensity": sea_intensity(getattr(self.scene.visual, "sea_wave_intensity", None)),
                       "impulse": getattr(getattr(self.scene.visual, "_sea_wave_state", None),
                                          "vocal_impulse" if sea_intensity(getattr(self.scene.visual, "sea_wave_intensity", None)) == "vocal" else "impulse", 0.0),
-                      "water_y": [points[i].y() for i in (0, len(points)//4, len(points)//2, 3*len(points)//4, len(points)-1)]}
+                      "water_y": [points[i].y() for i in (0, len(points)//4, len(points)//2, 3*len(points)//4, len(points)-1)],
+                      "water_y17": [point.y() for point in points[::3]]}
             self.log.write(json.dumps(record, ensure_ascii=False) + "\n")
             self.log.flush()
 

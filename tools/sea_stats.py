@@ -20,6 +20,46 @@ def summarize(rows):
     impulse = [row.get('impulse', 0.0) for row in rows]
     vocal = [row.get('vocal', 0.0) or 0.0 for row in rows]
     jumps = [abs(b - a) for a, b in zip(center, center[1:])]
+    fields = [row.get('water_y17') or row.get('water_y') for row in rows]
+    fields = [list(map(float, field)) for field in fields]
+    shifts, explained = [], []
+    for previous, current in zip(fields, fields[1:]):
+        n = min(len(previous), len(current))
+        previous, current = previous[:n], current[:n]
+        best_shift, best_error = 0, float('inf')
+        for shift_units in range(-100, 101):
+            shift = shift_units / 20.0
+            pairs = []
+            for i in range(n):
+                source = i + shift
+                left = math.floor(source)
+                fraction = source - left
+                if 0 <= left < n - 1:
+                    predicted = previous[left] * (1.0 - fraction) + previous[left + 1] * fraction
+                    pairs.append((predicted, current[i]))
+            if pairs:
+                error = sum((b - a) ** 2 for a, b in pairs) / len(pairs)
+                if error < best_error:
+                    best_error, best_shift = error, shift
+        shifts.append(abs(best_shift) * 440.0 / max(1, n - 1))
+        delta = [current[i] - previous[i] for i in range(n)]
+        total = sum((x - statistics.mean(delta)) ** 2 for x in delta)
+        explained.append(max(0.0, 1.0 - best_error / (total / max(1, n) + 1e-9)))
+    means = [statistics.mean(field) for field in fields]
+    total_variance = sum(sum((x - statistics.mean(field)) ** 2 for x in field) for field in fields) / max(1, len(fields))
+    common_variance = statistics.pvariance(means) if len(means) > 1 else 0.0
+    cohesion = common_variance / (total_variance / max(1, len(fields[0])) + 1e-9)
+    correlations = []
+    for field in fields:
+        centered = [x - statistics.mean(field) for x in field]
+        variance = sum(x*x for x in centered)
+        if not variance:
+            continue
+        for distance in range(1, len(centered)):
+            corr = sum(centered[i] * centered[i + distance] for i in range(len(centered) - distance)) / variance
+            if corr <= 0.5:
+                correlations.append(distance / max(1, len(centered) - 1))
+                break
     def stats(values):
         return {'min': min(values), 'max': max(values), 'std': statistics.pstdev(values)}
     return {'bands': [stats(band) for band in bands], 'center': stats(center),
@@ -28,9 +68,14 @@ def summarize(rows):
             'corr_low_amplitude': correlation(bands[0], amplitude),
             'corr_low_center_rise': correlation(bands[0], [-y for y in center]),
             'corr_vocal_center_rise': correlation(vocal, [-y for y in center]),
+            'corr_vocal_amplitude': correlation(vocal, amplitude),
             'corr_impulse_amplitude': correlation(impulse, amplitude),
             'corr_impulse_center_rise': correlation(impulse, [-y for y in center]),
-            'center_jump_p99': sorted(jumps)[math.ceil(len(jumps)*.99)-1] if jumps else 0.0}
+            'center_jump_p99': sorted(jumps)[math.ceil(len(jumps)*.99)-1] if jumps else 0.0,
+            'travel_shift_median': statistics.median(shifts) if shifts else 0.0,
+            'travel_explained_ratio': statistics.mean(explained) if explained else 0.0,
+            'cohesion': cohesion,
+            'spatial_correlation_length': statistics.mean(correlations) if correlations else 1.0}
 
 
 def main():
