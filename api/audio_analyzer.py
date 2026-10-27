@@ -240,9 +240,10 @@ class LiveAudioAnalyzer:
 
     def _estimated_frame(self, is_playing: bool, position_seconds: float) -> AudioFrame:
         if not is_playing:
-            return AudioFrame(0.02, 0.015, 0.01)
+            return AudioFrame(0.02, 0.015, 0.01, 0.01)
         t = position_seconds if position_seconds > 0 else time.monotonic() - self._started_at
         low = 0.40 + math.sin(t * 2.25) * 0.18 + random.random() * 0.05
         mid = 0.34 + math.sin(t * 3.10 + 1.2) * 0.16 + random.random() * 0.05
         high = 0.22 + math.sin(t * 5.40 + 2.4) * 0.12 + random.random() * 0.06
-        return AudioFrame(max(0.0, min(1.0, low)), max(0.0, min(1.0, mid)), max(0.0, min(1.0, high)))
+        vocal = 0.16 + math.sin(t * 2.7 + 0.8) * 0.10 + random.random() * 0.03
+        return AudioFrame(max(0.0, min(1.0, low)), max(0.0, min(1.0, mid)), max(0.0, min(1.0, high)), max(0.0, min(1.0, vocal)))
