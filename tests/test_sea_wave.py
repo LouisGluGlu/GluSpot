@@ -18,7 +18,7 @@ class SeaWaveTests(unittest.TestCase):
         state = SeaWaveState()
         state.update((0, 0, 0), 0)
         state.update((.2, .2, .2), .03)
-        self.assertGreater(state.bands[0], .45)
+        self.assertGreater(state.bands[0], .30)
         state.update((0, 0, 0), .06)
         self.assertGreater(state.bands[0], .4)
         for n in range(1, 400):

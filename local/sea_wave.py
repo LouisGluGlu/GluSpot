@@ -49,11 +49,11 @@ class SeaWaveState:
             raw = max(0.0, min(1.0, float(raw)))
             self.peaks[i] = max(raw, self.peaks[i] * 2 ** (-dt / 3.0))
             target = min(1.0, raw / max(self.peaks[i], 0.008)) if raw > 0.003 else 0.0
-            self.bands[i] = _follow(self.bands[i], target, dt, 0.03 if target > self.bands[i] else 0.22)
+            self.bands[i] = _follow(self.bands[i], target, dt, 0.05 if target > self.bands[i] else 0.22)
         vocal = max(0.0, min(1.0, float(vocal)))
         self.vocal_peak = max(vocal, self.vocal_peak * 2 ** (-dt / 3.0))
         vocal_target = min(1.0, vocal / max(self.vocal_peak, 0.008)) if vocal > 0.003 else 0.0
-        self.vocal = _follow(self.vocal, vocal_target, dt, 0.04 if vocal_target > self.vocal else 0.30)
+        self.vocal = _follow(self.vocal, vocal_target, dt, 0.06 if vocal_target > self.vocal else 0.30)
         excess_vocal = max(0.0, self.vocal - self.vocal_average * 1.1 - 0.06)
         self.vocal_average = _follow(self.vocal_average, self.vocal, dt, 0.4)
         self.vocal_impulse = max(excess_vocal, self.vocal_impulse * 2 ** (-dt / 0.13))
