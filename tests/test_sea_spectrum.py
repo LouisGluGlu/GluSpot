@@ -40,24 +40,55 @@ class SpectrumSeaTests(unittest.TestCase):
         self.assertLess(max(heights), 48)
 
     def test_latest_spectrum_survives_cached_band_sampling(self):
+        from local.audio_reactive_engine import AudioReactiveRuntime
         from local.island_stack_visual import IslandStackVisual
         first = self.analyze_tone(100)
         second = self.analyze_tone(5000)
-        class Runtime:
-            def input_snapshot(self, **kwargs):
-                # Model a cached-band hit, where the reader is not called.
-                return SimpleNamespace()
+        runtime = AudioReactiveRuntime()
         frame = [first]
+        reads = []
+
+        def read_frame():
+            reads.append(frame[0])
+            return frame[0]
+
         host = SimpleNamespace(
-            data_provider=SimpleNamespace(get_audio_frame=lambda: frame[0]),
-            _audio_reactive_runtime_for_current_settings=lambda: Runtime(),
+            data_provider=SimpleNamespace(get_audio_frame=read_frame),
+            _audio_reactive_runtime_for_current_settings=lambda: runtime,
             _effective_music_ambience_style=lambda: "sea_level",
         )
-        IslandStackVisual._music_wave_input_snapshot(host, 1.0)
+        initial = IslandStackVisual._music_wave_input_snapshot(host, 1.0)
         frame[0] = second
-        IslandStackVisual._music_wave_input_snapshot(host, 1.01)
+        cached = IslandStackVisual._music_wave_input_snapshot(host, 1.01)
+        self.assertEqual(initial.band_source, "live_frame")
+        self.assertEqual(cached.band_source, "cache")
+        self.assertEqual(cached.sampled_bands, initial.sampled_bands)
+        self.assertEqual(reads, [first, second])
+        self.assertEqual(host._sea_vocal_sample, second.vocal)
         self.assertEqual(host._sea_spectrum, second.spectrum)
+        self.assertEqual(host._sea_vocal_spectrum, second.vocal_spectrum)
         self.assertNotEqual(first.spectrum, second.spectrum)
+        self.assertNotEqual(first.vocal, second.vocal)
+        self.assertNotEqual(first.vocal_spectrum, second.vocal_spectrum)
+
+        # A missing/failed capture must clear all features, even on a cache hit.
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                frame[0] = second
+                IslandStackVisual._music_wave_input_snapshot(host, 1.02)
+
+                def unavailable():
+                    if missing:
+                        return None
+                    raise RuntimeError("capture unavailable")
+
+                host.data_provider.get_audio_frame = unavailable
+                snapshot = IslandStackVisual._music_wave_input_snapshot(host, 1.03)
+                self.assertEqual(snapshot.band_source, "cache")
+                self.assertEqual(host._sea_vocal_sample, 0.0)
+                self.assertEqual(host._sea_spectrum, ())
+                self.assertEqual(host._sea_vocal_spectrum, ())
+                host.data_provider.get_audio_frame = read_frame
 
     def test_render_is_idempotent_at_one_timestamp(self):
         from PySide6.QtCore import QRectF
