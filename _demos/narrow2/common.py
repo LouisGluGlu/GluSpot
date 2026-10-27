@@ -53,7 +53,7 @@ def rects(variant, w, h):
 
 def content_rect(variant, w, h):
     top = 188 if variant == 'B' else 124
-    bottom = h - (80 if variant == 'A' else 96 if variant == 'C' else 64)
+    bottom = h - (104 if variant == 'A' else 96 if variant == 'C' else 64)
     return (24, top, w - 48, max(0, bottom - top))
 
 def time_rects(variant, w, h):
@@ -74,7 +74,7 @@ def mixrect(a,b,t): return QRectF(*(blend(x,y,t) for x,y in zip((a.x(),a.y(),a.w
 
 class Demo(QWidget):
     def __init__(self, variant, bench):
-        super().__init__(); self.variant=variant; self.bench=bench; self.samples=deque(maxlen=max(1,bench)); self.anim_samples=deque(maxlen=max(1,bench)); self.frames=deque(); self.mode='lyrics'; self.track=0; self.color=0; self.paused=False; self.dj=True; self.favorite=False; self.hints=True; self.pos=4.8; self.scroll=0; self.narrow=False; self.start=0.; self.target=0.; self.transition=0.; self.last=time.monotonic(); self.last_activity=self.last; self.header=1.; self.hovered=None; self.hits={}; self.feedback=ControlFeedback(); self.renderer=GlassControlRenderer(); self.covers=[cover(c) for c in COLORS]; self.backgrounds=[]; self.bg_cache={}; self.lyric_cache={}; self.row_cache={}; self.tile_cache={}; self.frame_budget=0; self.first_paint=None; self.press_samples=deque(maxlen=max(1,bench)); self.palettes=[]; self.island_refresh=0.
+        super().__init__(); self.variant=variant; self.bench=bench; self.samples=deque(maxlen=max(1,bench)); self.anim_samples=deque(maxlen=max(1,bench)); self.frames=deque(); self.mode='lyrics'; self.track=0; self.color=0; self.paused=False; self.dj=True; self.favorite=False; self.hints=True; self.pos=4.8; self.scroll=0; self.narrow=False; self.start=0.; self.target=0.; self.transition=0.; self.last=time.monotonic(); self.last_activity=self.last; self.header=1.; self.hovered=None; self.hits={}; self.feedback=ControlFeedback(); self.renderer=GlassControlRenderer(); self.covers=[cover(c) for c in COLORS]; self.backgrounds=[]; self.bg_cache={}; self.lyric_cache={}; self.row_cache={}; self.tile_cache={}; self.frame_budget=0; self.first_paint=None; self.press_samples=deque(maxlen=max(1,bench)); self.palettes=[]; self.island_refresh=0.; self.paint_serial=0; self.refreshed=set(); self.grab_header=None; self.ink_cache={}
         for image,rgb in zip(self.covers,COLORS):
             c=QColor(*rgb); palette=artwork_surface_palette(image,c,c.darker(150)); self.backgrounds.append(background_role_color(palette.primary)); self.palettes.append(palette)
         # Warm expensive color fields and text masks before the first displayed frame.
@@ -113,9 +113,10 @@ class Demo(QWidget):
         super().resizeEvent(e)
     def tick(self):
         now=time.monotonic(); dt=min(.08,now-self.last); self.last=now
-        if not self.paused: self.pos+=dt
-        desired=0. if self.narrow and self.mode=='lyrics' and now-self.last_activity>3 else 1.
+        if not self.paused and not getattr(self,'grab_frozen',False): self.pos+=dt
+        desired=(self.grab_header if self.grab_header is not None else (0. if self.narrow and self.mode=='lyrics' and now-self.last_activity>3 else 1.))
         self.header += (desired-self.header)*min(1.,dt/ .18*3)
+        if abs(self.header-desired)<.001: self.header=desired
         groups=[{k:r for k,r in self.hits.items() if not k.startswith('row')}]; self.feedback.advance(groups,self.hovered,now)
         while self.frames and self.frames[0]<now-1: self.frames.popleft()
         self.setWindowTitle(f'GluSpot 窄窗v2 · 方案{self.variant} {LABELS[self.variant]} · {len(self.frames)} fps'); self.update()
@@ -150,7 +151,10 @@ class Demo(QWidget):
             elif k.startswith('row'): self.track=int(k[3:]); self.color=self.track%4
         self.last_activity=time.monotonic(); self.update()
     def wheelEvent(self,e):
-        if self.mode=='list': self.scroll=max(0,min(8*58-160,self.scroll-e.angleDelta().y()/120*58)); self.update()
+        if self.mode=='list':
+            top=188 if self.variant=='B' else 124
+            safe_bottom=self.height()-(104 if self.variant=='A' else 96 if self.variant=='C' else 64)
+            self.scroll=max(0,min(max(0,top+len(SONGS)*58-safe_bottom),self.scroll-e.angleDelta().y()/120*58)); self.update()
     def background(self):
         key=(self.color, self.width() > self.height())
         if key not in self.bg_cache:
@@ -179,8 +183,8 @@ class Demo(QWidget):
     def paint(self, painter, rect, **kw):
         # Adapter for the original transport painter: retain its exact path.
         command=kw['role'][1]; key='play' if command=='toggle_play_pause' else command
-        self.glass(painter, rect, key, kw['scene'], 'path', kw['path'])
-    def glass(self,p,r,key,scene,kind='circle',path=None):
+        self.glass(painter, rect, key, kw['scene'], 'path', kw['path'], kw['ink'])
+    def glass(self,p,r,key,scene,kind='circle',path=None,ink=None):
         state=self.feedback.state(key); hover=self.feedback.hover.get(key,0.)
         if key=='collection':
             candidates=[self.feedback.state(k) for k in ('favorite','playlist_add')]
@@ -211,8 +215,8 @@ class Demo(QWidget):
                     from PySide6.QtGui import QTransform
                     transform=QTransform(); transform.scale(scale,scale); transform.translate(-box.x(),-box.y()); localpath=transform.map(path)
                 self.renderer.clear()
-                self.renderer.paint(q,QRectF(0,0,tw,th),scene=sample,scene_bounds=QRectF(0,0,tw,th),ink=QColor('white'),now=time.monotonic(),role=key,kind=kind,path=localpath)
-                q.end(); cached=tmp; self.tile_cache[signature]=cached
+                self.renderer.paint(q,QRectF(0,0,tw,th),scene=sample,scene_bounds=QRectF(0,0,tw,th),ink=ink or QColor('white'),now=time.monotonic(),role=key,kind=kind,path=localpath)
+                q.end(); cached=tmp; self.tile_cache[signature]=cached; self.refreshed.add(key)
                 if key=='island': self.island_refresh=time.monotonic()
 
         if cached is not None:
@@ -231,12 +235,21 @@ class Demo(QWidget):
                         glow=QRadialGradient(state.contact,radius); glow.setColorAt(0,QColor(255,255,255,round(alpha*state.glow))); glow.setColorAt(1,QColor(255,255,255,0)); p.fillRect(grown,glow)
                 p.restore()
         return rr
+    def scene_ink(self):
+        from local.liquid_glass import glass_material_tint
+        image=self.background()
+        key=image.cacheKey()
+        if key not in self.ink_cache:
+            veil=glass_material_tint(light=False,material_level=50)
+            black,white=MusicSurfaceWindow._scene_control_ink_areas(image,veil)
+            self.ink_cache[key]=QColor('black' if black>white else 'white')
+        return self.ink_cache[key]
     def transport_path(self,r,key):
         raise RuntimeError('transport paths are supplied by MusicSurfaceWindow')
     def control(self,p,key,r,scene):
         self.hits[key]=r
         if key in ('previous','play','next'):
-            MusicSurfaceWindow._paint_transport_icon(self,p,r,'toggle_play_pause' if key=='play' else key,QColor('white'),scene_ink=QColor('white')); return
+            MusicSurfaceWindow._paint_transport_icon(self,p,r,'toggle_play_pause' if key=='play' else key,QColor('white'),scene_ink=self.scene_ink()); return
         if key in ('favorite','playlist_add'): return
         face=self.glass(p,r,key,scene,'dj' if key=='dj' else 'circle'); icon=face.adjusted(7,7,-7,-7); white=QColor(255,255,255,230)
         if key=='back': paint_music_source_icon(p,icon,'library_back',tint=white)
@@ -253,7 +266,7 @@ class Demo(QWidget):
         start=time.perf_counter(); now=time.monotonic(); self.frames.append(now); p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing); p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform); scene=self.background(); p.drawImage(QRectF(self.rect()),scene); self.hits={}; self.frame_budget=1; self.renderer.begin_frame(now); v=self.progress(); w=self.width(); h=self.height()
         wideart=QRectF(48,52,min(w*.34,h*.61),min(w*.34,h*.61)); small=QRectF(16,56,56,56); art=mixrect(wideart,small,v)
         p.save(); p.setOpacity(blend(1,self.header,v)); self.art(p,art,self.covers[self.color]); title=mixrect(QRectF(54,wideart.bottom()+14,wideart.width(),32),QRectF(84,59,max(20,w-100),24),v); self.text(p,title,SONGS[self.track][0],blend(25,16,v),255,True); self.text(p,title.translated(0,blend(30,22,v)),SONGS[self.track][1],blend(16,12,v),155); p.restore()
-        nx=24; ny=188 if self.variant=='B' else 124; ny-= (1-self.header)*(64 if self.variant=='B' else 56) if self.mode=='lyrics' else 0; bottom=h-(80 if self.variant=='A' else 96 if self.variant=='C' else 64); wx=wideart.right()+80; content=QRectF(blend(wx,nx,v),blend(65,ny,v),max(1,blend(w-wx-40,w-48,v)),max(1,blend(h-100,bottom-ny,v)))
+        nx=24; ny=188 if self.variant=='B' else 124; ny-= (1-self.header)*(64 if self.variant=='B' else 56) if self.mode=='lyrics' else 0; bottom=h-(0 if self.variant=='A' else 96 if self.variant=='C' else 64); wx=wideart.right()+80; content=QRectF(blend(wx,nx,v),blend(65,ny,v),max(1,blend(w-wx-40,w-48,v)),max(1,blend(h-100,bottom-ny,v)))
         # Render both layouts into cached-friendly images and fade their bottom edges.
         scene=QImage(self.size(),QImage.Format.Format_ARGB32_Premultiplied); backdrop=QPainter(scene); backdrop.drawImage(QRectF(self.rect()),self.background()); backdrop.setRenderHint(QPainter.RenderHint.Antialiasing); backdrop.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         widecontent=QRectF(wx,65,max(1,w-wx-40),max(1,h-130))
@@ -265,7 +278,12 @@ class Demo(QWidget):
             if self.mode=='lyrics': self.lyrics(lp,area)
             else: self.listing(lp,area)
             lp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-            fade=QLinearGradient(0,area.bottom()-40,0,area.bottom()); fade.setColorAt(0,QColor(255,255,255,255)); fade.setColorAt(1,QColor(255,255,255,0)); lp.fillRect(QRectF(area.left(),area.bottom()-40,area.width(),40),fade); lp.end()
+            if self.variant=='A' and area is narrowcontent:
+                fade=QLinearGradient(0,h-104,0,h-80); fade.setColorAt(0,QColor(255,255,255,255)); fade.setColorAt(1,QColor(255,255,255,89))
+                lp.fillRect(QRectF(area.left(),h-104,area.width(),24),fade); lp.fillRect(QRectF(area.left(),h-80,area.width(),80),QColor(255,255,255,89))
+            else:
+                fade=QLinearGradient(0,area.bottom()-40,0,area.bottom()); fade.setColorAt(0,QColor(255,255,255,255)); fade.setColorAt(1,QColor(255,255,255,0)); lp.fillRect(QRectF(area.left(),area.bottom()-40,area.width(),40),fade)
+            lp.end()
             backdrop.save(); backdrop.setOpacity(opacity); backdrop.drawImage(0,0,layer); backdrop.restore()
         backdrop.end(); p.drawImage(0,0,scene)
         p.save(); p.setOpacity(blend(1,self.header,v)); self.art(p,art,self.covers[self.color]); self.text(p,title,SONGS[self.track][0],blend(25,16,v),255,True); self.text(p,title.translated(0,blend(30,22,v)),SONGS[self.track][1],blend(16,12,v),155); p.restore()
@@ -293,7 +311,7 @@ class Demo(QWidget):
         paint_music_source_icon(p,f.adjusted(6,6,-6,-6),'heart_filled' if self.favorite else 'heart_outline',tint=QColor('white')); paint_music_source_icon(p,a.adjusted(6,6,-6,-6),'playlist_add',tint=QColor('white')); self.control(p,'dj',positions['dj'],scene)
         self.renderer.end_frame()
         if self.hints: self.text(p,QRectF(8,h-13,w-16,11),'L 歌词  P 列表  Tab 切换  N/W 宽窄  ←/→ 调宽  1–4 配色  Space 暂停  H 提示  Esc 退出',7,130)
-        p.end(); elapsed=(time.perf_counter()-start)*1000
+        p.end(); self.paint_serial+=1; elapsed=(time.perf_counter()-start)*1000
         if self.first_paint is None: self.first_paint=elapsed
         elif getattr(self,'bench_pressing',False): self.press_samples.append(elapsed)
         elif abs(v-self.target)>.001: self.anim_samples.append(elapsed)
@@ -306,7 +324,7 @@ class Demo(QWidget):
         p.save(); p.setClipRect(r); idx=int(self.pos//4)%len(LYRICS); phase=(self.pos%4)/4; step=74; cy=r.top()+r.height()*.42; slide=max(0,(phase-.945)/.055)*step
         for offset in range(-3,5):
             y=cy+offset*step-slide; line=LYRICS[(idx+offset)%len(LYRICS)]; alpha=255 if offset==0 else 120 if abs(offset)==1 else 60
-            edge=max(0,min(1,(y-r.top()+20)/35,(r.bottom()-y)/45)); alpha*=edge
+            edge=max(0,min(1,(y-r.top()+20)/35, 1 if self.variant=='A' and self.narrow else (r.bottom()-y)/45)); alpha*=edge
             if offset==0:
                 p.setFont(font(24,True)); p.setPen(QColor(255,255,255,round(alpha*.4))); p.drawText(QRectF(r.x(),y,r.width(),60),Qt.TextFlag.TextWordWrap|Qt.AlignmentFlag.AlignLeft,line); p.save(); p.setClipRect(QRectF(r.x(),y,r.width()*phase,60),Qt.ClipOperation.IntersectClip); p.setPen(QColor(255,255,255,round(alpha))); p.drawText(QRectF(r.x(),y,r.width(),60),Qt.TextFlag.TextWordWrap|Qt.AlignmentFlag.AlignLeft,line); p.restore()
             else:
@@ -327,7 +345,7 @@ class Demo(QWidget):
             y=r.y()+i*58-self.scroll
             if y+58<r.top() or y>r.bottom(): continue
             rr=QRectF(r.x(),y,r.width(),54); self.hits['row'+str(i)]=rr
-            p.save(); p.setOpacity(max(0,min(1,(y-r.top()+48)/35,(r.bottom()-y)/40)))
+            p.save(); p.setOpacity(max(0,min(1,(y-r.top()+48)/35,1 if self.variant=='A' and self.narrow else (r.bottom()-y)/40)))
             key=(i,round(r.width()),self.color,i==self.track)
             row=self.row_cache.get(key)
             if row is None:
@@ -341,20 +359,39 @@ class Demo(QWidget):
 def run(variant):
     parser=argparse.ArgumentParser(); parser.add_argument('--grab',type=Path); parser.add_argument('--seconds',type=float,default=0); parser.add_argument('--bench',type=int,default=0); args=parser.parse_args(); app=QApplication(sys.argv[:1]); win=Demo(variant,args.bench); win.show()
     if args.grab:
-        args.grab.mkdir(parents=True,exist_ok=True); win.hints=False
-        def save(name): win.grab().save(str(args.grab/f'narrow2_{variant}_{name}.png'))
-        QTimer.singleShot(500,lambda:save('wide_lyrics')); QTimer.singleShot(600,lambda:win.resize(360,640)); QTimer.singleShot(1150,lambda:save('narrow_lyrics')); QTimer.singleShot(1200,lambda:setattr(win,'mode','list')); QTimer.singleShot(1450,lambda:save('narrow_list'))
-        def collapse(): win.mode='lyrics'; win.last_activity=time.monotonic()-4; win.header=0
-        QTimer.singleShot(1500,collapse); QTimer.singleShot(1750,lambda:save('narrow_lyrics_collapsed'))
-        def reset(): win.mode='lyrics'; win.header=1; win.last_activity=time.monotonic(); win.resize(960,540)
-        QTimer.singleShot(1800,reset); QTimer.singleShot(2400,lambda:win.resize(360,640))
-        for i in range(5): QTimer.singleShot(2400+i*95,lambda i=i:save(f'transition_{i}'))
-        def color_frame(i):
-            win.mode='lyrics'; win.header=1.; win.last_activity=time.monotonic(); win.color=i; win.update()
-        for i in range(4):
-            QTimer.singleShot(3000+i*600,lambda i=i:color_frame(i))
-            QTimer.singleShot(3500+i*600,lambda i=i:save(f'color{i+1}'))
-        QTimer.singleShot(5500,app.quit)
+        args.grab.mkdir(parents=True,exist_ok=True); win.hints=False; win.grab_frozen=True; win.move(80,80)
+        steps=[('wide_lyrics',960,540,'lyrics',1,0),('narrow_lyrics',360,640,'lyrics',1,0),
+               ('narrow_list',360,640,'list',1,0),('narrow_lyrics_collapsed',360,640,'lyrics',0,0)]
+        steps += [(f'color{i+1}',360,640,'lyrics',1,i) for i in range(4)]
+        required={'back','audio','layout','mode','translation','window','previous','play','next','collection','dj'}
+        if variant=='A': required.add('island')
+        state={'index':-1,'stable':None,'list_checked':False,'settled':False}
+        def next_step():
+            state['index']+=1
+            if state['index']==len(steps):
+                if not state['list_checked']: raise RuntimeError('list screenshot was not verified')
+                app.quit(); return
+            name,w,h,mode,header,color=steps[state['index']]
+            win.resize(w,h); win.mode=mode; win.grab_header=header; win.color=color; win.scroll=0
+            win.tile_cache.clear(); win.refreshed.clear(); win.island_refresh=0; state['stable']=None; state['settled']=False
+            win.update()
+        def advance():
+            name,w,h,mode,header,color=steps[state['index']]
+            settled=(win.progress()==win.target and win.header==header)
+            if not settled: state['stable']=None; return
+            if not state['settled']:
+                win.tile_cache.clear(); win.refreshed.clear(); win.island_refresh=0; state['settled']=True; win.update(); return
+            if not required <= win.refreshed: state['stable']=None; return
+            if state['stable'] is None: state['stable']=win.paint_serial; win.update(); return
+            if win.paint_serial-state['stable']<2: win.update(); return
+            if name=='narrow_list':
+                if win.mode!='list' or not win.narrow or 'row0' not in win.hits: raise RuntimeError('list screenshot state invalid')
+                state['list_checked']=True
+            filename=f'narrow2_{variant}_{name}.png'
+            print(f'saved {filename} mode={win.mode} narrow={win.narrow} header={win.header:.3f}',flush=True)
+            if not win.grab().save(str(args.grab/filename)): raise RuntimeError('screenshot save failed')
+            next_step()
+        next_step(); grab_timer=QTimer(win); grab_timer.timeout.connect(advance); grab_timer.start(16)
     elif args.seconds>0:
         if args.bench:
             QTimer.singleShot(350,lambda:win.resize(360,640)); QTimer.singleShot(1100,lambda:win.resize(960,540))
