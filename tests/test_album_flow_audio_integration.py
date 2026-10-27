@@ -215,6 +215,7 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 closed_page = self._render_page(100.0)
                 closed_controls = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
                 closed_controls.fill(Qt.GlobalColor.transparent)
+                closed_connection = self.window._audio_output_motion.pose is not None
                 with QPainter(closed_controls) as painter, patch(
                         "local.music_surface_window.time.monotonic", return_value=100.0):
                     self.window._paint_window_controls(painter, QRectF(self.window.rect()))
@@ -275,7 +276,10 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 self.assertTrue(row.volume_slider.isVisible())
                 face = closed_controls.pixelColor(round(output.center().x()), round(output.top()) + 3)
                 self.assertGreater(face.alpha(), 180)
-                self.assertLess(face.alpha(), 245)
+                if closed_connection:
+                    self.assertLess(face.alpha(), 245)
+                else:
+                    self.assertEqual(face.alpha(), 255)
                 self.assertGreater(sum(controls.pixelColor(x, y).alpha() > 0
                     for y in range(round(translation.top()), round(translation.bottom()))
                     for x in range(round(translation.left()), round(translation.right()))), 100)

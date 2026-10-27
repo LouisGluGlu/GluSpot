@@ -94,7 +94,7 @@ class MusicSurfaceHoverTests(unittest.TestCase):
                     baseline = (drawn, hits)
                 self.assertEqual((drawn, hits), baseline)
 
-    def test_library_circle_and_expanded_label_use_the_enlarged_hit_shape(self):
+    def test_library_circle_and_expanded_label_keep_rest_hit_shape_on_hover(self):
         self._hover("library")
         for expanded in (0.0, 1.0):
             self.window._library_expansion_from = self.window._library_expansion_target = expanded
@@ -102,7 +102,7 @@ class MusicSurfaceHoverTests(unittest.TestCase):
                 self.window._sync_window_control_rects()
                 base = self.window._library_button_face(QRectF(self.window.rect()))
                 shown = self.window._button_rects["library"]
-                self.assertAlmostEqual(shown.width(), base.width() * 1.10)
+                self.assertEqual(shown, base)
                 self.assertTrue(self.window._window_control_contains("library", shown, shown.center()))
                 self.assertFalse(self.window._window_control_contains("library", shown, shown.topLeft()))
 

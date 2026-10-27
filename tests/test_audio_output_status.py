@@ -232,7 +232,7 @@ class MusicSurfaceOutputStatusTests(unittest.TestCase):
         circle = self.window._button_rects["audio_output"].toAlignedRect()
         face = image.pixelColor(circle.center().x(), circle.top() + 3)
         self.assertGreater(face.alpha(), 0)
-        self.assertLess(face.alpha(), 245)
+        self.assertEqual(face.alpha(), 255)
         # Connected glyph changes the compositor key, avoiding the old cached
         # link or single-device image when group membership changes.
         self.window._audio_output_kinds = ("homepod-mini", "homepod")

@@ -317,7 +317,7 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         self.assertTrue(all(image.pixelColor(x, y).alpha() > 240 for x, y in points))
         face = image.pixelColor(round(circle.center().x()), round(circle.top()) + 3)
         self.assertGreater(face.alpha(), 0)
-        self.assertLess(face.alpha(), 245)
+        self.assertEqual(face.alpha(), 255)
         self.assertGreater(abs(sum(image.pixelColor(x, y).lightness() for x, y in points) / len(points)
                                - face.lightness()), 80)
 

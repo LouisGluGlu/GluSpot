@@ -105,7 +105,7 @@ class LyricRecoveryTests(unittest.TestCase):
         surface._toggle_translation()
         self.assertTrue(owner.enable_dual_line_lyrics)
 
-    def test_enabled_translation_keeps_readable_ink_over_translucent_glass(self):
+    def test_enabled_translation_keeps_readable_ink_over_sampled_clear_glass(self):
         owner = _LayerOwner()
         surface = MusicSurfaceWindow(owner)
         surface.resize(1190, 666)
@@ -121,7 +121,9 @@ class LyricRecoveryTests(unittest.TestCase):
         pixels = [image.pixelColor(x, y) for x in range(inner.left(), inner.right())
                   for y in range(inner.top(), inner.bottom())]
         self.assertGreater(sum(pixel.alpha() > 240 for pixel in pixels), 10)
-        self.assertGreater(sum(0 < pixel.alpha() < 240 for pixel in pixels), 10)
+        # Clear transmits already sampled RGB; alpha describes the silhouette.
+        self.assertEqual({pixel.alpha() for pixel in pixels}, {255})
+        self.assertGreater(len({pixel.getRgb() for pixel in pixels}), 3)
 
 
 class ArtworkRecoveryTests(unittest.TestCase):

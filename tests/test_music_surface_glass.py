@@ -38,19 +38,22 @@ class MusicSurfaceGlassTests(unittest.TestCase):
         image.fill(Qt.GlobalColor.transparent)
         return image
 
-    def test_material_maps_local_source_and_follows_explicit_theme_even_when_active(self):
+    def test_clear_material_samples_surface_scene_and_keeps_shared_ink_even_when_active(self):
         target = QRectF(200, 100, 80, 40)
         for mode, light in (("dark", False), ("light", True)):
             self.mode = mode
             image = self.image()
             with QPainter(image) as painter, \
                     patch("local.music_surface_window.time.monotonic", return_value=100.), \
-                    patch("local.music_surface_window.paint_liquid_glass") as paint:
+                    patch.object(self.window._clear_control_renderer, "paint") as paint:
                 self.window._paint_surface_glass(painter, target, active=True)
-            self.assertEqual(paint.call_args.kwargs["light"], light)
-            self.assertTrue(paint.call_args.kwargs["refractive"])
-            self.assertEqual(paint.call_args.kwargs["backdrop_rect"], QRectF(50, 25, 20, 10))
-            self.assertIsNone(paint.call_args.kwargs.get("base_color"))
+                expected_ink = self.window._scene_control_ink()
+            args = paint.call_args
+            self.assertEqual(args.args[1], target)
+            self.assertEqual(args.kwargs["scene_bounds"], QRectF(self.window.rect()))
+            self.assertEqual(self.window._surface_glass_source_rect(target, args.kwargs["scene"]), QRectF(50, 25, 20, 10))
+            self.assertEqual(args.kwargs["ink"], expected_ink)
+            self.assertFalse(args.kwargs.get("selected", False))
 
     def test_idle_scene_freezes_for_prewarm_and_hide_then_refreshes_after_motion(self):
         idle = self.window.WINDOWED_CONTROL_IDLE_SECONDS
@@ -265,9 +268,9 @@ class MusicSurfaceGlassTests(unittest.TestCase):
         image = self.image()
         with QPainter(image) as painter, \
                 patch("local.music_surface_window.time.monotonic", return_value=100. + idle + .1), \
-                patch("local.music_surface_window.paint_liquid_glass") as paint:
+                patch.object(self.window._clear_control_renderer, "paint") as paint:
             self.window._paint_surface_glass(painter, QRectF(800, 450, 44, 44), live=True)
-        sampled = paint.call_args.kwargs["backdrop"]
+        sampled = paint.call_args.kwargs["scene"]
         self.assertEqual(sampled.cacheKey(), self.window._background_cache.cacheKey())
         self.assertNotEqual(sampled.cacheKey(), frozen)
 

@@ -4721,7 +4721,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
 
         pressed, colors = paint(pressed="next")
         self.assertEqual(colors[:2], [unread, unread])
-        self.assertEqual(colors[2].alpha(), round(unread.alpha() * 0.70))
+        # Press light is additive and independent of the unchanged scene ink.
+        self.assertEqual(colors[2], unread)
         self.assertEqual(pressed.pixelColor(350, 45), background)
         self.assertEqual(self.window._media_button_rects, normal_hit_rects)
 
@@ -4731,7 +4732,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(playing.pixelColor(round(middle.x()), round(middle.y())), background)
         self.assertNotEqual(paused.pixelColor(round(middle.x()), round(middle.y())), background)
 
-    def test_fullscreen_skip_feedback_expands_circular_light_from_cover_and_scales_only_icon(self):
+    def test_fullscreen_skip_wave_keeps_press_growth_independent_of_spatial_light(self):
         self.window.resize(1190, 666)
         self.window._fullscreen = True
         self.owner.timed_lyrics = [
@@ -4780,7 +4781,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         late, _ = render(late_at)
         self.assertEqual(self.window._media_button_rects, hit_rects)
         self.assertEqual(len(animated_scales), 1)
-        self.assertGreater(animated_scales[0], baseline_scales[0] * 1.1)
+        self.assertEqual(animated_scales, baseline_scales)
         origin = self.window._transport_light_origin()
         self.assertAlmostEqual(origin.x(), 262.0)
         self.assertAlmostEqual(origin.y(), 262.0)

@@ -95,11 +95,13 @@ class MusicQueueMotionTests(unittest.TestCase):
             for level in (0, 50, 100):
                 self.owner.settings_getter = lambda key, default=None: (
                     level if key == 'v2_music_glass_level' else theme if key == 'v2_theme_mode' else default)
-                with patch('local.music_surface_layout.paint_liquid_glass') as paint:
+                with patch.object(self.window._clear_control_renderer, 'paint') as paint:
                     self.render()
-                self.assertEqual(paint.call_count, 1)
-                self.assertEqual(paint.call_args.kwargs['material_level'], level)
-                self.assertEqual(paint.call_args.kwargs['light'], theme == 'light')
+                selected = [call for call in paint.call_args_list if call.kwargs.get('role') == 'queue-selection']
+                self.assertEqual(len(selected), 1)
+                self.assertEqual(selected[0].kwargs['level'], level)
+                self.assertTrue(selected[0].kwargs['selected'])
+                self.assertEqual(selected[0].kwargs['kind'], 'capsule')
 
 
 if __name__ == "__main__":

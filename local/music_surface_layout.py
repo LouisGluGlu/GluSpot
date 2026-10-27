@@ -8,6 +8,7 @@ from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAn
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath
 
 from local.liquid_glass import paint_liquid_glass
+from local.glass_style import GLASS_SELECTED_INK
 from local.music_lyric_motion import LogicalLineSpringChain
 from local.artwork_skeleton import paint_artwork_skeleton
 
@@ -525,10 +526,9 @@ class MusicContentLayoutMixin:
                               rect.width(), row_height - 5 * scale)
             if selected.intersects(viewport):
                 backdrop = self._surface_glass_backdrop()
-                paint_liquid_glass(painter, selected, radius=15. * scale, active=True,
-                    light=self._surface_glass_light(), material_level=self._surface_glass_level(),
-                    refractive=True, backdrop=backdrop,
-                    backdrop_rect=self._surface_glass_source_rect(selected, backdrop), cache_token=id(self))
+                self._clear_control_renderer.paint(painter, selected, scene=backdrop, scene_bounds=QRectF(self.rect()),
+                    ink=ink, now=time.monotonic(), role="queue-selection", kind="capsule",
+                    level=self._surface_glass_level(), selected=True)
         first = max(0, int(self._queue_scroll // row_height))
         last = min(len(entries), first + int(viewport.height() / row_height) + 2)
         visible_indices = []
@@ -536,6 +536,7 @@ class MusicContentLayoutMixin:
         for position in range(first, last):
             entry = entries[position]
             row = QRectF(rect.left(), top + position * row_height - self._queue_scroll, rect.width(), row_height - 5 * scale)
+            row_ink = QColor(GLASS_SELECTED_INK) if self._queue_selection_position >= 0. and selected.contains(row.center()) else ink
             self._queue_hit_rects[position] = row.intersected(viewport)
             if row.intersects(viewport) and len(visible_indices) < 24:
                 visible_indices.append(position)
@@ -562,14 +563,14 @@ class MusicContentLayoutMixin:
                 painter.drawImage(art_rect, image, QRectF((image.width() - side)/2., (image.height() - side)/2., side, side))
                 painter.restore()
             else:
-                paint_artwork_skeleton(painter, art_rect, ink, time.monotonic(), radius=6 * scale)
+                paint_artwork_skeleton(painter, art_rect, row_ink, time.monotonic(), radius=6 * scale)
                 missing_artwork = missing_artwork or bool(entry.artwork_url)
             text_left = 61 * scale
-            painter.setPen(ink)
+            painter.setPen(row_ink)
             painter.setFont(self._surface_font(18 * scale, QFont.Weight.DemiBold))
             title = QFontMetricsF(painter.font()).elidedText(entry.title, Qt.TextElideMode.ElideRight, max(1., row.width() - text_left - 14 * scale))
             painter.drawText(row.adjusted(text_left, 7 * scale, -14 * scale, -24 * scale), Qt.AlignmentFlag.AlignVCenter, title)
-            soft = QColor(ink); soft.setAlpha(round(soft.alpha() * .66)); painter.setPen(soft)
+            soft = QColor(row_ink); soft.setAlpha(round(soft.alpha() * .66)); painter.setPen(soft)
             painter.setFont(self._surface_font(13 * scale))
             artist = QFontMetricsF(painter.font()).elidedText(entry.artist, Qt.TextElideMode.ElideRight, max(1., row.width() - text_left - 14 * scale))
             painter.drawText(row.adjusted(text_left, 30 * scale, -14 * scale, -5 * scale), Qt.AlignmentFlag.AlignVCenter, artist)

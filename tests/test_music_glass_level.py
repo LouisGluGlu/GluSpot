@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
@@ -201,6 +201,14 @@ class MusicGlassLevelTests(unittest.TestCase):
         try:
             images = []
             for hovered, pressed in ((False, False), (True, False), (True, True)):
+                feedback = window._glass_feedback
+                feedback.reset()
+                group = {"media:toggle_play_pause": QRectF(80, 20, 80, 80)}
+                feedback.advance([group], "", 100.)
+                if pressed:
+                    feedback.press("media:toggle_play_pause", QPointF(99, 60), 100.)
+                for index in range(1, 61):
+                    feedback.advance([group], "media:toggle_play_pause" if hovered else "", 100. + index / 120.)
                 image = QImage(240, 120, QImage.Format.Format_ARGB32_Premultiplied)
                 image.fill(Qt.GlobalColor.transparent)
                 with QPainter(image) as painter, \
@@ -212,9 +220,9 @@ class MusicGlassLevelTests(unittest.TestCase):
                 self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
                 self.assertEqual(image.pixelColor(81, 60).alpha(), 0)
             center = [image.pixelColor(99, 60).lightness() for image in images]
-            # Hover still brightens transmitted opal inside the silhouette.
+            # Hover and the new additive contact glow both brighten Clear.
             self.assertGreater(center[1], center[0] + 8)
-            self.assertLess(center[2], center[1])
+            self.assertGreater(center[2], center[1])
         finally:
             window.shutdown()
             owner.close()
@@ -268,7 +276,7 @@ class MusicGlassLevelTests(unittest.TestCase):
             window.shutdown()
             owner.close()
 
-    def test_transport_opacity_follows_level_while_scene_still_changes_glyph_pixels(self):
+    def test_transport_level_keeps_clear_silhouette_while_scene_changes_glyph_pixels(self):
         owner = _TransitionOwner()
         values = {'v2_theme_mode': 'dark', 'v2_music_glass_level': 50}
         owner.settings_getter = lambda key, default=None: values.get(key, default)
@@ -295,8 +303,9 @@ class MusicGlassLevelTests(unittest.TestCase):
                     self.assertEqual(image.pixelColor(120, 60).alpha(), 0)
                     self.assertEqual(image.pixelColor(81, 60).alpha(), 0)
                 alpha = [color.alpha() for color in colors]
-                self.assertEqual(alpha, sorted(alpha))
-                self.assertGreater(alpha[-1], alpha[0] + 160)
+                # Confirmed Clear keeps shape/tint fixed; level scales only
+                # blur and veil, so a flat scene has the same glyph opacity.
+                self.assertEqual(alpha, [255] * 5)
                 scene_colors[background] = colors
             for index in range(1, 5):
                 teal = scene_colors['#168ba8'][index]

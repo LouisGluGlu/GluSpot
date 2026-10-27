@@ -233,18 +233,19 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         face = image.pixelColor(round(circle.center().x()), round(circle.top() + circle.height() * .12))
         return image, QColor(icon_call.kwargs["tint"]), face
 
-    def test_shuffle_and_repeat_keep_translucent_state_and_readable_scene_ink(self):
+    def test_shuffle_and_repeat_keep_clear_material_and_readable_scene_ink(self):
         for backdrop in (QColor("#102a40"), QColor("#e0edfc"), QColor("#20ed40")):
             with self.subTest(backdrop=backdrop.name()):
-                _, default_ink, default_face = self._mode_control_render("sequential", backdrop)
-                self.assertLess(default_face.alpha(), 240)
+                default_image, default_ink, default_face = self._mode_control_render("sequential", backdrop)
+                self.assertEqual(default_face.alpha(), 255)
                 expected = max((QColor("black"), QColor("white")),
                     key=lambda color: self.window._contrast_ratio(color, backdrop))
                 self.assertEqual(default_ink, expected)
                 for mode in ("shuffle", "repeat_one"):
                     image, ink, face = self._mode_control_render(mode, backdrop)
-                    self.assertNotEqual(face, default_face)
-                    self.assertLess(face.alpha(), 245)
+                    self.assertEqual(face, default_face)
+                    self.assertNotEqual(image, default_image)
+                    self.assertEqual(face.alpha(), 255)
                     self.assertEqual(ink, expected)
                     self.assertEqual(ink, default_ink)
                     self.assertGreaterEqual(self.window._contrast_ratio(ink, backdrop), 4.5)

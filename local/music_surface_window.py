@@ -88,7 +88,8 @@ from local.music_source_icons import paint_music_source_icon
 from local.personal_dj_icon import DJ_RING_CYCLE_SECONDS, paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
 from local.liquid_glass import GlassCaptureMixin, paint_liquid_glass, widget_glass_level, glass_material_tint, live_glass_paint
 from local.ui_theme import app_dark_mode
-from local.control_hover import HoverMotion, hover_scale
+from local.control_hover import HoverMotion
+from local.music_control_glass import ControlFeedback, GlassControlRenderer, paint_control_overlay
 from local.music_surface_layout import MusicContentLayoutMixin
 from local.music_song_collection import MusicSongCollectionMixin
 from local.music_window_compact import MusicWindowCompactMixin
@@ -171,7 +172,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     EMPHASIS_FRAME_MS = 4
     LYRIC_LAYOUT_BATCH_SECONDS = 0.0025
     CONTROL_BLUR_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
-    CONTROL_LAYER_DPR_CAP = 1.25
+    CONTROL_LAYER_DPR_CAP = 2.0
     CONTROL_LAYER_CACHE_MAX_BYTES = 64 * 1024 * 1024
     CONTROL_BOTTOM_REGION_HEIGHT = 195.0
     LYRIC_GLOW_CACHE_MAX_BYTES = 64 * 1024 * 1024
@@ -259,6 +260,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._control_reveal_target = 1.0
         self._control_last_tick_reveal = 1.0
         self._control_hover_motions: dict[str, HoverMotion] = {}
+        self._glass_feedback = ControlFeedback()
+        self._clear_control_renderer = GlassControlRenderer()
         self._dj_voice_selector_active = False
         self._dj_voice_selector_pointer = False
         self._dj_voice_selector_widget = None
@@ -1069,6 +1072,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return True
 
     def hideEvent(self, event):
+        self._glass_feedback.reset()
         self._reset_window_compact()
         self._dismiss_song_playlist_panel()
         self._disconnect_queue_artwork_signal()
@@ -1333,14 +1337,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _reset_control_hover(self, now: float | None = None):
         self._control_hover_motions.clear()
+        self._glass_feedback.reset()
 
     def _set_control_hover(self, window_key: str, media_key: str, now: float, *, arm_selector_leave: bool = True):
-        """Only the top-left return grows; menu opening belongs to clicks."""
-        targets = {"library"} if window_key == "library" else set()
-        for key in targets | self._control_hover_motions.keys():
-            if key not in self._control_hover_motions:
-                self._control_hover_motions[key] = HoverMotion()
-            self._control_hover_motions[key].set_hovered(key in targets, now)
+        """Hover changes light only; menu opening still belongs to clicks."""
         if window_key == "personal_dj" and arm_selector_leave:
             self._dj_voice_selector_close_timer.stop()
         elif arm_selector_leave and self._dj_voice_selector_active and not self._dj_voice_selector_pointer:
@@ -1348,20 +1348,41 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 self._dj_voice_selector_close_timer.start()
 
     def _hover_control_rect(self, key: str, button: QRectF, group: dict[str, QRectF], now: float) -> QRectF:
-        if key != "library":
-            return QRectF(button)
-        # Retain one exact hover pose through shared blur/hide, avoiding a
-        # newly rasterized blurred layer on every exit frame.
-        instant = (self._control_transition_started_at if self._control_reveal_target < 1.0 else now)
-        own = self._control_hover_motions.get(key)
-        factor = hover_scale(own.value(instant) if own is not None else 0.0)
-        if factor == 1.0:
-            return QRectF(button)
-        center = button.center()
-        result = QRectF(center.x() - button.width() * factor / 2,
-                        center.y() - button.height() * factor / 2,
-                        button.width() * factor, button.height() * factor)
-        return result
+        state = self._glass_feedback.state(key)
+        return button.translated(state.offset) if state is not None else QRectF(button)
+
+    def _glass_control_groups(self, now):
+        rect = QRectF(self.rect())
+        groups = [self._top_control_hover_group(rect)]
+        panel = self._media_control_panel_rect
+        if panel.isValid():
+            groups.append(self._transport_hover_group(panel))
+        bottom = {}
+        collection = self._song_collection_geometry(rect, now, shifted=False)
+        if collection.isValid():
+            bottom["collection"] = collection
+        if self._owned_personal_dj_enabled is not None:
+            icon, caption = self._personal_dj_geometry(rect, now, posed=False)
+            bottom["personal_dj"] = icon.united(caption)
+        groups.append(bottom)
+        if self._library_back_available():
+            groups.append({"library": self._library_button_face(rect)})
+        return groups
+
+    def _advance_glass_controls(self, now):
+        hovered = ("media:" + self._hovered_media_command if self._hovered_media_command
+                   else self._hovered_window_button)
+        if not self._glass_control_enabled(hovered):
+            hovered = ""
+        groups = self._glass_control_groups(now) if any(
+            state.active(now) for state in self._glass_feedback.controls.values()) else ()
+        return self._glass_feedback.advance(groups, hovered, now)
+
+    def _glass_control_enabled(self, key):
+        if key in {"favorite", "playlist_add"}:
+            state = self._song_collection_state()
+            return state.available and not state.busy and (key != "favorite" or state.liked is not None)
+        return True
 
     @staticmethod
     def _control_rect_transform(base: QRectF, posed: QRectF) -> QTransform:
@@ -1493,6 +1514,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._set_library_expanded(False, idle_at)
             self._pressed_window_button = ""
             self._pressed_media_command = ""
+            self._glass_feedback.release()
             if self._hovered_window_button or self._hovered_media_command:
                 self._hovered_window_button = ""
                 self._hovered_media_command = ""
@@ -1533,10 +1555,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _update_control_animation_regions(self, now: float, *, force: bool = False):
         reveal = self._control_reveal_at(now)
-        if reveal <= .001 and self._control_hover_motions:
+        if reveal <= .001 and (self._glass_feedback.controls or self._glass_feedback.hover):
             self._reset_control_hover(now)
         self._set_control_hover(self._hovered_window_button, self._hovered_media_command, now, arm_selector_leave=False)
-        hover_changed = any(motion.is_animating(now) for motion in self._control_hover_motions.values())
+        hover_changed = self._advance_glass_controls(now)
         if self._dj_voice_selector_active:
             self._notify_dj_voice_selector(True)
         self._update_metadata_control_state(now, reveal)
@@ -1560,7 +1582,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self.update(QRectF(0.0, rect.bottom() - bottom_height, 505.0 * scale, bottom_height).toAlignedRect())
         collection = self._song_collection_geometry(rect)
         if collection.isValid():
-            self.update(collection.adjusted(-3., -3., 3., 3.).toAlignedRect())
+            self.update(collection.adjusted(-18., -12., 18., 12.).toAlignedRect())
+        if hover_changed and self._owned_personal_dj_enabled is not None:
+            self.update(self._personal_dj_damage_rect(rect))
         if self._cover_layout_from > 0.0 or self._cover_layout_to > 0.0:
             original, _centered = self._cover_layout_endpoints(now)
             plan = self._centered_album_plan(original)
@@ -2211,6 +2235,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     def shutdown(self):
         if self._closing_for_shutdown:
             return
+        self._glass_feedback.reset()
+        self._clear_control_renderer.clear()
         self._disconnect_queue_artwork_signal()
         self._layout_animation.stop()
         self._layout_edge_animation.stop()
@@ -8451,7 +8477,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _window_control_contains(self, key: str, rect: QRectF, point: QPointF) -> bool:
         if key == "personal_dj":
-            path = self._personal_dj_hit_path(QRectF(self.rect()), time.monotonic(), shifted=False)
+            path = self._personal_dj_hit_path(QRectF(self.rect()), time.monotonic(), shifted=False, posed=False)
             bounds = path.boundingRect()
             if bounds.width() <= 0.0 or bounds.height() <= 0.0:
                 return False
@@ -8497,6 +8523,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return widget_glass_level(self)
 
     def refresh_glass_material(self):
+        self._clear_control_renderer.clear()
         """Invalidate control exit snapshots and any already open child panels."""
         self._control_layer_cache.clear()
         self._control_layer_cache_bytes = 0
@@ -8585,14 +8612,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     def _paint_surface_glass(self, painter: QPainter, target: QRectF, *, hovered=False,
                              pressed=False, active=False, live=False, role=None):
         image = self._background_cache if live else self._surface_glass_backdrop()
-        paint_liquid_glass(painter, target, hovered=hovered, pressed=pressed, active=active,
-                           light=self._surface_glass_light(), refractive=True,
-                           material_level=self._surface_glass_level(),
-                           backdrop=image, backdrop_rect=self._surface_glass_source_rect(target, image),
-                           cache_token=id(self), material_owner=self, material_role=role,
-                           material_scene=self._visual_track_identity,
-                           material_dirty=painter.worldTransform().mapRect(target),
-                           material_transition=.1)
+        key = {"content-layout": "content_layout", "audio-output": "audio_output",
+               "playback-mode": "playback_mode", "window-mode": "mode" if self._fullscreen else "return"}.get(role, role)
+        if isinstance(role, str) and role.startswith("dj-"):
+            key = "personal_dj"
+        kind = "dj" if key == "personal_dj" else "capsule" if target.width() > target.height() * 1.2 else "circle"
+        # The song-page specification retains scene ink on these controls.
+        # Its explicitly selected white face belongs to the queue row (4.1).
+        self._clear_control_renderer.paint(painter, target, scene=image, scene_bounds=QRectF(self.rect()),
+            ink=self._scene_control_ink(), now=time.monotonic(), role=role,
+            state=self._glass_feedback.state(key), hover=self._glass_feedback.hover.get(key, 0.),
+            kind=kind, level=self._surface_glass_level())
 
     def _paint_library_back(self, painter: QPainter, rect: QRectF):
         if not self._library_back_available():
@@ -8767,15 +8797,15 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             width = self._footer_lane_from
         return min(maximum, max(side, width))
 
-    def _personal_dj_button_rect(self, rect: QRectF) -> QRectF:
+    def _personal_dj_button_rect(self, rect: QRectF, *, posed=True) -> QRectF:
         now = time.monotonic()
-        icon, caption = self._personal_dj_geometry(rect, now)
+        icon, caption = self._personal_dj_geometry(rect, now, posed=posed)
         bounds = icon.united(caption)
         if self._personal_dj_status_reveal_at(now) > .001:
-            bounds = bounds.united(self._personal_dj_outro_status_rect(rect, now))
+            bounds = bounds.united(self._personal_dj_outro_status_rect(rect, now, posed=posed))
         return bounds
 
-    def _personal_dj_geometry(self, rect: QRectF, now: float, *, expansion: float | None = None):
+    def _personal_dj_geometry(self, rect: QRectF, now: float, *, expansion: float | None = None, posed=True):
         if self._owned_personal_dj_enabled is None and self._song_collection_state().track_id:
             return QRectF(), QRectF()
         scale = self._surface_scale(rect)
@@ -8800,8 +8830,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 (end.x(), end.y(), end.width(), end.height()))))
         icon, caption = blend(base, large), blend(base, pill)
         whole = icon.united(caption)
-        posed = self._hover_control_rect("personal_dj", whole, {"personal_dj": whole}, now)
-        transform = self._control_rect_transform(whole, posed)
+        pose = self._hover_control_rect("personal_dj", whole, {"personal_dj": whole}, now) if posed else whole
+        transform = self._control_rect_transform(whole, pose)
         return transform.mapRect(icon), transform.mapRect(caption)
 
     def _personal_dj_backdrop_rect(self, rect: QRectF) -> QRectF:
@@ -8845,14 +8875,14 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return QPointF(14.0 * self._surface_scale(rect) * (1.0 - reveal),
                        (rect.bottom() - bounds.top() + 4.0) * (1.0 - reveal))
 
-    def _personal_dj_hit_path(self, rect: QRectF, now: float, *, shifted: bool = True):
-        icon, caption = self._personal_dj_geometry(rect, now)
+    def _personal_dj_hit_path(self, rect: QRectF, now: float, *, shifted: bool = True, posed=True):
+        icon, caption = self._personal_dj_geometry(rect, now, posed=posed)
         shape = QPainterPath()
         shape.setFillRule(Qt.FillRule.WindingFill)
         shape.addEllipse(icon)
         shape.addRoundedRect(caption, caption.height() / 2, caption.height() / 2)
         if self._personal_dj_status_reveal_at(now) > .001:
-            status = self._personal_dj_outro_status_rect(rect, now)
+            status = self._personal_dj_outro_status_rect(rect, now, posed=posed)
             shape.addRoundedRect(status, status.height() / 2, status.height() / 2)
         if shifted:
             shift = self._personal_dj_control_shift(rect, self._personal_dj_reveal_at(now))
@@ -8881,9 +8911,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             return "本首歌播报已准备好"
         return "本首歌播报加载中"
 
-    def _personal_dj_outro_status_rect(self, rect: QRectF, now: float) -> QRectF:
+    def _personal_dj_outro_status_rect(self, rect: QRectF, now: float, *, posed=True) -> QRectF:
         """One glass prompt contains the message and its existing right icon."""
-        icon, _caption = self._personal_dj_geometry(rect, now)
+        icon, _caption = self._personal_dj_geometry(rect, now, posed=posed)
         scale = self._surface_scale(rect)
         margin = max(10.0, 18.0 * scale)
         inset = max(3.0, 4.0 * scale)
@@ -9028,7 +9058,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _personal_dj_icon_contains(self, position, now: float) -> bool:
         rect = QRectF(self.rect())
-        icon, _caption = self._personal_dj_geometry(rect, now)
+        icon, _caption = self._personal_dj_geometry(rect, now, posed=False)
         icon.translate(self._personal_dj_control_shift(rect, self._personal_dj_reveal_at(now)))
         shape = QPainterPath()
         shape.addEllipse(icon)
@@ -9077,9 +9107,20 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _paint_personal_dj_control(self, painter: QPainter, rect: QRectF):
         now = time.monotonic()
-        reveal = self._personal_dj_reveal_at(now)
-        if reveal <= .001:
+        if self._personal_dj_reveal_at(now) <= .001:
             return
+        icon, caption = self._personal_dj_geometry(rect, now)
+        bounds = icon.united(caption)
+        if self._personal_dj_activity_at(now) > .001:
+            bounds = bounds.united(self._personal_dj_backdrop_rect(rect))
+        if self._personal_dj_status_reveal_at(now) > .001:
+            bounds = bounds.united(self._personal_dj_outro_status_rect(rect, now))
+        bounds = bounds.adjusted(-20., -20., 20., 20.)
+        paint_control_overlay(painter, bounds, lambda layer: self._draw_personal_dj_control(layer, rect))
+
+    def _draw_personal_dj_control(self, painter: QPainter, rect: QRectF):
+        now = time.monotonic()
+        reveal = self._personal_dj_reveal_at(now)
         icon, caption = self._personal_dj_geometry(rect, now)
         button = icon.united(caption)
         speech_expansion = self._personal_dj_activity_at(now)
@@ -9107,16 +9148,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._paint_surface_glass(painter, caption, hovered=hovered,
                                      pressed=self._pressed_window_button == "personal_dj", live=True, role="dj-caption")
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            border = QColor(170, 172, 175, round(150 + 80 * energy))
-            painter.setPen(QPen(border, max(1.0, scale) + energy * scale * 1.5))
-            painter.drawRoundedRect(caption, caption.height() / 2, caption.height() / 2)
             if expansion < .999:
                 painter.save()
                 painter.setOpacity(reveal * (1.0 - status_reveal) * (1.0 - expansion))
                 self._paint_surface_glass(painter, icon, hovered=hovered,
                                          pressed=self._pressed_window_button == "personal_dj", live=True, role="dj-icon")
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(icon)
                 painter.restore()
             painter.restore()
         status_state = self._personal_dj_ring_status()
@@ -9125,7 +9161,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             # Enabled remains visible when no brief status text is open. This
             # is an outline only: glass keeps the same neutral scene material
             # as its neighboring controls, and ordinary idle hiding is shared.
-            status_color = self._interpolated_control_color("dj-accent", self._future_lyric_color(button))
+            status_color = QColor(52, 196, 112)
         if status_color is not None and status_reveal < .999:
             painter.save()
             painter.setOpacity(reveal * (1.0 - status_reveal))
@@ -9420,7 +9456,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         ink_key = cache_key[2] if cache_key[0] == "transport" else self._scene_control_ink().rgba()
         material_key = (self._surface_glass_light(), scene.cacheKey(), self.width(), self.height(),
                         ink_key, self._surface_glass_level())
-        cache_key = cache_key + (material_key,)
+        cache_key = cache_key + (material_key, self._glass_feedback.pose_key())
         if prewarm_default is not None:
             # Exit templates must stay stable while the live face keeps
             # following the ambient scene. Do not repeatedly blur new scene
@@ -9431,18 +9467,21 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             default_draw = prewarm_default[1]
             def draw_frozen(layer):
                 previous = getattr(self, "_glass_prewarm_backdrop", None)
+                previous_feedback = self._glass_feedback
                 self._glass_prewarm_backdrop = backdrop
+                self._glass_feedback = ControlFeedback()
                 try:
                     default_draw(layer)
                 finally:
                     self._glass_prewarm_backdrop = previous
-            prewarm_default = (prewarm_default[0] + (frozen_key,), draw_frozen)
+                    self._glass_feedback = previous_feedback
+            prewarm_default = (prewarm_default[0] + (frozen_key, ((), ())), draw_frozen)
         painter.save()
         scale = self._surface_scale()
         transform = painter.deviceTransform()
         native_dpr = max(1., math.hypot(transform.m11(), transform.m12()),
                          math.hypot(transform.m21(), transform.m22()))
-        dpr = min(native_dpr, self.CONTROL_LAYER_DPR_CAP)
+        dpr = max(2., min(native_dpr, self.CONTROL_LAYER_DPR_CAP))
         if reveal >= 0.999:
             # The background can rebuild on every paint at low cadence. Its
             # presence must not starve the existing one-level/35 ms prewarm
@@ -9452,7 +9491,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                     bounds, scale, dpr, prewarm_default[0], prewarm_default[1],
                 )
             painter.translate(shift)
-            draw(painter)
+            padding = math.ceil(20.0 * scale)
+            paint_control_overlay(painter, bounds.adjusted(-padding, -padding, padding, padding), draw)
             painter.restore()
             return
         padding = math.ceil(20.0 * scale)
@@ -9507,17 +9547,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         now = time.monotonic()
         reveal = self._control_reveal_at(now)
         group = self._top_control_hover_group(rect)
-        self._button_rects = ({key: self._hover_control_rect(key, target, group, now).translated(
+        self._button_rects = ({key: target.translated(
             self._window_control_shift(button, reveal)) for key, target in group.items()}
             if reveal >= .75 else {})
         if reveal >= 0.75 and library_available:
             library = self._library_button_face(rect)
-            self._button_rects["library"] = self._hover_control_rect("library", library, {"library": library}, now).translated(self._library_control_shift(rect, reveal))
+            self._button_rects["library"] = library.translated(self._library_control_shift(rect, reveal))
         if reveal >= .75 and getattr(self, "_library_loading", None) is None:
             self._button_rects.update(self._song_collection_rects(rect))
         dj_reveal = self._personal_dj_reveal_at(now)
         if dj_reveal >= .75 and getattr(self, "_library_loading", None) is None:
-            dj_button = self._personal_dj_button_rect(rect)
+            dj_button = self._personal_dj_button_rect(rect, posed=False)
             self._button_rects["personal_dj"] = dj_button.translated(self._personal_dj_control_shift(rect, dj_reveal))
         if reveal >= .75 and "audio_output" in group:
             audio = self._audio_output_button_rect(button, self._surface_scale(rect))
@@ -9525,7 +9565,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             if pose is not None:
                 audio = connection_capsule_rect(audio, pose, self._surface_font(
                     16.0 * self._surface_scale(rect), QFont.Weight.DemiBold), 16.0 * self._surface_scale(rect))
-            self._button_rects["audio_output"] = self._hover_control_rect("audio_output", audio, group, now).translated(self._window_control_shift(button, reveal))
+            self._button_rects["audio_output"] = audio.translated(self._window_control_shift(button, reveal))
         if self._hovered_window_button not in self._button_rects:
             self._hovered_window_button = ""
 
@@ -9754,39 +9794,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                     QRectF(line_x - stem / 2.0, cy - half_height, stem, half_height * 2.0),
                     stem * 0.30, stem * 0.30,
                 )
-        # Use the window-mode button's neutral glass inside the existing
-        # silhouette. Foreground ink must not add a dark/white face over it.
-        # Pause bars, triangles, stems and broad pointer targets stay intact.
-        image = self._surface_glass_backdrop()
-        level = self._surface_glass_level()
-        # A fine contact shadow and opposing reflections give transparent
-        # glyphs a readable edge on both bright and dark moving pigments.
-        # The center remains the same neutral transmitted glass as buttons.
-        edge_width = max(.85, min(1.5, size * .045))
-        painter.setPen(QPen(QColor(0, 0, 0, 48), edge_width * 1.35))
-        painter.setBrush(QColor(0, 0, 0, 26))
-        painter.drawPath(shape.translated(0., edge_width * .75))
-        opal = QColor(scene_ink if scene_ink is not None else self._scene_control_ink())
-        opal.setAlphaF(min(.78, .64 * math.sqrt(level / 100.) + (.10 if hovered else 0.)))
-        paint_liquid_glass(painter, shape.boundingRect(), path=shape,
-                           light=self._surface_glass_light(), refractive=True,
-                           hovered=hovered, pressed=pressed,
-                           material_level=level, backdrop=image, base_color=opal, face_opacity=1.,
-                           backdrop_rect=self._surface_glass_source_rect(shape.boundingRect(), image),
-                           cache_token=(id(self), "transport", command),
-                           material_owner=self, material_role=("transport", command),
-                           material_scene=self._visual_track_identity,
-                           material_dirty=painter.worldTransform().mapRect(shape.boundingRect()),
-                           material_transition=.1)
-        painter.setClipPath(shape, Qt.ClipOperation.IntersectClip)
-        reflection = QLinearGradient(shape.boundingRect().topLeft(), shape.boundingRect().bottomRight())
-        reflection.setColorAt(0., QColor(255, 255, 255, 188 if hovered else 152))
-        reflection.setColorAt(.42, QColor(255, 255, 255, 32))
-        reflection.setColorAt(.65, QColor(0, 0, 0, 62))
-        reflection.setColorAt(1., QColor(0, 0, 0, 118))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(reflection, edge_width))
-        painter.drawPath(shape)
+        ink = QColor(scene_ink if scene_ink is not None else self._scene_control_ink())
+        self._clear_control_renderer.paint(painter, shape.boundingRect(),
+            scene=self._surface_glass_backdrop(), scene_bounds=QRectF(self.rect()),
+            ink=ink, now=time.monotonic(), role=("transport", command),
+            state=self._glass_feedback.state("media:" + command),
+            hover=self._glass_feedback.hover.get("media:" + command, 0.),
+            path=shape, kind="path", level=self._surface_glass_level())
         painter.restore()
 
     @staticmethod
@@ -9910,101 +9924,29 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         for index, command in enumerate(commands):
             button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
             if reveal >= 0.75:
-                self._media_button_rects[command] = self._hover_control_rect("media:" + command, button, hover_group, now).translated(shift)
+                self._media_button_rects[command] = button.translated(shift)
         if not paint_ink:
             return
         accent = self._scene_control_ink()
-        feedback = {}
-        if reveal > 0.001:
-            for command in ("previous", "next"):
-                state = self._transport_feedback.get(command)
-                if state is None:
-                    continue
-                # At the exact initial pose the glyph has not moved. Keep
-                # its native cached compositing path until motion begins,
-                # avoiding a one-frame premultiplied-alpha rounding change.
-                if now <= state[0]:
-                    continue
-                icon_seconds = state[3] * self.TRANSPORT_FEEDBACK_SECONDS / (
-                    self.TRANSPORT_LIGHT_EXPAND_SECONDS + self.TRANSPORT_LIGHT_FADE_SECONDS
-                )
-                if now - state[0] >= icon_seconds:
-                    continue
-                frame = self._transport_feedback_frame(now - state[0], state[3])
-                if frame is not None:
-                    feedback[command] = (frame, state)
-        active_commands = tuple(command for command in commands if command in feedback)
-        def draw(
-            layer: QPainter, *, hovered_command: str = self._hovered_media_command,
-            pressed_command: str = self._pressed_media_command,
-            animated_commands: tuple[str, ...] = active_commands,
-            use_hover_pose: bool = True,
-        ):
+        def draw(layer: QPainter, *, use_pose=True):
             for index, command in enumerate(commands):
-                if command in animated_commands:
-                    continue
                 button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
-                if use_hover_pose:
+                if use_pose:
                     button = self._hover_control_rect("media:" + command, button, hover_group, now)
-                icon_color = QColor(accent)
-                if pressed_command == command:
-                    icon_color.setAlpha(round(icon_color.alpha() * 0.70))
-                elif hovered_command == command:
-                    icon_color.setAlpha(255)
-                growth = button.height() / max(.001, panel.height())
-                icon_side = min(44.0 * scale, panel.height() - 12.0 * scale) * growth
-                icon_rect = QRectF(
-                    button.center().x() - icon_side / 2.0,
-                    button.center().y() - icon_side / 2.0,
-                    icon_side,
-                    icon_side,
-                )
-                self._paint_transport_icon(layer, icon_rect, command, icon_color,
-                                           hovered=hovered_command == command,
-                                           pressed=pressed_command == command,
-                                           scene_ink=accent)
+                icon_side = min(44.0 * scale, panel.height() - 12.0 * scale)
+                icon_rect = QRectF(button.center().x() - icon_side / 2.0,
+                                   button.center().y() - icon_side / 2.0, icon_side, icon_side)
+                self._paint_transport_icon(layer, icon_rect, command, QColor(accent),
+                    hovered=self._hovered_media_command == command,
+                    pressed=self._pressed_media_command == command, scene_ink=accent)
 
-        def draw_default(layer: QPainter):
-            draw(layer, hovered_command="", pressed_command="", animated_commands=(), use_hover_pose=False)
-
-        self._paint_control_layer(
-            painter, panel, reveal, shift,
-            (
-                "transport", round(scale, 3), accent.rgba(),
-                self._display_playing_state(), self._hovered_media_command,
-                self._pressed_media_command, active_commands, self._control_hover_pose_key(hover_group, now),
-            ), draw,
-            prewarm_default=(
-                ("transport", round(scale, 3), accent.rgba(), self._display_playing_state(), "", "", (), ()),
-                draw_default,
-            ),
-        )
-        for command in active_commands:
-            frame, _state = feedback[command]
-            index = commands.index(command)
-            button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
-            button = self._hover_control_rect("media:" + command, button, hover_group, now)
-            growth = button.height() / max(.001, panel.height())
-            icon_side = min(44.0 * scale, panel.height() - 12.0 * scale) * growth
-            icon_rect = QRectF(
-                button.center().x() - icon_side / 2.0,
-                button.center().y() - icon_side / 2.0,
-                icon_side, icon_side,
-            )
-            icon_color = QColor(accent)
-            if self._hovered_media_command == command:
-                icon_color.setAlpha(255)
-            painter.save()
-            painter.setOpacity(reveal)
-            painter.translate(shift)
-            painter.translate(icon_rect.center())
-            painter.scale(frame[0], frame[0])
-            painter.translate(-icon_rect.center())
-            self._paint_transport_icon(painter, icon_rect, command, icon_color,
-                                       hovered=self._hovered_media_command == command,
-                                       pressed=self._pressed_media_command == command,
-                                       scene_ink=accent)
-            painter.restore()
+        self._paint_control_layer(painter, panel, reveal, shift,
+            ("transport", round(scale, 3), accent.rgba(), self._display_playing_state(),
+             self._hovered_media_command, self._pressed_media_command,
+             self._control_hover_pose_key(hover_group, now)), draw,
+            prewarm_default=(("transport", round(scale, 3), accent.rgba(),
+                              self._display_playing_state(), "", "", ()),
+                             lambda layer: draw(layer, use_pose=False)))
 
     def _edge_set(self, point: QPointF) -> set[str]:
         if self._fullscreen:
@@ -10075,12 +10017,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         if self._pressed_window_button == "library":
             self._resize_edges = set()
         self._pressed_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(event.position())), "") if controls_clickable else ""
+        glass_key = "media:" + self._pressed_media_command if self._pressed_media_command else self._pressed_window_button
+        if glass_key and self._glass_control_enabled(glass_key):
+            self._glass_feedback.press(glass_key, event.position(), time.monotonic())
+            self.update()
         self._pressed_lyric_index = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(event.position())), None)
         over_button = bool(self._pressed_window_button or self._pressed_media_command or self._pressed_lyric_index is not None or self._queue_pressed is not None)
         self._moving = not self._fullscreen and not self._resize_edges and not over_button and event.position().y() <= self.TITLE_BAR_HEIGHT
         event.accept()
 
     def mouseMoveEvent(self, event):
+        self._glass_feedback.move(event.position())
         if self._compact_committing:
             event.accept()
             return
@@ -10176,6 +10123,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._update_window_compact(requested_width, requested_height)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._glass_feedback.release()
         if self._compact_committing:
             event.accept()
             return

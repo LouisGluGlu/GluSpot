@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPainterPat
 from PySide6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from local.liquid_glass import GlassCaptureMixin, GlassPushButton, paint_liquid_glass, widget_glass_level
+from local.music_control_glass import paint_control_overlay
 from local.music_source_icons import paint_music_source_icon
 from local.song_collection_controller import SongCollectionState
 
@@ -414,42 +415,36 @@ class MusicSongCollectionMixin:
         return moving or active or lane_active
 
     def _paint_song_collection_control(self, painter, rect):
+        face = self._song_collection_geometry(rect)
+        if not face.isValid() or self._control_reveal_at(time.monotonic()) <= .001:
+            return
+        paint_control_overlay(painter, face.adjusted(-20., -15., 20., 15.),
+            lambda layer: self._draw_song_collection_control(layer, rect))
+
+    def _draw_song_collection_control(self, painter, rect):
         state = self._song_collection_state()
         now = time.monotonic()
         reveal = self._control_reveal_at(now)
         face = self._song_collection_geometry(rect, now)
-        if not face.isValid() or reveal <= .001:
-            return
+        motion = self._glass_feedback.state("collection")
+        offset = motion.offset if motion is not None else QPointF()
+        face.translate(offset)
         painter.save()
         painter.setOpacity(reveal)
         image = self._surface_glass_backdrop()
-        paint_liquid_glass(painter, face, radius=face.height()/2., light=self._surface_glass_light(),
-                          material_level=widget_glass_level(self),
-                          refractive=True, backdrop=image,
-                          backdrop_rect=self._surface_glass_source_rect(face, image), cache_token=(id(self), "collection"),
-                          material_owner=self, material_role='collection',
-                          material_scene=self._visual_track_identity,
-                          material_dirty=painter.worldTransform().mapRect(face), material_transition=.1)
+        hover_segments = tuple((self._glass_feedback.hover.get(key, 0.), segment.translated(offset))
+                               for key, segment in self._song_collection_rects(rect, now).items())
+        self._clear_control_renderer.paint(painter, face, scene=image, scene_bounds=QRectF(self.rect()),
+            ink=self._scene_control_ink(), now=now, role="collection", state=motion,
+            hover_segments=hover_segments,
+            kind="capsule", level=self._surface_glass_level())
         for key, target in self._song_collection_rects(rect, now).items():
             painter.save()
-            started = self._song_collection_clicks.get(key)
-            if started is not None:
-                frame = self._transport_feedback_frame(max(0., now - started),
-                    self.TRANSPORT_LIGHT_EXPAND_SECONDS + self.TRANSPORT_LIGHT_FADE_SECONDS)
-                if frame is not None:
-                    painter.translate(target.center())
-                    painter.scale(frame[0], frame[0])
-                    painter.translate(-target.center())
-            hovered = self._hovered_window_button == key
-            pressed = self._pressed_window_button == key
-            if hovered or pressed:
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(255, 255, 255, 30 if pressed else 15))
-                painter.drawEllipse(target.center(), target.height()*.43, target.height()*.43)
+            target.translate(offset)
             enabled = state.available and not state.busy and (key != "favorite" or state.liked is not None)
             ink = QColor("#ff3e4c") if key == "favorite" and state.liked is True else self._scene_control_ink()
             if not enabled:
-                painter.setOpacity(painter.opacity() * .5)
+                painter.setOpacity(painter.opacity() * .38)
             side = target.height() * (.63 if key == "favorite" else .61)
             glyph = QRectF(target.center().x()-side/2., target.center().y()-side/2., side, side)
             paint_music_source_icon(painter, glyph, "heart_filled" if key == "favorite" and state.liked else "heart_outline" if key == "favorite" else "playlist_add", tint=ink)

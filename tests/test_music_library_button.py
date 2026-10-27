@@ -9,6 +9,7 @@ from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_control_glass import paint_control_overlay
 from tests.test_owned_playback_surface import _Provider
 
 
@@ -255,7 +256,8 @@ class MusicLibraryButtonTests(unittest.TestCase):
             self.assertGreaterEqual(reveal, .999)
             painter.save()
             painter.translate(shift)
-            draw(painter)
+            padding = math.ceil(20. * self.window._surface_scale())
+            paint_control_overlay(painter, bounds.adjusted(-padding, -padding, padding, padding), draw)
             painter.restore()
 
         def assert_budget():
@@ -313,7 +315,8 @@ class MusicLibraryButtonTests(unittest.TestCase):
             self.assertGreaterEqual(reveal, .999)
             painter.save()
             painter.translate(shift)
-            draw(painter)
+            padding = math.ceil(20. * self.window._surface_scale())
+            paint_control_overlay(painter, bounds.adjusted(-padding, -padding, padding, padding), draw)
             painter.restore()
 
         with patch.object(self.window, "_build_control_blur", wraps=self.window._build_control_blur) as build_blur:

@@ -168,7 +168,7 @@ class MusicNativeDisplayCacheTests(unittest.TestCase):
             self.assertEqual(len(self.window._control_layer_cache), 0)
             self.assertEqual(self.window._control_layer_cache_bytes, 0)
 
-    def test_fully_visible_layer_draws_directly_at_target_dpr_and_shift(self):
+    def test_fully_visible_layer_supersamples_at_least_two_x_and_keeps_shift(self):
         self.window._reset_control_idle(now=50.)
         bounds = QRectF(30, 20, 80, 40)
         shift = QPointF(9., 5.)
@@ -188,7 +188,7 @@ class MusicNativeDisplayCacheTests(unittest.TestCase):
                         painter.translate(shift)
                         painter.fillRect(bounds, QColor('#b34e65'))
                     self.assertEqual(actual, reference)
-        self.assertEqual(draws, [1., 2.])
+        self.assertEqual(draws, [2., 2.])
         self.assertEqual(len(self.window._control_layer_cache), 0)
         self.assertEqual(self.window._control_layer_cache_bytes, 0)
 
@@ -209,34 +209,40 @@ class MusicNativeDisplayCacheTests(unittest.TestCase):
         self.assertEqual(target.pixelColor(45, 35), QColor('red'))
         self.assertEqual(target.pixelColor(185, 35), QColor('blue'))
 
-    def test_native_symbols_preserve_antialiasing_and_fractional_device_phase(self):
+    def test_supersampled_symbols_keep_fractional_placement_and_smooth_edges(self):
         self.window._reset_control_idle(now=50.)
         bounds = QRectF(30.25, 20.5, 40.1, 40.3)
         shift = QPointF(.13, .41)
         path = QPainterPath()
         path.addRoundedRect(bounds.adjusted(6.3, 5.1, -7.7, -8.5), 3.2, 4.1)
+        expected = path.boundingRect().translated(shift + QPointF(.21, .35))
         for dpr in (1., 1.25, 2.):
+            images = []
             for antialias in (False, True):
                 with self.subTest(dpr=dpr, antialias=antialias):
-                    images = []
-                    for through_helper in (False, True):
-                        image = QImage(math.ceil(160*dpr), math.ceil(100*dpr),
-                                       QImage.Format.Format_ARGB32_Premultiplied)
-                        image.setDevicePixelRatio(dpr)
-                        image.fill(Qt.GlobalColor.transparent)
-                        with QPainter(image) as painter, \
-                                patch('local.music_surface_window.time.monotonic', return_value=50.):
-                            painter.translate(.21, .35)
-                            painter.setRenderHint(QPainter.RenderHint.Antialiasing, antialias)
-                            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-                            draw = lambda layer: layer.fillPath(path, QColor('white'))
-                            if through_helper:
-                                self.window._paint_control_layer(painter, bounds, 1., shift, ('phase',), draw)
-                            else:
-                                painter.translate(shift)
-                                draw(painter)
-                        images.append(image)
-                    self.assertEqual(images[0], images[1])
+                    image = QImage(math.ceil(160*dpr), math.ceil(100*dpr),
+                                   QImage.Format.Format_ARGB32_Premultiplied)
+                    image.setDevicePixelRatio(dpr)
+                    image.fill(Qt.GlobalColor.transparent)
+                    with QPainter(image) as painter, \
+                            patch('local.music_surface_window.time.monotonic', return_value=50.):
+                        painter.translate(.21, .35)
+                        painter.setRenderHint(QPainter.RenderHint.Antialiasing, antialias)
+                        before = (painter.worldTransform(), painter.renderHints(), painter.opacity())
+                        self.window._paint_control_layer(painter, bounds, 1., shift, ('phase',),
+                                                         lambda layer: layer.fillPath(path, QColor('white')))
+                        self.assertEqual((painter.worldTransform(), painter.renderHints(), painter.opacity()), before)
+                    edge_pixels = 0
+                    for y in range(image.height()):
+                        for x in range(image.width()):
+                            alpha = image.pixelColor(x, y).alpha()
+                            if alpha:
+                                self.assertTrue(expected.adjusted(-1.5, -1.5, 1.5, 1.5).contains(
+                                    QPointF((x + .5) / dpr, (y + .5) / dpr)))
+                            edge_pixels += 0 < alpha < 255
+                    self.assertGreater(edge_pixels, 20)
+                    images.append(image)
+            self.assertEqual(images[0], images[1])
 
 
 if __name__ == '__main__':
