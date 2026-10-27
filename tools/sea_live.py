@@ -298,10 +298,12 @@ def main():
     parser.add_argument("--audio", type=Path)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--intensity", choices=("gentle", "medium", "strong", "vocal"))
+    parser.add_argument("--shape", choices=("spectrum", "wave"), default="spectrum")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     scene = Scene(app)
     scene.visual.sea_wave_intensity = sea_intensity(args.intensity)
+    scene.visual.sea_shape_mode = args.shape
     if args.audio:
         if not args.audio.is_file():
             parser.error(f"audio file does not exist: {args.audio}")
