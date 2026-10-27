@@ -17,6 +17,7 @@ from PIL.ImageFilter import GaussianBlur
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QRadialGradient, QTransform
 
+from local import glass_style
 from local.control_hover import HoverMotion, advance_neighbor_spring, neighbor_displacement
 from local.glass_style import (CONTROL_COMPOSITE_DPR, DJ_TINT, GLASS_CLEAR, GLASS_DJ,
                                GLASS_GLYPH, GLASS_SELECTED_ALPHA, PRESS_DAMPING,
@@ -248,14 +249,15 @@ def _sampling_maps(geometry_key, pad, sw, sh):
         x = np.clip((x + pad) * sw / full_w - .5, 0., sw - 1.001)
         y = np.clip((y + pad) * sh / full_h - .5, 0., sh - 1.001)
         ix, iy = x.astype(np.int32), y.astype(np.int32)
-        maps.append((ix, iy, x - ix, y - iy))
+        maps.append((iy * sw + ix, sw, x - ix, y - iy))
     return tuple(maps)
 
 
 def _sample_cached(channel, mapping):
-    ix, iy, fx, fy = mapping
-    top = channel[iy, ix] * (1. - fx) + channel[iy, ix + 1] * fx
-    bottom = channel[iy + 1, ix] * (1. - fx) + channel[iy + 1, ix + 1] * fx
+    index, width, fx, fy = mapping
+    flat = np.ascontiguousarray(channel).reshape(-1)
+    top = flat[index] * (1. - fx) + flat[index + 1] * fx
+    bottom = flat[index + width] * (1. - fx) + flat[index + width + 1] * fx
     return top * (1. - fy) + bottom * fy
 
 
@@ -367,9 +369,13 @@ class GlassControlRenderer:
                 scene_bounds.width(), scene_bounds.height())
         previous = self.patches.get(role)
         moving = state is not None and state.active(now)
-        if (previous is None or previous[0] != pose or
+        interval = glass_style.GLASS_MOVING_REFRESH_SECONDS
+        # Reuse the last patch during motion; the current rect still controls its placement and scale.
+        throttled = (moving and interval > 0. and previous is not None and
+                     0. <= now - previous[2] < interval)
+        if (not throttled and (previous is None or previous[0] != pose or
                 (previous[1] != scene.cacheKey() and (moving or (now - previous[2] >= GLASS_MATERIAL_FRAME_SECONDS and
-                            (self.refresh_roles is None or role in self.refresh_roles))))):
+                            (self.refresh_roles is None or role in self.refresh_roles)))))):
             image = _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint)
             if previous is not None:
                 self.bytes -= previous[3].sizeInBytes()
@@ -382,7 +388,7 @@ class GlassControlRenderer:
             image = previous[3]
             # A selected patch that already matches the scene must yield its
             # place to older stale patches on subsequent frames.
-            if (self.refresh_roles is not None and role in self.refresh_roles
+            if (not throttled and self.refresh_roles is not None and role in self.refresh_roles
                     and previous[1] == scene.cacheKey()):
                 self.patches[role] = (previous[0], previous[1], now, image)
         lift = state.lift if state is not None else 0.

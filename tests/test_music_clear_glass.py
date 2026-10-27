@@ -47,6 +47,32 @@ class ClearMotionTests(unittest.TestCase):
             np.testing.assert_array_equal(_sample_cached(pixels, mapping), expected)
         self.assertIsNot(maps, _sampling_maps(key, 21, 112, 112))
 
+    def test_moving_refresh_interval_reuses_patches(self):
+        scene = QImage(160, 160, QImage.Format.Format_RGB32)
+        scene.fill(QColor("red"))
+        output = QImage(160, 160, QImage.Format.Format_ARGB32_Premultiplied)
+        state = ControlMotion(held=True)
+        for interval, expected in ((0., (1, 2, 3)), (.033, (1, 1, 2))):
+            renderer = GlassControlRenderer()
+            with patch("local.glass_style.GLASS_MOVING_REFRESH_SECONDS", interval), \
+                 patch("local.music_control_glass._shade", wraps=__import__(
+                     "local.music_control_glass", fromlist=["_shade"])._shade) as shade, \
+                 QPainter(output) as painter:
+                for index, now in enumerate((100., 100.01, 100.04)):
+                    scene.fill(QColor("red" if index % 2 == 0 else "blue"))
+                    renderer.paint(painter, QRectF(30 + index, 30, 35, 35), scene=scene,
+                                   scene_bounds=QRectF(0, 0, 160, 160), ink=QColor("white"),
+                                   now=now, role="test", state=state)
+                    self.assertEqual(shade.call_count, expected[index])
+                renderer.paint(painter, QRectF(33, 30, 36, 35), scene=scene,
+                               scene_bounds=QRectF(0, 0, 160, 160), ink=QColor("white"),
+                               now=100.041, role="test", state=state)
+                self.assertEqual(shade.call_count, expected[-1] + (interval == 0.))
+                renderer.paint(painter, QRectF(33, 30, 36, 35), scene=scene,
+                               scene_bounds=QRectF(0, 0, 160, 160), ink=QColor("white"),
+                               now=100.08, role="test", state=state)
+                self.assertEqual(shade.call_count, expected[-1] + 1)
+
     def test_confirmed_tokens(self):
         self.assertEqual(tuple(vars(GLASS_CLEAR).values()), (1.2, 9., 6., .15, .05, 0., 1.3, 1., .45, .05))
         self.assertEqual(tuple(vars(GLASS_DJ).values()), (1.2, 9., 6., .15, 0., .72, 1., 1., .45, .05))

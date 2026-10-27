@@ -4,6 +4,7 @@ Logical pixels at the existing material level of 50. These tokens do not
 change the shared widget, island or popup material implementations.
 """
 from dataclasses import dataclass, replace
+import os
 
 from local.settings_store import normalize_music_glass_level
 
@@ -38,3 +39,9 @@ PRESS_STIFFNESS = 420.
 PRESS_DAMPING = 30.
 PRESS_GROWTH = .14
 CONTROL_COMPOSITE_DPR = 2.
+
+# Optional moving-control material refresh interval; zero preserves per-frame refresh.
+try:
+    GLASS_MOVING_REFRESH_SECONDS = max(0., float(os.environ.get("GLUSPOT_GLASS_MOVING_REFRESH", "0")))
+except ValueError:
+    GLASS_MOVING_REFRESH_SECONDS = 0.
