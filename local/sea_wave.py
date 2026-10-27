@@ -5,6 +5,8 @@ import math
 import os
 
 SEA_WAVE_INTENSITY = "medium"
+# Product default chosen by the user: spectrum-shaped water (the travelling-wave look stays available as "wave").
+SEA_SHAPE_MODE = "spectrum"
 INTENSITIES = {"gentle": 1.0, "medium": 1.55, "strong": 3.6, "vocal": 1.0}
 INTENSITY_LABELS = {"gentle": "柔和", "medium": "适中", "strong": "强烈", "vocal": "人声"}
 
