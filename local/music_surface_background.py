@@ -268,15 +268,19 @@ class AlbumFlowBackgroundRenderer:
             tone = 0.97 + 0.03 * math.sin(geometry_seconds * 0.18 + index * 1.21)
             pigment = np.array(color.getRgb()[:3], dtype=np.float32) * tone
             weighted += pigment[:, None, None] * weight[None, :, :]
-        mixture = weighted / np.maximum(total[None, :, :], 1e-8)
+        np.divide(weighted, np.maximum(total[None, :, :], 1e-8), out=weighted)
         # A dominant-field composition is independent of painter order.
         # Preserve the cover base wherever all domains have left the frame.
         coverage = strongest * strongest
-        rgb = np.rint(base[:, None, None] + coverage[None, :, :] * (mixture - base[:, None, None]))
-        rgb = rgb.clip(0, 255).astype(np.uint8).transpose(1, 2, 0)
-        opaque = np.full((height, width, 1), 255, dtype=np.uint8)
-        payload = np.concatenate((rgb, opaque), axis=2).tobytes()
-        return QImage(payload, size.width(), size.height(), size.width() * 4,
+        np.subtract(weighted, base[:, None, None], out=weighted)
+        np.multiply(weighted, coverage[None, :, :], out=weighted)
+        np.add(weighted, base[:, None, None], out=weighted)
+        np.rint(weighted, out=weighted)
+        np.clip(weighted, 0, 255, out=weighted)
+        rgba = np.empty((height, width, 4), dtype=np.uint8)
+        rgba[..., :3] = weighted.transpose(1, 2, 0)
+        rgba[..., 3] = 255
+        return QImage(rgba.data, width, height, width * 4,
                       QImage.Format.Format_RGBA8888).copy()
 
     def _accept_background_frame(self, image: QImage, domain, stamp) -> None:
