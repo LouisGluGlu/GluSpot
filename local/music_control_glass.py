@@ -237,8 +237,31 @@ def _sample(channel, x, y):
     return top * (1. - fy) + bottom * fy
 
 
-def _shade(scene, scene_bounds, rect, dpr, spec, geometry, tint):
-    samples, light, alpha = geometry
+@lru_cache(maxsize=32)
+def _sampling_maps(geometry_key, pad, sw, sh):
+    """Cache the scene-independent bilinear indices and weights."""
+    samples, _, alpha = control_geometry(*geometry_key)
+    h, w = alpha.shape
+    full_w, full_h = w + 2 * pad, h + 2 * pad
+    maps = []
+    for x, y in samples:
+        x = np.clip((x + pad) * sw / full_w - .5, 0., sw - 1.001)
+        y = np.clip((y + pad) * sh / full_h - .5, 0., sh - 1.001)
+        ix, iy = x.astype(np.int32), y.astype(np.int32)
+        maps.append((ix, iy, x - ix, y - iy))
+    return tuple(maps)
+
+
+def _sample_cached(channel, mapping):
+    ix, iy, fx, fy = mapping
+    top = channel[iy, ix] * (1. - fx) + channel[iy, ix + 1] * fx
+    bottom = channel[iy + 1, ix] * (1. - fx) + channel[iy + 1, ix + 1] * fx
+    return top * (1. - fy) + bottom * fy
+
+
+def _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint):
+    geometry = control_geometry(*geometry_key)
+    _, light, alpha = geometry
     h, w = alpha.shape
     pad = math.ceil((spec.lens * (1. + spec.chroma) + spec.blur * 3.) * dpr + 3.)
     full_w, full_h = w + 2 * pad, h + 2 * pad
@@ -272,8 +295,8 @@ def _shade(scene, scene_bounds, rect, dpr, spec, geometry, tint):
     else:
         pixels = np.full((sh, sw, 3), 112, np.uint8)
     pixels = np.asarray(Image.fromarray(pixels).filter(GaussianBlur(spec.blur * dpr * ratio)), dtype=np.float32)
-    rgb = np.stack([_sample(pixels[..., c], (x + pad) * sw / full_w - .5,
-                           (y + pad) * sh / full_h - .5) for c, (x, y) in enumerate(samples)], axis=-1)
+    rgb = np.stack([_sample_cached(pixels[..., c], mapping)
+                    for c, mapping in enumerate(_sampling_maps(geometry_key, pad, sw, sh))], axis=-1)
     lum = rgb @ np.array([.2126, .7152, .0722], np.float32)
     rgb = lum[..., None] + (rgb - lum[..., None]) * spec.sat
     if spec.veil:
@@ -319,7 +342,6 @@ class GlassControlRenderer:
         # Blur/veil and tint cannot affect the geometry cache.
         base_spec = GLASS_GLYPH if kind == "path" else GLASS_DJ if kind == "dj" else GLASS_CLEAR
         geometry_key = (w, h, round(min(rect.width(), rect.height()) / 2., 6), dpr, base_spec, signature)
-        geometry = control_geometry(*geometry_key)
         tint = DJ_TINT if kind == "dj" else (ink.red(), ink.green(), ink.blue())
         pose = (geometry_key, round(rect.x() * dpr), round(rect.y() * dpr), level, tint,
                 scene_bounds.width(), scene_bounds.height())
@@ -327,7 +349,7 @@ class GlassControlRenderer:
         moving = state is not None and state.active(now)
         if (previous is None or previous[0] != pose or
                 (previous[1] != scene.cacheKey() and (moving or now - previous[2] >= GLASS_MATERIAL_FRAME_SECONDS))):
-            image = _shade(scene, scene_bounds, rect, dpr, spec, geometry, tint)
+            image = _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint)
             if previous is not None:
                 self.bytes -= previous[3].sizeInBytes()
             self.patches[role] = (pose, scene.cacheKey(), now, image)

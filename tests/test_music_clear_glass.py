@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from local.glass_style import (GLASS_CLEAR, GLASS_DJ, GLASS_GLYPH, PRESS_HOLD_SECONDS,
                                PRESS_STIFFNESS, PRESS_DAMPING)
 from local.music_control_glass import (ControlFeedback, ControlMotion, GlassControlRenderer,
-                                       control_geometry, paint_control_overlay)
+                                       control_geometry, paint_control_overlay, _sampling_maps, _sample, _sample_cached)
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_surface_transition import _TransitionOwner
 from tests.test_owned_playback_surface import _Provider
@@ -31,6 +31,21 @@ class ClearMotionTests(unittest.TestCase):
         while self.feedback.last_tick < until - 1e-7:
             self.feedback.advance([self.top, self.back], hovered,
                                   min(until, self.feedback.last_tick + 1. / 120.))
+
+    def test_sampling_maps_are_reused_and_match_bilinear_sampling(self):
+        key = (70, 70, 17.5, 2., GLASS_CLEAR, None)
+        _sampling_maps.cache_clear()
+        maps = _sampling_maps(key, 20, 110, 110)
+        self.assertIs(maps, _sampling_maps(key, 20, 110, 110))
+        self.assertEqual(_sampling_maps.cache_info().hits, 1)
+        self.assertEqual(_sampling_maps.cache_info().maxsize, 32)
+        samples, _, _ = control_geometry(*key)
+        pixels = np.random.default_rng(1).random((110, 110), dtype=np.float32)
+        for mapping, (x, y) in zip(maps, samples):
+            expected = _sample(pixels, (x + 20) * 110 / 110 - .5,
+                               (y + 20) * 110 / 110 - .5)
+            np.testing.assert_array_equal(_sample_cached(pixels, mapping), expected)
+        self.assertIsNot(maps, _sampling_maps(key, 21, 112, 112))
 
     def test_confirmed_tokens(self):
         self.assertEqual(tuple(vars(GLASS_CLEAR).values()), (1.2, 9., 6., .15, .05, 0., 1.3, 1., .45, .05))
