@@ -19,6 +19,7 @@ def summarize(rows):
     amplitude = [max(row['water_y']) - min(row['water_y']) for row in rows]
     impulse = [row.get('impulse', 0.0) for row in rows]
     vocal = [row.get('vocal', 0.0) or 0.0 for row in rows]
+    lifts = [row.get('water_level_lift', 0.0) or 0.0 for row in rows]
     jumps = [abs(b - a) for a, b in zip(center, center[1:])]
     fields = [row.get('water_y17') or row.get('water_y') for row in rows]
     fields = [list(map(float, field)) for field in fields]
@@ -49,6 +50,10 @@ def summarize(rows):
     total_variance = sum(sum((x - statistics.mean(field)) ** 2 for x in field) for field in fields) / max(1, len(fields))
     common_variance = statistics.pvariance(means) if len(means) > 1 else 0.0
     cohesion = common_variance / (total_variance / max(1, len(fields[0])) + 1e-9)
+    flat_fraction = statistics.mean(sum(abs(y - 101.0) < 1.5 for y in field) / len(field) for field in fields)
+    crest_counts = []
+    for field in fields:
+        crest_counts.append(sum(field[i] < field[i - 1] and field[i] <= field[i + 1] for i in range(1, len(field) - 1)))
     correlations = []
     for field in fields:
         centered = [x - statistics.mean(field) for x in field]
@@ -69,6 +74,10 @@ def summarize(rows):
             'corr_low_center_rise': correlation(bands[0], [-y for y in center]),
             'corr_vocal_center_rise': correlation(vocal, [-y for y in center]),
             'corr_vocal_amplitude': correlation(vocal, amplitude),
+            'corr_low_water_level_lift': correlation(bands[0], lifts),
+            'corr_vocal_water_level_lift': correlation(vocal, lifts),
+            'flat_fraction': flat_fraction,
+            'crest_count': statistics.mean(crest_counts),
             'corr_impulse_amplitude': correlation(impulse, amplitude),
             'corr_impulse_center_rise': correlation(impulse, [-y for y in center]),
             'center_jump_p99': sorted(jumps)[math.ceil(len(jumps)*.99)-1] if jumps else 0.0,

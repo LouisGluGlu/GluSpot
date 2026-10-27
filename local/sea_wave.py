@@ -38,8 +38,10 @@ class SeaWaveState:
         self._onset_at = -10.0
         self._onset_index = point_count // 2
         self._time = 0.0
+        self.water_level_lift = 0.0
+        self.water_level_target = 0.0
 
-    def update(self, bands, now, vocal=0.0):
+    def update(self, bands, now, vocal=0.0, intensity=None):
         dt = 1 / 60 if self.updated_at is None else max(0.0, min(0.25, now - self.updated_at))
         self.updated_at = now
         self._time += dt
@@ -60,12 +62,16 @@ class SeaWaveState:
         self.average = _follow(self.average, low, dt, 0.45)
         self.impulse = max(excess, self.impulse * 2 ** (-dt / 0.16))
 
+        mode_drive = self.vocal if intensity == "vocal" else low
+        self.water_level_target = max(0.0, min(32.0, mode_drive * 24.0 + self.vocal_impulse * 5.0 + self.impulse * 7.0))
+        self.water_level_lift = _follow(self.water_level_lift, self.water_level_target, dt, 0.38)
+
         # A new onset drops a local disturbance into alternating positions. The
         # refractory period is short enough for syllables, but prevents chatter.
         drive = max(self.vocal_impulse, self.impulse)
         if drive > 0.055 and self._time - self._onset_at > 0.12:
             self._onset_index = (self._onset_index + (13 if self._onset_index % 2 else -17)) % self.point_count
-            self.velocity[self._onset_index] -= 22.0 * drive
+            self.velocity[self._onset_index] -= 2.0 * drive
             self._onset_at = self._time
 
         # Damped spring chain. Neighbor spread makes the disturbance travel;
@@ -105,13 +111,19 @@ class SeaWaveState:
         )
         point_index = int(round(max(0.0, min(1.0, pos)) * (self.point_count - 1)))
         ripple = self.surface[point_index]
-        local_onset = onset * 8.0 * math.exp(-((point_index - self._onset_index) / 5.0) ** 2)
+        local_onset = onset * 1.0 * math.exp(-((point_index - self._onset_index) / 5.0) ** 2)
         # Only a small mean lift is shared by all points; the spring chain and
         # travelling waves provide the visible surface motion.
         travelling += ripple * (1.0 + 0.35 * onset) + local_onset
         if mode == "vocal":
             travelling += onset * 5.0 * math.sin(pos * math.tau * 1.45 - self._time * 3.8)
-        if travelling >= 0.0:
+        lift = self.water_level_lift
+        if mode == "vocal":
+            lift = max(lift, self.vocal * 20.0)
+        else:
+            lift = max(lift, low * 16.0 * INTENSITIES[mode] * 0.55)
+        total = lift + travelling
+        if total >= 0.0:
             limit = 49.0 if mode != "vocal" else 44.0
-            return limit * math.tanh(travelling / limit)
-        return 3.0 * math.tanh(travelling / 3.0)
+            return limit * math.tanh(total / limit)
+        return max(-3.0, lift + 3.0 * math.tanh(travelling / 3.0))
