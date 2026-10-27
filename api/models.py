@@ -20,6 +20,8 @@ class AudioFrame:
     mid: float
     high: float
     vocal: float = 0.0
+    spectrum: tuple[float, ...] = ()
+    vocal_spectrum: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)

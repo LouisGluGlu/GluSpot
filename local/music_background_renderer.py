@@ -1097,21 +1097,22 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         intensity = sea_intensity(getattr(self.host, "sea_wave_intensity", None))
         phase = context.ambient_phase * 1.15
         scale = rect.height() / 200.0
-        cache_key = (state.updated_at, intensity, round(float(context.ambient_phase), 6))
+        shape_mode = getattr(self.host, "sea_shape_mode", "spectrum")
+        cache_key = (state.updated_at, intensity, shape_mode, round(float(context.ambient_phase), 6), rect.x(), rect.y(), rect.width(), rect.height())
         cached = getattr(state, "_surface_cache", None)
         if cached is not None and cached[0] == cache_key:
             return list(cached[1])
         points = []
         for index in range(49):
             pos = index / 48
-            displacement = state.displacement(pos, phase, intensity) * 0.84
+            displacement = (state.spectrum_displacement(pos, phase, intensity) if shape_mode == "spectrum" else state.displacement(pos, phase, intensity) * 0.84)
             y = rect.top() + rect.height() * 0.495 - scale * displacement
             points.append(QPointF(rect.left() + rect.width() * pos, y))
         # A small spatial filter removes isolated spring-chain kinks while
         # preserving the travelling-wave silhouette. It is pure for this cache
         # key, so repeated paints at one timestamp are identical.
         smoothed = points[:]
-        for _ in range(8):
+        for _ in range(14 if shape_mode == "spectrum" else 10):
             smoothed = [QPointF(point.x(), point.y()) for point in smoothed]
             for index in range(1, len(smoothed) - 1):
                 y = (smoothed[index - 1].y() + 2.0 * smoothed[index].y() + smoothed[index + 1].y()) / 4.0

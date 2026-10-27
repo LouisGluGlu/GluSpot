@@ -40,8 +40,16 @@ class SeaWaveState:
         self._time = 0.0
         self.water_level_lift = 0.0
         self.water_level_target = 0.0
+        self.spectrum = [0.0] * 24
+        self.spread_spectrum = [0.0] * 24
+        self.spectrum_peak = 0.01
+        self.sensitivity = 1.0
+        self.vibration = 0.0
+        self.vibration_velocity = 0.0
+        self.onset_strength = 0.0
+        self._vibration_at = -10.0
 
-    def update(self, bands, now, vocal=0.0, intensity=None):
+    def update(self, bands, now, vocal=0.0, intensity=None, spectrum=(), vocal_spectrum=()):
         dt = 1 / 60 if self.updated_at is None else max(0.0, min(0.25, now - self.updated_at))
         self.updated_at = now
         self._time += dt
@@ -68,6 +76,33 @@ class SeaWaveState:
         self.water_level_target = max(0.0, min(32.0, mode_drive * 24.0 + extra))
         self.water_level_lift = _follow(self.water_level_lift, self.water_level_target, dt, 0.09)
 
+        # Cava-inspired global automatic gain and fast attack / slower fall.
+        incoming = vocal_spectrum if active_vocal else spectrum
+        if incoming and len(incoming) == 24:
+            peak = max(incoming)
+            self.spectrum_peak = max(peak, self.spectrum_peak * 2 ** (-dt / 3.0), 0.0001)
+            for i, value in enumerate(incoming):
+                target = min(1.0, math.sqrt(max(0.0, value / self.spectrum_peak)))
+                self.spectrum[i] = _follow(self.spectrum[i], target, dt, .04 if target > self.spectrum[i] else .20)
+        else:
+            self.spectrum = [_follow(v, 0.0, dt, .20) for v in self.spectrum]
+        # Keep nearby band peaks distinct instead of spreading one peak across the surface.
+        self.spread_spectrum = [max(self.spectrum[j] * (0.30 ** abs(i-j))
+                                    for j in range(max(0, i-2), min(24, i+3)))
+                                for i in range(24)]
+        # Relative onset against recent mean, exciting an underdamped 4 Hz mode.
+        relative = vocal / max(self.vocal_peak * .5, .008) if active_vocal else low / max(self.average, .05)
+        self.onset_strength = max(0.0, min(1.0, (relative - 1.25) * .45))
+        if self.onset_strength > .12 and self._time - self._vibration_at > .18:
+            self.vibration_velocity += min(1.0, self.onset_strength) * 75.0
+            self._vibration_at = self._time
+        omega = math.tau * 4.0
+        substeps = max(1, math.ceil(dt / .004))
+        h = dt / substeps
+        for _ in range(substeps):
+            self.vibration_velocity += (-omega * omega * self.vibration - 2 * .4 * omega * self.vibration_velocity) * h
+            self.vibration += self.vibration_velocity * h
+
         # A new onset drops a local disturbance into alternating positions. The
         # refractory period is short enough for syllables, but prevents chatter.
         drive = self.vocal_impulse if active_vocal else self.impulse
@@ -91,6 +126,23 @@ class SeaWaveState:
                 self.velocity[i] += acceleration * step
                 next_surface[i] = old[i] + self.velocity[i] * step
             self.surface = next_surface
+
+    def spectrum_displacement(self, pos, phase, intensity):
+        mode = sea_intensity(intensity)
+        values = self.spectrum
+        # Smooth max-spread similar to cava's monstercat filter.
+        smooth = self.spread_spectrum
+        x = max(0.0, min(1.0, pos)) * (len(smooth) - 1)
+        i = int(x); f = x - i
+        a, b = smooth[i], smooth[min(i + 1, len(smooth) - 1)]
+        # cosine interpolation has zero slope at band centers
+        shape = a + (b-a) * (0.5 - 0.5 * math.cos(math.pi*f))
+        strength = {'gentle': 1.15, 'medium': 1.75, 'strong': 3.0, 'vocal': 1.0}[mode]
+        wave = 3.35 * math.sin(pos * math.tau * 3.0 - self._time * 2.5) * max(values)
+        vibration = self.vibration * (0.75 + .25 * math.cos(pos * math.tau))
+        motion = (shape * 25.0 + wave + vibration) * strength
+        return (48.0 * math.tanh(motion / 48.0) if motion >= 0.0
+                else 3.0 * math.tanh(motion / 3.0))
 
     def displacement(self, pos, phase, intensity):
         mode = sea_intensity(intensity)
@@ -119,11 +171,12 @@ class SeaWaveState:
         travelling += ripple * (1.0 + 0.35 * onset) + local_onset
         if mode == "vocal":
             travelling += onset * 5.0 * math.sin(pos * math.tau * 1.45 - self._time * 3.2)
-        lift = self.water_level_lift
+        # Strong travelling waves already carry more energy; restrain their shared lift.
+        lift = self.water_level_lift * (0.4 if mode == "strong" else 1.0)
         if mode == "vocal":
             lift = max(lift, self.vocal * 20.0)
         else:
-            lift = max(lift, low * 16.0 * INTENSITIES[mode] * 0.55)
+            lift = max(lift, low * 16.0 * INTENSITIES[mode] * (0.25 if mode == "strong" else 0.55))
         total = lift + travelling
         if total >= 0.0:
             limit = 49.0 if mode != "vocal" else 44.0

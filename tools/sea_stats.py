@@ -21,6 +21,21 @@ def summarize(rows):
     vocal = [row.get('vocal', 0.0) or 0.0 for row in rows]
     lifts = [row.get('water_level_lift', 0.0) or 0.0 for row in rows]
     jumps = [abs(b - a) for a, b in zip(center, center[1:])]
+    vibration = [row.get('vibration', 0.0) or 0.0 for row in rows]
+    onsets = [row.get('onset', 0.0) or 0.0 for row in rows]
+    spectral_correlations = []
+    for row in rows:
+        spectrum = row.get('spectrum') or ()
+        water = row.get('water_y17') or ()
+        if len(spectrum) > 1 and len(water) == 17:
+            # Remove the known modal vibration before comparing spatial shape.
+            shape = [99.0 - y - row.get('vibration', 0.0) * (.75 + .25 * math.cos(i * math.tau / 16)) for i, y in enumerate(water)]
+            interpolated = []
+            for i in range(17):
+                x = i * (len(spectrum)-1) / 16
+                index = int(x); fraction = x-index
+                interpolated.append(spectrum[index] * (1-fraction) + spectrum[min(index+1,len(spectrum)-1)] * fraction)
+            spectral_correlations.append(correlation(shape, interpolated))
     fields = [row.get('water_y17') or row.get('water_y') for row in rows]
     fields = [list(map(float, field)) for field in fields]
     shifts, explained = [], []
@@ -46,8 +61,11 @@ def summarize(rows):
         delta = [current[i] - previous[i] for i in range(n)]
         total = sum((x - statistics.mean(delta)) ** 2 for x in delta)
         explained.append(max(0.0, 1.0 - best_error / (total / max(1, n) + 1e-9)))
-    means = [statistics.mean(field) for field in fields]
-    total_variance = sum(sum((x - statistics.mean(field)) ** 2 for x in field) for field in fields) / max(1, len(fields))
+    # Subtract the logged vibration mode before estimating common shape motion.
+    shape_fields = [[y + (row.get('vibration', 0.0) or 0.0) * (.75 + .25 * math.cos(i * math.tau / max(1, len(field)-1)))
+                     for i, y in enumerate(field)] for row, field in zip(rows, fields)]
+    means = [statistics.mean(field) for field in shape_fields]
+    total_variance = sum(sum((x - statistics.mean(field)) ** 2 for x in field) for field in shape_fields) / max(1, len(shape_fields))
     common_variance = statistics.pvariance(means) if len(means) > 1 else 0.0
     cohesion = common_variance / (total_variance / max(1, len(fields[0])) + 1e-9)
     flat_fraction = statistics.mean(sum(abs(y - 101.0) < 1.5 for y in field) / len(field) for field in fields)
@@ -73,6 +91,8 @@ def summarize(rows):
     return {'bands': [stats(band) for band in bands], 'center': stats(center),
             'amplitude_mean': statistics.mean(amplitude),
             'amplitude_p95': sorted(amplitude)[math.ceil(len(amplitude)*.95)-1],
+            'spectral_shape_corr': statistics.median(spectral_correlations) if spectral_correlations else None,
+            'vibration_onset_corr': correlation([abs(v) for v in vibration], onsets),
             'corr_low_amplitude': correlation(bands[0], amplitude),
             'corr_low_center_rise': correlation(bands[0], [-y for y in center]),
             'corr_vocal_center_rise': correlation(vocal, [-y for y in center]),

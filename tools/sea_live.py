@@ -172,7 +172,9 @@ class Scene:
             self.frame = AudioFrame(.25 + .65 * math.exp(-beat * 6),
                 .30 + .25 * (.5 + .5 * math.sin(t * 1.7)),
                 .18 + .30 * math.exp(-((beat + .5) % 1) * 9),
-                vocal=.04 + .12 * (.5 + .5 * math.sin(t * 2.3))) if sound else AudioFrame(0, 0, 0)
+                vocal=.04 + .12 * (.5 + .5 * math.sin(t * 2.3)),
+                spectrum=tuple(.008 + .03 * (.5 + .5 * math.sin(i * .6 - t * 2)) * (1 + math.exp(-beat * 6)) for i in range(24)),
+                vocal_spectrum=tuple(.008 + .025 * (.5 + .5 * math.sin(i * .5 - t * 1.3)) for i in range(24))) if sound else AudioFrame(0, 0, 0)
         self.visual.media_is_playing = True
         self.visual.media_no_audio = False
         self.visual.ambient_phase = t * .6
@@ -231,7 +233,7 @@ class Window(QWidget):
         color = self.scene.visual._solid_album_background_color().getRgb()[:3]
         source = self.scene.audio.source if self.scene.audio else "simulated"
         low, mid, high = self.scene.visual.current_audio_bands
-        self.setWindowTitle(f"GluSpot 海平面预览 · {INTENSITY_LABELS[sea_intensity(getattr(self.scene.visual, 'sea_wave_intensity', None))]} | {source} | {low:.2f} {mid:.2f} {high:.2f} | {self.fps:.1f} fps")
+        self.setWindowTitle(f"GluSpot 海平面预览 · {INTENSITY_LABELS[sea_intensity(getattr(self.scene.visual, 'sea_wave_intensity', None))]} · {"频谱形状" if getattr(self.scene.visual, "sea_shape_mode", "spectrum") == "spectrum" else "行进波"} | {source} | {low:.2f} {mid:.2f} {high:.2f} | {self.fps:.1f} fps")
         self.update()
 
     def paintEvent(self, event):
@@ -255,6 +257,9 @@ class Window(QWidget):
             source = self.scene.audio.source if self.scene.audio else "simulated"
             record = {"time": now - self.start, "source": source,
                       "bands": self.scene.visual.current_audio_bands,
+                      "spectrum": list(getattr(getattr(self.scene.visual, "_sea_wave_state", None), "spectrum", ())),
+                      "vibration": getattr(getattr(self.scene.visual, "_sea_wave_state", None), "vibration", 0.0),
+                      "onset": getattr(getattr(self.scene.visual, "_sea_wave_state", None), "onset_strength", 0.0),
                       "vocal": getattr(self.scene.visual, "_sea_vocal_sample", 0.0),
                       "intensity": sea_intensity(getattr(self.scene.visual, "sea_wave_intensity", None)),
                       "impulse": getattr(getattr(self.scene.visual, "_sea_wave_state", None),
@@ -274,6 +279,8 @@ class Window(QWidget):
             self.last_switch = time.monotonic()
         elif key in (Qt.Key.Key_Q, Qt.Key.Key_W, Qt.Key.Key_E):
             self.scene.visual.sea_wave_intensity = {Qt.Key.Key_Q: "gentle", Qt.Key.Key_W: "medium", Qt.Key.Key_E: "strong"}[key]
+        elif key == Qt.Key.Key_T:
+            self.scene.visual.sea_shape_mode = "wave" if getattr(self.scene.visual, "sea_shape_mode", "spectrum") == "spectrum" else "spectrum"
         elif key == Qt.Key.Key_R:
             self.scene.visual.sea_wave_intensity = "vocal"
         elif key == Qt.Key.Key_S:
@@ -291,10 +298,12 @@ def main():
     parser.add_argument("--audio", type=Path)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--intensity", choices=("gentle", "medium", "strong", "vocal"))
+    parser.add_argument("--shape", choices=("spectrum", "wave"), default="spectrum")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     scene = Scene(app)
     scene.visual.sea_wave_intensity = sea_intensity(args.intensity)
+    scene.visual.sea_shape_mode = args.shape
     if args.audio:
         if not args.audio.is_file():
             parser.error(f"audio file does not exist: {args.audio}")
