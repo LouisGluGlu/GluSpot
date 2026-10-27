@@ -62,13 +62,15 @@ class SeaWaveState:
         self.average = _follow(self.average, low, dt, 0.45)
         self.impulse = max(excess, self.impulse * 2 ** (-dt / 0.16))
 
-        mode_drive = self.vocal if intensity == "vocal" else low
-        self.water_level_target = max(0.0, min(32.0, mode_drive * 24.0 + self.vocal_impulse * 5.0 + self.impulse * 7.0))
-        self.water_level_lift = _follow(self.water_level_lift, self.water_level_target, dt, 0.38)
+        active_vocal = intensity == "vocal"
+        mode_drive = vocal if active_vocal else low
+        extra = (self.vocal * 8.0 + self.vocal_impulse * 4.0) if active_vocal else self.impulse * 7.0
+        self.water_level_target = max(0.0, min(32.0, mode_drive * 24.0 + extra))
+        self.water_level_lift = _follow(self.water_level_lift, self.water_level_target, dt, 0.09)
 
         # A new onset drops a local disturbance into alternating positions. The
         # refractory period is short enough for syllables, but prevents chatter.
-        drive = max(self.vocal_impulse, self.impulse)
+        drive = self.vocal_impulse if active_vocal else self.impulse
         if drive > 0.055 and self._time - self._onset_at > 0.12:
             self._onset_index = (self._onset_index + (13 if self._onset_index % 2 else -17)) % self.point_count
             self.velocity[self._onset_index] -= 2.0 * drive
@@ -105,9 +107,9 @@ class SeaWaveState:
         # Long waves run faster than short waves: a compact dispersion-inspired
         # set of phase speeds creates visible horizontal motion.
         travelling = (
-            amplitudes[0] * math.sin(pos * math.tau * 0.85 - self._time * 2.95 + phase * 0.4)
-            + amplitudes[1] * math.sin(pos * math.tau * 1.75 - self._time * 4.4 - phase * 0.3)
-            + amplitudes[2] * math.sin(pos * math.tau * 3.7 - self._time * 6.3 + phase * 0.2)
+            amplitudes[0] * math.sin(pos * math.tau * 0.85 - self._time * 2.5 + phase * 0.4)
+            + amplitudes[1] * math.sin(pos * math.tau * 1.75 - self._time * 3.8 - phase * 0.3)
+            + amplitudes[2] * math.sin(pos * math.tau * 3.7 - self._time * 5.5 + phase * 0.2)
         )
         point_index = int(round(max(0.0, min(1.0, pos)) * (self.point_count - 1)))
         ripple = self.surface[point_index]
@@ -116,7 +118,7 @@ class SeaWaveState:
         # travelling waves provide the visible surface motion.
         travelling += ripple * (1.0 + 0.35 * onset) + local_onset
         if mode == "vocal":
-            travelling += onset * 5.0 * math.sin(pos * math.tau * 1.45 - self._time * 3.8)
+            travelling += onset * 5.0 * math.sin(pos * math.tau * 1.45 - self._time * 3.2)
         lift = self.water_level_lift
         if mode == "vocal":
             lift = max(lift, self.vocal * 20.0)

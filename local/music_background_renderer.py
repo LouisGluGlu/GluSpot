@@ -1097,19 +1097,27 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         intensity = sea_intensity(getattr(self.host, "sea_wave_intensity", None))
         phase = context.ambient_phase * 1.15
         scale = rect.height() / 200.0
+        cache_key = (state.updated_at, intensity, round(float(context.ambient_phase), 6))
+        cached = getattr(state, "_surface_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return list(cached[1])
         points = []
         for index in range(49):
             pos = index / 48
-            displacement = state.displacement(pos, phase, intensity)
+            displacement = state.displacement(pos, phase, intensity) * 0.84
             y = rect.top() + rect.height() * 0.495 - scale * displacement
             points.append(QPointF(rect.left() + rect.width() * pos, y))
-        previous = getattr(state, "_render_y", None)
-        if previous is not None and len(previous) == len(points):
-            for index, point in enumerate(points):
-                y = max(previous[index] - 3.5, min(previous[index] + 3.5, point.y()))
-                points[index] = QPointF(point.x(), y)
-        state._render_y = [point.y() for point in points]
-        return points
+        # A small spatial filter removes isolated spring-chain kinks while
+        # preserving the travelling-wave silhouette. It is pure for this cache
+        # key, so repeated paints at one timestamp are identical.
+        smoothed = points[:]
+        for _ in range(4):
+            smoothed = [QPointF(point.x(), point.y()) for point in smoothed]
+            for index in range(1, len(smoothed) - 1):
+                y = (smoothed[index - 1].y() + 2.0 * smoothed[index].y() + smoothed[index + 1].y()) / 4.0
+                smoothed[index] = QPointF(smoothed[index].x(), y)
+        state._surface_cache = (cache_key, tuple(smoothed))
+        return smoothed
 
     @staticmethod
     def _sea_level_colors(context: MusicBackgroundRenderContext) -> tuple[QColor, QColor]:

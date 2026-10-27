@@ -102,3 +102,13 @@ class SeaWaveTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class SeaRenderIdempotenceTests(unittest.TestCase):
+    def test_same_timestamp_does_not_advance_surface(self):
+        state = SeaWaveState()
+        state.update((.4, .2, .1), 1.0)
+        before = (tuple(state.surface), tuple(state.velocity), state.updated_at)
+        first = state.displacement(.5, 0.2, "medium")
+        second = state.displacement(.5, 0.2, "medium")
+        self.assertEqual(first, second)
+        self.assertEqual(before, (tuple(state.surface), tuple(state.velocity), state.updated_at))

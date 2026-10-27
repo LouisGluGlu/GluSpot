@@ -51,6 +51,9 @@ def summarize(rows):
     common_variance = statistics.pvariance(means) if len(means) > 1 else 0.0
     cohesion = common_variance / (total_variance / max(1, len(fields[0])) + 1e-9)
     flat_fraction = statistics.mean(sum(abs(y - 101.0) < 1.5 for y in field) / len(field) for field in fields)
+    curvature = []
+    for field in fields:
+        curvature.extend(abs(field[i - 1] - 2.0 * field[i] + field[i + 1]) for i in range(1, len(field) - 1))
     crest_counts = []
     for field in fields:
         crest_counts.append(sum(field[i] < field[i - 1] and field[i] <= field[i + 1] for i in range(1, len(field) - 1)))
@@ -84,7 +87,8 @@ def summarize(rows):
             'travel_shift_median': statistics.median(shifts) if shifts else 0.0,
             'travel_explained_ratio': statistics.mean(explained) if explained else 0.0,
             'cohesion': cohesion,
-            'spatial_correlation_length': statistics.mean(correlations) if correlations else 1.0}
+            'spatial_correlation_length': statistics.mean(correlations) if correlations else 1.0,
+            'corner_p99': sorted(curvature)[math.ceil(len(curvature) * .99) - 1] if curvature else 0.0}
 
 
 def main():
