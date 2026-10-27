@@ -279,6 +279,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._idle_cursor_restore_cursor: QCursor | None = None
         self._control_layer_cache: dict[tuple, QImage] = {}
         self._control_layer_cache_bytes = 0
+        self._visible_control_layers: dict[str, tuple] = {}
         self._control_layer_next_prewarm_at = 0.0
         self._control_prewarm_library_available = self._library_back_available()
         self._control_prewarm_remaining = (2 + int(self._control_prewarm_library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
@@ -5230,14 +5231,21 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return font
 
     def _surface_scale(self, rect: QRectF | None = None) -> float:
-        surface = QRectF(self.rect()) if rect is None else QRectF(rect)
-        raw_scale = surface.height() / self.REFERENCE_SURFACE_HEIGHT
-        if surface.width() < 640:
-            raw_scale = min(raw_scale, surface.width() / 470.)
+        width, height = (self.width(), self.height()) if rect is None else (rect.width(), rect.height())
+        cache = getattr(self, "_frame_geometry_cache", None)
+        key = ("surface_scale", width, height)
+        if cache is not None and key in cache:
+            return cache[key]
+        raw_scale = height / self.REFERENCE_SURFACE_HEIGHT
+        if width < 640:
+            raw_scale = min(raw_scale, width / 470.)
         # Width has no product minimum. Below the former floor's 235px span,
         # let the existing composition keep shrinking so controls stay inside.
-        floor = min(self.MIN_SURFACE_SCALE, max(.001, surface.width() / 470.))
-        return max(floor, min(self.MAX_SURFACE_SCALE, raw_scale))
+        floor = min(self.MIN_SURFACE_SCALE, max(.001, width / 470.))
+        scale = max(floor, min(self.MAX_SURFACE_SCALE, raw_scale))
+        if cache is not None:
+            cache[key] = scale
+        return scale
 
     def _font_height(self, font: QFont) -> float:
         # One long-song layout asks for the same lyric font once per row.
@@ -8532,6 +8540,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         """Invalidate control exit snapshots and any already open child panels."""
         self._control_layer_cache.clear()
         self._control_layer_cache_bytes = 0
+        self._visible_control_layers.clear()
         self._control_prewarm_remaining = (2 + int(self._control_prewarm_library_available)) * (len(self.CONTROL_BLUR_FRACTIONS) - 1)
         self._control_prewarm_requested = False
         self._control_layer_next_prewarm_at = 0.
@@ -9466,12 +9475,23 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # Glyph bodies also carry glass; all exiting layers must use the same
         # setting and frozen scene as their fully visible counterparts.
         scene = self._surface_glass_backdrop()
+        now = time.monotonic()
         # Transport's key already contains its one shared ink decision; reuse
         # it rather than asking the interpolator again within the same paint.
         ink_key = cache_key[2] if cache_key[0] == "transport" else self._scene_control_ink().rgba()
-        material_key = (self._surface_glass_light(), scene.cacheKey(), self.width(), self.height(),
+        original_key = cache_key
+        material_key = (self._surface_glass_light(), self.width(), self.height(),
                         ink_key, self._surface_glass_level())
-        cache_key = cache_key + (material_key, self._glass_feedback.pose_key())
+        layer_name = cache_key[0]
+        if layer_name == "window":
+            feedback_keys = {"mode", "return", "translation", "playback_mode", "content_layout", "audio_output"}
+        elif layer_name == "transport":
+            feedback_keys = {"media:previous", "media:toggle_play_pause", "media:next"}
+        elif layer_name == "library":
+            feedback_keys = {"library"}
+        else:
+            feedback_keys = None
+        cache_key = cache_key + (material_key, self._glass_feedback.pose_key(feedback_keys))
         if prewarm_default is not None:
             # Exit templates must stay stable while the live face keeps
             # following the ambient scene. Do not repeatedly blur new scene
@@ -9498,23 +9518,70 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                          math.hypot(transform.m21(), transform.m22()))
         dpr = max(2., min(native_dpr, self.CONTROL_LAYER_DPR_CAP))
         if reveal >= 0.999:
-            # The background can rebuild on every paint at low cadence. Its
-            # presence must not starve the existing one-level/35 ms prewarm
-            # budget or the controls would lose their idle-exit blur.
             if prewarm_default is not None:
                 self._maybe_prewarm_control_blur(
                     bounds, scale, dpr, prewarm_default[0], prewarm_default[1],
                 )
-            painter.translate(shift)
             padding = math.ceil(20.0 * scale)
-            paint_control_overlay(painter, bounds.adjusted(-padding, -padding, padding, padding), draw)
+            layer_bounds = QRectF(bounds).adjusted(-padding, -padding, padding, padding)
+            width = max(1, int(math.ceil(layer_bounds.width() * dpr)))
+            height = max(1, int(math.ceil(layer_bounds.height() * dpr)))
+            # The foreground depends on scene pixels only through the
+            # renderer's patches. Check their refresh schedule before reuse.
+            layer_key = (cache_key, width, height, dpr, layer_bounds.x(), layer_bounds.y(),
+                         layer_bounds.width(), layer_bounds.height(), shift.x(), shift.y(), reveal)
+            renderer = self._clear_control_renderer
+            entry = self._visible_control_layers.get(layer_name)
+            valid = entry is not None and entry[0] == layer_key
+            def current_state(role):
+                if isinstance(role, tuple) and role[0] == "transport":
+                    key = "media:" + role[1]
+                else:
+                    key = {"content-layout": "content_layout", "audio-output": "audio_output",
+                           "playback-mode": "playback_mode", "window-mode":
+                           "mode" if self._fullscreen else "return"}.get(role, role)
+                return self._glass_feedback.state(key)
+            if valid:
+                _, source, roles, versions = entry
+                valid = all(renderer.versions.get(role, 0) == version and
+                            not renderer.would_refresh(role, scene, now, pose, current_state(role))
+                            for (role, pose, _state), version in zip(roles, versions))
+            if valid:
+                for role, _pose, _state in roles:
+                    renderer.touch(role, scene, now, current_state(role))
+            else:
+                source = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+                source.setDevicePixelRatio(dpr)
+                source.fill(Qt.GlobalColor.transparent)
+                renderer.record_roles = []
+                try:
+                    with QPainter(source) as layer:
+                        layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+                        layer.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+                        layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                        layer.translate(-layer_bounds.topLeft())
+                        draw(layer)
+                finally:
+                    roles = renderer.record_roles
+                    renderer.record_roles = None
+                if roles:
+                    versions = tuple(renderer.versions.get(role, 0) for role, _, _ in roles)
+                    self._visible_control_layers[layer_name] = (layer_key, source, roles, versions)
+                else:
+                    self._visible_control_layers.pop(layer_name, None)
+            painter.translate(shift)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(layer_bounds.topLeft(), source)
             painter.restore()
             return
         padding = math.ceil(20.0 * scale)
         layer_bounds = QRectF(bounds).adjusted(-padding, -padding, padding, padding)
         width = max(1, int(math.ceil(layer_bounds.width() * dpr)))
         height = max(1, int(math.ceil(layer_bounds.height() * dpr)))
-        image_key = (cache_key, width, height, round(dpr, 3))
+        fade_material = (self._surface_glass_light(), scene.cacheKey(), self.width(), self.height(),
+                         ink_key, self._surface_glass_level())
+        fade_key = original_key + (fade_material, self._glass_feedback.pose_key())
+        image_key = (fade_key, width, height, round(dpr, 3))
         source = self._control_layer_source(image_key, layer_bounds, dpr, draw)
         wanted = (1.0 - reveal) * 6.0 * scale * dpr
         available = [(0.0, source)]

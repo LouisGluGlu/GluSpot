@@ -14,6 +14,29 @@ from local.music_surface_window import (MusicSurfaceWindow, paint_audio_output_s
 from tests.test_music_surface_transition import _TransitionOwner
 
 
+class BackgroundCompositorRegressionTests(unittest.TestCase):
+    def test_background_compositor_matches_frozen_reference(self):
+        import numpy as np
+        from PySide6.QtCore import QSize
+        from local.music_surface_background import AlbumFlowBackgroundRenderer
+        from tests.glass_background_reference import reference_field_pixels
+
+        rng = np.random.default_rng(730)
+        for width, height in ((61, 37), (160, 90), (321, 181)):
+            for count in (1, 3, 5):
+                colors = tuple(QColor(*map(int, rgb)) for rgb in
+                               rng.integers(0, 256, (count, 3)))
+                strengths = tuple(map(float, rng.uniform(.3, 1.3, count - 1)))
+                for phase in (0., 17.5):
+                    args = (QSize(width, height), colors, strengths, phase)
+                    expected = reference_field_pixels(AlbumFlowBackgroundRenderer, *args)
+                    actual = AlbumFlowBackgroundRenderer._paint_field_pixels(*args)
+                    a = np.frombuffer(actual.constBits(), np.uint8)
+                    b = np.frombuffer(expected.constBits(), np.uint8)
+                    np.testing.assert_array_equal(a, b)
+
+
+
 class MusicSurfaceGlassTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -199,6 +222,7 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                 # Exercise the real direct drawing path for each theme and
                 # presentation; material reuse must not change glyph ink.
                 self.window._control_layer_cache.clear()
+                self.window._visible_control_layers.clear()
                 self.window._control_layer_cache_bytes = 0
                 with self.subTest(mode=mode, fullscreen=fullscreen), \
                         patch("local.music_surface_window.time.monotonic", return_value=100.), \
@@ -230,7 +254,7 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                     calls_before = (source.call_count, output.call_count, transport.call_count)
                     self.assertEqual(paint_controls(), cold)
                     self.assertEqual((source.call_count, output.call_count, transport.call_count),
-                                     tuple(2 * count for count in calls_before))
+                                     calls_before)
                     self.assertEqual({key: image.cacheKey() for key, image in self.window._control_layer_cache.items()}, cache_before)
                     self.assertLessEqual(len(cache_before), 48)
                     self.assertLessEqual(self.window._control_layer_cache_bytes, self.window.CONTROL_LAYER_CACHE_MAX_BYTES)

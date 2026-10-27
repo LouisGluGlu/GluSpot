@@ -1,9 +1,12 @@
 """Interactive, isolated Clear glass fixture for comparing refresh intervals."""
 import argparse
 from collections import deque
+import csv
+import json
 import os
 from pathlib import Path
 import sys
+import statistics
 import tempfile
 import time
 from unittest.mock import Mock
@@ -15,6 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--throttle', type=float, default=0.)
 parser.add_argument('--auto-press', action='store_true')
 parser.add_argument('--seconds', type=float, default=0.)
+parser.add_argument('--log', type=Path, help='Write per-paint timings as CSV on exit')
 args = parser.parse_args()
 os.environ['GLUSPOT_GLASS_MOVING_REFRESH'] = str(max(0., args.throttle))
 sandbox = tempfile.TemporaryDirectory(prefix='gluspot-glass-')
@@ -64,6 +68,52 @@ window._layout_animation.stop()
 window._finish_content_layout()
 window._cover_layout_from = window._cover_layout_to = float(window._no_lyrics_cover_target())
 window._reset_control_idle()
+
+# Wrap the bound instance method: include the real paintEvent and its cleanup.
+# Completion-to-completion intervals describe Qt callbacks, not display scanout.
+paint_rows = []
+paint_completed = []
+real_paint_event = window.paintEvent
+def timed_paint_event(event):
+    started = time.perf_counter()
+    try:
+        return real_paint_event(event)
+    finally:
+        completed = time.perf_counter()
+        interval = (completed - paint_completed[-1]) * 1000 if paint_completed else None
+        paint_rows.append((len(paint_rows) + 1, (completed - started) * 1000, interval))
+        paint_completed.append(completed)
+if args.log:
+    window.paintEvent = timed_paint_event
+
+# The production close handler returns to the island; this isolated fixture
+# instead ends its event loop when the user closes it.
+real_close_event = window.closeEvent
+def close_fixture(event):
+    real_close_event(event)
+    app.quit()
+window.closeEvent = close_fixture
+
+def write_timings():
+    args.log.parent.mkdir(parents=True, exist_ok=True)
+    with args.log.open('w', encoding='utf-8', newline='') as output:
+        writer = csv.writer(output, lineterminator='\n')
+        writer.writerow(('frame', 'paint_ms', 'interval_ms'))
+        writer.writerows(paint_rows)
+    def percentile(values, fraction):
+        return sorted(values)[round(fraction * (len(values) - 1))] if values else None
+    paints = [row[1] for row in paint_rows]
+    intervals = [row[2] for row in paint_rows if row[2] is not None]
+    print(json.dumps({
+        'frames': len(paints),
+        'fps': (len(paint_completed) - 1) / (paint_completed[-1] - paint_completed[0]) if len(paint_completed) > 1 else 0.,
+        'paint_ms': {'median': statistics.median(paints) if paints else None,
+                     'p95': percentile(paints, .95), 'max': max(paints, default=None)},
+        'interval_ms': {'median': statistics.median(intervals) if intervals else None,
+                        'p95': percentile(intervals, .95)},
+        'interval_over_16_7': sum(value > 16.7 for value in intervals),
+        'interval_over_33_3': sum(value > 33.3 for value in intervals),
+    }), flush=True)
 
 class PaintStats(QObject):
     def __init__(self):
@@ -123,6 +173,10 @@ if args.seconds > 0:
 try:
     app.exec()
 finally:
-    window.shutdown()
-    owner.close()
-    sandbox.cleanup()
+    try:
+        if args.log:
+            write_timings()
+    finally:
+        window.shutdown()
+        owner.close()
+        sandbox.cleanup()

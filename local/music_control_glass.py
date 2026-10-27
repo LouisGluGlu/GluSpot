@@ -10,6 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from functools import lru_cache
 import math
+import sys
 
 import numpy as np
 from PIL import Image
@@ -144,11 +145,13 @@ class ControlFeedback:
                 state.offset, state.velocity = advance_neighbor_spring(state.offset, state.velocity, target, dt)
         return changed
 
-    def pose_key(self):
-        return (tuple((key, round(s.lift, 5), round(s.glow, 5), round(s.offset.x(), 4),
-                       round(s.offset.y(), 4), round(s.contact.x(), 2), round(s.contact.y(), 2))
-                      for key, s in self.controls.items() if s.lift or s.glow or not s.offset.isNull()),
-                tuple((key, round(value, 5)) for key, value in self.hover.items() if value))
+    def pose_key(self, keys=None):
+        return (tuple((key, s.lift, s.glow, s.offset.x(), s.offset.y(),
+                       s.contact.x(), s.contact.y())
+                      for key, s in self.controls.items()
+                      if (keys is None or key in keys) and (s.lift or s.glow or not s.offset.isNull())),
+                tuple((key, value) for key, value in self.hover.items()
+                      if (keys is None or key in keys) and value))
 
 
 def _material_maps(dist, nx, ny, xx, yy, dpr, spec):
@@ -253,6 +256,20 @@ def _sampling_maps(geometry_key, pad, sw, sh):
     return tuple(maps)
 
 
+@lru_cache(maxsize=32)
+def _sampling_lookup(geometry_key, pad, sw, sh):
+    """Interleaved RGB corner indices and bilinear weights for one take."""
+    mappings = _sampling_maps(geometry_key, pad, sw, sh)
+    indices, weights = [], []
+    for channel, (index, width, fx, fy) in enumerate(mappings):
+        fx, fy = fx.astype(np.float32), fy.astype(np.float32)
+        index = index * 3 + channel
+        indices.extend((index, index + 3, index + width * 3, index + width * 3 + 3))
+        weights.extend(((1. - fx) * (1. - fy), fx * (1. - fy),
+                        (1. - fx) * fy, fx * fy))
+    return np.stack(indices), np.stack(weights)
+
+
 def _sample_cached(channel, mapping):
     index, width, fx, fy = mapping
     flat = np.ascontiguousarray(channel).reshape(-1)
@@ -280,8 +297,10 @@ def _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint):
         with QPainter(crop) as p:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             p.drawImage(QRectF(0, 0, sw, sh), scene, source)
-        rgba = crop.convertToFormat(QImage.Format.Format_RGBA8888)
-        pixels = np.frombuffer(rgba.constBits(), np.uint8).reshape(sh, rgba.bytesPerLine())[:, :sw * 4].reshape(sh, sw, 4)[..., :3]
+        # RGB32 has native BGRA bytes on little-endian Qt platforms. Pillow
+        # converts directly while copying, avoiding a second QImage raster.
+        raw_format = "BGRX" if sys.byteorder == "little" else "XRGB"
+        pixels = Image.frombuffer("RGB", (sw, sh), crop.constBits(), "raw", raw_format, 0, 1)
     elif not scene.isNull():
         # Clamp with edge replication, including controls near window edges.
         sx = (area.x() - scene_bounds.x()) * scene.width() / scene_bounds.width()
@@ -296,18 +315,31 @@ def _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint):
         pixels = np.stack([_sample(source[..., c].astype(np.float32), xx, yy) for c in range(3)], axis=-1).astype(np.uint8)
     else:
         pixels = np.full((sh, sw, 3), 112, np.uint8)
-    pixels = np.asarray(Image.fromarray(pixels).filter(GaussianBlur(spec.blur * dpr * ratio)), dtype=np.float32)
-    rgb = np.stack([_sample_cached(pixels[..., c], mapping)
-                    for c, mapping in enumerate(_sampling_maps(geometry_key, pad, sw, sh))], axis=-1)
+    if not isinstance(pixels, Image.Image):
+        pixels = Image.fromarray(pixels)
+    pixels = np.asarray(pixels.filter(GaussianBlur(spec.blur * dpr * ratio)), dtype=np.float32)
+    flat = pixels.reshape(-1)
+    indices, weights = _sampling_lookup(geometry_key, pad, sw, sh)
+    sampled = np.take(flat, indices)
+    np.multiply(sampled, weights, out=sampled)
+    rgb = np.empty((h, w, 3), np.float32)
+    for c in range(3):
+        np.add(sampled[4*c], sampled[4*c+1], out=rgb[..., c])
+        np.add(rgb[..., c], sampled[4*c+2], out=rgb[..., c])
+        np.add(rgb[..., c], sampled[4*c+3], out=rgb[..., c])
     lum = rgb @ np.array([.2126, .7152, .0722], np.float32)
-    rgb = lum[..., None] + (rgb - lum[..., None]) * spec.sat
+    np.subtract(rgb, lum[..., None], out=rgb)
+    np.multiply(rgb, spec.sat, out=rgb)
+    np.add(rgb, lum[..., None], out=rgb)
     if spec.veil:
         dark = float(lum.mean()) / 255. < .55
         amount = spec.veil * (1. if dark else 1.6)
-        rgb = rgb * (1. - amount) + (255. if dark else 0.) * amount
+        np.multiply(rgb, 1. - amount, out=rgb)
+        np.add(rgb, (255. if dark else 0.) * amount, out=rgb)
     if spec.tint_alpha:
-        rgb = rgb * (1. - spec.tint_alpha) + np.array(tint, np.float32) * spec.tint_alpha
-    rgb = np.clip(rgb, 0., 255.)
+        np.multiply(rgb, 1. - spec.tint_alpha, out=rgb)
+        np.add(rgb, np.array(tint, np.float32) * spec.tint_alpha, out=rgb)
+    np.clip(rgb, 0., 255., out=rgb)
     rgb += (255. - rgb) * light
     rgba = np.empty((h, w, 4), np.uint8)
     rgba[..., :3], rgba[..., 3] = rgb, alpha * 255.
@@ -322,6 +354,8 @@ class GlassControlRenderer:
         self.refresh_roles = None
         self.seen_roles = set()
         self.frame_roles = None
+        self.versions = {}
+        self.record_roles = None
 
     def begin_frame(self, now):
         # Reserve refreshes for the oldest eligible patches, independent of paint order.
@@ -341,6 +375,30 @@ class GlassControlRenderer:
         self.refresh_roles = None
         self.seen_roles.clear()
         self.frame_roles = None
+        self.versions.clear()
+
+    def would_refresh(self, role, scene, now, pose, state):
+        previous = self.patches.get(role)
+        moving = state is not None and state.active(now)
+        interval = glass_style.GLASS_MOVING_REFRESH_SECONDS
+        throttled = (moving and interval > 0. and previous is not None and
+                     0. <= now - previous[2] < interval)
+        return not throttled and (previous is None or previous[0] != pose or
+            (previous[1] != scene.cacheKey() and (moving or
+             (now - previous[2] >= GLASS_MATERIAL_FRAME_SECONDS and
+              (self.refresh_roles is None or role in self.refresh_roles)))))
+
+    def touch(self, role, scene, now, state):
+        if self.frame_roles is not None:
+            self.frame_roles.add(role)
+        previous = self.patches.get(role)
+        moving = state is not None and state.active(now)
+        interval = glass_style.GLASS_MOVING_REFRESH_SECONDS
+        throttled = (moving and interval > 0. and previous is not None and
+                     0. <= now - previous[2] < interval)
+        if (previous is not None and not throttled and self.refresh_roles is not None
+                and role in self.refresh_roles and previous[1] == scene.cacheKey()):
+            self.patches[role] = (previous[0], previous[1], now, previous[3])
 
     def paint(self, painter, rect, *, scene, scene_bounds, ink, now, role,
               state=None, hover=0., path=None, kind="circle", level=50,
@@ -368,29 +426,21 @@ class GlassControlRenderer:
         pose = (geometry_key, round(rect.x() * dpr), round(rect.y() * dpr), level, tint,
                 scene_bounds.width(), scene_bounds.height())
         previous = self.patches.get(role)
-        moving = state is not None and state.active(now)
-        interval = glass_style.GLASS_MOVING_REFRESH_SECONDS
-        # Reuse the last patch during motion; the current rect still controls its placement and scale.
-        throttled = (moving and interval > 0. and previous is not None and
-                     0. <= now - previous[2] < interval)
-        if (not throttled and (previous is None or previous[0] != pose or
-                (previous[1] != scene.cacheKey() and (moving or (now - previous[2] >= GLASS_MATERIAL_FRAME_SECONDS and
-                            (self.refresh_roles is None or role in self.refresh_roles)))))):
+        if self.record_roles is not None:
+            self.record_roles.append((role, pose, state))
+        if self.would_refresh(role, scene, now, pose, state):
             image = _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint)
             if previous is not None:
                 self.bytes -= previous[3].sizeInBytes()
             self.patches[role] = (pose, scene.cacheKey(), now, image)
+            self.versions[role] = self.versions.get(role, 0) + 1
             self.bytes += image.sizeInBytes()
             self.patches.move_to_end(role)
             while len(self.patches) > 32 or self.bytes > 8 * 1024 * 1024:
                 self.bytes -= self.patches.popitem(last=False)[1][3].sizeInBytes()
         else:
             image = previous[3]
-            # A selected patch that already matches the scene must yield its
-            # place to older stale patches on subsequent frames.
-            if (not throttled and self.refresh_roles is not None and role in self.refresh_roles
-                    and previous[1] == scene.cacheKey()):
-                self.patches[role] = (previous[0], previous[1], now, image)
+            self.touch(role, scene, now, state)
         lift = state.lift if state is not None else 0.
         grown = QRectF(rect)
         if kind == "capsule" or kind == "dj" and rect.width() > rect.height() * 1.2:
