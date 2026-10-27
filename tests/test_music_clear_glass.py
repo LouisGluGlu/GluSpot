@@ -52,28 +52,35 @@ class ClearMotionTests(unittest.TestCase):
         from tests.glass_shade_reference import reference_shade
 
         rng = np.random.default_rng(90210)
-        pixels = rng.integers(0, 256, (200, 240, 4), dtype=np.uint8)
-        pixels[..., 3] = 255
-        scene = QImage(pixels.data, 240, 200, 240 * 4, QImage.Format.Format_RGBA8888).copy()
+        scenes = []
+        for low, high in ((0, 256), (0, 96), (160, 256)):
+            pixels = rng.integers(low, high, (200, 240, 4), dtype=np.uint8)
+            pixels[..., 3] = 255
+            scenes.append(QImage(pixels.data, 240, 200, 240 * 4,
+                                 QImage.Format.Format_RGBA8888).copy())
+        threshold_scene = QImage(240, 200, QImage.Format.Format_RGB32)
+        threshold_scene.fill(QColor(1, 185, 107))
+        scenes.extend((threshold_scene, QImage()))
         bounds = QRectF(0, 0, 240, 200)
         path = QPainterPath()
         path.moveTo(2, 2)
         path.lineTo(28, 16)
         path.lineTo(2, 30)
         path.closeSubpath()
-        for spec in (GLASS_CLEAR, GLASS_DJ, GLASS_GLYPH):
-            for rect, dpr, signature in ((QRectF(70, 60, 35, 35), 2., None),
-                                         (QRectF(-4, 4, 45, 28), 2., None),
-                                         (QRectF(210, 170, 32, 32), 3., _path_signature(path))):
-                w, h = round(rect.width() * dpr), round(rect.height() * dpr)
-                key = (w, h, min(rect.width(), rect.height()) / 2, dpr, spec, signature)
-                for level in (0, 50, 100):
-                    args = (scene, bounds, rect, dpr, spec.at_level(level), key, (70, 150, 233))
-                    expected = reference_shade(*args)
-                    actual = _shade(*args)
-                    a = np.frombuffer(actual.constBits(), np.uint8).astype(np.int16)
-                    b = np.frombuffer(expected.constBits(), np.uint8).astype(np.int16)
-                    self.assertLessEqual(np.max(np.abs(a - b)), 1, (spec, rect, level))
+        for scene in scenes:
+            for spec in (GLASS_CLEAR, GLASS_DJ, GLASS_GLYPH):
+                for rect, dpr, signature in ((QRectF(70, 60, 35, 35), 2., None),
+                                             (QRectF(-4, 4, 45, 28), 2., None),
+                                             (QRectF(210, 170, 32, 32), 3., _path_signature(path))):
+                    w, h = round(rect.width() * dpr), round(rect.height() * dpr)
+                    key = (w, h, min(rect.width(), rect.height()) / 2, dpr, spec, signature)
+                    for level in (0, 50, 100):
+                        args = (scene, bounds, rect, dpr, spec.at_level(level), key, (70, 150, 233))
+                        expected = reference_shade(*args)
+                        actual = _shade(*args)
+                        a = np.frombuffer(actual.constBits(), np.uint8).astype(np.int16)
+                        b = np.frombuffer(expected.constBits(), np.uint8).astype(np.int16)
+                        self.assertLessEqual(np.max(np.abs(a - b)), 1, (spec, rect, level))
 
     def test_moving_refresh_interval_reuses_patches(self):
         scene = QImage(160, 160, QImage.Format.Format_RGB32)
