@@ -9,6 +9,10 @@ import math
 import os
 from pathlib import Path
 import statistics
+import shutil
+import subprocess
+import threading
+from collections import deque
 import sys
 import tempfile
 import time
@@ -23,10 +27,12 @@ SANDBOX = tempfile.TemporaryDirectory(prefix="gluspot-sea-")
 for key in ("HOME", "APPDATA", "LOCALAPPDATA"):
     os.environ[key] = SANDBOX.name
 
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, Qt, QTimer
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
-from api.models import TimedLyricLine
+from api.models import TimedLyricLine, AudioFrame
+from api.audio_analyzer import LiveAudioAnalyzer
+from local.owned_audio_bridge import OwnedAudioBridge
 from api.providers import empty_visual_data
 from local.island_stack_visual import IslandStackVisual
 
@@ -56,12 +62,64 @@ def cover_bytes(rgb):
     return bytes(data)
 
 
+class AudioSource:
+    def __init__(self, path):
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QAudioFormat, QAudioBuffer
+        self.player = QMediaPlayer()
+        self.output = QAudioOutput()
+        self.player.setAudioOutput(self.output)
+        self.analyzer = LiveAudioAnalyzer()
+        self.frames = deque()
+        self.source = "owned-pcm"
+        self.error = ""
+        try:
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg and sys.platform == "win32":
+                candidate = Path(r"C:\Program Files\ffmpeg-9.0.1-essentials_build\bin\ffmpeg.exe")
+                ffmpeg = str(candidate) if candidate.is_file() else None
+            if not ffmpeg:
+                raise FileNotFoundError("ffmpeg not found")
+            decoded = subprocess.run([ffmpeg, "-v", "error", "-i", str(path), "-f", "s16le",
+                                      "-ac", "2", "-ar", "44100", "pipe:1"],
+                                     check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+            fmt = QAudioFormat()
+            fmt.setSampleRate(44100)
+            fmt.setChannelCount(2)
+            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            lock, smooth = threading.Lock(), [0.0, 0.0, 0.0]
+            for offset in range(0, len(decoded), 176400):
+                chunk = decoded[offset:offset + 176400]
+                buffer = QAudioBuffer(QByteArray(chunk), fmt, round(offset / 176400 * 1000000))
+                OwnedAudioBridge._append_band_frames(buffer, self.frames, lock, smooth)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            self.error = str(exc)
+        self.player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        self.player.play()
+
+    def frame(self):
+        if self.analyzer.has_recent_real_frame():
+            self.source = "system-capture"
+            return self.analyzer.get_frame(is_playing=True, position_seconds=self.player.position() / 1000)
+        self.source = "owned-pcm" if self.frames else "simulated"
+        position = self.player.position() / 1000
+        for start, end, frame in self.frames:
+            if start <= position < end:
+                return frame
+        return AudioFrame(0.0, 0.0, 0.0) if self.frames else None
+
+    def close(self):
+        self.player.stop()
+        self.analyzer.stop()
+
+
 class Scene:
     def __init__(self, app):
         self.app = app
+        self.audio = None
+        self.frame = None
         self.data = empty_visual_data("Song", "Artist", "fixture.music")
         with patch("local.island_stack_visual.read_finder_material", return_value=SimpleNamespace(available=False)):
-            self.visual = IslandStackVisual(SimpleNamespace(get_visual_data=lambda: self.data))
+            self.visual = IslandStackVisual(SimpleNamespace(get_visual_data=lambda: self.data, get_audio_frame=lambda: self.frame, has_live_audio=lambda: self.frame is not None))
         self.visual.timer.stop()
         self.visual.hide()
         self.visual.music_ambience_style = "sea_level"
@@ -106,12 +164,16 @@ class Scene:
 
     def advance(self, t, sound=True):
         beat = (t * 2) % 1
-        self.visual.current_audio_bands = ((.25 + .65 * math.exp(-beat * 6),
-            .30 + .25 * (.5 + .5 * math.sin(t * 1.7)),
-            .18 + .30 * math.exp(-((beat + .5) % 1) * 9)) if sound else (0., 0., 0.))
+        if self.audio:
+            self.frame = self.audio.frame() if sound else AudioFrame(0, 0, 0)
+        else:
+            self.frame = AudioFrame(.25 + .65 * math.exp(-beat * 6),
+                .30 + .25 * (.5 + .5 * math.sin(t * 1.7)),
+                .18 + .30 * math.exp(-((beat + .5) % 1) * 9)) if sound else AudioFrame(0, 0, 0)
         self.visual.media_is_playing = True
         self.visual.media_no_audio = False
         self.visual.ambient_phase = t * .6
+        self.visual._update_wave_values()
 
     def render(self, scale=1):
         image = QImage(440 * scale, 200 * scale, QImage.Format.Format_ARGB32_Premultiplied)
@@ -137,8 +199,13 @@ class Scene:
 
 
 class Window(QWidget):
-    def __init__(self, scene):
+    def __init__(self, scene, log=None, bench=False):
         super().__init__()
+        self.log = log
+        self.bench = bench
+        self.setWindowTitle("GluSpot 海平面预览")
+        self.paint_times = []
+        self.paint_at = []
         self.scene = scene
         self.resize(480, 240)
         self.start = time.monotonic()
@@ -156,18 +223,38 @@ class Window(QWidget):
             self.scene.select((self.scene.index + 1) % 4)
             self.last_switch = now
         self.scene.advance(now - self.start, self.sound)
-        self.scene.app.processEvents()
         self.fps = .9 * self.fps + .1 / max(.001, now - self.last_frame)
         self.last_frame = now
         color = self.scene.visual._solid_album_background_color().getRgb()[:3]
-        self.setWindowTitle(f"海平面 {COVERS[self.scene.index][0]} RGB{color} {self.fps:.1f} fps | 空格切换暂停 1-4 选色 S 声音 Esc 退出")
+        source = self.scene.audio.source if self.scene.audio else "simulated"
+        low, mid, high = self.scene.visual.current_audio_bands
+        self.setWindowTitle(f"GluSpot 海平面预览 | {source} | {low:.2f} {mid:.2f} {high:.2f} | {self.fps:.1f} fps")
         self.update()
 
     def paintEvent(self, event):
+        start = time.perf_counter()
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(235, 235, 238))
-        p.drawImage(20, 20, self.scene.render())
+        p.translate(20, 20)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        self.scene.rows.clear()
+        self.scene.visual._paint_music(p, RECT, True)
         p.end()
+        now = time.monotonic()
+        if self.bench:
+            self.paint_at.append(now)
+            self.paint_times.append((time.perf_counter() - start) * 1000)
+        if self.log:
+            renderer = self.scene.visual._native_music_background_renderer()
+            context = renderer.render_context("sea_level", expanded=True)
+            points = renderer._sea_level_surface(context, RECT, True)
+            source = self.scene.audio.source if self.scene.audio else "simulated"
+            record = {"time": now - self.start, "source": source,
+                      "bands": self.scene.visual.current_audio_bands,
+                      "water_y": [points[i].y() for i in (0, len(points)//4, len(points)//2, 3*len(points)//4, len(points)-1)]}
+            self.log.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self.log.flush()
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -187,9 +274,44 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--shots", type=Path)
     parser.add_argument("--bench", type=int, default=0)
+    parser.add_argument("--grab", type=Path)
+    parser.add_argument("--audio", type=Path)
+    parser.add_argument("--log", type=Path)
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     scene = Scene(app)
+    if args.audio:
+        if not args.audio.is_file():
+            parser.error(f"audio file does not exist: {args.audio}")
+        scene.audio = AudioSource(args.audio)
+        if scene.audio.error:
+            print(f"PCM fallback unavailable: {scene.audio.error}", file=sys.stderr)
+    log = args.log.open("w", encoding="utf-8", newline="\n") if args.log else None
+    window = Window(scene, log, bool(args.bench))
+    scene.advance(0.0)
+    window.show()
+    app.processEvents()
+    if args.grab:
+        args.grab.mkdir(parents=True, exist_ok=True)
+        window.rotate = False
+        for index in range(len(COVERS)):
+            scene.select(index)
+            scene.settle()
+            window.tick()
+            window.repaint()
+            app.processEvents()
+            if not window.grab().save(str(args.grab / f"sea_{index + 1}.png")):
+                raise RuntimeError("window grab failed")
+    if args.bench:
+        window.rotate = False
+        window.paint_times.clear()
+        window.paint_at.clear()
+        while len(window.paint_times) < args.bench:
+            app.processEvents()
+            time.sleep(.001)
+        times = window.paint_times
+        elapsed = window.paint_at[-1] - window.paint_at[0]
+        print(f"window: median={statistics.median(times):.2f}ms p95={sorted(times)[math.ceil(len(times)*.95)-1]:.2f}ms fps={(len(times)-1)/elapsed if elapsed else 0:.1f}", flush=True)
     if args.shots or args.bench:
         if args.shots:
             args.shots.mkdir(parents=True, exist_ok=True)
@@ -219,11 +341,13 @@ def main():
         print(output)
         if args.shots:
             (args.shots / "measurements.json").write_text(output + "\n", encoding="utf-8", newline="\n")
-        scene.visual.close()
-        return
-    window = Window(scene)
-    window.show()
-    app.exec()
+    if not (args.shots or args.bench or args.grab):
+        app.exec()
+    window.close()
+    if scene.audio:
+        scene.audio.close()
+    if log:
+        log.close()
     scene.visual.close()
 
 

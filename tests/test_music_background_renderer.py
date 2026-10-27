@@ -208,6 +208,16 @@ def _reactive_response(**overrides: float) -> dict[str, float]:
 
 
 class MusicBackgroundRendererTests(unittest.TestCase):
+    def test_sea_line_is_neutral_for_different_cover_colors(self):
+        host = FakeReactiveHost()
+        renderer = NativeMusicBackgroundRenderer(host)
+        for color in (QColor(20, 80, 180), QColor(210, 90, 30)):
+            host._solid_album_background_color = lambda color=color: color
+            context = renderer.render_context("sea_level", expanded=True)
+            sea, line = renderer._sea_level_colors(context)
+            self.assertEqual(sea.getRgb()[:3], color.getRgb()[:3])
+            self.assertEqual(line.getRgb(), (255, 255, 255, 175))
+
     def _paint_image(self, paint_func, *, now: float = 42.0) -> QImage:
         image = QImage(260, 96, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(QColor(0, 0, 0, 0))
