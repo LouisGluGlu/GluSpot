@@ -1102,7 +1102,6 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
             pos = index / 48
             displacement = state.displacement(pos, phase, intensity)
             y = rect.top() + rect.height() * 0.495 - scale * displacement
-            y = min(rect.top() + rect.height() * 0.515, y)
             points.append(QPointF(rect.left() + rect.width() * pos, y))
         return points
 

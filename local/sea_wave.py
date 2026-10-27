@@ -5,7 +5,7 @@ import math
 import os
 
 SEA_WAVE_INTENSITY = "medium"
-INTENSITIES = {"gentle": 0.80, "medium": 1.25, "strong": 1.55}
+INTENSITIES = {"gentle": 1.0, "medium": 1.55, "strong": 3.6}
 INTENSITY_LABELS = {"gentle": "柔和", "medium": "适中", "strong": "强烈"}
 
 
@@ -37,6 +37,8 @@ class SeaWaveState:
             target = min(1.0, raw / max(self.peaks[i], 0.008)) if raw > 0.003 else 0.0
             self.bands[i] = _follow(self.bands[i], target, dt, 0.03 if target > self.bands[i] else 0.22)
         low = self.bands[0]
+        # Continuous positive flux above the slow baseline; no refractory
+        # interval, so closely spaced drum hits are not silently discarded.
         excess = max(0.0, low - self.average * 1.15 - 0.08)
         self.average = _follow(self.average, low, dt, 0.45)
         self.impulse = max(excess, self.impulse * 2 ** (-dt / 0.16))
@@ -56,6 +58,11 @@ class SeaWaveState:
         broad = math.sin(pos * math.tau * 1.1 + phase)
         middle = math.sin(pos * math.tau * 2.3 - phase * 0.7)
         fine = math.sin(pos * math.tau * 4.1 + phase * 0.4)
-        motion = (low * (5.0 + 7.0 * broad) + mid * 3.0 * middle
-                  + high * 1.4 * fine + self.swell * (12.0 + 9.0 * broad)) * strength
-        return 22.0 * math.tanh(motion / 22.0)
+        motion = (low * (7.0 + 13.0 * broad) + mid * 4.0 * middle
+                  + high * 1.5 * fine + self.swell * 18.0
+                  + self.impulse * 12.0) * strength
+        if motion >= 0.0:
+            # A low-band envelope keeps the breadth responsive even where
+            # the strong setting approaches the upper soft limit.
+            return 49.0 * math.tanh(motion / 49.0) * (0.35 + 0.65 * low)
+        return 3.0 * math.tanh(motion / 3.0)

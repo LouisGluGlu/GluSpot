@@ -40,6 +40,30 @@ class SeaWaveTests(unittest.TestCase):
         self.assertLess(state.impulse, .001)
         self.assertLess(abs(state.swell), .001)
 
+    def test_impulse_lifts_entire_surface_and_then_decays(self):
+        state = SeaWaveState()
+        for n in range(60):
+            state.update((0.0, 0.0, 0.0), n / 60)
+        state.update((0.2, 0.0, 0.0), 1.0)
+        with_impulse = [state.displacement(p, 0.4, 'strong') for p in (0, .25, .5, .75, 1)]
+        impulse = state.impulse
+        state.impulse = 0
+        without_impulse = [state.displacement(p, 0.4, 'strong') for p in (0, .25, .5, .75, 1)]
+        self.assertGreater(impulse, 0)
+        for raised, base in zip(with_impulse, without_impulse):
+            self.assertGreater(raised, base)
+        for n in range(1, 240):
+            state.update((0.0, 0.0, 0.0), 1.0 + n / 60)
+        self.assertLess(abs(state.displacement(.5, .4, 'strong')), .01)
+
+    def test_stats_center_jump_and_impulse_correlation(self):
+        from tools.sea_stats import summarize
+        rows = [dict(bands=[i, 0, 0], water_y=[100 - i] * 5, impulse=i)
+                for i in (0, 1, 3, 2)]
+        stats = summarize(rows)
+        self.assertEqual(stats['center_jump_p99'], 2)
+        self.assertAlmostEqual(stats['corr_impulse_center_rise'], 1)
+
     def test_intensity_and_limit(self):
         state = SeaWaveState()
         for n in range(60):
@@ -48,7 +72,8 @@ class SeaWaveTests(unittest.TestCase):
         self.assertLess(values[0], values[1])
         self.assertLess(values[1], values[2])
         for pos in range(101):
-            self.assertLessEqual(abs(state.displacement(pos / 100, 3, 'strong')), 22)
+            self.assertGreaterEqual(state.displacement(pos / 100, 3, 'strong'), -3)
+            self.assertLessEqual(state.displacement(pos / 100, 3, 'strong'), 49)
 
 
 if __name__ == '__main__':

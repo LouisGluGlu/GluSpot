@@ -18,13 +18,16 @@ def summarize(rows):
     center = [row['water_y'][2] for row in rows]
     amplitude = [max(row['water_y']) - min(row['water_y']) for row in rows]
     impulse = [row.get('impulse', 0.0) for row in rows]
+    jumps = [abs(b - a) for a, b in zip(center, center[1:])]
     def stats(values):
         return {'min': min(values), 'max': max(values), 'std': statistics.pstdev(values)}
     return {'bands': [stats(band) for band in bands], 'center': stats(center),
             'amplitude_mean': statistics.mean(amplitude),
             'amplitude_p95': sorted(amplitude)[math.ceil(len(amplitude)*.95)-1],
             'corr_low_amplitude': correlation(bands[0], amplitude),
-            'corr_impulse_amplitude': correlation(impulse, amplitude)}
+            'corr_impulse_amplitude': correlation(impulse, amplitude),
+            'corr_impulse_center_rise': correlation(impulse, [-y for y in center]),
+            'center_jump_p99': sorted(jumps)[math.ceil(len(jumps)*.99)-1] if jumps else 0.0}
 
 
 def main():
