@@ -1094,11 +1094,10 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
 
     @staticmethod
     def _sea_level_colors(context: MusicBackgroundRenderContext) -> tuple[QColor, QColor]:
-        """The cover tone (same as the solid background) and its light water-line tint."""
+        """The cover tone and a neutral glass-like water-line highlight."""
         sea = QColor(context.palette.solid_album_background)
         sea.setAlpha(255)
-        line = QColor(round(sea.red() + (255 - sea.red()) * 0.62), round(sea.green() + (255 - sea.green()) * 0.62),
-                      round(sea.blue() + (255 - sea.blue()) * 0.62))
+        line = QColor(255, 255, 255, 175)
         return sea, line
 
     def _paint_background_blob(self, painter: QPainter, center: QPointF, radius_x: float, radius_y: float, color: QColor, alpha: int):
@@ -1210,9 +1209,14 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
             path.lineTo(point)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         glow = QColor(line)
-        glow.setAlpha(46)
-        painter.setPen(QPen(glow, self._u(3.2 if expanded else 2.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        glow.setAlpha(24)
+        painter.setPen(QPen(glow, self._u(2.4 if expanded else 1.8), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawPath(path)
-        painter.setPen(QPen(line, self._u(1.1 if expanded else 0.8), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setPen(QPen(line, self._u(0.9 if expanded else 0.7), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.drawPath(path)
+        # A faint upper edge gives the highlight the same restrained light falloff as glass.
+        painter.translate(0, -self._u(0.25))
+        upper = QColor(255, 255, 255, 65)
+        painter.setPen(QPen(upper, self._u(0.4), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawPath(path)
         painter.restore()

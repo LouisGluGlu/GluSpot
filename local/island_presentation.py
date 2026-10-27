@@ -638,7 +638,7 @@ def music_background_layer_paint_plan(
             steps.append("bilateral_diffraction_ambience")
     else:
         steps.extend(("glass_body", "bottom_ambience"))
-        if style != "duotone_full":
+        if style not in {"duotone_full", "sea_level"}:
             steps.append("blur_mask")
         steps.append("light_wave")
     return MusicBackgroundLayerPaintPlan(ambience_style=style, steps=tuple(steps))
