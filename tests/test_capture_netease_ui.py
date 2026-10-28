@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from api.capture.netease import NetEaseInstallation
 
@@ -101,6 +101,7 @@ class NetEaseCaptureSettingsTests(unittest.TestCase):
         self.values['v2_capture_app_profiles'] = {'netease': {'mode': 'off'}, 'qq': {'mode': 'smtc'}}
         panel.enable_button.click()
         self.assertEqual(len(self.confirmations), 1)
+        self.assertTrue(self.values['v2_system_capture_enabled'])
         self.assertTrue(self.values['v2_capture_position_enabled'])
         self.assertTrue(self.values['netease.cef.enabled'])
         self.assertEqual(self.values['netease.transport'], 'relaunch')
@@ -145,7 +146,9 @@ class NetEaseCaptureSettingsTests(unittest.TestCase):
         self.assertEqual(self.provider.disables, 1)
         self.assertEqual(panel.status_label.text(), '未启用')
 
-    def test_enable_disclosure_covers_restart_local_port_and_terms(self):
+    def test_enable_disclosure_covers_system_source_and_restart_terms(self):
+        panel = self.panel()
+        self.assertTrue(any('系统抓取' in label.text() for label in panel.findChildren(QLabel)))
         for text in ('重启', '127.0.0.1', '没有鉴权', '其他进程或用户', '用户协议'):
             self.assertIn(text, self.enable_notice)
 

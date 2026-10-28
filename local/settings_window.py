@@ -2921,6 +2921,11 @@ class SettingsWindow(QDialog):
     def _save(self, key: str, value):
         if self.settings:
             self.settings.set(key, value)
+        # NetEaseCaptureSettings writes the existing system-source setting as
+        # part of its explicit consent flow. Keep this visible control in sync
+        # without making the panel depend on the surrounding window type.
+        if key == "v2_system_capture_enabled" and hasattr(self, "system_capture_switch"):
+            self._set_switch_checked(self.system_capture_switch, bool(value))
 
     def _set_music_glass_level(self, value: int):
         self._save("v2_music_glass_level", normalize_music_glass_level(value))

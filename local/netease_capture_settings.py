@@ -91,7 +91,7 @@ class NetEaseCaptureSettings(QWidget):
         for button in (self.enable_button, self.repair_button, self.disable_button):
             buttons.addWidget(button)
         layout.addLayout(buttons)
-        hint = QLabel('关闭本功能后，正常退出网易云音乐即可关闭此次启动的本机调试端口。')
+        hint = QLabel('启用会同时打开系统抓取，以便将网易云精确进度送入歌词；若程序内播放正在使用中，仍会优先显示程序内播放。关闭本功能后，正常退出网易云音乐即可关闭此次启动的本机调试端口。')
         hint.setObjectName('Muted')
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -129,6 +129,11 @@ class NetEaseCaptureSettings(QWidget):
             return
         if not self.confirm():
             return
+        # The provider is selected through the existing system-capture source.
+        # Enabling precise NetEase progress must opt that source in as part of
+        # the same consented operation; otherwise PlaybackSourceProvider can
+        # keep returning the idle/owned source and never bind the CEF runtime.
+        self.set_setting('v2_system_capture_enabled', True)
         self.set_setting('v2_capture_position_enabled', True)
         profiles = self.get_setting('v2_capture_app_profiles', {})
         profiles = dict(profiles) if isinstance(profiles, dict) else {}
