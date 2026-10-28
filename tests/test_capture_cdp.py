@@ -135,7 +135,22 @@ class CdpTests(CaptureAsyncTestCase):
         await self.session.start()
         self.assertFalse(await self.session.wait_ready(timeout=0.25))
         self.assertFalse(await self.session.seek('native-1', 'no', 3))
-        self.assertEqual(self.session.probe, dict(api=False, reason='native-callback-chain-unavailable'))
+        expected_probe = dict(api=False, reason='native-callback-chain-unavailable')
+        # A busy test process can spend the initial readiness deadline in the
+        # reload wait. Observe the explicit refusal with a separate bounded
+        # grace period instead of treating an unfinished probe as its result.
+        # Rejection must never publish readiness or authorize a seek.
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while self.session.probe.get('api') is not False and asyncio.get_running_loop().time() < deadline:
+            self.assertFalse(self.session.ready)
+            self.assertFalse(any(
+                '.seek(' in str(command.get('params', {}).get('expression', ''))
+                for command in self.server.commands
+                if command.get('method') == 'Runtime.evaluate'
+            ))
+            await asyncio.sleep(0.01)
+        self.assertFalse(self.session.ready)
+        self.assertEqual(self.session.probe, expected_probe)
         self.assertEqual(self.session.diagnostics()['reason'], 'native-callback-chain-unavailable')
 
     async def test_close_restores_adapter_before_removing_binding_and_socket(self):
