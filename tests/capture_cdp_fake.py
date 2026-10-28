@@ -128,11 +128,16 @@ class FakeCdpServer:
                         emit = True
                     elif expression.endswith('.read()'):
                         result = {'result': {'value': self.sample}}
+                    elif expression.endswith('.health()'):
+                        result = {'result': {'value': dict(chainIntact=True,
+                            originalCalls=dict(PlayProgress=self.sample['sequence'], PlayState=0, Load=0, End=0))}}
                     elif 'native-events-unavailable' in expression:
                         result = {'result': {'value': {'api': not self.reject_probe, 'sampleHz':10,
                                                      'seek':True,'seekWhilePaused':None,
-                                                     'adapter':'legacy-native-v1'}}}
-                        emit = True
+                                                     'adapter':'legacy-native-v1',
+                                                     'hook':'existing-websdk-chain-v1',
+                                                     **({'reason':'native-callback-chain-unavailable'} if self.reject_probe else {})}}}
+                        emit = not self.reject_probe
                     else:
                         result = {'result': {'value': None}}
                 await self._send(writer, dict(id=message['id'], result=result))

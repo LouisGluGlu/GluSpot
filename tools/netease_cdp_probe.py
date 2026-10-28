@@ -53,7 +53,9 @@ async def run_probe(port: int, *, adapter="auto", timeout=10.0, sample_seconds=1
     """
     report = dict(passed=False, transport="existing-loopback-port", port=port,
                   sample_seconds=sample_seconds, samples=0, seeks=[], restore=None,
-                  error=None)
+                  error=None, api=False, reason=None, hook=None, original_callbacks_fired=False,
+                  original_callback_counts={}, callback_chain_intact=False,
+                  playback_advancing=None, auto_next_sanity=None)
     session = CdpSession(port, adapter=adapter)
     source = CefPositionSource(session)
     backend = CefSeekBackend(source)
@@ -97,7 +99,15 @@ async def run_probe(port: int, *, adapter="auto", timeout=10.0, sample_seconds=1
     try:
         await session.start()
         if not await session.wait_ready(timeout=timeout):
-            raise RuntimeError("NetEase CDP attach/probe did not become ready")
+            reason = session.diagnostics().get('reason', '')
+            report['reason'] = reason or None
+            raise RuntimeError("NetEase CDP attach/probe did not become ready" +
+                               (f": {reason}" if reason else ""))
+        report['api'] = True
+        report['hook'] = session.probe.get('hook')
+        initial_health = await session.hook_health()
+        if not isinstance(initial_health, dict) or initial_health.get('chainIntact') is not True:
+            raise RuntimeError("Pre-existing NetEase callback chain is unavailable")
         original = await source.wait_sample(timeout=timeout)
         if original is None:
             raise RuntimeError("NetEase did not push a physical progress sample")
@@ -112,6 +122,19 @@ async def run_probe(port: int, *, adapter="auto", timeout=10.0, sample_seconds=1
                                           if len(arrival_times) > 1 else 0.0)
         report["position_range_seconds"] = [min(positions), max(positions)] if positions else None
         report["tracks_observed"] = len(identities)
+        health = await session.hook_health()
+        report['callback_chain_intact'] = bool(isinstance(health, dict) and health.get('chainIntact') is True)
+        before_counts = initial_health.get('originalCalls', {})
+        counts = health.get('originalCalls', {}) if isinstance(health, dict) else {}
+        report['original_callback_counts'] = {
+            event: max(0, counts.get(event, 0) - before_counts.get(event, 0))
+            for event in ('PlayProgress', 'PlayState', 'Load', 'End')}
+        report['original_callbacks_fired'] = report['original_callback_counts']['PlayProgress'] > 0
+        # These counts establish invocation of the pre-existing queue callbacks,
+        # not audible playback, lyric rendering or End/auto-next acceptance.
+        report['playback_advancing'] = max(positions) > min(positions) if len(positions) > 1 else None
+        if not report['callback_chain_intact'] or not report['original_callbacks_fired']:
+            raise RuntimeError("Pre-existing NetEase progress callback did not continue; refusing seeks")
         if not arrival_times:
             raise RuntimeError("No pushed progress arrived during the sampling window")
         if not await current():
@@ -146,6 +169,7 @@ async def run_probe(port: int, *, adapter="auto", timeout=10.0, sample_seconds=1
         source.close()
         await session.close()
     report["passed"] = (report["error"] is None and len(report["seeks"]) == 3
+                        and report['callback_chain_intact'] and report['original_callbacks_fired']
                         and all(item["succeeded"] for item in report["seeks"])
                         and bool(report["restore"] and report["restore"]["succeeded"]))
     return report

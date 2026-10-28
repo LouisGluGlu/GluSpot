@@ -26,6 +26,11 @@ class PushedSession:
         self.sequence = 0
         self.closed = False
         self.tick = 0
+        self.probe = dict(hook='existing-websdk-chain-v1')
+
+    async def hook_health(self):
+        return dict(chainIntact=True, originalCalls=dict(PlayProgress=self.sequence,
+                                                        PlayState=0, Load=0, End=0))
 
     def clock(self):
         self.tick += 1
@@ -97,6 +102,10 @@ class ProbeTests(CaptureAsyncTestCase):
     async def test_three_clamped_seeks_and_original_position_restored(self):
         result, session, messages = await self.run_probe()
         self.assertTrue(result["passed"], result)
+        self.assertTrue(result['callback_chain_intact'])
+        self.assertTrue(result['original_callbacks_fired'])
+        self.assertGreater(result['original_callback_counts']['PlayProgress'], 0)
+        self.assertIsNone(result['auto_next_sanity'])
         self.assertGreater(result["samples"], 0)
         self.assertEqual([item[2] for item in session.writes], [15, 45, 49, 12])
         self.assertEqual(len({item[1] for item in session.writes}), 4)
@@ -112,6 +121,37 @@ class ProbeTests(CaptureAsyncTestCase):
         self.assertEqual(netease_cdp_probe._targets(sample), [42.238, 41.238, 40.238])
         sample.position_seconds = 1
         self.assertEqual(netease_cdp_probe._targets(sample), [0, 0, 0])
+
+    async def test_missing_original_progress_calls_refuses_all_seeks(self):
+        session = PushedSession(12345)
+
+        async def health_without_original():
+            return dict(chainIntact=True, originalCalls={})
+
+        async def deliver_samples(_):
+            session.push()
+
+        session.hook_health = health_without_original
+        with patch.object(netease_cdp_probe, 'CdpSession', return_value=session), \
+             patch.object(netease_cdp_probe, 'asyncio', SimpleNamespace(sleep=deliver_samples)):
+            result = await netease_cdp_probe.run_probe(12345, sample_seconds=.03,
+                                                      timeout=.2, emit=lambda _: None)
+        self.assertFalse(result['passed'])
+        self.assertFalse(result['original_callbacks_fired'])
+        self.assertIn('callback did not continue', result['error'])
+        self.assertEqual(session.writes, [])
+        self.assertTrue(session.closed)
+
+    async def test_unsafe_hook_refusal_reason_is_reported_without_seeks(self):
+        async with FakeCdpServer() as server:
+            server.reject_probe = True
+            result = await netease_cdp_probe.run_probe(server.port, sample_seconds=.01,
+                                                      timeout=.06, emit=lambda _: None)
+            self.assertFalse(result['passed'])
+            self.assertFalse(result['api'])
+            self.assertEqual(result['reason'], 'native-callback-chain-unavailable')
+            self.assertIn('native-callback-chain-unavailable', result['error'])
+            self.assertEqual(result['seeks'], [])
 
     async def test_track_change_during_sampling_refuses_all_mutations(self):
         session = PushedSession(12345, replace=True)

@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import unittest
@@ -122,6 +123,53 @@ class CdpTests(CaptureAsyncTestCase):
         await self.session.start()
         self.assertFalse(await self.session.wait_ready(timeout=0.08))
         self.assertFalse(await self.session.seek('native-1', 'no', 3))
+        self.assertEqual(self.session.probe, dict(api=False, reason='native-callback-chain-unavailable'))
+        self.assertEqual(self.session.diagnostics()['reason'], 'native-callback-chain-unavailable')
+
+    async def test_close_restores_adapter_before_removing_binding_and_socket(self):
+        await self.ready()
+        await self.session.close()
+        cleanup = self.server.commands[-2:]
+        self.assertEqual(cleanup[0]['method'], 'Runtime.evaluate')
+        self.assertEqual(cleanup[0]['params']['expression'], self.session.adapter.close_expression())
+        self.assertEqual(cleanup[1]['method'], 'Runtime.removeBinding')
+
+    async def test_close_during_probe_failure_cleanup_finishes_restoration(self):
+        self.server.reject_probe = True
+        entered = asyncio.Event()
+        evaluate = self.session._evaluate
+        blocked = False
+
+        async def block_first_cleanup(expression):
+            nonlocal blocked
+            if expression == self.session.adapter.close_expression() and not blocked:
+                blocked = True
+                entered.set()
+                await asyncio.Future()
+            return await evaluate(expression)
+
+        self.session._evaluate = block_first_cleanup
+        await self.session.start()
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(self.session.close(), 1)
+        self.assertIsNone(self.session._ws)
+        self.assertIsNone(self.session._reader_task)
+        self.assertEqual(self.session._pending, {})
+        self.assertEqual(self.server.commands[-1]['method'], 'Runtime.removeBinding')
+
+    async def test_chain_loss_invalidates_evidence_and_records_health_reason(self):
+        await self.ready()
+        self.server.reject_probe = True
+        await self.server.emit(dict(type='unavailable', reason='native-callback-chain-changed'))
+        for _ in range(30):
+            if not self.session.ready:
+                break
+            await asyncio.sleep(.005)
+        self.assertFalse(self.session.ready)
+        self.assertIsNone(self.session.latest)
+        self.assertIn(None, self.events)
+        self.assertIn(self.session.diagnostics()['reason'],
+                      {'native-callback-chain-changed', 'native-callback-chain-unavailable'})
 
     async def test_context_replacement_reconnects(self):
         await self.ready()
@@ -212,16 +260,205 @@ class LocatorTests(CaptureAsyncTestCase):
 
 
 class AdapterJavascriptTests(unittest.TestCase):
+    def run_javascript(self, harness, *, existing=True):
+        fixture = (Path(__file__).parent / 'fixtures/capture/netease_native_callbacks.js').read_text()
+        setup = ('const fake = makeNativeFixture({existing:' + str(existing).lower() + '});'
+                 'const {legacyNativeCmder, registered} = fake;\n')
+        script = fixture + '\n' + setup + harness.replace(
+            'SCRIPT', json.dumps(JsAdapterRegistry.select().install_expression()))
+        return json.loads(subprocess.run([shutil.which('node'), '-e', script],
+                                         check=True, text=True, capture_output=True).stdout)
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_single_slot_model_reproduces_first_append_displacement(self):
+        value = self.run_javascript(r'''
+registered.PlayProgress('song', 1, .1);
+let observed = 0;
+legacyNativeCmder.appendRegisterCall('PlayProgress', 'audioplayer', () => observed++);
+const stub = fake.nativeSlots['audioplayer.onPlayProgress'];
+legacyNativeCmder.appendRegisterCall('PlayProgress', 'audioplayer', () => observed++);
+registered.PlayProgress('song', 2, .2);
+console.log(JSON.stringify({originalCalls:fake.calls.length, observed,
+  registrations:fake.registrations.length, sameStub:stub === fake.nativeSlots['audioplayer.onPlayProgress']}));
+''', existing=False)
+        self.assertEqual(value, dict(originalCalls=1, observed=2, registrations=1, sameStub=True))
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_native_callbacks_chain_first_and_restore_exactly_with_idempotent_install(self):
+        value = self.run_javascript(r'''
+const before = fake.events.map(event => {
+  const key = 'audioplayer.on' + event;
+  const queue = legacyNativeCmder.registerCallMap[key];
+  // Retain an earlier player callback too; both must run before GluSpot.
+  queue.unshift(function() { fake.calls.push({event:'earlier'}); });
+  Object.defineProperty(queue, '1', {value:fake.originals[event],
+    writable:true, enumerable:false, configurable:false});
+  return {queue, descriptor:Object.getOwnPropertyDescriptor(queue, '1'),
+          slot:fake.nativeSlots[key], stub:legacyNativeCmder.registerCallStubs[key]};
+});
+const pushed = [], ordering = [];
+let now = 0, timers = 0;
+globalThis.performance = {now: () => now};
+globalThis.setInterval = () => ++timers; globalThis.clearInterval = () => {};
+globalThis.__gluspotNeteaseSample = value => {
+  pushed.push(JSON.parse(value)); ordering.push(fake.calls.map(call => call.event));
+};
+const first = eval(SCRIPT), adapter = globalThis.__gluspotNeteaseV1;
+const wrappers = before.map(item => item.queue[1]);
+const second = eval(SCRIPT);
+const sameWrappers = before.every((item, index) => item.queue[1] === wrappers[index]);
+const receiver = {};
+const result = registered.PlayProgress.call(receiver, 'song', 5, .1);
+registered.PlayState(true); registered.End(); registered.Load();
+const health = adapter.health();
+const sameReceiver = fake.calls[1].receiver === receiver;
+const sameArguments = JSON.stringify(fake.calls[1].args) === JSON.stringify(['song',5,.1]);
+adapter.close(); adapter.close();
+const restored = before.every((item,index) => {
+  const key = 'audioplayer.on' + fake.events[index];
+  const actual = Object.getOwnPropertyDescriptor(item.queue, '1');
+  return Object.keys(item.descriptor).every(key => actual[key] === item.descriptor[key]) &&
+    fake.nativeSlots[key] === item.slot && legacyNativeCmder.registerCallStubs[key] === item.stub;
+});
+const count = pushed.length;
+registered.PlayProgress('song', 6, .12);
+const dormant = pushed.length === count;
+const third = eval(SCRIPT);
+registered.PlayProgress('song', 7, .14);
+adapter.close();
+console.log(JSON.stringify({first,second,third,sameWrappers,timers,result,sameReceiver,sameArguments,
+  health,restored,dormant,ordering,registrations:fake.registrations.length}));
+''')
+        self.assertTrue(all(value[key]['api'] for key in ('first', 'second', 'third')))
+        self.assertTrue(all(value[key] for key in ('sameWrappers', 'sameReceiver', 'sameArguments', 'restored', 'dormant')))
+        self.assertEqual(value['result'], 'native-PlayProgress')
+        self.assertEqual(value['timers'], 2)
+        self.assertEqual(value['registrations'], 0)
+        self.assertTrue(value['health']['chainIntact'])
+        self.assertEqual(value['health']['originalCalls'], dict(PlayProgress=1, PlayState=1, Load=1, End=1))
+        self.assertEqual(value['ordering'][0], ['earlier', 'PlayProgress'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_unreachable_native_owner_refuses_without_displacement(self):
+        value = self.run_javascript(r'''
+const slots = {...fake.nativeSlots};
+const probe = eval(SCRIPT);
+for (const event of fake.events) registered[event]('song', 1, .1);
+console.log(JSON.stringify({probe, nativeCalls:fake.calls.length, registrations:fake.registrations.length,
+  unchanged:fake.events.every(event => fake.nativeSlots['audioplayer.on'+event] === slots['audioplayer.on'+event]),
+  keys:Object.keys(legacyNativeCmder.registerCallMap), installed:!!globalThis.__gluspotNeteaseV1}));
+''', existing=False)
+        self.assertEqual(value['probe'], dict(api=False, reason='native-callback-chain-unavailable'))
+        self.assertEqual(value['nativeCalls'], 4)
+        self.assertTrue(value['unchanged'])
+        self.assertEqual(value['registrations'], 0)
+        self.assertEqual(value['keys'], [])
+        self.assertFalse(value['installed'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_all_events_preflight_before_mutation_and_partial_install_rolls_back(self):
+        for mode in ('missing-end', 'empty-end', 'unwritable-end', 'accessor-end', 'missing-stub', 'write-failure'):
+            with self.subTest(mode=mode):
+                value = self.run_javascript(r'''
+const mode = MODE, map = legacyNativeCmder.registerCallMap;
+if (mode === 'missing-end') delete map['audioplayer.onEnd'];
+if (mode === 'empty-end') map['audioplayer.onEnd'] = [];
+if (mode === 'unwritable-end') Object.freeze(map['audioplayer.onEnd']);
+if (mode === 'accessor-end') Object.defineProperty(map, 'audioplayer.onEnd', {get() { throw Error('no getter'); }});
+if (mode === 'missing-stub') delete legacyNativeCmder.registerCallStubs['audioplayer.onEnd'];
+if (mode === 'write-failure') map['audioplayer.onEnd'] = new Proxy(map['audioplayer.onEnd'], {
+  defineProperty() { throw Error('blocked'); }
+});
+const probe = eval(SCRIPT);
+const untouched = ['PlayProgress','PlayState','Load'].every(event => map['audioplayer.on'+event][0] === fake.originals[event]);
+console.log(JSON.stringify({probe,untouched,registrations:fake.registrations.length,installed:!!globalThis.__gluspotNeteaseV1}));
+'''.replace('MODE', json.dumps(mode)))
+                self.assertEqual(value['probe'], dict(api=False, reason='native-callback-chain-unavailable'))
+                self.assertTrue(value['untouched'])
+                self.assertEqual(value['registrations'], 0)
+                self.assertFalse(value['installed'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_observer_errors_cannot_change_original_return_or_exception(self):
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+globalThis.performance = {now() { throw Error('GluSpot clock failure'); }};
+globalThis.__gluspotNeteaseSample = () => { throw Error('GluSpot binding failure'); };
+const nativeError = new Error('native exception');
+legacyNativeCmder.registerCallMap['audioplayer.onEnd'][0] = () => { throw nativeError; };
+eval(SCRIPT);
+const result = registered.PlayProgress('song', 5, .1);
+let sameError = false;
+try { registered.End(); } catch (error) { sameError = error === nativeError; }
+globalThis.__gluspotNeteaseV1.close();
+console.log(JSON.stringify({result,sameError,nativeCalls:fake.calls.length}));
+''')
+        self.assertEqual(value, dict(result='native-PlayProgress', sameError=True, nativeCalls=1))
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_strict_original_preserves_null_undefined_and_primitive_receivers(self):
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+globalThis.__gluspotNeteaseSample = () => {};
+const queue = legacyNativeCmder.registerCallMap['audioplayer.onPlayProgress'];
+queue[0] = function() { 'use strict'; return this; };
+eval(SCRIPT);
+const preserved = [undefined, null, 7, 'receiver', false].every(receiver =>
+  Reflect.apply(queue[0], receiver, ['song',1,.1]) === receiver);
+globalThis.__gluspotNeteaseV1.close();
+console.log(JSON.stringify({preserved}));
+''')
+        self.assertTrue(value['preserved'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_player_replacement_is_preserved_and_chain_loss_closes_other_hooks(self):
+        value = self.run_javascript(r'''
+let tick;
+const pushed = [];
+globalThis.setInterval = callback => { tick = callback; return 1; };
+globalThis.clearInterval = () => {};
+globalThis.__gluspotNeteaseSample = value => pushed.push(JSON.parse(value));
+eval(SCRIPT);
+const adapter = globalThis.__gluspotNeteaseV1;
+const replacement = () => 'replacement';
+legacyNativeCmder.registerCallMap['audioplayer.onEnd'][0] = replacement;
+tick();
+console.log(JSON.stringify({health:adapter.health(), pushed,
+  preserved:legacyNativeCmder.registerCallMap['audioplayer.onEnd'][0] === replacement,
+  restored:legacyNativeCmder.registerCallMap['audioplayer.onPlayProgress'][0] === fake.originals.PlayProgress}));
+''')
+        self.assertFalse(value['health']['chainIntact'])
+        self.assertEqual(value['pushed'], [dict(type='unavailable', reason='native-callback-chain-changed')])
+        self.assertTrue(value['preserved'] and value['restored'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_old_unsafe_adapter_is_never_restarted(self):
+        value = self.run_javascript(r'''
+globalThis.__gluspotNeteaseV1 = {start() { throw Error('must not run'); }};
+console.log(JSON.stringify(eval(SCRIPT)));
+''')
+        self.assertEqual(value, dict(api=False, reason='unsafe-previous-adapter'))
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_unwritable_adapter_global_rolls_back_all_hooks(self):
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+Object.defineProperty(globalThis, '__gluspotNeteaseV1', {value:undefined,configurable:false});
+const probe = eval(SCRIPT);
+console.log(JSON.stringify({probe,restored:fake.events.every(event =>
+  legacyNativeCmder.registerCallMap['audioplayer.on'+event][0] === fake.originals[event])}));
+''')
+        self.assertEqual(value['probe'], dict(api=False, reason='native-callback-chain-unavailable'))
+        self.assertTrue(value['restored'])
+
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_real_string_track_progress_and_zero_ratio(self):
-        script = JsAdapterRegistry.select().install_expression()
         harness = r"""
-const registered = {}, seeks = [];
+const seeks = [];
 let now = 0;
 globalThis.performance = {now: () => now};
 globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
 globalThis.__gluspotNeteaseSample = () => {};
-const legacyNativeCmder = {appendRegisterCall: (name, source, callback) => registered[name] = callback};
 const channel = {call: (method, callback, args) => seeks.push(args)};
 eval(SCRIPT);
 registered.Load({duration_seconds: 38});
@@ -236,9 +473,8 @@ registered.Load();
 registered.PlayProgress('1390072207_BRKMZZ', 0, 0);
 const unknown = globalThis.__gluspotNeteaseV1.read();
 console.log(JSON.stringify({initial, progress, readback, unknown, seeks}));
-""".replace('SCRIPT', json.dumps(script))
-        value = json.loads(subprocess.run([shutil.which('node'), '-e', harness],
-                                          check=True, text=True, capture_output=True).stdout)
+"""
+        value = self.run_javascript(harness)
         self.assertEqual(value['initial']['duration'], 38)
         self.assertEqual(value['unknown']['duration'], 0)
         self.assertAlmostEqual(value['progress']['duration'], 14.046 / .36996)
@@ -247,14 +483,12 @@ console.log(JSON.stringify({initial, progress, readback, unknown, seeks}));
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_ratio_one_progress_survives_multiple_seeks_and_cdp_validation(self):
-        script = JsAdapterRegistry.select().install_expression()
         harness = r"""
-const registered = {}, pushed = [];
+const pushed = [];
 let now = 0;
 globalThis.performance = {now: () => now};
 globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
 globalThis.__gluspotNeteaseSample = value => pushed.push(JSON.parse(value));
-const legacyNativeCmder = {appendRegisterCall: (name, source, callback) => registered[name] = callback};
 const channel = {call: () => {}};
 eval(SCRIPT);
 registered.PlayProgress('3444775814_PL8SGJ', 43.238, 1);
@@ -266,9 +500,8 @@ for (const target of [15, 45, 90]) {
 registered.Load({duration_seconds: 200});
 registered.PlayProgress('3444775814_PL8SGJ', 43.238, 1);
 console.log(JSON.stringify(pushed));
-""".replace('SCRIPT', json.dumps(script))
-        pushed = json.loads(subprocess.run([shutil.which('node'), '-e', harness],
-                                           check=True, text=True, capture_output=True).stdout)
+"""
+        pushed = self.run_javascript(harness)
         samples = [value for value in pushed if value['type'] == 'sample']
         self.assertEqual([sample['duration'] for sample in samples], [0] * 7 + [200])
         session = CdpSession(12345)
@@ -279,14 +512,12 @@ console.log(JSON.stringify(pushed));
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_real_script_native_events_coalesce_and_seek_without_optimism(self):
-        script = JsAdapterRegistry.select().install_expression()
         harness = r'''
-const registered = {}, pushed = [], seeks = [];
+const pushed = [], seeks = [];
 let now = 0;
 globalThis.performance = {now: () => now};
 globalThis.setInterval = () => 123; globalThis.clearInterval = () => {};
 globalThis.__gluspotNeteaseSample = value => pushed.push(JSON.parse(value));
-const legacyNativeCmder = {appendRegisterCall: (name, source, callback) => {registered[name] = callback;}};
 const channel = {call:(method,callback,args) => seeks.push([method,args])};
 const probe = eval(SCRIPT);
 for (now of [0,30,60,100]) registered.PlayProgress(42, now/1000, (now/1000)/180);
@@ -305,9 +536,8 @@ registered.PlayProgress(99,5,0.1);
 const restarted = globalThis.__gluspotNeteaseV1.read();
 console.log(JSON.stringify({probe,before,after,pushed:pushed.slice(0,beforeCloseCount),
                            seeks,events:Object.keys(registered),beforeCloseCount,dormant,restarted}));
-'''.replace('SCRIPT', json.dumps(script))
-        result = subprocess.run([shutil.which('node'), '-e', harness], check=True, text=True, capture_output=True)
-        value = json.loads(result.stdout)
+'''
+        value = self.run_javascript(harness)
         self.assertEqual(value['events'], ['PlayProgress','PlayState','Load','End'])
         self.assertEqual(value['before'], value['after'])
         samples = [p for p in value['pushed'] if p['type'] == 'sample']

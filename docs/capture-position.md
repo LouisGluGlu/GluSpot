@@ -164,15 +164,45 @@ refuses restoration. An unknown native identity cannot establish recording or
 version identity beyond the existing metadata match.
 
 `CdpSession` discovers targets through loopback `/json`, selects the verified
-`orpheus://orpheus/pub/app.html` page and enables Runtime bindings. A versioned
-JavaScript adapter probes for `legacyNativeCmder.appendRegisterCall` and
-`channel.call` before registering `PlayProgress`, `PlayState`, `Load` and `End`.
+`orpheus://orpheus/pub/app.html` page and enables Runtime bindings.
+
+NetEase 3.1.42's native adapter has **one native callback slot per event**. The first
+`appendRegisterCall` creates a websdk stub via `registerCallAdapter`, displacing
+the native UI callback. Before injection, `registerCallMap` had no
+`audioplayer.onPlayProgress`, `audioplayer.onPlayState`, `audioplayer.onLoad` or
+`audioplayer.onEnd` entries. Receiving events after registration does not prove
+that NetEase's UI callbacks or automatic track advance remain intact.
+The UI therefore uses a separate native path. Its precise JavaScript entry
+point is unknown from this static investigation; no alternate global is guessed.
+
+The conservative non-invasive adapter must never call `appendRegisterCall` or
+`registerCallAdapter`. It may only chain an existing callback in an already
+populated `registerCallMap` queue with a callable `registerCallStubs` entry.
+Preflight all four queues before any mutation. Each wrapper calls the original
+callback first with the same `this` and arguments, preserves its return value
+and error propagation, and swallows only observer errors. Close must restore
+the original slot descriptor; reinstall must be idempotent. If no established
+chain is available, return `api:false` with health reason
+`native-callback-chain-unavailable` and use the existing fallback below. Do not
+create queues or register callbacks to manufacture a chain. The observed empty
+map therefore makes this conservative route unavailable in that state.
+
+Ordinary detach/close restores each still-owned callback's exact descriptor
+before removing the Runtime binding and closing the socket. It preserves any
+later callback replacement made by NetEase. If the socket is already dead,
+Python cannot execute immediate page cleanup; wrappers still call their originals
+and native registration is untouched. Reconnection reuses the same adapter
+without double wrapping. Replacing the page destroys its old callbacks entirely.
+
 The supplied NetEase 3.1.42 evidence establishes `PlayProgress(trackId, seconds,
 ratio)` at approximately 30 ms intervals and
 `channel.call('audioplayer.seek', callback, [trackId, uniqueSeekId, seconds])`.
 Ordinary pushed samples are coalesced to at most 10 Hz; track, state and seek
-events are delivered immediately. Progress is never polled. Unknown versions
-must pass the generic adapter probe before the route becomes available.
+events are delivered immediately. Ratios 0 or 1 cannot infer duration; a known
+prior duration or explicit `Load.duration_seconds` is retained. Progress is never
+polled. Seek retains the channel call above and independent physical readback.
+Unknown versions must pass the same conservative chain preflight; the channel
+feature probe independently determines whether seeking is available.
 The numeric meanings of `PlayState` and whether native seeks work while paused
 have not been verified on the real player. The adapter does not invent a
 numeric state mapping, and its probe reports paused-seek support as unknown.
@@ -227,7 +257,9 @@ python tools/netease_cdp_probe.py --port 9222
 ```
 
 The tool attaches to that existing port; it never launches, relaunches or stops
-NetEase. It samples pushed progress for ten seconds, then verifies seeks to
+NetEase. Without an established callback chain it must report `api:false` and
+`native-callback-chain-unavailable`, without registering callbacks or seeking.
+With a chain, it samples pushed progress for ten seconds, then verifies seeks to
 15, 45 and 90 seconds through `CefSeekBackend` and `SeekExecutor`. Targets are
 clamped inside the observed duration to avoid advancing to the next track. It
 prints each physical readback error in milliseconds, then attempts to restore
@@ -237,13 +269,56 @@ same executor, so restoration may be refused safely. Playback is not paused by
 the tool. The last stdout line is a JSON summary; exit status is zero only if
 all three seeks and restoration were independently verified.
 
+Probe reports must include original callback counts, whether the callback chain
+remains intact, and whether physical playback is advancing. Event delivery or
+successful seek readback alone does not establish these properties. Auto-next
+must be reported as **unverified unless checked on device**. This documentation
+update performs no live probe and claims no live acceptance.
+Callback counts establish invocation of the pre-existing WebSDK callbacks,
+not audible output or execution of an unidentified native UI callback. The
+`existing=true` offline fixture models a compatible pre-existing WebSDK route;
+the reported clean 3.1.42 state uses the separate `existing=false` refusal case.
+
 The supplied live-player timing evidence (25–34 ms to the first post-seek
 progress event) is a pre-existing observation from NetEase 3.1.42, not a result
-established by the fake server tests. Windows player/version coverage, actual
-relaunch/restore behavior, paused seeks, CPU use, eight-hour soak and 1,000-seek
-acceptance remain required before enabling this experiment by default.
+established by the fake server tests or acceptance of the conservative chain.
+Windows player/version coverage, intact original callbacks, physical playback
+advance, auto-next, actual relaunch/restore behavior, paused seeks, CPU use,
+eight-hour soak and 1,000-seek acceptance remain required before enabling this
+experiment by default.
+
+### Non-invasive hook verification (2026-10-28)
+
+The final source passed three consecutive runs with
+`QT_QPA_PLATFORM=offscreen`, `/tmp/gluspot-capture-test-venv/bin/python`
+(Python 3.13.5) and `-m unittest discover -s tests -p 'test_capture*.py'`:
+**193 tests / 6.713 s**, **193 / 6.721 s**, **193 / 6.729 s**; zero failures,
+errors or skips. Compilation and `git diff --check` passed. Offline tests cover
+the confirmed first-APPEND displacement model, preserved native registrations
+and original callback invocation, all-event preflight, rollback, exact slot
+descriptor restoration, idempotent attach, observer exception isolation,
+chain loss, refusal health, probe gating and close during failed-probe cleanup.
+The existing unknown-duration, 10 Hz and independently verified seek tests pass.
+Logs are ignored `.runtime/capture/noninvasive-final-{1,2,3}.log`.
+
+No live NetEase process or installation was accessed. PC sync/tests remain
+pending because this session has no configured PC execution channel. After
+syncing this commit, repeat the capture discovery three times from
+`E:\grok-gluspot\_wt_capture2` using only
+`E:\gpt-island\.venv\Scripts\python.exe`.
+
+After the user restarts NetEase with `--remote-debugging-port=39222`, device
+acceptance must check audible uninterrupted playback, in-app lyric scrolling,
+pause/resume, seeks, End/auto-next, repeated attach and ordinary detach. The
+reported empty-map state must refuse capture with its health reason and retain
+the existing fallback; it must not create WebSDK queues. If a genuine compatible
+chain is available, check the probe's callback counters and chain integrity too.
+These device checks and PC repetitions were not performed by this change.
 
 ### NetEase P0/P1 verification (2026-10-28)
+
+These recorded runs predate the conservative callback-chain requirements above;
+they do not validate those requirements or establish live acceptance.
 
 Both full runs used the standard command with
 `/workspace/gluspot/qtvenv/bin/python` (Python 3.13.5),

@@ -697,6 +697,7 @@ class WindowsMediaProvider:
         state = "off"
         message = "精确进度未启用"
         ready = cdp is not None and cdp.ready
+        reason = getattr(cdp, 'probe', {}).get('reason', '') if cdp is not None else ''
         if self._netease_cef_enabled():
             if ready:
                 state, message = "ready", "精确进度已连接"
@@ -705,9 +706,12 @@ class WindowsMediaProvider:
                     state, message = "degraded", "精确进度已连接；精确跳转不可用，暂用系统跳转"
             elif cdp is not None:
                 state, message = "connecting", "正在连接；暂用系统进度"
+                if reason:
+                    state, message = "degraded", "无法安全监听网易云进度；暂用系统进度"
             else:
                 state, message = "repair", "未连接；可修复并重启网易云"
         return dict(state=state, message=message, ready=bool(ready),
+                    reason=reason,
                     restore=getattr(self, "_netease_restore_status", ""))
 
     def repair_netease_capture(self):

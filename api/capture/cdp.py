@@ -16,6 +16,8 @@ from api.capture._websocket import LoopbackWebSocket
 from api.capture.netease_js import BINDING_NAME, JsAdapterRegistry
 
 TARGET_URL = 'orpheus://orpheus/pub/app.html'
+_HOOK_FAILURES = frozenset({'native-events-unavailable', 'unsafe-previous-adapter',
+                            'native-callback-chain-unavailable', 'native-callback-chain-changed'})
 
 
 class CdpError(ConnectionError):
@@ -187,6 +189,18 @@ class CdpSession:
         self._sample(payload)
         return self.latest
 
+    async def hook_health(self):
+        """Read callback counters/ownership, never the player's position."""
+        if not self.ready:
+            return None
+        return await self._evaluate(self.adapter.health_expression())
+
+    def _probe_failure(self, probe):
+        # Only our fixed reason codes may reach diagnostics, never page text.
+        reason = probe.get('reason') if isinstance(probe, dict) else None
+        if isinstance(reason, str) and reason in _HOOK_FAILURES:
+            self.probe = dict(api=False, reason=reason)
+
     async def _run(self):
         failures = 0
         while not self._closed:
@@ -212,7 +226,8 @@ class CdpSession:
                     if isinstance(probe, dict) and probe.get('api') is True:
                         self.probe = probe
                         break
-                if not self.probe:
+                    self._probe_failure(probe)
+                if self.probe.get('api') is not True:
                     raise CdpError('NetEase native adapter probe failed')
                 self._last_heartbeat = self.clock()
                 self._ready.set()
@@ -272,6 +287,9 @@ class CdpSession:
                 kind = payload.get('type')
                 if kind == 'heartbeat':
                     self._last_heartbeat = self.clock()
+                elif kind == 'unavailable':
+                    self._probe_failure(payload)
+                    raise CdpError('NetEase callback chain changed')
                 elif kind == 'reset':
                     self.latest = None
                     self._notify(None)
@@ -345,6 +363,16 @@ class CdpSession:
         self._ready.clear()
         self.latest = None
         self._notify(None)
+        # Restore while the response reader is still available (e.g. heartbeat
+        # failure or ordinary close). A dead socket cannot run page cleanup;
+        # reconnect reuses the same adapter without wrapping a second time.
+        if (self._ws is not None and self._reader_task is not None
+                and not self._reader_task.done()):
+            try:
+                await self._evaluate(self.adapter.close_expression())
+                await self.command('Runtime.removeBinding', {'name': BINDING_NAME})
+            except (ConnectionError, asyncio.TimeoutError):
+                pass
         if self._reader_task is not None:
             self._reader_task.cancel()
             await asyncio.gather(self._reader_task, return_exceptions=True)
@@ -358,22 +386,17 @@ class CdpSession:
 
     async def close(self):
         self._closed = True
-        if self.ready:
-            try:
-                await self._evaluate(self.adapter.close_expression())
-                await self.command('Runtime.removeBinding', {'name': BINDING_NAME})
-            except (ConnectionError, asyncio.TimeoutError):
-                pass
         if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
-        else:
-            await self._disconnect()
+        # Cancellation may have interrupted _run's own finally/cleanup. Finish
+        # it again so a close racing probe failure cannot retain a live reader.
+        await self._disconnect()
 
     def diagnostics(self):
         return dict(ready=self.ready, transport='relaunch', port=self.port,
                     adapter=self.adapter.name, probe=dict(self.probe),
                     generation=self.generation, attempts=self.attempts,
                     reconnects=self.reconnects, samples=self.samples,
-                    error=self._last_error)
+                    error=self._last_error, reason=self.probe.get('reason', ''))

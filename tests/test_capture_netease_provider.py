@@ -71,6 +71,16 @@ class NetEaseProviderTests(CaptureAsyncTestCase):
         self.assertIs(first, second)
         provider._netease_locator.launch.assert_awaited_once()
 
+    async def test_unsafe_callback_chain_reports_degraded_fallback_health(self):
+        provider, _ = self.provider()
+        provider._netease_cdp_session = session = Session(12345)
+        session.probe = dict(api=False, reason='native-callback-chain-unavailable')
+        health = provider.netease_capture_health()
+        self.assertFalse(health['ready'])
+        self.assertEqual(health['state'], 'degraded')
+        self.assertEqual(health['reason'], 'native-callback-chain-unavailable')
+        self.assertIn('系统进度', health['message'])
+
     async def test_disable_during_launch_never_starts_a_cdp_worker(self):
         provider, values = self.provider()
         entered, release = asyncio.Event(), asyncio.Event()

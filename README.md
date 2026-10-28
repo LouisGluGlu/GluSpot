@@ -270,16 +270,47 @@ and multi-hour soak remain pending; this experiment is not a release claim.
 The NetEase P0/P1 follow-up adds an independently disabled CEF route using
 **transport A only**: GluSpot starts/restarts `cloudmusic.exe` with a random
 loopback debugging port. Nothing is written into NetEase's install directory.
-A versioned, feature-probed JavaScript adapter pushes coalesced progress through
-CDP; precise seeks reuse the existing physical-readback state machine. The
-fallback order is CDP, a nonzero SMTC timeline, UIA progress, then basic capture.
+NetEase 3.1.42 has one native callback slot per event: the first `appendRegisterCall`
+creates a websdk stub via `registerCallAdapter` and displaces the native UI
+callback. Before injection, `registerCallMap` had no entries for
+`audioplayer.onPlayProgress`, `audioplayer.onPlayState`, `audioplayer.onLoad` or
+`audioplayer.onEnd`. Captured events alone therefore cannot prove safe capture.
+NetEase's UI receives these events through a separate native path; its precise
+JavaScript entry point has not been established from the available evidence.
+
+Conservative non-invasive capture must never call `appendRegisterCall` or
+`registerCallAdapter`. It may only chain an existing callback in an already
+populated `registerCallMap` queue with a callable `registerCallStubs` entry;
+all four queues must pass preflight before any mutation. The original callback
+runs first with the same `this` and arguments, preserving its return value and
+errors; observer errors are swallowed. Close restores the original slot
+descriptor, and reinstall is idempotent. Without an established chain, return
+`api:false` with health reason `native-callback-chain-unavailable` and use the
+existing fallback: a nonzero SMTC timeline, UIA progress, then basic capture.
+
+Ordinary pushed progress stays capped at 10 Hz, with immediate track/state/seek
+events and no progress polling. Ratios 0 or 1 cannot infer duration; an already
+known duration from prior progress or an explicit Load field is retained.
+Seek retains `channel.call('audioplayer.seek', callback, [trackId, uniqueSeekId,
+seconds])` and the existing independent physical-readback state machine.
 The stdlib WebSocket client adds no package dependency. See the [NetEase
 configuration, safety limits and existing-port probe](docs/capture-position.md#netease-cef-experiment-transport-a).
-The probe samples ten seconds, verifies three clamped seeks, restores the
-original observed position, and prints a JSON summary as its last line. This
-source experiment changes no release version or package.
+With an established chain, the probe samples ten seconds, attempts three clamped
+seeks and restoration, and prints a final JSON summary. Reports must include
+original callback counts, whether the chain is intact and whether physical
+playback is advancing; auto-next remains unverified unless checked on device.
+This source experiment changes no release version or package. No live acceptance
+is claimed.
 
-Latest Linux offscreen verification (2026-10-28): baseline `a69e740` **5,544
+Non-invasive hook verification (2026-10-28): the final capture suite passed
+**193 tests × 3** on Linux offscreen (6.713 / 6.721 / 6.729 s), with zero failures,
+errors or skips. Tests model single-slot displacement, safe existing chains,
+refusal, exact restoration, repeated attach, observer errors and cleanup races.
+PC repetitions and real playback/lyrics/auto-next remain pending; see the
+[offline evidence and device checklist](docs/capture-position.md#non-invasive-hook-verification-2026-10-28).
+
+Recorded Linux offscreen verification (2026-10-28), predating the conservative
+callback-chain requirements above: baseline `a69e740` **5,544
 tests / 149.938 s**; NetEase P0/P1 source `33d4d72` **5,625 tests / 158.407 s**.
 Both report **17 failures, 11 errors and 31 skips**, with all 28 failure/error
 identities unchanged. All **172 capture tests pass / 4.422 s**, including 81
