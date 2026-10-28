@@ -383,7 +383,10 @@ class RuntimeSeekTests(unittest.IsolatedAsyncioTestCase):
 
         for disabled_scope in ('flag', 'profile'):
             with self.subTest(scope=disabled_scope):
-                settings = {'v2_capture_position_enabled': True}
+                settings = {
+                    'v2_capture_position_enabled': True,
+                    'v2_capture_app_profiles': {'netease': {'mode': 'smtc'}},
+                }
                 provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
                 provider.settings_getter = lambda key, default=None: settings.get(key, default)
                 provider._seek_session_matches_track = lambda *_args: matches(None)
