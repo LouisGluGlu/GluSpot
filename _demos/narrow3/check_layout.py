@@ -43,11 +43,11 @@ def check(variant, width, mode, dj):
 def main():
     failures = 0
     layout = NarrowLayout(360, 640)
-    expected = [(layout.previous, (106, 460, 48)), (layout.play, (180, 460, 72)),
-                (layout.next, (254, 460, 48)), (layout.favorite, (38, 592, 44)),
-                (layout.dj, (320, 592, 48))]
-    for fraction, points in ((1, ((148, 532), (212, 532))),
-                             (0, ((264, 592), (324, 592)))):
+    expected = [(layout.previous, (115, 532, 50)), (layout.play, (180, 532, 64)),
+                (layout.next, (245, 532, 50)), (layout.favorite, (68.5, 601, 105)),
+                (layout.dj, (321, 601, 46))]
+    for fraction, points in ((1, ((195, 601), (251, 601))),
+                             (0, ((264, 601), (324, 601)))):
         expected.extend((rect, (x, y, 40)) for rect, (x, y) in zip(layout.utility(fraction), points))
     for rect, (x, y, side) in expected:
         if (rect.center().x(), rect.center().y(), rect.width()) != (x, y, side):

@@ -43,28 +43,28 @@ class NarrowLayout:
 
     @property
     def play(self):
-        return self.centered(self.width / 2, self.height - 180, 72)
+        return self.centered(self.width / 2, self.height - 108, 64)
 
     @property
     def previous(self):
-        return self.centered(self.width / 2 - 74, self.height - 180, 48)
+        return self.centered(self.width / 2 - 65, self.height - 108, 50)
 
     @property
     def next(self):
-        return self.centered(self.width / 2 + 74, self.height - 180, 48)
+        return self.centered(self.width / 2 + 65, self.height - 108, 50)
 
     @property
     def favorite(self):
-        return self.centered(38, self.height - 48, 44)
+        return QRectF(16, self.height - 60, 105, 42)
 
     @property
     def dj(self):
-        return self.centered(self.width - 40, self.height - 48, 48)
+        return self.centered(self.width - 39, self.height - 39, 46)
 
     def utility(self, dj_fraction):
-        # Interpolate between the centered row and the right-aligned bottom row.
+        # Keep both buttons on the bottom baseline as the DJ lane opens or closes.
         t = max(0.0, min(1.0, dj_fraction))
-        y = (self.height - 48) * (1 - t) + (self.height - 108) * t
-        loop_x = (self.width - 96) * (1 - t) + (self.width / 2 - 32) * t
-        layout_x = (self.width - 36) * (1 - t) + (self.width / 2 + 32) * t
+        y = self.height - 39
+        loop_x = (self.width - 96) * (1 - t) + (self.width - 165) * t
+        layout_x = (self.width - 36) * (1 - t) + (self.width - 109) * t
         return self.centered(loop_x, y, 40), self.centered(layout_x, y, 40)

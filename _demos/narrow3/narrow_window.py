@@ -59,6 +59,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.cover_index = 0
         self.song_index = 0
         self.liked_songs = set()
+        self.playlist_songs = set()
         self.shelf = False
         self.footer_hover = False
         self.dj_available = True
@@ -362,9 +363,18 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             rect = self.posed_rect("media:" + command, rect)
             self._paint_transport_icon(painter, rect, command, ink)
         favorite = self.posed_rect("collection", layout.favorite)
-        self._paint_surface_glass(painter, favorite, role="collection")
+        self._clear_control_renderer.paint(
+            painter, favorite, scene=self._surface_glass_backdrop(),
+            scene_bounds=QRectF(self.rect()), ink=ink, now=time.monotonic(),
+            role="collection", state=self._glass_feedback.state("collection"),
+            kind="capsule", level=self._surface_glass_level())
         heart = "heart_filled" if self.song_index in self.liked_songs else "heart_outline"
-        paint_music_source_icon(painter, favorite.adjusted(11, 11, -11, -11), heart, tint=ink)
+        for index, icon in enumerate((heart, "playlist_add")):
+            side = favorite.height() * (.63 if index == 0 else .61)
+            center_x = favorite.left() + favorite.width() * (.25 + .5 * index)
+            glyph = QRectF(center_x - side / 2, favorite.center().y() - side / 2, side, side)
+            icon_ink = QColor("#ff3e4c") if index == 0 and self.song_index in self.liked_songs else ink
+            paint_music_source_icon(painter, glyph, icon, tint=icon_ink)
         loop, mode = layout.utility(self.dj_motion.value(time.monotonic()))
         loop = self.posed_rect("footer_loop", loop)
         mode = self.posed_rect("footer_layout", mode)
@@ -460,10 +470,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         elif footer_visible and layout.play.contains(event.position()):
             self.owner.media_is_playing = not self.owner.media_is_playing
         elif footer_visible and layout.favorite.contains(event.position()):
-            if self.song_index in self.liked_songs:
-                self.liked_songs.remove(self.song_index)
+            if event.position().x() < layout.favorite.center().x():
+                if self.song_index in self.liked_songs:
+                    self.liked_songs.remove(self.song_index)
+                else:
+                    self.liked_songs.add(self.song_index)
             else:
-                self.liked_songs.add(self.song_index)
+                self.playlist_songs.add(self.song_index)
         elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[0].contains(event.position()):
             self.loop_mode = (self.loop_mode + 1) % 3
         elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[1].contains(event.position()):
