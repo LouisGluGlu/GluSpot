@@ -240,7 +240,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             painter.save()
             painter.setOpacity(visibility)
             painter.drawImage(QPointF(0, 0), self._controls_bands[0])
-            painter.drawImage(QPointF(0, self.height() - 128), self._controls_bands[1])
+            painter.drawImage(QPointF(0, self.height() - VeilOverlay.BOTTOM_HEIGHT), self._controls_bands[1])
             painter.restore()
         if self.hints:
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
@@ -372,8 +372,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.paint_controls(layer, layout, 1.0)
         self._clear_control_renderer.end_frame()
         self._controls_bands = (image.copy(0, 0, image.width(), round(VeilOverlay.TOP_END * ratio)),
-                                image.copy(0, round((self.height() - 128) * ratio),
-                                           image.width(), round(128 * ratio)))
+                                image.copy(0, round((self.height() - VeilOverlay.BOTTOM_HEIGHT) * ratio),
+                                           image.width(), round(VeilOverlay.BOTTOM_HEIGHT * ratio)))
         self._controls_key, self._controls_at = key, now
 
     def refresh_fade_background(self, now):
