@@ -470,6 +470,13 @@ class WindowsMediaProvider:
             self.lyrics_store = LocalLyricsStore(root=Path(__file__).resolve().parents[1] / "lyrics", settings_getter=settings_getter)
         self._loop = None
         self._capture_runtime = None
+        # NetEase transport-A session is owned by the provider loop.  It is
+        # deliberately separate from CaptureRuntime so a track rebind does
+        # not tear down the CDP connection and so a disabled flag can close it
+        # without touching the SMTC route.
+        self._netease_cdp_session = None
+        self._netease_locator = None
+        self._netease_launch = None
         self._thread = None
         self._manager = None
         self._last_data: IslandVisualData | None = None
@@ -625,6 +632,8 @@ class WindowsMediaProvider:
         if runtime is not None and loop is not None and loop.is_running():
             asyncio.run_coroutine_threadsafe(runtime.close(), loop)
             self._capture_runtime = None
+        if loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._close_netease_cdp(), loop)
         lock = getattr(self, "_audio_route_init_lock", None)
         if lock is None:
             lock = self._audio_route_init_lock = threading.Lock()
@@ -637,6 +646,191 @@ class WindowsMediaProvider:
     def _capture_is_enabled(self) -> bool:
         return capture_enabled(getattr(self, "settings_getter", None))
 
+    def _netease_cef_enabled(self) -> bool:
+        """Return the explicit, default-off transport-A opt-in.
+
+        ``port`` and ``pipe`` remain accepted settings values for migration
+        and future transports, but this branch implements only relaunch.  A
+        random loopback port is allocated by NetEaseLocator; no player
+        installation file is ever written.
+        """
+        getter = getattr(self, "settings_getter", None)
+        if not callable(getter) or not self._capture_is_enabled():
+            return False
+        transport = str(getter("netease.transport", "off") or "off").strip().casefold()
+        if getter("netease.cef.enabled", False) is not True or transport != "relaunch":
+            return False
+        from api.capture.capabilities import capability_for, capture_profile
+        return capture_profile(getter, capability_for("cloudmusic.exe")) != "off"
+
+    async def _close_netease_cdp(self):
+        start_lock = getattr(self, "_netease_start_lock", None)
+        if (getattr(self, "_netease_cdp_session", None) is None
+                and getattr(self, "_netease_restore_task", None) is None
+                and (start_lock is None or not start_lock.locked())):
+            return
+        async with self._netease_lifecycle_lock():
+            await self._close_netease_cdp_locked()
+
+    def _netease_lifecycle_lock(self):
+        lock = getattr(self, "_netease_start_lock", None)
+        if lock is None:
+            lock = self._netease_start_lock = asyncio.Lock()
+        return lock
+
+    async def _close_netease_cdp_locked(self):
+        restore = getattr(self, "_netease_restore_task", None)
+        self._netease_restore_task = None
+        if restore is not None and restore is not asyncio.current_task():
+            restore.cancel()
+            await asyncio.gather(restore, return_exceptions=True)
+        cdp = getattr(self, "_netease_cdp_session", None)
+        self._netease_cdp_session = None
+        if cdp is not None:
+            latest = cdp.latest
+            self._netease_expected_native = latest.get('trackId') if isinstance(latest, dict) else None
+            await cdp.close()
+
+    def netease_capture_health(self):
+        """Immutable status for the settings surface; no native I/O."""
+        cdp = getattr(self, "_netease_cdp_session", None)
+        state = "off"
+        message = "精确进度未启用"
+        ready = cdp is not None and cdp.ready
+        if self._netease_cef_enabled():
+            if ready:
+                state, message = "ready", "精确进度已连接"
+                runtime = getattr(self, "_capture_runtime", None)
+                if runtime is not None and not getattr(runtime, "_cef_seek_enabled", True):
+                    state, message = "degraded", "精确进度已连接；精确跳转不可用，暂用系统跳转"
+            elif cdp is not None:
+                state, message = "connecting", "正在连接；暂用系统进度"
+            else:
+                state, message = "repair", "未连接；可修复并重启网易云"
+        return dict(state=state, message=message, ready=bool(ready),
+                    restore=getattr(self, "_netease_restore_status", ""))
+
+    def repair_netease_capture(self):
+        """Queue the explicitly requested restart; never block the Qt thread."""
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running() or not self._netease_cef_enabled():
+            return False
+        return asyncio.run_coroutine_threadsafe(self._repair_netease_capture(), loop)
+
+    async def _repair_netease_capture(self):
+        runtime = getattr(self, "_capture_runtime", None)
+        executor = getattr(self, "_capture_executor", None) or getattr(runtime, "executor", None)
+        if executor is not None and (executor.busy or executor.uncertain):
+            return False
+        async with self._netease_lifecycle_lock():
+            cdp = getattr(self, "_netease_cdp_session", None)
+            # Settings changes can trigger a refresh before the enable button
+            # queues its explicit launch. Join that just-started connection.
+            if cdp is None or time.monotonic() - getattr(self, "_netease_started_at", 0.0) > 2.0:
+                await self._close_netease_cdp_locked()
+                self._netease_retry_at = 0.0
+                cdp = await self._ensure_netease_cdp_locked()
+        self._request_immediate_media_refresh()
+        return cdp is not None
+
+    def disable_netease_capture(self):
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running():
+            return False
+        return asyncio.run_coroutine_threadsafe(self._close_netease_cdp(), loop)
+
+    async def _ensure_netease_cdp(self):
+        async with self._netease_lifecycle_lock():
+            return await self._ensure_netease_cdp_locked()
+
+    async def _ensure_netease_cdp_locked(self):
+        if not self._netease_cef_enabled():
+            await self._close_netease_cdp_locked()
+            return None
+        existing = getattr(self, "_netease_cdp_session", None)
+        if existing is not None and not getattr(existing, "_closed", False):
+            return existing
+        if time.monotonic() < getattr(self, "_netease_retry_at", 0.0):
+            return None
+        # Reserve the retry window before any await: a simultaneous settings
+        # repair and media refresh cannot launch two copies. Reconnect itself
+        # belongs to CdpSession and never restarts the player.
+        self._netease_retry_at = time.monotonic() + 10.0
+        from api.capture.cdp import CdpSession
+        from api.capture.netease import NetEaseLocator
+        from api.capture.netease_js import JsAdapterRegistry
+        locator = getattr(self, "_netease_locator", None) or NetEaseLocator()
+        self._netease_locator = locator
+        try:
+            adapter = str(self.settings_getter("netease.adapter", "auto") or "auto")
+            JsAdapterRegistry.select(requested=adapter)  # Validate before restart.
+            installation = await asyncio.to_thread(locator.locate)
+            if installation is None:
+                return None
+            if not self._netease_cef_enabled():
+                return None
+            track = getattr(getattr(self, "_last_data", None), "track", None)
+            launch = await locator.launch(installation, relaunch=True)
+            self._netease_launch = launch
+            if not self._netease_cef_enabled():
+                return None
+            cdp = CdpSession(launch.port, adapter=adapter, version=installation.version)
+            await cdp.start()
+            self._netease_cdp_session = cdp
+            self._netease_started_at = time.monotonic()
+            if track is not None and track.source_app_id and track.duration_seconds > 0:
+                self._netease_restore_task = asyncio.create_task(self._restore_netease_position(cdp, track))
+            return cdp
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return None
+
+    async def _restore_netease_position(self, cdp, track):
+        """Best effort only after independent post-restart metadata evidence."""
+        from api.capture.capabilities import capability_for
+        from api.capture.cef import CEF_SEEK_POLICY, CefPositionSource, CefSeekBackend
+        if capability_for(track.source_app_id).service != "netease":
+            return
+        self._netease_restore_status = "pending"
+        source = CefPositionSource(cdp)
+        try:
+            if not await cdp.wait_ready(timeout=10.0):
+                self._netease_restore_status = "no-connection"
+                return
+            sample = await source.wait_sample(timeout=5.0)
+            if sample is None:
+                self._netease_restore_status = "no-progress"
+                return
+            expected_native = getattr(self, "_netease_expected_native", None)
+            if expected_native is not None and source.native_track_id != expected_native:
+                self._netease_restore_status = "track-changed"
+                return
+            async def current():
+                if cdp is not getattr(self, "_netease_cdp_session", None) or not self._netease_cef_enabled():
+                    return False
+                selected = await self._get_session()
+                return (selected is not None and str(selected.source_app_user_model_id) == track.source_app_id
+                        and await self._seek_session_matches_track(selected, track.title, track.artist, ""))
+            if not await current():
+                self._netease_restore_status = "track-changed"
+                return
+            executor = getattr(self, "_capture_executor", None)
+            if executor is None:
+                from api.capture.seek import SeekExecutor
+                executor = self._capture_executor = SeekExecutor()
+            result = await executor.execute(
+                track.position_seconds, identity=sample.identity,
+                request_id="restore-" + secrets.token_hex(12), smtc=CefSeekBackend(source),
+                fallback=None, guard=current, policy=CEF_SEEK_POLICY, primary_name="cef")
+            self._netease_restore_status = result.reason
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._netease_restore_status = "unavailable"
+        finally:
+            source.close()
+
     async def _bind_capture_session(self, session, track):
         """Wire opt-in observations on the existing WinRT background loop."""
         runtime = getattr(self, "_capture_runtime", None)
@@ -646,6 +840,7 @@ class WindowsMediaProvider:
             if runtime is not None:
                 await runtime.close()
                 self._capture_runtime = None
+            await self._close_netease_cdp()
             return
         from api.capture.capabilities import capability_for, capture_profile
         mode = capture_profile(getattr(self, "settings_getter", None), capability_for(track.source_app_id))
@@ -653,7 +848,23 @@ class WindowsMediaProvider:
             if runtime is not None:
                 await runtime.close()
                 self._capture_runtime = None
+            if capability_for(track.source_app_id).service == "netease" or not self._netease_cef_enabled():
+                await self._close_netease_cdp()
             return
+        capability = capability_for(track.source_app_id)
+        cef_session = None
+        cef_requested = False
+        if capability.service == "netease":
+            cef_requested = self._netease_cef_enabled()
+            cef_session = await self._ensure_netease_cdp()
+            # Installation discovery can fail on the first refresh and
+            # succeed later (for example while CloudMusic is updating). A
+            # runtime made before that discovery must be rebound so it can
+            # construct its CefPositionSource.
+            if runtime is not None and (getattr(runtime, "cef_session", None) is not cef_session
+                                        or getattr(runtime, "cef_requested", False) != cef_requested):
+                await runtime.close()
+                self._capture_runtime = runtime = None
         if runtime is None:
             from api.capture.runtime import CaptureRuntime
             from api.capture.seek import SeekExecutor
@@ -666,7 +877,9 @@ class WindowsMediaProvider:
             worker = getattr(self, "_capture_uia_worker", None)
             if worker is None:
                 worker = self._capture_uia_worker = StaWorker()
-            runtime = self._capture_runtime = CaptureRuntime(executor=executor, uia_worker=worker)
+            runtime = self._capture_runtime = CaptureRuntime(
+                executor=executor, uia_worker=worker, cef_session=cef_session,
+                cef_requested=cef_requested)
 
         async def matches(candidate):
             return (str(getattr(candidate, "source_app_user_model_id", "")) == track.source_app_id
@@ -2398,6 +2611,8 @@ class WindowsMediaProvider:
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
+        if self._netease_cef_enabled():
+            self._loop.create_task(self._ensure_netease_cdp())
         self._loop.run_forever()
 
     def _run(self, coro):

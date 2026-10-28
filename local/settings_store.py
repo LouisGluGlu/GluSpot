@@ -339,6 +339,13 @@ DEFAULT_SETTINGS = {
     # Experimental external position pipeline; legacy SMTC behavior stays default.
     "v2_capture_position_enabled": False,
     "v2_capture_app_profiles": {},
+    # NetEase CEF/CDP capture is a separate developer opt-in.  Transport A
+    # owns process startup and never writes to the player's installation
+    # directory.  Keep these keys explicit so a malformed or legacy settings
+    # file cannot turn the bridge on accidentally.
+    "netease.transport": "off",
+    "netease.cef.enabled": False,
+    "netease.adapter": "auto",
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_font_size": 12,
     "v2_dual_line_secondary_weight": 72,
@@ -497,6 +504,25 @@ class SettingsManager(QObject):
                 if not isinstance(self._settings.get(key), bool):
                     self._settings[key] = default
                     migrated = True
+            transport = self._settings.get("netease.transport", "off")
+            if not isinstance(transport, str) or transport.strip().casefold() not in {"off", "relaunch", "port", "pipe"}:
+                self._settings["netease.transport"] = "off"
+                migrated = True
+            else:
+                canonical = transport.strip().casefold()
+                migrated = migrated or transport != canonical
+                self._settings["netease.transport"] = canonical
+            if not isinstance(self._settings.get("netease.cef.enabled"), bool):
+                self._settings["netease.cef.enabled"] = False
+                migrated = True
+            adapter = self._settings.get("netease.adapter", "auto")
+            if not isinstance(adapter, str) or not adapter.strip() or len(adapter.strip()) > 64:
+                self._settings["netease.adapter"] = "auto"
+                migrated = True
+            else:
+                canonical = adapter.strip().casefold()
+                migrated = migrated or adapter != canonical
+                self._settings["netease.adapter"] = canonical
             if not self._settings["v2_owned_playback_enabled"] and not self._settings["v2_system_capture_enabled"]:
                 self._settings["v2_owned_playback_enabled"] = True
                 migrated = True
@@ -605,6 +631,17 @@ class SettingsManager(QObject):
         if key == "v2_capture_app_profiles":
             from api.capture.capabilities import normalize_capture_profiles
             value = normalize_capture_profiles(getattr(self, "_capture_legacy_profiles", None), value)
+        if key == "netease.transport":
+            if not isinstance(value, str) or value.strip().casefold() not in {"off", "relaunch", "port", "pipe"}:
+                return
+            value = value.strip().casefold()
+        if key == "netease.cef.enabled":
+            if not isinstance(value, bool):
+                return
+        if key == "netease.adapter":
+            if not isinstance(value, str) or not value.strip() or len(value.strip()) > 64:
+                return
+            value = value.strip().casefold()
         if key == "v2_personal_dj_enabled" and not isinstance(value, bool):
             return
         if key == "v2_library_expanded" and not isinstance(value, bool):

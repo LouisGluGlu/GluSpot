@@ -63,3 +63,25 @@ class CaptureSettingsTests(unittest.TestCase):
         self.assertIs(manager.get('v2_capture_position_enabled'), False)
         manager.set('v2_capture_position_enabled', 1)
         self.assertIs(manager.get('v2_capture_position_enabled'), False)
+
+    def test_netease_transport_defaults_off_and_malformed_flags_fail_closed(self):
+        manager, _ = self.manager({'netease.cef.enabled': 'true', 'netease.transport': 123})
+        self.assertIs(manager.get('netease.cef.enabled'), False)
+        self.assertEqual(manager.get('netease.transport'), 'off')
+        self.assertEqual(manager.get('netease.adapter'), 'auto')
+        manager.set('netease.cef.enabled', 1)
+        manager.set('netease.transport', 'unknown')
+        self.assertIs(manager.get('netease.cef.enabled'), False)
+        self.assertEqual(manager.get('netease.transport'), 'off')
+
+    def test_netease_flags_roundtrip_without_enabling_master(self):
+        manager, path = self.manager({})
+        manager.set('netease.transport', ' RELAUNCH ')
+        manager.set('netease.cef.enabled', True)
+        manager.set('netease.adapter', ' LEGACY-NATIVE-V1 ')
+        manager.save_now()
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved['netease.transport'], 'relaunch')
+        self.assertTrue(saved['netease.cef.enabled'])
+        self.assertEqual(saved['netease.adapter'], 'legacy-native-v1')
+        self.assertFalse(saved['v2_capture_position_enabled'])
