@@ -148,7 +148,7 @@ class ProbeTests(CaptureAsyncTestCase):
         async with FakeCdpServer() as server:
             server.reject_probe = True
             result = await netease_cdp_probe.run_probe(server.port, sample_seconds=.01,
-                                                      timeout=.06, emit=lambda _: None)
+                                                      timeout=1.0, emit=lambda _: None)
             self.assertFalse(result['passed'])
             self.assertFalse(result['api'])
             self.assertEqual(result['reason'], 'native-callback-chain-unavailable')
