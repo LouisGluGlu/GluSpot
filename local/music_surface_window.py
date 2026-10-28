@@ -34,6 +34,7 @@ from local.lyric_unit_timing import (
     real_unit_row_finished_before_next_start,
     timed_highlight_wave_progress,
     timed_unit_reading_front,
+    _aligned_offsets,
 )
 from local.island_presentation import animation_duration
 from local.music_lyric_reading import (
@@ -254,6 +255,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._pressed_window_button = ""
         self._pressed_dj_toggle_ready = False
         self._pressed_lyric_index: int | None = None
+        # A word target is kept separately from the row target.  Row hit
+        # rectangles remain the fallback for ordinary line-timed lyrics and
+        # for whitespace around a genuinely timed word.
+        self._pressed_lyric_word: tuple[int, int, float] | None = None
+        self._pressed_lyric_track_key = None
         self._control_last_motion_at = time.monotonic()
         self._control_transition_started_at = self._control_last_motion_at
         self._control_reveal_from = 1.0
@@ -451,6 +457,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._seek_request_source_app: str | None = None
         self._pending_lyric_offset_reanchor = False
         self._lyric_hit_rects: dict[int, QRectF] = {}
+        self._lyric_word_hit_rects: dict[tuple[int, int, int], tuple[QRectF, float]] = {}
+        self._lyric_word_hit_track_key = None
         self._hovered_lyric_index: int | None = None
         self._lyric_clip_rect = QRectF()
         self._seek_pending = False
@@ -2819,6 +2827,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                  if title is not None else None)
         if title is not None:
             self._lyric_hit_rects.clear()
+            self._lyric_word_hit_rects.clear()
+            self._lyric_word_hit_track_key = None
             self._queue_hit_rects.clear()
             self._media_button_rects.clear()
             self._metadata_hit_rects.clear()
@@ -2829,6 +2839,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._dismiss_song_playlist_panel()
             self._pressed_media_command = ""
             self._pressed_lyric_index = None
+            self._pressed_lyric_word = None
+            self._pressed_lyric_track_key = None
         self._reset_control_idle()
         self.update()
 
@@ -7369,6 +7381,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         )
         focus_index = pair_first_by_row.get(focus_index, focus_index)
         self._lyric_hit_rects = {}
+        self._lyric_word_hit_rects = {}
+        self._lyric_word_hit_track_key = (
+            self._visual_track_identity(),
+            str(getattr(self.owner, "media_source_app", "") or ""),
+        )
         # Sentence spacing leaves a clear entrance lane for annotations;
         # wrapping within a sentence retains its tighter visual-line rhythm.
         row_gap = max(18.0 * surface_scale, rect.height() * 0.035)
@@ -7825,6 +7842,21 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             if timed and outgoing_lyrics is None and not lyrics_hidden_by_layout and (cover_fraction < 0.02 or cover_lyrics_layout):
                 hit_row = QRectF(row.left(), painted_top, row.width(), max(1.0, painted_bottom - painted_top))
                 self._lyric_hit_rects[index] = lyric_transform.mapRect(hit_row.intersected(lyric_clip))
+                if index < len(self._display_timed_kinds) and self._display_timed_kinds[index] == "unit":
+                    self._populate_lyric_word_hit_rects(
+                        index,
+                        text=paint_lines[index],
+                        source_text=timed[index][1],
+                        layers=visual_layers[index],
+                        layout=layout,
+                        units=tuple(self._display_timed_units[index])
+                        if index < len(self._display_timed_units) else (),
+                        row=row,
+                        line_offsets=tuple(line_offsets),
+                        lyric_transform=lyric_transform,
+                        lyric_clip=lyric_clip,
+                        lyric_slide=lyric_slide,
+                    )
             # QWidget clips pixels, but the Python lyric shaping and halo work
             # would still run for every visible row on a controls-only frame.
             # Keep hit geometry current while skipping ink outside the exposed
@@ -10045,6 +10077,116 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             edges.add("bottom")
         return edges
 
+    def _populate_lyric_word_hit_rects(
+        self, index: int, text: str, source_text: str, layers, layout: QTextLayout,
+        units: tuple[object, ...], row: QRectF, line_offsets: tuple[float, ...],
+        lyric_transform: QTransform, lyric_clip: QRectF, lyric_slide: float,
+    ) -> None:
+        """Expose measured source words as precise seek targets.
+
+        ``units`` are timed against the provider's original text while the
+        surface may hide a singer label or a bracketed annotation.  The
+        presentation layer already carries a source offset for every painted
+        character, so hit geometry can use the same mapping as the reading
+        front without retiming or inventing estimates.
+        """
+        if not units:
+            return
+        previous_start = -math.inf
+        seekable_unit = False
+        for unit in units:
+            if bool(getattr(unit, "estimated", False)):
+                return
+            try:
+                unit_start = float(getattr(unit, "start_seconds"))
+            except (TypeError, ValueError, OverflowError, AttributeError):
+                return
+            if not math.isfinite(unit_start) or unit_start < previous_start:
+                return
+            if str(getattr(unit, "text", "") or ""):
+                seekable_unit = True
+            previous_start = unit_start
+        if not seekable_unit:
+            return
+        primary = self._primary_timed_lyric_text(source_text)
+        if not primary or not text.strip():
+            return
+        # Source units are provider data.  Refuse a malformed/stale unit row
+        # before using offsets, otherwise a later unit could land on a
+        # different painted word while still carrying valid numbers.
+        source_offsets = _aligned_offsets(primary, units)
+        if source_offsets is None or len(source_offsets) != len(units) + 1:
+            return
+        offsets = self._visible_primary_source_offsets(source_text, layers)
+        if offsets is None:
+            visible_primary = self._primary_timed_lyric_text(text)
+            if visible_primary != primary:
+                return
+            offsets = tuple(range(len(text) + 1))
+        if len(offsets) != len(text) + 1:
+            return
+        for unit_index, unit in enumerate(units):
+            unit_text = str(getattr(unit, "text", "") or "")
+            source_start = source_offsets[unit_index]
+            source_end = min(len(primary), source_offsets[unit_index + 1])
+            if source_end <= source_start:
+                continue
+            try:
+                seconds = float(getattr(unit, "start_seconds"))
+            except (TypeError, ValueError, OverflowError, AttributeError):
+                continue
+            if not math.isfinite(seconds):
+                continue
+            visible_start = bisect_left(offsets, source_start)
+            visible_end = bisect_left(offsets, source_end)
+            if visible_end <= visible_start:
+                continue
+            fragments = []
+            for visual_index in range(layout.lineCount()):
+                visual = layout.lineAt(visual_index)
+                line_start = len(self._utf16_slice(text, 0, visual.textStart()))
+                line_end = line_start + len(self._utf16_slice(text, visual.textStart(), visual.textLength()))
+                start = max(visible_start, line_start)
+                end = min(visible_end, line_end)
+                if end <= start:
+                    continue
+                left_utf16 = self._utf16_offset(text, start)
+                right_utf16 = self._utf16_offset(text, end)
+                left = float(visual.cursorToX(left_utf16)[0])
+                right = float(visual.cursorToX(right_utf16)[0])
+                offset = line_offsets[visual_index] if visual_index < len(line_offsets) else 0.0
+                segment = QRectF(
+                    row.left() + min(left, right),
+                    row.top() + visual.y() + offset,
+                    max(2.0, abs(right - left)),
+                    max(1.0, visual.height()),
+                ).intersected(lyric_clip)
+                if segment.isEmpty():
+                    continue
+                mapped = lyric_transform.mapRect(segment)
+                if lyric_slide:
+                    mapped.translate(lyric_slide, 0.0)
+                mapped = mapped.intersected(QRectF(self.rect()))
+                if mapped.isEmpty():
+                    continue
+                fragments.append(mapped)
+            for fragment_index, target in enumerate(fragments):
+                if target.isValid() and not target.isEmpty():
+                    self._lyric_word_hit_rects[(index, unit_index, fragment_index)] = (target, seconds)
+
+    def _lyric_word_target_at(self, point: QPointF):
+        """Return ``(row, unit, seconds)`` for a measured word under point."""
+        current_key = (
+            self._visual_track_identity(),
+            str(getattr(self.owner, "media_source_app", "") or ""),
+        )
+        if self._lyric_word_hit_track_key != current_key:
+            return None
+        for (row, unit, _fragment), (rect, seconds) in self._lyric_word_hit_rects.items():
+            if rect.contains(point):
+                return row, unit, seconds
+        return None
+
     def mousePressEvent(self, event):
         if self._compact_committing:
             event.accept()
@@ -10058,6 +10200,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._queue_pressed = None
         self._queue_pressed_token = None
         self._pressed_dj_toggle_ready = False
+        self._pressed_lyric_track_key = None
         if self._audio_output_panel is not None and self._audio_output_panel.isVisible():
             output_button = self._button_rects.get("audio_output", QRectF())
             if not output_button.contains(event.position()):
@@ -10076,6 +10219,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 and self._transition_window_control_contains(key, rect, event.position())
             ), "")
             self._pressed_lyric_index = None
+            self._pressed_lyric_word = None
+            self._pressed_lyric_track_key = None
             event.accept()
             return
         if self._effective_content_layout() == "playlist" and self._queue_snapshot is not None:
@@ -10103,7 +10248,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         if glass_key and self._glass_control_enabled(glass_key):
             self._glass_feedback.press(glass_key, event.position(), time.monotonic())
             self.update()
-        self._pressed_lyric_index = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(event.position())), None)
+        self._pressed_lyric_word = self._lyric_word_target_at(event.position())
+        self._pressed_lyric_index = (
+            self._pressed_lyric_word[0]
+            if self._pressed_lyric_word is not None else
+            next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(event.position())), None)
+        )
+        if self._pressed_lyric_index is not None:
+            self._pressed_lyric_track_key = (
+                self._visual_track_identity(),
+                str(getattr(self.owner, "media_source_app", "") or ""),
+            )
         over_button = bool(self._pressed_window_button or self._pressed_media_command or self._pressed_lyric_index is not None or self._queue_pressed is not None)
         self._moving = not self._fullscreen and not self._resize_edges and not over_button and event.position().y() <= self.TITLE_BAR_HEIGHT
         event.accept()
@@ -10127,13 +10282,19 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             if not (event.buttons() & Qt.MouseButton.LeftButton):
                 self._pressed_window_button = ""
             self._pressed_lyric_index = None
+            self._pressed_lyric_word = None
+            self._pressed_lyric_track_key = None
             self._moving = False
             self._resize_edges = set()
             self.unsetCursor()
             event.accept()
             return
         if not (event.buttons() & Qt.MouseButton.LeftButton):
-            hover = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(event.position())), None)
+            word_hover = self._lyric_word_target_at(event.position())
+            hover = (
+                word_hover[0] if word_hover is not None else
+                next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(event.position())), None)
+            )
             if hover != self._hovered_lyric_index:
                 self._hovered_lyric_index = hover
                 self.update()
@@ -10226,6 +10387,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._pressed_media_command = ""
             self._pressed_window_button = ""
             self._pressed_lyric_index = None
+            self._pressed_lyric_word = None
+            self._pressed_lyric_track_key = None
             self._queue_pressed = None
             self._queue_pressed_token = None
             if event.button() == Qt.MouseButton.LeftButton and pressed == released:
@@ -10242,10 +10405,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             release_window_button = next((key for key, rect in self._button_rects.items()
                                           if self._window_button_clickable(key, controls_clickable) and self._window_control_contains(key, rect, point)), "")
             release_media_command = next((command for command, rect in self._media_button_rects.items() if rect.contains(point)), "") if controls_clickable else ""
+            release_lyric_word = self._lyric_word_target_at(point)
             release_lyric_index = next((index for index, rect in self._lyric_hit_rects.items() if rect.contains(point)), None)
             pressed_window_button = str(getattr(self, "_pressed_window_button", "") or "")
             pressed_media_command = str(getattr(self, "_pressed_media_command", "") or "")
             pressed_lyric_index = getattr(self, "_pressed_lyric_index", None)
+            pressed_lyric_word = getattr(self, "_pressed_lyric_word", None)
+            pressed_lyric_track_key = getattr(self, "_pressed_lyric_track_key", None)
+            current_lyric_track_key = (
+                self._visual_track_identity(),
+                str(getattr(self.owner, "media_source_app", "") or ""),
+            )
             if pressed_window_button == "library" and release_window_button == "library":
                 self.return_to_library()
             elif pressed_window_button == "return" and release_window_button == "return":
@@ -10266,7 +10436,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 self._activate_personal_dj(event.position(), toggle_ready=self._pressed_dj_toggle_ready)
             elif pressed_window_button == "audio_output" and release_window_button == "audio_output":
                 self._toggle_audio_output_panel()
-            elif pressed_lyric_index is not None and release_lyric_index == pressed_lyric_index:
+            elif pressed_lyric_word is not None:
+                if (pressed_lyric_track_key == current_lyric_track_key
+                        and release_lyric_word == pressed_lyric_word):
+                    self._seek_to_lyric(pressed_lyric_word[0], pressed_lyric_word[2])
+            elif (pressed_lyric_index is not None
+                    and pressed_lyric_track_key == current_lyric_track_key
+                    and release_lyric_index == pressed_lyric_index):
                 self._seek_to_lyric(pressed_lyric_index)
             elif pressed_media_command and release_media_command == pressed_media_command:
                 self._start_transport_feedback(pressed_media_command)
@@ -10281,6 +10457,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._pressed_window_button = ""
         self._pressed_dj_toggle_ready = False
         self._pressed_lyric_index = None
+        self._pressed_lyric_word = None
+        self._pressed_lyric_track_key = None
         self._queue_pressed = None
         self._queue_pressed_token = None
         if self._pending_fullscreen is None and not self._island_returning and not self._fullscreen and self.geometry().isValid():
@@ -10311,7 +10489,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self.update()
         event.accept()
 
-    def _seek_to_lyric(self, index: int):
+    def _seek_to_lyric(self, index: int, seconds: float | None = None):
         _lines, timed = self._display_lyrics()
         if self._seek_pending or not 0 <= index < len(timed):
             return
@@ -10323,7 +10501,16 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             except TypeError:
                 # Older owners expose the original no-argument offset API.
                 lyric_offset = float(offset())
-        seconds = max(0.0, float(timed[index][0]) - lyric_offset)
+        if seconds is None:
+            seconds = float(timed[index][0])
+        else:
+            try:
+                seconds = float(seconds)
+            except (TypeError, ValueError, OverflowError):
+                seconds = float(timed[index][0])
+            if not math.isfinite(seconds):
+                seconds = float(timed[index][0])
+        seconds = max(0.0, seconds - lyric_offset)
         track_key = self._browse_track_key
         provider = getattr(self.owner, "data_provider", None)
         seek = getattr(provider, "seek_playback_position", None)
@@ -10406,6 +10593,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._pressed_media_command = ""
         self._pressed_window_button = ""
         self._pressed_lyric_index = None
+        self._pressed_lyric_word = None
+        self._pressed_lyric_track_key = None
         self.unsetCursor()
         super().leaveEvent(event)
 
