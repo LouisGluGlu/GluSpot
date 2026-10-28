@@ -336,6 +336,8 @@ DEFAULT_SETTINGS = {
     "v2_music_surface_preload_count": 6,
     "v2_music_intro_cleanup_enabled": True,
     "v2_system_lyric_offset_seconds": 0.0,
+    # Experimental external position pipeline; legacy SMTC behavior stays default.
+    "v2_capture_position_enabled": False,
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_font_size": 12,
     "v2_dual_line_secondary_weight": 72,

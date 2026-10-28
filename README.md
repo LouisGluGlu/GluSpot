@@ -244,6 +244,18 @@ Known Windows test-build caveats:
 - PyInstaller reports optional missing modules from Unix-only Python paths, NumPy/Pillow optional helpers, and setuptools internals; these are expected in a Windows GUI package unless a runtime feature proves otherwise.
 - Existing packages may contain optional UIAutomation dependencies from earlier builds. The current application does not initialize message detection; a future packaging dependency cleanup is separate from this source change.
 
+## Experimental external capture (grok/capture)
+
+The capture PRD is being implemented in isolated steps. `v2_capture_position_enabled`
+defaults to `false`; enabling it is an explicit development opt-in. With it off,
+the established external SMTC path and dormant legacy adapters are unchanged.
+The new platform-neutral `api/capture` contracts separate position observations,
+seek acknowledgements and optional calibration. Only `api/providers.py` wires
+these components into the V2 app. Windows dependencies must remain lazy and
+mockable; no release version or package is changed by this work.
+
+Implementation: step 1 (interfaces and flag) complete; steps 2–6 pending.
+
 ## Guardrails
 
 - Keep the runnable app at `local/main.py`.
