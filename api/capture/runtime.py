@@ -37,12 +37,16 @@ class CaptureRuntime:
         self._seek_task = None
         self.seek_attempts = 0
         self.seek_successes = 0
+        self._uia_worker = None
+        self._calibration_task = None
 
     async def bind(self, session, track, matches):
         if self._closed:
             return
         identity = (str(session.source_app_user_model_id), track.track_id)
         if self.identity == identity and self.source is not None and self.source.session is session:
+            if self.fallback is not None:
+                self.fallback.track = track
             return
         if self.collector is not None:
             await self.collector.close()
@@ -51,6 +55,20 @@ class CaptureRuntime:
                 self.model = PositionModel()
                 self._valid = False
             self.identity = identity
+        if self._calibration_task is not None:
+            self._calibration_task.cancel()
+            self._calibration_task = None
+        if self.fallback is not None:
+            self.fallback.close()
+            self.fallback = None
+        hint = identity[0].casefold()
+        service = ('netease' if any(value in hint for value in ('cloudmusic', 'netease', 'orpheus'))
+                   else 'qq' if 'qqmusic' in hint else '')
+        if service:
+            from api.capture.uia import StaWorker, UiaBackend
+            if self._uia_worker is None:
+                self._uia_worker = StaWorker()
+            self.fallback = UiaBackend(service, track, worker=self._uia_worker, clock=self.clock)
         self.policy = seek_policy(identity[0])
         self.source = SmtcSessionSource(session, track.track_id, matches, clock=self.clock)
         self.collector = SmtcCollector(self.source, self._publish)
@@ -62,7 +80,26 @@ class CaptureRuntime:
         with self._lock:
             self._valid = sample is not None and sample.identity == self.identity
             if self._valid:
-                self.model.observe(sample)
+                if sample.source == 'uia':
+                    self.model.calibrate(sample)
+                else:
+                    self.model.observe(sample)
+        if (sample is not None and sample.source != 'uia' and self.fallback is not None
+                and not self.executor.busy and not self._closed
+                and (self._calibration_task is None or self._calibration_task.done())):
+            self._calibration_task = asyncio.create_task(self._calibrate())
+
+    async def _calibrate(self):
+        backend = self.fallback
+        source = self.source
+        with self._lock:
+            snapshot = self.model.snapshot(self.clock())
+            anomaly = (snapshot is not None and snapshot.anchor_age > 15.0) or abs(self.model.last_error_seconds) > 1.5
+        sample = await backend.calibrate(anomaly=anomaly)
+        if (sample is not None and backend is self.fallback and source is self.source
+                and not self._closed and not self.executor.busy
+                and await source.matches(source.session)):
+            self._publish(sample)
 
     def project(self, data, now=None):
         """Replace only matching external state; never project another session."""
@@ -73,17 +110,20 @@ class CaptureRuntime:
         if snapshot is None or snapshot.identity != identity or str(track.track_id).startswith('owned:'):
             return data
         position = snapshot.position_seconds
+        sampled_at = snapshot.sampled_at
+        observed_seconds = snapshot.observed_seconds
         with self._lock:
             optimistic = self._optimistic
         if optimistic is not None and optimistic[0] == identity:
+            sampled_at, observed_seconds = optimistic[2], optimistic[1]
             position = optimistic[1] + (max(0.0, (self.clock() if now is None else now) - optimistic[2]) * snapshot.rate)
             if track.duration_seconds > 0:
                 position = min(track.duration_seconds, position)
         return replace(data, track=replace(track, position_seconds=position,
                                             is_playing=snapshot.is_playing,
                                             position_source='capture-model', position_confidence=0.95,
-                                            position_sampled_at=snapshot.sampled_at,
-                                            position_observed_seconds=snapshot.observed_seconds))
+                                            position_sampled_at=sampled_at,
+                                            position_observed_seconds=observed_seconds))
 
     async def seek(self, target, track_id, guard):
         """Optimistically project a target while verifying independent raw state."""
@@ -133,11 +173,18 @@ class CaptureRuntime:
                               state=self.executor.state.value,
                               reason=self.executor.last_result.reason if self.executor.last_result else '',
                               success_rate=self.seek_successes / self.seek_attempts if self.seek_attempts else None)
+        result['uia'] = self.fallback.diagnostics() if self.fallback is not None else {}
         result['smtc'] = self.collector.diagnostics() if self.collector is not None else {}
         return result
 
     async def close(self):
         self._closed = True
+        if self._calibration_task is not None:
+            self._calibration_task.cancel()
+        if self.fallback is not None:
+            self.fallback.close()
+        if self._uia_worker is not None:
+            self._uia_worker.close()
         if self._seek_task is not None and self._seek_task is not asyncio.current_task():
             self._seek_task.cancel()
         with self._lock:

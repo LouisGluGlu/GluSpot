@@ -97,6 +97,24 @@ class PositionModel:
         self._signature = signature
         return reanchor
 
+    def calibrate(self, sample: TimelineSample) -> bool:
+        """Apply independent UIA progress without replacing the SMTC signature.
+
+        The unchanged old SMTC anchor must not undo a physical correction on
+        the next poll. A genuinely changed SMTC anchor still wins normally.
+        """
+        if (self._sample is None or sample.identity != self._sample.identity
+                or sample.observed_at < self._sample.observed_at
+                or not math.isfinite(sample.position_seconds)):
+            return False
+        self.last_error_seconds = sample.position_seconds - self.position(sample.observed_at)
+        self._anchor_position = self._clamp(sample.position_seconds)
+        self._anchor_mono = sample.observed_at
+        self._rate = max(0.0, sample.rate) if sample.is_playing else 0.0
+        self._sample = sample
+        self.reanchors += 1
+        return True
+
     def position(self, now: float) -> float:
         """Read a bounded prediction; backwards monotonic inputs cannot rewind."""
         return self._clamp(self._anchor_position + max(0.0, now - self._anchor_mono) * self._rate)
@@ -104,7 +122,7 @@ class PositionModel:
     def snapshot(self, now: float) -> PositionSnapshot | None:
         if self._sample is None:
             return None
-        return PositionSnapshot(self.position(now), self._sample.observed_at,
+        return PositionSnapshot(self.position(now), self._anchor_mono,
                                 self._sample.position_seconds, self._sample.is_playing,
                                 self._rate, self._sample.identity,
                                 max(0.0, now - self._anchor_mono))

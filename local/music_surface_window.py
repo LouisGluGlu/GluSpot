@@ -3712,10 +3712,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # That fresh source event can re-anchor an already-paused view; the
         # first playing->paused sample still passes the stale-clock filter.
         explicit_seek = paused_source_seek or (
-            source == "local-seek"
+            source in {"local-seek", "capture-model"}
             and (
                 self._owner_seek_marker is None
-                or self._owner_seek_marker[2] != "local-seek"
+                or self._owner_seek_marker[2] != source
                 or (original_sample_at > 0.0 and sample_id != self._owner_seek_marker)
             )
         )

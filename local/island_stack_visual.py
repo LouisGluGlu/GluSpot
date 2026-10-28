@@ -1295,7 +1295,8 @@ class IslandStackVisual(QWidget):
         prior = getattr(self, "_island_lyric_source_sample", None)
         playing = bool(getattr(self, "media_is_playing", False))
         explicit_seek = (
-            source == "local-seek" and (prior is None or prior[2] != source or sample != prior)
+            source in {"local-seek", "capture-model"}
+            and (prior is None or prior[2] != source or sample != prior)
         ) or (
             not playing and getattr(self, "_island_lyric_source_playing", None) is False
             and source in {"windows-media", "interactive"}

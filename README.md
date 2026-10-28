@@ -256,7 +256,10 @@ mockable; no release version or package is changed by this work.
 
 Implementation: steps 1–4 complete (contracts, monotonic model, background
 SMTC events with a 2 Hz polling fallback and verified seek state machine);
-steps 5–6 pending. Opt-in seeks project an optimistic target, verify independent
+step 5 (optional STA UIA calibration and one-attempt physical fallback) complete;
+step 6 pending. Hybrid NetEase/QQ sampling runs at 7.5-second intervals, with
+a bounded anomaly cadence. UIA timeout quarantines the single worker until
+completion; access denial/disappearing elements fail closed. Opt-in seeks project an optimistic target, verify independent
 raw readbacks, and roll back on failure with a visible lyric-click message.
 Native mutation timeouts are ambiguous and never trigger a second backend.
 The optional fallback contract is tested with mocks; real UIA integration is step 5. Diagnostics report
