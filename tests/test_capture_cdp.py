@@ -1,10 +1,12 @@
 import asyncio
 import json
 import math
+import os
 import shutil
 import subprocess
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from api.capture.cdp import CdpError, CdpSession, discover_target
 from api.capture.netease import NetEaseInstallation, NetEaseLocator
@@ -196,7 +198,8 @@ class LocatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_other_executable(self):
         locator = self.locator(path='/apps/other.exe')
-        self.assertIsNone(locator.locate())
+        with patch.dict(os.environ, {'ProgramFiles': '', 'ProgramFiles(x86)': '', 'LOCALAPPDATA': ''}):
+            self.assertIsNone(locator.locate())
         with self.assertRaises(ValueError):
             await locator.launch(NetEaseInstallation('/apps/other.exe'))
 

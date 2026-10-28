@@ -90,7 +90,21 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum("readback error" in message for message in messages), 4)
 
     async def test_track_change_during_sampling_refuses_all_mutations(self):
-        result, session, _ = await self.run_probe(replace=True)
+        session = PushedSession(12345, replace=True)
+
+        async def deliver_samples(_seconds):
+            # start() pushed the original; deliver both identities while sampling.
+            session.push()
+            session.push()
+            session.push()
+
+        with patch.object(netease_cdp_probe, "CdpSession", return_value=session), \
+             patch.object(netease_cdp_probe.asyncio, "sleep", side_effect=deliver_samples):
+            result = await netease_cdp_probe.run_probe(12345, sample_seconds=.03,
+                                                      timeout=.2, emit=lambda _: None)
+        self.assertTrue(session.closed)
+        self.assertEqual(session.callbacks, [])
+        self.assertEqual(result["tracks_observed"], 2)
         self.assertFalse(result["passed"])
         self.assertIn("Track changed", result["error"])
         self.assertEqual(session.writes, [])
