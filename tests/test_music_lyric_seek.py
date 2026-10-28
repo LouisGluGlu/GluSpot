@@ -61,7 +61,7 @@ class MusicLyricSeekTests(unittest.TestCase):
         ]
         self.owner.timed_lyric_units = [
             (
-                TimedLyricUnit(2.0, 4.0, "first  "),
+                TimedLyricUnit(2.0, None, "first  "),
                 TimedLyricUnit(4.0, 6.0, "line"),
             ),
             (), (),
@@ -137,13 +137,39 @@ class MusicLyricSeekTests(unittest.TestCase):
             (0.0, "first line"), (20.0, "next"), (40.0, "later"), (60.0, "last"),
         ]
         self.owner.timed_lyric_units = [
-            (TimedLyricUnit(2.0, 4.0, "wrong"),),
+            (
+                SimpleNamespace(start_seconds=2.0, end_seconds=4.0, text="first ", estimated=True),
+                SimpleNamespace(start_seconds=4.0, end_seconds=6.0, text="line", estimated=True),
+            ),
             (), (),
         ]
         self.owner.timed_lyric_timing_kinds = ["unit", "line", "line", "line"]
         self.window._browse_track_key = self.owner.media_track_id
         self._render()
         self.assertFalse(self.window._lyric_word_hit_rects)
+
+    def test_wrapped_word_keeps_fragment_hit_rects_separate(self):
+        long_word = "x" * 180
+        self.owner.media_track_id = "wrapped-track"
+        self.owner.timed_lyrics = [
+            (0.0, "first " + long_word), (20.0, "next"),
+            (40.0, "later"), (60.0, "last"),
+        ]
+        self.owner.timed_lyric_units = [
+            (TimedLyricUnit(2.0, None, "first "), TimedLyricUnit(4.0, None, long_word)),
+            (), (),
+        ]
+        self.owner.timed_lyric_timing_kinds = ["unit", "line", "line", "line"]
+        self.window._browse_track_key = self.owner.media_track_id
+        self._render()
+        fragments = [
+            rect for (row, unit, _fragment), (rect, _seconds)
+            in self.window._lyric_word_hit_rects.items()
+            if row == 0 and unit == 1
+        ]
+        self.assertGreaterEqual(len(fragments), 2)
+        self.assertGreaterEqual(len({round(rect.top(), 2) for rect in fragments}), 2)
+        self.assertLessEqual(max(rect.height() for rect in fragments), 48.0)
 
 
 if __name__ == "__main__":
