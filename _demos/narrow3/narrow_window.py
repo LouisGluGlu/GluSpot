@@ -132,7 +132,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         top = {key: rect for key, rect in zip(top_keys, layout.top)}
         now = time.monotonic()
         top = {key: rect for index, (key, rect) in enumerate(top.items())
-               if index == 0 or self.visibility.top[index - 1].value(now) > .001}
+               if (self.visibility.footer if index == 0 else self.visibility.top[index - 1]).value(now) > .001}
         loop, mode = layout.utility(self.dj_motion.value(now))
         footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
                   "media:next": layout.next, "collection": layout.favorite,
@@ -141,7 +141,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             footer["personal_dj"] = layout.dj
         if self.visibility.footer.value(now) <= .001:
             footer = {}
-        return [top, {"library": layout.back}, footer]
+        return [top, {"library": layout.back} if self.visibility.footer.value(now) > .001 else {}, footer]
 
     def posed_rect(self, key, rect):
         state = self._glass_feedback.state(key)
@@ -185,8 +185,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         palette = self._art_palette()
         self._paint_background(painter, QRectF(self.rect()), QColor(palette.primary), QColor(palette.secondary), now,
                                ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights)
-        layout = NarrowLayout(self.width(), self.height())
+        visibility = self.visibility.footer.value(now)
+        layout = NarrowLayout(self.width(), self.height(), visibility)
+        painter.save()
+        painter.setOpacity(visibility)
         self.paint_header(painter, layout)
+        painter.restore()
         self.paint_fading_content(painter, layout)
         self.paint_controls(painter, layout)
         if self.hints:
@@ -212,7 +216,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             fade = 32
         else:
             self.paint_list(layer, layout)
-            area = QRectF(0, 218, self.width(), max(1, layout.viewport.bottom() - 218))
+            area = QRectF(0, layout.viewport.top() + 28, self.width(), max(1, layout.viewport.height() - 28))
             fade = 28
         layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
         gradient = QLinearGradient(0, area.top(), 0, area.bottom())
@@ -258,7 +262,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         font = self._surface_font(22)
         painter.save()
         painter.setClipRect(viewport.adjusted(-18, 0, 18, 0))
-        for index in range(max(0, focus - 3), min(len(TIMED_LYRICS), focus + 4)):
+        for index in range(len(TIMED_LYRICS)):
             line = TIMED_LYRICS[index]
             y = anchor + (index - visual_focus) * 44 - 22
             width = QFontMetricsF(font).horizontalAdvance(line.text)
@@ -290,11 +294,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         ink = self._scene_control_ink()
         painter.setPen(ink)
         painter.setFont(self._surface_font(12, QFont.Weight.DemiBold))
-        painter.drawText(QRectF(20, 190, self.width() - 40, 28), Qt.AlignmentFlag.AlignVCenter, "播放列表")
+        painter.drawText(QRectF(20, viewport.top(), self.width() - 40, 28), Qt.AlignmentFlag.AlignVCenter, "播放列表")
         painter.save()
-        painter.setClipRect(QRectF(0, 218, self.width(), max(0, layout.viewport.bottom() - 218)))
+        painter.setClipRect(QRectF(0, viewport.top() + 28, self.width(), max(0, viewport.height() - 28)))
         for index, (title, artist) in enumerate(SONGS):
-            y = 218 + index * 56
+            y = viewport.top() + 28 + index * 56
             if index == self.song_index:
                 row = QRectF(12, y + 2, self.width() - 24, 52)
                 self._clear_control_renderer.paint(painter, row, scene=self._surface_glass_backdrop(),
@@ -322,6 +326,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.restore()
 
     def paint_controls(self, painter, layout):
+        opacity = self.visibility.footer.value(time.monotonic())
+        painter.save()
+        painter.setOpacity(opacity)
         back = self.posed_rect("library", layout.back)
         self._paint_surface_glass(painter, back, role="library")
         ink = self._scene_control_ink()
@@ -329,6 +336,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         content = self.posed_rect("content_layout", layout.top[0])
         self._paint_surface_glass(painter, content, role="content-layout")
         self._paint_content_layout_icon(painter, content.adjusted(7, 7, -7, -7))
+        painter.restore()
         roles = ("audio-output", "playback-mode", "translation", "window-mode")
         keys = ("audio_output", "playback_mode", "translation", "return")
         for index, (rect, role, key) in enumerate(zip(layout.top[1:], roles, keys)):
@@ -451,15 +459,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if not self.narrow:
             super().mousePressEvent(event)
             return
-        layout = NarrowLayout(self.width(), self.height())
-        footer_visible = self.visibility.footer.value(time.monotonic()) > .001
+        visibility = self.visibility.footer.value(time.monotonic())
+        layout = NarrowLayout(self.width(), self.height(), visibility)
+        footer_visible = visibility > .001
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(event.position()):
                     self._glass_feedback.press(key, event.position(), time.monotonic())
-        if layout.back.contains(event.position()):
+        if footer_visible and layout.back.contains(event.position()):
             self.resize(960, 540)
-        elif layout.top[0].contains(event.position()):
+        elif footer_visible and layout.top[0].contains(event.position()):
             self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
             self.set_content_layout(self.mode, animate=False)
             self._finish_content_layout()
@@ -487,8 +496,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.dj_enabled = not self.dj_enabled
             if not self.dj_enabled:
                 self.dj_speaking = False
-        elif self.mode == "playlist" and 218 <= event.position().y() < layout.viewport.bottom():
-            index = int((event.position().y() - 218) // 56)
+        elif self.mode == "playlist" and layout.viewport.top() + 28 <= event.position().y() < layout.viewport.bottom():
+            index = int((event.position().y() - layout.viewport.top() - 28) // 56)
             if index < len(SONGS):
                 self.select_song(index)
         self.update()

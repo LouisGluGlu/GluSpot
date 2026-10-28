@@ -8,13 +8,21 @@ from motion import EaseOutFade, Visibility
 
 
 def check(variant, width, mode, dj):
-    layout = NarrowLayout(width, 640)
-    controls = [layout.back, layout.top[0]]
+    layout = NarrowLayout(width, 640, float(variant == "B"))
+    controls = []
     if variant == "B":
-        controls += layout.top[1:] + [layout.previous, layout.play, layout.next, layout.favorite] + list(layout.utility(float(dj)))
+        controls += [layout.back] + layout.top + [layout.previous, layout.play, layout.next, layout.favorite] + list(layout.utility(float(dj)))
         if dj:
             controls.append(layout.dj)
     errors = []
+    viewport = layout.viewport
+    if variant == "A" and (viewport.top() != 20 or viewport.bottom() != 620 or viewport.width() != width - 40):
+        errors.append("idle viewport")
+    if variant == "B" and (viewport.top() != 190 or viewport.bottom() != 414):
+        errors.append("hover viewport")
+    middle = NarrowLayout(width, 640, .5).viewport
+    if middle.top() != 105 or middle.bottom() != 517:
+        errors.append("interpolated viewport")
     bounds = QRectF(0, 0, width, 640)
     for rect in controls:
         if not bounds.contains(rect):

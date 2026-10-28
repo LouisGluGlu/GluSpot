@@ -8,6 +8,7 @@ from PySide6.QtCore import QRectF
 class NarrowLayout:
     width: int
     height: int
+    visibility: float = 1.0
 
     @property
     def button_size(self):
@@ -25,7 +26,10 @@ class NarrowLayout:
 
     @property
     def viewport(self):
-        return QRectF(20, 190, min(340, self.width - 40), max(0, self.height - 416))
+        t = max(0.0, min(1.0, self.visibility))
+        top = 20 + 170 * t
+        bottom = self.height - 20 - 206 * t
+        return QRectF(20, top, self.width - 40, max(1, bottom - top))
 
     @property
     def back(self):
