@@ -77,6 +77,86 @@ the identical pair. Use explicit new `mode: off` to preserve that intention.
 New modes always take precedence and survive restart/master-flag disable.
 No configured path is needed to enable a recognized player's adapter.
 
+## Current lyric wiring
+
+The existing opt-in flags bind the selected NetEase session through
+`WindowsMediaProvider._bind_capture_session` to `CaptureRuntime` and its CEF
+source. Native load-time progress is projected by `CaptureRuntime.project` as
+`capture-model`, then carried through `_project_visual_position` and
+`_apply_visual_data` into the existing island and music-surface line/word
+clocks. `media_position_pipeline` retains its 300 ms presentation hysteresis;
+SMTC zeroes do not replace fresh CEF samples.
+
+The surface derives per-unit hit fragments from the same `QTextLayout`, source
+offsets, wrapping, spring positions and cover transforms used for painting.
+Supplied unit starts remain seekable when ends are absent; display estimates do
+not become seek targets. Uniquely aligned inline backing vocals use their own
+visible layout. Ambiguous/unavailable timing and untimed translations keep the
+line-start fallback. The configured lyric offset is subtracted once without
+output latency. A matching press/release then calls
+`seek_playback_position(seconds, expected_track_id=...)` → `_seek_capture_position`
+→ `CaptureRuntime.seek` → `CefSeekBackend`, using the existing independent
+physical-readback verifier. Painted-track, pressed-track and source guards join
+the provider's expected-track fence to reject obsolete clicks, including a track
+replacement before the background request executes.
+
+The user path is **设置 → 媒体控制 → 播放来源 → 网易云精确进度（实验） → 启用并重启网易云**,
+with the displayed confirmation. That explicit opt-in enables
+`v2_system_capture_enabled` together with precise capture; it does not
+automatically disable program-owned playback. If a program-owned track is
+active, it retains UI priority. Turn off **程序内播放** in the same playback
+source card to follow NetEase. NetEase remains relaunch-only for this route;
+there is no documented attach to an existing `:39222` session.
+
+Box verification uses `QT_QPA_PLATFORM=offscreen` and
+`/tmp/gluspot-capture-test-venv/bin/python -X faulthandler`. At `3fb11d0`,
+capture discovery passes **206 tests × 3**, in **10.443 / 10.358 / 10.994 s**;
+there are no failures, errors or skips. Focused CEF/provider/settings/lyric-clock,
+word-hit, media-position, unit-timing and fullscreen tests pass **376 / 14.931 s**.
+Standard full discovery completes **5,667 tests / 158.517 s**, with **26 failures,
+11 errors and 31 skips**. The unchanged `a3ffe79` archive completes 5,656 tests /
+156.886 s with exactly the same failure/error identities (zero new or resolved).
+These inherited failures cover platform mocks, missing optional dependencies,
+fonts, Cantonese conversion and offscreen rendering/transition assumptions;
+the full suite is not a clean pass.
+
+The first baseline full attempt and two intermediate focused runs hit a native
+GC crash. The new settings fixture now closes/deletes its owned Qt widgets and
+dispatches deferred deletion; the exact 100-test order and subsequent 376-test
+focus/full runs complete with ordinary GC. This supports cleanup, not a proven
+root cause of native corruption. An intermediate full run also exposed the
+existing 250 ms probe-result race and the new aside entrance overlap. The probe
+test now waits for explicit bounded refusal while asserting no readiness/seek;
+aside hits follow paint order and the settled test advances the animation clock.
+No product CDP timing or native hook changed. Complete local evidence is in
+`/tmp/gluspot-lyric-{final-focused,final-verified-full}.log`,
+`/tmp/gluspot-lyric-capture-verified-{1,2,3}.log` and
+`/tmp/gluspot-lyric-final-summary.json`.
+
+Windows mirror sync, native repetitions and live UI acceptance remain pending:
+this session has no working PC execution/file-transfer relay and no forwarded
+`:39222` endpoint. No current PC or live UI success is claimed. The rerun uses
+`E:\gpt-island\.venv\Scripts\python.exe` against
+`E:\grok-gluspot\_wt_capture2`, with capture discovery and the focused
+lyric-integration, media-position-pipeline and music-playback-sync modules.
+The current focused module is `tests.test_music_lyric_seek`. The requested
+commands are:
+
+```powershell
+E:\gpt-island\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_capture*.py' -v
+E:\gpt-island\.venv\Scripts\python.exe -m unittest tests.test_capture_lyric_integration tests.test_music_lyric_seek tests.test_media_position_pipeline tests.test_music_playback_sync -v
+E:\gpt-island\.venv\Scripts\python.exe -m unittest discover tests -v
+```
+
+After sync, enable precision through the consent path above, select system
+capture (disable program-owned playback if it holds an active track), and check
+the connected health state. With a real song carrying word timestamps, watch
+line/word highlights in window/fullscreen and click one later word to confirm
+the player and lyric clock move to that word. Also check pause/resume and one
+line-timed song's fallback. The automated provider integration proves CEF seek
+selection and replacement-track fencing; it does not establish physical-screen
+alignment. No version or package was changed, and nothing was pushed.
+
 ## Evidence and acceptance limits
 
 `tests/fixtures/capture/` contains 41 deterministic mock timeline events and

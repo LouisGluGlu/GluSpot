@@ -314,6 +314,36 @@ playback is advancing; auto-next remains unverified unless checked on device.
 This source experiment changes no release version or package. No live acceptance
 is claimed.
 
+### Current lyric wiring
+
+The existing opt-in flags bind `CaptureRuntime` to the selected NetEase session
+and its load-time CEF source. `CaptureRuntime.project` publishes real progress as
+`capture-model` through the provider and `_apply_visual_data` into the island and
+music-surface line/word clocks, retaining the existing 300 ms lyric hysteresis.
+The surface uses its painted text layout to hit-test source-timed words, including
+uniquely aligned inline backing vocals. Missing or unalignable unit timing keeps
+the line-start fallback. After applying the lyric offset once, a click follows
+`seek_playback_position(seconds, expected_track_id=...)` → capture runtime →
+`CefSeekBackend` with physical readback. Painted/pressed track and source guards
+and the existing provider fence reject stale clicks.
+
+Enable it at **设置 → 媒体控制 → 播放来源 → 网易云精确进度（实验） → 启用并重启网易云**
+after the confirmation. This explicit action enables system capture as part of
+the same opt-in and keeps the transport relaunch-only. Program-owned playback
+keeps priority while it has an active track; turn off **程序内播放** in the
+same playback-source card to follow NetEase. This wiring does not attach to an
+already-running `:39222` session.
+
+Box verification at `3fb11d0`: **206 capture tests × 3** pass
+(10.443 / 10.358 / 10.994 s), and **376 focused tests** pass (14.931 s),
+including fullscreen lyrics and word seek. Ordinary full discovery completes
+**5,667 tests / 158.517 s**, with the same **26 failures, 11 errors and 31 skips**
+as baseline `a3ffe79` (5,656 tests / 156.886 s); failure/error identities match
+exactly. Earlier native GC crashes and corrected fixture/timing races are
+recorded in the [verification notes](docs/capture-position.md#current-lyric-wiring).
+Windows mirror sync, PC tests and a live lyric/word-click check remain pending:
+this session exposes no working PC relay or forwarded `:39222` endpoint.
+
 Non-invasive hook verification (2026-10-28): the final capture suite passed
 **203 tests × 3** on Linux offscreen (9.948 / 10.227 / 10.004 s), with zero failures,
 errors or skips. Tests cover channel installation by definition/assignment,
