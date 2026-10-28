@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication, QLabel
 
 from api.capture.netease import NetEaseInstallation
@@ -53,6 +54,14 @@ class NetEaseCaptureSettingsTests(unittest.TestCase):
         cls.island_type = FakeIslandWidget
         cls.settings_type = FakeSettingsManager
         cls.enable_notice = ENABLE_NOTICE
+
+    def _dispose_widget(self, widget):
+        if widget is None:
+            return
+        widget.close()
+        widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app.processEvents()
 
     def panel(self, *, platform='win32', installed=True, accept=True):
         self.values = {}
@@ -156,11 +165,11 @@ class NetEaseCaptureSettingsTests(unittest.TestCase):
 
     def test_window_source_switch_and_provider_route_follow_opt_in(self):
         island = self.island_type()
-        self.addCleanup(island.close)
+        self.addCleanup(self._dispose_widget, island)
         settings = self.settings_type()
         settings.set('v2_system_capture_enabled', False)
         window = self.settings_window_type(island, settings)
-        self.addCleanup(window.close)
+        self.addCleanup(self._dispose_widget, window)
         system = Provider()
         system.get_visual_data = lambda: empty_visual_data("Cloud", "Artist", "cloudmusic.exe")
         island.data_provider = SimpleNamespace(system=system)
@@ -171,7 +180,7 @@ class NetEaseCaptureSettingsTests(unittest.TestCase):
             panel = self.panel_type(window._setting_value, window._save,
                                     window._system_media_provider,
                                     locator=locator, platform='win32', confirm=lambda: True)
-        self.addCleanup(panel.close)
+        self.addCleanup(self._dispose_widget, panel)
         self.app.processEvents()
         self.assertFalse(window.system_capture_switch.isChecked())
         source = PlaybackSourceProvider.__new__(PlaybackSourceProvider)
