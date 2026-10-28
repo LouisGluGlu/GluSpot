@@ -267,13 +267,28 @@ Serialized mock timeline traces exercise projection, pause, seek, clock jumps
 and track changes; these are not live Windows recordings. Native player tests
 and multi-hour soak remain pending; this experiment is not a release claim.
 
-Linux offscreen verification (2026-10-28): baseline **5,453 tests / 155.793 s**;
-final **5,544 tests / 146.022 s**. Both report **17 failures, 11 errors and
-31 skips**, with exactly the same failure/error identities; **91 new capture
-tests pass**. Inherited issues include missing optional `soundcard`, Win32-only
-mocks, absent font assets and offscreen rendering assumptions. Compilation and
-whitespace checks pass. This is a no-new-failures comparison, not a clean full
-suite or Windows native acceptance. Detailed evidence is in the capture report.
+The NetEase P0/P1 follow-up adds an independently disabled CEF route using
+**transport A only**: GluSpot starts/restarts `cloudmusic.exe` with a random
+loopback debugging port. Nothing is written into NetEase's install directory.
+A versioned, feature-probed JavaScript adapter pushes coalesced progress through
+CDP; precise seeks reuse the existing physical-readback state machine. The
+fallback order is CDP, a nonzero SMTC timeline, UIA progress, then basic capture.
+The stdlib WebSocket client adds no package dependency. See the [NetEase
+configuration, safety limits and existing-port probe](docs/capture-position.md#netease-cef-experiment-transport-a).
+The probe samples ten seconds, verifies three clamped seeks, restores the
+original observed position, and prints a JSON summary as its last line. This
+source experiment changes no release version or package.
+
+Latest Linux offscreen verification (2026-10-28): baseline `a69e740` **5,544
+tests / 149.938 s**; NetEase P0/P1 source `33d4d72` **5,625 tests / 158.407 s**.
+Both report **17 failures, 11 errors and 31 skips**, with all 28 failure/error
+identities unchanged. All **172 capture tests pass / 4.422 s**, including 81
+added for P0/P1. Earlier full attempts encountered a native Qt image-decode
+crash; UI test helper imports now wait for `QApplication`, and the final run
+used the standard discovery command. The precise Qt/Python lifetime cause is
+unproven. Compilation and whitespace checks pass. Inherited failures and
+Windows acceptance limits remain documented in the [capture report](docs/capture-position.md#netease-p0p1-verification-2026-10-28).
+No EXE was built or pushed.
 
 ## Guardrails
 

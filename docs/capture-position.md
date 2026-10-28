@@ -39,6 +39,13 @@ Program-owned playback remains independent behind `api/providers.py`.
   readback error, SMTC trust, event rate/delay and UIA calls/timeouts/errors.
 - `runtime.py`: session generation, lifecycle, model, optimistic UI and optional
   calibration coordination. Only `api/providers.py` attaches it to the app.
+- `netease.py`: read-only install/process/version discovery and explicit
+  launch/relaunch with random loopback debugging flags. Reconnect never stops
+  or restarts a player.
+- `cdp.py`, `_websocket.py`, `netease_js.py`: bounded loopback CDP session,
+  standard-library WebSocket framing and versioned native-event JS adapter.
+- `cef.py`: push-only physical position source and independent CEF seek
+  readback using the shared `SeekExecutor`.
 
 ## Configuration and migration
 
@@ -110,3 +117,165 @@ Complete logs and machine-readable comparisons are ignored local evidence in
 `.runtime/capture/{baseline,final}.log` and `{baseline,final}-summary.json`.
 The final full run tested source `a99d8a5`; the subsequent amendment adds only
 this evidence and the matching README record. No EXE was built or pushed.
+
+## NetEase CEF experiment: transport A
+
+The NetEase follow-up implements PRD P0/P1 through **transport A only**:
+GluSpot launches or relaunches `cloudmusic.exe` with
+`--remote-debugging-port=<random>` and
+`--remote-debugging-address=127.0.0.1`. It never writes into NetEase's install
+directory. There is no bridge DLL, pipe transport, native injection, installer
+modification or dependency installation. The capture master flag defaults off,
+as do `netease.cef.enabled` and `netease.transport`. The release remains 6.417.
+
+An explicit development opt-in uses these existing settings JSON keys:
+
+```json
+{
+  "v2_capture_position_enabled": true,
+  "netease.transport": "relaunch",
+  "netease.cef.enabled": true,
+  "netease.adapter": "auto"
+}
+```
+
+`netease.transport` supports only `relaunch` in this branch. `off` disables it;
+the reserved `port` and `pipe` values do not enable another transport. The
+standalone existing-port probe below is a diagnostic, not a second runtime
+transport. `netease.adapter` accepts `auto` and `legacy-native-v1`; both require
+the feature probe to succeed. Setting the capture profile to `off` still wins.
+
+The settings panel shows **网易云精确进度（实验）** only when read-only Windows
+discovery finds NetEase. **启用并重启网易云** presents one confirmation covering
+playback interruption, the unauthenticated local debug port and NetEase terms.
+Accepting sets the explicit flags, resets the NetEase capture profile to `auto`
+and queues process work on the provider loop. The health lamp reports waiting,
+connected or degraded seek state. **修复 / 重启网易云** explicitly reconnects
+through another relaunch. There is no automatic process restart during CDP
+reconnection. **关闭精确进度** turns the route off and detaches GluSpot; normally
+exiting NetEase closes the debug port created for that process launch.
+
+The relaunch closes only processes whose verified executable path matches the
+selected `cloudmusic.exe`. It may discard unsaved NetEase UI state. Position
+restoration is best effort through the same independently verified seek path:
+post-restart SMTC metadata must match the original track, and a previously
+known native track ID must also match. A missing observation or changed track
+refuses restoration. An unknown native identity cannot establish recording or
+version identity beyond the existing metadata match.
+
+`CdpSession` discovers targets through loopback `/json`, selects the verified
+`orpheus://orpheus/pub/app.html` page and enables Runtime bindings. A versioned
+JavaScript adapter probes for `legacyNativeCmder.appendRegisterCall` and
+`channel.call` before registering `PlayProgress`, `PlayState`, `Load` and `End`.
+The supplied NetEase 3.1.42 evidence establishes `PlayProgress(trackId, seconds,
+ratio)` at approximately 30 ms intervals and
+`channel.call('audioplayer.seek', callback, [trackId, uniqueSeekId, seconds])`.
+Ordinary pushed samples are coalesced to at most 10 Hz; track, state and seek
+events are delivered immediately. Progress is never polled. Unknown versions
+must pass the generic adapter probe before the route becomes available.
+The numeric meanings of `PlayState` and whether native seeks work while paused
+have not been verified on the real player. The adapter does not invent a
+numeric state mapping, and its probe reports paused-seek support as unknown.
+When native state is unknown, SMTC supplies only play/pause state; it cannot
+refresh the native position timestamp. A confirmed paused position remains
+valid while the adapter heartbeat is healthy. Provider track replacement
+rejects the previous native track ID until a different native track event
+arrives, including when metadata reaches GluSpot before the player event.
+State arrival has its own display timestamp, so resuming after a long pause
+does not project through the paused interval. Seek verification uses the
+separate native progress receipt time and sequence; a state edge or repeated
+adapter-cache read cannot become fresh progress evidence.
+
+The WebSocket client in `api/capture/_websocket.py` is a small GluSpot-owned
+standard-library implementation, not a downloaded or installed package. It is
+limited to this loopback CDP use: masked client text frames, unmasked server
+text frames, fragmentation and ping/pong/close, with a 4 MiB message limit.
+Unsupported extensions, binary frames and remote target URLs fail closed.
+Keeping this narrow client avoids adding an unpinned runtime dependency to the
+Windows builds. Fake-server tests exercise its handshake, framing, discovery
+and disconnection behavior. One writer lock serializes command and control
+frames; the session has one receive task and dispatches responses by CDP ID.
+
+`CefPositionSource` implements the existing physical-observation contract.
+`CefSeekBackend` reuses `SeekExecutor` for identity fencing, one mutation per
+request ID and independent physical readback. An accepted CDP command or the
+requested target alone cannot confirm a seek. A missing or drifting readback
+disables that precise seek route without blocking ordinary playback controls.
+The existing `PositionModel` and calibrator remain unchanged.
+
+The fallback order is CDP, a physical SMTC timeline only when nonzero, then an
+available read-only UIA progress observation, then basic capture. Attach/probe
+and lost-heartbeat failures invalidate CDP observations and retry with bounded
+exponential backoff (10 seconds maximum). A disconnection never converts the
+last CDP target or an optimistic position into fallback evidence.
+UIA fallback reads are limited to approximately one per second when SMTC has
+no usable timeline; they do not authorize UIA seek mutations in this chain.
+
+CDP has no authentication. Loopback binding and a random port reduce accidental
+exposure but do not prevent another local process or user from attaching. The
+enable/restart flow discloses this and the possibility of a NetEase terms-of-use
+conflict. Enabling precise capture does not decrypt media or bypass paid access.
+Restart can interrupt playback; restoration is best effort and requires an
+independent matching track observation.
+
+### Existing-port diagnostic
+
+Start NetEase with its loopback debugging flags, start playback, then run:
+
+```powershell
+python tools/netease_cdp_probe.py --port 9222
+```
+
+The tool attaches to that existing port; it never launches, relaunches or stops
+NetEase. It samples pushed progress for ten seconds, then verifies seeks to
+15, 45 and 90 seconds through `CefSeekBackend` and `SeekExecutor`. Targets are
+clamped inside the observed duration to avoid advancing to the next track. It
+prints each physical readback error in milliseconds, then attempts to restore
+the first observed position. A track change aborts further mutations rather
+than seeking another song. An uncertain mutation remains quarantined by the
+same executor, so restoration may be refused safely. Playback is not paused by
+the tool. The last stdout line is a JSON summary; exit status is zero only if
+all three seeks and restoration were independently verified.
+
+The supplied live-player timing evidence (25–34 ms to the first post-seek
+progress event) is a pre-existing observation from NetEase 3.1.42, not a result
+established by the fake server tests. Windows player/version coverage, actual
+relaunch/restore behavior, paused seeks, CPU use, eight-hour soak and 1,000-seek
+acceptance remain required before enabling this experiment by default.
+
+### NetEase P0/P1 verification (2026-10-28)
+
+Both full runs used the standard command with
+`/workspace/gluspot/qtvenv/bin/python` (Python 3.13.5),
+`QT_QPA_PLATFORM=offscreen` and `PYTHONFAULTHANDLER=1`:
+
+```bash
+/workspace/gluspot/qtvenv/bin/python -m unittest discover tests -v
+```
+
+| Source | Tests | Seconds | Failures | Errors | Skips |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline `a69e740` | 5,544 | 149.938 | 17 | 11 | 31 |
+| P0/P1 `33d4d72` | 5,625 | 158.407 | 17 | 11 | 31 |
+
+All 28 failure/error identities match: zero new and zero resolved. The
+independent capture command, `-m unittest discover -s tests -p
+'test_capture*.py' -v`, passes **172 tests in 4.422 seconds**: the inherited 91
+plus 81 P0/P1 tests. Coverage includes a stdlib fake HTTP/CDP/WebSocket server,
+the real JS adapter under the existing Node runtime, reconnect and heartbeat
+loss, native/state timestamp separation, track races, independent seek
+readback, default-off provider lifecycle, UI consent and the existing-port
+probe's three seeks and restoration. Compilation and `git diff --check` pass.
+
+Earlier full attempts crashed in native Qt while decoding an image in the
+pre-existing artwork tests, before capture tests executed. The new UI test's
+helper imports were deferred until after `QApplication` exists; the final
+standard discovery run above completed without a custom loader or suppressed
+tests. The underlying Qt/Python lifetime fault is not proven. This evidence
+establishes no new observed test failures; it does not establish clean native
+Qt behavior or real Windows/NetEase acceptance.
+
+Ignored local evidence: `.runtime/capture/netease-baseline-recheck.log`,
+`.runtime/capture/netease-ui-lazy-import-investigation.log` and
+`.runtime/capture/netease-final-summary.json`. The source hash precedes only
+this documentation commit. No EXE was built or pushed.
