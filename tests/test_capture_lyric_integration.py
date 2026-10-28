@@ -1,8 +1,13 @@
 """Accepted model discontinuities must reach both existing lyric consumers."""
+import asyncio
+import threading
+import time
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
+
+from PySide6.QtTest import QTest
 
 from api.capture.runtime import CaptureRuntime
 from api.models import TimedLyricLine, TimedLyricUnit
@@ -94,6 +99,75 @@ class CaptureLyricIntegrationTests(unittest.TestCase):
                         self.assertAlmostEqual(timed_unit_reading_front(
                             'Two words', visual.timed_lyric_units[index],
                             surface._lyric_motion.last_position, range(10)), front)
+            finally:
+                await runtime.close()
+
+        run_async(exercise())
+
+    def test_word_target_uses_provider_cef_seek_and_rejects_replaced_track(self):
+        """The lyric command retains the provider's physical route and fence."""
+        visual, data, track = playback_tests.MusicPlaybackClockTests._owner(self)
+        units = (TimedLyricUnit(40, 42, 'Two '), TimedLyricUnit(42, 44, 'words'))
+        track = replace(track, position_seconds=0, source_app_id='cloudmusic.exe',
+                        timed_lyrics=(TimedLyricLine(0, 'First'),
+                                      TimedLyricLine(40, 'Two words', units, 'unit'),
+                                      TimedLyricLine(50, 'Third')))
+        data = replace(data, track=track)
+        visual._apply_visual_data(data)
+        deadline = time.perf_counter() + 3
+        while visual._lyric_presentation_store.get() is None and time.perf_counter() < deadline:
+            QTest.qWait(5)
+        self.assertIsNotNone(visual._lyric_presentation_store.get())
+        visual._effective_lyric_offset_seconds = lambda **_kwargs: 1.5
+        callbacks = []
+        visual._run_background = lambda _name, callback: callbacks.append(callback)
+        surface = MusicSurfaceWindow(visual)
+        self.addCleanup(surface.shutdown)
+        surface._lyric_frame(visual.timed_lyrics, 100)
+
+        async def exercise():
+            clock = Clock()
+            cdp = FakeCdp(clock)
+            runtime = CaptureRuntime(clock=clock, cef_session=cdp)
+            provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
+            provider.settings_getter = lambda key, default=None: (
+                True if key == 'v2_capture_position_enabled' else default)
+            provider._capture_runtime = runtime
+            provider._capture_executor = runtime.executor
+            provider._last_data = data
+            provider._loop = asyncio.get_running_loop()
+            provider._thread = threading.current_thread()
+            provider._request_immediate_media_refresh = Mock()
+            session = Session()
+            session.get_timeline_properties = lambda: SimpleNamespace(
+                position=0, start_time=0, end_time=0)
+            session.try_change_playback_position_async = AsyncMock(
+                side_effect=AssertionError('CEF route must own the mutation'))
+            provider._get_session = AsyncMock(return_value=session)
+            provider._seek_session_matches_track = AsyncMock(return_value=True)
+            visual.data_provider = provider
+            try:
+                await runtime.bind(session, track, matches, mode='smtc')
+                surface._seek_to_lyric(1, 42.0)
+                self.assertEqual(len(callbacks), 1)
+                await asyncio.to_thread(callbacks.pop())
+                playback_tests.MusicPlaybackClockTests.app.processEvents()
+                self.assertEqual(len(cdp.writes), 1)
+                self.assertEqual(cdp.writes[0][0], 'native-song')
+                self.assertEqual(cdp.writes[0][2], 40.5)
+                self.assertEqual(runtime.executor.last_result.backend, 'cef')
+                self.assertTrue(runtime.executor.last_result.succeeded)
+                session.try_change_playback_position_async.assert_not_awaited()
+                provider._request_immediate_media_refresh.assert_called_once()
+
+                # A click queued for the old UI must not seek its replacement.
+                surface._seek_to_lyric(1, 42.0)
+                self.assertEqual(len(callbacks), 1)
+                provider._last_data = replace(data, track=replace(track, track_id='replacement'))
+                await asyncio.to_thread(callbacks.pop())
+                playback_tests.MusicPlaybackClockTests.app.processEvents()
+                self.assertEqual(len(cdp.writes), 1)
+                self.assertFalse(surface._seek_pending)
             finally:
                 await runtime.close()
 
