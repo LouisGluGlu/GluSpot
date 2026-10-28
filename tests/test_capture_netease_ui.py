@@ -7,6 +7,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication, QLabel
 
 from api.capture.netease import NetEaseInstallation
+from api.providers import PlaybackSourceProvider, empty_visual_data
 
 
 class Locator:
@@ -149,8 +150,42 @@ class NetEaseCaptureSettingsTests(unittest.TestCase):
     def test_enable_disclosure_covers_system_source_and_restart_terms(self):
         panel = self.panel()
         self.assertTrue(any('系统抓取' in label.text() for label in panel.findChildren(QLabel)))
-        for text in ('重启', '127.0.0.1', '没有鉴权', '其他进程或用户', '用户协议'):
+        for text in ('系统抓取', '重启', '127.0.0.1', '没有鉴权', '其他进程或用户', '用户协议'):
             self.assertIn(text, self.enable_notice)
+
+
+    def test_window_source_switch_and_provider_route_follow_opt_in(self):
+        island = self.island_type()
+        self.addCleanup(island.close)
+        settings = self.settings_type()
+        settings.set('v2_system_capture_enabled', False)
+        window = self.settings_window_type(island, settings)
+        self.addCleanup(window.close)
+        system = Provider()
+        system.get_visual_data = lambda: empty_visual_data("Cloud", "Artist", "cloudmusic.exe")
+        island.data_provider = SimpleNamespace(system=system)
+        locator = Locator(NetEaseInstallation('C:/CloudMusic/cloudmusic.exe'))
+        pool = SimpleNamespace(start=lambda job: job.run())
+        with patch('local.netease_capture_settings.QThreadPool') as thread_pool:
+            thread_pool.globalInstance.return_value = pool
+            panel = self.panel_type(window._setting_value, window._save,
+                                    window._system_media_provider,
+                                    locator=locator, platform='win32', confirm=lambda: True)
+        self.addCleanup(panel.close)
+        self.app.processEvents()
+        self.assertFalse(window.system_capture_switch.isChecked())
+        source = PlaybackSourceProvider.__new__(PlaybackSourceProvider)
+        source.system, source.owned = system, SimpleNamespace(track=None)
+        source.settings_getter = window._setting_value
+        self.assertEqual(source.get_visual_data().track.title, '程序内播放')
+        panel.enable_button.click()
+        self.assertTrue(settings.get('v2_system_capture_enabled'))
+        self.assertTrue(window.system_capture_switch.isChecked())
+        self.assertTrue(settings.get('v2_owned_playback_enabled'))
+        self.assertEqual(source.get_visual_data().track.title, 'Cloud')
+        owned_data = empty_visual_data('Owned', 'Artist', 'GluSpot')
+        source.owned = SimpleNamespace(track=owned_data.track, visual_data=lambda: owned_data)
+        self.assertEqual(source.get_visual_data().track.title, 'Owned')
 
     def test_media_page_resolves_wrapper_system_provider(self):
         island = self.island_type()

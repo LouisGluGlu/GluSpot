@@ -16,7 +16,7 @@ from local.liquid_glass import GlassPushButton
 
 
 ENABLE_NOTICE = (
-    "GluSpot 将启用精确歌词进度与点词跳转，并重启网易云音乐。"
+    "GluSpot 将启用精确歌词进度与点词跳转，并开启系统抓取后重启网易云音乐。"
     "当前播放会中断，GluSpot 会尽量恢复同一曲目的进度。\n\n"
     "网易云将开放仅监听本机 127.0.0.1 的调试端口。该端口没有鉴权，"
     "同机其他进程或用户可能连接；启用调试接口可能不符合网易云用户协议。\n\n"
