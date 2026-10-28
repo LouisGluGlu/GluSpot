@@ -619,6 +619,9 @@ class WindowsMediaProvider:
         runtime = getattr(self, "_capture_runtime", None)
         loop = getattr(self, "_loop", None)
         self._capture_closed = True
+        worker = getattr(self, "_capture_uia_worker", None)
+        if worker is not None:
+            worker.close()
         if runtime is not None and loop is not None and loop.is_running():
             asyncio.run_coroutine_threadsafe(runtime.close(), loop)
             self._capture_runtime = None
@@ -644,15 +647,32 @@ class WindowsMediaProvider:
                 await runtime.close()
                 self._capture_runtime = None
             return
+        from api.capture.capabilities import capability_for, capture_profile
+        mode = capture_profile(getattr(self, "settings_getter", None), capability_for(track.source_app_id))
+        if mode == "off":
+            if runtime is not None:
+                await runtime.close()
+                self._capture_runtime = None
+            return
         if runtime is None:
             from api.capture.runtime import CaptureRuntime
-            runtime = self._capture_runtime = CaptureRuntime()
+            from api.capture.seek import SeekExecutor
+            from api.capture.uia import StaWorker
+            # Retain uncertainty and the native worker across flag/profile
+            # toggles: disabling capture cannot cancel an in-flight COM write.
+            executor = getattr(self, "_capture_executor", None)
+            if executor is None:
+                executor = self._capture_executor = SeekExecutor()
+            worker = getattr(self, "_capture_uia_worker", None)
+            if worker is None:
+                worker = self._capture_uia_worker = StaWorker()
+            runtime = self._capture_runtime = CaptureRuntime(executor=executor, uia_worker=worker)
 
         async def matches(candidate):
             return (str(getattr(candidate, "source_app_user_model_id", "")) == track.source_app_id
                     and await self._seek_session_matches_track(candidate, track.title, track.artist, ""))
 
-        await runtime.bind(session, track, matches)
+        await runtime.bind(session, track, matches, mode=mode)
 
     def get_visual_data(self) -> IslandVisualData:
         now = time.monotonic()
@@ -2173,7 +2193,14 @@ class WindowsMediaProvider:
         return lyrics_match, lyrics_lookup_pending, lookup_started
 
     def seek_playback_position(self, position_seconds: float, expected_track_id: str | None = None) -> bool:
-        if self._capture_is_enabled():
+        executor = getattr(self, "_capture_executor", None)
+        worker = getattr(self, "_capture_uia_worker", None)
+        if ((executor is not None and (executor.busy or executor.uncertain))
+                or (worker is not None and worker.busy)):
+            # A flag/profile toggle cannot cancel a previous native write.
+            # This gate also protects a return to the legacy SMTC route.
+            return False
+        if self._capture_is_enabled() and getattr(self, "_capture_runtime", None) is not None:
             return self._seek_capture_position(position_seconds, expected_track_id)
         try:
             position = max(0.0, float(position_seconds))

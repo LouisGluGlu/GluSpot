@@ -73,6 +73,11 @@ class SeekExecutor:
     def busy(self):
         return self._busy
 
+    @property
+    def uncertain(self):
+        """Whether a native mutation may still be executing in the player."""
+        return self._uncertain
+
     async def execute(self, target: float, *, identity: tuple[str, str], request_id: str,
                       smtc: SeekBackend, fallback: SeekBackend | None, guard,
                       policy: SeekPolicy = SeekPolicy(), optimistic=None) -> SeekResult:
@@ -98,12 +103,12 @@ class SeekExecutor:
             target = max(before.start_seconds, min(bounds[0], target) if bounds else target)
             if optimistic is not None:
                 optimistic(target)
-            started = self.clock()
             for name, backend in (('smtc', smtc), ('uia', fallback)):
                 if backend is None:
                     break
                 if not await guard():
                     return self._finish(request_id, False, SeekState.CANCELLED, 'identity-changed')
+                started = self.clock()
                 self.state = SeekState.SMTC_REQUEST if name == 'smtc' else SeekState.UIA_REQUEST
                 try:
                     self._mutation_pending = True

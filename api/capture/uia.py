@@ -58,6 +58,10 @@ class StaWorker:
                 try:
                     if initialization_error is not None:
                         raise initialization_error
+                    with self._lock:
+                        closed_before_dispatch = self._closed
+                    if closed_before_dispatch:
+                        raise RuntimeError('UIA worker closed before dispatch')
                     result = operation()
                     error = None
                 except Exception as exc:
@@ -98,13 +102,22 @@ class StaWorker:
         try:
             # Shield leaves the future alive after timeout/cancellation, so the
             # slot remains occupied until the actual native operation finishes.
-            return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), self.timeout)
+            wrapped = asyncio.wrap_future(future)
+            # A cancelled/timed-out caller still owns observing a late COM
+            # exception; consuming it does not change normal await behavior.
+            wrapped.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            done, _pending = await asyncio.wait({wrapped}, timeout=self.timeout)
+            if not done:
+                raise asyncio.TimeoutError()
+            return wrapped.result()
         except asyncio.TimeoutError:
             self.timeouts += 1
             raise
 
     def close(self):
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
             if self._thread is not None and self._pending is None:
                 self._queue.put_nowait(None)
@@ -148,6 +161,8 @@ class UiaBackend:
             return None
         track = self.track
         def operation():
+            if self._closed:
+                return None
             try:
                 sample = self._get_reader().read_progress_position(track.title, track.artist, track.duration_seconds)
                 if sample is None:
@@ -172,6 +187,8 @@ class UiaBackend:
             self._requests = {request_id}
         track = self.track
         def operation():
+            if self._closed:
+                return False
             try:
                 return self._get_reader().seek_playback_position_once(
                     position_seconds, track.duration_seconds, track.title, track.artist)

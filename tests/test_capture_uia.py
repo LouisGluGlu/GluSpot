@@ -49,6 +49,31 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await asyncio.to_thread(completed.wait, 1)
 
+    async def test_backend_closed_during_sta_initialization_never_dispatches_queued_seek(self):
+        release = threading.Event()
+        initialized = threading.Event()
+        writes = []
+        def initialize():
+            initialized.set()
+            release.wait(1)
+        class Reader:
+            def seek_playback_position_once(self, *_args):
+                writes.append('stale write')
+                return True
+        worker = StaWorker(timeout=.5, initializer=initialize)
+        backend = UiaBackend('netease', visual().track, worker=worker, reader_factory=Reader)
+        task = asyncio.create_task(backend.seek(80, request_id='queued'))
+        try:
+            await asyncio.to_thread(initialized.wait, 1)
+            backend.close()
+            release.set()
+            self.assertFalse(await task)
+            self.assertEqual(writes, [])
+        finally:
+            release.set()
+            worker.close()
+            await asyncio.to_thread(worker._thread.join, 1)
+
     async def test_access_denied_or_com_initialization_error_fails_closed(self):
         def denied():
             raise PermissionError('UIPI')

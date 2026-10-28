@@ -1,19 +1,18 @@
 """Accepted model discontinuities must reach both existing lyric consumers."""
 import unittest
-from unittest.mock import patch
 
 from local.music_surface_window import MusicSurfaceWindow
-from tests.test_music_playback_sync import MusicPlaybackClockTests
+from tests import test_music_playback_sync as playback_tests
 
 
 class CaptureLyricIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        MusicPlaybackClockTests.setUpClass()
+        playback_tests.MusicPlaybackClockTests.setUpClass()
 
     def test_sparse_external_seek_reanchors_island_and_large_surface(self):
         # Reuse the real V2 owner fixture and its lifecycle cleanup.
-        visual, _data, _track = MusicPlaybackClockTests._owner(self)
+        visual, _data, _track = playback_tests.MusicPlaybackClockTests._owner(self)
         surface = MusicSurfaceWindow(visual)
         self.addCleanup(surface.shutdown)
         visual.media_position_source = 'capture-model'

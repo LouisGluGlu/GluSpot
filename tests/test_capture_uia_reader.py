@@ -78,7 +78,8 @@ class CaptureUiaReaderTests(unittest.TestCase):
     def setUp(self):
         self.reader = NeteasePositionReader()
         self.windows = []
-        self.reader._netease_windows = lambda *_args, **_kwargs: self.windows
+        self.enumerate_windows = Mock(side_effect=lambda *_args, **_kwargs: self.windows)
+        self.reader._netease_windows = self.enumerate_windows
         self.reader._position_from_progress_windows = self._sample
         fake_pywinauto = SimpleNamespace(Desktop=lambda **_kwargs: object())
         self.modules = patch.dict(sys.modules, {"pywinauto": fake_pywinauto})
@@ -96,6 +97,101 @@ class CaptureUiaReaderTests(unittest.TestCase):
 
     def _seek(self):
         return self.reader.seek_playback_position_once(120.0, 240.0, "Song", "Artist")
+
+    def test_mutation_reservation_is_false_before_first_seek(self):
+        self.assertFalse(self.reader.last_capture_seek_attempted)
+
+    def test_cached_wrapper_reuse_still_reads_fresh_progress(self):
+        window = FakeWindow(progress=42.0)
+        self.windows = [window]
+        with patch("api.netease_position.time.monotonic", return_value=100.0):
+            self.assertEqual(self.reader.read_progress_position("Song", "Artist", 240).position_seconds, 42.0)
+        window.progress = 44.0
+        with patch("api.netease_position.time.monotonic", return_value=107.0):
+            self.assertEqual(self.reader.read_progress_position("Song", "Artist", 240).position_seconds, 44.0)
+        self.assertEqual(self.enumerate_windows.call_count, 1)
+
+    def test_wrapper_cache_expires_without_sliding_on_hits(self):
+        self.windows = [FakeWindow(progress=42.0)]
+        with patch("api.netease_position.time.monotonic", return_value=100.0):
+            self.reader.read_progress_position("Song", "Artist", 240)
+        with patch("api.netease_position.time.monotonic", return_value=109.0):
+            self.reader.read_progress_position("Song", "Artist", 240)
+        replacement = FakeWindow(progress=55.0)
+        self.windows = [replacement]
+        with patch("api.netease_position.time.monotonic", return_value=110.0):
+            self.assertEqual(self.reader.read_progress_position("Song", "Artist", 240).position_seconds, 55.0)
+        self.assertEqual(self.enumerate_windows.call_count, 2)
+
+    def test_changed_request_identity_resolves_new_track_wrappers(self):
+        self.windows = [FakeWindow()]
+        self.reader.read_progress_position("Song", "Artist", 240)
+        replacement = FakeWindow(progress=55.0)
+        replacement.caption = "Replacement - Artist"
+        self.windows = [replacement]
+        sample = self.reader.read_progress_position("Replacement", "Artist", 240)
+        self.assertEqual(sample.position_seconds, 55.0)
+        self.assertEqual(self.enumerate_windows.call_count, 2)
+
+    def test_cached_title_replacement_fails_closed_before_later_reparse(self):
+        old = FakeWindow()
+        self.windows = [old]
+        self.reader.read_progress_position("Song", "Artist", 240)
+        old.caption = "Replacement - Artist"
+        self.windows = [FakeWindow(progress=55.0)]
+        self.assertIsNone(self.reader.read_progress_position("Song", "Artist", 240))
+        self.assertEqual(self.enumerate_windows.call_count, 1)
+        self.assertFalse(self.reader._capture_window_cache)
+        self.assertEqual(self.reader.read_progress_position("Song", "Artist", 240).position_seconds, 55.0)
+        self.assertEqual(self.enumerate_windows.call_count, 2)
+
+    def test_cached_native_process_mismatch_cannot_seek(self):
+        window = FakeWindow([FakeRange()])
+        window.handle = 101
+        window.element_info = SimpleNamespace(process_id=987, class_name="OrpheusBrowserHost")
+        self.windows = [window]
+        process = {"name": "cloudmusic.exe"}
+        self.reader._native_process_executable = lambda _pid: process["name"]
+        gui = SimpleNamespace(
+            IsWindow=lambda _handle: True,
+            GetClassName=lambda _handle: "OrpheusBrowserHost",
+            GetWindowText=lambda _handle: window.caption,
+        )
+        processes = SimpleNamespace(GetWindowThreadProcessId=lambda _handle: (1, 987))
+        with patch.dict(sys.modules, {"win32gui": gui, "win32process": processes}):
+            self.assertIsNotNone(self.reader.read_progress_position("Song", "Artist", 240))
+            process["name"] = "unrelated.exe"
+            self.assertFalse(self._seek())
+        self.assertFalse(self.reader._capture_window_cache)
+        self.assertEqual(self.enumerate_windows.call_count, 1)
+        self.assertEqual(window.ranges[0].writes, [])
+        self.assertFalse(self.reader.last_capture_seek_attempted)
+
+    def test_cached_com_failure_invalidates_without_same_operation_reparse(self):
+        self.windows = [FakeWindow()]
+        self.reader.read_progress_position("Song", "Artist", 240)
+        with patch.object(self.reader, "_seek_window_matches_track", side_effect=RuntimeError("element gone")):
+            self.assertIsNone(self.reader.read_progress_position("Song", "Artist", 240))
+        self.assertFalse(self.reader._capture_window_cache)
+        self.assertEqual(self.enumerate_windows.call_count, 1)
+
+    def test_cached_wrapper_is_not_used_from_another_com_thread(self):
+        self.windows = [FakeWindow()]
+        with patch("api.netease_position.threading.get_ident", return_value=100):
+            self.reader.read_progress_position("Song", "Artist", 240)
+        with patch("api.netease_position.threading.get_ident", return_value=200):
+            self.assertIsNone(self.reader.read_progress_position("Song", "Artist", 240))
+        self.assertEqual(self.enumerate_windows.call_count, 1)
+
+    def test_cached_wrapper_can_be_used_for_one_verified_range_write(self):
+        interface = FakeRange()
+        window = FakeWindow([interface])
+        interface.after_write = lambda value: setattr(window, "progress", value * 2.4)
+        self.windows = [window]
+        self.reader.read_progress_position("Song", "Artist", 240)
+        self.assertTrue(self._seek())
+        self.assertEqual(interface.writes, [50.0])
+        self.assertEqual(self.enumerate_windows.call_count, 1)
 
     def test_read_returns_fresh_progress_without_cached_sample_or_worker(self):
         self.windows = [FakeWindow(progress=42.0)]
@@ -125,6 +221,7 @@ class CaptureUiaReaderTests(unittest.TestCase):
         self.reader._last_sample = NeteasePositionSample(99.0, 240.0, "netease-uia-progress", 0.92)
         self.reader._position_from_progress_windows = Mock(side_effect=RuntimeError("element disappeared"))
         self.assertIsNone(self.reader.read_progress_position("Song", "Artist", 240.0))
+        self.assertFalse(self.reader._capture_window_cache)
 
     def test_invalid_inputs_do_not_resolve_windows(self):
         self.reader._capture_progress_windows = Mock(side_effect=AssertionError("unexpected UIA"))

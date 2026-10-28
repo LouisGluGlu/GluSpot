@@ -338,6 +338,7 @@ DEFAULT_SETTINGS = {
     "v2_system_lyric_offset_seconds": 0.0,
     # Experimental external position pipeline; legacy SMTC behavior stays default.
     "v2_capture_position_enabled": False,
+    "v2_capture_app_profiles": {},
     "v2_enable_dual_line_lyrics": False,
     "v2_dual_line_font_size": 12,
     "v2_dual_line_secondary_weight": 72,
@@ -476,8 +477,20 @@ class SettingsManager(QObject):
                 data = json.load(f)
             if not isinstance(data, dict):
                 return
+            # Retain raw migration evidence before fixed legacy defaults are
+            # applied. The new envelope is written only after explicit opt-in.
+            self._capture_legacy_profiles = copy.deepcopy(data.get("v2_music_app_profiles"))
             migrated = any(key in data for key in _REMOVED_VISUAL_SETTING_KEYS)
             self._settings.update({key: value for key, value in data.items() if key not in _REMOVED_VISUAL_SETTING_KEYS})
+            if self._settings.get("v2_capture_position_enabled") is True:
+                from api.capture.capabilities import normalize_capture_profiles
+                profiles = normalize_capture_profiles(self._capture_legacy_profiles,
+                                                      self._settings.get("v2_capture_app_profiles"))
+                migrated = migrated or profiles != self._settings.get("v2_capture_app_profiles")
+                self._settings["v2_capture_app_profiles"] = profiles
+            elif self._settings.get("v2_capture_position_enabled") is not False:
+                self._settings["v2_capture_position_enabled"] = False
+                migrated = True
             for key, default in (("v2_owned_playback_enabled", True), ("v2_system_capture_enabled", True),
                                  ("v2_playback_onboarding_completed", False), ("v2_personal_dj_enabled", False),
                                  ("v2_library_expanded", False), ("v2_bar_hide_follow_enabled", True)):
@@ -582,6 +595,16 @@ class SettingsManager(QObject):
             value = key == "v2_owned_playback_enabled"
         if key in _REMOVED_VISUAL_SETTING_KEYS or key in FIXED_DEFAULT_SETTING_KEYS:
             return
+        if key == "v2_capture_position_enabled":
+            if not isinstance(value, bool):
+                return
+            if value:
+                from api.capture.capabilities import normalize_capture_profiles
+                self._settings["v2_capture_app_profiles"] = normalize_capture_profiles(
+                    getattr(self, "_capture_legacy_profiles", None), self._settings.get("v2_capture_app_profiles"))
+        if key == "v2_capture_app_profiles":
+            from api.capture.capabilities import normalize_capture_profiles
+            value = normalize_capture_profiles(getattr(self, "_capture_legacy_profiles", None), value)
         if key == "v2_personal_dj_enabled" and not isinstance(value, bool):
             return
         if key == "v2_library_expanded" and not isinstance(value, bool):

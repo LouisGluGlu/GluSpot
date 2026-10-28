@@ -254,17 +254,26 @@ seek acknowledgements and optional calibration. Only `api/providers.py` wires
 these components into the V2 app. Windows dependencies must remain lazy and
 mockable; no release version or package is changed by this work.
 
-Implementation: steps 1–4 complete (contracts, monotonic model, background
-SMTC events with a 2 Hz polling fallback and verified seek state machine);
-step 5 (optional STA UIA calibration and one-attempt physical fallback) complete;
-step 6 pending. Hybrid NetEase/QQ sampling runs at 7.5-second intervals, with
-a bounded anomaly cadence. UIA timeout quarantines the single worker until
-completion; access denial/disappearing elements fail closed. Opt-in seeks project an optimistic target, verify independent
-raw readbacks, and roll back on failure with a visible lyric-click message.
-Native mutation timeouts are ambiguous and never trigger a second backend.
-The optional fallback contract is tested with mocks; real UIA integration is step 5. Diagnostics report
-event counts/rate, arrival-to-read latency, errors and model corrections. Serialized mock timeline traces exercise projection, pause,
-seek, clock jumps and track changes; these are not live Windows recordings.
+Implementation: steps 1–6 complete behind the flag. Auto capability dispatch
+uses AUMID / exact process basename and requires no saved path. New
+`v2_capture_app_profiles` modes (`auto`, `smtc`, `hybrid`, `off`) isolate rollout
+and preserve explicit overrides; migration happens only after opt-in. Legacy
+false/empty-path defaults migrate to auto; their manual-intent ambiguity and
+the new explicit off override are documented. Verified seek uses independent
+readbacks, optional single-attempt STA UIA fallback, optimistic rollback and
+failure feedback. Diagnostics report event rate/delay, correction and seek/UIA
+metrics. See [architecture, configuration, tests and Windows acceptance limits](docs/capture-position.md).
+Serialized mock timeline traces exercise projection, pause, seek, clock jumps
+and track changes; these are not live Windows recordings. Native player tests
+and multi-hour soak remain pending; this experiment is not a release claim.
+
+Linux offscreen verification (2026-10-28): baseline **5,453 tests / 155.793 s**;
+final **5,544 tests / 146.022 s**. Both report **17 failures, 11 errors and
+31 skips**, with exactly the same failure/error identities; **91 new capture
+tests pass**. Inherited issues include missing optional `soundcard`, Win32-only
+mocks, absent font assets and offscreen rendering assumptions. Compilation and
+whitespace checks pass. This is a no-new-failures comparison, not a clean full
+suite or Windows native acceptance. Detailed evidence is in the capture report.
 
 ## Guardrails
 
@@ -398,7 +407,7 @@ Legacy data classes, independent provider modules, assets and unit fixtures rema
 - Production credits use explicit-field evidence and conservative leading-block expansion. Long bilingual roles and old NetEase JSON headers are cleaned without treating arbitrary colon prose, singer labels or unrelated JSON as credits. Window/fullscreen, cover/external lyrics and the island share display-only cleanup; a fully removed metadata payload uses the existing no-lyrics state.
 - Intro dots retain the existing 5-second rule. Middle gaps appear only when retained, genuinely timed vocals prove more than 3 seconds of silence, including sustained overlaps, duets and backing vocals. Ordinary LRC and unknown ends do not create estimated middle/tail gaps. Dots follow the actual playback position through pause, seek and song changes, and are rebuilt after display-preference changes without touching raw rows or persistent caches.
 - QQ now obtains and independently decodes online QRC through the existing verified platform path, retaining LRC fallback. AMLL TTML is a bounded exact-platform-ID fallback after existing sources; manual lyrics retain precedence. Owned playback publishes official lyrics before a low-priority backup lookup. Identity/version/duration checks and request generations reject unrelated or obsolete results, while failures preserve established lyrics. Cross-source companions require compatible original text and clocks; raw QRC/TTML/NetEase variants and bounded companion provenance survive cache reload and translation/romanization changes. No new runtime dependency or bundled lyric database is introduced. See [staged changes, source conditions and verification](docs/lyric-pipeline-2026-10-19.md).
-- External playback uses Windows SMTC only, without player-window, UIA, progress-plugin or app-path listening. The visible settings retain one global system lyric offset. Legacy adapter helpers remain dormant compatibility code; program-owned source providers remain independent.
+- Default external playback uses Windows SMTC only, without player-window, UIA, progress-plugin or app-path listening. The experimental capture flag described above separately enables the new hybrid path. The visible settings retain one global system lyric offset. Legacy adapter helpers remain dormant compatibility code; program-owned source providers remain independent.
 - Program-owned playback and external SMTC share the provider boundary. The global external offset never changes an `owned:` track.
 - Owned album artwork retries transient download/decoder-image/worker failures twice at bounded delays, independently of surface visibility. A failed known NetEase size upgrade falls back to the exact supplied URL; a valid thumbnail remains visible while larger artwork is retried. HTTP declared lengths and complete Windows thumbnail streams are validated before caching. See [failure evidence, Folia/Mineradio source references and verification](docs/artwork-resilience.md).
 
