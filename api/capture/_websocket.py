@@ -51,7 +51,10 @@ class LoopbackWebSocket:
             return cls(reader, writer)
         except BaseException:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), cls.CLOSE_TIMEOUT)
+            except (OSError, asyncio.TimeoutError):
+                pass
             raise
 
     async def send(self, text: str):

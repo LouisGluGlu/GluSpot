@@ -6,6 +6,8 @@ from dataclasses import replace
 from api.capture.contracts import TimelineSample
 from api.capture.seek import SeekExecutor, SeekPolicy, SeekState
 
+from tests.capture_async import CaptureAsyncTestCase
+
 
 class Backend:
     def __init__(self, name, trace, *, moves=False, ack=True, fail=None):
@@ -35,7 +37,7 @@ async def current():
     return True
 
 
-class SeekExecutorTests(unittest.IsolatedAsyncioTestCase):
+class SeekExecutorTests(CaptureAsyncTestCase):
     def setUp(self):
         self.trace = []
         self.executor = SeekExecutor(clock=lambda: 100, sleep=self.sleep)

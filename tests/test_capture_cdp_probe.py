@@ -10,6 +10,8 @@ from unittest.mock import patch
 from tools import netease_cdp_probe
 from tests.capture_cdp_fake import FakeCdpServer
 
+from tests.capture_async import CaptureAsyncTestCase
+
 
 class PushedSession:
     def __init__(self, port, *, adapter="auto", move=True, fail=False, replace=False):
@@ -68,7 +70,7 @@ class PushedSession:
             await asyncio.gather(self.task, return_exceptions=True)
 
 
-class ProbeTests(unittest.IsolatedAsyncioTestCase):
+class ProbeTests(CaptureAsyncTestCase):
     async def run_probe(self, **options):
         session = PushedSession(12345, **options)
         messages = []

@@ -10,8 +10,10 @@ from api.capture.position import PositionModel
 from api.capture.contracts import TimelineSample
 from tests.test_capture_smtc import visual
 
+from tests.capture_async import CaptureAsyncTestCase
 
-class WorkerTests(unittest.IsolatedAsyncioTestCase):
+
+class WorkerTests(CaptureAsyncTestCase):
     async def test_sta_initialization_io_and_cleanup_share_thread(self):
         threads = []
         cleaned = threading.Event()

@@ -9,6 +9,14 @@ import re
 import struct
 
 
+async def close_writer(writer):
+    try:
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), 1)
+    except (OSError, asyncio.TimeoutError):
+        pass
+
+
 class FakeCdpServer:
     def __init__(self):
         self.port = 0
@@ -36,17 +44,18 @@ class FakeCdpServer:
     async def close(self):
         if self.server:
             self.server.close()
-            await self.server.wait_closed()
-        await self.drop_connections()
-        for task in self.tasks:
+        tasks = tuple(self.tasks)
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await self.drop_connections()
+        if tasks:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 2)
+        if self.server:
+            await asyncio.wait_for(self.server.wait_closed(), 1)
 
     async def drop_connections(self):
         clients = tuple(self.clients)
-        for writer in clients:
-            writer.close()
-        await asyncio.gather(*(writer.wait_closed() for writer in clients), return_exceptions=True)
+        await asyncio.gather(*(close_writer(writer) for writer in clients))
 
     async def emit(self, payload):
         message = dict(method='Runtime.bindingCalled', params=dict(
@@ -136,6 +145,5 @@ class FakeCdpServer:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
             self.clients.discard(writer)
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
             self.tasks.discard(task)

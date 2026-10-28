@@ -11,10 +11,12 @@ from unittest.mock import patch
 from api.capture.cdp import CdpError, CdpSession, discover_target
 from api.capture.netease import NetEaseInstallation, NetEaseLocator
 from api.capture.netease_js import JsAdapterRegistry
-from tests.capture_cdp_fake import FakeCdpServer
+from tests.capture_cdp_fake import FakeCdpServer, close_writer
+
+from tests.capture_async import CaptureAsyncTestCase
 
 
-class CdpTests(unittest.IsolatedAsyncioTestCase):
+class CdpTests(CaptureAsyncTestCase):
     async def asyncSetUp(self):
         self.server = await FakeCdpServer().__aenter__()
         self.events = []
@@ -155,7 +157,7 @@ class CdpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.session.latest)
 
 
-class LocatorTests(unittest.IsolatedAsyncioTestCase):
+class LocatorTests(CaptureAsyncTestCase):
     def locator(self, **kwargs):
         return NetEaseLocator(processes=lambda: [], registry_paths=lambda: [],
                               exists=lambda path: True, version=lambda path: '3.1.42', **kwargs)
@@ -287,7 +289,7 @@ console.log(JSON.stringify({probe,before,after,pushed:pushed.slice(0,beforeClose
         self.assertEqual(value['restarted']['position'], 5)
 
 
-class WebSocketFrameTests(unittest.IsolatedAsyncioTestCase):
+class WebSocketFrameTests(CaptureAsyncTestCase):
     def connection(self, data):
         from api.capture._websocket import LoopbackWebSocket
         reader = asyncio.StreamReader()
@@ -329,7 +331,40 @@ class WebSocketFrameTests(unittest.IsolatedAsyncioTestCase):
             await connection.receive()
 
 
-class BoundedIoTests(unittest.IsolatedAsyncioTestCase):
+class BoundedIoTests(CaptureAsyncTestCase):
+    async def test_fixture_close_handles_reset_and_stalled_writer(self):
+        class Writer:
+            def __init__(self, reset):
+                self.reset = reset
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+            async def wait_closed(self):
+                if self.reset:
+                    raise ConnectionResetError("connection reset")
+                await asyncio.Future()
+
+        reset, stalled = Writer(True), Writer(False)
+        await asyncio.wait_for(asyncio.gather(close_writer(reset), close_writer(stalled)), 2)
+        self.assertTrue(reset.closed and stalled.closed)
+
+    async def test_fixture_stop_cancels_incomplete_client_handshake(self):
+        server = await FakeCdpServer().__aenter__()
+        reader, writer = await asyncio.open_connection('127.0.0.1', server.port)
+        try:
+            writer.write(b'GET /')
+            await writer.drain()
+            await asyncio.sleep(0.01)
+            self.assertTrue(server.tasks)
+            await asyncio.wait_for(server.close(), 2)
+            self.assertFalse(server.tasks)
+            self.assertEqual(await asyncio.wait_for(reader.read(), 1), b'')
+        finally:
+            await close_writer(writer)
+            await server.close()
+
     async def test_command_timeout_includes_socket_drain(self):
         class StalledSocket:
             async def send(self, _):
@@ -379,8 +414,7 @@ class BoundedIoTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
             writer.write(body[8:])
             await writer.drain()
-            writer.close()
-            await writer.wait_closed()
+            await close_writer(writer)
         server = await asyncio.start_server(respond, '127.0.0.1', 0)
         port = server.sockets[0].getsockname()[1]
         try:
@@ -388,4 +422,4 @@ class BoundedIoTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(target['url'], 'orpheus://orpheus/pub/app.html')
         finally:
             server.close()
-            await server.wait_closed()
+            await asyncio.wait_for(server.wait_closed(), 1)

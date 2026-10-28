@@ -10,6 +10,8 @@ from api.capture.cdp import CdpSession
 from tests.capture_cdp_fake import FakeCdpServer
 from tests.test_capture_smtc import Session as MediaSession, visual
 
+from tests.capture_async import CaptureAsyncTestCase
+
 
 class Session:
     def __init__(self, port, **kwargs):
@@ -24,7 +26,7 @@ class Session:
         self._closed = True
 
 
-class NetEaseProviderTests(unittest.IsolatedAsyncioTestCase):
+class NetEaseProviderTests(CaptureAsyncTestCase):
     def provider(self, values=None):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         defaults = {'v2_capture_position_enabled': True,
@@ -74,12 +76,12 @@ class NetEaseProviderTests(unittest.IsolatedAsyncioTestCase):
         entered, release = asyncio.Event(), asyncio.Event()
         async def launch(*args, **kwargs):
             entered.set()
-            await release.wait()
+            await asyncio.wait_for(release.wait(), 2)
             return NetEaseLaunch(12345, NetEaseInstallation('/apps/cloudmusic.exe'), 99)
         provider._netease_locator.launch.side_effect = launch
         with patch('api.capture.cdp.CdpSession', side_effect=Session) as factory:
             starting = asyncio.create_task(provider._ensure_netease_cdp())
-            await entered.wait()
+            await asyncio.wait_for(entered.wait(), 2)
             values['netease.cef.enabled'] = False
             closing = asyncio.create_task(provider._close_netease_cdp())
             await asyncio.sleep(0)

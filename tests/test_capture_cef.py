@@ -9,6 +9,8 @@ from api.capture.runtime import CaptureRuntime
 from api.capture.seek import SeekExecutor, SeekState
 from tests.test_capture_smtc import Session, matches, visual
 
+from tests.capture_async import CaptureAsyncTestCase
+
 
 class Clock:
     value = 100.0
@@ -51,7 +53,7 @@ class FakeCdp:
         return True
 
 
-class CefSourceTests(unittest.IsolatedAsyncioTestCase):
+class CefSourceTests(CaptureAsyncTestCase):
     def setUp(self):
         self.clock = Clock()
         self.session = FakeCdp(self.clock)
@@ -223,7 +225,7 @@ class CefSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.session.writes), 1)
 
 
-class CefRuntimeTests(unittest.IsolatedAsyncioTestCase):
+class CefRuntimeTests(CaptureAsyncTestCase):
     async def test_resume_after_long_pause_does_not_project_paused_interval(self):
         clock = Clock()
         cdp = FakeCdp(clock)

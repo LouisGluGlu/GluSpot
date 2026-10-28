@@ -78,7 +78,10 @@ async def discover_target(port: int, *, timeout: float = 2.0) -> dict:
             raise CdpError('NetEase player target unavailable')
         finally:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), LoopbackWebSocket.CLOSE_TIMEOUT)
+            except (OSError, asyncio.TimeoutError):
+                pass
     return await asyncio.wait_for(fetch(), timeout)
 
 

@@ -15,6 +15,8 @@ from api.capture.smtc import SmtcCollector, SmtcSessionSource
 from api.providers import EmptyIslandDataProvider, WindowsMediaProvider
 from local.media_position_pipeline import media_position_update_plan
 
+from tests.capture_async import CaptureAsyncTestCase, run_async
+
 
 class Session:
     source_app_user_model_id = 'cloudmusic.exe'
@@ -53,7 +55,7 @@ def visual():
     return replace(data, track=replace(data.track, track_id='song', source_app_id='cloudmusic.exe', is_playing=True))
 
 
-class CollectorTests(unittest.IsolatedAsyncioTestCase):
+class CollectorTests(CaptureAsyncTestCase):
     async def test_cancelled_initial_bind_can_rebind_same_session_and_track(self):
         runtime = CaptureRuntime(clock=lambda: 100)
         session = Session()
@@ -107,7 +109,7 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
                     # Pre-seek and verification reads finished; runtime is
                     # now copying independent success evidence into its model.
                     final_read_started.set()
-                    await release_final_read.wait()
+                    await asyncio.wait_for(release_final_read.wait(), 2)
                 return sample
 
             async def seek(self, target, *, request_id):
@@ -160,7 +162,7 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
             sample = await original_read()
             if calls == 1:
                 first_started.set()
-                await release_first.wait()
+                await asyncio.wait_for(release_first.wait(), 2)
             return sample
 
         source.read = read
@@ -176,9 +178,10 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.wait_for(first_started.wait(), timeout=0.2)
             session.position = 40
-            thread = threading.Thread(target=session.events['timeline_properties_changed'])
+            thread = threading.Thread(target=session.events['timeline_properties_changed'], daemon=True)
             thread.start()
-            thread.join()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
             # Deliver the queued native callback while the first read still
             # holds its older physical sample.
             await asyncio.sleep(0)
@@ -250,9 +253,10 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.sleep(0)
             session.position = 40
-            thread = threading.Thread(target=session.events['timeline_properties_changed'])
+            thread = threading.Thread(target=session.events['timeline_properties_changed'], daemon=True)
             thread.start()
-            thread.join()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
             await asyncio.sleep(0.015)
             self.assertEqual(samples[-1].position_seconds, 40)
             self.assertGreaterEqual(collector.stats['events'], 1)
@@ -330,7 +334,7 @@ class ProviderCaptureTests(unittest.TestCase):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         provider.settings_getter = lambda _k, default=None: default
         with patch('api.capture.runtime.CaptureRuntime', side_effect=AssertionError('flag off')):
-            asyncio.run(provider._bind_capture_session(Session(), visual().track))
+            run_async(provider._bind_capture_session(Session(), visual().track))
         self.assertIsNone(getattr(provider, '_capture_runtime', None))
 
     def test_io_runs_on_provider_background_loop_and_shutdown_unsubscribes(self):
@@ -363,7 +367,7 @@ class ProviderCaptureTests(unittest.TestCase):
         self.assertEqual(media_position_update_plan(incoming_position_seconds=10, **args).position_seconds, 10)
 
 
-class RuntimeSeekTests(unittest.IsolatedAsyncioTestCase):
+class RuntimeSeekTests(CaptureAsyncTestCase):
     async def test_fresh_native_wrapper_for_same_player_does_not_abort_seek_binding(self):
         runtime = CaptureRuntime()
         first, refreshed = Session(), Session()
