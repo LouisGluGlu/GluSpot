@@ -25,7 +25,7 @@ class NarrowLayout:
 
     @property
     def viewport(self):
-        return QRectF(20, 190, min(340, self.width - 40), self.height - 286)
+        return QRectF(20, 190, min(340, self.width - 40), max(0, self.height - 416))
 
     @property
     def back(self):
@@ -37,18 +37,34 @@ class NarrowLayout:
         return [QRectF(self.width - 16 - side - i * (side + 16), 16, side, side)
                 for i in range(5)]
 
+    @staticmethod
+    def centered(x, y, side):
+        return QRectF(x - side / 2, y - side / 2, side, side)
+
     @property
     def play(self):
-        return QRectF(60, self.height - 56, 32, 32)
+        return self.centered(self.width / 2, self.height - 180, 72)
 
     @property
     def previous(self):
-        return QRectF(20, self.height - 56, 32, 32)
+        return self.centered(self.width / 2 - 74, self.height - 180, 48)
 
     @property
     def next(self):
-        return QRectF(100, self.height - 56, 32, 32)
+        return self.centered(self.width / 2 + 74, self.height - 180, 48)
 
     @property
     def favorite(self):
-        return QRectF(self.width - 92, self.height - 55, 72, 30)
+        return self.centered(38, self.height - 48, 44)
+
+    @property
+    def dj(self):
+        return self.centered(self.width - 40, self.height - 48, 48)
+
+    def utility(self, dj_fraction):
+        # Interpolate between the centered row and the right-aligned bottom row.
+        t = max(0.0, min(1.0, dj_fraction))
+        y = (self.height - 48) * (1 - t) + (self.height - 108) * t
+        loop_x = (self.width - 96) * (1 - t) + (self.width / 2 - 32) * t
+        layout_x = (self.width - 36) * (1 - t) + (self.width / 2 + 32) * t
+        return self.centered(loop_x, y, 40), self.centered(layout_x, y, 40)

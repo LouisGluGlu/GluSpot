@@ -16,7 +16,7 @@ for name in ("HOME", "APPDATA", "LOCALAPPDATA"):
     os.environ[name] = SANDBOX.name
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QTextLayout
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextLayout
 from PySide6.QtWidgets import QApplication
 
 from api.models import ColorToken, TimedLyricLine, TimedLyricUnit
@@ -30,7 +30,8 @@ from test_music_surface_transition import _TransitionOwner
 from test_owned_playback_surface import _Provider
 from test_song_collection_surface import Collection
 from layout import NarrowLayout
-from motion import Visibility
+from motion import EaseOutFade, Visibility
+from local.personal_dj_icon import paint_personal_dj_icon
 
 SONGS = [("夜航的信", "林间电台"), ("晚风经过", "陈小雨"), ("云与海之间", "南方来信"), ("星光落下来", "木子"), ("慢慢的旅程", "夏日回声"), ("下一站黎明", "白昼乐队"), ("你听见了吗", "无名旅人"), ("再见之前", "海边房间")]
 LYRICS = ["在夜色中慢慢走", "把心事交给晚风", "那些没有说完的话", "会在星光里重逢", "让时间轻轻流过", "我们还在这条路上", "等天边亮起微光", "再一起迎接远方"]
@@ -60,6 +61,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.liked_songs = set()
         self.shelf = False
         self.footer_hover = False
+        self.dj_available = True
+        self.dj_enabled = False
+        self.dj_speaking = False
+        self.dj_motion = EaseOutFade(1.0)
+        self.loop_mode = 0
         self.visibility = Visibility(variant == "B")
         self.hovered_glass = ""
         self.hints = True
@@ -72,7 +78,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.cold_paint = None
         self.last_tick = time.monotonic()
         self.frame_times = []
-        self.setMinimumSize(320, 400)
+        self.setMinimumSize(320, 560)
         self.setMouseTracking(True)
         self.move(80, 80)
         self.resize(360, 640)
@@ -112,6 +118,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.owner.media_position_seconds = (self.owner.media_position_seconds + now - self.last_tick) % 32
         self.last_tick = now
         self.visibility.advance(now, self.shelf, self.footer_hover, self.mode == "playlist")
+        self.dj_motion.retarget(float(self.dj_available), now, .18)
         self._glass_feedback.advance(self.glass_groups(), self.hovered_glass, now)
         self.update()
         names = {"A": "静态", "B": "悬停"}
@@ -125,8 +132,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         now = time.monotonic()
         top = {key: rect for index, (key, rect) in enumerate(top.items())
                if index == 0 or self.visibility.top[index - 1].value(now) > .001}
+        loop, mode = layout.utility(self.dj_motion.value(now))
         footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
-                  "media:next": layout.next, "collection": layout.favorite}
+                  "media:next": layout.next, "collection": layout.favorite,
+                  "footer_loop": loop, "footer_layout": mode}
+        if self.dj_available:
+            footer["personal_dj"] = layout.dj
         if self.visibility.footer.value(now) <= .001:
             footer = {}
         return [top, {"library": layout.back}, footer]
@@ -200,7 +211,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             fade = 32
         else:
             self.paint_list(layer, layout)
-            area = QRectF(0, 218, self.width(), self.height() - 314)
+            area = QRectF(0, 218, self.width(), max(1, layout.viewport.bottom() - 218))
             fade = 28
         layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
         gradient = QLinearGradient(0, area.top(), 0, area.bottom())
@@ -280,7 +291,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.setFont(self._surface_font(12, QFont.Weight.DemiBold))
         painter.drawText(QRectF(20, 190, self.width() - 40, 28), Qt.AlignmentFlag.AlignVCenter, "播放列表")
         painter.save()
-        painter.setClipRect(QRectF(0, 218, self.width(), self.height() - 314))
+        painter.setClipRect(QRectF(0, 218, self.width(), max(0, layout.viewport.bottom() - 218)))
         for index, (title, artist) in enumerate(SONGS):
             y = 218 + index * 56
             if index == self.song_index:
@@ -353,8 +364,31 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         favorite = self.posed_rect("collection", layout.favorite)
         self._paint_surface_glass(painter, favorite, role="collection")
         heart = "heart_filled" if self.song_index in self.liked_songs else "heart_outline"
-        paint_music_source_icon(painter, QRectF(favorite.x() + 8, favorite.y() + 5, 20, 20), heart, tint=ink)
-        paint_music_source_icon(painter, QRectF(favorite.x() + 43, favorite.y() + 5, 20, 20), "playlist_add", tint=ink)
+        paint_music_source_icon(painter, favorite.adjusted(11, 11, -11, -11), heart, tint=ink)
+        loop, mode = layout.utility(self.dj_motion.value(time.monotonic()))
+        loop = self.posed_rect("footer_loop", loop)
+        mode = self.posed_rect("footer_layout", mode)
+        self._paint_surface_glass(painter, loop, role="playback-mode")
+        paint_music_source_icon(painter, loop.adjusted(9, 9, -9, -9),
+                                ("sequence", "shuffle", "repeat_one")[self.loop_mode], tint=ink)
+        self._paint_surface_glass(painter, mode, role="content-layout")
+        self._paint_content_layout_icon(painter, mode.adjusted(9, 9, -9, -9))
+        if self.dj_available:
+            dj = self.posed_rect("personal_dj", layout.dj)
+            self._paint_surface_glass(painter, dj, role="dj-icon")
+            if self.dj_enabled:
+                painter.save()
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(52, 196, 112), 1.8))
+                ring = dj.adjusted(1, 1, -1, -1)
+                if self.dj_speaking:
+                    painter.drawArc(ring, int(-time.monotonic() * 150 * 16), 80 * 16)
+                else:
+                    painter.drawEllipse(ring)
+                painter.restore()
+            paint_personal_dj_icon(painter, dj.adjusted(dj.width() * .18, dj.height() * .14,
+                                   -dj.width() * .18, -dj.height() * .14), ink,
+                                   elapsed=time.monotonic() if self.dj_speaking else 0, neutral=ink)
         painter.restore()
 
     def keyPressEvent(self, event):
@@ -378,6 +412,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.set_cover(key - Qt.Key.Key_1)
         elif key == Qt.Key.Key_Space:
             self.owner.media_is_playing = not self.owner.media_is_playing
+        elif key == Qt.Key.Key_D:
+            self.dj_available = not self.dj_available
+        elif key == Qt.Key.Key_S:
+            self.dj_enabled = True
+            self.dj_speaking = not self.dj_speaking
         elif key == Qt.Key.Key_H:
             self.hints = not self.hints
         else:
@@ -420,13 +459,22 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.select_song(self.song_index + 1)
         elif footer_visible and layout.play.contains(event.position()):
             self.owner.media_is_playing = not self.owner.media_is_playing
-        elif (footer_visible and layout.favorite.contains(event.position())
-              and event.position().x() < layout.favorite.center().x()):
+        elif footer_visible and layout.favorite.contains(event.position()):
             if self.song_index in self.liked_songs:
                 self.liked_songs.remove(self.song_index)
             else:
                 self.liked_songs.add(self.song_index)
-        elif self.mode == "playlist" and 218 <= event.position().y() < self.height() - 96:
+        elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[0].contains(event.position()):
+            self.loop_mode = (self.loop_mode + 1) % 3
+        elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[1].contains(event.position()):
+            self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
+            self.set_content_layout(self.mode, animate=False)
+            self._finish_content_layout()
+        elif footer_visible and self.dj_available and layout.dj.contains(event.position()):
+            self.dj_enabled = not self.dj_enabled
+            if not self.dj_enabled:
+                self.dj_speaking = False
+        elif self.mode == "playlist" and 218 <= event.position().y() < layout.viewport.bottom():
             index = int((event.position().y() - 218) // 56)
             if index < len(SONGS):
                 self.select_song(index)

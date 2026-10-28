@@ -24,6 +24,16 @@ class Fade:
         return now >= self.started + self.duration
 
 
+class EaseOutFade(Fade):
+    """Retargetable ease-out interpolation for the utility row's position."""
+    def value(self, now):
+        if not self.duration:
+            return self.target
+        t = max(0.0, min(1.0, (now - self.started) / self.duration))
+        eased = 1.0 - (1.0 - t) ** 3
+        return self.start + (self.target - self.start) * eased
+
+
 class Visibility:
     def __init__(self, enabled):
         self.enabled = enabled
