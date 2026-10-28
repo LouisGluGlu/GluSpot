@@ -47,9 +47,9 @@ class Visibility:
             self.top_enter = now
         if not active:
             self.top_enter = None
-        self.footer.retarget(float(active), now, .32)
+        self.footer.retarget(float(active), now, .34)
         for fade in self.top:
-            fade.retarget(float(active), now, .32)
+            fade.retarget(float(active), now, .34)
 
     def settled(self, now):
         return self.footer.settled(now) and all(fade.settled(now) for fade in self.top)

@@ -23,6 +23,22 @@ def check(variant, width, mode, dj):
     middle = NarrowLayout(width, 640, .5).viewport
     if middle.top() != 105 or middle.bottom() != 517:
         errors.append("interpolated viewport")
+    if width == 360 and not 30 <= layout.lyric_font <= 32:
+        errors.append("lyric size at 360")
+    fonts = [NarrowLayout(size, 640).lyric_font for size in (320, 360, 480)]
+    if not (fonts[0] < fonts[1] <= fonts[2]) or fonts[-1] > 40:
+        errors.append("lyric size does not scale")
+    if viewport.top() < 16 or width - viewport.right() < 16:
+        errors.append("viewport margin")
+    if abs(layout.lyric_anchor - (viewport.top() + viewport.height() * .33)) > .001:
+        errors.append("lyric anchor")
+    if viewport.top() + layout.lyric_step * 5 > 640 * 2 / 3 and variant == "A":
+        errors.append("lyrics do not reach bottom third")
+    rows = layout.list_top + layout.list_step(8) * 8
+    if variant == "A" and rows < 640 * 2 / 3:
+        errors.append("list does not reach bottom third")
+    if variant == "A" and layout.list_heading > .001:
+        errors.append("idle list keeps heading")
     bounds = QRectF(0, 0, width, 640)
     for rect in controls:
         if not bounds.contains(rect):

@@ -24,12 +24,49 @@ class NarrowLayout:
         left = self.cover.right() + 16
         return QRectF(left, 70, self.width - left - 20, self.cover.height())
 
+    @staticmethod
+    def _ease(value):
+        # Smoothstep keeps the shrink and the re-centering on one curve, so the
+        # viewport grows out of place instead of snapping between two rectangles.
+        t = max(0.0, min(1.0, float(value)))
+        return t * t * (3 - 2 * t)
+
     @property
     def viewport(self):
-        t = max(0.0, min(1.0, self.visibility))
+        t = self._ease(self.visibility)
         top = 20 + 170 * t
         bottom = self.height - 20 - 206 * t
         return QRectF(20, top, self.width - 40, max(1, bottom - top))
+
+    @property
+    def lyric_font(self):
+        # 31.5 px at 360 wide; tracks the window so the reading size holds.
+        return min(40.0, max(26.0, self.width * .0875))
+
+    @property
+    def lyric_step(self):
+        return self.lyric_font * 1.45
+
+    @property
+    def lyric_row(self):
+        return self.lyric_font * 1.3
+
+    @property
+    def lyric_anchor(self):
+        return self.viewport.top() + self.viewport.height() * .33
+
+    @property
+    def list_heading(self):
+        # The list heading belongs to the hover chrome; idle rows run edge to edge.
+        return 28.0 * self._ease(self.visibility)
+
+    @property
+    def list_top(self):
+        return self.viewport.top() + self.list_heading
+
+    def list_step(self, count):
+        available = max(1.0, self.viewport.bottom() - self.list_top)
+        return min(76.0, max(52.0, available / max(1, count)))
 
     @property
     def back(self):

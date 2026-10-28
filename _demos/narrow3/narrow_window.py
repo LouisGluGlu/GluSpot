@@ -34,7 +34,7 @@ from motion import EaseOutFade, Visibility
 from local.personal_dj_icon import paint_personal_dj_icon
 
 SONGS = [("夜航的信", "林间电台"), ("晚风经过", "陈小雨"), ("云与海之间", "南方来信"), ("星光落下来", "木子"), ("慢慢的旅程", "夏日回声"), ("下一站黎明", "白昼乐队"), ("你听见了吗", "无名旅人"), ("再见之前", "海边房间")]
-LYRICS = ["在夜色中慢慢走", "把心事交给晚风", "那些没有说完的话", "会在星光里重逢", "让时间轻轻流过", "我们还在这条路上", "等天边亮起微光", "再一起迎接远方"]
+LYRICS = ["在夜色中慢慢走", "把心事交给晚风", "那些没有说完的话", "会在星光里重逢", "让时间轻轻流过", "我们还在这条路上", "等天边亮起微光", "再一起迎接远方", "城市把灯光放低", "远处有汽笛回响", "我把这首歌留给你", "天亮以前不要散场"]
 # Explicit timings belong to the synthetic demo lyrics only.
 TIMED_LYRICS = tuple(
     TimedLyricLine(
@@ -116,7 +116,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def tick(self):
         now = time.monotonic()
         if self.owner.media_is_playing and not self.freeze_clock:
-            self.owner.media_position_seconds = (self.owner.media_position_seconds + now - self.last_tick) % 32
+            loop = len(TIMED_LYRICS) * 4.0
+            self.owner.media_position_seconds = (self.owner.media_position_seconds + now - self.last_tick) % loop
         self.last_tick = now
         self.visibility.advance(now, self.shelf, self.footer_hover, self.mode == "playlist")
         self.dj_motion.retarget(float(self.dj_available), now, .18)
@@ -213,17 +214,19 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if self.mode == "lyrics":
             self.paint_lyrics(layer, layout)
             area = layout.viewport
-            fade = 32
+            fade = min(88, area.height() * .16)
         else:
             self.paint_list(layer, layout)
-            area = QRectF(0, layout.viewport.top() + 28, self.width(), max(1, layout.viewport.height() - 28))
-            fade = 28
+            area = QRectF(0, layout.list_top, self.width(), max(1, layout.viewport.bottom() - layout.list_top))
+            fade = min(72, area.height() * .14)
         layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
         gradient = QLinearGradient(0, area.top(), 0, area.bottom())
-        edge = min(.5, fade / area.height())
+        edge = min(.5, fade / max(1, area.height()))
         gradient.setColorAt(0, QColor(255, 255, 255, 0))
+        gradient.setColorAt(edge * .45, QColor(255, 255, 255, 150))
         gradient.setColorAt(edge, QColor(255, 255, 255, 255))
         gradient.setColorAt(1 - edge, QColor(255, 255, 255, 255))
+        gradient.setColorAt(1 - edge * .45, QColor(255, 255, 255, 150))
         gradient.setColorAt(1, QColor(255, 255, 255, 0))
         if self.mode == "playlist":
             # Preserve the heading above the list's faded viewport.
@@ -255,16 +258,18 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         position = self.owner.media_position_seconds
         focus = min(len(TIMED_LYRICS) - 1, int(position // 4))
         elapsed = position - focus * 4.0
-        transition = min(1.0, max(0.0, elapsed / .42))
+        transition = min(1.0, max(0.0, elapsed / .36))
         eased = 1.0 - (1.0 - transition) ** 3
         visual_focus = focus - (1.0 - eased) if focus else 0.0
-        anchor = viewport.top() + viewport.height() * .38
-        font = self._surface_font(22)
+        anchor = layout.lyric_anchor
+        step = layout.lyric_step
+        row = layout.lyric_row
+        font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
         painter.save()
         painter.setClipRect(viewport.adjusted(-18, 0, 18, 0))
         for index in range(len(TIMED_LYRICS)):
             line = TIMED_LYRICS[index]
-            y = anchor + (index - visual_focus) * 44 - 22
+            y = anchor + (index - visual_focus) * step - row / 2
             width = QFontMetricsF(font).horizontalAdvance(line.text)
             x = viewport.left()
             if self.lyrics_alignment == "center":
@@ -275,13 +280,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 text_layout.createLine().setLineWidth(viewport.width())
                 text_layout.endLayout()
                 color = QColor(255, 255, 255) if index < focus else self._future_lyric_color(viewport)
-                image, padding = self._lyric_raster(line.text, font, viewport.width(), 30, text_layout, color)
+                image, padding = self._lyric_raster(line.text, font, viewport.width(), row, text_layout, color)
                 level = self._lyric_group_blur_level(index, focus)
                 image = self._blurred_lyric_raster(image, level, color)
                 painter.drawImage(QPointF(x - padding, y - padding), image)
                 continue
             self.reading_renderer.paint(
-                painter, QRectF(x, y, viewport.width(), 30), x, line.text, font,
+                painter, QRectF(x, y, viewport.width(), row), x, line.text, font,
                 max(0.0, min(1.0, (position - line.time_seconds) / 4.0)),
                 self._future_lyric_color(viewport), QColor(255, 255, 255),
                 timed_units=line.units, timed_position=position,
@@ -291,16 +296,20 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def paint_list(self, painter, layout):
         viewport = layout.viewport
+        step = layout.list_step(len(SONGS))
+        top = layout.list_top
         ink = self._scene_control_ink()
-        painter.setPen(ink)
-        painter.setFont(self._surface_font(12, QFont.Weight.DemiBold))
-        painter.drawText(QRectF(20, viewport.top(), self.width() - 40, 28), Qt.AlignmentFlag.AlignVCenter, "播放列表")
+        if layout.list_heading > 1:
+            painter.setPen(ink)
+            painter.setFont(self._surface_font(12, QFont.Weight.DemiBold))
+            painter.drawText(QRectF(20, viewport.top(), self.width() - 40, 28), Qt.AlignmentFlag.AlignVCenter, "播放列表")
         painter.save()
-        painter.setClipRect(QRectF(0, viewport.top() + 28, self.width(), max(0, viewport.height() - 28)))
+        painter.setClipRect(QRectF(0, top, self.width(), max(0, viewport.bottom() - top)))
         for index, (title, artist) in enumerate(SONGS):
-            y = viewport.top() + 28 + index * 56
+            y = top + index * step
+            row_height = min(52.0, step - 4)
             if index == self.song_index:
-                row = QRectF(12, y + 2, self.width() - 24, 52)
+                row = QRectF(12, y + 2, self.width() - 24, row_height)
                 self._clear_control_renderer.paint(painter, row, scene=self._surface_glass_backdrop(),
                     scene_bounds=QRectF(self.rect()), ink=ink, now=time.monotonic(), role="queue-selection",
                     kind="capsule", selected=True, level=self._surface_glass_level(),
@@ -309,7 +318,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 row_ink = QColor("#0b0c0e")
             else:
                 row_ink = QColor(ink)
-            art = QRectF(20, y + 10, 36, 36)
+            art_side = min(44.0, row_height - 8)
+            art = QRectF(20, y + (row_height - art_side) / 2 + 2, art_side, art_side)
             painter.save()
             clip = QPainterPath()
             clip.addRoundedRect(art, 5, 5)
@@ -496,8 +506,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.dj_enabled = not self.dj_enabled
             if not self.dj_enabled:
                 self.dj_speaking = False
-        elif self.mode == "playlist" and layout.viewport.top() + 28 <= event.position().y() < layout.viewport.bottom():
-            index = int((event.position().y() - layout.viewport.top() - 28) // 56)
+        elif self.mode == "playlist" and layout.list_top <= event.position().y() < layout.viewport.bottom():
+            index = int((event.position().y() - layout.list_top) // layout.list_step(len(SONGS)))
             if index < len(SONGS):
                 self.select_song(index)
         self.update()
