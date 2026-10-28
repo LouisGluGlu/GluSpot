@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QImage
@@ -185,8 +186,11 @@ class MusicLyricSeekTests(unittest.TestCase):
         ]
         self.owner.timed_lyric_timing_kinds = ["unit", "line", "line", "line"]
         self.window._browse_track_key = self.owner.media_track_id
-        self._render()
-        self._render()
+        # Advance the existing entrance animation before testing settled ink.
+        with patch('local.music_surface_window.time.monotonic', return_value=100.0):
+            self._render()
+        with patch('local.music_surface_window.time.monotonic', return_value=101.0):
+            self._render()
         target = next(
             (rect for (row, unit, _fragment), (rect, _seconds)
              in self.window._lyric_word_hit_rects.items()

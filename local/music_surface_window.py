@@ -7839,6 +7839,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             )
             if painted_bottom + row_bleed < rect.top() or painted_top - row_bleed > rect.bottom():
                 continue
+            primary_paint_y = (
+                -obo_active_primary_lift
+                if handoff_active and index == active and obo_reading_handoff > 0.0 else 0.0
+            )
             if timed and outgoing_lyrics is None and not lyrics_hidden_by_layout and (cover_fraction < 0.02 or cover_lyrics_layout):
                 hit_row = QRectF(row.left(), painted_top, row.width(), max(1.0, painted_bottom - painted_top))
                 self._lyric_hit_rects[index] = lyric_transform.mapRect(hit_row.intersected(lyric_clip))
@@ -7856,7 +7860,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                         lyric_transform=lyric_transform,
                         lyric_clip=lyric_clip,
                         lyric_slide=lyric_slide,
-                        extra_y=-obo_active_primary_lift if handoff_active and index == active else 0.0,
+                        extra_y=primary_paint_y,
                     )
             # QWidget clips pixels, but the Python lyric shaping and halo work
             # would still run for every visible row on a controls-only frame.
@@ -7884,8 +7888,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 painter.setOpacity(painter.opacity() * (
                     1.0 - (1.0 - surrounding_lyric_opacity) * min(1.0, blur_level)
                 ))
-            if handoff_active and index == active and obo_reading_handoff > 0.0:
-                painter.translate(0.0, -obo_active_primary_lift)
+            if primary_paint_y:
+                painter.translate(0.0, primary_paint_y)
             if blur_level and self.devicePixelRatioF() > self.BLURRED_LYRIC_DPR_CAP:
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             reading_focused = (
@@ -8329,7 +8333,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                         lyric_clip=lyric_clip,
                                         lyric_slide=lyric_slide,
                                         visible_source_offsets=aside_offsets,
-                                        extra_y=-layer_lift,
+                                        extra_y=primary_paint_y + (
+                                            obo_active_primary_lift - layer_lift if layer_lift else 0.0
+                                        ),
                                     )
                             if completed and not aside_reading:
                                 annotation_blur = blur_level
