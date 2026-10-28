@@ -63,7 +63,20 @@ _EARLY_SHIM = r"""(() => {
   const originalCalls = Object.fromEntries(events.map(event => [event, 0]));
   const registrations = [];
   const patched = new WeakMap();
-  const inspected = new WeakSet();
+  const paths = new WeakMap();
+  const defineProperty = Object.defineProperty, defineProperties = Object.defineProperties;
+  const setBootInterval = globalThis.setInterval, clearBootInterval = globalThis.clearInterval;
+  const rootKeys = ['legacyNativeCmder', '_envAdapter', 'channel', 'orpheus'];
+  const registrationMethods = ['registerCallAdapter', 'registerCall', 'appendRegisterCall'];
+  const roots = new Set([globalThis]);
+  try { if (globalThis.window) roots.add(globalThis.window); } catch (_) {}
+  let bootTimer = null;
+  const stopBootScan = () => {
+    if (bootTimer !== null) {
+      Reflect.apply(clearBootInterval, globalThis, [bootTimer]);
+      bootTimer = null;
+    }
+  };
   let listener = null;
   const keyEvent = value => {
     if (typeof value !== 'string') return null;
@@ -84,7 +97,7 @@ _EARLY_SHIM = r"""(() => {
   const wrapped = (event, original) => {
     if (typeof original !== 'function') return original;
     const prior = hooks.get(event);
-    if (prior && prior.original === original) return prior.wrapper;
+    if (prior && (prior.original === original || prior.wrapper === original)) return prior.wrapper;
     const wrapper = function(...args) {
       const result = Reflect.apply(original, this, args);
       originalCalls[event]++;
@@ -106,10 +119,10 @@ _EARLY_SHIM = r"""(() => {
   const patch = (owner, method, path) => {
     if (!owner || (typeof owner !== 'object' && typeof owner !== 'function')) return;
     let methods = patched.get(owner);
-    if (!methods) { methods = new Set(); patched.set(owner, methods); }
-    if (methods.has(method)) return;
+    if (!methods) { methods = new Map(); patched.set(owner, methods); }
     const found = descriptor(owner, method);
     if (!found || typeof found.descriptor.value !== 'function') return;
+    if (methods.get(method) === found.descriptor.value) return;
     const original = found.descriptor.value;
     const wrapper = function(...args) {
       const item = registration(args);
@@ -117,53 +130,104 @@ _EARLY_SHIM = r"""(() => {
       const next = args.slice();
       next[item.callback] = wrapped(item.event, next[item.callback]);
       registrations.push({path, method, event:item.event});
-      return Reflect.apply(original, this, next);
+      const result = Reflect.apply(original, this, next);
+      try { if (hooks.size === events.length) stopBootScan(); } catch (_) {}
+      return result;
     };
     try {
-      Object.defineProperty(owner, method, {...found.descriptor, value:wrapper});
-      methods.add(method);
+      Reflect.apply(defineProperty, Object, [owner, method, {...found.descriptor, value:wrapper}]);
+      methods.set(method, wrapper);
     } catch (_) {}
   };
-  const inspect = (owner, path) => {
+  const inspect = (owner, path, seen = new WeakSet()) => {
     if (!owner || (typeof owner !== 'object' && typeof owner !== 'function')) return;
-    if (inspected.has(owner)) return;
-    inspected.add(owner);
-    for (const method of ['registerCallAdapter', 'registerCall', 'appendRegisterCall', 'on'])
-      patch(owner, method, path);
+    if (seen.has(owner)) return;
+    seen.add(owner);
+    if (!paths.has(owner)) paths.set(owner, path);
+    path = paths.get(owner);
+    for (const method of [...registrationMethods, 'on']) {
+      try { patch(owner, method, path); } catch (_) {}
+    }
     for (const key of ['_envAdapter', 'channel', 'eventBridge']) {
-      try { inspect(owner[key], path + '.' + key); } catch (_) {}
+      try { inspect(owner[key], path + '.' + key, seen); } catch (_) {}
     }
   };
-  const watch = key => {
+  const watch = (root, key) => {
     let found;
-    try { found = Object.getOwnPropertyDescriptor(globalThis, key); } catch (_) { return; }
-    if (found && 'value' in found) {
-      try { inspect(found.value, key); } catch (_) {}
-    }
-    if (found && (!found.configurable || !('value' in found))) return;
+    try { found = Object.getOwnPropertyDescriptor(root, key); } catch (_) { return; }
+    try { inspect(root[key], key); } catch (_) {}
+    if (found && (!found.configurable || !('value' in found) || !found.writable)) return;
     let current = found && 'value' in found ? found.value : undefined;
     try {
-      Object.defineProperty(globalThis, key, {
+      Reflect.apply(defineProperty, Object, [root, key, {
         configurable: !found || found.configurable !== false,
         enumerable: found ? !!found.enumerable : true,
         get() { return current; },
-        set(value) { current = value; inspect(value, key); }
-      });
+        set(value) { current = value; try { inspect(value, key); } catch (_) {} }
+      }]);
     } catch (_) {}
+  };
+  const scan = () => {
+    for (const root of roots) {
+      for (const key of rootKeys) {
+        try { inspect(root[key], key); } catch (_) {}
+      }
+    }
+  };
+  const inspectDefined = (owner, path) => {
+    if (paths.has(owner) || registrationMethods.some(method => {
+      const found = descriptor(owner, method);
+      return found && typeof found.descriptor.value === 'function';
+    })) inspect(owner, path);
+  };
+  const defined = (owner, key) => {
+    if (roots.has(owner)) {
+      // A data descriptor bypasses/replaces our assignment setter. Inspect the
+      // installed value synchronously, before the caller can register its UI.
+      // Do not reread the caller's descriptor or coerce its property key again.
+      if (typeof key === 'string' && rootKeys.includes(key)) watch(owner, key);
+      else for (const rootKey of rootKeys) watch(owner, rootKey);
+    } else inspectDefined(owner, paths.get(owner) || 'defined-object');
+    if (typeof key === 'string') {
+      const found = Object.getOwnPropertyDescriptor(owner, key);
+      if (found && 'value' in found) inspectDefined(found.value, paths.get(owner) || key);
+    }
   };
   const state = {
     hookKind: 'load-time-native-chain-v1',
     status() {
       const caught = events.filter(event => hooks.has(event));
-      return {api:caught.length === events.length, caught, registrations:registrations.slice(),
+      // Progress is the capture source. State/end improve it when registered;
+      // 3.1.42 need not register Load during boot.
+      return {api:hooks.has('PlayProgress'), caught, registrations:registrations.slice(),
               hook:'load-time-native-chain-v1'};
     },
     activate(next) { listener = typeof next === 'function' ? next : null; return this.status(); },
     deactivate() { listener = null; },
     health() { return {...this.status(), originalCalls:{...originalCalls}}; }
   };
-  Object.defineProperty(globalThis, name, {value:state, writable:false, configurable:false});
-  for (const key of ['legacyNativeCmder', '_envAdapter', 'channel', 'orpheus']) watch(key);
+  Reflect.apply(defineProperty, Object, [globalThis, name, {value:state, writable:false, configurable:false}]);
+  for (const root of roots) for (const key of rootKeys) watch(root, key);
+  for (const [method, original] of [['defineProperty', defineProperty], ['defineProperties', defineProperties]]) {
+    const found = Object.getOwnPropertyDescriptor(Object, method);
+    const wrapper = function(...args) {
+      const result = Reflect.apply(original, this, args);
+      try { defined(args[0], method === 'defineProperty' ? args[1] : null); } catch (_) {}
+      return result;
+    };
+    Reflect.apply(defineProperty, Object, [Object, method, {...found, value:wrapper}]);
+  }
+  // Discovery only: no player-state reads or native registration. Revisit
+  // objects that gain methods/children by assignment during the first 5 s.
+  const bootDeadline = Date.now() + 5000;
+  let bootScans = 0;
+  bootTimer = Reflect.apply(setBootInterval, globalThis, [() => {
+    if (hooks.size === events.length || Date.now() >= bootDeadline || ++bootScans >= 100) {
+      stopBootScan();
+      return;
+    }
+    scan();
+  }, 50]);
   return state.status();
 })()"""
 
@@ -202,6 +266,9 @@ _INSTALL = r"""(() => {
     const prepared = [];
     for (const event of events) {
       const key = 'audioplayer.on' + event;
+      // Optional events may never acquire a queue. Any present queue must
+      // still pass preflight before we touch it.
+      if (event !== 'PlayProgress' && !data(map, key)) continue;
       const queue = value(map, key), stub = value(stubs, key);
       if (!Array.isArray(queue) || !queue.length || typeof stub !== 'function') return null;
       for (let i = 0; i < queue.length; i++)
@@ -218,7 +285,7 @@ _INSTALL = r"""(() => {
         } catch (_) {} // GluSpot must never throw into NetEase's dispatcher.
         return result;
       };
-      prepared.push({map,stubs,key,queue,stub,index,descriptor,wrapper});
+      prepared.push({event,map,stubs,key,queue,stub,index,descriptor,wrapper});
     }
     return prepared;
   };
@@ -227,7 +294,7 @@ _INSTALL = r"""(() => {
     if (earlyBound) {
       try { return early.status().api === true; } catch (_) { return false; }
     }
-    return hooks.length === events.length && hooks.every(hook =>
+    return hooks.some(hook => hook.event === 'PlayProgress') && hooks.every(hook =>
       value(native, 'registerCallMap') === hook.map &&
       value(native, 'registerCallStubs') === hook.stubs &&
       value(hook.map, hook.key) === hook.queue && value(hook.stubs, hook.key) === hook.stub &&
@@ -327,8 +394,8 @@ _INSTALL = r"""(() => {
           earlyBound = true;
         } catch (_) { active = false; return {api:false, reason:'native-callback-chain-unavailable'}; }
       } else if (native) {
-        // Preflight every event before touching any queue. The clean 3.1.42
-        // page has no such queues, so capture must fall back without registering.
+        // Preflight progress and all present optional queues before mutation.
+        // A clean 3.1.42 page has no queues: fall back without registering.
         try { hooks = prepare() || []; } catch (_) { hooks = []; }
         if (!hooks.length) { active = false; return {api:false, reason:'native-callback-chain-unavailable'}; }
         try {

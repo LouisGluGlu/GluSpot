@@ -277,17 +277,23 @@ callback. Before injection, `registerCallMap` had no entries for
 `audioplayer.onEnd`. Captured events alone therefore cannot prove safe capture.
 NetEase's UI receives these events through a separate native path. The
 load-time path registers a document-start shim with CDP, reloads the page once,
-and observes the registration method before NetEase creates its queues. It
-wraps the four event handlers in place, calls NetEase first, and records the
-registration path/method for the probe. Detach clears only GluSpot forwarding,
-so NetEase's original handler continues to run. No live Windows page was
-available in this session, so the production registration path is still a
-probe result to collect on PC.
+and observes the registration method before NetEase registers its UI callbacks. It
+wraps matching event handlers in place, calls NetEase first with `Reflect.apply`,
+and records caught events and the registration path/method for the probe.
+User-supplied document-start discovery on wuju PC (3.1.42) found
+`channel.registerCall` registering PlayProgress, PlayState and End, with no Load
+in an eight-second boot window; `appendRegisterCall` was unused and the map
+stayed empty. **PlayProgress is required for readiness; PlayState, End and Load
+are optional.** Global assignment and `Object.defineProperty`/`defineProperties`
+installation are observed; a boot scan revisits assigned methods/children for
+at most five seconds or 100 ticks. Detach clears only GluSpot forwarding,
+so NetEase's original handler continues to run.
 
 The late fallback adapter must never call `appendRegisterCall` or
 `registerCallAdapter`. It may only chain an existing callback in an already
-populated `registerCallMap` queue with a callable `registerCallStubs` entry;
-all four queues must pass preflight before any mutation. The original callback
+populated `registerCallMap` queue with a callable `registerCallStubs` entry.
+The progress queue is required; absent optional queues are skipped, and every
+present queue must pass preflight before any mutation. The original callback
 runs first with the same `this` and arguments, preserving its return value and
 errors; observer errors are swallowed. Close restores the original slot
 descriptor, and reinstall is idempotent. Without an established chain, return
@@ -309,10 +315,11 @@ This source experiment changes no release version or package. No live acceptance
 is claimed.
 
 Non-invasive hook verification (2026-10-28): the final capture suite passed
-**195 tests × 3** on Linux offscreen (7.277 / 7.111 / 7.099 s), with zero failures,
-errors or skips. Tests model single-slot displacement, safe existing chains,
-refusal, exact restoration, repeated attach, observer errors and cleanup races.
-PC repetitions, live registration discovery, and real playback/lyrics/auto-next remain pending; see the
+**203 tests × 3** on Linux offscreen (9.948 / 10.227 / 10.004 s), with zero failures,
+errors or skips. Tests cover channel installation by definition/assignment,
+no-Load activation, missing-progress refusal, bounded discovery, single-slot
+displacement, safe existing chains, exact restoration and cleanup races.
+PC repetitions and real playback/lyrics/auto-next remain pending; see the
 [offline evidence and device checklist](docs/capture-position.md#non-invasive-hook-verification-2026-10-28).
 
 Recorded Linux offscreen verification (2026-10-28), predating the conservative

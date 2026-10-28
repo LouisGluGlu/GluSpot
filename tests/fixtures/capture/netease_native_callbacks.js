@@ -29,6 +29,15 @@ function makeNativeFixture({existing = true} = {}) {
       this.registerCallMap[key].push(callback);
     }
   };
+  // The observed UI boot route registers its single-slot callbacks directly,
+  // without creating legacyNativeCmder's WebSDK queues.
+  const channel = {
+    registerCall(key, callback) {
+      registrations.push({key});
+      nativeSlots[key] = callback;
+      return key;
+    }
+  };
   for (const event of events) {
     const key = 'audioplayer.on' + event;
     originals[event] = function(...args) {
@@ -44,5 +53,18 @@ function makeNativeFixture({existing = true} = {}) {
       nativeSlots[key] = stub;
     }
   }
-  return {events, legacyNativeCmder, nativeSlots, originals, registered, calls, registrations};
+  // Model installation after the document-start shim, including a read-only
+  // global data property that bypasses a previously installed setter.
+  function installGlobal(method = 'defineProperty', key = 'legacyNativeCmder', owner = legacyNativeCmder) {
+    if (method === 'assignment') return (globalThis[key] = owner);
+    const reassign = method.endsWith('+assignment');
+    const descriptor = reassign ? {value:{}, writable:true, configurable:true} :
+      {value:owner, enumerable:true};
+    const result = method.startsWith('defineProperties') ?
+      Object.defineProperties(globalThis, {[key]:descriptor}) :
+      Object.defineProperty(globalThis, key, descriptor);
+    if (reassign) globalThis[key] = owner;
+    return result;
+  }
+  return {events, legacyNativeCmder, channel, nativeSlots, originals, registered, calls, registrations, installGlobal};
 }
