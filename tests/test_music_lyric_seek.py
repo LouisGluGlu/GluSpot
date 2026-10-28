@@ -8,6 +8,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 from api.models import TimedLyricUnit
+from local.music_lyric_presentation import split_display_layers
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_surface_transition import _TransitionOwner
 
@@ -75,6 +76,7 @@ class MusicLyricSeekTests(unittest.TestCase):
             None,
         )
         self.assertIsNotNone(target)
+        self.assertEqual(self.window._lyric_word_target_at(target.center())[2], 4.0)
         self.window.mousePressEvent(self._event(target.center()))
         self.window.mouseReleaseEvent(self._event(target.center()))
         self.assertEqual(self.provider.calls, [(2.5, "word-track")])
@@ -170,6 +172,40 @@ class MusicLyricSeekTests(unittest.TestCase):
         self.assertGreaterEqual(len(fragments), 2)
         self.assertGreaterEqual(len({round(rect.top(), 2) for rect in fragments}), 2)
         self.assertLessEqual(max(rect.height() for rect in fragments), 48.0)
+
+    def test_timed_parenthetical_word_uses_its_own_visible_layout(self):
+        self.owner.media_track_id = "aside-track"
+        self.owner.timed_lyrics = [
+            (0.0, "first (echo)"), (20.0, "next"),
+            (40.0, "later"), (60.0, "last"),
+        ]
+        self.owner.timed_lyric_units = [
+            (TimedLyricUnit(2.0, None, "first "), TimedLyricUnit(4.0, None, "(echo)")),
+            (), (),
+        ]
+        self.owner.timed_lyric_timing_kinds = ["unit", "line", "line", "line"]
+        self.window._browse_track_key = self.owner.media_track_id
+        self._render()
+        self._render()
+        target = next(
+            (rect for (row, unit, _fragment), (rect, _seconds)
+             in self.window._lyric_word_hit_rects.items()
+             if row == 0 and unit == 1),
+            None,
+        )
+        self.assertIsNotNone(target)
+        self.assertEqual(self.window._lyric_word_target_at(target.center())[2], 4.0)
+        self.window.mousePressEvent(self._event(target.center()))
+        self.window.mouseReleaseEvent(self._event(target.center()))
+        self.assertEqual(self.provider.calls, [(2.5, "aside-track")])
+
+    def test_ambiguous_parenthetical_source_span_falls_back_safely(self):
+        layers = split_display_layers("first (echo)")
+        self.assertIsNone(
+            self.window._parenthetical_source_offsets(
+                "first (echo) and echo", layers, "echo",
+            )
+        )
 
 
 if __name__ == "__main__":

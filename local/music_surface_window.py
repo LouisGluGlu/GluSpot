@@ -7856,6 +7856,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                         lyric_transform=lyric_transform,
                         lyric_clip=lyric_clip,
                         lyric_slide=lyric_slide,
+                        extra_y=-obo_active_primary_lift if handoff_active and index == active else 0.0,
                     )
             # QWidget clips pixels, but the Python lyric shaping and halo work
             # would still run for every visible row on a controls-only frame.
@@ -8301,6 +8302,35 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                 painter.translate(0.0, obo_active_primary_lift - layer_lift)
                             layer_origin = QPointF(row.left(), row.top() + layer_top + slide)
                             layer_offsets = (combined_offsets[-1] if combined_offsets else 0.0,) * annotation_layout.lineCount()
+                            if (
+                                not is_translation
+                                and timed
+                                and outgoing_lyrics is None
+                                and not lyrics_hidden_by_layout
+                                and (cover_fraction < 0.02 or cover_lyrics_layout)
+                                and index < len(self._display_timed_kinds)
+                                and self._display_timed_kinds[index] == "unit"
+                            ):
+                                aside_offsets = self._parenthetical_source_offsets(
+                                    timed[index][1], visual_layers[index], layer_text,
+                                )
+                                if aside_offsets is not None:
+                                    self._populate_lyric_word_hit_rects(
+                                        index,
+                                        text=layer_text,
+                                        source_text=timed[index][1],
+                                        layers=visual_layers[index],
+                                        layout=annotation_layout,
+                                        units=tuple(self._display_timed_units[index])
+                                        if index < len(self._display_timed_units) else (),
+                                        row=QRectF(layer_origin.x(), layer_origin.y(), row_width, layer_height),
+                                        line_offsets=tuple(layer_offsets),
+                                        lyric_transform=lyric_transform,
+                                        lyric_clip=lyric_clip,
+                                        lyric_slide=lyric_slide,
+                                        visible_source_offsets=aside_offsets,
+                                        extra_y=-layer_lift,
+                                    )
                             if completed and not aside_reading:
                                 annotation_blur = blur_level
                                 if aside_window is not None:
@@ -10077,10 +10107,66 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             edges.add("bottom")
         return edges
 
+    @staticmethod
+    def _display_source_offsets(source: str, display: str) -> tuple[int, ...] | None:
+        """Map a whitespace-normalized painted string back to its source."""
+        source, display = str(source), str(display)
+        if source == display:
+            return tuple(range(len(display) + 1))
+        if " ".join(source.split()) != " ".join(display.split()):
+            return None
+        offsets = [0] * (len(display) + 1)
+        source_index = display_index = 0
+        while source_index < len(source):
+            if source[source_index].isspace():
+                source_end = source_index + 1
+                while source_end < len(source) and source[source_end].isspace():
+                    source_end += 1
+                display_end = display_index
+                while display_end < len(display) and display[display_end].isspace():
+                    display_end += 1
+                for boundary in range(display_index + 1, display_end + 1):
+                    offsets[boundary] = source_end
+                source_index, display_index = source_end, display_end
+                continue
+            if display_index >= len(display) or source[source_index] != display[display_index]:
+                return None
+            source_index += 1
+            display_index += 1
+            offsets[display_index] = source_index
+        if display_index != len(display):
+            return None
+        return tuple(offsets)
+
+    @classmethod
+    def _parenthetical_source_offsets(cls, source_text: str, layers, text: str) -> tuple[int, ...] | None:
+        """Return painted aside boundaries only for one provable source span."""
+        annotation = str(getattr(layers, "parenthetical_text", "") or "").strip()
+        if not annotation:
+            return None
+        source = cls._primary_timed_lyric_text(source_text)
+        pattern = re.escape(annotation).replace(r"\ ", r"\s+")
+        matches = tuple(re.finditer(pattern, source))
+        if len(matches) != 1:
+            return None
+        match = matches[0]
+        kept = cls._visible_primary_source_offsets(source_text, layers)
+        if kept is None:
+            return None
+        if any(match.start() <= offset < match.end() for offset in kept[:-1]):
+            return None
+        segment = source[match.start():match.end()]
+        local = cls._display_source_offsets(segment, str(text))
+        if local is None or len(local) != len(str(text)) + 1:
+            return None
+        return tuple(match.start() + offset for offset in local)
+
     def _populate_lyric_word_hit_rects(
         self, index: int, text: str, source_text: str, layers, layout: QTextLayout,
         units: tuple[object, ...], row: QRectF, line_offsets: tuple[float, ...],
         lyric_transform: QTransform, lyric_clip: QRectF, lyric_slide: float,
+        *, visible_source_offsets: tuple[int, ...] | None = None,
+        extra_y: float = 0.0,
     ) -> None:
         """Expose measured source words as precise seek targets.
 
@@ -10117,7 +10203,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         source_offsets = _aligned_offsets(primary, units)
         if source_offsets is None or len(source_offsets) != len(units) + 1:
             return
-        offsets = self._visible_primary_source_offsets(source_text, layers)
+        offsets = (
+            tuple(visible_source_offsets)
+            if visible_source_offsets is not None else
+            self._visible_primary_source_offsets(source_text, layers)
+        )
         if offsets is None:
             visible_primary = self._primary_timed_lyric_text(text)
             if visible_primary != primary:
@@ -10157,7 +10247,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 offset = line_offsets[visual_index] if visual_index < len(line_offsets) else 0.0
                 segment = QRectF(
                     row.left() + min(left, right),
-                    row.top() + visual.y() + offset,
+                    row.top() + visual.y() + offset + float(extra_y),
                     max(2.0, abs(right - left)),
                     max(1.0, visual.height()),
                 ).intersected(lyric_clip)
@@ -10170,9 +10260,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 if mapped.isEmpty():
                     continue
                 fragments.append(mapped)
+            fragment_offset = sum(
+                1 for key in self._lyric_word_hit_rects
+                if key[0] == index and key[1] == unit_index
+            )
             for fragment_index, target in enumerate(fragments):
                 if target.isValid() and not target.isEmpty():
-                    self._lyric_word_hit_rects[(index, unit_index, fragment_index)] = (target, seconds)
+                    self._lyric_word_hit_rects[(index, unit_index, fragment_offset + fragment_index)] = (target, seconds)
 
     def _lyric_word_target_at(self, point: QPointF):
         """Return ``(row, unit, seconds)`` for a measured word under point."""
@@ -10182,7 +10276,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         )
         if self._lyric_word_hit_track_key != current_key:
             return None
-        for (row, unit, _fragment), (rect, seconds) in self._lyric_word_hit_rects.items():
+        # Later entries are painted later.  During an aside's elastic reveal
+        # its box can overlap the main row, so preserve the same z-order for
+        # pointer hit testing.
+        for (row, unit, _fragment), (rect, seconds) in reversed(tuple(self._lyric_word_hit_rects.items())):
             if rect.contains(point):
                 return row, unit, seconds
         return None
