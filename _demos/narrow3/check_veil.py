@@ -7,6 +7,7 @@ Artifacts and the machine-readable report are written only to --out.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import math
 import os
@@ -69,19 +70,32 @@ def synthetic_checks(dpr):
         overlay.prepare(key, lambda: (_ for _ in ()).throw(AssertionError("cache-hit factory called")))
         fades = [rgba(compose(overlay, source, key, value)) for value in (0, .25, .5, .75, 1)]
     full = fades[-1]
-    middle = slice(round(88 * dpr), round(512 * dpr))
+    top_end = VeilOverlay.TOP_END
+    top_start = VeilOverlay.TOP_FEATHER_START
+    bottom_start = 640 - VeilOverlay.BOTTOM_HEIGHT
+    bottom_end = bottom_start + VeilOverlay.BOTTOM_FEATHER
+    middle = slice(round(top_end * dpr), round(bottom_start * dpr))
     assert np.array_equal(before[middle], full[middle]), "middle pixels changed"
     assert np.array_equal(before, fades[0]), "A opacity 0 changed content"
-    for y in (30, 60, 76, 84, 520, 532, 548, 600):
+    for y in (30, top_start - 4, bottom_end + 4, 600):
         row = full[round(y * dpr), :, 0]
-        if y < 64 or y >= 544:
-            assert row[round(100 * dpr)] < 40, ("sharp glyph survived strongest blur", y)
-            assert row[round(92 * dpr)] > 0, ("blur does not spread glyph ink", y)
+        assert row[round(100 * dpr)] < 40, ("sharp glyph survived strongest blur", y)
+        assert row[round(92 * dpr)] > 0, ("blur does not spread glyph ink", y)
     # Maximal solid bands are constant; feather approaches clear middle.
-    for y, expected in ((0, 1), (64, 1), (88, 0), (200, 0), (512, 0), (544, 1), (639, 1)):
+    for y, expected in ((0, 1), (top_start, 1), (top_end, 0),
+                        ((top_end + bottom_start) / 2, 0),
+                        (bottom_start, 0), (bottom_end, 1), (639, 1)):
         assert abs(VeilOverlay.band_strength(y, 640) - expected) < 1e-6, (y, expected)
-    assert 0 < VeilOverlay.band_strength(76, 640) < 1
-    assert 0 < VeilOverlay.band_strength(528, 640) < 1
+    assert top_end - top_start >= 40, "top feather regressed below 40px"
+    assert VeilOverlay.BOTTOM_FEATHER >= 64, "bottom feather regressed below 64px"
+    for start, end, reverse in ((top_start, top_end, True),
+                                (bottom_start, bottom_end, False)):
+        for fraction in (.01, .25, .5, .75, .99):
+            expected = fraction * fraction * (3 - 2 * fraction)
+            if reverse:
+                expected = 1 - expected
+            actual = VeilOverlay.band_strength(start + (end - start) * fraction, 640)
+            assert abs(actual - expected) < 1e-6, ("veil is not smoothstep", actual, expected)
     empty = image_at_scale(dpr)
     dimmed = image_at_scale(dpr)
     dimmed.fill(Qt.GlobalColor.white)
@@ -91,18 +105,35 @@ def synthetic_checks(dpr):
     for y in (30, 600):
         assert abs(int(dim_pixels[round(y*dpr), round(250*dpr), 0])-round(255*(1-.55))) <= 1, "dim alpha differs from .55"
     assert int(dim_pixels[round(300*dpr), round(250*dpr), 0]) == 255, "dim reaches the middle"
+    # Both sides of each feather meet the clear/solid area with zero slope.
+    # Read real composited pixels, so this also catches a straight dim seam.
+    column = dim_pixels[:, round(250 * dpr), 0].astype(int)
+    for boundary in (top_start, top_end, bottom_start, bottom_end):
+        row = round(boundary * dpr)
+        assert abs(column[row] - column[row - 1]) <= 1, ("dim seam", boundary)
+    for row in range(round(top_start*dpr), round(top_end*dpr)):
+        expected = 255 * (1 - VeilOverlay.DIM_ALPHA * VeilOverlay.band_strength((row + .5) / dpr, 640))
+        assert abs(column[row] - expected) <= 2, ("blur and dim profiles differ", row, column[row], expected)
+    for row in range(round(bottom_start*dpr), round(bottom_end*dpr)):
+        expected = 255 * (1 - VeilOverlay.DIM_ALPHA * VeilOverlay.band_strength((row + .5) / dpr, 640))
+        assert abs(column[row] - expected) <= 2, ("blur and dim profiles differ", row, column[row], expected)
     # Scrolling a vertically invariant source cannot move the radius profile:
     # the feather belongs to the window, while only the text texture moves.
     for delta in (-15.0, 15.0):
         shifted = rgba(compose(overlay, source, key, 1, delta))
-        for y in (72, 76, 80, 520, 528, 536):
+        for y in (top_start + (top_end-top_start) * t for t in (.25, .5, .75)):
+            row = round(y*dpr)
+            error = np.abs(shifted[row].astype(int)-full[row].astype(int)).max()
+            assert error <= 3, ("blur feather moved with scroll", dpr, y, delta, int(error))
+        for y in (bottom_start + VeilOverlay.BOTTOM_FEATHER * t for t in (.25, .5, .75)):
             row = round(y*dpr)
             error = np.abs(shifted[row].astype(int)-full[row].astype(int)).max()
             assert error <= 3, ("blur feather moved with scroll", dpr, y, delta, int(error))
     # LRU keys contain all invalidation inputs, while sub-row movement reuses one.
     cache = VeilOverlay()
-    for frame in range(310):
-        cache.prepare(("text-layout", "dark", dpr, frame // 31), source)
+    samples_per_row = math.ceil(NarrowLayout(360, 640).lyric_step)
+    for frame in range(samples_per_row * 10):
+        cache.prepare(("text-layout", "dark", dpr, frame // samples_per_row), source)
     assert cache.hits / (cache.hits + cache.misses) >= .95, "steady scroll cache hit rate"
     assert cache.cache_size <= 6, "cache entry limit"
     assert cache.cache_bytes <= 2.8 * 1024 * 1024, "DPR2 cache exceeds approximately 2.8MB"
@@ -131,6 +162,12 @@ def capture(window, output, dpr, mode):
     window._layout_animation.stop()
     window._finish_content_layout()
     window.refresh_veil()
+    if mode == "lyrics":
+        layout = NarrowLayout(window.width(), window.height())
+        bucket = round(window.lyric_focus()[1])
+        resting = rgba(window.content_image(layout, bucket, include_current=False))
+        source = rgba(window.content_image(layout, bucket, veil_source=True, include_current=False))
+        assert np.array_equal(resting, source), "veil source sharpens the resting lyric ink"
     images = {}
     for label, opacity in (("A", 0.0), ("B", 1.0)):
         set_opacity(window, opacity)
@@ -138,9 +175,13 @@ def capture(window, output, dpr, mode):
         window.repaint()
         images[label] = window.grab().toImage()
     first, second = (rgba(images[label]) for label in ("A", "B"))
-    assert np.array_equal(first[round(88*dpr):round(512*dpr)],
-                          second[round(88*dpr):round(512*dpr)]), "actual A/B middle changed"
-    for label, top, height in (("A", 0, 640), ("B_top", 0, 112), ("B_bottom", 488, 152)):
+    clear_top = VeilOverlay.TOP_END
+    clear_bottom = 640 - VeilOverlay.BOTTOM_HEIGHT
+    assert np.array_equal(first[round(clear_top*dpr):round(clear_bottom*dpr)],
+                          second[round(clear_top*dpr):round(clear_bottom*dpr)]), "actual A/B middle changed"
+    bottom_crop = max(0, clear_bottom - 24)
+    for label, top, height in (("A", 0, 640), ("B_top", 0, clear_top + 24),
+                               ("B_bottom", bottom_crop, 640 - bottom_crop)):
         image = images["A" if label == "A" else "B"]
         if label != "A":
             image = image.copy(0, round(top * dpr), round(360 * dpr), round(height * dpr))
@@ -149,7 +190,7 @@ def capture(window, output, dpr, mode):
         assert image.save(str(path)), path
     # Every alpha samples the exact same full content layer and geometry.
     original = rgba(window.content_image(NarrowLayout(360, 640, 0)))
-    for top, bottom in ((20, 88), (512, 620)):
+    for top, bottom in ((20, clear_top), (clear_bottom, 620)):
         assert np.count_nonzero(original[round(top*dpr):round(bottom*dpr), :, 3]) > 100*dpr*dpr, "content no longer fills a veil band"
     animation = []
     forward = [1-(1-t)**3 for t in np.linspace(0, 1, 19)]
@@ -179,11 +220,12 @@ def actual_scroll_cache(window):
     original_position = window.owner.media_position_seconds
     old_hits, old_misses = window.veil.hits, window.veil.misses
     try:
-        for frame in range(310):
-            focus = 13 + frame//31
-            fraction = (frame % 31)/31
+        samples_per_row = math.ceil(NarrowLayout(window.width(), window.height()).lyric_step)
+        for frame in range(samples_per_row * 10):
+            focus = 13 + frame//samples_per_row
+            fraction = (frame % samples_per_row)/samples_per_row
             # Invert the demo's cubic ease-out to advance exactly one logical
-            # pixel per frame through ten fixed 31px scroll buckets.
+            # row through each bucket, sampled at at most one pixel per frame.
             transition = 1-(1-fraction)**(1/3)
             window.owner.media_position_seconds = focus*4 + transition*.36
             window.refresh_veil()
@@ -197,11 +239,73 @@ def actual_scroll_cache(window):
         window.refresh_veil()
 
 
-def render_frame(window, target):
+def render_frame(window, target, *, composite_only=False):
     window.tick()
     count = len(window.samples)
-    window.render(target)
+    with ExitStack() as guards:
+        if composite_only:
+            guards.enter_context(patch.object(Image.Image, "filter",
+                                              side_effect=AssertionError("filter during fade paint")))
+        if window.mode == "playlist":
+            guards.enter_context(patch.object(window, "paint_list",
+                                              side_effect=AssertionError("list rebuilt during paint")))
+        window.render(target)
     assert len(window.samples) == count+1, "benchmark did not trigger exactly one paint"
+
+
+def start_fade(window, now, reveal):
+    window.shelf = window.footer_hover = reveal
+    window.visibility.idle_since = None if reveal else now - window.visibility.IDLE_DELAY
+    fade = window.visibility.opacity
+    fade.start, fade.target = (0.0, 1.0) if reveal else (1.0, 0.0)
+    fade.started, fade.duration = now, window.visibility.DURATION
+
+
+def simulated_fades(window, target, frames, *, advancing=False, position=None):
+    """Sample genuine 300ms fades at 60Hz; perf_counter stays a real clock.
+
+    The old alpha assignment used duration=0, which sampled the steady paint
+    path. Here tick and paint observe one monotonically advancing time and a
+    live fade object. Each sample lies inside the transition, including frames
+    beyond the list's 100ms material-refresh interval.
+    """
+    base = time.monotonic()
+    old_position = window.owner.media_position_seconds
+    old_playing, old_freeze = window.owner.media_is_playing, window.freeze_clock
+    window.owner.media_is_playing, window.freeze_clock = advancing, not advancing
+    window.last_tick = base
+    paints, totals = [], []
+    old_builds = window.veil.builds
+    try:
+        for frame in range(frames):
+            cycle, offset = divmod(frame, 18)
+            instant = base + (frame + .5) / 60
+            if offset == 0:
+                start_fade(window, base + cycle * .3, cycle % 2 == 0)
+            if position is not None:
+                window.owner.media_position_seconds = position + frame / 60
+            with patch("narrow_window.time.monotonic", return_value=instant):
+                assert not window.visibility.settled(instant), "sample is outside the fade"
+                started = time.perf_counter()
+                render_frame(window, target,
+                             composite_only=not advancing and position is None)
+                totals.append((time.perf_counter() - started) * 1000)
+                paints.append(window.samples[-1])
+        if not advancing and position is None:
+            assert window.veil.builds == old_builds, "stationary fade rebuilt a blur band"
+        return paints, totals
+    finally:
+        window.owner.media_is_playing, window.freeze_clock = old_playing, old_freeze
+        window.owner.media_position_seconds = old_position
+        # The simulated segment can finish ahead of wall time. Return the demo
+        # sampling clocks to the real cadence before the next independent case.
+        now = time.monotonic()
+        window.last_tick = window._glass_feedback.last_tick = now
+        window._controls_at = window._list_layer_at = now
+        window._frame_control_color_at = now
+        set_opacity(window, 1.0)
+        window.shelf = window.footer_hover = True
+        window.refresh_veil()
 
 
 def paint_benchmark(window, frames, mode):
@@ -223,20 +327,10 @@ def paint_benchmark(window, frames, mode):
         set_opacity(window, 1.0)
         render_frame(window, target)
         time.sleep(window.study_timer.interval()/1000)
-    samples = []
-    for frame in range(frames):
-        phase = (frame % 36) / 18
-        alpha = 1 - (1 - min(phase, 2-phase)) ** 3
-        set_opacity(window, alpha)
-        render_frame(window, target)
-        samples.append(window.samples[-1])
-    p95, p99 = percentile(samples, .95), percentile(samples, .99)
     # Match the app's existing 33ms timer for its CPU acceptance, and report
     # a separate 60Hz stress sample. Both include tick/preparation + full paint.
     def fade_cpu(interval):
-        fade = window.visibility.opacity
-        fade.start, fade.target = 0.0, 1.0
-        fade.started, fade.duration = time.monotonic(), .3
+        start_fade(window, time.monotonic(), True)
         cpu_start = time.process_time()
         start = time.perf_counter()
         count = 0
@@ -278,27 +372,24 @@ def paint_benchmark(window, frames, mode):
         window.owner.media_position_seconds = old_position
         window.refresh_veil()
     live_p95 = percentile(live_samples, .95)
+    assert live_p95 <= 16.7, (mode, "steady advancing-clock p95", live_p95)
+    # Measure advancing playback during a real reveal/hide too, separately
+    # from the steady background path above.
+    advancing_samples, advancing_totals = simulated_fades(window, target, 36, advancing=True)
+    advancing_p95 = percentile(advancing_samples, .95)
+    assert advancing_p95 <= 16.7, (mode, "advancing-clock fade p95", advancing_p95)
     scroll_p95 = None
     if mode == "lyrics":
-        old_playing, old_freeze = window.owner.media_is_playing, window.freeze_clock
-        old_position = window.owner.media_position_seconds
-        window.owner.media_is_playing, window.freeze_clock = True, True
-        overlap_samples = []
-        try:
-            for frame in range(30):
-                window.owner.media_position_seconds = 55.9+frame/60
-                set_opacity(window, 1-(1-min(1, frame/18))**3)
-                render_frame(window, target)
-                overlap_samples.append(window.samples[-1])
-            scroll_p95 = percentile(overlap_samples, .95)
-            assert scroll_p95 <= 16.7, ("scroll+fade overlap p95", scroll_p95)
-        finally:
-            window.owner.media_is_playing, window.freeze_clock = old_playing, old_freeze
-            window.owner.media_position_seconds = old_position
-            window.refresh_veil()
-    assert live_p95 <= 16.7, (mode, "advancing-clock p95", live_p95)
+        overlap_samples, _ = simulated_fades(window, target, 30, position=55.9)
+        scroll_p95 = percentile(overlap_samples, .95)
+        assert scroll_p95 <= 16.7, ("scroll+fade overlap p95", scroll_p95)
+    samples, frame_totals = simulated_fades(window, target, frames)
+    p95, p99 = percentile(samples, .95), percentile(samples, .99)
     return {"frames": frames, "p95_ms": p95, "p99_ms": p99, "prepare_ms": prepare_ms,
+            "tick_and_paint_p95_ms": percentile(frame_totals, .95),
             "advancing_clock_frames": 30, "advancing_clock_p95_ms": live_p95,
+            "advancing_clock_fade_frames": 36, "advancing_clock_fade_p95_ms": advancing_p95,
+            "advancing_clock_fade_tick_and_paint_p95_ms": percentile(advancing_totals, .95),
             "scroll_fade_overlap_frames": 30 if mode == "lyrics" else 0,
             "scroll_fade_overlap_p95_ms": scroll_p95,
             "fade_cpu_percent": cpu_percent, "fade_cadence_ms": app_interval*1000,

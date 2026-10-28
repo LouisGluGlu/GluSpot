@@ -4,11 +4,12 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QRectF
-from PySide6.QtGui import QFont, QTextLayout
+from PySide6.QtGui import QFont, QFontMetricsF
 from PySide6.QtWidgets import QApplication
 
 from layout import NarrowLayout
 from motion import EaseOutFade, Visibility
+from veil import VeilOverlay
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from local.music_surface_window import MusicSurfaceWindow
@@ -21,13 +22,20 @@ def check(variant, width, mode, dj):
     for alpha in (0, .1, .5, .9, 1):
         pose = NarrowLayout(width, 640, alpha)
         if (pose.viewport != viewport or pose.lyric_font != layout.lyric_font
-                or pose.lyric_row != 31 or pose.lyric_step != 31
+                or pose.lyric_row != layout.lyric_row
+                or pose.lyric_step != layout.lyric_step
                 or pose.lyric_anchor != layout.lyric_anchor
                 or pose.list_top != layout.list_top
                 or pose.list_step(8) != layout.list_step(8)):
             errors.append("content geometry changes with visibility")
     if abs(layout.lyric_anchor - 211) > .5:
         errors.append("current lyric baseline")
+    if not 26 <= layout.lyric_font <= 40:
+        errors.append("immersive lyric font outside 26–40px")
+    if width == 360 and abs(layout.lyric_font - 31.5) > .001:
+        errors.append("360px lyrics lost the 31.5px immersive size")
+    if layout.lyric_row <= layout.lyric_font or layout.lyric_step <= layout.lyric_row:
+        errors.append("lyric rows do not leave space around the large glyphs")
     if layout.list_heading != 0 or layout.list_top != viewport.top():
         errors.append("list heading or top")
     if abs(layout.list_top + layout.list_step(8) * 8 - viewport.bottom()) > .001:
@@ -36,16 +44,27 @@ def check(variant, width, mode, dj):
     font.setFamilies(list(MusicSurfaceWindow.SURFACE_FONT_FAMILIES))
     font.setPixelSize(round(layout.lyric_font))
     font.setWeight(QFont.Weight.Bold)
-    text = QTextLayout("把心事交给晚风", font)
-    text.beginLayout()
-    text_line = text.createLine()
-    text.endLayout()
-    if text_line.height() > layout.lyric_step:
-        errors.append("font exceeds the fixed baseline rhythm")
+    # Fallback fonts reserve ascent/descent beyond their visible Chinese ink.
+    # Check actual glyph bounds against the rhythm instead of that line box.
+    ink = QFontMetricsF(font).tightBoundingRect("把心事交给晚风")
+    if ink.height() > layout.lyric_step:
+        errors.append("lyric glyphs exceed the responsive baseline rhythm")
 
-    header = QRectF(0, 0, width, 88)
-    bottom = QRectF(0, 512, width, 128)
+    header = QRectF(0, 0, width, VeilOverlay.TOP_END)
+    bottom = QRectF(0, layout.height - VeilOverlay.BOTTOM_HEIGHT,
+                   width, VeilOverlay.BOTTOM_HEIGHT)
     top_controls = [layout.back, *layout.top, layout.cover, layout.text]
+    if (layout.cover.width() < 84 or layout.cover.width() != layout.cover.height()
+            or (width == 360 and abs(layout.cover.width() - 96) > .001)):
+        errors.append("header cover is no longer a full-size square")
+    if layout.cover.top() <= max(rect.bottom() for rect in [layout.back, *layout.top]):
+        errors.append("header cover is not below the top buttons")
+    if (layout.text.left() <= layout.cover.right()
+            or layout.text.height() != layout.cover.height()
+            or layout.text.top() != layout.cover.top()):
+        errors.append("header title and artist have no full-height adjacent column")
+    if max(layout.cover.bottom(), layout.text.bottom()) > VeilOverlay.TOP_FEATHER_START:
+        errors.append("header extends into the top feather")
     loop, mode_rect = layout.utility(float(dj))
     footer = [layout.favorite, loop, mode_rect] + ([layout.dj] if dj else [])
     transport = [layout.previous, layout.play, layout.next]

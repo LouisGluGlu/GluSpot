@@ -250,16 +250,18 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.end()
 
     def content_image(self, layout, visual_focus=None, *, veil_source=False,
-                      include_current=True):
+                      include_current=True, refresh=False):
         if self.mode == "playlist":
             # Queue data is static between demo actions. Its selected glass
-            # face follows the existing scene at a bounded 10Hz refresh.
+            # face is prepared by refresh_veil at a bounded 10Hz refresh.
+            # Paint consumes those pixels without rasterizing glass again.
             key = (self.width(), self.height(), self.devicePixelRatioF(),
                    self.song_index, self._scene_control_ink().rgba())
             now = time.monotonic()
-            if (key == self._list_layer_key and self._list_layer is not None
-                    and (not self.visibility.settled(now)
-                         or now - self._list_layer_at < .1)):
+            if (self._list_layer is not None
+                    and (not refresh or (key == self._list_layer_key
+                         and (not self.visibility.settled(now)
+                              or now - self._list_layer_at < .1)))):
                 return self._list_layer
         else:
             focus, visual = self.lyric_focus()
@@ -369,7 +371,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.paint_header(layer, layout)
             self.paint_controls(layer, layout, 1.0)
         self._clear_control_renderer.end_frame()
-        self._controls_bands = (image.copy(0, 0, image.width(), round(88 * ratio)),
+        self._controls_bands = (image.copy(0, 0, image.width(), round(VeilOverlay.TOP_END * ratio)),
                                 image.copy(0, round((self.height() - 128) * ratio),
                                            image.width(), round(128 * ratio)))
         self._controls_key, self._controls_at = key, now
@@ -414,16 +416,19 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     @property
     def veil_scroll_delta(self):
         visual = self.lyric_focus()[1] if self.mode == "lyrics" else 0.0
-        return -(visual - round(visual)) * 31.0
+        step = NarrowLayout(self.width(), self.height()).lyric_step
+        return -(visual - round(visual)) * step
 
     def refresh_veil(self):
-        """Prepare only when a layout/theme/DPR/31px scroll bucket changes.
+        """Prepare only when layout/theme/DPR/current line/scroll bucket changes.
 
         Called from the timer/input/capture preparation, never paintEvent.
         Word highlighting is confined to the clear middle and is not a cache key.
         """
         layout = NarrowLayout(self.width(), self.height())
-        _, visual = self.lyric_focus()
+        if self.mode == "playlist":
+            self.content_image(layout, refresh=True)
+        focus, visual = self.lyric_focus()
         bucket = round(visual) if self.mode == "lyrics" else 0
         self.veil_key = (
             self.mode, self.width(), self.height(), layout.lyric_font,
@@ -431,7 +436,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.song_index, self.cover_index, self.devicePixelRatioF(),
             self.owner.album_color.rgba(), self.owner.secondary_color.rgba(),
             self._future_lyric_color(layout.viewport).rgba(),
-            self._scene_control_ink().rgba(), bucket,
+            self._scene_control_ink().rgba(), focus if self.mode == "lyrics" else 0, bucket,
         )
         # prepare accepts a source factory: a hit must not rasterize full content.
         self.veil.prepare(self.veil_key,
@@ -447,14 +452,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.drawImage(cover, self.owner.album_art)
         painter.restore()
         column = layout.text
-        painter.setFont(self._surface_font(13))
+        painter.setFont(self._surface_font(20))
         painter.setPen(QColor(255, 255, 255, 242))
         title = QFontMetricsF(painter.font()).elidedText(self.owner.track_title, Qt.TextElideMode.ElideRight, int(column.width()))
-        painter.drawText(QRectF(column.x(), column.top(), column.width(), 17), Qt.AlignmentFlag.AlignVCenter, title)
-        painter.setFont(self._surface_font(10, QFont.Weight.Medium))
+        painter.drawText(QRectF(column.x(), column.center().y() - 25, column.width(), 26), Qt.AlignmentFlag.AlignVCenter, title)
+        painter.setFont(self._surface_font(13, QFont.Weight.Medium))
         painter.setPen(QColor(255, 255, 255, 142))
         artist = QFontMetricsF(painter.font()).elidedText(self.owner.artist, Qt.TextElideMode.ElideRight, int(column.width()))
-        painter.drawText(QRectF(column.x(), column.top() + 15, column.width(), 13), Qt.AlignmentFlag.AlignVCenter, artist)
+        painter.drawText(QRectF(column.x(), column.center().y() + 5, column.width(), 20), Qt.AlignmentFlag.AlignVCenter, artist)
 
     def paint_lyrics(self, painter, layout, visual_focus=None, *,
                      static_only=False, current_only=False, overscan=0,
@@ -490,8 +495,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 text_layout.endLayout()
                 color = QColor(255, 255, 255) if index < focus else self._future_lyric_color(viewport)
                 image, padding = self._lyric_raster(line.text, font, viewport.width(), row, text_layout, color)
-                # Veil supplies its own radius. Do not blur its source twice.
-                level = 0 if veil_source or abs(index - focus) <= 2 else self._lyric_group_blur_level(index, focus)
+                # Filter the same resting ink that the clear side displays.
+                # A sharp-only veil source would revive distant rows midway
+                # through the feather and expose a horizontal change in focus.
+                level = 0 if abs(index - focus) <= 2 else self._lyric_group_blur_level(index, focus)
                 image = self._blurred_lyric_raster(image, level, color)
                 painter.drawImage(QPointF(x - padding, y - padding), image)
                 continue
@@ -659,6 +666,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.hints = not self.hints
         else:
             super().keyPressEvent(event)
+        if self.narrow:
+            self.refresh_veil()
+            self.refresh_controls(time.monotonic())
         self.update()
 
     def mouseMoveEvent(self, event):
@@ -753,6 +763,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             index = int((position.y() - layout.list_top) // layout.list_step(len(SONGS)))
             if index < len(SONGS):
                 self.select_song(index)
+        if self.narrow:
+            self.refresh_veil()
+            self.refresh_controls(time.monotonic())
         self.update()
 
     def mouseReleaseEvent(self, event):

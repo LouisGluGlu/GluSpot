@@ -16,12 +16,13 @@ class NarrowLayout:
 
     @property
     def cover(self):
-        return QRectF(20, 58, 24, 24)
+        side = min(96.0, max(84.0, self.width * .267))
+        return QRectF(20, 70, side, side)
 
     @property
     def text(self):
-        left = self.cover.right() + 12
-        return QRectF(left, 58, self.width - left - 20, 24)
+        left = self.cover.right() + 16
+        return QRectF(left, 70, self.width - left - 20, self.cover.height())
 
     @property
     def viewport(self):
@@ -30,17 +31,16 @@ class NarrowLayout:
 
     @property
     def lyric_font(self):
-        # The bundled Linux fallback needs 31px for 21px Chinese glyphs.
-        # Keep the fixed 31px baseline rhythm readable without overlapping rows.
-        return min(21.0, max(20.0, self.width * 21 / 360))
+        # Restore the immersive reading size; visibility never changes it.
+        return min(40.0, max(26.0, self.width * .0875))
 
     @property
     def lyric_step(self):
-        return 31.0
+        return self.lyric_font * 1.45
 
     @property
     def lyric_row(self):
-        return 31.0
+        return self.lyric_font * 1.3
 
     @property
     def lyric_anchor(self):
