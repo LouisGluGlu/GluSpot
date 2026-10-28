@@ -2,8 +2,8 @@
 import concurrent.futures
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from api.capture.netease import NetEaseInstallation
@@ -63,16 +63,18 @@ class NetEaseCaptureSettingsTests(unittest.TestCase):
             self.confirmations.append(True)
             return accept
 
-        panel = self.panel_type(self.values.get, self.values.__setitem__,
-                                lambda: self.provider, locator=self.locator,
-                                platform=platform, confirm=confirm)
+        # Run the discovery job synchronously, then deliver its queued UI signal.
+        # Observing locator.calls alone does not mean _located has run yet.
+        pool = SimpleNamespace(start=lambda job: job.run())
+        with patch('local.netease_capture_settings.QThreadPool') as thread_pool:
+            thread_pool.globalInstance.return_value = pool
+            panel = self.panel_type(self.values.get, self.values.__setitem__,
+                                    lambda: self.provider, locator=self.locator,
+                                    platform=platform, confirm=confirm)
         self.addCleanup(panel.close)
-        for _ in range(20):
-            self.app.processEvents()
-            if self.locator.calls or platform != 'win32':
-                QTest.qWait(10)
-                break
-            QTest.qWait(5)
+        self.app.processEvents()
+        if platform == 'win32':
+            self.assertIsNone(panel._job)
         return panel
 
     def test_platform_gate_does_not_probe_or_show(self):
