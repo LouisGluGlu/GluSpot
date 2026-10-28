@@ -254,7 +254,9 @@ seek acknowledgements and optional calibration. Only `api/providers.py` wires
 these components into the V2 app. Windows dependencies must remain lazy and
 mockable; no release version or package is changed by this work.
 
-Implementation: step 1 (interfaces and flag) complete; steps 2–6 pending.
+Implementation: steps 1–2 (interfaces, flag and monotonic PositionModel) complete;
+steps 3–6 pending. Serialized mock timeline traces exercise projection, pause,
+seek, clock jumps and track changes; these are not live Windows recordings.
 
 ## Guardrails
 

@@ -1,0 +1,41 @@
+{
+  "provenance": "Deterministic mock trace; not a Windows or live-player recording.",
+  "description": "Regular SMTC updates with bounded drift, rate changes, and song end.",
+  "events": [
+    {
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 0.0, "observed_at": 200.0, "wall_time": 5000.0, "updated_at": 5000.0, "is_playing": true, "end_seconds": 10.0},
+      "now": 200.0, "expected": 0.0
+    },
+    {"now": 200.5, "expected": 0.5},
+    {
+      "description": "A 20 ms measurement difference does not move the predicted clock.",
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 1.02, "observed_at": 201.0, "wall_time": 5001.0, "updated_at": 5001.0, "is_playing": true, "end_seconds": 10.0},
+      "now": 201.0, "expected": 1.0
+    },
+    {
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 1.99, "observed_at": 202.0, "wall_time": 5002.0, "updated_at": 5002.0, "is_playing": true, "end_seconds": 10.0},
+      "now": 202.0, "expected": 2.0
+    },
+    {
+      "description": "A rate change keeps the supplied position and advances at twice speed.",
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 3.0, "observed_at": 203.0, "wall_time": 5003.0, "updated_at": 5003.0, "is_playing": true, "rate": 2.0, "end_seconds": 10.0},
+      "now": 203.0, "expected": 3.0
+    },
+    {"now": 204.0, "expected": 5.0},
+    {
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 5.0, "observed_at": 204.0, "wall_time": 5004.0, "updated_at": 5004.0, "is_playing": false, "rate": 2.0, "end_seconds": 10.0},
+      "now": 204.0, "expected": 5.0
+    },
+    {"now": 206.0, "expected": 5.0},
+    {
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 5.0, "observed_at": 206.0, "wall_time": 5006.0, "updated_at": 5006.0, "is_playing": true, "rate": 1.0, "end_seconds": 10.0},
+      "now": 206.0, "expected": 5.0
+    },
+    {"now": 207.0, "expected": 6.0},
+    {
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 9.8, "observed_at": 210.8, "wall_time": 5010.8, "updated_at": 5010.8, "is_playing": true, "end_seconds": 10.0},
+      "now": 210.8, "expected": 9.8
+    },
+    {"description": "Prediction cannot pass the supplied song end.", "now": 211.5, "expected": 10.0}
+  ]
+}

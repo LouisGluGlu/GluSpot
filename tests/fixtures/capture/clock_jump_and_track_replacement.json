@@ -1,0 +1,58 @@
+{
+  "provenance": "Deterministic mock trace; not a Windows or live-player recording.",
+  "description": "Wall-clock corrections and track/session replacement never reuse stale clock state.",
+  "events": [
+    {
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 20.0, "observed_at": 300.0, "wall_time": 10000.0, "updated_at": 9999.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 300.0, "expected": 21.0
+    },
+    {
+      "description": "A one-hour wall-clock jump cannot move an unchanged anchor.",
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 20.0, "observed_at": 301.0, "wall_time": 13601.0, "updated_at": 9999.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 301.0, "expected": 22.0
+    },
+    {"now": 302.0, "expected": 23.0},
+    {
+      "description": "Fresh evidence during the clock adjustment uses receipt time.",
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 24.0, "observed_at": 303.0, "wall_time": 13603.0, "updated_at": 13603.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 303.0, "expected": 24.0
+    },
+    {"now": 304.0, "expected": 25.0},
+    {
+      "description": "Restoring the original wall clock preserves normal projection.",
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 26.0, "observed_at": 305.0, "wall_time": 10005.0, "updated_at": 10005.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 305.0, "expected": 26.0
+    },
+    {
+      "description": "A late callback older than the latest observation is ignored.",
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 0.0, "observed_at": 304.0, "wall_time": 10004.0, "updated_at": 10004.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 306.0, "expected": 27.0
+    },
+    {
+      "sample": {"session_id": "mock:generic", "track_id": "song:B", "position_seconds": 0.0, "observed_at": 310.0, "wall_time": 10010.0, "updated_at": 10010.0, "is_playing": true, "end_seconds": 120.0},
+      "now": 310.0, "expected": 0.0
+    },
+    {"now": 312.0, "expected": 2.0},
+    {
+      "description": "Returning to A starts a fresh identity epoch.",
+      "sample": {"session_id": "mock:generic", "track_id": "song:A", "position_seconds": 50.0, "observed_at": 313.0, "wall_time": 10013.0, "updated_at": 10013.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 313.0, "expected": 50.0
+    },
+    {
+      "description": "The same track in another selected session has its own anchor.",
+      "sample": {"session_id": "mock:another-player", "track_id": "song:A", "position_seconds": 3.0, "observed_at": 314.0, "wall_time": 10014.0, "updated_at": 10014.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 314.0, "expected": 3.0
+    },
+    {
+      "description": "A backward wall-clock jump also leaves the old prediction intact.",
+      "sample": {"session_id": "mock:another-player", "track_id": "song:A", "position_seconds": 3.0, "observed_at": 315.0, "wall_time": 6415.0, "updated_at": 10014.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 315.0, "expected": 4.0
+    },
+    {
+      "description": "A new anchor after the backward jump is mapped from receipt time.",
+      "sample": {"session_id": "mock:another-player", "track_id": "song:A", "position_seconds": 7.0, "observed_at": 316.0, "wall_time": 6416.0, "updated_at": 6416.0, "is_playing": true, "end_seconds": 200.0},
+      "now": 316.0, "expected": 7.0
+    },
+    {"now": 317.0, "expected": 8.0}
+  ]
+}
