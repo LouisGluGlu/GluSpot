@@ -199,10 +199,13 @@ class CefSeekBackend:
             self.source._receive(payload)
         sample = await self.source.read()
         progress_at = self.source.progress_observed_at
-        if sample is None or progress_at is None or progress_at <= self._requested_at:
+        if sample is None or progress_at is None or progress_at < self._requested_at:
             return None
         sequence = self.source.progress_sequence
-        if self._request_sequence is not None and (sequence is None or sequence <= self._request_sequence):
+        if self._request_sequence is not None:
+            if sequence is None or sequence <= self._request_sequence:
+                return None
+        elif progress_at <= self._requested_at:
             return None
         if self.source.generation != self._request_generation:
             return None

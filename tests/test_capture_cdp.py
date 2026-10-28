@@ -211,6 +211,39 @@ class LocatorTests(unittest.IsolatedAsyncioTestCase):
 
 class AdapterJavascriptTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_real_string_track_progress_and_zero_ratio(self):
+        script = JsAdapterRegistry.select().install_expression()
+        harness = r"""
+const registered = {}, seeks = [];
+let now = 0;
+globalThis.performance = {now: () => now};
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+globalThis.__gluspotNeteaseSample = () => {};
+const legacyNativeCmder = {appendRegisterCall: (name, source, callback) => registered[name] = callback};
+const channel = {call: (method, callback, args) => seeks.push(args)};
+eval(SCRIPT);
+registered.Load({duration_seconds: 38});
+registered.PlayProgress('1390072207_BRKMZZ', 0, 0);
+const initial = globalThis.__gluspotNeteaseV1.read();
+now = 100; registered.PlayProgress('1390072207_BRKMZZ', 14.046, 0.36996);
+const progress = globalThis.__gluspotNeteaseV1.read();
+globalThis.__gluspotNeteaseV1.seek('1390072207_BRKMZZ', 'req', 20);
+now = 200; registered.PlayProgress('1390072207_BRKMZZ', 20, 0.5268);
+const readback = globalThis.__gluspotNeteaseV1.read();
+registered.Load();
+registered.PlayProgress('1390072207_BRKMZZ', 0, 0);
+const unknown = globalThis.__gluspotNeteaseV1.read();
+console.log(JSON.stringify({initial, progress, readback, unknown, seeks}));
+""".replace('SCRIPT', json.dumps(script))
+        value = json.loads(subprocess.run([shutil.which('node'), '-e', harness],
+                                          check=True, text=True, capture_output=True).stdout)
+        self.assertEqual(value['initial']['duration'], 38)
+        self.assertEqual(value['unknown']['duration'], 0)
+        self.assertAlmostEqual(value['progress']['duration'], 14.046 / .36996)
+        self.assertEqual(value['readback']['trackId'], value['progress']['trackId'])
+        self.assertEqual(value['seeks'], [['1390072207_BRKMZZ', 'req', 20]])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_real_script_native_events_coalesce_and_seek_without_optimism(self):
         script = JsAdapterRegistry.select().install_expression()
         harness = r'''

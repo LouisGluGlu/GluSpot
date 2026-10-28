@@ -68,6 +68,28 @@ class CefSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sample.end_seconds, 200)
         self.assertTrue(sample.is_playing)
 
+    async def test_string_track_identity_survives_duration_drift_and_same_tick_seek(self):
+        self.session.emit(dict(trackId='1390072207_BRKMZZ', position=14.046,
+                               duration=14.046 / .36996, received_at=self.clock(),
+                               generation=1, sequence=1, playing=False))
+        source = CefPositionSource(self.session, clock=self.clock)
+        try:
+            before = await source.read()
+            backend = CefSeekBackend(source)
+            async def seek(track_id, request_id, seconds):
+                self.session.emit(dict(trackId=track_id, position=seconds,
+                                       duration=seconds / .5268, received_at=self.clock(),
+                                       generation=1, sequence=2, playing=False))
+                return True
+            self.session.seek = seek
+            self.assertTrue(await backend.seek(20, request_id='real-shape'))
+            readback = await backend.read()
+            self.assertEqual(before.identity, readback.identity)
+            self.assertEqual(readback.position_seconds, 20)
+            self.assertNotEqual(before.end_seconds, readback.end_seconds)
+        finally:
+            source.close()
+
     async def test_native_replacement_invalidates_until_metadata_rebind(self):
         payload = self.session.payload(50)
         payload['trackId'] = 'replacement'

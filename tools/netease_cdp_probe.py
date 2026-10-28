@@ -99,9 +99,7 @@ async def run_probe(port: int, *, adapter="auto", timeout=10.0, sample_seconds=1
         original = await source.wait_sample(timeout=timeout)
         if original is None:
             raise RuntimeError("NetEase did not push a physical progress sample")
-        targets = _targets(original)
         report["original_position_seconds"] = original.position_seconds
-        report["duration_seconds"] = original.end_seconds
         emit(f"Sampling pushed progress for {sample_seconds:g}s...")
         sampling = True
         await asyncio.sleep(sample_seconds)
@@ -116,6 +114,9 @@ async def run_probe(port: int, *, adapter="auto", timeout=10.0, sample_seconds=1
             raise RuntimeError("No pushed progress arrived during the sampling window")
         if not await current():
             raise RuntimeError("Track changed while sampling; refusing to seek a different track")
+        latest = await source.read()
+        targets = _targets(latest)
+        report["duration_seconds"] = latest.end_seconds
         for number, target in enumerate(targets, 1):
             mutated = True
             result = await verified_seek(target, f"probe-{number}-{secrets.token_hex(8)}")

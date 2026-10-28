@@ -49,7 +49,7 @@ _INSTALL = r"""(() => {
   if (!native || typeof native.appendRegisterCall !== 'function')
     return {api:false, reason:'native-events-unavailable'};
   const canSeek = !!seekChannel && typeof seekChannel.call === 'function';
-  let active = false, heartbeat = null, latest = null, playing = null;
+  let active = false, heartbeat = null, latest = null, playing = null, loadDuration = 0;
   let lastSent = -Infinity, sequence = 0, forceNext = true;
   const emit = value => {
     if (!active) return;
@@ -79,8 +79,9 @@ _INSTALL = r"""(() => {
     const position = Number(seconds), fraction = Number(ratio);
     if (trackId == null || !Number.isFinite(position) || position < 0) return;
     const changed = !latest || String(trackId) !== latest.trackId;
+    if (changed && latest) loadDuration = 0;
     const duration = fraction > 0 && fraction <= 1 ? position / fraction :
-      (!changed && latest ? latest.duration : 0);
+      (!changed && latest && latest.duration > 0 ? latest.duration : loadDuration);
     latest = {trackId:String(trackId),nativeTrackId:trackId,position,duration,playing,rate:1,
               event:'PlayProgress',sequence:++sequence};
     forward(changed);
@@ -92,7 +93,16 @@ _INSTALL = r"""(() => {
         const value = state(args);
         if (value !== null) playing = value;
       } else if (event === 'End') playing = false;
-      if (event === 'Load') { latest = null; playing = null; emit({type:'reset'}); }
+      if (event === 'Load') {
+        latest = null; playing = null; loadDuration = 0;
+        // Only explicitly named seconds have established units.
+        for (const value of args) {
+          if (value && typeof value === 'object' &&
+              Number.isFinite(value.duration_seconds) && value.duration_seconds > 0)
+            loadDuration = value.duration_seconds;
+        }
+        emit({type:'reset'});
+      }
       forceNext = true;
       if (latest) {
         latest = {...latest,playing,event};

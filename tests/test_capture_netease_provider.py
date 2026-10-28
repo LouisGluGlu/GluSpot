@@ -155,6 +155,7 @@ class NetEaseProviderTests(unittest.IsolatedAsyncioTestCase):
         provider._get_session = AsyncMock(return_value=SimpleNamespace(source_app_user_model_id='cloudmusic.exe'))
         provider._seek_session_matches_track = AsyncMock(return_value=True)
         async with FakeCdpServer() as server:
+            server.sample['playing'] = False
             cdp = provider._netease_cdp_session = CdpSession(server.port)
             await cdp.start()
             try:
