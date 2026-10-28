@@ -10377,6 +10377,12 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # a verified provider success is allowed to publish the target time.
         self._clear_lyric_browse()
         self._hovered_lyric_index = None
+        provider = getattr(self.owner, "data_provider", None)
+        capture_enabled = getattr(provider, "_capture_is_enabled", None)
+        if not succeeded and callable(capture_enabled) and capture_enabled():
+            from PySide6.QtGui import QCursor
+            from PySide6.QtWidgets import QToolTip
+            QToolTip.showText(QCursor.pos(), "未能确认播放器跳转，请在播放器中重试", self)
         if succeeded and self.owner is not None:
             # Provider success only confirms that the command was accepted.
             # Keep following the real clock, but remember the target long

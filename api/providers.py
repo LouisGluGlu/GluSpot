@@ -618,8 +618,10 @@ class WindowsMediaProvider:
     def close_audio_outputs(self):
         runtime = getattr(self, "_capture_runtime", None)
         loop = getattr(self, "_loop", None)
+        self._capture_closed = True
         if runtime is not None and loop is not None and loop.is_running():
             asyncio.run_coroutine_threadsafe(runtime.close(), loop)
+            self._capture_runtime = None
         lock = getattr(self, "_audio_route_init_lock", None)
         if lock is None:
             lock = self._audio_route_init_lock = threading.Lock()
@@ -635,6 +637,8 @@ class WindowsMediaProvider:
     async def _bind_capture_session(self, session, track):
         """Wire opt-in observations on the existing WinRT background loop."""
         runtime = getattr(self, "_capture_runtime", None)
+        if getattr(self, "_capture_closed", False):
+            return
         if not self._capture_is_enabled():
             if runtime is not None:
                 await runtime.close()
@@ -2169,6 +2173,8 @@ class WindowsMediaProvider:
         return lyrics_match, lyrics_lookup_pending, lookup_started
 
     def seek_playback_position(self, position_seconds: float, expected_track_id: str | None = None) -> bool:
+        if self._capture_is_enabled():
+            return self._seek_capture_position(position_seconds, expected_track_id)
         try:
             position = max(0.0, float(position_seconds))
         except (TypeError, ValueError):
@@ -2223,6 +2229,46 @@ class WindowsMediaProvider:
             self._mark_player_anchor_fast_refresh(duration=2.4)
             self._request_immediate_media_refresh()
         return bool(result)
+
+    def _seek_capture_position(self, position_seconds, expected_track_id=None) -> bool:
+        """Wait on the background state machine; UI callers already use a worker."""
+        try:
+            target = float(position_seconds)
+        except (TypeError, ValueError):
+            return False
+        runtime = getattr(self, "_capture_runtime", None)
+        loop = getattr(self, "_loop", None)
+        data = getattr(self, "_last_data", None)
+        if runtime is None or loop is None or data is None or not math.isfinite(target):
+            return False
+        track = data.track
+        if expected_track_id and expected_track_id != track.track_id:
+            return False
+        # A synchronous wait from the owning event loop would deadlock.
+        if threading.current_thread() is getattr(self, "_thread", None):
+            return False
+
+        async def current():
+            current_data = getattr(self, "_last_data", None)
+            selected = await self._get_session()
+            return (self._capture_is_enabled() and current_data is not None
+                    and current_data.track.track_id == track.track_id
+                    and current_data.track.source_app_id == track.source_app_id
+                    and selected is not None
+                    and str(getattr(selected, "source_app_user_model_id", "")) == track.source_app_id
+                    and await self._seek_session_matches_track(selected, track.title, track.artist, ""))
+
+        future = asyncio.run_coroutine_threadsafe(runtime.seek(max(0.0, target), track.track_id, current), loop)
+        try:
+            result = bool(future.result(timeout=5.0))
+        except FutureTimeoutError:
+            future.cancel()
+            return False
+        except Exception:
+            return False
+        if result:
+            self._request_immediate_media_refresh()
+        return result
 
     def _seek_player_position_fallback(self, position_seconds: float, expected_track_id: str = "") -> bool:
         if expected_track_id and not self._seek_track_is_current(expected_track_id):

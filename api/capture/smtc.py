@@ -138,13 +138,17 @@ class SmtcCollector:
                 self.stats['event_latency_samples'] += 1
         except Exception:
             self.stats['errors'] += 1
+            self.publish(None)
 
     async def _run(self):
         while not self._closed:
             self.stats['polls'] += 1
-            await self.collect_once(event_at=self._event_at)
+            event_at = self._event_at
             self._event_at = None
             self._wake.clear()
+            await self.collect_once(event_at=event_at)
+            if self._wake.is_set():
+                continue  # Events arriving during a read must trigger another read.
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self.poll_seconds)
             except asyncio.TimeoutError:
