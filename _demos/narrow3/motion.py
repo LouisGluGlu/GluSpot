@@ -25,7 +25,7 @@ class Fade:
 
 
 class EaseOutFade(Fade):
-    """Retargetable ease-out interpolation for the utility row's position."""
+    """Retargetable cubic ease-out for opacity and utility-row position."""
     def value(self, now):
         if not self.duration:
             return self.target
@@ -35,21 +35,35 @@ class EaseOutFade(Fade):
 
 
 class Visibility:
+    DURATION = .300
+    IDLE_DELAY = 1.200
+
     def __init__(self, enabled):
         self.enabled = enabled
-        self.top = [Fade() for _ in range(4)]
-        self.footer = Fade()
+        # All chrome and the veil sample this same curve, including reversals.
+        self.opacity = EaseOutFade()
+        self.footer = self.opacity
+        self.top = [self.opacity] * 4
         self.top_enter = None
+        self.idle_since = None
 
     def advance(self, now, top_hover, bottom_hover, playlist):
         active = self.enabled and (top_hover or bottom_hover)
-        if active and self.top_enter is None:
-            self.top_enter = now
-        if not active:
+        if active:
+            if self.top_enter is None:
+                self.top_enter = now
+            self.idle_since = None
+            self.opacity.retarget(1.0, now, self.DURATION)
+        elif not self.enabled:
             self.top_enter = None
-        self.footer.retarget(float(active), now, .34)
-        for fade in self.top:
-            fade.retarget(float(active), now, .34)
+            self.idle_since = None
+            self.opacity.retarget(0.0, now, self.DURATION)
+        else:
+            self.top_enter = None
+            if self.idle_since is None:
+                self.idle_since = now
+            if now - self.idle_since >= self.IDLE_DELAY - 1e-9:
+                self.opacity.retarget(0.0, now, self.DURATION)
 
     def settled(self, now):
-        return self.footer.settled(now) and all(fade.settled(now) for fade in self.top)
+        return self.opacity.settled(now)

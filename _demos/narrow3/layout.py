@@ -16,49 +16,40 @@ class NarrowLayout:
 
     @property
     def cover(self):
-        side = min(96.0, max(84.0, self.width * 0.267))
-        return QRectF(20, 70, side, side)
+        return QRectF(20, 58, 24, 24)
 
     @property
     def text(self):
-        left = self.cover.right() + 16
-        return QRectF(left, 70, self.width - left - 20, self.cover.height())
-
-    @staticmethod
-    def _ease(value):
-        # Smoothstep keeps the shrink and the re-centering on one curve, so the
-        # viewport grows out of place instead of snapping between two rectangles.
-        t = max(0.0, min(1.0, float(value)))
-        return t * t * (3 - 2 * t)
+        left = self.cover.right() + 12
+        return QRectF(left, 58, self.width - left - 20, 24)
 
     @property
     def viewport(self):
-        t = self._ease(self.visibility)
-        top = 20 + 170 * t
-        bottom = self.height - 20 - 206 * t
-        return QRectF(20, top, self.width - 40, max(1, bottom - top))
+        # Chrome overlays this full-height content; visibility never changes it.
+        return QRectF(20, 20, self.width - 40, max(1, self.height - 40))
 
     @property
     def lyric_font(self):
-        # 31.5 px at 360 wide; tracks the window so the reading size holds.
-        return min(40.0, max(26.0, self.width * .0875))
+        # The bundled Linux fallback needs 31px for 21px Chinese glyphs.
+        # Keep the fixed 31px baseline rhythm readable without overlapping rows.
+        return min(21.0, max(20.0, self.width * 21 / 360))
 
     @property
     def lyric_step(self):
-        return self.lyric_font * 1.45
+        return 31.0
 
     @property
     def lyric_row(self):
-        return self.lyric_font * 1.3
+        return 31.0
 
     @property
     def lyric_anchor(self):
-        return self.viewport.top() + self.viewport.height() * .33
+        # Baseline, rather than the center of a font-dependent row rectangle.
+        return self.height * .33
 
     @property
     def list_heading(self):
-        # The list heading belongs to the hover chrome; idle rows run edge to edge.
-        return 28.0 * self._ease(self.visibility)
+        return 0.0
 
     @property
     def list_top(self):
@@ -85,12 +76,12 @@ class NarrowLayout:
     @property
     def transport_panel(self):
         width = min(300.0, self.width - 32.0)
-        return QRectF((self.width - width) / 2, self.height - 128, width, 60)
+        return QRectF((self.width - width) / 2, self.height - 116, width, 44)
 
     def transport_slot(self, index):
         panel = self.transport_panel
         width = panel.width() / 3
-        return QRectF(panel.left() + index * width, panel.top(), width, panel.height())
+        return self.centered(panel.left() + (index + .5) * width, panel.center().y(), 44)
 
     @property
     def previous(self):
@@ -105,16 +96,15 @@ class NarrowLayout:
         return self.transport_slot(2)
 
     def transport_icon(self, slot):
-        side = min(44.0, self.transport_panel.height() - 12.0)
-        return self.centered(slot.center().x(), slot.center().y(), side)
+        return self.centered(slot.center().x(), slot.center().y(), 44)
 
     @property
     def favorite(self):
-        return QRectF(16, self.height - 60, 105, 42)
+        return QRectF(16, self.height - 59, 105, 40)
 
     @property
     def dj(self):
-        return self.centered(self.width - 39, self.height - 39, 46)
+        return self.centered(self.width - 39, self.height - 39, 40)
 
     def utility(self, dj_fraction):
         # Keep both buttons on the bottom baseline as the DJ lane opens or closes.
