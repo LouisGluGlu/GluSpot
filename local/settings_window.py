@@ -2241,6 +2241,12 @@ class SettingsWindow(QDialog):
         player_hint.setMaximumWidth(600)
         player_hint.setStyleSheet(self._hint_style(2, 12))
         c.addWidget(player_hint)
+        from local.netease_capture_settings import NetEaseCaptureSettings
+        self.netease_capture_settings = NetEaseCaptureSettings(
+            self._setting_value, self._save, self._system_media_provider,
+            platform='unsupported' if owned_playback_only() else None,
+            lamp=self._status_indicator(False))
+        c.addWidget(self.netease_capture_settings)
         self.music_app_profile_controls = {}
         self.system_lyric_offset = self._slider_row(
             c, "系统歌词偏移", -12000, 12000,
@@ -2353,6 +2359,10 @@ class SettingsWindow(QDialog):
         self._update_previews()
         layout.addStretch(1)
         return page
+
+    def _system_media_provider(self):
+        provider = getattr(self.island_widget, 'data_provider', None)
+        return getattr(provider, 'system', provider)
 
     @staticmethod
     def _reading_gradient_label(value: int) -> str:
@@ -2656,6 +2666,7 @@ class SettingsWindow(QDialog):
         self._update_taskbar_controls()
         self.finder_bar_preview.set_style(self.finder_bar_style.currentData())
         self._update_music_app_profile_controls()
+        self.netease_capture_settings.refresh()
         self._update_theme_schedule_controls()
         self._update_music_ambience_controls()
         self._update_lyric_flow_controls()
