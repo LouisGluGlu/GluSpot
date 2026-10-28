@@ -13,10 +13,11 @@ import time
 from urllib.parse import urlsplit
 
 from api.capture._websocket import LoopbackWebSocket
-from api.capture.netease_js import BINDING_NAME, JsAdapterRegistry
+from api.capture.netease_js import BINDING_NAME, EARLY_GLOBAL, JsAdapterRegistry
 
 TARGET_URL = 'orpheus://orpheus/pub/app.html'
 _HOOK_FAILURES = frozenset({'native-events-unavailable', 'unsafe-previous-adapter',
+                            'unsafe-previous-early-shim',
                             'native-callback-chain-unavailable', 'native-callback-chain-changed'})
 
 
@@ -119,6 +120,10 @@ class CdpSession:
         self._context_id = None
         self._contexts = []
         self._last_error = ''
+        self._reloading = False
+        self._page_loaded = asyncio.Event()
+        self._early_script_id = None
+        self._target_endpoint = None
 
     @property
     def ready(self):
@@ -207,13 +212,52 @@ class CdpSession:
             try:
                 self.attempts += 1
                 target = await discover_target(self.port, timeout=self.command_timeout)
-                self._ws = await asyncio.wait_for(LoopbackWebSocket.connect(self.port, _websocket_path(target['webSocketDebuggerUrl'], self.port)), self.command_timeout)
+                endpoint = target['webSocketDebuggerUrl']
+                if endpoint != self._target_endpoint:
+                    self._early_script_id = None
+                    self._target_endpoint = endpoint
+                self._ws = await asyncio.wait_for(LoopbackWebSocket.connect(self.port, _websocket_path(endpoint, self.port)), self.command_timeout)
                 self.generation += 1
                 self._contexts = []
                 self._context_id = None
                 self._reader_task = asyncio.create_task(self._reader())
+                # Enable Page events, then register the document-start shim before
+                # Runtime and before the one reload that runs it in this page.
+                await self.command('Page.enable')
+                if self._early_script_id is None:
+                    result = await self.command('Page.addScriptToEvaluateOnNewDocument',
+                                                {'source': self.adapter.early_install_expression()})
+                    self._early_script_id = result.get('identifier')
                 await self.command('Runtime.enable')
+                try:
+                    await self.command('Runtime.removeBinding', {'name': BINDING_NAME})
+                except CdpError:
+                    pass
                 await self.command('Runtime.addBinding', {'name': BINDING_NAME})
+                self._context_id = None
+                early_ready = False
+                try:
+                    status = await self._evaluate(
+                        f"Boolean(globalThis.{EARLY_GLOBAL} && "
+                        f"globalThis.{EARLY_GLOBAL}.status && "
+                        f"globalThis.{EARLY_GLOBAL}.status().api === true)")
+                    early_ready = status is True
+                except CdpError:
+                    pass
+                if not early_ready:
+                    self._page_loaded.clear()
+                    self._reloading = True
+                    try:
+                        await self.command('Page.reload', {'ignoreCache': False})
+                        try:
+                            await asyncio.wait_for(self._page_loaded.wait(),
+                                                   max(1.0, self.command_timeout * 5))
+                        except asyncio.TimeoutError:
+                            # Some CEF builds do not emit Page.loadEventFired;
+                            # the new context still runs the script at reload.
+                            pass
+                    finally:
+                        self._reloading = False
                 self.probe = {}
                 # Main-world evaluation first; alternate CEF contexts are feature
                 # probed rather than selected by an undocumented frame name.
@@ -270,11 +314,20 @@ class CdpSession:
                 context_id = params.get('context', {}).get('id')
                 if isinstance(context_id, int):
                     self._contexts.append(context_id)
-            elif (method == 'Runtime.executionContextsCleared'
-                  or method == 'Inspector.detached'
+            elif method == 'Page.loadEventFired':
+                self._page_loaded.set()
+            elif method == 'Runtime.executionContextsCleared':
+                self._contexts = []
+                self._context_id = None
+                self.latest = None
+                self._notify(None)
+                if not self._reloading:
+                    raise CdpError('NetEase page context replaced')
+            elif (method == 'Inspector.detached'
                   or (method == 'Runtime.executionContextDestroyed'
                       and params.get('executionContextId') == self._context_id)):
-                raise CdpError('NetEase page context replaced')
+                if not self._reloading:
+                    raise CdpError('NetEase page context replaced')
             elif method == 'Runtime.bindingCalled' and params.get('name') == BINDING_NAME:
                 if self._context_id is not None and params.get('executionContextId') != self._context_id:
                     continue
@@ -371,6 +424,10 @@ class CdpSession:
             try:
                 await self._evaluate(self.adapter.close_expression())
                 await self.command('Runtime.removeBinding', {'name': BINDING_NAME})
+                if self._closed and self._early_script_id is not None:
+                    await self.command('Page.removeScriptToEvaluateOnNewDocument',
+                                       {'identifier': self._early_script_id})
+                    self._early_script_id = None
             except (ConnectionError, asyncio.TimeoutError):
                 pass
         if self._reader_task is not None:

@@ -54,13 +54,23 @@ class CdpTests(CaptureAsyncTestCase):
     async def test_attach_binding_event_and_readback_are_raw(self):
         await self.ready()
         self.assertTrue(self.session.probe['api'])
+        self.assertEqual(self.session.probe['hook'], 'load-time-native-chain-v1')
         sample = self.session.latest
         self.assertEqual(sample['position'], 12)
         readback = await self.session.readback()
         self.assertEqual(sample, readback)
         self.assertEqual(self.session.samples, 1)
         self.assertEqual([m['method'] for m in self.server.commands][:3],
-                         ['Runtime.enable', 'Runtime.addBinding', 'Runtime.evaluate'])
+                         ['Page.enable', 'Page.addScriptToEvaluateOnNewDocument',
+                          'Runtime.enable'])
+        methods = [m['method'] for m in self.server.commands]
+        self.assertEqual(self.server.reloads, 1)
+        self.assertLess(methods.index('Page.addScriptToEvaluateOnNewDocument'),
+                        methods.index('Runtime.enable'))
+        self.assertLess(methods.index('Runtime.enable'), methods.index('Page.reload'))
+        script_command = next(item for item in self.server.commands
+                             if item['method'] == 'Page.addScriptToEvaluateOnNewDocument')
+        self.assertIn('__gluspotNeteaseEarlyV1', script_command['params']['source'])
 
     async def test_seek_uses_native_binding_for_new_evidence(self):
         await self.ready()
@@ -117,11 +127,12 @@ class CdpTests(CaptureAsyncTestCase):
         self.assertIn(None, self.events)
         self.assertTrue(self.session.ready)
         self.assertGreaterEqual(self.server.connections, 2)
+        self.assertEqual(self.server.reloads, 1)
 
     async def test_probe_failure_never_becomes_ready(self):
         self.server.reject_probe = True
         await self.session.start()
-        self.assertFalse(await self.session.wait_ready(timeout=0.08))
+        self.assertFalse(await self.session.wait_ready(timeout=0.25))
         self.assertFalse(await self.session.seek('native-1', 'no', 3))
         self.assertEqual(self.session.probe, dict(api=False, reason='native-callback-chain-unavailable'))
         self.assertEqual(self.session.diagnostics()['reason'], 'native-callback-chain-unavailable')
@@ -129,10 +140,11 @@ class CdpTests(CaptureAsyncTestCase):
     async def test_close_restores_adapter_before_removing_binding_and_socket(self):
         await self.ready()
         await self.session.close()
-        cleanup = self.server.commands[-2:]
+        cleanup = self.server.commands[-3:]
         self.assertEqual(cleanup[0]['method'], 'Runtime.evaluate')
         self.assertEqual(cleanup[0]['params']['expression'], self.session.adapter.close_expression())
         self.assertEqual(cleanup[1]['method'], 'Runtime.removeBinding')
+        self.assertEqual(cleanup[2]['method'], 'Page.removeScriptToEvaluateOnNewDocument')
 
     async def test_close_during_probe_failure_cleanup_finishes_restoration(self):
         self.server.reject_probe = True
@@ -155,7 +167,7 @@ class CdpTests(CaptureAsyncTestCase):
         self.assertIsNone(self.session._ws)
         self.assertIsNone(self.session._reader_task)
         self.assertEqual(self.session._pending, {})
-        self.assertEqual(self.server.commands[-1]['method'], 'Runtime.removeBinding')
+        self.assertEqual(self.server.commands[-1]['method'], 'Page.removeScriptToEvaluateOnNewDocument')
 
     async def test_chain_loss_invalidates_evidence_and_records_health_reason(self):
         await self.ready()
@@ -270,6 +282,44 @@ class AdapterJavascriptTests(unittest.TestCase):
                                          check=True, text=True, capture_output=True).stdout)
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_document_start_shim_wraps_late_registration_and_detach_keeps_original(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        value = self.run_javascript(r'''globalThis.legacyNativeCmder = legacyNativeCmder;
+const early = eval(EARLY);
+const observed = [], neteaseCalls = [], slots = {}, trace = [], results = [];
+for (const event of fake.events) {
+  const key = 'audioplayer.on' + event;
+  legacyNativeCmder.registerCallAdapter(key, function(...args) {
+    neteaseCalls.push({event, receiver:this, args}); trace.push('native-' + event);
+    return 'native-' + event;
+  }, 'audioplayer');
+  slots[event] = fake.nativeSlots[key];
+}
+globalThis.__gluspotNeteaseSample = value => { trace.push('observer'); observed.push(JSON.parse(value)); };
+globalThis.performance = {now: () => 100};
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const probe = eval(SCRIPT);
+for (const event of fake.events) results.push(fake.registered[event].call({event}, 'song', 5, .1));
+const beforeClose = {calls:neteaseCalls.length, observed:observed.length,
+  health:globalThis.__gluspotNeteaseV1.health()};
+globalThis.__gluspotNeteaseV1.close();
+for (const event of fake.events) fake.registered[event]('song', 6, .2);
+console.log(JSON.stringify({probe, beforeClose, afterClose:{calls:neteaseCalls.length, observed:observed.length},
+  slotsStillOwned:fake.events.every(event => fake.nativeSlots['audioplayer.on'+event] === slots[event]), results, trace}));
+'''.replace('EARLY', early), existing=False)
+        self.assertTrue(value['probe']['api'])
+        self.assertEqual(value['beforeClose']['calls'], 4)
+        self.assertEqual(value['results'], ['native-' + event for event in ('PlayProgress', 'PlayState', 'Load', 'End')])
+        self.assertEqual(value['beforeClose']['health']['discovery']['hook'], 'load-time-native-chain-v1')
+        self.assertEqual(value['beforeClose']['health']['originalCalls'],
+                         dict(PlayProgress=1, PlayState=1, Load=1, End=1))
+        self.assertGreater(value['beforeClose']['observed'], 0)
+        self.assertEqual(value['trace'][:2], ['native-PlayProgress', 'observer'])
+        self.assertEqual(value['afterClose']['calls'], 8)
+        self.assertEqual(value['afterClose']['observed'], value['beforeClose']['observed'])
+        self.assertTrue(value['slotsStillOwned'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_single_slot_model_reproduces_first_append_displacement(self):
         value = self.run_javascript(r'''
 registered.PlayProgress('song', 1, .1);
@@ -282,6 +332,20 @@ console.log(JSON.stringify({originalCalls:fake.calls.length, observed,
   registrations:fake.registrations.length, sameStub:stub === fake.nativeSlots['audioplayer.onPlayProgress']}));
 ''', existing=False)
         self.assertEqual(value, dict(originalCalls=1, observed=2, registrations=1, sameStub=True))
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_document_start_shim_miss_keeps_clean_slot_refusal(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        value = self.run_javascript(r'''globalThis.legacyNativeCmder = legacyNativeCmder;
+eval(EARLY);
+const probe = eval(SCRIPT);
+console.log(JSON.stringify({probe, registrations:fake.registrations.length,
+  keys:Object.keys(legacyNativeCmder.registerCallMap), installed:!!globalThis.__gluspotNeteaseV1}));
+'''.replace('EARLY', early), existing=False)
+        self.assertEqual(value['probe'], dict(api=False, reason='native-callback-chain-unavailable'))
+        self.assertEqual(value['registrations'], 0)
+        self.assertEqual(value['keys'], [])
+        self.assertFalse(value['installed'])
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_native_callbacks_chain_first_and_restore_exactly_with_idempotent_install(self):

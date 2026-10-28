@@ -32,6 +32,11 @@ class FakeCdpServer:
         self.target_url = 'orpheus://orpheus/pub/app.html'
         self.target_host = '127.0.0.1'
         self.send_heartbeats = True
+        self.new_document_scripts = {}
+        self.reloads = 0
+        self.reload_context_events = True
+        self.require_early_shim = False
+        self.early_shim_active = False
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._accept, '127.0.0.1', 0)
@@ -117,11 +122,24 @@ class FakeCdpServer:
                 method, params = message['method'], message.get('params', {})
                 result = {}
                 emit = False
-                if method == 'Runtime.enable':
+                reloaded = False
+                if method == 'Page.addScriptToEvaluateOnNewDocument':
+                    identifier = f'script-{len(self.new_document_scripts) + 1}'
+                    self.new_document_scripts[identifier] = params['source']
+                    result = dict(identifier=identifier)
+                elif method == 'Page.removeScriptToEvaluateOnNewDocument':
+                    self.new_document_scripts.pop(params['identifier'], None)
+                elif method == 'Page.reload':
+                    self.reloads += 1
+                    self.early_shim_active = bool(self.new_document_scripts)
+                    reloaded = self.reload_context_events
+                elif method == 'Runtime.enable':
                     await self._send(writer, dict(method='Runtime.executionContextCreated',params={'context':{'id':1}}))
                 elif method == 'Runtime.evaluate':
                     expression = params.get('expression', '')
-                    if '.seek(' in expression:
+                    if expression.startswith('Boolean(globalThis.__gluspotNeteaseEarlyV1'):
+                        result = {'result': {'value': self.early_shim_active}}
+                    elif '.seek(' in expression:
                         arguments = json.loads('[' + expression.split('.seek(', 1)[1][:-1] + ']')
                         self.sample = dict(self.sample, position=arguments[2], sequence=self.sample['sequence'] + 1)
                         result = {'result': {'value': True}}
@@ -132,15 +150,22 @@ class FakeCdpServer:
                         result = {'result': {'value': dict(chainIntact=True,
                             originalCalls=dict(PlayProgress=self.sample['sequence'], PlayState=0, Load=0, End=0))}}
                     elif 'native-events-unavailable' in expression:
-                        result = {'result': {'value': {'api': not self.reject_probe, 'sampleHz':10,
+                        rejected = self.reject_probe or (self.require_early_shim and not self.early_shim_active)
+                        result = {'result': {'value': {'api': not rejected, 'sampleHz':10,
                                                      'seek':True,'seekWhilePaused':None,
                                                      'adapter':'legacy-native-v1',
-                                                     'hook':'existing-websdk-chain-v1',
-                                                     **({'reason':'native-callback-chain-unavailable'} if self.reject_probe else {})}}}
-                        emit = not self.reject_probe
+                                                     'hook':('load-time-native-chain-v1' if self.early_shim_active
+                                                             else 'existing-websdk-chain-v1'),
+                                                     **({'reason':'native-callback-chain-unavailable'} if rejected else {})}}}
+                        emit = not rejected
                     else:
                         result = {'result': {'value': None}}
                 await self._send(writer, dict(id=message['id'], result=result))
+                if reloaded:
+                    await self._send(writer, dict(method='Runtime.executionContextsCleared'))
+                    await self._send(writer, dict(method='Runtime.executionContextCreated',
+                                                 params={'context': {'id': self.reloads + 1}}))
+                    await self._send(writer, dict(method='Page.loadEventFired', params={'timestamp': 0}))
                 if emit:
                     await self.emit(self.sample)
         except (asyncio.IncompleteReadError, ConnectionError, OSError):

@@ -172,10 +172,19 @@ the native UI callback. Before injection, `registerCallMap` had no
 `audioplayer.onPlayProgress`, `audioplayer.onPlayState`, `audioplayer.onLoad` or
 `audioplayer.onEnd` entries. Receiving events after registration does not prove
 that NetEase's UI callbacks or automatic track advance remain intact.
-The UI therefore uses a separate native path. Its precise JavaScript entry
-point is unknown from this static investigation; no alternate global is guessed.
+The UI therefore uses a separate native path. The adapter now installs a
+small document-start shim with `Page.addScriptToEvaluateOnNewDocument`, then
+reloads the page once so it runs before NetEase's own registration. The shim
+observes the registration boundary (including `legacyNativeCmder` registration
+methods and their supported adapter objects), wraps only the four named event
+handlers, and records the path and method in `hook_health()` for the probe.
+Each wrapper calls NetEase first and forwards to GluSpot afterward; detach only
+clears GluSpot forwarding, so the native wrapper continues to invoke NetEase.
+This session has not run against a live Windows page, so the actual production
+registration path remains unverified and must be taken from the probe's
+`registration_paths` report.
 
-The conservative non-invasive adapter must never call `appendRegisterCall` or
+The late fallback adapter must never call `appendRegisterCall` or
 `registerCallAdapter`. It may only chain an existing callback in an already
 populated `registerCallMap` queue with a callable `registerCallStubs` entry.
 Preflight all four queues before any mutation. Each wrapper calls the original
@@ -184,8 +193,10 @@ and error propagation, and swallows only observer errors. Close must restore
 the original slot descriptor; reinstall must be idempotent. If no established
 chain is available, return `api:false` with health reason
 `native-callback-chain-unavailable` and use the existing fallback below. Do not
-create queues or register callbacks to manufacture a chain. The observed empty
-map therefore makes this conservative route unavailable in that state.
+create queues or register callbacks to manufacture a chain. The observed empty map is therefore safe only when the document-start shim
+has already caught all four registrations. If the shim misses a registration,
+the adapter retains the refusal reason `native-callback-chain-unavailable`
+and does not create a queue or displace NetEase.
 
 Ordinary detach/close restores each still-owned callback's exact descriptor
 before removing the Runtime binding and closing the socket. It preserves any
@@ -292,7 +303,7 @@ experiment by default.
 The final source passed three consecutive runs with
 `QT_QPA_PLATFORM=offscreen`, `/tmp/gluspot-capture-test-venv/bin/python`
 (Python 3.13.5) and `-m unittest discover -s tests -p 'test_capture*.py'`:
-**193 tests / 6.713 s**, **193 / 6.721 s**, **193 / 6.729 s**; zero failures,
+**195 tests / 7.277 s**, **195 / 7.111 s**, **195 / 7.099 s**; zero failures,
 errors or skips. Compilation and `git diff --check` passed. Offline tests cover
 the confirmed first-APPEND displacement model, preserved native registrations
 and original callback invocation, all-event preflight, rollback, exact slot
@@ -302,7 +313,9 @@ The existing unknown-duration, 10 Hz and independently verified seek tests pass.
 Logs are ignored `.runtime/capture/noninvasive-final-{1,2,3}.log`.
 
 No live NetEase process or installation was accessed. PC sync/tests remain
-pending because this session has no configured PC execution channel. After
+pending because this session has no configured PC execution channel. The
+load-time shim's live registration path, lyric/audio continuity, sample rate,
+seek latency, and End/auto-next behavior are consequently unverified. After
 syncing this commit, repeat the capture discovery three times from
 `E:\grok-gluspot\_wt_capture2` using only
 `E:\gpt-island\.venv\Scripts\python.exe`.

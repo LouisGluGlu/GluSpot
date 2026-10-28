@@ -1,7 +1,9 @@
 """Versioned adapter for the event interface verified on NetEase 3.1.42.
 
-Unknown versions use this feature-probed adapter. Missing existing callback
-chains fail closed: first-time native registration can displace NetEase's UI.
+Unknown versions use this feature-probed adapter. A document-start shim
+chains NetEase's first registration; the late fallback still fails closed when
+no established callback chain exists because first-time registration can
+displace NetEase's UI.
 No timer reads player state:
 position arrives only through native callbacks, coalesced to 10 Hz. A separate
 one-second heartbeat carries no player data. No install-directory file is used.
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 
 BINDING_NAME = '__gluspotNeteaseSample'
 ADAPTER_GLOBAL = '__gluspotNeteaseV1'
+EARLY_GLOBAL = '__gluspotNeteaseEarlyV1'
 
 
 @dataclass(frozen=True)
@@ -20,6 +23,9 @@ class JsAdapter:
 
     def install_expression(self) -> str:
         return _INSTALL
+
+    def early_install_expression(self) -> str:
+        return _EARLY_SHIM
 
     def read_expression(self) -> str:
         return f'globalThis.{ADAPTER_GLOBAL}.read()'
@@ -46,10 +52,127 @@ class JsAdapterRegistry:
         return JsAdapter()
 
 
+_EARLY_SHIM = r"""(() => {
+  'use strict';
+  const name = '__gluspotNeteaseEarlyV1';
+  const events = ['PlayProgress', 'PlayState', 'Load', 'End'];
+  const existing = globalThis[name];
+  if (existing && existing.hookKind === 'load-time-native-chain-v1') return existing.status();
+  if (existing) return {api:false, reason:'unsafe-previous-early-shim'};
+  const hooks = new Map();
+  const originalCalls = Object.fromEntries(events.map(event => [event, 0]));
+  const registrations = [];
+  const patched = new WeakMap();
+  const inspected = new WeakSet();
+  let listener = null;
+  const keyEvent = value => {
+    if (typeof value !== 'string') return null;
+    const match = /^(?:audioplayer\.)?(?:on)?(PlayProgress|PlayState|Load|End)$/i.exec(value);
+    if (!match) return null;
+    return events.find(item => item.toLowerCase() === match[1].toLowerCase()) || null;
+  };
+  const registration = args => {
+    let event = null, callback = -1;
+    for (let index = 0; index < args.length; index++) {
+      if (typeof args[index] === 'function') callback = index;
+      if (!event) event = keyEvent(args[index]);
+    }
+    if (!event && args.some(value => value === 'audioplayer'))
+      event = args.map(keyEvent).find(Boolean) || null;
+    return event && callback >= 0 ? {event, callback} : null;
+  };
+  const wrapped = (event, original) => {
+    if (typeof original !== 'function') return original;
+    const prior = hooks.get(event);
+    if (prior && prior.original === original) return prior.wrapper;
+    const wrapper = function(...args) {
+      const result = Reflect.apply(original, this, args);
+      originalCalls[event]++;
+      try { if (listener) listener(event, this, args); } catch (_) {}
+      return result;
+    };
+    hooks.set(event, {original, wrapper});
+    return wrapper;
+  };
+  const descriptor = (owner, key) => {
+    let cursor = owner;
+    while (cursor) {
+      const value = Object.getOwnPropertyDescriptor(cursor, key);
+      if (value) return {owner:cursor, descriptor:value};
+      cursor = Object.getPrototypeOf(cursor);
+    }
+    return null;
+  };
+  const patch = (owner, method, path) => {
+    if (!owner || (typeof owner !== 'object' && typeof owner !== 'function')) return;
+    let methods = patched.get(owner);
+    if (!methods) { methods = new Set(); patched.set(owner, methods); }
+    if (methods.has(method)) return;
+    const found = descriptor(owner, method);
+    if (!found || typeof found.descriptor.value !== 'function') return;
+    const original = found.descriptor.value;
+    const wrapper = function(...args) {
+      const item = registration(args);
+      if (!item) return Reflect.apply(original, this, args);
+      const next = args.slice();
+      next[item.callback] = wrapped(item.event, next[item.callback]);
+      registrations.push({path, method, event:item.event});
+      return Reflect.apply(original, this, next);
+    };
+    try {
+      Object.defineProperty(owner, method, {...found.descriptor, value:wrapper});
+      methods.add(method);
+    } catch (_) {}
+  };
+  const inspect = (owner, path) => {
+    if (!owner || (typeof owner !== 'object' && typeof owner !== 'function')) return;
+    if (inspected.has(owner)) return;
+    inspected.add(owner);
+    for (const method of ['registerCallAdapter', 'registerCall', 'appendRegisterCall', 'on'])
+      patch(owner, method, path);
+    for (const key of ['_envAdapter', 'channel', 'eventBridge']) {
+      try { inspect(owner[key], path + '.' + key); } catch (_) {}
+    }
+  };
+  const watch = key => {
+    let found;
+    try { found = Object.getOwnPropertyDescriptor(globalThis, key); } catch (_) { return; }
+    if (found && 'value' in found) {
+      try { inspect(found.value, key); } catch (_) {}
+    }
+    if (found && (!found.configurable || !('value' in found))) return;
+    let current = found && 'value' in found ? found.value : undefined;
+    try {
+      Object.defineProperty(globalThis, key, {
+        configurable: !found || found.configurable !== false,
+        enumerable: found ? !!found.enumerable : true,
+        get() { return current; },
+        set(value) { current = value; inspect(value, key); }
+      });
+    } catch (_) {}
+  };
+  const state = {
+    hookKind: 'load-time-native-chain-v1',
+    status() {
+      const caught = events.filter(event => hooks.has(event));
+      return {api:caught.length === events.length, caught, registrations:registrations.slice(),
+              hook:'load-time-native-chain-v1'};
+    },
+    activate(next) { listener = typeof next === 'function' ? next : null; return this.status(); },
+    deactivate() { listener = null; },
+    health() { return {...this.status(), originalCalls:{...originalCalls}}; }
+  };
+  Object.defineProperty(globalThis, name, {value:state, writable:false, configurable:false});
+  for (const key of ['legacyNativeCmder', '_envAdapter', 'channel', 'orpheus']) watch(key);
+  return state.status();
+})()"""
+
+
 _INSTALL = r"""(() => {
   'use strict'; // Preserve even null/undefined/primitive callback receivers.
   const name = '__gluspotNeteaseV1';
   const hookKind = 'existing-websdk-chain-v1';
+  const early = globalThis.__gluspotNeteaseEarlyV1;
   if (globalThis[name]) {
     if (globalThis[name].hookKind !== hookKind)
       return {api:false, reason:'unsafe-previous-adapter'};
@@ -57,17 +180,17 @@ _INSTALL = r"""(() => {
   }
   const native = typeof legacyNativeCmder !== 'undefined' ? legacyNativeCmder : null;
   const seekChannel = typeof channel !== 'undefined' ? channel : null;
-  if (!native)
+  if (!native && !early)
     return {api:false, reason:'native-events-unavailable'};
   const canSeek = !!seekChannel && typeof seekChannel.call === 'function';
   let active = false, heartbeat = null, latest = null, playing = null, loadDuration = 0;
   let lastSent = -Infinity, sequence = 0, forceNext = true;
   const events = ['PlayProgress','PlayState','Load','End'];
   const listeners = {}, originalCalls = Object.fromEntries(events.map(event => [event, 0]));
-  let hooks = [];
+  let hooks = [], earlyBound = false;
   // Inspect own data properties only. Unknown accessors/shapes are not evidence
-  // of a safe chain. Never call appendRegisterCall or registerCallAdapter:
-  // their first registration replaces a single native callback slot.
+  // of a safe late chain. This branch never calls appendRegisterCall or
+  // registerCallAdapter: their first registration replaces a single native slot.
   const data = (owner, key) => owner && Object.getOwnPropertyDescriptor(owner, key);
   const value = (owner, key) => {
     const descriptor = data(owner, key);
@@ -99,12 +222,22 @@ _INSTALL = r"""(() => {
     }
     return prepared;
   };
-  const intact = () => active && hooks.length === events.length && hooks.every(hook =>
-    value(native, 'registerCallMap') === hook.map &&
-    value(native, 'registerCallStubs') === hook.stubs &&
-    value(hook.map, hook.key) === hook.queue && value(hook.stubs, hook.key) === hook.stub &&
-    value(hook.queue, hook.index) === hook.wrapper);
+  const intact = () => {
+    if (!active) return false;
+    if (earlyBound) {
+      try { return early.status().api === true; } catch (_) { return false; }
+    }
+    return hooks.length === events.length && hooks.every(hook =>
+      value(native, 'registerCallMap') === hook.map &&
+      value(native, 'registerCallStubs') === hook.stubs &&
+      value(hook.map, hook.key) === hook.queue && value(hook.stubs, hook.key) === hook.stub &&
+      value(hook.queue, hook.index) === hook.wrapper);
+  };
   const restore = () => {
+    if (earlyBound && early) {
+      try { early.deactivate(); } catch (_) {}
+      earlyBound = false;
+    }
     for (const hook of hooks) {
       // A later player change owns its slot; never overwrite it on detach.
       try {
@@ -182,32 +315,51 @@ _INSTALL = r"""(() => {
         this.close();
         return {api:false, reason:'native-callback-chain-changed'};
       }
-      // Preflight every event before touching any queue. The clean 3.1.42
-      // page has no such queues, so capture must fall back without registering.
-      try { hooks = prepare() || []; } catch (_) { hooks = []; }
-      if (!hooks.length) return {api:false, reason:'native-callback-chain-unavailable'};
-      try {
-        for (const hook of hooks)
-          Object.defineProperty(hook.queue, hook.index, {...hook.descriptor,value:hook.wrapper});
-        heartbeat = setInterval(() => {
-          if (!intact()) {
-            emit({type:'unavailable',reason:'native-callback-chain-changed'});
-            this.close();
-          } else emit({type:'heartbeat'});
-        }, 1000);
-      } catch (_) {
-        restore();
+      active = true; forceNext = true;
+      let earlyStatus = null;
+      try { earlyStatus = early && early.status ? early.status() : null; } catch (_) {}
+      if (earlyStatus && earlyStatus.api === true && typeof early.activate === 'function') {
+        try {
+          const status = early.activate((event, receiver, args) => {
+            if (listeners[event]) { originalCalls[event]++; Reflect.apply(listeners[event], receiver, args); }
+          });
+          if (!status || status.api !== true) { active = false; return {api:false, reason:'native-callback-chain-unavailable'}; }
+          earlyBound = true;
+        } catch (_) { active = false; return {api:false, reason:'native-callback-chain-unavailable'}; }
+      } else if (native) {
+        // Preflight every event before touching any queue. The clean 3.1.42
+        // page has no such queues, so capture must fall back without registering.
+        try { hooks = prepare() || []; } catch (_) { hooks = []; }
+        if (!hooks.length) { active = false; return {api:false, reason:'native-callback-chain-unavailable'}; }
+        try {
+          for (const hook of hooks)
+            Object.defineProperty(hook.queue, hook.index, {...hook.descriptor,value:hook.wrapper});
+        } catch (_) {
+          restore(); active = false;
+          return {api:false, reason:'native-callback-chain-unavailable'};
+        }
+      } else {
+        active = false;
         return {api:false, reason:'native-callback-chain-unavailable'};
       }
-      active = true; forceNext = true;
+      heartbeat = setInterval(() => {
+        if (!intact()) {
+          emit({type:'unavailable',reason:'native-callback-chain-changed'});
+          this.close();
+        } else emit({type:'heartbeat'});
+      }, 1000);
       return this.probe();
     },
     probe() {
       return {api:true,sampleHz:10,seek:canSeek,seekWhilePaused:null,
-              trackId:latest ? latest.trackId : null,adapter:'legacy-native-v1',hook:hookKind};
+              trackId:latest ? latest.trackId : null,adapter:'legacy-native-v1',
+              hook:earlyBound ? 'load-time-native-chain-v1' : hookKind};
     },
     health() {
-      return {hook:hookKind,chainIntact:intact(),originalCalls:{...originalCalls}};
+      let discovery = null;
+      try { discovery = early && early.health ? early.health() : null; } catch (_) {}
+      return {hook:earlyBound ? 'load-time-native-chain-v1' : hookKind,
+              chainIntact:intact(),originalCalls:{...originalCalls},discovery};
     },
     read() { return latest; },
     seek(trackId, requestId, seconds) {

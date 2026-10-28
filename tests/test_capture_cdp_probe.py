@@ -26,11 +26,13 @@ class PushedSession:
         self.sequence = 0
         self.closed = False
         self.tick = 0
-        self.probe = dict(hook='existing-websdk-chain-v1')
+        self.probe = dict(hook='load-time-native-chain-v1')
 
     async def hook_health(self):
         return dict(chainIntact=True, originalCalls=dict(PlayProgress=self.sequence,
-                                                        PlayState=0, Load=0, End=0))
+                                                        PlayState=0, Load=0, End=0),
+                    discovery=dict(registrations=[], hook='load-time-native-chain-v1',
+                                  originalCalls=dict(PlayProgress=self.sequence, PlayState=0, Load=0, End=0)))
 
     def clock(self):
         self.tick += 1

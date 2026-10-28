@@ -275,10 +275,16 @@ creates a websdk stub via `registerCallAdapter` and displaces the native UI
 callback. Before injection, `registerCallMap` had no entries for
 `audioplayer.onPlayProgress`, `audioplayer.onPlayState`, `audioplayer.onLoad` or
 `audioplayer.onEnd`. Captured events alone therefore cannot prove safe capture.
-NetEase's UI receives these events through a separate native path; its precise
-JavaScript entry point has not been established from the available evidence.
+NetEase's UI receives these events through a separate native path. The
+load-time path registers a document-start shim with CDP, reloads the page once,
+and observes the registration method before NetEase creates its queues. It
+wraps the four event handlers in place, calls NetEase first, and records the
+registration path/method for the probe. Detach clears only GluSpot forwarding,
+so NetEase's original handler continues to run. No live Windows page was
+available in this session, so the production registration path is still a
+probe result to collect on PC.
 
-Conservative non-invasive capture must never call `appendRegisterCall` or
+The late fallback adapter must never call `appendRegisterCall` or
 `registerCallAdapter`. It may only chain an existing callback in an already
 populated `registerCallMap` queue with a callable `registerCallStubs` entry;
 all four queues must pass preflight before any mutation. The original callback
@@ -303,10 +309,10 @@ This source experiment changes no release version or package. No live acceptance
 is claimed.
 
 Non-invasive hook verification (2026-10-28): the final capture suite passed
-**193 tests × 3** on Linux offscreen (6.713 / 6.721 / 6.729 s), with zero failures,
+**195 tests × 3** on Linux offscreen (7.277 / 7.111 / 7.099 s), with zero failures,
 errors or skips. Tests model single-slot displacement, safe existing chains,
 refusal, exact restoration, repeated attach, observer errors and cleanup races.
-PC repetitions and real playback/lyrics/auto-next remain pending; see the
+PC repetitions, live registration discovery, and real playback/lyrics/auto-next remain pending; see the
 [offline evidence and device checklist](docs/capture-position.md#non-invasive-hook-verification-2026-10-28).
 
 Recorded Linux offscreen verification (2026-10-28), predating the conservative
