@@ -34,10 +34,14 @@ class PlayerCapability:
     mode: str
     policy: SeekPolicy
     probe: bool = False
+    precise_progress: bool = False
+    seek: bool = True
+    seek_granularity: float = 1.5
 
 
 CAPABILITIES: Mapping[str, PlayerCapability] = MappingProxyType({
-    "netease": PlayerCapability("netease", "hybrid", seek_policy("cloudmusic")),
+    "netease": PlayerCapability("netease", "hybrid", seek_policy("cloudmusic"),
+                                precise_progress=True, seek_granularity=0.05),
     "qq": PlayerCapability("qq", "hybrid", seek_policy("qqmusic")),
     "spotify": PlayerCapability("spotify", "smtc", SeekPolicy()),
     "browser": PlayerCapability("browser", "smtc", SeekPolicy()),

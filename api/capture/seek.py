@@ -16,6 +16,8 @@ class SeekState(str, Enum):
     VERIFY_SMTC = 'verify-smtc'
     UIA_REQUEST = 'uia-request'
     VERIFY_UIA = 'verify-uia'
+    CEF_REQUEST = 'cef-request'
+    VERIFY_CEF = 'verify-cef'
     SUCCEEDED = 'succeeded'
     FAILED = 'failed'
     UNCERTAIN = 'uncertain'
@@ -80,7 +82,8 @@ class SeekExecutor:
 
     async def execute(self, target: float, *, identity: tuple[str, str], request_id: str,
                       smtc: SeekBackend, fallback: SeekBackend | None, guard,
-                      policy: SeekPolicy = SeekPolicy(), optimistic=None) -> SeekResult:
+                      policy: SeekPolicy = SeekPolicy(), optimistic=None,
+                      primary_name: str = 'smtc', fallback_name: str = 'uia') -> SeekResult:
         """Run one fenced request; repeated IDs return their recorded result."""
         if request_id in self._results:
             return self._results[request_id]
@@ -103,13 +106,13 @@ class SeekExecutor:
             target = max(before.start_seconds, min(bounds[0], target) if bounds else target)
             if optimistic is not None:
                 optimistic(target)
-            for name, backend in (('smtc', smtc), ('uia', fallback)):
+            for name, backend in ((primary_name, smtc), (fallback_name, fallback)):
                 if backend is None:
                     break
                 if not await guard():
                     return self._finish(request_id, False, SeekState.CANCELLED, 'identity-changed')
                 started = self.clock()
-                self.state = SeekState.SMTC_REQUEST if name == 'smtc' else SeekState.UIA_REQUEST
+                self.state = {'smtc': SeekState.SMTC_REQUEST, 'cef': SeekState.CEF_REQUEST}.get(name, SeekState.UIA_REQUEST)
                 try:
                     self._mutation_pending = True
                     ack = await asyncio.wait_for(backend.seek(target, request_id=request_id), policy.request_timeout)
@@ -121,7 +124,7 @@ class SeekExecutor:
                 self._mutation_pending = False
                 if name == 'smtc':
                     acknowledged = bool(ack)
-                self.state = SeekState.VERIFY_SMTC if name == 'smtc' else SeekState.VERIFY_UIA
+                self.state = {'smtc': SeekState.VERIFY_SMTC, 'cef': SeekState.VERIFY_CEF}.get(name, SeekState.VERIFY_UIA)
                 for delay in policy.read_delays:
                     await self.sleep(delay)
                     if not await guard():

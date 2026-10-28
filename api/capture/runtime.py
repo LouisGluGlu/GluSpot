@@ -22,7 +22,8 @@ class CaptureRuntime:
     teardown belong to the provider loop. The legacy provider remains separate.
     """
 
-    def __init__(self, *, clock=time.monotonic, uia_factory=None, uia_worker=None, executor=None):
+    def __init__(self, *, clock=time.monotonic, uia_factory=None, uia_worker=None, executor=None,
+                 cef_session=None, cef_requested=False):
         self.clock = clock
         self._lock = threading.Lock()
         self.model = PositionModel()
@@ -46,6 +47,17 @@ class CaptureRuntime:
         self._duration = 0.0
         self._uia_factory = uia_factory
         self._calibration_task = None
+        self.cef_session = cef_session
+        # An unavailable transport must retain the requested fallback policy.
+        # Session existence represents successful launch, never user intent.
+        self.cef_requested = bool(cef_requested or cef_session is not None)
+        self._cef_route_requested = False
+        self._cef_source = None
+        self._cef_backend = None
+        self._cef_seek_enabled = True
+        self._smtc_timeline_valid = False
+        self._position_route = 'smtc'
+        self._next_uia_read = 0.0
 
     async def bind(self, session, track, matches, *, mode=None):
         if self._closed:
@@ -55,7 +67,7 @@ class CaptureRuntime:
         self._duration = track.duration_seconds
         mode = mode or capability.mode
         if (self.identity == identity and getattr(self, '_mode', None) == mode
-                and self.source is not None and self._valid
+                and self.source is not None and (self._valid or self._cef_route_requested)
                 and self.collector is not None and self.collector._task is not None
                 and not self.collector._task.done()):
             if self.fallback is not None:
@@ -63,6 +75,14 @@ class CaptureRuntime:
             return
         if self.collector is not None:
             await self.collector.close()
+        previous_native_id = None
+        if self._cef_source is not None:
+            if self.identity != identity:
+                previous_native_id = (self._cef_source.native_track_id
+                                      or self._cef_source.excluded_native_track_id)
+            self._cef_source.close()
+            self._cef_source = None
+            self._cef_backend = None
         with self._lock:
             if self.identity != identity:
                 self.model = PositionModel()
@@ -77,14 +97,29 @@ class CaptureRuntime:
         self._mode = mode
         self._capability = capability
         service = capability.service
-        if mode == 'hybrid' and service in {'netease', 'qq'} and (sys.platform == 'win32' or self._uia_factory is not None):
+        self._cef_route_requested = self.cef_requested and service == 'netease'
+        cef_enabled = self.cef_session is not None and service == 'netease'
+        if (mode == 'hybrid' or self._cef_route_requested) and service in {'netease', 'qq'} and (sys.platform == 'win32' or self._uia_factory is not None):
             from api.capture.uia import StaWorker, UiaBackend
             if self._uia_worker is None:
                 self._uia_worker = StaWorker()
             self.fallback = (self._uia_factory or UiaBackend)(service, track, worker=self._uia_worker, clock=self.clock)
         self.policy = capability.policy
         self.source = SmtcSessionSource(session, track.track_id, matches, clock=self.clock)
-        self.collector = SmtcCollector(self.source, self._publish)
+        if cef_enabled:
+            from api.capture.cef import CefPositionSource, CefSeekBackend
+            self._cef_source = CefPositionSource(
+                self.cef_session, session_id=identity[0], track_id=identity[1],
+                excluded_native_track_id=previous_native_id,
+                duration_seconds=track.duration_seconds, is_playing=track.is_playing,
+                clock=self.clock)
+            self._cef_backend = CefSeekBackend(self._cef_source)
+            self._cef_seek_enabled = True
+            self._cef_source.subscribe(self._publish_cef)
+            initial = await self._cef_source.read()
+            if initial is not None:
+                self._publish_cef(initial)
+        self.collector = SmtcCollector(self.source, self._publish_smtc)
         try:
             await self.collector.collect_once()
             self.collector.start()
@@ -94,6 +129,63 @@ class CaptureRuntime:
             await self.collector.close()
             self.source = None
             raise
+
+    def _cef_fresh(self):
+        source = self._cef_source
+        return source is not None and source.fresh
+
+    def _publish_cef(self, sample):
+        if sample is not None:
+            self._position_route = 'cef'
+            self._publish(sample)
+        elif self._position_route == 'cef':
+            # A renderer disconnect or track change must stop projection now,
+            # before the next ordinary SMTC fallback observation arrives.
+            self._publish(None)
+
+    def _publish_smtc(self, sample):
+        if not self._cef_route_requested:
+            self._publish(sample)
+            return
+        if (self._cef_source is not None and sample is not None and isinstance(self.cef_session.latest, dict)
+                and self.cef_session.latest.get('playing') is None):
+            # PlayState numeric enum values are not verified across versions.
+            # Keep physical SMTC transport state until the adapter has a
+            # verified boolean state; progress still comes from native pushes.
+            self._cef_source.update_transport_state(sample.is_playing)
+        self._smtc_timeline_valid = (sample is not None and
+                                    (sample.position_seconds > 0 or sample.end_seconds > sample.start_seconds))
+        if self._cef_fresh():
+            return
+        if self._smtc_timeline_valid:
+            self._position_route = 'smtc'
+            self._publish(sample)
+        else:
+            if self._position_route != 'uia' or self.clock() - self._last_received_at > 2.0:
+                self._publish(None)
+            if (self.fallback is not None and not self._closed and self._seek_task is None
+                    and self.clock() >= self._next_uia_read
+                    and (self._calibration_task is None or self._calibration_task.done())):
+                self._next_uia_read = self.clock() + 1.0
+                self._calibration_task = asyncio.create_task(self._read_uia_fallback())
+
+    async def _read_uia_fallback(self):
+        backend = self.fallback
+        source = self.source
+        try:
+            sample = await backend.read()
+        except Exception:
+            sample = None
+        if (sample is not None and backend is self.fallback and source is self.source
+                and not self._closed and not self._cef_fresh() and not self._smtc_timeline_valid
+                and self._seek_task is None and await source.matches(source.session)):
+            self._position_route = 'uia'
+            # With no SMTC anchor, UIA supplies the base observation. This path
+            # remains read-only; it never invents a seek capability.
+            with self._lock:
+                self.model.observe(sample, lyric_duration=self._duration)
+                self._valid = self.model.sample is sample
+                self._last_received_at = self.clock()
 
     def _publish(self, sample):
         self._last_received_at = self.clock()
@@ -106,6 +198,7 @@ class CaptureRuntime:
                     self.model.observe(sample, lyric_duration=self._duration)
                     self._valid = self.model.sample is sample
         if (sample is not None and sample.source != 'uia' and self.fallback is not None
+                and not self._cef_route_requested
                 and self._seek_task is None and not self._closed
                 and (self._calibration_task is None or self._calibration_task.done())):
             self._calibration_task = asyncio.create_task(self._calibrate())
@@ -127,8 +220,10 @@ class CaptureRuntime:
         track = data.track
         identity = (track.source_app_id, track.track_id)
         instant = self.clock() if now is None else now
+        paused_cef_fresh = (self._position_route == 'cef' and self._cef_source is not None
+                            and self._cef_source.fresh)
         with self._lock:
-            fresh = self._valid and instant - self._last_received_at <= 2.0
+            fresh = self._valid and (paused_cef_fresh or instant - self._last_received_at <= 2.0)
             snapshot = self.model.snapshot(instant) if fresh else None
         if snapshot is None or snapshot.identity != identity or str(track.track_id).startswith('owned:'):
             return data
@@ -168,27 +263,44 @@ class CaptureRuntime:
                 self._optimistic = (identity, position, self.clock())
 
         try:
+            primary = source
+            fallback = self.fallback
+            primary_name, fallback_name = 'smtc', 'uia'
+            policy = self.policy
+            if self._cef_route_requested:
+                # CEF failure degrades seek independently from position. UIA
+                # in the new transport chain is deliberately read-only.
+                fallback = None
+                if self._cef_seek_enabled and self._cef_fresh():
+                    from api.capture.cef import CEF_SEEK_POLICY
+                    primary, primary_name, policy = self._cef_backend, 'cef', CEF_SEEK_POLICY
+                elif not self._smtc_timeline_valid:
+                    return False
             result = await self.executor.execute(target, identity=identity,
-                                                 request_id=secrets.token_hex(12), smtc=source,
-                                                 fallback=self.fallback, guard=current,
-                                                 policy=self.policy, optimistic=optimistic)
+                                                 request_id=secrets.token_hex(12), smtc=primary,
+                                                 fallback=fallback, guard=current,
+                                                 policy=policy, optimistic=optimistic,
+                                                 primary_name=primary_name, fallback_name=fallback_name)
+            if primary_name == 'cef' and not result.succeeded:
+                self._cef_seek_enabled = False
             if result.succeeded:
                 self.smtc_trust = result.backend == 'smtc'
             elif result.smtc_acknowledged and result.reason == 'fake-ack':
                 self.smtc_trust = False
             with self._lock:
                 metrics = self._player_metrics.setdefault(self._capability.service, dict(
-                    attempts=0, successes=0, smtc_successes=0, uia_successes=0,
+                    attempts=0, successes=0, smtc_successes=0, uia_successes=0, cef_successes=0,
                     error_seconds=None))
                 metrics['attempts'] += 1
                 metrics['successes'] += int(result.succeeded)
                 metrics['smtc_successes'] += int(result.succeeded and result.backend == 'smtc')
                 metrics['uia_successes'] += int(result.succeeded and result.backend == 'uia')
+                metrics['cef_successes'] += int(result.succeeded and result.backend == 'cef')
                 metrics['error_seconds'] = result.error_seconds
             if result.succeeded:
-                backend = source if result.backend == 'smtc' else self.fallback
+                backend = primary if result.backend == primary_name else fallback
                 try:
-                    sample = await asyncio.wait_for(backend.read(), timeout=self.policy.read_timeout)
+                    sample = await asyncio.wait_for(backend.read(), timeout=policy.read_timeout)
                 except Exception:
                     sample = None
                 if sample is not None and await current():
@@ -210,6 +322,9 @@ class CaptureRuntime:
         result['mode'] = getattr(self, '_mode', 'smtc')
         result['capability'] = getattr(self, '_capability', capability_for('')).service
         result['smtc_seek_trusted'] = self.smtc_trust
+        result['position_route'] = self._position_route
+        result['cef'] = (dict(self._cef_source.diagnostics(), seek_enabled=self._cef_seek_enabled)
+                         if self._cef_source is not None else {})
         result['seek'] = dict(attempts=self.seek_attempts, successes=self.seek_successes,
                               state=self.executor.state.value,
                               reason=self.executor.last_result.reason if self.executor.last_result else '',
@@ -220,6 +335,8 @@ class CaptureRuntime:
 
     async def close(self):
         self._closed = True
+        if self._cef_source is not None:
+            self._cef_source.close()
         if self._calibration_task is not None:
             self._calibration_task.cancel()
         if self.fallback is not None:
