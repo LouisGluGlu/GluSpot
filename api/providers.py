@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
 
+from api.capture import capture_enabled
 from api.audio_analyzer import LiveAudioAnalyzer
 from api.audio_routes import AudioRouteSnapshot
 from api.artwork_sources import (
@@ -468,6 +469,7 @@ class WindowsMediaProvider:
         except OSError:
             self.lyrics_store = LocalLyricsStore(root=Path(__file__).resolve().parents[1] / "lyrics", settings_getter=settings_getter)
         self._loop = None
+        self._capture_runtime = None
         self._thread = None
         self._manager = None
         self._last_data: IslandVisualData | None = None
@@ -614,6 +616,10 @@ class WindowsMediaProvider:
         return enabled is True and self.start_audio_outputs().set_auto_latency(True)
 
     def close_audio_outputs(self):
+        runtime = getattr(self, "_capture_runtime", None)
+        loop = getattr(self, "_loop", None)
+        if runtime is not None and loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(runtime.close(), loop)
         lock = getattr(self, "_audio_route_init_lock", None)
         if lock is None:
             lock = self._audio_route_init_lock = threading.Lock()
@@ -622,6 +628,27 @@ class WindowsMediaProvider:
             controller = getattr(self, "_audio_route_controller", None)
             if controller is not None:
                 controller.close()
+
+    def _capture_is_enabled(self) -> bool:
+        return capture_enabled(getattr(self, "settings_getter", None))
+
+    async def _bind_capture_session(self, session, track):
+        """Wire opt-in observations on the existing WinRT background loop."""
+        runtime = getattr(self, "_capture_runtime", None)
+        if not self._capture_is_enabled():
+            if runtime is not None:
+                await runtime.close()
+                self._capture_runtime = None
+            return
+        if runtime is None:
+            from api.capture.runtime import CaptureRuntime
+            runtime = self._capture_runtime = CaptureRuntime()
+
+        async def matches(candidate):
+            return (str(getattr(candidate, "source_app_user_model_id", "")) == track.source_app_id
+                    and await self._seek_session_matches_track(candidate, track.title, track.artist, ""))
+
+        await runtime.bind(session, track, matches)
 
     def get_visual_data(self) -> IslandVisualData:
         now = time.monotonic()
@@ -1107,6 +1134,9 @@ class WindowsMediaProvider:
         return replace(data, track=updated_track)
 
     def _project_visual_position(self, data: IslandVisualData, now: float, anchor_at: float) -> IslandVisualData:
+        runtime = getattr(self, "_capture_runtime", None)
+        if runtime is not None and self._capture_is_enabled():
+            return runtime.project(data, now)
         track = data.track
         if not track.is_playing:
             return data
@@ -1331,6 +1361,9 @@ class WindowsMediaProvider:
                 "sender": (self._audio_route_controller.diagnostics()
                            if getattr(self, "_audio_route_controller", None) is not None else {}),
             },
+            "capture": (self._capture_runtime.diagnostics()
+                        if getattr(self, "_capture_runtime", None) is not None and self._capture_is_enabled()
+                        else {"enabled": False}),
             "provider_status": self._provider_status,
             "winsdk_loaded": MediaManager is not None,
             "winsdk_import_attempted": WINSdk_IMPORT_ATTEMPTED,
@@ -2882,6 +2915,7 @@ class WindowsMediaProvider:
             album_art_lookup_state=album_art_lookup_state,
             source_app_id=raw_source_app,
         )
+        await self._bind_capture_session(session, track)
         with cache_lock:
             if epoch != int(getattr(self, "_music_cache_epoch", 0)):
                 return None

@@ -254,8 +254,9 @@ seek acknowledgements and optional calibration. Only `api/providers.py` wires
 these components into the V2 app. Windows dependencies must remain lazy and
 mockable; no release version or package is changed by this work.
 
-Implementation: steps 1–2 (interfaces, flag and monotonic PositionModel) complete;
-steps 3–6 pending. Serialized mock timeline traces exercise projection, pause,
+Implementation: steps 1–3 complete (contracts, monotonic model and background
+SMTC events with a 2 Hz polling fallback); steps 4–6 pending. Diagnostics report
+event counts/rate, arrival-to-read latency, errors and model corrections. Serialized mock timeline traces exercise projection, pause,
 seek, clock jumps and track changes; these are not live Windows recordings.
 
 ## Guardrails
