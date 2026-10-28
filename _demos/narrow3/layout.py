@@ -42,16 +42,30 @@ class NarrowLayout:
         return QRectF(x - side / 2, y - side / 2, side, side)
 
     @property
-    def play(self):
-        return self.centered(self.width / 2, self.height - 108, 64)
+    def transport_panel(self):
+        width = min(300.0, self.width - 32.0)
+        return QRectF((self.width - width) / 2, self.height - 128, width, 60)
+
+    def transport_slot(self, index):
+        panel = self.transport_panel
+        width = panel.width() / 3
+        return QRectF(panel.left() + index * width, panel.top(), width, panel.height())
 
     @property
     def previous(self):
-        return self.centered(self.width / 2 - 65, self.height - 108, 50)
+        return self.transport_slot(0)
+
+    @property
+    def play(self):
+        return self.transport_slot(1)
 
     @property
     def next(self):
-        return self.centered(self.width / 2 + 65, self.height - 108, 50)
+        return self.transport_slot(2)
+
+    def transport_icon(self, slot):
+        side = min(44.0, self.transport_panel.height() - 12.0)
+        return self.centered(slot.center().x(), slot.center().y(), side)
 
     @property
     def favorite(self):
@@ -65,6 +79,8 @@ class NarrowLayout:
         # Keep both buttons on the bottom baseline as the DJ lane opens or closes.
         t = max(0.0, min(1.0, dj_fraction))
         y = self.height - 39
-        loop_x = (self.width - 96) * (1 - t) + (self.width - 165) * t
-        layout_x = (self.width - 36) * (1 - t) + (self.width - 109) * t
+        left = self.favorite.right()
+        right = (self.width - 16) * (1 - t) + self.dj.left() * t
+        loop_x = left + (right - left) / 3
+        layout_x = left + 2 * (right - left) / 3
         return self.centered(loop_x, y, 40), self.centered(layout_x, y, 40)

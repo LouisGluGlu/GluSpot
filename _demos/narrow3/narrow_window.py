@@ -361,7 +361,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         for command, rect in (("previous", layout.previous),
                               ("toggle_play_pause", layout.play), ("next", layout.next)):
             rect = self.posed_rect("media:" + command, rect)
-            self._paint_transport_icon(painter, rect, command, ink)
+            self._paint_transport_icon(painter, layout.transport_icon(rect), command, ink)
         favorite = self.posed_rect("collection", layout.favorite)
         self._clear_control_renderer.paint(
             painter, favorite, scene=self._surface_glass_backdrop(),

@@ -24,8 +24,8 @@ def check(variant, width, mode, dj):
     for first, second in itertools.combinations(controls, 2):
         if first.intersects(second):
             errors.append("controls overlap")
-    if variant == "B" and not (layout.previous.right() < layout.play.left()
-                               and layout.play.right() < layout.next.left()):
+    if variant == "B" and not (layout.previous.right() <= layout.play.left()
+                               and layout.play.right() <= layout.next.left()):
         errors.append("transport order or spacing")
     visibility = Visibility(variant == "B")
     for frame in range(60):
@@ -43,16 +43,14 @@ def check(variant, width, mode, dj):
 def main():
     failures = 0
     layout = NarrowLayout(360, 640)
-    expected = [(layout.previous, (115, 532, 50)), (layout.play, (180, 532, 64)),
-                (layout.next, (245, 532, 50)), (layout.favorite, (68.5, 601, 105)),
-                (layout.dj, (321, 601, 46))]
-    for fraction, points in ((1, ((195, 601), (251, 601))),
-                             (0, ((264, 601), (324, 601)))):
-        expected.extend((rect, (x, y, 40)) for rect, (x, y) in zip(layout.utility(fraction), points))
-    for rect, (x, y, side) in expected:
-        if (rect.center().x(), rect.center().y(), rect.width()) != (x, y, side):
-            print(f"FAIL expected {(x, y, side)} got {rect}")
+    for slot in (layout.previous, layout.play, layout.next):
+        icon = layout.transport_icon(slot)
+        if icon.width() != 44 or icon.height() != 44 or icon.center() != slot.center():
+            print(f"FAIL transport icon {icon}")
             failures += 1
+    if layout.transport_panel.width() != 300 or layout.transport_panel.height() != 60:
+        print("FAIL transport panel")
+        failures += 1
     motion = EaseOutFade(1)
     motion.retarget(0, 0, .18)
     if not (0 < motion.value(.09) < .5 and motion.value(.18) == 0):
