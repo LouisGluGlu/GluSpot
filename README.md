@@ -341,8 +341,20 @@ including fullscreen lyrics and word seek. Ordinary full discovery completes
 as baseline `a3ffe79` (5,656 tests / 156.886 s); failure/error identities match
 exactly. Earlier native GC crashes and corrected fixture/timing races are
 recorded in the [verification notes](docs/capture-position.md#current-lyric-wiring).
-Windows mirror sync, PC tests and a live lyric/word-click check remain pending:
-this session exposes no working PC relay or forwarded `:39222` endpoint.
+PC verification at `32fee94` on `E:\grok-gluspot\_wt_capture2` with
+`E:\gpt-island\.venv\Scripts\python.exe` (native Windows Qt): capture discovery
+**206 tests × 3** pass (**15.634 / 15.603 / 15.364 s**), then tip `34d1907` /
+`25388d2` re-checks pass **206 / 14.430 s** and focused lyric/seek/UI
+**21 / 1.673 s** (`tests.test_music_lyric_seek`, `tests.test_capture_lyric_integration`,
+`tests.test_capture_netease_ui`). Earlier tip `888bfd5` focused the same three
+modules at **19 / 1.893 s**. Live CDP on existing `:39222` (media-play +
+Page.reload approved; hook `load-time-native-chain-v1`) passed: **77 samples /
+10 s ≈ 7.7 Hz**, seeks readback **6 / 3 / 0 ms**, restore **35 ms**, native
+`PlayProgress` **+614** during sampling, `callback_chain_intact` true. Full
+GluSpot UI lyric follow + click-word was **not** exercised end-to-end here
+(does not write wuju real settings); after enabling the consent path above and
+disabling program-owned playback if it holds the track, watch window/fullscreen
+highlights and click one later timed word.
 
 Non-invasive hook verification (2026-10-28): the final capture suite passed
 **203 tests × 3** on Linux offscreen (9.948 / 10.227 / 10.004 s), with zero failures,

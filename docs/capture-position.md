@@ -133,14 +133,19 @@ No product CDP timing or native hook changed. Complete local evidence is in
 `/tmp/gluspot-lyric-capture-verified-{1,2,3}.log` and
 `/tmp/gluspot-lyric-final-summary.json`.
 
-Windows mirror sync, native repetitions and live UI acceptance remain pending:
-this session has no working PC execution/file-transfer relay and no forwarded
-`:39222` endpoint. No current PC or live UI success is claimed. The rerun uses
-`E:\gpt-island\.venv\Scripts\python.exe` against
-`E:\grok-gluspot\_wt_capture2`, with capture discovery and the focused
-lyric-integration, media-position-pipeline and music-playback-sync modules.
-The current focused module is `tests.test_music_lyric_seek`. The requested
-commands are:
+PC verification used `E:\gpt-island\.venv\Scripts\python.exe` against
+`E:\grok-gluspot\_wt_capture2` (detached tip synced by git bundle). Capture
+discovery **206 tests × 3** pass (**15.634 / 15.603 / 15.364 s** at `888bfd5`);
+tip `34d1907`/`25388d2` re-check **206 / 14.430 s** plus focused lyric/seek/UI
+**21 / 1.673 s**. Live CDP on the already-open `:39222` port (approved media-play
+key + `Page.reload`; hook `load-time-native-chain-v1`) passed: **77 samples /
+10 s ≈ 7.7 Hz**, seeks **6 / 3 / 0 ms** readback error, restore **35 ms**, native
+`PlayProgress` **+614** in the sample window, chain intact. Full GluSpot UI
+line/word highlight + click-a-word was not launched against wuju's real settings
+store; after the consent path above (and turning off program-owned playback when
+it owns the track), confirm highlights and one later word click on a YRC track.
+
+Suggested commands remain:
 
 ```powershell
 E:\gpt-island\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_capture*.py' -v
