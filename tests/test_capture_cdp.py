@@ -246,6 +246,38 @@ console.log(JSON.stringify({initial, progress, readback, unknown, seeks}));
         self.assertEqual(value['seeks'], [['1390072207_BRKMZZ', 'req', 20]])
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_ratio_one_progress_survives_multiple_seeks_and_cdp_validation(self):
+        script = JsAdapterRegistry.select().install_expression()
+        harness = r"""
+const registered = {}, pushed = [];
+let now = 0;
+globalThis.performance = {now: () => now};
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+globalThis.__gluspotNeteaseSample = value => pushed.push(JSON.parse(value));
+const legacyNativeCmder = {appendRegisterCall: (name, source, callback) => registered[name] = callback};
+const channel = {call: () => {}};
+eval(SCRIPT);
+registered.PlayProgress('3444775814_PL8SGJ', 43.238, 1);
+for (const target of [15, 45, 90]) {
+  globalThis.__gluspotNeteaseV1.seek('3444775814_PL8SGJ', 'req', target);
+  now += 100; registered.PlayProgress('3444775814_PL8SGJ', target, 1);
+  now += 100; registered.PlayProgress('3444775814_PL8SGJ', target + 0.1, 1);
+}
+registered.Load({duration_seconds: 200});
+registered.PlayProgress('3444775814_PL8SGJ', 43.238, 1);
+console.log(JSON.stringify(pushed));
+""".replace('SCRIPT', json.dumps(script))
+        pushed = json.loads(subprocess.run([shutil.which('node'), '-e', harness],
+                                           check=True, text=True, capture_output=True).stdout)
+        samples = [value for value in pushed if value['type'] == 'sample']
+        self.assertEqual([sample['duration'] for sample in samples], [0] * 7 + [200])
+        session = CdpSession(12345)
+        for sample in samples[:7]:
+            session._sample(sample)
+            self.assertEqual(session.latest['sequence'], sample['sequence'])
+            self.assertEqual(session.latest['position'], sample['position'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_real_script_native_events_coalesce_and_seek_without_optimism(self):
         script = JsAdapterRegistry.select().install_expression()
         harness = r'''

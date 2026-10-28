@@ -3,8 +3,8 @@ import asyncio
 from contextlib import redirect_stdout
 import io
 import json
-import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tools import netease_cdp_probe
@@ -14,8 +14,9 @@ from tests.capture_async import CaptureAsyncTestCase
 
 
 class PushedSession:
-    def __init__(self, port, *, adapter="auto", move=True, fail=False, replace=False):
+    def __init__(self, port, *, adapter="auto", move=True, fail=False, replace=False, duration=50.0):
         self.port, self.move, self.fail, self.replace = port, move, fail, replace
+        self.duration = duration
         self.ready = False
         self.latest = None
         self.callbacks = []
@@ -24,6 +25,11 @@ class PushedSession:
         self.task = None
         self.sequence = 0
         self.closed = False
+        self.tick = 0
+
+    def clock(self):
+        self.tick += 1
+        return self.tick / 1000
 
     def subscribe(self, callback):
         self.callbacks.append(callback)
@@ -40,8 +46,8 @@ class PushedSession:
     def push(self):
         self.sequence += 1
         self.latest = dict(trackId="replacement" if self.replace and self.sequence > 3 else "song",
-                           position=self.position, duration=50.0, playing=False, rate=1.0,
-                           received_at=time.monotonic(), sequence=self.sequence, generation=1)
+                           position=self.position, duration=self.duration, playing=False, rate=1.0,
+                           received_at=self.clock(), sequence=self.sequence, generation=1)
         for callback in tuple(self.callbacks):
             callback(self.latest)
 
@@ -74,7 +80,14 @@ class ProbeTests(CaptureAsyncTestCase):
     async def run_probe(self, **options):
         session = PushedSession(12345, **options)
         messages = []
-        with patch.object(netease_cdp_probe, "CdpSession", return_value=session):
+        async def deliver_samples(_seconds):
+            session.push()
+
+        source_class = netease_cdp_probe.CefPositionSource
+        with patch.object(netease_cdp_probe, "CdpSession", return_value=session), \
+             patch.object(netease_cdp_probe, "CefPositionSource",
+                          side_effect=lambda s: source_class(s, clock=session.clock)), \
+             patch.object(netease_cdp_probe, "asyncio", SimpleNamespace(sleep=deliver_samples)):
             result = await netease_cdp_probe.run_probe(12345, sample_seconds=.03,
                                                       timeout=.2, emit=messages.append)
         self.assertTrue(session.closed)
@@ -91,6 +104,15 @@ class ProbeTests(CaptureAsyncTestCase):
         self.assertEqual(session.position, 12)
         self.assertEqual(sum("readback error" in message for message in messages), 4)
 
+    async def test_unknown_duration_uses_conservative_targets(self):
+        result, session, _ = await self.run_probe(duration=0)
+        self.assertTrue(result["passed"], result)
+        self.assertEqual([item[2] for item in session.writes], [11, 10, 9, 12])
+        sample = SimpleNamespace(start_seconds=0, end_seconds=0, position_seconds=43.238)
+        self.assertEqual(netease_cdp_probe._targets(sample), [42.238, 41.238, 40.238])
+        sample.position_seconds = 1
+        self.assertEqual(netease_cdp_probe._targets(sample), [0, 0, 0])
+
     async def test_track_change_during_sampling_refuses_all_mutations(self):
         session = PushedSession(12345, replace=True)
 
@@ -100,8 +122,11 @@ class ProbeTests(CaptureAsyncTestCase):
             session.push()
             session.push()
 
+        source_class = netease_cdp_probe.CefPositionSource
         with patch.object(netease_cdp_probe, "CdpSession", return_value=session), \
-             patch.object(netease_cdp_probe.asyncio, "sleep", side_effect=deliver_samples):
+             patch.object(netease_cdp_probe, "CefPositionSource",
+                          side_effect=lambda s: source_class(s, clock=session.clock)), \
+             patch.object(netease_cdp_probe, "asyncio", SimpleNamespace(sleep=deliver_samples)):
             result = await netease_cdp_probe.run_probe(12345, sample_seconds=.03,
                                                       timeout=.2, emit=lambda _: None)
         self.assertTrue(session.closed)

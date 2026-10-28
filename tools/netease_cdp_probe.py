@@ -37,7 +37,9 @@ def _targets(sample) -> list[float]:
     start = max(0.0, sample.start_seconds)
     end = sample.end_seconds
     if not math.isfinite(end) or end <= start:
-        raise RuntimeError("A positive track duration is required for clamped seeks")
+        # With no known end, move backwards by small offsets to avoid seeking
+        # past an unknown track boundary.
+        return [max(start, sample.position_seconds - offset) for offset in (1.0, 2.0, 3.0)]
     upper = max(start, end - min(1.0, (end - start) / 10.0))
     return [max(start, min(upper, target)) for target in (15.0, 45.0, 90.0)]
 
