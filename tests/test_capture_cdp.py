@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -278,8 +279,17 @@ class AdapterJavascriptTests(unittest.TestCase):
                  'const {legacyNativeCmder, registered} = fake;\n')
         script = fixture + '\n' + setup + harness.replace(
             'SCRIPT', json.dumps(JsAdapterRegistry.select().install_expression()))
-        return json.loads(subprocess.run([shutil.which('node'), '-e', script],
-                                         check=True, text=True, capture_output=True).stdout)
+        script_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.js', encoding='utf-8',
+                                             delete=False) as script_file:
+                script_path = script_file.name
+                script_file.write(script)
+            return json.loads(subprocess.run([shutil.which('node'), script_path],
+                                             check=True, text=True, capture_output=True).stdout)
+        finally:
+            if script_path is not None:
+                os.unlink(script_path)
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_document_start_shim_wraps_late_registration_and_detach_keeps_original(self):
