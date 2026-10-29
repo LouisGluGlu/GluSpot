@@ -20,6 +20,7 @@ class Session:
         self._closed = False
         self.latest = None
         self.start = AsyncMock()
+        self.wait_ready = AsyncMock(return_value=True)
         self.close = AsyncMock(side_effect=self.mark_closed)
 
     def mark_closed(self):
@@ -38,7 +39,8 @@ class NetEaseProviderTests(CaptureAsyncTestCase):
         provider._netease_locator = SimpleNamespace(
             locate=lambda: NetEaseInstallation('/apps/cloudmusic.exe', '3.1.42'),
             launch=AsyncMock(return_value=NetEaseLaunch(
-                12345, NetEaseInstallation('/apps/cloudmusic.exe', '3.1.42'), 99)))
+                12345, NetEaseInstallation('/apps/cloudmusic.exe', '3.1.42'), 99)),
+            restore=AsyncMock())
         return provider, defaults
 
     async def test_all_flags_require_explicit_opt_in(self):
@@ -70,6 +72,69 @@ class NetEaseProviderTests(CaptureAsyncTestCase):
                                                   provider._ensure_netease_cdp())
         self.assertIs(first, second)
         provider._netease_locator.launch.assert_awaited_once()
+
+    async def test_second_repair_reuses_an_old_ready_connection(self):
+        provider, _ = self.provider()
+        provider._request_immediate_media_refresh = lambda: None
+        with patch('api.capture.cdp.CdpSession', Session):
+            first = await provider._ensure_netease_cdp()
+            provider._netease_started_at = 0.0
+            first.ready = True
+            self.assertTrue(await provider._repair_netease_capture())
+            self.assertIs(first, provider._netease_cdp_session)
+        provider._netease_locator.launch.assert_awaited_once()
+
+    async def test_cdp_start_failure_restores_normal_player_and_surfaces_error(self):
+        provider, _ = self.provider()
+        session = Session(12345)
+        session.start.side_effect = OSError('CDP startup failed')
+        with patch('api.capture.cdp.CdpSession', return_value=session):
+            self.assertIsNone(await provider._ensure_netease_cdp())
+        provider._netease_locator.restore.assert_awaited_once()
+
+        self.assertIsNone(provider._netease_cdp_session)
+        session.close.assert_awaited_once()
+        self.assertIn('CDP startup failed', provider.netease_capture_health()['reason'])
+
+    async def test_late_cdp_failure_restores_normal_player(self):
+        provider, _ = self.provider()
+        session = Session(12345)
+        session.wait_ready.return_value = False
+        with patch('api.capture.cdp.CdpSession', return_value=session):
+            await provider._ensure_netease_cdp()
+            await provider._netease_watch_task
+        provider._netease_locator.restore.assert_awaited_once()
+        self.assertIsNone(provider._netease_cdp_session)
+        self.assertIn('connection failed', provider.netease_capture_health()['reason'])
+
+    async def test_failed_normal_recovery_is_visible_and_cdp_is_closed(self):
+        provider, _ = self.provider()
+        session = Session(12345)
+        session.start.side_effect = OSError('CDP startup failed')
+        provider._netease_locator.restore.side_effect = OSError('normal spawn refused')
+        with patch('api.capture.cdp.CdpSession', return_value=session):
+            self.assertIsNone(await provider._ensure_netease_cdp())
+        session.close.assert_awaited_once()
+        self.assertIn('normal spawn refused', provider.netease_capture_health()['reason'])
+
+    async def test_reusing_debug_port_does_not_restore_stale_position(self):
+        provider, _ = self.provider()
+        provider._last_data = visual()
+        provider._netease_locator.launch.return_value = NetEaseLaunch(
+            12345, NetEaseInstallation('/apps/cloudmusic.exe'), 99, reused=True)
+        provider._restore_netease_position = AsyncMock()
+        with patch('api.capture.cdp.CdpSession', Session):
+            await provider._ensure_netease_cdp()
+            await asyncio.sleep(0)
+        provider._restore_netease_position.assert_not_awaited()
+
+    async def test_automatic_retry_does_not_authorize_another_stop(self):
+        provider, _ = self.provider()
+        provider._netease_locator.launch.side_effect = OSError('unavailable')
+        await provider._ensure_netease_cdp()
+        provider._netease_retry_at = 0.0
+        await provider._ensure_netease_cdp()
+        self.assertEqual(provider._netease_locator.launch.await_args.kwargs, {'relaunch': False})
 
     async def test_unsafe_callback_chain_reports_degraded_fallback_health(self):
         provider, _ = self.provider()

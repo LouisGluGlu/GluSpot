@@ -359,8 +359,9 @@ discovery finds NetEase. **启用并重启网易云** presents one confirmation 
 playback interruption, the unauthenticated local debug port and NetEase terms.
 Accepting sets the explicit flags, resets the NetEase capture profile to `auto`
 and queues process work on the provider loop. The health lamp reports waiting,
-connected or degraded seek state. **修复 / 重启网易云** explicitly reconnects
-through another relaunch. There is no automatic process restart during CDP
+connected or degraded seek state. **修复 / 重启网易云** joins an existing
+connection, or explicitly requests repair when none remains. A healthy debug
+port is reused across provider instances and app launches. There is no automatic process restart during CDP
 reconnection. **关闭精确进度** turns the route off and detaches GluSpot; normally
 exiting NetEase closes the debug port created for that process launch.
 
@@ -371,6 +372,19 @@ post-restart SMTC metadata must match the original track, and a previously
 known native track ID must also match. A missing observation or changed track
 refuses restoration. An unknown native identity cannot establish recording or
 version identity beyond the existing metadata match.
+
+The October 29 incident correction gives the locator sole ownership of process
+changes. An executable-specific OS file lock covers stop, verified debug
+startup and recovery; an atomically saved 120-second cooldown prevents repeated
+stops across independent processes. Stops are logged before execution. A failed
+stop, spawn, startup probe or cancellation requests unflagged normal startup;
+recovery never stops surviving player processes. Automatic provider retries do
+not receive another relaunch authorization. Reusing an endpoint does not seek
+back to a previous provider's saved position. Late CDP failure detaches the
+failed session, preserves normal playback and reports the failure through
+capture health. Native recovery still requires evidence of a usable player,
+because a surviving renderer is not sufficient. See the
+[incident evidence and remaining PC checks](netease-relaunch-incident.md).
 
 `CdpSession` discovers targets through loopback `/json`, selects the verified
 `orpheus://orpheus/pub/app.html` page and enables Runtime bindings.

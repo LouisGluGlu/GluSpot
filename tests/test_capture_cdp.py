@@ -263,13 +263,23 @@ class CdpTests(CaptureAsyncTestCase):
 
 
 class LocatorTests(CaptureAsyncTestCase):
+    def setUp(self):
+        self.owner_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.owner_dir.cleanup)
+
     def locator(self, **kwargs):
         return NetEaseLocator(processes=lambda: [], registry_paths=lambda: [],
-                              exists=lambda path: True, version=lambda path: '3.1.42', **kwargs)
+                              exists=lambda path: True, version=lambda path: '3.1.42',
+                              owner_dir=self.owner_dir.name, debug_ports=lambda: [], **kwargs)
 
     async def test_launch_argv_has_random_loopback_port(self):
-        calls = []
-        locator = self.locator(path='/apps/cloudmusic.exe', spawn=lambda args, **kw: calls.append((args, kw)) or SimpleNamespace(pid=123))
+        calls, running = [], []
+        def spawn(args, **kw):
+            calls.append((args, kw))
+            running.append((123, '/apps/cloudmusic.exe'))
+            return SimpleNamespace(pid=123)
+        locator = self.locator(path='/apps/cloudmusic.exe', spawn=spawn, healthy=lambda port: True)
+        locator._processes = lambda: list(running)
         launch = await locator.launch()
         self.assertTrue(1 <= launch.port <= 65535)
         self.assertEqual(calls[0][0], ['/apps/cloudmusic.exe', f'--remote-debugging-port={launch.port}',
@@ -278,7 +288,8 @@ class LocatorTests(CaptureAsyncTestCase):
 
     async def test_running_player_requires_explicit_relaunch(self):
         locator = NetEaseLocator('/apps/cloudmusic.exe', processes=lambda: [(1, '/apps/cloudmusic.exe')],
-                                 registry_paths=lambda: [], exists=lambda _: True, version=lambda _: '')
+                                 registry_paths=lambda: [], exists=lambda _: True, version=lambda _: '',
+                                 owner_dir=self.owner_dir.name, debug_ports=lambda: [])
         with self.assertRaisesRegex(RuntimeError, 'explicit relaunch'):
             await locator.launch()
 
@@ -288,12 +299,16 @@ class LocatorTests(CaptureAsyncTestCase):
         def stop(pid):
             stopped.append(pid)
             running[:] = [(p, path) for p, path in running if p != pid]
+        def spawn(*args, **kwargs):
+            running.append((3, '/apps/cloudmusic.exe'))
+            return SimpleNamespace(pid=3)
         locator = NetEaseLocator('/apps/cloudmusic.exe', processes=lambda: list(running),
                                  registry_paths=lambda: [], exists=lambda _: True, version=lambda _: '',
-                                 stop=stop, spawn=lambda *a, **k: SimpleNamespace(pid=3))
+                                 stop=stop, spawn=spawn, owner_dir=self.owner_dir.name,
+                                 debug_ports=lambda: [], healthy=lambda port: True)
         launch = await locator.launch(relaunch=True)
         self.assertEqual(stopped, [1])
-        self.assertEqual(running, [(2, '/other/cloudmusic.exe')])
+        self.assertEqual(running, [(2, '/other/cloudmusic.exe'), (3, '/apps/cloudmusic.exe')])
         self.assertEqual(launch.pid, 3)
 
     async def test_locator_uses_process_path_and_version(self):

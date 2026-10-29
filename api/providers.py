@@ -7,6 +7,7 @@ import ctypes
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -42,6 +43,7 @@ from local.runtime_platform import owned_playback_only
 
 
 PlaybackCommand = Literal["previous", "toggle_play_pause", "next"]
+logger = logging.getLogger(__name__)
 PROJECTED_POSITION_SOURCES = {
     "windows-media",
     "local-estimate",
@@ -685,6 +687,11 @@ class WindowsMediaProvider:
         return lock
 
     async def _close_netease_cdp_locked(self):
+        watch = getattr(self, "_netease_watch_task", None)
+        self._netease_watch_task = None
+        if watch is not None and watch is not asyncio.current_task():
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
         restore = getattr(self, "_netease_restore_task", None)
         self._netease_restore_task = None
         if restore is not None and restore is not asyncio.current_task():
@@ -703,7 +710,8 @@ class WindowsMediaProvider:
         state = "off"
         message = "精确进度未启用"
         ready = cdp is not None and cdp.ready
-        reason = getattr(cdp, 'probe', {}).get('reason', '') if cdp is not None else ''
+        reason = ((getattr(cdp, 'probe', {}).get('reason', '') if cdp is not None else '')
+                  or getattr(self, '_netease_launch_error', ''))
         if self._netease_cef_enabled():
             if ready:
                 state, message = "ready", "精确进度已连接"
@@ -735,11 +743,12 @@ class WindowsMediaProvider:
             return False
         async with self._netease_lifecycle_lock():
             cdp = getattr(self, "_netease_cdp_session", None)
-            # Settings changes can trigger a refresh before the enable button
-            # queues its explicit launch. Join that just-started connection.
-            if cdp is None or time.monotonic() - getattr(self, "_netease_started_at", 0.0) > 2.0:
+            # A repair trigger joins an existing connection at any age. Native
+            # reconnect belongs to CdpSession and never authorizes another kill.
+            if cdp is None or getattr(cdp, "_closed", False):
                 await self._close_netease_cdp_locked()
                 self._netease_retry_at = 0.0
+                self._netease_launch_attempted = False  # Explicit repair only.
                 cdp = await self._ensure_netease_cdp_locked()
         self._request_immediate_media_refresh()
         return cdp is not None
@@ -772,6 +781,7 @@ class WindowsMediaProvider:
         from api.capture.netease_js import JsAdapterRegistry
         locator = getattr(self, "_netease_locator", None) or NetEaseLocator()
         self._netease_locator = locator
+        launch = cdp = None
         try:
             adapter = str(self.settings_getter("netease.adapter", "auto") or "auto")
             JsAdapterRegistry.select(requested=adapter)  # Validate before restart.
@@ -781,22 +791,61 @@ class WindowsMediaProvider:
             if not self._netease_cef_enabled():
                 return None
             track = getattr(getattr(self, "_last_data", None), "track", None)
-            launch = await locator.launch(installation, relaunch=True)
+            relaunch = not getattr(self, "_netease_launch_attempted", False)
+            self._netease_launch_attempted = True
+            launch = await locator.launch(installation, relaunch=relaunch)
             self._netease_launch = launch
             if not self._netease_cef_enabled():
+                await locator.restore(launch)
                 return None
             cdp = CdpSession(launch.port, adapter=adapter, version=installation.version)
             record_seek_decision('transport', 'relaunch-port-bound', port=launch.port, backend='cef')
             await cdp.start()
             self._netease_cdp_session = cdp
+            self._netease_launch_error = ""
             self._netease_started_at = time.monotonic()
-            if track is not None and track.source_app_id and track.duration_seconds > 0:
+            self._netease_watch_task = asyncio.create_task(self._watch_netease_startup(cdp, locator, launch))
+            if (not launch.reused and track is not None
+                    and track.source_app_id and track.duration_seconds > 0):
                 self._netease_restore_task = asyncio.create_task(self._restore_netease_position(cdp, track))
             return cdp
         except asyncio.CancelledError:
+            if cdp is not None:
+                await cdp.close()
+            if launch is not None:
+                await self._recover_netease_player(locator, launch)
             raise
-        except Exception:
+        except Exception as error:
+            self._netease_launch_error = str(error)
+            logger.warning("NetEase capture startup failed: %s", error)
+            if cdp is not None:
+                await cdp.close()
+            if launch is not None:
+                await self._recover_netease_player(locator, launch)
             return None
+
+    async def _recover_netease_player(self, locator, launch):
+        try:
+            await locator.restore(launch)
+        except Exception as error:
+            self._netease_launch_error = f"Normal NetEase recovery failed: {error}"
+            logger.error(self._netease_launch_error)
+
+    async def _watch_netease_startup(self, cdp, locator, launch):
+        """CDP start only schedules work; its later failure must recover too."""
+        try:
+            if not await cdp.wait_ready(timeout=15.0):
+                self._netease_launch_error = "NetEase capture connection failed; normal playback preserved"
+                logger.warning(self._netease_launch_error)
+                if getattr(self, '_netease_cdp_session', None) is cdp:
+                    self._netease_cdp_session = None
+                await cdp.close()
+                await self._recover_netease_player(locator, launch)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._netease_launch_error = str(error)
+            logger.warning("NetEase capture recovery failed: %s", error)
 
     async def _restore_netease_position(self, cdp, track):
         """Best effort only after independent post-restart metadata evidence."""
