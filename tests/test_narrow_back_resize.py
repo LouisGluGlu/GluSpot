@@ -92,13 +92,17 @@ class NarrowBackResizeTests(unittest.TestCase):
                         QTest.keyClick(self.window, key)
                         resize.assert_not_called()
 
-    def test_manual_resize_uses_width_threshold_for_narrow_flag(self):
+    def test_manual_resize_uses_shared_content_measure_for_narrow_flag(self):
         self.show()
         self.window.toggle_wide(True)
         for width, height in ((483, 560), (959, 540), (960, 900), (1000, 900)):
             with self.subTest(width=width, height=height):
                 self.window.resize(width, height)
-                self.assertEqual(self.window.narrow, width < 960)
+                self.assertEqual(self.window.narrow, self.window._width_breakpoint_narrow())
+        self.window.resize(959, 540)
+        self.assertFalse(self.window.narrow)
+        self.window.resize(960, 900)
+        self.assertTrue(self.window.narrow)
 
     def test_return_uses_toggle_and_wide_button_returns_to_narrow_without_seek(self):
         self.show()

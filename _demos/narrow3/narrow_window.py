@@ -79,6 +79,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._finish_width_chrome()
         changed = super().set_content_layout(
             normalize_content_layout(layout), animate=animate and not getattr(self, "narrow", False))
+        if changed and hasattr(self, "_width_chrome_animation"):
+            self._sync_narrow_mode()
+            # Selecting content is immediate; only resizing owns the width
+            # handoff, including a switch back from a cover-only layout.
+            self._width_chrome_animation.stop()
+            self._finish_width_chrome()
         if changed and hasattr(self, "_controls_key"):
             self._controls_key = None
             self._painted_live_model = self._painted_live_hit_pose = None
@@ -92,8 +98,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if (getattr(self, "_width_chrome_active", False)
                 and self.mode == "lyrics"):
             target = self._width_lyric_geometry(self.narrow, rect)
-            content, cover, column = (self._interpolate_rect(first, last, self._width_chrome_progress)
-                                      for first, last in zip(self._width_content_from, target))
+            content, cover = (self._interpolate_rect(first, last, self._width_chrome_progress)
+                              for first, last in zip(self._width_content_from[:2], target[:2]))
+            column = target[2]
             compact = self._width_chrome_progress if self.narrow else 1. - self._width_chrome_progress
             cover.translate(0., -VeilOverlay.TOP_END * (1. - self.visibility.progress) * compact)
             return content, cover, column
@@ -110,7 +117,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def _width_lyric_geometry(self, narrow, rect=None):
         if not narrow:
-            return super()._content_column_geometry(rect)
+            return self._wide_content_column_geometry(rect)
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
         layout = NarrowLayout(surface.width(), surface.height())
         return surface, layout.cover.translated(surface.topLeft()), layout.viewport.translated(surface.topLeft())
@@ -474,6 +481,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
 
     def glass_groups(self):
+        if not self.narrow and not self._width_chrome_active:
+            self._sync_window_control_rects()
+            groups = super()._glass_control_groups(time.monotonic())
+            groups[0] = dict(self._button_rects)
+            return groups
         library_available = self._library_back_available()
         layout = NarrowLayout(self.width(), self.height(), library_available=library_available,
                               dj_available=self.dj_available)
@@ -529,11 +541,29 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._width_content_from = ()
         self.update()
 
+    def _width_breakpoint_animated_externally(self):
+        return True
+
+    def _width_breakpoint_narrow(self):
+        explicit = getattr(self, "_explicit_width_target", None)
+        if explicit is not None and (self.width(), self.height()) == explicit[:2]:
+            narrow = explicit[2]
+            previous = getattr(self, "_content_layout_fit_narrow", None)
+            self._content_layout_fit_key = None
+            self._content_layout_fit_narrow = narrow
+            if previous is None or previous != narrow:
+                self._retarget_width_layout(narrow)
+            return narrow
+        return super()._width_breakpoint_narrow()
+
     def _sync_narrow_mode(self):
-        previous = getattr(self, "narrow", self.width() < 960)
-        # 24 logical pixels of deadband; initial explicit 960-wide mode still
-        # enters wide. Reversals start at the displayed geometry.
-        narrow = self.width() < (960 if previous else 936)
+        previous = getattr(self, "narrow", None)
+        explicit = getattr(self, "_explicit_width_target", None)
+        if explicit is not None and (self.width(), self.height()) != explicit[:2]:
+            self._explicit_width_target = None
+        narrow = self._width_breakpoint_narrow()
+        if self.mode not in {"lyrics", "playlist"}:
+            narrow = False
         if narrow == previous or not hasattr(self, "_width_chrome_animation"):
             self.narrow = narrow
             return
@@ -549,7 +579,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.narrow = narrow
         self._width_chrome_animation.stop()
         if (self.isVisible() and self.mode in {"lyrics", "playlist"}
-                and not getattr(self, "_explicit_width_toggle", False)):
+                and not getattr(self, "_explicit_width_toggle", False)
+                and not self._content_layout_resize_suspended
+                and self._pending_fullscreen is None
+                and not self._island_entering and not self._island_returning
+                and not self._capturing_transition_snapshot):
             self._width_chrome_from = old_rects
             self._width_content_from = old_content
             self._width_chrome_progress = 0.
@@ -575,6 +609,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         elif not self.narrow:
             self._painted_live_hit_pose = None
             super().paintEvent(event)
+            if self.live and self.mode == "cover_lyrics":
+                self._painted_live_model = self.live_model_key()
+                self._painted_track = self._visual_track_identity()
         else:
             self.paint_narrow()
         now = time.monotonic()
@@ -1660,8 +1697,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.restore()
 
     def toggle_wide(self, wide=None):
-        wide = self.width() < 960 if wide is None else wide
+        wide = self.narrow if wide is None else wide
         width, height = (960, 540) if wide else (360, 640)
+        self._explicit_width_target = (width, height, not wide)
         if wide:
             # Let Qt apply both target dimensions without clamping to 560.
             self.setMinimumHeight(540)

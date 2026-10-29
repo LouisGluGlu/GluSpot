@@ -2,9 +2,11 @@
 import unittest
 
 from PySide6.QtCore import QAbstractAnimation
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_lyric_fit import cjk_unit
 from tests.test_music_surface_transition import _TransitionOwner
 from tests.test_owned_playback_surface import _Provider
 
@@ -43,11 +45,54 @@ class MusicWidthBreakpointTests(unittest.TestCase):
         for width in (entry + 4, entry - 3, entry + 8, entry):
             self.window.resize(width, 640)
             self.assertTrue(self.window._content_layout_is_narrow())
-        self.window.resize(entry + 30, 640)
+        font = self.window._surface_font(self.window.LYRIC_PIXEL_SIZE * self.window._surface_scale(), QFont.Weight.Bold)
+        deadband = cjk_unit(font)
+        self.window.resize(entry + round(deadband) + 10, 640)
         self.assertFalse(self.window._content_layout_is_narrow())
-        for width in (entry + 26, entry + 20, entry + 28):
+        for width in (entry + 16, entry + 10, entry + 18):
             self.window.resize(width, 640)
             self.assertFalse(self.window._content_layout_is_narrow())
+
+    def _entry_and_exit(self, height):
+        self.window.resize(1800, height)
+        self.assertFalse(self.window._width_breakpoint_narrow())
+        for width in range(1799, 329, -1):
+            self.window.resize(width, height)
+            if self.window._width_breakpoint_narrow():
+                entry = width
+                break
+        else:
+            self.fail("No content breakpoint")
+        font = self.window._surface_font(self.window.LYRIC_PIXEL_SIZE * self.window._surface_scale(), QFont.Weight.Bold)
+        for width in range(entry, 1801):
+            self.window.resize(width, height)
+            if not self.window._width_breakpoint_narrow():
+                return entry, width, cjk_unit(font)
+        self.fail("No content breakpoint exit")
+
+    def test_breakpoint_follows_font_not_pixels(self):
+        short = self._entry_and_exit(640)[0]
+        tall = self._entry_and_exit(900)[0]
+        self.assertGreater(tall, short)
+
+    def test_deadband_scales_with_font(self):
+        gaps = []
+        for height in (640, 900):
+            entry, exit_width, glyph = self._entry_and_exit(height)
+            self.assertAlmostEqual(exit_width - entry, glyph, delta=2.)
+            gaps.append(exit_width - entry)
+        self.assertGreater(gaps[1], gaps[0])
+
+    def test_repeated_queries_do_not_restart_animation(self):
+        self.window.resize(700, 640)
+        animation = self.window._width_layout_animation
+        animation.setCurrentTime(160)
+        fraction = self.window._width_layout_fraction
+        for _ in range(10):
+            self.window._width_breakpoint_narrow()
+            self.window._content_column_geometry()
+        self.assertEqual(animation.currentTime(), 160)
+        self.assertEqual(self.window._width_layout_fraction, fraction)
 
     def test_external_modes_animate_one_cover_keep_live_columns_and_reverse(self):
         for layout in ("lyrics", "playlist"):

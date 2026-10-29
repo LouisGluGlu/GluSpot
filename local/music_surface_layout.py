@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient,
 from local.liquid_glass import paint_liquid_glass
 from local.glass_style import GLASS_SELECTED_INK
 from local.music_lyric_motion import LogicalLineSpringChain
+from local.music_lyric_fit import fits as lyric_column_fits
 from local.artwork_skeleton import paint_artwork_skeleton
 
 
@@ -57,8 +58,6 @@ def paint_content_layout_glyph(painter, rect, layout, ink):
 
 
 class MusicContentLayoutMixin:
-    WIDTH_LAYOUT_HYSTERESIS = 24.0
-
     def _init_content_layout(self):
         getter = getattr(self.owner, "settings_getter", None)
         self._content_layout = normalize_content_layout(getter("v2_music_content_layout", "lyrics") if callable(getter) else "lyrics")
@@ -130,10 +129,14 @@ class MusicContentLayoutMixin:
         return self._preceding_control_rect(anchor, scale)
 
     def _content_layout_is_narrow(self):
-        # A tall, independently resized window can be wider than the former
-        # 640px cutoff yet have no room beside its height-scaled artwork. Use
-        # the exact cover, gutters and font that the two-column layout paints.
+        return self._width_breakpoint_narrow()
+
+    def _width_breakpoint_narrow(self):
+        # Both external modes use the hypothetical wide lyric font as their
+        # yardstick, so switching to the width-coupled narrow font cannot
+        # change the decision that caused the switch.
         scale = self._surface_scale()
+        assert math.isfinite(scale) and scale > 0., "Invalid lyric surface scale"
         # Fit is queried by controls, cover and lyrics during one paint. Font
         # shaping is stable until the exact size/font/device inputs change;
         # retain only this current result, rather than accumulate resize keys.
@@ -144,27 +147,24 @@ class MusicContentLayoutMixin:
             return self._content_layout_fit_narrow
         _content, _cover, column = self._wide_content_column_geometry()
         font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
-        six_glyphs = QFontMetricsF(font).horizontalAdvance("音乐正在播放")
-        required = max(180., six_glyphs, (43. + 61. + 14. + 4. * 18.) * scale)
         previous = getattr(self, "_content_layout_fit_narrow", None)
-        # Enter and leave on opposite sides of a logical-pixel deadband.
-        # Repeated fit queries at one size cannot restart the animation.
-        margin = self.WIDTH_LAYOUT_HYSTERESIS * .5
-        threshold = required
-        if previous is not None:
-            threshold += margin if previous else -margin
         self._content_layout_fit_key = key
-        self._content_layout_fit_narrow = column.width() < threshold
+        self._content_layout_fit_narrow = not lyric_column_fits(
+            column.width(), font, previous=previous, dpr=self.devicePixelRatioF())
         if previous is None or previous != self._content_layout_fit_narrow:
             self._retarget_width_layout(self._content_layout_fit_narrow)
         return self._content_layout_fit_narrow
+
+    def _width_breakpoint_animated_externally(self):
+        return False
 
     def _retarget_width_layout(self, narrow):
         target = float(narrow)
         animation = self._width_layout_animation
         animation.stop()
         fraction = self._width_layout_fraction
-        if (fraction is None or not self.isVisible()
+        if (self._width_breakpoint_animated_externally()
+                or fraction is None or not self.isVisible()
                 or self._content_layout not in {"lyrics", "playlist"}
                 or self._content_layout_resize_suspended
                 or self._pending_fullscreen is not None
