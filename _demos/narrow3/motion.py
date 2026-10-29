@@ -35,7 +35,7 @@ class EaseOutFade(Fade):
 
 
 class Visibility:
-    DURATION = .300
+    DURATION = .320
     IDLE_DELAY = 1.200
 
     def __init__(self, enabled):

@@ -24,9 +24,10 @@ TOP_END = 214.0
 TOP_FEATHER_START = 166.0
 BOTTOM_HEIGHT = 192.0
 BOTTOM_FEATHER = 80.0
-MAX_BLUR = 16.0
-DIM_ALPHA = .55
+MAX_BLUR = 6.0
+DIM_ALPHA = .18
 DIM_COLOR = QColor.fromRgbF(0.0, 0.0, 0.0, DIM_ALPHA)
+BLUR_LEVELS = int(MAX_BLUR / 2)
 CACHE_LIMIT = 6
 RASTER_SCALE = .5
 # Half of the largest 58px lyric step, with room for interpolation.
@@ -107,6 +108,11 @@ class VeilOverlay:
         bottom = float(height) - BOTTOM_HEIGHT
         return VeilOverlay._smoothstep((y - bottom) / BOTTOM_FEATHER)
 
+    @staticmethod
+    def progress(opacity):
+        alpha = max(0., min(1., float(opacity)))
+        return DIM_ALPHA * alpha, MAX_BLUR * alpha
+
     def clear(self):
         self.cache.clear()
         self.cache_bytes = 0
@@ -117,15 +123,15 @@ class VeilOverlay:
     @lru_cache(maxsize=144)
     def _profile_region(degree, top, height):
         """Support of one radius weight along the shared smoothstep."""
-        low = VeilOverlay._inverse_smoothstep((degree - 1) / 8)
-        high = VeilOverlay._inverse_smoothstep((degree + 1) / 8)
+        low = VeilOverlay._inverse_smoothstep((degree - 1) / BLUR_LEVELS)
+        high = VeilOverlay._inverse_smoothstep((degree + 1) / BLUR_LEVELS)
         if top:
             feather = TOP_END - TOP_FEATHER_START
-            return (0.0 if degree == 8 else TOP_END - high * feather,
+            return (0.0 if degree == BLUR_LEVELS else TOP_END - high * feather,
                     TOP_END - low * feather)
         start = height - BOTTOM_HEIGHT
         return (start + low * BOTTOM_FEATHER,
-                height if degree == 8 else start + high * BOTTOM_FEATHER)
+                height if degree == BLUR_LEVELS else start + high * BOTTOM_FEATHER)
 
     def prepare(self, key, source: QImage | Callable[[], QImage]):
         """Filter a half-resolution canonical pose once, outside paint.
@@ -273,10 +279,10 @@ class VeilOverlay:
         # Gaussian levels. Include every radius knot so the cropped supports
         # meet exactly and cannot leave a bright or dark horizontal seam.
         stops = {i / 64 for i in range(65)}
-        stops.update(VeilOverlay._inverse_smoothstep(i / 8) for i in range(9))
+        stops.update(VeilOverlay._inverse_smoothstep(i / BLUR_LEVELS) for i in range(BLUR_LEVELS + 1))
         for t in sorted(stops):
             strength = VeilOverlay.band_strength(start + t * (end - start), height)
-            weight = max(0.0, 1.0 - abs(strength * 8 - degree))
+            weight = max(0.0, 1.0 - abs(strength * BLUR_LEVELS - degree))
             gradient.setColorAt(t, QColor.fromRgbF(1.0, 1.0, 1.0, weight))
         return gradient
 
@@ -315,7 +321,7 @@ class VeilOverlay:
                                 cached.feathers[0 if top else 1])
                 plateau_start = 0.0 if top else cached.height - BOTTOM_HEIGHT + BOTTOM_FEATHER
                 plateau_end = TOP_FEATHER_START if top else cached.height
-                strip = next(s for s in cached.strips if s.degree == 8 and s.top == top)
+                strip = next(s for s in cached.strips if s.degree == BLUR_LEVELS and s.top == top)
                 sample = QRectF(strip.rect.x(), strip.rect.y() + (plateau_start - strip.source_start) * strip.scale_y,
                                 strip.rect.width(), (plateau_end - plateau_start) * strip.scale_y)
                 layer.drawImage(QRectF(0, plateau_start - y, cached.width, plateau_end - plateau_start),
@@ -339,7 +345,7 @@ class VeilOverlay:
                 return
             # Radius weights are evaluated at the destination y.  Sampling
             # source y-delta moves lyrics, while the blur feather stays put.
-            for degree in range(0 if include_clear else 1, 9):
+            for degree in range(0 if include_clear else 1, BLUR_LEVELS + 1):
                 start, end = self._profile_region(degree, top, cached.height)
                 tile = QImage(source.width(), max(1, round((end - start) * dpr)),
                               QImage.Format.Format_ARGB32_Premultiplied)

@@ -33,6 +33,12 @@ _glass_material_slots: OrderedDict[tuple, tuple[tuple, float]] = OrderedDict()
 _glass_material_cache_bytes = 0
 
 
+def music_control_fill_color(ink, alpha=24):
+    """The shared island/surface button face; alpha retains its 0–255 meaning."""
+    alpha = max(0, min(255, int(alpha)))
+    return QColor(246, 247, 248, alpha) if ink.lightness() < 128 else QColor(18, 20, 24, alpha)
+
+
 @contextmanager
 def synchronous_glass_capture(owner):
     """QWidget.render/grab redirect painting without changing painter.device()."""

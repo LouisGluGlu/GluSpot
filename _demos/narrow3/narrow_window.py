@@ -21,6 +21,7 @@ from api.online_music import OnlineSong
 from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
+from local.liquid_glass import paint_liquid_glass
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_lyric_motion import MusicLyricFrame
@@ -347,8 +348,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         return [top, {"library": layout.back} if self.visibility.footer.value(now) > .001 else {}, footer]
 
     def posed_rect(self, key, rect):
-        state = self._glass_feedback.state(key)
-        return rect.translated(state.offset) if state else rect
+        return QRectF(rect)
+
+    def _music_control_fill_color(self, fill_alpha=24):
+        return self.owner._music_control_fill_color(fill_alpha)
+
+    def _paint_narrow_glass(self, painter, rect, *, role=None):
+        paint_liquid_glass(painter, rect, radius=rect.height() / 2,
+                           base_color=self._music_control_fill_color(24))
 
     def resizeEvent(self, event):
         ratio = self.width() / max(1, self.height())
@@ -1081,11 +1088,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.save()
         painter.setOpacity(opacity)
         back = self.posed_rect("library", layout.back)
-        self._paint_surface_glass(painter, back, role="library")
+        self._paint_narrow_glass(painter, back, role="library")
         ink = self._scene_control_ink()
         paint_music_source_icon(painter, back.adjusted(8, 8, -8, -8), "library_back", tint=ink)
         content = self.posed_rect("content_layout", layout.top[0])
-        self._paint_surface_glass(painter, content, role="content-layout")
+        self._paint_narrow_glass(painter, content, role="content-layout")
         self._paint_content_layout_icon(painter, content.adjusted(7, 7, -7, -7))
         painter.restore()
         roles = ("audio-output", "playback-mode", "translation", "window-mode")
@@ -1096,7 +1103,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             painter.save()
             painter.setOpacity(opacity)
             rect = self.posed_rect(key, rect)
-            self._paint_surface_glass(painter, rect, role=role)
+            self._paint_narrow_glass(painter, rect, role=role)
             icon = rect.adjusted(8, 8, -8, -8)
             if role == "audio-output":
                 paint_audio_output_status(painter, rect, (), ink, count=0)
@@ -1119,13 +1126,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         for command, rect in (("previous", layout.previous),
                               ("toggle_play_pause", layout.play), ("next", layout.next)):
             rect = self.posed_rect("media:" + command, rect)
+            self._paint_narrow_glass(painter, rect, role=command)
             self._paint_transport_icon(painter, layout.transport_icon(rect), command, ink)
         favorite = self.posed_rect("collection", layout.favorite)
-        self._clear_control_renderer.paint(
-            painter, favorite, scene=self._surface_glass_backdrop(),
-            scene_bounds=QRectF(self.rect()), ink=ink, now=time.monotonic(),
-            role="collection", state=self._glass_feedback.state("collection"),
-            kind="capsule", level=self._surface_glass_level())
+        self._paint_narrow_glass(painter, favorite, role="collection")
         collection_state = self._song_collection_state() if self.live else None
         liked = collection_state.liked is True if self.live else self.song_index in self.liked_songs
         heart = "heart_filled" if liked else "heart_outline"
@@ -1142,14 +1146,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         loop, mode = layout.utility(self.dj_motion.value(time.monotonic()))
         loop = self.posed_rect("footer_loop", loop)
         mode = self.posed_rect("footer_layout", mode)
-        self._paint_surface_glass(painter, loop, role="playback-mode")
+        self._paint_narrow_glass(painter, loop, role="playback-mode")
         paint_music_source_icon(painter, loop.adjusted(9, 9, -9, -9),
                                 ("sequence", "shuffle", "repeat_one")[self.loop_mode], tint=ink)
-        self._paint_surface_glass(painter, mode, role="content-layout")
+        self._paint_narrow_glass(painter, mode, role="content-layout")
         self._paint_content_layout_icon(painter, mode.adjusted(9, 9, -9, -9))
         if self.dj_available:
             dj = self.posed_rect("personal_dj", layout.dj)
-            self._paint_surface_glass(painter, dj, role="dj-icon")
+            self._paint_narrow_glass(painter, dj, role="dj-icon")
             if self.dj_enabled:
                 painter.save()
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1443,6 +1447,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.shelf = False
         self.footer_hover = False
         self._pointer_active_until = 0.0
+        self._pointer_exit_at = time.monotonic()
         super().leaveEvent(event)
 
 

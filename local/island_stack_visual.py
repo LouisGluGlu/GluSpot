@@ -2408,10 +2408,8 @@ class IslandStackVisual(QWidget):
         return self._music_lyric_text_color(alpha)
 
     def _music_control_fill_color(self, alpha: int = 24) -> QColor:
-        alpha = max(0, min(255, int(alpha)))
-        if self._music_lyric_text_color(255).lightness() < 128:
-            return QColor(246, 247, 248, alpha)
-        return QColor(18, 20, 24, alpha)
+        from local.liquid_glass import music_control_fill_color
+        return music_control_fill_color(self._music_lyric_text_color(255), alpha)
 
     def _music_control_icon_spec(self, command: str) -> dict[str, object]:
         command_key = str(command or "")
