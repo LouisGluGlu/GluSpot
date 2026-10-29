@@ -150,6 +150,7 @@ def _run(args, *, settings_path):
                           owner_source=owner.media_position_source,
                           playing=owner.media_is_playing, paints=self.paints,
                           controls_target=window.visibility.footer.target)
+            sample.update(window.diagnostic_snapshot())
             if self.samples:
                 prior = self.samples[-1]
                 if sample['track'] == prior['track'] and sample['index'] < prior['index']:
@@ -172,6 +173,7 @@ def _run(args, *, settings_path):
                         backward_index_steps=self.backward_steps,
                         controls_retargets=self.visibility_retargets,
                         visibility_events=self.events, samples=self.samples,
+                        diagnostics=window.diagnostic_snapshot(),
                         capture=provider.netease_capture_health())
 
     trace = Trace()

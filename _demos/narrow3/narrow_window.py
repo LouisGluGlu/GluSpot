@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextLayout, QTransform
 from PySide6.QtWidgets import QApplication
 
@@ -64,6 +64,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._live_press = None
         self._painted_live_model = None
         self._painted_live_hit_pose = None
+        self._diagnostics = dict(samples=0, commits=0, swap_commits=0,
+                                 snap_frames=0, noop_paints=0, visible_windows=0,
+                                 hidden_owner_paints=0, controls_retargets=0,
+                                 lyric_layer_builds=0, paints=0)
+        self._diagnostic_target = 0.0
         super().__init__(owner)
         self.variant = variant
         self.lyrics_alignment = lyrics_alignment
@@ -127,6 +132,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.study_timer.timeout.connect(self.tick)
         if not self.live:
             self.study_timer.start(33)
+
+    def diagnostic_snapshot(self):
+        result = dict(self._diagnostics)
+        result['visible_windows'] = sum(
+            widget.isVisible() and not widget.isMinimized()
+            for widget in QApplication.topLevelWidgets()
+            if isinstance(widget, MusicSurfaceWindow) or widget is self.owner)
+        result['lyric_bounds'] = NarrowLayout(self.width(), self.height()).viewport.getRect()
+        return result
 
     def playback_position(self):
         if not self.live:
@@ -235,6 +249,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def tick(self):
         now = time.monotonic()
+        self._diagnostics['samples'] += 1
+        self._diagnostics['commits'] += 1
         if self.live:
             self._sync_owned_playback_mode()
             self.dj_available = self._owned_personal_dj_enabled is not None
@@ -246,6 +262,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.last_tick = now
         self.visibility.advance(now, self.shelf or self.touch_active, self.footer_hover,
                                 self.mode == "playlist")
+        target = self.visibility.footer.target
+        if target != self._diagnostic_target:
+            self._diagnostics['controls_retargets'] += 1
+            self._diagnostic_target = target
         self.dj_motion.retarget(float(self.dj_available), now, .18)
         feedback = self._glass_feedback
         if (self.hovered_glass or any(feedback.hover.values())
@@ -303,6 +323,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.refresh_controls(time.monotonic())
 
     def paintEvent(self, event):
+        self._diagnostics['paints'] += 1
         start = time.perf_counter()
         if not self.narrow:
             self._painted_live_hit_pose = None
@@ -402,6 +423,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if frame_key == self._content_frame_key:
                 return self._content_frame
         ratio = self.devicePixelRatioF()
+        self._diagnostics['lyric_layer_builds'] += int(self.mode == 'lyrics')
         image = QImage(round(self.width() * ratio), round(self.height() * ratio),
                        QImage.Format.Format_ARGB32_Premultiplied)
         image.setDevicePixelRatio(ratio)
