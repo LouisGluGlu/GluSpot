@@ -369,7 +369,8 @@ class VeilOverlay:
                 layer.drawImage(QPointF(0, start - y), tile)
         painter.drawImage(QPointF(0, y), band)
 
-    def paint(self, painter, sharp_content, key, opacity, scroll_delta=0.0):
+    def paint(self, painter, sharp_content, key, opacity, scroll_delta=0.0, *,
+              bottom_start=None, include_dim=True):
         """Compose prepared pixels and a fixed dim mask; never filter here.
 
         ``scroll_delta`` is the current content translation relative to the
@@ -385,16 +386,33 @@ class VeilOverlay:
         dpr = sharp_content.devicePixelRatio()
         width = sharp_content.width() / dpr
         height = sharp_content.height() / dpr
+        # A narrow lyric viewport can extend below the transport plateau.
+        # Preserve those rows sharply; the caller derives this clip from its
+        # layout, without changing the transport's geometry or paint path.
+        bottom = height - BOTTOM_HEIGHT
+        if bottom_start is not None:
+            bottom = min(height, max(bottom, float(bottom_start)))
         painter.save()
         if cached is None:
             painter.drawImage(QPointF(0, 0), sharp_content)
         else:
-            middle = QRectF(0, TOP_END, width, max(0.0, height - BOTTOM_HEIGHT - TOP_END))
+            middle = QRectF(0, TOP_END, width, max(0.0, bottom - TOP_END))
             painter.drawImage(middle, sharp_content, self._source_rect(middle, dpr))
             self._paint_band(painter, sharp_content, cached, alpha, True, scroll_delta)
+            painter.save()
+            painter.setClipRect(QRectF(0, bottom, width, height - bottom), Qt.ClipOperation.IntersectClip)
             self._paint_band(painter, sharp_content, cached, alpha, False, scroll_delta)
-        painter.setOpacity(painter.opacity() * alpha)
+            painter.restore()
+        painter.restore()
+        if include_dim:
+            self.paint_dim(painter, width, height, alpha, bottom_start=bottom)
+
+    def paint_dim(self, painter, width, height, opacity, *, bottom_start=None):
+        """Dim belongs to the window, independently of moving lyric ink."""
+        bottom = height - BOTTOM_HEIGHT if bottom_start is None else bottom_start
+        painter.save()
+        painter.setOpacity(painter.opacity() * opacity)
         painter.fillRect(QRectF(0, 0, width, TOP_END), self._dim_mask(True, height))
-        painter.fillRect(QRectF(0, height - BOTTOM_HEIGHT, width, BOTTOM_HEIGHT),
+        painter.fillRect(QRectF(0, bottom, width, max(0., height - bottom)),
                          self._dim_mask(False, height))
         painter.restore()

@@ -111,6 +111,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._lyric_static_image = None
         self._content_frame_key = None
         self._content_frame = None
+        self._content_frames = {}
+        self._scroll_content_key = None
+        self._scroll_endpoints = None
+        self._scroll_surface_key = None
+        self.scroll_surface = None
+        self._scroll_guard_key = None
+        self._scroll_guard = 0
+        self._scroll_frame = None
+        self._scroll_fade_generation = None
+        self._intro_dot_key = None
+        self._intro_dot_image = None
         self._controls_key = None
         self._controls_bands = None
         self._controls_at = -float("inf")
@@ -173,6 +184,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         result['is_first_sample'] = getattr(self.owner, 'media_is_first_sample', False)
         result['reveal_progress'] = self.visibility.progress
         result['dim'], result['blur'] = self.veil.progress(self.visibility.progress)
+        result['veil_cache_hit_ratio'] = self.veil.hits / max(1, self.veil.hits + self.veil.misses)
         result['controls_translate'] = 0.
         result['controls_scale'] = 1.
         return result
@@ -343,7 +355,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # Resting springs have no work. Keep their clock current so the
             # next real input starts with the same elapsed time as before.
             feedback.last_tick = now
-        key = (self.playback_position(), self.lyric_focus(), self._visual_track_identity(),
+        focus, visual = self.lyric_focus()
+        # Only changes that can alter pixels authorize another present. The
+        # shared clock itself is deliberately absent from this frame key.
+        frame_key = (focus, round(visual, 3), self.ink_position())
+        key = (frame_key, self._visual_track_identity(),
                self._settled_epoch,
                self.source_lines(), self.visibility.progress,
                feedback.pose_key(), self.dj_motion.value(now), self.mode,
@@ -446,12 +462,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # Veil / neighbor layer never carries live reading ink. Ink advances in
         # a sharp overlay after veil so the active line is never covered by a
         # re-blurred copy of itself (GIF active_band ~23Hz flicker).
-        content = self.content_image(layout, include_current=False)
-        # The packed endpoints belong to one frozen fade basis. A live veil
-        # bucket or focus must never be part of this lookup, or a scroll step
-        # mid-fade drops back to a fresh partial-alpha composite and re-flashes.
-        if (fading and self._fade_anchor_key is not None
-                and self._fade_content_frames is not None):
+        focus, visual = self.lyric_focus()
+        scrolling = self.mode == "lyrics" and abs(focus - visual) > .001
+        self._diagnostics['paint_source'] = ("SCROLL" if scrolling else
+                                             "LIVE" if self.owner.media_is_playing else "IDLE_CACHE")
+        content = (self.content_image(layout, focus, include_current=False, overscan=self._scroll_guard)
+                   if self.mode == "lyrics" else self.content_image(layout, include_current=False))
+        # Resting paused content can blend opaque endpoints. Moving content
+        # always uses the same stanza compositor as ordinary playback.
+        if (fading and not scrolling and self._fade_anchor_key is not None
+                and self._fade_content_frames is not None
+                and self._fade_content_key == self.fade_content_key()):
             # Paused source rows are part of these exact endpoint pixels.
             # The advancing fixture run is painted separately below.
             painter.drawImage(QPointF(0, 0), self._fade_content_frames[0])
@@ -470,8 +491,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # Blend from the frozen veil basis during a fade. Outside a fade
             # (or before the first anchor) the live key is authoritative.
             veil_key = self._fade_veil_key if fading and self._fade_veil_key is not None else self.veil_key
-            self.veil.paint(painter, content, veil_key, visibility,
-                            scroll_delta=self.veil_scroll_delta)
+            if self.mode == "lyrics":
+                self.paint_scroll_surface(painter, layout, content, visibility)
+            else:
+                self.veil.paint(painter, content, veil_key, visibility,
+                                scroll_delta=self.veil_scroll_delta)
         if self.mode == "lyrics" and self.live:
             # Crisp active line + reading ink above veil (never under row blur).
             self.paint_live_lyrics(painter, layout, current_only=True)
@@ -502,7 +526,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 self._diagnostics['stale_frames'] += 1
 
     def content_image(self, layout, visual_focus=None, *, veil_source=False,
-                      include_current=True, refresh=False):
+                      include_current=True, refresh=False, overscan=0):
+        assert not (veil_source and include_current), "veil must never sample live lyric ink"
         if self.mode == "playlist":
             # Queue data is static between demo actions. Its selected glass
             # face is prepared by refresh_veil at a bounded 10Hz refresh.
@@ -522,37 +547,45 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # Static/veil layers key on a quantized scroll pose so sub-pixel
             # spring motion does not rebuild neighbor rasters every tick.
             # Reading ink is a separate overlay; only include_current sees the bucket.
-            scroll_key = round(visual, 3) if include_current else round(visual)
+            visual = round(visual, 3) if include_current else round(visual)
+            scroll_key = visual
             frame_key = (self.width(), self.height(), self.devicePixelRatioF(),
                          layout.lyric_font, focus, scroll_key, self.lyrics_alignment,
                          self._future_lyric_color(layout.viewport).rgba(),
                          self.ink_position() if include_current else None,
                          self.source_lines(),
-                         include_current, veil_source)
-            if frame_key == self._content_frame_key:
+                         include_current, overscan)
+            # Preparation and presentation share the same frozen neighbor
+            # image. A veil lookup must not evict the live-ink cache (or vice
+            # versa), which used to force alternating full-layer rebuilds.
+            cache_slot = (include_current, bool(overscan))
+            cached = self._content_frames.get(cache_slot)
+            if cached is not None and frame_key == cached[0]:
+                self._content_frame_key, self._content_frame = cached
                 return self._content_frame
         ratio = self.devicePixelRatioF()
         self._diagnostics['lyric_layer_builds'] += int(self.mode == 'lyrics')
-        image = QImage(round(self.width() * ratio), round(self.height() * ratio),
+        image = QImage(round(self.width() * ratio), round((self.height() + 2 * overscan) * ratio),
                        QImage.Format.Format_ARGB32_Premultiplied)
         image.setDevicePixelRatio(ratio)
         image.fill(Qt.GlobalColor.transparent)
         layer = QPainter(image)
         layer.setRenderHint(QPainter.RenderHint.Antialiasing)
         layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        layer.translate(0, overscan)
         if self.mode == "lyrics" and self.live:
-            self.paint_live_lyrics(layer, layout, visual_focus=visual_focus,
-                                   static_only=not include_current)
+            self.paint_live_lyrics(layer, layout, visual_focus=visual,
+                                   static_only=not include_current, overscan=overscan)
             area = layout.viewport
             fade = min(88, area.height() * .16)
         elif self.mode == "lyrics":
             layer.save()
-            layer.setClipRect(layout.viewport.adjusted(-18, 0, 18, 0))
+            layer.setClipRect(layout.viewport.adjusted(-18, -overscan, 18, overscan))
             base_key = (self.width(), self.height(), ratio, layout.lyric_font,
-                        focus, self.lyrics_alignment, veil_source, self.source_lines(),
+                        focus, self.lyrics_alignment, self.source_lines(), overscan,
                         self._future_lyric_color(layout.viewport).rgba())
             if base_key != self._lyric_static_key:
-                guard = layout.lyric_step
+                guard = max(layout.lyric_step, overscan)
                 base = QImage(image.width(), round((self.height() + guard * 2) * ratio),
                               image.format())
                 base.setDevicePixelRatio(ratio)
@@ -565,7 +598,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                       static_only=True, overscan=guard,
                                       veil_source=veil_source)
                 self._lyric_static_key, self._lyric_static_image = base_key, base
-            layer.drawImage(QPointF(0, (focus - visual) * layout.lyric_step - layout.lyric_step),
+            layer.drawImage(QPointF(0, (focus - visual) * layout.lyric_step - max(layout.lyric_step, overscan)),
                             self._lyric_static_image)
             if include_current:
                 self.paint_lyrics(layer, layout, visual_focus=visual, current_only=True)
@@ -576,6 +609,18 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.paint_list(layer, layout)
             area = QRectF(0, layout.list_top, self.width(), max(1, layout.viewport.bottom() - layout.list_top))
             fade = min(72, area.height() * .14)
+        if not overscan:
+            self.mask_content_edges(layer, layout, area, fade)
+        layer.end()
+        if self.mode == "playlist":
+            self._list_layer_key, self._list_layer = key, image
+            self._list_layer_at = now
+        else:
+            self._content_frame_key, self._content_frame = frame_key, image
+            self._content_frames[cache_slot] = (frame_key, image)
+        return image
+
+    def mask_content_edges(self, layer, layout, area, fade):
         layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
         gradient = QLinearGradient(0, area.top(), 0, area.bottom())
         edge = min(.5, fade / max(1, area.height()))
@@ -589,13 +634,103 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # Preserve the heading above the list's faded viewport.
             layer.fillRect(QRectF(0, 0, self.width(), area.top()), QColor("white"))
         layer.fillRect(area, gradient)
-        layer.end()
-        if self.mode == "playlist":
-            self._list_layer_key, self._list_layer = key, image
-            self._list_layer_at = now
-        else:
-            self._content_frame_key, self._content_frame = frame_key, image
-        return image
+
+    def paint_scroll_surface(self, painter, layout, content, opacity):
+        """Move one frozen neighbor composite; active ink is painted afterward.
+
+        Both veil endpoints read the same static source. A scroll changes only
+        the transform, never text, its active-row exclusion, or a blur input.
+        The premultiplied fade is additive so partially opaque neighbors do
+        not acquire a second copy during reveal/hide.
+        """
+        key = (self.veil_key, content.cacheKey(), layout.viewport.bottom())
+        if key != self._scroll_content_key:
+            ratio = content.devicePixelRatio()
+            center = content.copy(0, round(self._scroll_guard * ratio), content.width(),
+                                  round(self.height() * ratio))
+            center.setDevicePixelRatio(ratio)
+            band = QImage(center.size(), center.format())
+            band.setDevicePixelRatio(ratio)
+            band.fill(Qt.GlobalColor.transparent)
+            with QPainter(band) as layer:
+                self.veil.paint(layer, center, self.veil_key, 1.0,
+                                bottom_start=layout.viewport.bottom() + 6, include_dim=False)
+            revealed = content.copy()
+            with QPainter(revealed) as layer:
+                layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+                layer.drawImage(QPointF(0, self._scroll_guard), band)
+            self._scroll_content_key = key
+            self._scroll_endpoints = (content, revealed)
+            self._scroll_surface_key = None
+        alpha = round(max(0., min(1., opacity)), 3)
+        frame_key = (key, alpha)
+        if frame_key != self._scroll_surface_key:
+            clear, revealed = self._scroll_endpoints
+            if alpha == 0:
+                self.scroll_surface = clear
+            elif alpha == 1:
+                self.scroll_surface = revealed
+            else:
+                # Qt applies global opacity as coverage for CompositionMode_Plus.
+                # Scale both sources first with complementary 8-bit weights;
+                # otherwise even identical endpoint ink loses alpha mid-fade.
+                surface, weighted = clear.copy(), revealed.copy()
+                weight = round(alpha * 255)
+                for image, strength in ((surface, 255 - weight), (weighted, weight)):
+                    with QPainter(image) as layer:
+                        layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                        layer.fillRect(QRectF(0, 0, image.width() / image.devicePixelRatio(),
+                                              image.height() / image.devicePixelRatio()),
+                                       QColor(0, 0, 0, strength))
+                with QPainter(surface) as layer:
+                    layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+                    layer.drawImage(QPointF(), weighted)
+                self.scroll_surface = surface
+            self._scroll_surface_key = frame_key
+        focus, visual = self.lyric_focus()
+        delta = (self.real_scroll_offset(focus) - self.real_scroll_offset(visual)
+                 if self.live else (focus - visual) * layout.lyric_step)
+        ratio = self.devicePixelRatioF()
+        if (self._scroll_frame is None or self._scroll_frame.width() != round(self.width() * ratio)
+                or self._scroll_frame.height() != round(self.height() * ratio)
+                or self._scroll_frame.devicePixelRatio() != ratio):
+            self._scroll_frame = QImage(round(self.width() * ratio), round(self.height() * ratio),
+                                       QImage.Format.Format_ARGB32_Premultiplied)
+            self._scroll_frame.setDevicePixelRatio(ratio)
+        self._scroll_frame.fill(Qt.GlobalColor.transparent)
+        with QPainter(self._scroll_frame) as layer:
+            layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            layer.setClipRect(layout.viewport.adjusted(-18, 0, 18, 0))
+            layer.drawImage(QPointF(0, delta - self._scroll_guard), self.scroll_surface)
+            self.mask_content_edges(layer, layout, layout.viewport, min(88, layout.viewport.height() * .16))
+        painter.save()
+        painter.setClipRect(layout.viewport.adjusted(-18, 0, 18, 0), Qt.ClipOperation.IntersectClip)
+        painter.drawImage(QPointF(), self._scroll_frame)
+        painter.restore()
+        self.veil.paint_dim(painter, self.width(), self.height(), alpha,
+                            bottom_start=layout.viewport.bottom() + 6)
+
+    def paint_intro_dots(self, painter, center, font):
+        """One opaque dot raster, owned by the sharp layer above the veil."""
+        ratio = self.devicePixelRatioF()
+        key = (font.pixelSize(), ratio)
+        if key != self._intro_dot_key:
+            radius = intro_dot_radius(font.pixelSize())
+            half_width = math.ceil(radius * (3.35 + 1) + 2)
+            half_height = math.ceil(radius + 2)
+            image = QImage(round(2 * half_width * ratio), round(2 * half_height * ratio),
+                           QImage.Format.Format_ARGB32_Premultiplied)
+            image.setDevicePixelRatio(ratio)
+            image.fill(Qt.GlobalColor.transparent)
+            with QPainter(image) as layer:
+                layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+                paint_intro_countdown(layer, center=QPointF(half_width, half_height),
+                                      pixel_size=font.pixelSize(), color=QColor('white'),
+                                      opacity=1., blur_layers=((0, 1.),), scale=ratio)
+            self._intro_dot_key, self._intro_dot_image = key, image
+        image = self._intro_dot_image
+        painter.drawImage(QPointF(center.x() - image.width() / ratio / 2,
+                                 center.y() - image.height() / ratio / 2), image)
 
     def refresh_controls(self, now):
         """Capture production control pixels outside paint; fade only blends.
@@ -679,8 +814,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                    ambient_weights=palette.ambient_weights, advance_frame=False)
         self._fade_background_key, self._fade_background = key, image
         self._fade_anchor_key = generation
-        # Freeze the blurred overlay for this fade too. Scroll may continue
-        # underneath; the veil source is re-blended only from prepared pixels.
+        # Playlist fades retain this prepared veil basis. Lyrics own one
+        # canonical stanza source and invalidate it only on a line/model change.
         self._fade_veil_key = self.veil_key
 
     def paint_current_lyrics(self, painter, layout):
@@ -701,6 +836,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             top = math.floor(layout.lyric_anchor + QFontMetricsF(font).capHeight() / 2
                              + (focus - visual) * layout.lyric_step - ascent - 16)
             height = math.ceil(layout.lyric_row + 32)
+            if any(line.text == INTRO_COUNTDOWN_TEXT for line in self.source_lines()):
+                # The sharp owner also draws visible neighboring gap markers.
+                # Keep them in the paused cache instead of cropping to focus.
+                top, height = 0, self.height()
             image = QImage(round(self.width() * ratio), round(height * ratio),
                            QImage.Format.Format_ARGB32_Premultiplied)
             image.setDevicePixelRatio(ratio)
@@ -721,38 +860,53 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         At 360x640/DPR2 the two opaque endpoints occupy 7,372,800 bytes total.
         They are released as soon as the transition settles.
 
-        The endpoints belong to one frozen basis (background anchor plus the
-        veil key captured at fade start). Focus, scroll bucket or content that
-        changes mid-fade must not repack them: a repack is exactly the
-        partial-alpha background+veil rebuild that reads as a re-flash. The
-        lookup key mirrors paint_narrow, so a hit here is a hit there.
+        Endpoints use the ordinary stanza compositor, including its fixed
+        viewport mask and dim. They are prepared only at a settled scroll pose;
+        a new source/focus invalidates them before another present.
         """
         advancing_live_lyrics = self.live and self.mode == "lyrics" and self.owner.media_is_playing
-        if (advancing_live_lyrics or self.visibility.settled(now)
+        focus, visual = self.lyric_focus()
+        scrolling = self.mode == "lyrics" and abs(focus - visual) > .001
+        if scrolling and not self.visibility.settled(now):
+            self._scroll_fade_generation = self.visibility.opacity.generation
+        # Keep one compositor for the whole fade after scroll has used it.
+        # Switching to opaque endpoints at scroll end changes dim ordering.
+        scroll_fade = (self.mode == "lyrics"
+                       and self._scroll_fade_generation == self.visibility.opacity.generation)
+        if (advancing_live_lyrics or scrolling or scroll_fade or self.visibility.settled(now)
                 or self._fade_background is None or self._fade_veil_key is None):
             self._fade_content_key = self._fade_content_frames = None
             return
-        content = self.content_image(NarrowLayout(self.width(), self.height()), include_current=False)
-        # Content identity that survives scroll: the source lines, font,
-        # alignment, theme and size. Focus, visual offset and ink bucket move
-        # with the scroll and must not repack a frozen fade endpoint.
         layout = NarrowLayout(self.width(), self.height())
-        key = (self._fade_background_key, self._fade_veil_key,
-               self.mode, self.source_lines(), self.queue_snapshot(),
-               layout.lyric_font, self.lyrics_alignment,
-               self._future_lyric_color(layout.viewport).rgba(),
-               self.owner.album_color.rgba(), self.owner.secondary_color.rgba(),
-               self._scene_control_ink().rgba())
+        content = self.content_image(layout, self.lyric_focus()[0] if self.mode == "lyrics" else None,
+                                     include_current=False,
+                                     overscan=self._scroll_guard if self.mode == "lyrics" else 0)
+        # The ink clock never enters this identity. Only a model, theme or
+        # settled focus change can authorize new paused endpoints.
+        key = self.fade_content_key()
         if self._fade_content_frames is not None and key == self._fade_content_key:
             return
         endpoints = []
         for opacity in (0.0, 1.0):
             image = self._fade_background.copy()
             with QPainter(image) as painter:
-                self.veil.paint(painter, content, self._fade_veil_key, opacity,
-                                scroll_delta=self.veil_scroll_delta)
+                if self.mode == "lyrics":
+                    self.paint_scroll_surface(painter, layout, content, opacity)
+                else:
+                    self.veil.paint(painter, content, self._fade_veil_key, opacity)
             endpoints.append(image)
         self._fade_content_key, self._fade_content_frames = key, tuple(endpoints)
+
+    def fade_content_key(self):
+        layout = NarrowLayout(self.width(), self.height())
+        return (self._fade_background_key,
+                self.veil_key if self.mode == "lyrics" else self._fade_veil_key,
+                self.mode, self.source_lines(), self.queue_snapshot(),
+                layout.lyric_font, self.lyrics_alignment,
+                self._future_lyric_color(layout.viewport).rgba(),
+                self.owner.album_color.rgba(), self.owner.secondary_color.rgba(),
+                self._scene_control_ink().rgba(),
+                self.lyric_focus()[0] if self.mode == "lyrics" else None)
 
     def _advance_lyric_animation(self, now):
         if self.live:
@@ -807,6 +961,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._lyric_hit_rects.clear()
             self._clear_lyric_browse()
             self.veil.clear()
+            self._content_frames.clear()
+            self._scroll_content_key = self._scroll_surface_key = None
+            self._scroll_endpoints = self.scroll_surface = None
+            self._scroll_guard_key = None
         if swapped:
             self._display_lyrics_cache_key = self._display_lyrics_cache = None
             self._frame_lyric_cache = None
@@ -857,13 +1015,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if self.mode == "playlist":
             self.content_image(layout, refresh=True)
         focus, visual = self.lyric_focus()
-        bucket = round(visual) if self.mode == "lyrics" else 0
+        # One stanza source for an entire line change. Fractional scroll is
+        # applied to the composed surface, never fed back into blur prepare.
+        bucket = focus if self.mode == "lyrics" else 0
         canonical_visual = bucket
-        if self.live and self.mode == "lyrics":
-            # Real wrapped groups have variable height. Quantize in pixels so
-            # the residual always fits the atlas's fixed 32px source guard.
-            bucket = round(self.real_scroll_offset(visual) / 32.0) * 32.0
-            canonical_visual = self.real_visual_for_offset(bucket)
         self.veil_key = (
             self.mode, self.width(), self.height(), layout.lyric_font,
             self._queue_scroll if self.live and self.mode == "playlist" else 0,
@@ -872,14 +1027,28 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.song_index, self.cover_index, self.devicePixelRatioF(),
             self.owner.album_color.rgba(), self.owner.secondary_color.rgba(),
             self._future_lyric_color(layout.viewport).rgba(),
-            self._scene_control_ink().rgba(), focus if self.mode == "lyrics" else 0, bucket,
+            self._scene_control_ink().rgba() if self.mode == "playlist" else None,
+            focus if self.mode == "lyrics" else 0, bucket,
         )
+        if self.mode == "lyrics" and self.veil_key != self._scroll_guard_key:
+            delta = (self.real_scroll_offset(focus) - self.real_scroll_offset(visual)
+                     if self.live else (focus - visual) * layout.lyric_step)
+            self._scroll_guard = math.ceil(abs(delta) + layout.lyric_step)
+            self._scroll_guard_key = self.veil_key
         # prepare accepts a source factory: a hit must not rasterize full content.
         # Veil blur atlas samples static rows only. Live ink must not enter
         # prepare(), or the active line is re-blurred into the chrome bands.
-        self.veil.prepare(self.veil_key,
-                          lambda: self.content_image(layout, canonical_visual, veil_source=True,
-                                                     include_current=False))
+        def frozen_source():
+            if self.mode != "lyrics":
+                return self.content_image(layout, veil_source=True, include_current=False)
+            strip = self.content_image(layout, canonical_visual, veil_source=True,
+                                       include_current=False, overscan=self._scroll_guard)
+            ratio = strip.devicePixelRatio()
+            tile = strip.copy(0, round(self._scroll_guard * ratio), strip.width(),
+                              round(self.height() * ratio))
+            tile.setDevicePixelRatio(ratio)
+            return tile
+        self.veil.prepare(self.veil_key, frozen_source)
 
     def paint_header(self, painter, layout):
         cover = layout.cover
@@ -929,20 +1098,18 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         ascent = metrics_layout.lineAt(0).ascent()
         painter.save()
         painter.setClipRect(viewport.adjusted(-18, -overscan, 18, overscan))
-        for index in ((focus,) if current_only else range(len(lines))):
-            if (static_only and index == focus) or (current_only and index != focus):
+        for index in range(len(lines)):
+            dots = lines[index].text == INTRO_COUNTDOWN_TEXT
+            if (static_only and (index == focus or dots)) or (current_only and index != focus and not dots):
                 continue
             line = lines[index]
             y = anchor + (index - visual_focus) * step - ascent
             if y + row < viewport.top() - 16 - overscan or y > viewport.bottom() + 16 + overscan:
                 continue
             if line.text == INTRO_COUNTDOWN_TEXT:
-                paint_intro_countdown(
-                    painter, center=QPointF(viewport.left() + intro_dot_radius(font.pixelSize()) * (1.2 + 3.35),
-                        layout.lyric_anchor + (index - visual_focus) * step),
-                    pixel_size=font.pixelSize(), color=QColor('white'),
-                    opacity=1. if index == focus else LYRIC_PREVIOUS_ALPHA if index < focus else LYRIC_NEXT_ALPHA,
-                    blur_layers=((0, 1.),), scale=self.devicePixelRatioF())
+                self.paint_intro_dots(painter, QPointF(
+                    viewport.left() + intro_dot_radius(font.pixelSize()) * (1.2 + 3.35),
+                    layout.lyric_anchor + (index - visual_focus) * step), font)
                 continue
             x = viewport.left()
             if self.lyrics_alignment == "center":
@@ -1054,7 +1221,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         clip = layout.viewport.adjusted(-18, -overscan, 18, overscan)
         painter.setClipRect(clip)
         for index, row, layers, runs in self.live_lyric_rows(layout, visual_focus):
-            if (static_only and index == focus) or (current_only and index != focus):
+            dots = lines[index].text == INTRO_COUNTDOWN_TEXT
+            if (static_only and (index == focus or dots)) or (current_only and index != focus and not dots):
                 continue
             if row.bottom() < clip.top() - 18 or row.top() > clip.bottom() + 18:
                 continue
@@ -1066,11 +1234,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
                 metrics = QFontMetricsF(font)
                 baseline_offset = metrics.ascent() - metrics.capHeight() / 2
-                paint_intro_countdown(
-                    painter, center=QPointF(row.left() + intro_dot_radius(font.pixelSize()) * (1.2 + 3.35), row.top() + baseline_offset),
-                    pixel_size=font.pixelSize(), color=QColor('white'),
-                    opacity=1. if index == focus else LYRIC_PREVIOUS_ALPHA if index < focus else LYRIC_NEXT_ALPHA,
-                    blur_layers=((0, 1.),), scale=self.devicePixelRatioF())
+                self.paint_intro_dots(painter, QPointF(
+                    row.left() + intro_dot_radius(font.pixelSize()) * (1.2 + 3.35),
+                    row.top() + baseline_offset), font)
                 continue
             for part_index, (text, font, shaped, offset, height) in enumerate(runs):
                 target = QRectF(row.left(), row.top() + offset, row.width(), height)
