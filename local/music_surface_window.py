@@ -3711,7 +3711,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             source,
             source_app,
         )
-        playing = bool(getattr(self.owner, "media_is_playing", False))
+        playing = bool(getattr(self.owner, "media_is_playing", False)) and source != "capture-unavailable"
         paused_source_seek = (
             not playing and self._lyric_source_was_playing is False
             and source in {"windows-media", "interactive"}

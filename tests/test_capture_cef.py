@@ -288,8 +288,10 @@ class CefRuntimeTests(CaptureAsyncTestCase):
             self.assertEqual(projected.track.position_seconds, 50)
             self.assertFalse(projected.track.is_playing)
             cdp.ready = False
-            self.assertEqual(runtime.project(visual()).track.position_seconds,
-                             visual().track.position_seconds)
+            disconnected = runtime.project(visual()).track
+            self.assertEqual(disconnected.position_seconds, 50)
+            self.assertEqual(disconnected.position_source, 'capture-unavailable')
+            self.assertEqual(disconnected.position_confidence, 0)
         finally:
             await runtime.close()
 
@@ -430,6 +432,53 @@ class CefRuntimeTests(CaptureAsyncTestCase):
             await runtime.collector.collect_once()
             await asyncio.sleep(.01)
             self.assertEqual(len(reads), 2)
+        finally:
+            await runtime.close()
+
+    async def test_repeated_zero_timeline_never_resurrects_a_legacy_position(self):
+        clock = Clock()
+        session = Session()
+        session.get_timeline_properties = lambda: type(
+            'Timeline', (), dict(position=0, start_time=0, end_time=0))()
+        runtime = CaptureRuntime(clock=clock, cef_requested=True)
+        try:
+            await runtime.bind(session, visual().track, matches, mode='smtc')
+            for legacy_position in (15, 90, 0, 130, 1):
+                clock.value += .65
+                await runtime.collector.collect_once()
+                legacy = replace(visual(), track=replace(
+                    visual().track, position_seconds=legacy_position,
+                    position_source='local-estimate', position_confidence=.34))
+                projected = runtime.project(legacy).track
+                self.assertEqual(projected.position_seconds, 0)
+                self.assertEqual(projected.position_source, 'capture-unavailable')
+                self.assertEqual(projected.position_confidence, 0)
+                self.assertIsNone(projected.position_observed_seconds)
+                self.assertTrue(projected.is_playing)
+            self.assertFalse(runtime.diagnostics()['valid'])
+        finally:
+            await runtime.close()
+
+    async def test_lost_capture_freezes_last_displayed_position_across_zero_samples(self):
+        clock = Clock()
+        cdp = FakeCdp(clock)
+        cdp.latest = cdp.payload(50)
+        session = Session()
+        session.get_timeline_properties = lambda: type(
+            'Timeline', (), dict(position=0, start_time=0, end_time=0))()
+        runtime = CaptureRuntime(clock=clock, cef_session=cdp)
+        try:
+            await runtime.bind(session, visual().track, matches, mode='smtc')
+            self.assertEqual(runtime.project(visual()).track.position_seconds, 50)
+            cdp.ready = False
+            cdp.emit(None)
+            for delta in (.1, 1, 10):
+                clock.value += delta
+                await runtime.collector.collect_once()
+                projected = runtime.project(visual()).track
+                self.assertEqual(projected.position_seconds, 50)
+                self.assertEqual(projected.position_source, 'capture-unavailable')
+                self.assertTrue(projected.is_playing)
         finally:
             await runtime.close()
 

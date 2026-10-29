@@ -58,6 +58,7 @@ class CaptureRuntime:
         self._smtc_timeline_valid = False
         self._position_route = 'smtc'
         self._next_uia_read = 0.0
+        self._last_projection = None
 
     async def bind(self, session, track, matches, *, mode=None):
         if self._closed:
@@ -226,6 +227,18 @@ class CaptureRuntime:
             fresh = self._valid and (paused_cef_fresh or instant - self._last_received_at <= 2.0)
             snapshot = self.model.snapshot(instant) if fresh else None
         if snapshot is None or snapshot.identity != identity or str(track.track_id).startswith('owned:'):
+            if (self._cef_route_requested and self.identity == identity
+                    and not str(track.track_id).startswith('owned:')):
+                # Returning the legacy data here resurrected an invented clock
+                # from an all-zero SMTC timeline. Retain the last displayed
+                # capture position and keep actual transport state independent.
+                with self._lock:
+                    prior = self._last_projection
+                position = prior[1] if prior is not None and prior[0] == identity else 0.0
+                return replace(data, track=replace(
+                    track, position_seconds=position, position_source='capture-unavailable',
+                    position_confidence=0.0, position_sampled_at=0.0,
+                    position_observed_seconds=None))
             return data
         position = snapshot.position_seconds
         sampled_at = snapshot.sampled_at
@@ -237,6 +250,8 @@ class CaptureRuntime:
             position = optimistic[1] + (max(0.0, instant - optimistic[2]) * snapshot.rate)
             if track.duration_seconds > 0:
                 position = min(track.duration_seconds, position)
+        with self._lock:
+            self._last_projection = (identity, position)
         return replace(data, track=replace(
             track, position_seconds=position, is_playing=snapshot.is_playing,
             position_source='capture-model', position_confidence=0.95,

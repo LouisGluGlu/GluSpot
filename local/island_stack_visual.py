@@ -1226,6 +1226,8 @@ class IslandStackVisual(QWidget):
 
     def _estimated_media_position(self, now: float) -> float:
         base = max(0.0, float(getattr(self, "media_position_seconds", 0.0)))
+        if getattr(self, "media_position_source", "") == "capture-unavailable":
+            return base
         sync_at = float(getattr(self, "media_position_sync_at", now))
         duration = max(0.0, float(getattr(self, "media_duration_seconds", 0.0)))
         if bool(getattr(self, "media_is_playing", False)):
@@ -1276,6 +1278,8 @@ class IslandStackVisual(QWidget):
         progress continue to use _estimated_media_position without output delay.
         """
         position = self._estimated_media_position(now)
+        if getattr(self, "media_position_source", "") == "capture-unavailable":
+            return position
         sync_at = getattr(self, "media_position_sync_at", None)
         if sync_at is None:
             return position

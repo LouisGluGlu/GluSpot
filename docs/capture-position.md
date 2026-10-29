@@ -5,6 +5,26 @@ version or package and deletes no legacy reader or provider path. All new
 runtime work requires `v2_capture_position_enabled: true`; the default is false.
 Program-owned playback remains independent behind `api/providers.py`.
 
+The 2026-10-29 attachment correction also accepts `netease.transport: "attach"`
+with `netease.cef.enabled: true`. This uses the existing validated debug port
+discovery and CEF runtime without starting, stopping or restoring a player.
+Missing/failed endpoints remain detached. The ordinary application defaults
+stay off; the isolated narrow entry selects attach in memory.
+
+For requested NetEase capture, unavailable observations now project
+`capture-unavailable` at the last displayed capture position (zero before the
+first observation). Owner and lyric-motion clocks freeze following while the
+actual play/pause state is retained. This prevents an all-zero SMTC timeline
+from reviving the legacy estimated clock after capture loss.
+
+Box capture discovery passes **258 tests ×3**. Ordinary full discovery could
+not complete: a Qt garbage-collection hang and a subsequent native SIGSEGV were
+recorded; the unchanged `a45b097` baseline also produced a native SIGSEGV. These
+are not full-suite passes. Evidence is outside source control under
+`/workspace/gluspot/handoff/flicker/box-evidence/`. PC attachment, sustained
+progress and real word-seek acceptance remain pending; no PC connector is
+exposed in this session. No player installation or user settings were changed.
+
 ## Module ownership
 
 - `api/capture/contracts.py`: immutable physical observations and asynchronous

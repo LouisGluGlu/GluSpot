@@ -94,7 +94,33 @@ class NetEaseLocator:
 
     async def restore(self, launch):
         """Request normal recovery without stopping any running player."""
+        if launch.reused:
+            return
         await asyncio.to_thread(self._restore_owned, launch.installation)
+
+    async def attach(self, installation=None) -> NetEaseLaunch | None:
+        """Discover an existing endpoint without starting or stopping a player."""
+        return await asyncio.to_thread(self._attach_existing, installation)
+
+    def _attach_existing(self, installation):
+        installation = installation or self.locate()
+        if installation is None:
+            return None
+        with self._owner(installation) as owner:
+            return self._existing_launch(installation, owner.read())
+
+    def _existing_launch(self, installation, state):
+        key = _path_key(installation.path)
+        matching = self._matching(installation)
+        def candidates():
+            yield state.get('pid'), installation.path, state.get('port')
+            yield from self._debug_ports()
+        for pid, path, port in candidates():
+            if (pid in matching and _path_key(path) == key
+                    and isinstance(port, int) and not isinstance(port, bool)
+                    and 1 <= port <= 65535 and self._healthy(port)):
+                return NetEaseLaunch(port, installation, pid, reused=True)
+        return None
 
     def _matching(self, installation):
         key = _path_key(installation.path)
@@ -131,14 +157,9 @@ class NetEaseLocator:
         with self._owner(installation, cancelled) as owner:
             state = owner.read()
             matching = self._matching(installation)
-            def candidates():
-                yield state.get('pid'), installation.path, state.get('port')
-                yield from self._debug_ports()
-            for pid, path, port in candidates():
-                if (pid in matching and _path_key(path) == key
-                        and isinstance(port, int) and not isinstance(port, bool)
-                        and 1 <= port <= 65535 and self._healthy(port)):
-                    return NetEaseLaunch(port, installation, pid, reused=True)
+            existing = self._existing_launch(installation, state)
+            if existing is not None:
+                return existing
             if cancelled.is_set():
                 raise RuntimeError('NetEase launch cancelled before process changes')
             if self._clock() - state.get('attempted_at', float('-inf')) < 120.0:

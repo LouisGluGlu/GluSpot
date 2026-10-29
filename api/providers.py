@@ -655,18 +655,12 @@ class WindowsMediaProvider:
         return capture_enabled(getattr(self, "settings_getter", None))
 
     def _netease_cef_enabled(self) -> bool:
-        """Return the explicit, default-off transport-A opt-in.
-
-        ``port`` and ``pipe`` remain accepted settings values for migration
-        and future transports, but this branch implements only relaunch.  A
-        random loopback port is allocated by NetEaseLocator; no player
-        installation file is ever written.
-        """
+        """Enable explicit relaunch or read-only discovery of an existing port."""
         getter = getattr(self, "settings_getter", None)
         if not callable(getter) or not self._capture_is_enabled():
             return False
         transport = str(getter("netease.transport", "off") or "off").strip().casefold()
-        if getter("netease.cef.enabled", False) is not True or transport != "relaunch":
+        if getter("netease.cef.enabled", False) is not True or transport not in {"attach", "relaunch"}:
             return False
         from api.capture.capabilities import capability_for, capture_profile
         return capture_profile(getter, capability_for("cloudmusic.exe")) != "off"
@@ -723,7 +717,10 @@ class WindowsMediaProvider:
                 if reason:
                     state, message = "degraded", "无法安全监听网易云进度；暂用系统进度"
             else:
-                state, message = "repair", "未连接；可修复并重启网易云"
+                if str(self.settings_getter("netease.transport", "off")).strip().casefold() == "attach":
+                    state, message = "degraded", "未发现可连接的网易云进度；播放器保持运行"
+                else:
+                    state, message = "repair", "未连接；可修复并重启网易云"
         return dict(state=state, message=message, ready=bool(ready),
                     reason=reason,
                     restore=getattr(self, "_netease_restore_status", ""))
@@ -791,15 +788,24 @@ class WindowsMediaProvider:
             if not self._netease_cef_enabled():
                 return None
             track = getattr(getattr(self, "_last_data", None), "track", None)
-            relaunch = not getattr(self, "_netease_launch_attempted", False)
-            self._netease_launch_attempted = True
-            launch = await locator.launch(installation, relaunch=relaunch)
+            transport = str(self.settings_getter("netease.transport", "off") or "off").strip().casefold()
+            if transport == "attach":
+                launch = await locator.attach(installation)
+                if launch is None:
+                    self._netease_launch_error = "No existing NetEase debug endpoint; player left running"
+                    logger.info(self._netease_launch_error)
+                    return None
+            else:
+                relaunch = not getattr(self, "_netease_launch_attempted", False)
+                self._netease_launch_attempted = True
+                launch = await locator.launch(installation, relaunch=relaunch)
             self._netease_launch = launch
             if not self._netease_cef_enabled():
-                await locator.restore(launch)
+                await self._recover_netease_player(locator, launch)
                 return None
             cdp = CdpSession(launch.port, adapter=adapter, version=installation.version)
-            record_seek_decision('transport', 'relaunch-port-bound', port=launch.port, backend='cef')
+            record_seek_decision('transport', 'existing-port-bound' if launch.reused else 'relaunch-port-bound',
+                                 port=launch.port, backend='cef')
             await cdp.start()
             self._netease_cdp_session = cdp
             self._netease_launch_error = ""
@@ -825,6 +831,8 @@ class WindowsMediaProvider:
             return None
 
     async def _recover_netease_player(self, locator, launch):
+        if launch.reused:
+            return
         try:
             await locator.restore(launch)
         except Exception as error:

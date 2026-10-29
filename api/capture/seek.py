@@ -29,7 +29,7 @@ def record_seek_decision(stage, reason, *, target=None, backend='', port=None, e
     if stage not in {'source', 'transport', 'restore', 'provider', 'provider-guard', 'runtime', 'runtime-result', 'cef', 'ui'}:
         return
     if reason not in {
-        'owned-active', 'system-disabled', 'system-selected', 'relaunch-port-bound',
+        'owned-active', 'system-disabled', 'system-selected', 'relaunch-port-bound', 'existing-port-bound',
         'previous-request-uncertain', 'busy', 'uia-worker-busy', 'legacy-route',
         'invalid-target', 'unavailable', 'expected-track-mismatch', 'owning-thread',
         'loop-unavailable', 'capture-disabled', 'track-changed', 'source-changed',
