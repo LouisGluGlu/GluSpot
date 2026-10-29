@@ -11,6 +11,7 @@ class NarrowLayout:
     height: int
     visibility: float = 1.0
     library_available: bool = True
+    dj_available: bool = False
 
     @property
     def button_size(self):
@@ -63,15 +64,30 @@ class NarrowLayout:
 
     @property
     def back(self):
-        return (QRectF(16, 16, self.button_size, self.button_size)
-                if self.library_available else QRectF())
+        return self._top_rects.get("library", QRectF())
+
+    @property
+    def _top_rects(self):
+        side = self.button_size
+        slots = ([("library", side)] if self.library_available else [])
+        slots += [("collection", side * 2), ("audio_output", side),
+                  ("playback_mode", side), ("content_layout", side),
+                  ("translation", side), ("return", side)]
+        if self.dj_available:
+            slots.append(("personal_dj", side))
+        gap = (self.width - 32 - sum(width for _key, width in slots)) / (len(slots) - 1)
+        left = 16.0
+        rects = {}
+        for key, width in slots:
+            rects[key] = QRectF(left, 16, width, side)
+            left += width + gap
+        return rects
 
     @property
     def top(self):
-        side = self.button_size
-        step = side + 16 if self.library_available else (self.width - 32 - side) / 4
-        return [QRectF(self.width - 16 - side - i * step, 16, side, side)
-                for i in range(5)]
+        rects = self._top_rects
+        return [rects[key] for key in ("content_layout", "audio_output", "playback_mode",
+                                      "translation", "return")]
 
     @staticmethod
     def centered(x, y, side):
@@ -104,18 +120,12 @@ class NarrowLayout:
 
     @property
     def favorite(self):
-        return QRectF(16, self.height - 59, 105, 40)
+        return self._top_rects["collection"]
 
     @property
     def dj(self):
-        return self.centered(self.width - 39, self.height - 39, 40)
+        return self._top_rects.get("personal_dj", QRectF())
 
     def utility(self, dj_fraction):
-        # Keep both buttons on the bottom baseline as the DJ lane opens or closes.
-        t = max(0.0, min(1.0, dj_fraction))
-        y = self.height - 39
-        left = self.favorite.right()
-        right = (self.width - 16) * (1 - t) + self.dj.left() * t
-        loop_x = left + (right - left) / 3
-        layout_x = left + 2 * (right - left) / 3
-        return self.centered(loop_x, y, 40), self.centered(layout_x, y, 40)
+        # Compatibility aliases: these controls now occupy their single top slots.
+        return self.top[2], self.top[0]

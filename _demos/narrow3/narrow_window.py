@@ -424,20 +424,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def glass_groups(self):
         library_available = self._library_back_available()
-        layout = NarrowLayout(self.width(), self.height(), library_available=library_available)
+        layout = NarrowLayout(self.width(), self.height(), library_available=library_available,
+                              dj_available=self.dj_available)
         top_keys = ("content_layout", "audio_output", "playback_mode", "translation", "return")
         top = {key: rect for key, rect in zip(top_keys, layout.top)}
-        now = time.monotonic()
-        top = {key: rect for index, (key, rect) in enumerate(top.items())
-               if self.visibility.progress > .001}
-        loop, mode = layout.utility(self.dj_motion.value(now))
-        footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
-                  "media:next": layout.next, "collection": layout.favorite,
-                  "footer_loop": loop, "footer_layout": mode}
+        top["collection"] = layout.favorite
         if self.dj_available:
-            footer["personal_dj"] = layout.dj
+            top["personal_dj"] = layout.dj
+        footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
+                  "media:next": layout.next}
         if self.visibility.progress <= .001:
-            footer = {}
+            top, footer = {}, {}
         return [top, {"library": layout.back}
                 if library_available and self.visibility.progress > .001 else {}, footer]
 
@@ -792,7 +789,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             layer.setRenderHint(QPainter.RenderHint.Antialiasing)
             layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             layout = NarrowLayout(self.width(), self.height(),
-                                  library_available=self._library_back_available())
+                                  library_available=self._library_back_available(),
+                                  dj_available=self.dj_available)
             self.paint_header(layer, layout)
             self.paint_controls(layer, layout, 1.0)
         self._clear_control_renderer.end_frame()
@@ -1406,7 +1404,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if role == "audio-output":
                 paint_audio_output_status(painter, rect, (), ink, count=0)
             elif role == "playback-mode":
-                paint_music_source_icon(painter, icon, "sequence", tint=ink)
+                paint_music_source_icon(painter, icon,
+                                        ("sequence", "shuffle", "repeat_one")[self.loop_mode], tint=ink)
             elif role == "translation":
                 painter.save()
                 painter.setPen(Qt.PenStyle.NoPen)
@@ -1444,14 +1443,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 painter.setOpacity(painter.opacity() * .38)
             paint_music_source_icon(painter, glyph, icon, tint=icon_ink)
             painter.restore()
-        loop, mode = layout.utility(self.dj_motion.value(time.monotonic()))
-        loop = self.posed_rect("footer_loop", loop)
-        mode = self.posed_rect("footer_layout", mode)
-        self._paint_surface_glass(painter, loop, role="playback-mode")
-        paint_music_source_icon(painter, loop.adjusted(9, 9, -9, -9),
-                                ("sequence", "shuffle", "repeat_one")[self.loop_mode], tint=ink)
-        self._paint_surface_glass(painter, mode, role="content-layout")
-        self._paint_content_layout_icon(painter, mode.adjusted(9, 9, -9, -9))
         if self.dj_available:
             dj = self.posed_rect("personal_dj", layout.dj)
             self._paint_surface_glass(painter, dj, role="dj-icon")

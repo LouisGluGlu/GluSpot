@@ -18,7 +18,7 @@ from local.music_surface_window import MusicSurfaceWindow
 
 
 def check(variant, width, mode, dj):
-    layout = NarrowLayout(width, 640, float(variant == "B"))
+    layout = NarrowLayout(width, 640, float(variant == "B"), dj_available=dj)
     errors = []
     viewport = QRectF(20, 20, width - 40, 600)
     for alpha in (0, .1, .5, .9, 1):
@@ -55,7 +55,10 @@ def check(variant, width, mode, dj):
     header = QRectF(0, 0, width, VeilOverlay.TOP_END)
     bottom = QRectF(0, layout.height - VeilOverlay.BOTTOM_HEIGHT,
                    width, VeilOverlay.BOTTOM_HEIGHT)
-    top_controls = [layout.back, *layout.top, layout.cover, layout.text]
+    top_controls = [layout.back, layout.favorite, *layout.top]
+    if dj:
+        top_controls.append(layout.dj)
+    header_content = [layout.cover, layout.text]
     if (layout.cover.width() < 84 or layout.cover.width() != layout.cover.height()
             or (width == 360 and abs(layout.cover.width() - 96) > .001)):
         errors.append("header cover is no longer a full-size square")
@@ -67,12 +70,10 @@ def check(variant, width, mode, dj):
         errors.append("header title and artist have no full-height adjacent column")
     if max(layout.cover.bottom(), layout.text.bottom()) > VeilOverlay.TOP_FEATHER_START:
         errors.append("header extends into the top feather")
-    loop, mode_rect = layout.utility(float(dj))
-    footer = [layout.favorite, loop, mode_rect] + ([layout.dj] if dj else [])
     transport = [layout.previous, layout.play, layout.next]
-    if any(not header.contains(rect) for rect in top_controls):
+    if any(not header.contains(rect) for rect in top_controls + header_content):
         errors.append("header extends outside the top veil band")
-    if any(not bottom.contains(rect) for rect in transport + footer):
+    if any(not bottom.contains(rect) for rect in transport):
         errors.append("control extends outside the bottom veil band")
     if any(rect.width() != 44 or rect.height() != 44 for rect in transport):
         errors.append("transport hit target is not 44x44")
@@ -80,14 +81,15 @@ def check(variant, width, mode, dj):
         errors.append("transport icon and hit target differ")
     if layout.transport_panel.height() != 44:
         errors.append("transport row height")
-    if any(rect.height() != 40 for rect in footer):
-        errors.append("footer row height")
+    if any(rect.height() != layout.button_size for rect in top_controls):
+        errors.append("top row height")
     if not all(a.right() < b.left() for a, b in zip(transport, transport[1:])):
         errors.append("transport order or spacing")
-    if not all(a.right() < b.left() for a, b in zip(footer, footer[1:])):
-        errors.append("footer order or spacing")
+    ordered_top = sorted(top_controls, key=lambda rect: rect.left())
+    if not all(a.right() <= b.left() + .001 for a, b in zip(ordered_top, ordered_top[1:])):
+        errors.append("top row order or spacing")
     # Overlap with the content is intentional: chrome is above the veil.
-    for first, second in itertools.combinations(top_controls + transport + footer, 2):
+    for first, second in itertools.combinations(top_controls + header_content + transport, 2):
         if first.intersects(second):
             errors.append("chrome elements overlap")
     if variant == "A":

@@ -421,7 +421,7 @@ class NarrowCommitTests(unittest.TestCase):
         surface = [call for call in calls if isinstance(call.func, ast.Attribute)
                    and call.func.attr == '_paint_surface_glass']
         self.assertEqual({ast.unparse(call.args[1]) for call in surface},
-                         {'back', 'content', 'rect', 'loop', 'mode', 'dj'})
+                         {'back', 'content', 'rect', 'dj'})
         transport_loop = next(node for node in ast.walk(tree) if isinstance(node, ast.For)
                               and 'toggle_play_pause' in ast.unparse(node.iter))
         paint_calls = [node.func.attr for node in ast.walk(transport_loop)
