@@ -2765,7 +2765,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         rect = QRectF(self.rect())
         scale = self._surface_scale(rect)
         content, original, _column = self._content_column_geometry(rect)
-        if self._content_layout_is_narrow():
+        if (self._content_layout_is_narrow()
+                and self._effective_content_layout() in {"cover", "cover_lyrics"}):
             side = max(1., min(rect.width() - 24. * scale, rect.height() - 142. * scale))
             original = QRectF(content.left(), content.top(), side, side)
             footer_height = self._personal_dj_footer_height(rect)
@@ -5267,6 +5268,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self, cover: QRectF, content: QRectF, surface_scale: float, control_reveal: float,
     ) -> tuple[QFont, QRectF, QFont, QRectF]:
         """Let title lead and artist follow into space freed by the controls."""
+        if (self._content_layout in {"lyrics", "playlist"}
+                and self._content_layout_is_narrow()):
+            # The stacked column keeps names beside its small header cover.
+            left = cover.right() + 16. * surface_scale
+            width = max(1., content.right() - left)
+            title_size, artist_size = 18. * surface_scale, 14. * surface_scale
+            self._metadata_draw_pixel_sizes = {"title": title_size, "artist": artist_size}
+            return (self._surface_font(title_size, QFont.Weight.Bold),
+                    QRectF(left, cover.center().y() - 30. * surface_scale, width, 30. * surface_scale),
+                    self._surface_font(artist_size, QFont.Weight.Medium),
+                    QRectF(left, cover.center().y() + 5. * surface_scale, width, 22. * surface_scale))
         expansion = 1.0 - max(0.0, min(1.0, float(control_reveal)))
         title_gain = self._metadata_spring_fraction(expansion, delay=0.05, overshoot=0.5)
         artist_gain = self._metadata_spring_fraction(expansion, delay=0.16, overshoot=0.38)
@@ -6704,13 +6716,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._frame_glass_light = previous_light
             self._frame_control_color_at = previous_color_at
 
-    def _paint_surface_frame(self, _event):
+    def _paint_surface_frame(self, _event, *, paint_chrome=True):
         paint_started = time.perf_counter()
         if self._paint_window_compact():
             self._record_paint_cost(paint_started, _event)
             return
         navigation_capture = getattr(self, "_navigation_cover_capture", False)
-        if (not navigation_capture and getattr(self, "_library_loading", None) is None
+        if (paint_chrome and not navigation_capture and getattr(self, "_library_loading", None) is None
                 and self._paint_cached_content_layout()):
             self._record_paint_cost(paint_started, _event)
             return
@@ -7000,7 +7012,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         window_control_exposed = paint_region is None or paint_region.intersects(
             QRectF(rect.right() - 420.0 * surface_scale, 0.0, 420.0 * surface_scale, 100.0 * surface_scale).toAlignedRect()
         )
-        content_snapshot = self._capturing_content_snapshot
+        content_snapshot = self._capturing_content_snapshot or not paint_chrome
         if not content_snapshot and (paint_region is None or paint_region.intersects(self._library_damage_rect(rect))):
             self._paint_library_back(painter, rect)
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed and not content_snapshot)
@@ -7017,7 +7029,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 normal_controls_bottom - controls_height,
                 max(controls_top, cover.bottom() + 6.0 * surface_scale * cover_fraction),
             )
-        panel_width = metadata_width - 50.0
+        panel_width = max(1., metadata_width - 50.0)
         if cover.bottom() > controls_top:
             panel_width = min(
                 panel_width,

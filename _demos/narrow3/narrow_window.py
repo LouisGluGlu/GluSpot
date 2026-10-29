@@ -22,6 +22,7 @@ from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
+from local.music_surface_layout import normalize_content_layout
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_lyric_presentation import (
     split_display_layers, INTRO_COUNTDOWN_TEXT, intro_dot_radius, paint_intro_countdown,
@@ -62,6 +63,24 @@ INK_BUCKET_SECONDS = .05
 
 class NarrowStudyWindow(MusicSurfaceWindow):
     @property
+    def mode(self):
+        return self._content_layout
+
+    @mode.setter
+    def mode(self, value):
+        self.set_content_layout(value, animate=False)
+
+    def set_content_layout(self, layout, *, animate=True):
+        # One selection is shared by the narrow and wide painters and inputs.
+        # Narrow keeps its established immediate content switch.
+        changed = super().set_content_layout(
+            normalize_content_layout(layout), animate=animate and not getattr(self, "narrow", False))
+        if changed and hasattr(self, "_controls_key"):
+            self._controls_key = None
+            self._painted_live_model = self._painted_live_hit_pose = None
+        return changed
+
+    @property
     def _narrow_lyrics_mount(self):
         return getattr(self, "narrow", False) and getattr(self, "mode", None) == "lyrics"
 
@@ -72,11 +91,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         viewport = NarrowLayout(surface.width(), surface.height()).viewport
         viewport.translate(surface.topLeft())
         return QRectF(viewport), QRectF(-10000., 0., 0., 0.), viewport
-
-    def _content_layout_is_narrow(self):
-        if self._narrow_lyrics_mount:
-            return False
-        return super()._content_layout_is_narrow()
 
     def _paint_wide_lyrics_mounted(self, painter):
         self._paint_lyric_column(painter, QRectF(self.rect()))
@@ -319,8 +333,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # cadence rather than interleave patches from different frames.
         timer = getattr(self, "study_timer", None)
         if self.live and timer is not None and timer.isActive():
-            if self._narrow_lyrics_mount:
-                self._wide_lyrics_dirty = True
+            self._wide_lyrics_dirty = True
             return
         return super().update(*args)
 
@@ -399,8 +412,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self.owner.secondary_color.rgba(), self.owner.track_title, self.owner.artist,
                self.width(), self.height(), self.devicePixelRatioF(),
                getattr(self.owner, 'media_position_source', ''), self.hovered_glass)
-        if (self.live and key == self._commit_key
-                and not (self._narrow_lyrics_mount and self._wide_lyrics_dirty)):
+        if self.live and key == self._commit_key and not self._wide_lyrics_dirty:
             self._diagnostics['noop_paints'] += 1
             return
         self._commit_key = key
@@ -478,6 +490,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if (self._snap_change == (self._visual_track_identity(), self.owner.lyric_changed_at)
                     and abs(focus - visual) > .000001):
                 self._diagnostics['snap_frames'] += 1
+        if self.mode != "lyrics":
+            self._paint_shared_narrow_content()
+            return
         self._frame_control_color_at = now
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -489,7 +504,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                           self.devicePixelRatioF())
         visibility = self.visibility.progress
         layout = NarrowLayout(self.width(), self.height(),
-                              library_available=self._library_back_available())
+                              library_available=self._library_back_available(),
+                              dj_available=self.dj_available)
         focus, visual = self.lyric_focus()
         scrolling = self.mode == "lyrics" and abs(focus - visual) > .001
         self._diagnostics['paint_source'] = ("SCROLL" if scrolling else
@@ -546,6 +562,25 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             source_track = self._source_lines_key[0] if self._source_lines_key else None
             if source_track != self._painted_track:
                 self._diagnostics['stale_frames'] += 1
+
+    def _paint_surface_frame(self, event):
+        super()._paint_surface_frame(event, paint_chrome=not self.narrow)
+
+    def _paint_shared_narrow_content(self):
+        # Keep shared content live (including queue artwork/focus), then draw
+        # the same narrow chrome for every selected mode.
+        super().paintEvent(None)
+        if not self._capturing_content_snapshot and self.visibility.progress > .001:
+            with QPainter(self) as painter:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                layout = NarrowLayout(self.width(), self.height(),
+                                      library_available=self._library_back_available(),
+                                      dj_available=self.dj_available)
+                self.paint_controls(painter, layout, self.visibility.progress)
+        if self.live and self.mode == "cover_lyrics":
+            self._painted_live_model = self.live_model_key()
+            self._painted_track = self._visual_track_identity()
 
     def content_image(self, layout, visual_focus=None, *, veil_source=False,
                       include_current=True, refresh=False, overscan=0):
@@ -888,7 +923,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         viewport mask and dim. They are prepared only at a settled scroll pose;
         a new source/focus invalidates them before another present.
         """
-        if self._narrow_lyrics_mount:
+        if self._narrow_lyrics_mount or self.mode != "lyrics":
             self._fade_content_key = self._fade_content_frames = None
             return
         advancing_live_lyrics = self.live and self.mode == "lyrics" and self.owner.media_is_playing
@@ -1032,7 +1067,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         Reading ink advances in the sharp lyric layer. The blurred overlay is
         prepared only for a changed row/scroll bucket, never for word progress.
         """
-        if self._narrow_lyrics_mount:
+        if self._narrow_lyrics_mount or self.mode != "lyrics":
             return
         layout = NarrowLayout(self.width(), self.height())
         if self.mode == "playlist":
@@ -1487,10 +1522,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.toggle_wide(True)
         elif key in (Qt.Key.Key_L, Qt.Key.Key_P, Qt.Key.Key_Tab):
             if key == Qt.Key.Key_Tab:
-                self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
+                self._cycle_content_layout()
             else:
-                self.mode = "lyrics" if key == Qt.Key.Key_L else "playlist"
-            self.set_content_layout(self.mode, animate=False)
+                self.set_content_layout("lyrics" if key == Qt.Key.Key_L else "playlist", animate=False)
             self._finish_content_layout()
         elif self.live and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Space):
             command = {Qt.Key.Key_Left: "previous", Qt.Key.Key_Right: "next",
@@ -1658,7 +1692,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 if rect.contains(position):
                     token = self._queue_snapshot[0] if self._queue_snapshot is not None else None
                     return ("queue", index, token)
-        if self.mode == "lyrics":
+        if self.mode in {"lyrics", "cover_lyrics"}:
             return self.live_lyric_action_at(position)
         return None
 
@@ -1694,8 +1728,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         elif action.startswith("media:"):
             self._send_media_command(action.removeprefix("media:"))
         elif action in {"content_layout", "footer_layout"}:
-            self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
-            self.set_content_layout(self.mode, animate=False)
+            self._cycle_content_layout()
             self._finish_content_layout()
         elif action in {"playback_mode", "footer_loop"}:
             self._cycle_owned_playback_mode()
@@ -1723,7 +1756,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.visibility.advance(time.monotonic(), True, True, self.mode == "playlist")
         library_available = self._library_back_available()
         layout = NarrowLayout(self.width(), self.height(), visibility,
-                              library_available=library_available)
+                              library_available=library_available, dj_available=self.dj_available)
         footer_visible = visibility > .001
         for group in self.glass_groups():
             for key, rect in group.items():
@@ -1734,8 +1767,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         elif footer_visible and layout.top[4].contains(position):
             self.toggle_wide()
         elif footer_visible and layout.top[0].contains(position):
-            self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
-            self.set_content_layout(self.mode, animate=False)
+            self._cycle_content_layout()
             self._finish_content_layout()
         elif footer_visible and layout.previous.contains(position):
             self.select_song(self.song_index - 1)
@@ -1754,8 +1786,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[0].contains(position):
             self.loop_mode = (self.loop_mode + 1) % 3
         elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[1].contains(position):
-            self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
-            self.set_content_layout(self.mode, animate=False)
+            self._cycle_content_layout()
             self._finish_content_layout()
         elif footer_visible and self.dj_available and layout.dj.contains(position):
             self.dj_enabled = not self.dj_enabled

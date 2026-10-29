@@ -45,7 +45,7 @@ class MusicNativeDisplayCacheTests(unittest.TestCase):
                 with patch.object(self.window, 'SURFACE_FONT_FAMILIES', families), \
                         patch.object(self.window, 'devicePixelRatioF', return_value=dpr):
                     scale = self.window._surface_scale()
-                    column = self.window._content_column_geometry()[2]
+                    column = self.window._wide_content_column_geometry()[2]
                     glyphs = QFontMetricsF(original(self.window.LYRIC_PIXEL_SIZE * scale,
                                                    QFont.Weight.Bold)).horizontalAdvance('音乐正在播放')
                     expected = column.width() < max(180., glyphs, 190. * scale)

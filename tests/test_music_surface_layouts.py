@@ -108,21 +108,19 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
             self.assertEqual(self.window._content_layout, expected)
         self.assertEqual(self.owner.data_provider.calls, [])
 
-    def test_narrow_fallback_retains_requested_layout_resizing_wide_restores_it(self):
-        self.window.resize(372, 432)
-        self.window.set_content_layout("playlist", animate=False)
-        self.assertEqual(self.window._content_layout, "playlist")
-        self.assertEqual(self.window._effective_content_layout(), "cover")
-        self.assertTrue(self.window._layout_edge_animation.state())
-        self.window.resize(960, 540)
-        self.assertEqual(self.window._effective_content_layout(), "playlist")
-        self.window.resize(372, 432)
-        self.window._cycle_content_layout()
-        self.assertEqual(self.window._effective_content_layout(), "cover_lyrics")
-        self.window._cycle_content_layout()
-        self.assertEqual(self.window._effective_content_layout(), "cover")
+    def test_requested_layout_survives_both_widths_without_settings_writes(self):
+        for layout in CONTENT_LAYOUTS:
+            self.window.set_content_layout(layout, animate=False)
+            self.saved.clear()
+            for size in ((372, 432), (960, 540), (665, 628), (960, 540)):
+                with self.subTest(layout=layout, size=size):
+                    self.window.resize(*size)
+                    self.window._resize_content_layout()
+                    self.assertEqual(self.window._content_layout, layout)
+                    self.assertEqual(self.window._effective_content_layout(), layout)
+                    self.assertEqual(self.saved, {})
 
-    def test_wide_click_priority_starts_with_each_current_layouts_own_pair(self):
+    def test_both_widths_cycle_four_modes_starting_with_current_layouts_own_pair(self):
         cycles = {
             "lyrics": ("playlist", "cover", "cover_lyrics", "lyrics"),
             "playlist": ("lyrics", "cover_lyrics", "cover", "playlist"),
@@ -131,29 +129,35 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         }
         for fullscreen in (False, True):
             self.window._fullscreen = fullscreen
-            self.window.resize(960, 540)
-            self.assertFalse(self.window._content_layout_is_narrow())
-            for current, cycle in cycles.items():
-                with self.subTest(fullscreen=fullscreen, current=current):
-                    self.window.set_content_layout(current, animate=False)
-                    for expected in cycle * 2:
-                        self.window._cycle_content_layout()
-                        self.assertEqual(self.window._effective_content_layout(), expected)
+            for size in ((372, 432), (665, 628), (960, 540)):
+                self.window.resize(*size)
+                for current, cycle in cycles.items():
+                    with self.subTest(fullscreen=fullscreen, size=size, current=current):
+                        self.window.set_content_layout(current, animate=False)
+                        for expected in cycle * 2:
+                            self.window._cycle_content_layout()
+                            self.assertEqual(self.window._effective_content_layout(), expected)
         self.assertEqual(self.owner.data_provider.calls, [])
 
-    def test_landscape_without_a_usable_side_column_keeps_only_compact_pair(self):
+    def test_landscape_without_a_side_column_still_renders_external_modes(self):
+        songs = tuple(OnlineSong("netease", str(i), f"Song {i}") for i in range(8))
+        self.owner.data_provider.get_owned_playback_queue = lambda: (19, 2, songs)
         for fullscreen in (False, True):
             self.window._fullscreen = fullscreen
             self.window.resize(665, 628)
             self.assertGreater(self.window.width(), self.window.height())
             self.assertTrue(self.window._content_layout_is_narrow())
-            for current in CONTENT_LAYOUTS:
-                self.window.set_content_layout(current, animate=False)
-                for _ in range(6):
-                    before = self.window._effective_content_layout()
-                    self.window._cycle_content_layout()
-                    self.assertEqual(self.window._effective_content_layout(),
-                                     "cover" if before == "cover_lyrics" else "cover_lyrics")
+            for layout in ("lyrics", "playlist"):
+                with self.subTest(fullscreen=fullscreen, layout=layout):
+                    self.window.set_content_layout(layout, animate=False)
+                    self.settle()
+                    self.assertEqual(self.window._effective_content_layout(), layout)
+                    if layout == "playlist":
+                        self.assertTrue(self.window._queue_hit_rects)
+                        self.assertTrue(self.window._lyric_clip_rect.isEmpty())
+                    else:
+                        self.assertTrue(self.window._lyric_hit_rects)
+                        self.assertEqual(self.window._queue_hit_rects, {})
 
     def test_explicit_layout_and_width_family_changes_restart_same_pair_priority(self):
         self.window.set_content_layout("playlist", animate=False)
@@ -258,14 +262,16 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
     def test_column_fit_uses_available_width_at_current_height_instead_of_fixed_cutoff(self):
         self.window.resize(665, 628)
         content, cover, column = self.window._content_column_geometry()
-        self.assertLess(column.width(), 180.)
         self.assertTrue(self.window._content_layout_is_narrow())
+        self.assertGreater(column.top(), cover.bottom())
+        self.assertGreaterEqual(column.width(), cover.width())
         self.window.set_content_layout("lyrics", animate=False)
         self.assertEqual(self.window._content_layout, "lyrics")
-        self.assertEqual(self.window._effective_content_layout(), "cover_lyrics")
-        self.assertTrue(self.window._layout_edge_animation.state())
+        self.assertEqual(self.window._effective_content_layout(), "lyrics")
         self.window.resize(640, 360)
         self.assertFalse(self.window._content_layout_is_narrow())
+        content, cover, column = self.window._content_column_geometry()
+        self.assertGreater(column.left(), cover.right())
         self.assertEqual(self.window._effective_content_layout(), "lyrics")
         self.window.resize(960, 540)
         self.assertEqual(self.window._effective_content_layout(), "lyrics")
@@ -298,20 +304,23 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                     self.assertTrue(bounds.contains(self.window._media_control_panel_rect),self.window._media_control_panel_rect)
                     self.assertTrue(all(bounds.contains(button) for button in self.window._button_rects.values()),self.window._button_rects)
 
-    def test_compact_cover_forms_promote_only_on_crossing_to_a_usable_wide_column(self):
+    def test_user_resize_keeps_every_mode_without_writing_a_new_selection(self):
         self.window.show(); self.window._timer.stop(); self.window._audio_output_status_timer.stop()
-        for compact,wide in (("cover","playlist"),("cover_lyrics","lyrics")):
+        for layout in CONTENT_LAYOUTS:
             self.window.resize(372,432)
-            self.window.set_content_layout(compact,animate=False)
+            self.window.set_content_layout(layout,animate=False)
+            self.saved.clear()
             self.drag_resize(665,628)
-            self.assertEqual(self.window._effective_content_layout(),compact)
+            self.assertEqual(self.window._effective_content_layout(),layout)
             self.assertEqual(self.window.height(),628)
             self.drag_resize(960,540)
-            self.assertEqual(self.window._effective_content_layout(),wide)
-            self.assertEqual(self.saved["v2_music_content_layout"],wide)
-            self.window.set_content_layout(compact,animate=False)
+            self.assertEqual(self.window._effective_content_layout(),layout)
+            self.assertEqual(self.saved,{})
             self.drag_resize(1000,540)
-            self.assertEqual(self.window._effective_content_layout(),compact)
+            self.assertEqual(self.window._effective_content_layout(),layout)
+            self.drag_resize(372,432)
+            self.assertEqual(self.window._effective_content_layout(),layout)
+            self.assertEqual(self.saved,{})
         self.assertEqual(self.window._minimum_window_size().width(),330)
         self.assertEqual(self.window._minimum_window_size().height(),400)
 
@@ -351,7 +360,7 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
             self.assertFalse(self.window._last_content_layout_narrow)
             self.assertEqual(self.saved, {})
 
-    def test_fullscreen_morph_and_interruption_preserve_choice_before_next_real_drag(self):
+    def test_fullscreen_morph_interruption_and_next_real_drag_preserve_choice(self):
         self.window.show(); self.window._timer.stop(); self.window._audio_output_status_timer.stop()
         self.window.set_content_layout("cover", animate=False)
         self.saved.clear()
@@ -369,8 +378,8 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         self.assertEqual(self.saved, {})
         self.drag_resize(372, 432)
         self.drag_resize(960, 540)
-        self.assertEqual(self.window._content_layout, "playlist")
-        self.assertEqual(self.saved, {"v2_music_content_layout": "playlist"})
+        self.assertEqual(self.window._content_layout, "cover")
+        self.assertEqual(self.saved, {})
 
     def test_layout_animation_preserves_unrelated_cached_control_layers(self):
         marker = object()

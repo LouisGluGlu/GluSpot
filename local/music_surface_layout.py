@@ -135,7 +135,7 @@ class MusicContentLayoutMixin:
                self.logicalDpiX(), self.logicalDpiY())
         if key == getattr(self, "_content_layout_fit_key", None):
             return self._content_layout_fit_narrow
-        _content, _cover, column = self._content_column_geometry()
+        _content, _cover, column = self._wide_content_column_geometry()
         font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
         six_glyphs = QFontMetricsF(font).horizontalAdvance("音乐正在播放")
         required = max(180., six_glyphs, (43. + 61. + 14. + 4. * 18.) * scale)
@@ -144,7 +144,24 @@ class MusicContentLayoutMixin:
         return self._content_layout_fit_narrow
 
     def _content_column_geometry(self, rect=None):
-        """One bounded source of artwork/side-column geometry for fit and ink."""
+        """Width changes the external column arrangement, never its mode."""
+        content, cover, column = self._wide_content_column_geometry(rect)
+        if (self._content_layout in {"lyrics", "playlist"}
+                and self._content_layout_is_narrow()):
+            surface = QRectF(self.rect()) if rect is None else QRectF(rect)
+            scale = self._surface_scale(surface)
+            margin = min(20., 20. * scale)
+            top = min(70., surface.height() * .16)
+            content = surface.adjusted(margin, top, -margin, -margin)
+            side = max(1., min(96., surface.width() * .267, content.height() * .28))
+            cover = QRectF(content.left(), content.top(), side, side)
+            column_top = cover.bottom() + 24. * scale
+            bottom = max(column_top + 1., surface.bottom() - 156. * scale)
+            column = QRectF(content.left(), column_top, content.width(), bottom - column_top)
+        return content, cover, column
+
+    def _wide_content_column_geometry(self, rect=None):
+        """Unadapted two-column geometry also supplies the fit measurement."""
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
         scale = self._surface_scale(surface)
         margin = 60. * scale
@@ -157,34 +174,25 @@ class MusicContentLayoutMixin:
         return content, cover, column
 
     def _effective_content_layout(self):
-        layout = self._content_layout
-        if self._content_layout_is_narrow():
-            return "cover_lyrics" if layout in {"lyrics", "cover_lyrics"} else "cover"
-        return layout
+        return self._content_layout
 
     def _cycle_content_layout(self):
         effective = self._effective_content_layout()
-        if self._content_layout_is_narrow():
-            following = "cover" if effective == "cover_lyrics" else "cover_lyrics"
-            cross_pair_next = False
-        else:
-            # The first click always tries the other member of the visible
-            # family. The next click crosses to its corresponding compact /
-            # external form, so starting on either member still visits four
-            # layouts instead of becoming trapped in a two-item toggle.
-            same_pair = {"lyrics": "playlist", "playlist": "lyrics",
-                         "cover": "cover_lyrics", "cover_lyrics": "cover"}
-            other_pair = {"lyrics": "cover_lyrics", "playlist": "cover",
-                          "cover": "playlist", "cover_lyrics": "lyrics"}
-            following = (other_pair if self._content_layout_cross_pair_next else same_pair)[effective]
-            cross_pair_next = not self._content_layout_cross_pair_next
+        # Preserve the established click order at every width: first the
+        # current pair, then its corresponding external/cover form.
+        same_pair = {"lyrics": "playlist", "playlist": "lyrics",
+                     "cover": "cover_lyrics", "cover_lyrics": "cover"}
+        other_pair = {"lyrics": "cover_lyrics", "playlist": "cover",
+                      "cover": "playlist", "cover_lyrics": "lyrics"}
+        following = (other_pair if self._content_layout_cross_pair_next else same_pair)[effective]
+        cross_pair_next = not self._content_layout_cross_pair_next
         changed = self.set_content_layout(following)
         if changed:
             self._content_layout_cross_pair_next = cross_pair_next
         return changed
 
     def _content_layout_tooltip(self):
-        return "单击切换专辑 / 封面歌词" if self._content_layout_is_narrow() else "单击切换：先切换同组布局，再切换另一组"
+        return "单击切换：先切换同组布局，再切换另一组"
 
     def _pulse_content_layout_edges(self):
         self._layout_edge_started_at = time.monotonic()
@@ -212,14 +220,6 @@ class MusicContentLayoutMixin:
         narrow = self._content_layout_is_narrow()
         if narrow != self._last_content_layout_narrow:
             self._content_layout_cross_pair_next = False
-        if user_resize and self._last_content_layout_narrow is True and not narrow:
-            # Only an actual edge drag crossing out of the compact family
-            # promotes its two forms. Presentation changes retain selection.
-            compact = self._last_effective_content_layout
-            self._content_layout = "playlist" if compact == "cover" else "lyrics"
-            setter = getattr(self.owner, "settings_setter", None)
-            if callable(setter):
-                setter("v2_music_content_layout", self._content_layout)
         self._last_content_layout_narrow = narrow
         effective = self._effective_content_layout()
         if effective != self._last_effective_content_layout:
@@ -228,8 +228,6 @@ class MusicContentLayoutMixin:
                 self._clear_playback_queue_artwork_hint()
             self._clear_lyric_browse()
             self._logical_line_spring = LogicalLineSpringChain()
-            if self._content_layout_is_narrow() and self._content_layout in {"lyrics", "playlist"}:
-                self._pulse_content_layout_edges()
             self.update()
 
     def set_content_layout(self, layout, *, animate=True):
@@ -249,8 +247,6 @@ class MusicContentLayoutMixin:
             self._clear_playback_queue_artwork_hint()
         self._last_effective_content_layout = self._effective_content_layout()
         self._last_content_layout_narrow = self._content_layout_is_narrow()
-        if self._content_layout_is_narrow() and layout in {"lyrics", "playlist"}:
-            self._pulse_content_layout_edges()
         self._layout_transition_track = self._visual_track_identity()
         self._layout_transition_fraction = 1.
         self._queue_scroll = 0.
