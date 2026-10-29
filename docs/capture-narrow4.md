@@ -5,6 +5,14 @@ the current session has no PC connector, so fresh PC capture tests, NetEase
 End/auto-next and real-playback screenshots are unverified. No push, package or
 version change was made.
 
+The subsequent NetEase relaunch incident correction is tracked separately in
+[the incident report](netease-relaunch-incident.md). Ordinary narrow use should
+run `local/main.py --narrow-live`. The explicit relaunch route now has shared
+ownership, a two-minute cooldown and normal-start recovery. Box capture passes
+244 tests, narrow fixtures pass 20 + 5 tests and 25 layout assertions, and the
+5,709-test full run retains the baseline 17 failures / 11 errors / 31 skips.
+Native validation is still required before treating that repair as accepted.
+
 ## Branch decision
 
 Keep both input branches intact and integrate on **`grok/capture-narrow-v4`**, in

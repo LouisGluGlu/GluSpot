@@ -48,9 +48,20 @@ No version, packaging input, player-install file or real user setting changes.
 
 - Terra supplied ten isolated process-model regressions; root added interrupted
   state-update and independent-interpreter OS-lock checks. The final focused
-  locator/provider result is 32 tests / 0.709 seconds, passed.
-- Box capture discovery, narrow checks and full-suite comparison: final results
-  are recorded below after verification completes.
+  locator/provider result is 32 tests / 0.706 seconds, passed.
+- Box capture discovery: **244 / 12.203 seconds** on integration, and
+  **244 / 12.843 seconds** on the shared capture branch, passed. An earlier
+  243-test revision also passed three consecutive discovery runs.
+- Narrow checks passed: **20 live-provider fixtures / 2.681 seconds**, **5 input
+  tests / 1.458 seconds**, **25 layout assertions**. Related lyric/capture/UI
+  focus: **25 / 1.321 seconds**, passed. These are fixtures, not live PC evidence.
+- Full Box discovery: **5,709 / 166.863 seconds**, **17 failures, 11 errors,
+  31 skips**. All 28 failure/error identities exactly match the saved integration
+  baseline; no new identities. This is not a clean full-suite pass. Comparison
+  and complete logs are in the external handoff's `box-evidence` directory.
+- The five changed Python sources compile; tracked whitespace checks pass.
+  Static review caught and corrected interrupted cooldown updates, stale seek
+  restoration on port reuse and late-failure health/session handling.
 - Fresh PC capture discovery ×3, native capture/narrow focus, the one approved
   relaunch, second-trigger no-stop proof and final running-player check remain
   pending. This session exposes no PC execution/file-transfer tool. No live

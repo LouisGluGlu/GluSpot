@@ -106,6 +106,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-10-29: NetEase relaunch incident correction adds a shared OS lock, a durable two-minute cooldown, healthy-port reuse and normal-start recovery for stop/spawn/startup failure or cancellation. Automatic retries cannot authorize another stop; reused players keep their current position. Box capture passes 244 tests; full discovery has the same 17 failures / 11 errors / 31 skips as baseline. Evidence is recorded in [the incident report](docs/netease-relaunch-incident.md). Fresh PC tests and the one approved relaunch/second-trigger check remain pending until the PC executor is connected. For ordinary narrow use, run `local/main.py --narrow-live` without the relaunch flag.
+
 - 2026-10-29: Source-only capture/narrow integration is isolated on `grok/capture-narrow-v4`, preserving `grok/capture` and `grok/narrow-v3`. The real-provider narrow entry is `local/main.py --narrow-live`; no release/version change. Fixture fade CPU passes the 15% gate at both DPRs, but the live performance gate, native PC tests, End/auto-next, real playback screenshots and the absent non-narrow drag target remain pending. The full Linux suite still has inherited failures. See [implementation, branch choice and exact verification limits](docs/capture-narrow4.md).
 
 - 2026-10-22：6.417 发布与主线整理。应用及构建输入保持已验收字节，仅更新发布说明；旧分支与未提交旧源码通过[归档索引](docs/branch-archive-6.417.md)保留 GitHub 记录。分支清理须在 Release 附件完整性和 main／开发分支一致性确认后执行，最终保留 main，版本为 6.417。
