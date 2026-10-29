@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import ast
+import inspect
+import textwrap
 import time
 import unittest
 from unittest.mock import patch
@@ -402,19 +405,37 @@ class NarrowCommitTests(unittest.TestCase):
         self.assertLess(visual, 31)
         self.assertEqual(self.window.playback_position(), 93.2)
 
-    def test_veil_progress_and_glass_fill_follow_shared_owner_values(self):
-        from local.liquid_glass import music_control_fill_color
+    def test_veil_progress_follows_shared_owner_values(self):
         for alpha in (0, .125, .5, 1):
             dim, blur = self.window.veil.progress(alpha)
             self.assertAlmostEqual(dim, .18 * alpha)
             self.assertAlmostEqual(blur, 6 * alpha)
-        for light in (False, True):
-            ink = QColor(20, 22, 24) if light else QColor(245, 247, 249)
-            with patch.object(self.owner, '_music_lyric_text_color', return_value=ink):
-                for fill_alpha in (18, 24, 36, 206):
-                    expected = music_control_fill_color(ink, fill_alpha)
-                    self.assertEqual(self.owner._music_control_fill_color(fill_alpha), expected)
-                    self.assertEqual(self.window._music_control_fill_color(fill_alpha), expected)
+
+    def test_control_paint_paths_match_narrow_baseline(self):
+        source = textwrap.dedent(inspect.getsource(type(self.window).paint_controls))
+        tree = ast.parse(source)
+        self.assertNotIn('paint_liquid_glass', source)
+        self.assertNotIn('_paint_narrow_glass', source)
+        self.assertNotIn('_paint_music_control_svg_icon', source)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        surface = [call for call in calls if isinstance(call.func, ast.Attribute)
+                   and call.func.attr == '_paint_surface_glass']
+        self.assertEqual({ast.unparse(call.args[1]) for call in surface},
+                         {'back', 'content', 'rect', 'loop', 'mode', 'dj'})
+        transport_loop = next(node for node in ast.walk(tree) if isinstance(node, ast.For)
+                              and 'toggle_play_pause' in ast.unparse(node.iter))
+        paint_calls = [node.func.attr for node in ast.walk(transport_loop)
+                       if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                       and node.func.attr.startswith('_paint')]
+        self.assertEqual(paint_calls, ['_paint_transport_icon'])
+        self.assertIn('layout.transport_icon(rect)', ast.unparse(transport_loop))
+        capsule = next(call for call in calls if ast.unparse(call.func) ==
+                       'self._clear_control_renderer.paint')
+        self.assertEqual(ast.unparse(capsule.args[1]), 'favorite')
+        keywords = {kw.arg: ast.unparse(kw.value) for kw in capsule.keywords}
+        self.assertEqual(keywords['kind'], "'capsule'")
+        self.assertEqual(keywords['level'], 'self._surface_glass_level()')
+        self.assertEqual(keywords['scene'], 'self._surface_glass_backdrop()')
 
     def test_pointer_movement_threshold_and_exit_hysteresis(self):
         now = time.monotonic()
