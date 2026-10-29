@@ -46,8 +46,10 @@ class Visibility:
         self.top = [self.opacity] * 4
         self.top_enter = None
         self.idle_since = None
+        self.progress = 0.0
 
     def advance(self, now, top_hover, bottom_hover, playlist):
+        previous_target = self.opacity.target
         active = self.enabled and (top_hover or bottom_hover)
         if active:
             if self.top_enter is None:
@@ -64,6 +66,8 @@ class Visibility:
                 self.idle_since = now
             if now - self.idle_since >= self.IDLE_DELAY - 1e-9:
                 self.opacity.retarget(0.0, now, self.DURATION)
+        self.progress = (self.opacity.start if previous_target != self.opacity.target
+                         else self.opacity.value(now))
 
     def settled(self, now):
         return self.opacity.settled(now)

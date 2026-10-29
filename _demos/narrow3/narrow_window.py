@@ -21,7 +21,7 @@ from api.online_music import OnlineSong
 from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
-from local.liquid_glass import paint_liquid_glass
+from local.liquid_glass import paint_liquid_glass, music_control_fill_color
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_lyric_motion import MusicLyricFrame
@@ -301,7 +301,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # next real input starts with the same elapsed time as before.
             feedback.last_tick = now
         key = (self.playback_position(), self.lyric_focus(), self._visual_track_identity(),
-               self.source_lines(), self.visibility.footer.value(now),
+               self.source_lines(), self.visibility.progress,
                feedback.pose_key(), self.dj_motion.value(now), self.mode,
                self._queue_scroll, self.queue_snapshot(), self.dj_available,
                self.dj_enabled, self.loop_mode, self.owner.media_is_playing,
@@ -336,22 +336,24 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         top = {key: rect for key, rect in zip(top_keys, layout.top)}
         now = time.monotonic()
         top = {key: rect for index, (key, rect) in enumerate(top.items())
-               if (self.visibility.footer if index == 0 else self.visibility.top[index - 1]).value(now) > .001}
+               if self.visibility.progress > .001}
         loop, mode = layout.utility(self.dj_motion.value(now))
         footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
                   "media:next": layout.next, "collection": layout.favorite,
                   "footer_loop": loop, "footer_layout": mode}
         if self.dj_available:
             footer["personal_dj"] = layout.dj
-        if self.visibility.footer.value(now) <= .001:
+        if self.visibility.progress <= .001:
             footer = {}
-        return [top, {"library": layout.back} if self.visibility.footer.value(now) > .001 else {}, footer]
+        return [top, {"library": layout.back} if self.visibility.progress > .001 else {}, footer]
 
     def posed_rect(self, key, rect):
         return QRectF(rect)
 
     def _music_control_fill_color(self, fill_alpha=24):
-        return self.owner._music_control_fill_color(fill_alpha)
+        getter = getattr(self.owner, '_music_control_fill_color', None)
+        return (getter(fill_alpha) if callable(getter)
+                else music_control_fill_color(self._scene_control_ink(), fill_alpha))
 
     def _paint_narrow_glass(self, painter, rect, *, role=None):
         paint_liquid_glass(painter, rect, radius=rect.height() / 2,
@@ -398,7 +400,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         fading = not self.visibility.settled(now)
         background_key = (self._background_cache.cacheKey(), self.width(), self.height(),
                           self.devicePixelRatioF())
-        visibility = self.visibility.footer.value(now)
+        visibility = self.visibility.progress
         layout = NarrowLayout(self.width(), self.height())
         content = self.content_image(layout, include_current=self.live)
         endpoint_key = (background_key, content.cacheKey(), self.veil_key)
@@ -552,7 +554,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self.owner.media_is_playing,
                self._scene_control_ink().rgba())
         hidden = (self.visibility.opacity.target <= 0
-                  and self.visibility.opacity.value(now) <= .001)
+                  and self.visibility.progress <= .001)
         if hidden and key == self._controls_key:
             return
         fading = not self.visibility.settled(now)
@@ -1142,7 +1144,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                               ("toggle_play_pause", layout.play), ("next", layout.next)):
             rect = self.posed_rect("media:" + command, rect)
             self._paint_narrow_glass(painter, rect, role=command)
-            self._paint_transport_icon(painter, layout.transport_icon(rect), command, ink)
+            svg = getattr(self.owner, '_paint_music_control_svg_icon', None)
+            if not callable(svg) or not svg(
+                    painter, "music:" + command, layout.transport_icon(rect).adjusted(8, 8, -8, -8)):
+                self._paint_transport_icon(painter, layout.transport_icon(rect), command, ink)
         favorite = self.posed_rect("collection", layout.favorite)
         self._paint_narrow_glass(painter, favorite, role="collection")
         collection_state = self._song_collection_state() if self.live else None
@@ -1317,7 +1322,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._press_at(event.position())
 
     def _live_action_at(self, position):
-        if self.visibility.footer.value(time.monotonic()) >= .75:
+        if self.visibility.progress >= .75:
             for group in self.glass_groups():
                 for key, rect in group.items():
                     if rect.contains(position):
@@ -1388,7 +1393,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if self.live:
             self._begin_live_press(position)
             return
-        visibility = self.visibility.footer.value(time.monotonic())
+        visibility = self.visibility.progress
         self.visibility.advance(time.monotonic(), True, True, self.mode == "playlist")
         layout = NarrowLayout(self.width(), self.height(), visibility)
         footer_visible = visibility > .001

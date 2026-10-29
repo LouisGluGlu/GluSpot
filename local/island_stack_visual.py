@@ -1374,9 +1374,14 @@ class IslandStackVisual(QWidget):
             if small_backstep:
                 index = previous_index
         self.lyric_last_sync_position = position
+        epoch = getattr(self, 'media_capture_epoch_id', 0)
+        first_capture = bool(epoch) and (
+            self.media_track_id, epoch) != getattr(self, '_lyric_capture_epoch', None)
+        if first_capture:
+            self._lyric_capture_epoch = (self.media_track_id, epoch)
         if index != self.lyric_index and index < len(self.lyrics):
             distance = abs(index - self.lyric_index)
-            self.prev_lyric_index = self.lyric_index
+            self.prev_lyric_index = index if first_capture else self.lyric_index
             self.lyric_index = index
             self.lyric_changed_at = now
             self.lyric_transition_distance = distance
@@ -1386,6 +1391,8 @@ class IslandStackVisual(QWidget):
             self.lyric_last_phase_at = now
             self.lyric_last_phase_timing_kind = ""
             return True
+        if first_capture:
+            self.prev_lyric_index = index
         return False
 
     def _u(self, value: float) -> float:
