@@ -25,7 +25,7 @@ from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_lyric_motion import MusicLyricFrame
 from local.music_lyric_presentation import (
-    split_display_layers, INTRO_COUNTDOWN_TEXT, paint_intro_countdown,
+    split_display_layers, INTRO_COUNTDOWN_TEXT, intro_dot_radius, paint_intro_countdown,
     LYRIC_PREVIOUS_ALPHA, LYRIC_NEXT_ALPHA,
 )
 if __package__:
@@ -926,7 +926,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 continue
             if line.text == INTRO_COUNTDOWN_TEXT:
                 paint_intro_countdown(
-                    painter, center=QPointF(self.width() / 2,
+                    painter, center=QPointF(viewport.left() + intro_dot_radius(font.pixelSize()) * (1.2 + 3.35),
                         layout.lyric_anchor + (index - visual_focus) * step),
                     pixel_size=font.pixelSize(), color=QColor('white'),
                     opacity=1. if index == focus else LYRIC_PREVIOUS_ALPHA if index < focus else LYRIC_NEXT_ALPHA,
@@ -1055,7 +1055,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 metrics = QFontMetricsF(font)
                 baseline_offset = metrics.ascent() - metrics.capHeight() / 2
                 paint_intro_countdown(
-                    painter, center=QPointF(self.width() / 2, row.top() + baseline_offset),
+                    painter, center=QPointF(row.left() + intro_dot_radius(font.pixelSize()) * (1.2 + 3.35), row.top() + baseline_offset),
                     pixel_size=font.pixelSize(), color=QColor('white'),
                     opacity=1. if index == focus else LYRIC_PREVIOUS_ALPHA if index < focus else LYRIC_NEXT_ALPHA,
                     blur_layers=((0, 1.),), scale=self.devicePixelRatioF())
