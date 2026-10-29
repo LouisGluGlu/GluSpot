@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 
-from api.models import ColorToken, IslandVisualData, TimedLyricLine, TrackData
+from api.models import ColorToken, IslandVisualData, TimedLyricLine, TimedLyricUnit, TrackData
 from api.providers import EmptyIslandDataProvider
 from api.capture.runtime import CaptureRuntime
 from local.island_stack_visual import IslandStackVisual
@@ -302,6 +302,34 @@ class NarrowCommitTests(unittest.TestCase):
                 self.sample(now + offset)
                 self.assertEqual(self.window.content_image(layout).cacheKey(), content.cacheKey())
         self.assertEqual(self.window.veil.builds, builds)
+
+    def test_word_progress_changes_sharp_ink_without_rebuilding_blur(self):
+        units = (TimedLyricUnit(3, 4, 'one '), TimedLyricUnit(4, 5, 'two '),
+                 TimedLyricUnit(5, 6, 'three'))
+        lines = (TimedLyricLine(0, 'Past line'),
+                 TimedLyricLine(3, 'one two three', units, 'word'),
+                 TimedLyricLine(9, 'Next line'))
+        self.apply(lyric_track(timed_lyrics=lines, position_seconds=3.2,
+                               is_playing=True))
+        self.owner.lyric_index = self.owner.prev_lyric_index = 1
+        self.owner.lyric_changed_at = time.monotonic() - 1
+        self.owner.lyric_last_sync_position = 3.2
+        self.sample(time.monotonic())
+        layout = NarrowLayout(360, 640)
+        initial_focus = self.window.lyric_focus()
+        self.window.refresh_veil()
+        key, builds = self.window.veil_key, self.window.veil.builds
+        first = QImage(self.window.content_image(layout))
+        images = []
+        for position in (3.45, 3.7, 4.2, 4.7):
+            self.owner.lyric_last_sync_position = position
+            self.window.refresh_veil()
+            self.assertEqual(self.window.lyric_focus(), initial_focus)
+            self.assertEqual(self.window.veil_key, key)
+            self.assertEqual(self.window.veil.builds, builds)
+            images.append(QImage(self.window.content_image(layout)))
+        self.assertTrue(any(image != first for image in images),
+                        'sharp source-timed word ink stopped advancing')
 
     def test_live_intro_uses_shared_circle_surface_in_active_slot(self):
         lines = (TimedLyricLine(0, presentation.INTRO_COUNTDOWN_TEXT),

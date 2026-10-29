@@ -341,7 +341,7 @@ def paint_benchmark(window, frames, mode):
         set_opacity(window, 1.0)
         render_frame(window, target)
         time.sleep(window.study_timer.interval()/1000)
-    # Match the app's existing 33ms timer for its CPU acceptance, and report
+    # Match the app's existing visual timer for its CPU acceptance, and report
     # a separate 60Hz stress sample. Both include tick/preparation + full paint.
     def fade_cpu(interval):
         start_fade(window, time.monotonic(), True)
@@ -408,7 +408,7 @@ def paint_benchmark(window, frames, mode):
             "scroll_fade_overlap_p95_ms": scroll_p95,
             "fade_cpu_percent": cpu_percent, "fade_cadence_ms": app_interval*1000,
             "stress_60hz_cpu_percent": stress_cpu_percent, "veil_fade_cpu_percent_60hz": veil_cpu,
-            "fade_cpu_scenario": "paused source at the actual 33ms app cadence",
+            "fade_cpu_scenario": f"paused source at the actual {app_interval * 1000:g}ms app cadence",
             "cpu_target_met": cpu_percent <= 15,
             "paint_target_met": p95 <= 16.7 and p99 <= 24}
 
