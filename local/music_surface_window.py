@@ -1086,6 +1086,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return True
 
     def hideEvent(self, event):
+        self._finish_width_layout()
         self._glass_feedback.reset()
         self._reset_window_compact()
         self._dismiss_song_playlist_panel()
@@ -2249,6 +2250,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     def shutdown(self):
         if self._closing_for_shutdown:
             return
+        self._finish_width_layout()
         self._glass_feedback.reset()
         self._clear_control_renderer.clear()
         self._disconnect_queue_artwork_signal()

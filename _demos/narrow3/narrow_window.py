@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextLayout, QTransform
 from PySide6.QtWidgets import QApplication
 
@@ -73,6 +73,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def set_content_layout(self, layout, *, animate=True):
         # One selection is shared by the narrow and wide painters and inputs.
         # Narrow keeps its established immediate content switch.
+        if hasattr(self, "_width_chrome_animation"):
+            self._width_chrome_animation.stop()
+            self._finish_width_chrome()
         changed = super().set_content_layout(
             normalize_content_layout(layout), animate=animate and not getattr(self, "narrow", False))
         if changed and hasattr(self, "_controls_key"):
@@ -85,6 +88,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         return getattr(self, "narrow", False) and getattr(self, "mode", None) == "lyrics"
 
     def _content_column_geometry(self, rect=None):
+        if (getattr(self, "_width_chrome_active", False)
+                and self.mode == "lyrics"):
+            target = self._width_lyric_geometry(self.narrow, rect)
+            return tuple(self._interpolate_rect(first, last, self._width_chrome_progress)
+                         for first, last in zip(self._width_content_from, target))
         if not self._narrow_lyrics_mount:
             return super()._content_column_geometry(rect)
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
@@ -92,10 +100,21 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         viewport.translate(surface.topLeft())
         return QRectF(viewport), QRectF(-10000., 0., 0., 0.), viewport
 
+    def _width_lyric_geometry(self, narrow, rect=None):
+        if not narrow:
+            return super()._content_column_geometry(rect)
+        surface = QRectF(self.rect()) if rect is None else QRectF(rect)
+        layout = NarrowLayout(surface.width(), surface.height())
+        return surface, layout.cover.translated(surface.topLeft()), layout.viewport.translated(surface.topLeft())
+
     def _paint_wide_lyrics_mounted(self, painter):
         self._paint_lyric_column(painter, QRectF(self.rect()))
 
     def __init__(self, owner, variant, lyrics_alignment, *, live=False):
+        self._width_chrome_active = False
+        self._width_chrome_progress = 1.
+        self._width_chrome_from = {}
+        self._width_content_from = ()
         self.live = live
         self._wide_lyrics_dirty = True
         self._source_lines_key = None
@@ -192,6 +211,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self.move(80, 80)
         self.toggle_wide(False)
+        self._width_chrome_animation = QVariantAnimation(self)
+        self._width_chrome_animation.setDuration(320)
+        self._width_chrome_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._width_chrome_animation.valueChanged.connect(self._advance_width_chrome)
+        self._width_chrome_animation.finished.connect(self._finish_width_chrome)
         if not live:
             self.set_cover(0)
         self._sync_owned_playback_mode()
@@ -306,6 +330,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 self.study_timer.start(40)
 
     def hideEvent(self, event):
+        if hasattr(self, "_width_chrome_animation"):
+            self._width_chrome_animation.stop()
+            self._finish_width_chrome()
         if self.live and hasattr(self, "study_timer"):
             self.study_timer.stop()
         super().hideEvent(event)
@@ -410,7 +437,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self._library_back_available(),
                self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
                self.owner.secondary_color.rgba(), self.owner.track_title, self.owner.artist,
-               self.width(), self.height(), self.devicePixelRatioF(),
+               self.width(), self.height(), self.devicePixelRatioF(), self._width_chrome_progress,
                getattr(self.owner, 'media_position_source', ''), self.hovered_glass)
         if self.live and key == self._commit_key and not self._wide_lyrics_dirty:
             self._diagnostics['noop_paints'] += 1
@@ -447,14 +474,69 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                   "media:next": layout.next}
         if self.visibility.progress <= .001:
             top, footer = {}, {}
-        return [top, {"library": layout.back}
-                if library_available and self.visibility.progress > .001 else {}, footer]
+        groups = [top, {"library": layout.back}
+                  if library_available and self.visibility.progress > .001 else {}, footer]
+        if self._width_chrome_active:
+            return [{key: self.posed_rect(key, rect) for key, rect in group.items()}
+                    for group in groups]
+        return groups
 
     def posed_rect(self, key, rect):
+        if self._width_chrome_active:
+            targets = self._width_control_rects(self.narrow)
+            target = targets.get(key, rect)
+            return self._interpolate_rect(self._width_chrome_from.get(key, target), target,
+                                          self._width_chrome_progress)
         return QRectF(rect)
 
+    def _width_control_rects(self, narrow):
+        if narrow:
+            layout = NarrowLayout(self.width(), self.height(),
+                                  library_available=self._library_back_available(),
+                                  dj_available=self.dj_available)
+            return {**layout._top_rects, "media:previous": layout.previous,
+                    "media:toggle_play_pause": layout.play, "media:next": layout.next}
+        return {key: rect for group in super()._glass_control_groups(time.monotonic())
+                for key, rect in group.items()}
+
+    def _advance_width_chrome(self, value):
+        self._width_chrome_progress = float(value)
+        self._controls_key = None
+        self.update()
+
+    def _finish_width_chrome(self):
+        self._width_chrome_active = False
+        self._width_chrome_progress = 1.
+        self._width_chrome_from.clear()
+        self._width_content_from = ()
+        self.update()
+
     def _sync_narrow_mode(self):
-        self.narrow = self.width() < 960
+        previous = getattr(self, "narrow", self.width() < 960)
+        # 24 logical pixels of deadband; initial explicit 960-wide mode still
+        # enters wide. Reversals start at the displayed geometry.
+        narrow = self.width() < (960 if previous else 936)
+        if narrow == previous or not hasattr(self, "_width_chrome_animation"):
+            self.narrow = narrow
+            return
+        old_rects = self._width_control_rects(previous)
+        if self._width_chrome_active:
+            old_rects = {key: self.posed_rect(key, rect) for key, rect in old_rects.items()}
+        old_content = (self._content_column_geometry() if self._width_chrome_active
+                       else self._width_lyric_geometry(previous))
+        self.narrow = narrow
+        self._width_chrome_animation.stop()
+        if (self.isVisible() and self.mode in {"lyrics", "playlist"}
+                and not getattr(self, "_explicit_width_toggle", False)):
+            self._width_chrome_from = old_rects
+            self._width_content_from = old_content
+            self._width_chrome_progress = 0.
+            self._width_chrome_active = True
+            self._width_chrome_animation.setStartValue(0.)
+            self._width_chrome_animation.setEndValue(1.)
+            self._width_chrome_animation.start()
+        else:
+            self._finish_width_chrome()
 
     def resizeEvent(self, event):
         self._sync_narrow_mode()
@@ -466,7 +548,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def paintEvent(self, event):
         self._diagnostics['paints'] += 1
         start = time.perf_counter()
-        if not self.narrow:
+        if self._width_chrome_active:
+            self._paint_shared_narrow_content()
+        elif not self.narrow:
             self._painted_live_hit_pose = None
             super().paintEvent(event)
         else:
@@ -564,7 +648,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 self._diagnostics['stale_frames'] += 1
 
     def _paint_surface_frame(self, event):
-        super()._paint_surface_frame(event, paint_chrome=not self.narrow)
+        super()._paint_surface_frame(event, paint_chrome=not (self.narrow or self._width_chrome_active))
 
     def _paint_shared_narrow_content(self):
         # Keep shared content live (including queue artwork/focus), then draw
@@ -1503,7 +1587,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # Let Qt apply both target dimensions without clamping to 560.
             self.setMinimumHeight(540)
         if (self.width(), self.height()) != (width, height):
-            self.resize(width, height)
+            self._explicit_width_toggle = True
+            try:
+                self.resize(width, height)
+            finally:
+                self._explicit_width_toggle = False
+            if hasattr(self, "_width_chrome_animation"):
+                self._width_chrome_animation.stop()
+                self._finish_width_chrome()
         if not wide:
             self.setMinimumHeight(560)
         self._sync_narrow_mode()
@@ -1554,7 +1645,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def mouseMoveEvent(self, event):
         # Keep the press path until release if resizing switches to wide mode.
-        if not self.narrow and not self._narrow_drag:
+        if not (self.narrow or self._width_chrome_active) and not self._narrow_drag:
             super().mouseMoveEvent(event)
             return
         if (self.live and event.buttons() & Qt.MouseButton.LeftButton
@@ -1661,7 +1752,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         return super().event(event)
 
     def mousePressEvent(self, event):
-        if not self.narrow:
+        if not (self.narrow or self._width_chrome_active):
             super().mousePressEvent(event)
             return
         if self.live:
@@ -1810,7 +1901,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.update()
 
     def mouseReleaseEvent(self, event):
-        if not self.narrow and not self._narrow_drag:
+        if not (self.narrow or self._width_chrome_active) and not self._narrow_drag:
             super().mouseReleaseEvent(event)
             return
         if self.live:

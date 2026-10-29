@@ -57,6 +57,8 @@ def paint_content_layout_glyph(painter, rect, layout, ink):
 
 
 class MusicContentLayoutMixin:
+    WIDTH_LAYOUT_HYSTERESIS = 24.0
+
     def _init_content_layout(self):
         getter = getattr(self.owner, "settings_getter", None)
         self._content_layout = normalize_content_layout(getter("v2_music_content_layout", "lyrics") if callable(getter) else "lyrics")
@@ -76,6 +78,11 @@ class MusicContentLayoutMixin:
         self._layout_animation.setEasingCurve(QEasingCurve.Type.Linear)
         self._layout_animation.valueChanged.connect(self._advance_content_layout)
         self._layout_animation.finished.connect(self._finish_content_layout)
+        self._width_layout_fraction = None
+        self._width_layout_animation = QVariantAnimation(self)
+        self._width_layout_animation.setDuration(320)
+        self._width_layout_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._width_layout_animation.valueChanged.connect(self._advance_width_layout)
         self._queue_scroll = 0.
         self._queue_hit_rects = {}
         self._queue_pressed = None
@@ -139,25 +146,66 @@ class MusicContentLayoutMixin:
         font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
         six_glyphs = QFontMetricsF(font).horizontalAdvance("音乐正在播放")
         required = max(180., six_glyphs, (43. + 61. + 14. + 4. * 18.) * scale)
+        previous = getattr(self, "_content_layout_fit_narrow", None)
+        # Enter and leave on opposite sides of a logical-pixel deadband.
+        # Repeated fit queries at one size cannot restart the animation.
+        margin = self.WIDTH_LAYOUT_HYSTERESIS * .5
+        threshold = required
+        if previous is not None:
+            threshold += margin if previous else -margin
         self._content_layout_fit_key = key
-        self._content_layout_fit_narrow = column.width() < required
+        self._content_layout_fit_narrow = column.width() < threshold
+        if previous is None or previous != self._content_layout_fit_narrow:
+            self._retarget_width_layout(self._content_layout_fit_narrow)
         return self._content_layout_fit_narrow
+
+    def _retarget_width_layout(self, narrow):
+        target = float(narrow)
+        animation = self._width_layout_animation
+        animation.stop()
+        fraction = self._width_layout_fraction
+        if (fraction is None or not self.isVisible()
+                or self._content_layout not in {"lyrics", "playlist"}
+                or self._content_layout_resize_suspended
+                or self._pending_fullscreen is not None
+                or self._island_entering or self._island_returning
+                or self._capturing_transition_snapshot):
+            self._width_layout_fraction = target
+            return
+        animation.setStartValue(fraction)
+        animation.setEndValue(target)
+        animation.start()
+
+    def _advance_width_layout(self, value):
+        self._width_layout_fraction = float(value)
+        self.update()
+
+    def _finish_width_layout(self):
+        self._width_layout_animation.stop()
+        if hasattr(self, "_content_layout_fit_narrow"):
+            self._width_layout_fraction = float(self._content_layout_fit_narrow)
 
     def _content_column_geometry(self, rect=None):
         """Width changes the external column arrangement, never its mode."""
         content, cover, column = self._wide_content_column_geometry(rect)
-        if (self._content_layout in {"lyrics", "playlist"}
-                and self._content_layout_is_narrow()):
+        if self._content_layout in {"lyrics", "playlist"}:
+            narrow = self._content_layout_is_narrow()
             surface = QRectF(self.rect()) if rect is None else QRectF(rect)
             scale = self._surface_scale(surface)
             margin = min(20., 20. * scale)
             top = min(70., surface.height() * .16)
-            content = surface.adjusted(margin, top, -margin, -margin)
-            side = max(1., min(96., surface.width() * .267, content.height() * .28))
-            cover = QRectF(content.left(), content.top(), side, side)
-            column_top = cover.bottom() + 24. * scale
+            stacked_content = surface.adjusted(margin, top, -margin, -margin)
+            side = max(1., min(96., surface.width() * .267, stacked_content.height() * .28))
+            stacked_cover = QRectF(stacked_content.left(), stacked_content.top(), side, side)
+            column_top = stacked_cover.bottom() + 24. * scale
             bottom = max(column_top + 1., surface.bottom() - 156. * scale)
-            column = QRectF(content.left(), column_top, content.width(), bottom - column_top)
+            if narrow:
+                column = QRectF(stacked_content.left(), column_top, stacked_content.width(), bottom - column_top)
+            # Keep live lyric/queue columns reflowing at their target width;
+            # only the artwork and its surrounding content geometry travel.
+            fraction = self._width_layout_fraction
+            content = self._interpolate_rect(content, stacked_content, fraction)
+            cover = self._interpolate_rect(cover, stacked_cover, fraction)
         return content, cover, column
 
     def _wide_content_column_geometry(self, rect=None):
