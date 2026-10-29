@@ -1064,12 +1064,12 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self.hide()
 
     def _library_back_available(self) -> bool:
+        getter = getattr(self.owner, "settings_getter", None)
+        if callable(getter) and not getter("v2_owned_playback_enabled", True):
+            return False
         if self._library_login_required():
             return callable(getattr(self.owner, "_music_login_callback", None))
-        callback = getattr(self.owner, "_music_library_back_callback", None)
-        active = getattr(getattr(self.owner, "data_provider", None), "_owned_active", None)
-        return callable(callback) and (getattr(self, "_library_loading", None) is not None
-                                      or callable(active) and bool(active()))
+        return callable(getattr(self.owner, "_music_library_back_callback", None))
 
     def _library_login_required(self) -> bool:
         getter = getattr(self.owner, "_music_login_required", None)

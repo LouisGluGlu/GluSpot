@@ -10,6 +10,7 @@ class NarrowLayout:
     width: int
     height: int
     visibility: float = 1.0
+    library_available: bool = True
 
     @property
     def button_size(self):
@@ -62,12 +63,14 @@ class NarrowLayout:
 
     @property
     def back(self):
-        return QRectF(16, 16, self.button_size, self.button_size)
+        return (QRectF(16, 16, self.button_size, self.button_size)
+                if self.library_available else QRectF())
 
     @property
     def top(self):
         side = self.button_size
-        return [QRectF(self.width - 16 - side - i * (side + 16), 16, side, side)
+        step = side + 16 if self.library_available else (self.width - 32 - side) / 4
+        return [QRectF(self.width - 16 - side - i * step, 16, side, side)
                 for i in range(5)]
 
     @staticmethod

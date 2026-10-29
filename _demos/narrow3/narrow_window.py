@@ -394,6 +394,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                feedback.pose_key(), self.dj_motion.value(now), self.mode,
                self._queue_scroll, self.queue_snapshot(), self.dj_available,
                self.dj_enabled, self.loop_mode, self.owner.media_is_playing,
+               self._library_back_available(),
                self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
                self.owner.secondary_color.rgba(), self.owner.track_title, self.owner.artist,
                self.width(), self.height(), self.devicePixelRatioF(),
@@ -422,7 +423,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
 
     def glass_groups(self):
-        layout = NarrowLayout(self.width(), self.height())
+        library_available = self._library_back_available()
+        layout = NarrowLayout(self.width(), self.height(), library_available=library_available)
         top_keys = ("content_layout", "audio_output", "playback_mode", "translation", "return")
         top = {key: rect for key, rect in zip(top_keys, layout.top)}
         now = time.monotonic()
@@ -436,7 +438,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             footer["personal_dj"] = layout.dj
         if self.visibility.progress <= .001:
             footer = {}
-        return [top, {"library": layout.back} if self.visibility.progress > .001 else {}, footer]
+        return [top, {"library": layout.back}
+                if library_available and self.visibility.progress > .001 else {}, footer]
 
     def posed_rect(self, key, rect):
         return QRectF(rect)
@@ -488,7 +491,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         background_key = (self._background_cache.cacheKey(), self.width(), self.height(),
                           self.devicePixelRatioF())
         visibility = self.visibility.progress
-        layout = NarrowLayout(self.width(), self.height())
+        layout = NarrowLayout(self.width(), self.height(),
+                              library_available=self._library_back_available())
         focus, visual = self.lyric_focus()
         scrolling = self.mode == "lyrics" and abs(focus - visual) > .001
         self._diagnostics['paint_source'] = ("SCROLL" if scrolling else
@@ -763,7 +767,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         key = (self.width(), self.height(), self.devicePixelRatioF(),
                self._glass_feedback.pose_key(), self.dj_motion.value(now),
-               self.dj_available, self.dj_enabled,
+               self.dj_available, self.dj_enabled, self._library_back_available(),
                int(now * 30) if self.dj_speaking else 0,
                self.loop_mode, self.mode, self.song_index, self.cover_index,
                self.owner.album_art.cacheKey(), self.owner.track_title, self.owner.artist,
@@ -787,7 +791,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         with QPainter(image) as layer:
             layer.setRenderHint(QPainter.RenderHint.Antialiasing)
             layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            layout = NarrowLayout(self.width(), self.height())
+            layout = NarrowLayout(self.width(), self.height(),
+                                  library_available=self._library_back_available())
             self.paint_header(layer, layout)
             self.paint_controls(layer, layout, 1.0)
         self._clear_control_renderer.end_frame()
@@ -1379,10 +1384,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         painter.save()
         painter.setOpacity(opacity)
-        back = self.posed_rect("library", layout.back)
-        self._paint_surface_glass(painter, back, role="library")
         ink = self._scene_control_ink()
-        paint_music_source_icon(painter, back.adjusted(8, 8, -8, -8), "library_back", tint=ink)
+        if self._library_back_available():
+            back = self.posed_rect("library", layout.back)
+            self._paint_surface_glass(painter, back, role="library")
+            paint_music_source_icon(painter, back.adjusted(8, 8, -8, -8), "library_back", tint=ink)
         content = self.posed_rect("content_layout", layout.top[0])
         self._paint_surface_glass(painter, content, role="content-layout")
         self._paint_content_layout_icon(painter, content.adjusted(7, 7, -7, -7))
@@ -1724,13 +1730,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         visibility = self.visibility.progress
         self.visibility.advance(time.monotonic(), True, True, self.mode == "playlist")
-        layout = NarrowLayout(self.width(), self.height(), visibility)
+        library_available = self._library_back_available()
+        layout = NarrowLayout(self.width(), self.height(), visibility,
+                              library_available=library_available)
         footer_visible = visibility > .001
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(position):
                     self._glass_feedback.press(key, position, time.monotonic())
-        if footer_visible and layout.back.contains(position):
+        if footer_visible and library_available and layout.back.contains(position):
             self.return_to_library()
         elif footer_visible and layout.top[4].contains(position):
             self.toggle_wide()
