@@ -780,8 +780,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         """Prepare only when layout/theme/DPR/current line/scroll bucket changes.
 
         Called from the timer/input/capture preparation, never paintEvent.
-        Fixture word highlighting stays separate. Live wrapped reading can
-        extend behind controls, so its veil source is refreshed at most 10Hz.
+        Reading ink advances in the sharp lyric layer. The blurred overlay is
+        prepared only for a changed row/scroll bucket, never for word progress.
         """
         layout = NarrowLayout(self.width(), self.height())
         if self.mode == "playlist":
@@ -794,13 +794,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # the residual always fits the atlas's fixed 32px source guard.
             bucket = round(self.real_scroll_offset(visual) / 32.0) * 32.0
             canonical_visual = self.real_visual_for_offset(bucket)
-        live_read_bucket = None
-        if self.live and self.mode == "lyrics":
-            # A current wrapped block can extend under the controls. Its blur
-            # snapshot follows the real reading clock at a bounded 10Hz.
-            live_read_bucket = int(self.playback_position() * 10)
         self.veil_key = (
-            live_read_bucket, self.mode, self.width(), self.height(), layout.lyric_font,
+            self.mode, self.width(), self.height(), layout.lyric_font,
             self._queue_scroll if self.live and self.mode == "playlist" else 0,
             layout.lyric_step, self.lyrics_alignment, self.source_lines(), self.queue_snapshot(),
             self._visual_track_identity(),
