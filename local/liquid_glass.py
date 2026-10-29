@@ -24,7 +24,7 @@ from local.control_hover import install_control_hover
 from local.settings_store import MUSIC_GLASS_DEFAULT_LEVEL, normalize_music_glass_level
 
 GLASS_FACE_OPACITY = .80
-GLASS_MATERIAL_MAX_EDGE = 160
+GLASS_MATERIAL_MAX_EDGE = 224
 GLASS_MATERIAL_CACHE_MAX_BYTES = 4 * 1024 * 1024
 GLASS_MATERIAL_CACHE_MAX_ENTRIES = 64
 GLASS_MATERIAL_FRAME_SECONDS = .1
@@ -133,7 +133,7 @@ def glass_backdrop_opacity(material_level: int = MUSIC_GLASS_DEFAULT_LEVEL) -> f
 
 
 def glass_blur_scale(material_level: int = MUSIC_GLASS_DEFAULT_LEVEL) -> float:
-    return normalize_music_glass_level(material_level) / 50.
+    return 1.45 * normalize_music_glass_level(material_level) / 50.
 
 
 def _sample_rgba(pixels: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:

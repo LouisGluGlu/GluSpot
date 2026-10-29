@@ -96,6 +96,19 @@ class MusicWidthBreakpointTests(unittest.TestCase):
                          QAbstractAnimation.State.Stopped)
         self.assertEqual(self.window._width_layout_fraction, 1.)
 
+    def test_explicit_layout_selection_finishes_width_motion_before_target_capture(self):
+        self.window.resize(700, 640)
+        animation = self.window._width_layout_animation
+        animation.setCurrentTime(animation.duration() // 2)
+        self.assertGreater(self.window._width_layout_fraction, 0.)
+        self.assertLess(self.window._width_layout_fraction, 1.)
+        self.window.set_content_layout("cover", animate=False)
+        self.assertEqual(animation.state(), QAbstractAnimation.State.Stopped)
+        self.assertEqual(self.window._width_layout_fraction, 1.)
+        self.window.set_content_layout("lyrics", animate=False)
+        self.assertEqual(animation.state(), QAbstractAnimation.State.Stopped)
+        self.assertEqual(self.window._width_layout_fraction, 1.)
+
     def test_hidden_resize_adopts_current_geometry_without_a_replay(self):
         self.window.hide()
         self.window.resize(700, 640)

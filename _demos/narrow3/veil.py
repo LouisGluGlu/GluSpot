@@ -416,3 +416,116 @@ class VeilOverlay:
         painter.fillRect(QRectF(0, bottom, width, max(0., height - bottom)),
                          self._dim_mask(False, height))
         painter.restore()
+
+
+class BackgroundEdgeVeil:
+    """Two bounded edge treatments prepared from raw background pixels only.
+
+    The caller owns background epochs and freezes this preparation during a
+    chrome transition. Live lyric and control layers are painted afterwards;
+    this helper never samples a widget, scratch frame or foreground ink.
+    """
+
+    IDLE_RADIUS = 12.0
+    REVEAL_RADIUS = 24.0
+    IDLE_DIM = .04
+    REVEAL_DIM = .18
+    MAX_SAMPLE_SIDE = 512
+
+    def __init__(self):
+        self._key = None
+        self._source = QImage()
+        self._states = ()
+        self.builds = 0
+
+    @property
+    def ready(self):
+        return bool(self._states)
+
+    @property
+    def cache_bytes(self):
+        return sum(state.sizeInBytes() for state in self._states)
+
+    @staticmethod
+    def progress(progress):
+        amount = max(0., min(1., float(progress)))
+        return (.04 + .14 * amount, 12. + 12. * amount)
+
+    def prepare(self, source, width, height):
+        """Prepare idle/revealed scale-space endpoints, never during paint.
+
+        Radius is measured in logical window pixels even when the background
+        provider supplies a much smaller raster. Only two current endpoint
+        images and one bounded source copy are retained; no frame history is
+        accumulated while a song or window changes.
+        """
+        if source.isNull() or width <= 0 or height <= 0:
+            return False
+        key = (source.cacheKey(), float(width), float(height))
+        if key == self._key:
+            return False
+        scale = min(1., self.MAX_SAMPLE_SIDE / max(float(width), float(height)))
+        sample_width, sample_height = max(1, round(width * scale)), max(1, round(height * scale))
+        sampled = source.scaled(sample_width, sample_height,
+                                Qt.AspectRatioMode.IgnoreAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation)
+        sampled = sampled.convertToFormat(QImage.Format.Format_RGBA8888_Premultiplied)
+        pixels = Image.frombytes("RGBA", (sample_width, sample_height),
+                                 bytes(sampled.constBits()), "raw", "RGBA", sampled.bytesPerLine())
+        sample_scale = sample_width / float(width)
+        # Six logical pixels between Gaussian levels gives continuous radius
+        # blending without a filter per destination row or animation frame.
+        levels = (pixels,) + tuple(pixels.filter(ImageFilter.GaussianBlur(radius * sample_scale))
+                                   for radius in (6., 12., 18., 24.))
+        states = []
+        for radius, dim in ((self.IDLE_RADIUS, self.IDLE_DIM),
+                            (self.REVEAL_RADIUS, self.REVEAL_DIM)):
+            endpoint = pixels.copy()
+            for y in range(sample_height):
+                strength = VeilOverlay.band_strength((y + .5) * height / sample_height, height)
+                if strength <= 0.:
+                    continue
+                degree = radius * strength / 6.
+                lower = min(len(levels) - 1, int(degree))
+                upper = min(len(levels) - 1, lower + 1)
+                box = (0, y, sample_width, y + 1)
+                row = Image.blend(levels[lower].crop(box), levels[upper].crop(box), degree - lower)
+                darken = [round(value * (1. - dim * strength)) for value in range(256)]
+                # Work on premultiplied RGB channels and preserve coverage.
+                row = row.point(darken * 3 + list(range(256)))
+                endpoint.paste(row, (0, y))
+            data = endpoint.tobytes()
+            states.append(QImage(data, sample_width, sample_height, sample_width * 4,
+                                 QImage.Format.Format_RGBA8888_Premultiplied).copy())
+        self._key, self._source, self._states = key, sampled, tuple(states)
+        self.builds += 1
+        return True
+
+    def paint(self, painter, rect, progress):
+        """Blend prepared background bands without filtering or new rasters."""
+        if not self.ready or rect.isEmpty():
+            return
+        amount = max(0., min(1., float(progress)))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        opacity = painter.opacity()
+        # Cropping full bounded endpoints at exact logical edges avoids a
+        # second rescale of feather rows and leaves the clear middle alone.
+        bands = ((0., min(TOP_END, rect.height())),
+                 (max(0., rect.height() - BOTTOM_HEIGHT), rect.height()))
+        for index, (image, alpha) in enumerate(((self._states[0], 1.), (self._states[1], amount))):
+            if alpha <= 0.:
+                continue
+            # Replace the raw edge first. Fractional image resampling can
+            # round alpha below255; SourceOver would leak a changing base
+            # through an otherwise frozen endpoint by one colour level.
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source
+                                       if index == 0
+                                       else QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setOpacity(opacity * alpha)
+            for top, bottom in bands:
+                target = QRectF(rect.left(), rect.top() + top, rect.width(), bottom - top)
+                source = QRectF(0., top * image.height() / rect.height(), image.width(),
+                                (bottom - top) * image.height() / rect.height())
+                painter.drawImage(target, image, source)
+        painter.restore()

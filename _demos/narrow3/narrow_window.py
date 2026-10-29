@@ -31,11 +31,11 @@ from local.music_lyric_presentation import (
 if __package__:
     from .layout import NarrowLayout
     from .motion import EaseOutFade, Visibility
-    from .veil import VeilOverlay
+    from .veil import VeilOverlay, BackgroundEdgeVeil
 else:
     from layout import NarrowLayout
     from motion import EaseOutFade, Visibility
-    from veil import VeilOverlay
+    from veil import VeilOverlay, BackgroundEdgeVeil
 from local.personal_dj_icon import paint_personal_dj_icon
 
 SONGS = [("夜航的信", "林间电台"), ("晚风经过", "陈小雨"), ("云与海之间", "南方来信"), ("星光落下来", "木子"), ("慢慢的旅程", "夏日回声"), ("下一站黎明", "白昼乐队"), ("你听见了吗", "无名旅人"), ("再见之前", "海边房间")]
@@ -91,10 +91,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if (getattr(self, "_width_chrome_active", False)
                 and self.mode == "lyrics"):
             target = self._width_lyric_geometry(self.narrow, rect)
-            return tuple(self._interpolate_rect(first, last, self._width_chrome_progress)
-                         for first, last in zip(self._width_content_from, target))
+            content, cover, column = (self._interpolate_rect(first, last, self._width_chrome_progress)
+                                      for first, last in zip(self._width_content_from, target))
+            compact = self._width_chrome_progress if self.narrow else 1. - self._width_chrome_progress
+            cover.translate(0., -VeilOverlay.TOP_END * (1. - self.visibility.progress) * compact)
+            return content, cover, column
         if not self._narrow_lyrics_mount:
-            return super()._content_column_geometry(rect)
+            content, cover, column = super()._content_column_geometry(rect)
+            if (getattr(self, "narrow", False) and self.mode == "playlist"
+                    and hasattr(self, "visibility")):
+                cover.translate(0., -VeilOverlay.TOP_END * (1. - self.visibility.progress))
+            return content, cover, column
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
         viewport = NarrowLayout(surface.width(), surface.height()).viewport
         viewport.translate(surface.topLeft())
@@ -164,6 +171,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.loop_mode = 0
         self.visibility = Visibility(variant == "B")
         self.veil = VeilOverlay()
+        self.background_veil = BackgroundEdgeVeil()
+        self._background_veil_key = None
         self.veil_key = None
         self._lyric_static_key = None
         self._lyric_static_image = None
@@ -247,9 +256,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         result['capture_epoch_id'] = getattr(self.owner, 'media_capture_epoch_id', 0)
         result['is_first_sample'] = getattr(self.owner, 'media_is_first_sample', False)
         result['reveal_progress'] = self.visibility.progress
-        result['dim'], result['blur'] = self.veil.progress(self.visibility.progress)
+        result['dim'] = .04 + .14 * self.visibility.progress
+        result['blur'] = 12. + 12. * self.visibility.progress
         result['veil_cache_hit_ratio'] = self.veil.hits / max(1, self.veil.hits + self.veil.misses)
-        result['controls_translate'] = 0.
+        result['controls_translate'] = -VeilOverlay.TOP_END * (1. - self.visibility.progress)
         result['controls_scale'] = 1.
         return result
 
@@ -446,8 +456,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._wide_lyrics_dirty = False
         self._diagnostics['commits'] += 1
         assert self._diagnostics['commits'] <= self._diagnostics['samples']
-        if self.narrow:
+        if self.narrow or self._width_chrome_active:
             self.refresh_fade_background(now)
+            self.refresh_background_veil(now)
             self.refresh_veil()
             self.refresh_controls(now)
             self.refresh_fade_content(now)
@@ -472,22 +483,28 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             top["personal_dj"] = layout.dj
         footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
                   "media:next": layout.next}
-        if self.visibility.progress <= .001:
+        if self.visibility.progress < .75 and not getattr(self, "_capturing_chrome", False):
             top, footer = {}, {}
         groups = [top, {"library": layout.back}
-                  if library_available and self.visibility.progress > .001 else {}, footer]
-        if self._width_chrome_active:
-            return [{key: self.posed_rect(key, rect) for key, rect in group.items()}
-                    for group in groups]
-        return groups
+                  if library_available and (self.visibility.progress >= .75
+                                           or getattr(self, "_capturing_chrome", False)) else {}, footer]
+        return [{key: self.posed_rect(key, rect) for key, rect in group.items()}
+                for group in groups]
 
     def posed_rect(self, key, rect):
         if self._width_chrome_active:
             targets = self._width_control_rects(self.narrow)
             target = targets.get(key, rect)
-            return self._interpolate_rect(self._width_chrome_from.get(key, target), target,
-                                          self._width_chrome_progress)
-        return QRectF(rect)
+            rect = self._interpolate_rect(self._width_chrome_from.get(key, target), target,
+                                           self._width_chrome_progress)
+        else:
+            rect = QRectF(rect)
+        if not getattr(self, "_capturing_chrome", False):
+            hidden = 1. - self.visibility.progress
+            rect.translate(0. if key.startswith("media:") else (self.width() + 22.) * hidden,
+                           (VeilOverlay.BOTTOM_HEIGHT if key.startswith("media:")
+                                else -VeilOverlay.TOP_END) * hidden)
+        return rect
 
     def _width_control_rects(self, narrow):
         if narrow:
@@ -521,7 +538,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         old_rects = self._width_control_rects(previous)
         if self._width_chrome_active:
-            old_rects = {key: self.posed_rect(key, rect) for key, rect in old_rects.items()}
+            self._capturing_chrome = True
+            try:
+                old_rects = {key: self.posed_rect(key, rect) for key, rect in old_rects.items()}
+            finally:
+                self._capturing_chrome = False
         old_content = (self._content_column_geometry() if self._width_chrome_active
                        else self._width_lyric_geometry(previous))
         self.narrow = narrow
@@ -611,6 +632,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         else:
             if fading and background_key == self._fade_background_key:
                 painter.drawImage(QPointF(0, 0), self._fade_background)
+                self.background_veil.paint(painter, QRectF(self.rect()), visibility)
             else:
                 self._paint_background(painter, QRectF(self.rect()), QColor(palette.primary), QColor(palette.secondary), now,
                                        ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights,
@@ -623,11 +645,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 self.veil.paint(painter, content, veil_key, visibility,
                                 scroll_delta=self.veil_scroll_delta)
         if visibility > .001 and self._controls_bands is not None:
-            painter.save()
-            painter.setOpacity(visibility)
-            painter.drawImage(QPointF(0, 0), self._controls_bands[0])
-            painter.drawImage(QPointF(0, self.height() - VeilOverlay.BOTTOM_HEIGHT), self._controls_bands[1])
-            painter.restore()
+            self._paint_chrome_bands(painter)
         if self.live and self.owner.media_position_source == "capture-unavailable":
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
             painter.setPen(QColor(255, 255, 255, 220))
@@ -650,6 +668,43 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def _paint_surface_frame(self, event):
         super()._paint_surface_frame(event, paint_chrome=not (self.narrow or self._width_chrome_active))
 
+    def refresh_background_veil(self, now):
+        if self._background_cache.isNull():
+            return
+        # Pin both endpoints for the whole reveal/hide generation. The source
+        # is the raw AlbumFlow raster; it cannot contain lyric/control ink.
+        key = (self._visual_track_identity(), self.width(), self.height(),
+               self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
+               self.owner.secondary_color.rgba(), self.visibility.opacity.generation)
+        if key != self._background_veil_key or not self.background_veil.ready:
+            self.background_veil.prepare(self._background_cache, self.width(), self.height())
+            self._background_veil_key = key
+
+    def _paint_background(self, painter, rect, primary, secondary, now, **kwargs):
+        narrow = (getattr(self, "narrow", False) or self._width_chrome_active) and hasattr(self, "background_veil")
+        if narrow and not self.visibility.settled(now):
+            kwargs['advance_frame'] = False
+        super()._paint_background(painter, rect, primary, secondary, now, **kwargs)
+        if narrow:
+            self.background_veil.paint(painter, rect, self.visibility.progress)
+
+    def _paint_chrome_bands(self, painter):
+        hidden = 1. - self.visibility.progress
+        painter.save()
+        painter.setOpacity(min(1., self.visibility.progress / .2))
+        painter.drawImage(QPointF((self.width() + 22.) * hidden, -VeilOverlay.TOP_END * hidden), self._controls_bands[0])
+        painter.drawImage(QPointF(0, self.height() - VeilOverlay.BOTTOM_HEIGHT
+                                 + VeilOverlay.BOTTOM_HEIGHT * hidden), self._controls_bands[1])
+        painter.restore()
+
+    def refresh_glass_material(self):
+        super().refresh_glass_material()
+        # Cached narrow bands must change level together with the shared faces.
+        self._controls_key = None
+        self._controls_bands = None
+        if hasattr(self, "visibility"):
+            self.refresh_controls(time.monotonic())
+
     def _paint_shared_narrow_content(self):
         # Keep shared content live (including queue artwork/focus), then draw
         # the same narrow chrome for every selected mode.
@@ -661,7 +716,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 layout = NarrowLayout(self.width(), self.height(),
                                       library_available=self._library_back_available(),
                                       dj_available=self.dj_available)
-                self.paint_controls(painter, layout, self.visibility.progress)
+                if self._width_chrome_active:
+                    self.paint_controls(painter, layout, self.visibility.progress)
+                elif self._controls_bands is not None:
+                    self._paint_chrome_bands(painter)
         if self.live and self.mode == "cover_lyrics":
             self._painted_live_model = self.live_model_key()
             self._painted_track = self._visual_track_identity()
@@ -910,8 +968,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             layout = NarrowLayout(self.width(), self.height(),
                                   library_available=self._library_back_available(),
                                   dj_available=self.dj_available)
-            self.paint_header(layer, layout)
-            self.paint_controls(layer, layout, 1.0)
+            self._capturing_chrome = True
+            try:
+                if self.mode == "lyrics":
+                    self.paint_header(layer, layout)
+                self.paint_controls(layer, layout, 1.0)
+            finally:
+                self._capturing_chrome = False
         self._clear_control_renderer.end_frame()
         self._controls_bands = (image.copy(0, 0, image.width(), round(VeilOverlay.TOP_END * ratio)),
                                 image.copy(0, round((self.height() - VeilOverlay.BOTTOM_HEIGHT) * ratio),
@@ -951,7 +1014,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         with QPainter(image) as layer:
             layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
             layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            self._paint_background(layer, QRectF(self.rect()), QColor(palette.primary),
+            super()._paint_background(layer, QRectF(self.rect()), QColor(palette.primary),
                                    QColor(palette.secondary), now,
                                    ambient_colors=palette.ambient_colors,
                                    ambient_weights=palette.ambient_weights, advance_frame=False)
@@ -1193,14 +1256,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.veil.prepare(self.veil_key, frozen_source)
 
     def paint_header(self, painter, layout):
-        cover = layout.cover
+        shift = 0. if getattr(self, "_capturing_chrome", False) else -VeilOverlay.TOP_END * (1. - self.visibility.progress)
+        cover = layout.cover.translated(0., shift)
         painter.save()
         clip = QPainterPath()
         clip.addRoundedRect(cover, 10, 10)
         painter.setClipPath(clip)
         painter.drawImage(cover, self.owner.album_art)
         painter.restore()
-        column = layout.text
+        column = layout.text.translated(0., shift)
         painter.setFont(self._surface_font(20))
         painter.setPen(QColor(255, 255, 255, 242))
         title = QFontMetricsF(painter.font()).elidedText(self.owner.track_title, Qt.TextElideMode.ElideRight, int(column.width()))
@@ -1500,7 +1564,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if opacity <= .001:
             return
         painter.save()
-        painter.setOpacity(opacity)
+        painter.setOpacity(min(1.0, opacity / .2))
         ink = self._scene_control_ink()
         if self._library_back_available():
             back = self.posed_rect("library", layout.back)
@@ -1516,7 +1580,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if opacity <= .001:
                 continue
             painter.save()
-            painter.setOpacity(opacity)
+            painter.setOpacity(min(1.0, opacity / .2))
             rect = self.posed_rect(key, rect)
             self._paint_surface_glass(painter, rect, role=role)
             icon = rect.adjusted(8, 8, -8, -8)
@@ -1538,7 +1602,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if footer <= .001:
             return
         painter.save()
-        painter.setOpacity(footer)
+        painter.setOpacity(min(1.0, footer / .2))
         for command, rect in (("previous", layout.previous),
                               ("toggle_play_pause", layout.play), ("next", layout.next)):
             rect = self.posed_rect("media:" + command, rect)
@@ -1857,24 +1921,26 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         layout = NarrowLayout(self.width(), self.height(), visibility,
                               library_available=library_available, dj_available=self.dj_available)
         footer_visible = visibility > .001
+        action = None
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(position):
+                    action = key
                     self._glass_feedback.press(key, position, time.monotonic())
-        if footer_visible and library_available and layout.back.contains(position):
+        if footer_visible and library_available and action == 'library':
             self.return_to_library()
-        elif footer_visible and layout.top[4].contains(position):
+        elif footer_visible and action == 'return':
             self.toggle_wide()
-        elif footer_visible and layout.top[0].contains(position):
+        elif footer_visible and action == 'content_layout':
             self._cycle_content_layout()
             self._finish_content_layout()
-        elif footer_visible and layout.previous.contains(position):
+        elif footer_visible and action == 'media:previous':
             self.select_song(self.song_index - 1)
-        elif footer_visible and layout.next.contains(position):
+        elif footer_visible and action == 'media:next':
             self.select_song(self.song_index + 1)
-        elif footer_visible and layout.play.contains(position):
+        elif footer_visible and action == 'media:toggle_play_pause':
             self.owner.media_is_playing = not self.owner.media_is_playing
-        elif footer_visible and layout.favorite.contains(position):
+        elif footer_visible and action == 'collection':
             if position.x() < layout.favorite.center().x():
                 if self.song_index in self.liked_songs:
                     self.liked_songs.remove(self.song_index)
@@ -1882,12 +1948,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                     self.liked_songs.add(self.song_index)
             else:
                 self.playlist_songs.add(self.song_index)
-        elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[0].contains(position):
+        elif footer_visible and action == 'playback_mode':
             self.loop_mode = (self.loop_mode + 1) % 3
-        elif footer_visible and layout.utility(self.dj_motion.value(time.monotonic()))[1].contains(position):
+        elif footer_visible and action == 'content_layout':
             self._cycle_content_layout()
             self._finish_content_layout()
-        elif footer_visible and self.dj_available and layout.dj.contains(position):
+        elif footer_visible and self.dj_available and action == 'personal_dj':
             self.dj_enabled = not self.dj_enabled
             if not self.dj_enabled:
                 self.dj_speaking = False

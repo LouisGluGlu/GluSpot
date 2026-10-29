@@ -53,6 +53,21 @@ class MusicGlassLevelTests(unittest.TestCase):
                 manager._save_timer.stop()
                 reloaded._save_timer.stop()
 
+    def test_strengthened_blur_is_level_driven_and_static_frames_are_identical(self):
+        self.assertEqual(glass.glass_blur_scale(50), 1.45)
+        self.assertEqual(glass.GLASS_MATERIAL_MAX_EDGE, 224)
+        scene, rect = self.striped_scene(), QRectF(0, 0, 120, 60)
+        for level in (25, 75):
+            images = []
+            for _frame in range(10):
+                image = QImage(120, 60, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(Qt.GlobalColor.transparent)
+                with QPainter(image) as painter:
+                    glass.paint_liquid_glass(painter, rect, refractive=True,
+                        backdrop=scene, material_level=level, cache_token='stable')
+                images.append(image)
+            self.assertTrue(all(image == images[0] for image in images))
+
     def test_one_settings_slider_persists_both_material_effects_and_syncs(self):
         island, settings = FakeIslandWidget(), FakeSettingsManager()
         window = SettingsWindow(island, settings)

@@ -286,6 +286,7 @@ class MusicContentLayoutMixin:
         cover_from = self._content_layout_cover_pose()
         snapshot = self._capture_content_layout() if animate and self.isVisible() else QImage()
         transport_from = QRectF(self._media_control_panel_rect)
+        self._finish_width_layout()
         self._layout_animation.stop()
         self._layout_target_snapshot = QImage()
         self._layout_composite = QImage()

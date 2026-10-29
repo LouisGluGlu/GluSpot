@@ -92,7 +92,7 @@ from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
 from local.music_source_icons import paint_music_source_icon
 from local.personal_dj_icon import DJ_RING_CYCLE_SECONDS, paint_personal_dj_icon, personal_dj_status_color, personal_dj_status_opacity
-from local.liquid_glass import GlassCaptureMixin, paint_liquid_glass, widget_glass_level, glass_material_tint, live_glass_paint
+from local.liquid_glass import GlassCaptureMixin, paint_liquid_glass, widget_glass_level, glass_material_tint, live_glass_paint, clear_glass_cache
 from local.ui_theme import app_dark_mode
 from local.control_hover import HoverMotion
 from local.music_control_glass import ControlFeedback, GlassControlRenderer, paint_control_overlay
@@ -8622,8 +8622,9 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return widget_glass_level(self)
 
     def refresh_glass_material(self):
+        """Invalidate material and control snapshots as one settings change."""
         self._clear_control_renderer.clear()
-        """Invalidate control exit snapshots and any already open child panels."""
+        clear_glass_cache()
         self._control_layer_cache.clear()
         self._control_layer_cache_bytes = 0
         self._visible_control_layers.clear()
@@ -9696,7 +9697,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 mixed.setOpacity(blend)
                 mixed.drawImage(target, upper_image)
             layer_image.setDevicePixelRatio(dpr)
-        painter.setOpacity(reveal ** 0.75)
+        painter.setOpacity(min(1.0, reveal / .2))
         if native_dpr > dpr:
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.drawImage(layer_bounds.translated(shift), layer_image)
@@ -9877,7 +9878,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         )
         if audio_available and not audio_active and audio_pose is not None:
             painter.save()
-            painter.setOpacity(reveal ** .75)
+            painter.setOpacity(min(1.0, reveal / .2))
             painter.translate(self._window_control_shift(button, reveal))
             connection = connection_capsule_rect(audio_button, audio_pose, self._surface_font(
                 16.0 * scale, QFont.Weight.DemiBold), 16.0 * scale)
