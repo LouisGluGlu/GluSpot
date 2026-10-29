@@ -69,12 +69,56 @@ class NarrowWidthBreakpointTests(unittest.TestCase):
         halfway = self.window.glass_groups()[0]['content_layout']
         cover = self.window._content_column_geometry()[1]
         self.assertNotEqual(before, halfway)
-        self.assertNotEqual(start, cover)
+        self.assertEqual(start, cover, 'wide content returns only after B has split')
         self.assertEqual(target_column, self.window._content_column_geometry()[2])
         self.assertEqual(self.window._live_action_at(halfway.center()), 'content_layout')
         self.assertTrue(self.window._layout_snapshot.isNull())
+        self.window._advance_width_chrome(.7)
+        self.assertEqual(self.window._content_column_geometry()[1], start)
+        self.window._advance_width_chrome(.85)
+        self.assertNotEqual(self.window._content_column_geometry()[1], start)
+        self.assertEqual(target_column, self.window._content_column_geometry()[2])
         self.window._advance_width_chrome(1.)
         self.assertNotEqual(halfway, self.window.glass_groups()[0]['content_layout'])
+        self.assertNotEqual(self.window._content_column_geometry()[1], start)
+        self.assertEqual(target_column, self.window._content_column_geometry()[2])
+
+    def test_merge_phases_move_B_only_after_bottom_exit_and_reverse_A_first(self):
+        entry, exit_width = self.crossover()
+        self.window.resize(entry, 640)
+        self.window._width_chrome_animation.stop()
+        self.assertEqual(self.window._width_chrome_animation.duration(), 420)
+
+        def at(progress):
+            self.window._advance_width_chrome(progress)
+            return {key: rect for group in self.window.glass_groups() for key, rect in group.items()}
+
+        wide_B = at(0.)['content_layout']
+        self.assertEqual(at(.29)['content_layout'], wide_B)
+        self.assertNotIn('collection', at(.4))
+        merging_B = at(.4)['content_layout']
+        narrow_B = at(.55)['content_layout']
+        self.assertNotEqual(merging_B, wide_B)
+        self.assertNotEqual(merging_B, narrow_B)
+        self.assertNotIn('collection', at(.56))
+        narrow = at(1.)
+        self.assertEqual(narrow['content_layout'], narrow_B)
+        self.assertLess(narrow['collection'].bottom(), self.window.height() / 2)
+        self.window._finish_width_chrome()
+
+        self.window.resize(exit_width, 640)
+        self.window._width_chrome_animation.stop()
+        narrow_B = at(0.)['content_layout']
+        self.assertEqual(at(.44)['content_layout'], narrow_B)
+        self.assertNotIn('collection', at(.5))
+        splitting_B = at(.575)['content_layout']
+        wide_B = at(.7)['content_layout']
+        self.assertNotEqual(splitting_B, narrow_B)
+        self.assertNotEqual(splitting_B, wide_B)
+        self.assertNotIn('collection', at(.71))
+        wide = at(1.)
+        self.assertEqual(wide['content_layout'], wide_B)
+        self.assertGreater(wide['collection'].top(), self.window.height() / 2)
 
     def test_reversal_starts_at_displayed_chrome_and_hide_releases(self):
         entry, exit_width = self.crossover()
@@ -93,6 +137,32 @@ class NarrowWidthBreakpointTests(unittest.TestCase):
         self.window.hide()
         self.assertFalse(self.window._width_chrome_active)
         self.assertEqual(self.window._width_chrome_animation.state().value, 0)
+
+    def test_reversal_preserves_half_fused_outline_and_half_squeezed_A(self):
+        entry, exit_width = self.crossover()
+        for narrowing, progress, phase_index in ((True, .425, 0), (True, .775, 1),
+                                                  (False, .225, 1), (False, .575, 0)):
+            with self.subTest(narrowing=narrowing, progress=progress):
+                self.window.resize(exit_width if narrowing else entry, 640)
+                self.window._width_chrome_animation.stop()
+                self.window._finish_width_chrome()
+                self.window.resize(entry if narrowing else exit_width, 640)
+                self.window._width_chrome_animation.stop()
+                self.window._advance_width_chrome(progress)
+                previous_phases = self.window._chrome_phases()
+                self.assertAlmostEqual(previous_phases[phase_index], .5)
+
+                self.window.resize(exit_width if narrowing else entry, 640)
+                self.window._width_chrome_animation.stop()
+                self.assertEqual(self.window._width_chrome_progress, 0.)
+                self.assertEqual(self.window._chrome_phases(), previous_phases,
+                                 'reversal must inherit the displayed glass outline')
+                targets = self.window._width_control_rects(self.window.narrow)
+                for key in ('audio_output', 'content_layout', 'playback_mode', 'return', 'collection'):
+                    self.assertIn(key, self.window._width_chrome_from)
+                    self.assertEqual(self.window.posed_rect(key, targets[key]),
+                                     self.window._width_chrome_from[key],
+                                     f'{key} jumped away from its recorded reversal pose')
 
     def test_narrow_uses_the_shared_decision_and_only_one_animation(self):
         with patch.object(self.window, '_width_breakpoint_narrow', return_value=True) as shared:

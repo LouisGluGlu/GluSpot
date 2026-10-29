@@ -23,7 +23,8 @@ from local.control_hover import HoverMotion, advance_neighbor_spring, neighbor_d
 from local.glass_style import (CONTROL_COMPOSITE_DPR, DJ_TINT, GLASS_CLEAR, GLASS_DJ,
                                GLASS_GLYPH, GLASS_SELECTED_ALPHA, PRESS_DAMPING,
                                PRESS_GROWTH, PRESS_HOLD_SECONDS, PRESS_STIFFNESS)
-from local.liquid_glass import GLASS_MATERIAL_FRAME_SECONDS, GLASS_MATERIAL_MAX_EDGE
+from local.liquid_glass import (GLASS_CAPSULE_MATERIAL_MAX_EDGE,
+                                GLASS_MATERIAL_FRAME_SECONDS, GLASS_MATERIAL_MAX_EDGE)
 
 
 def paint_control_overlay(painter, bounds, draw):
@@ -173,6 +174,56 @@ def _path_signature(path):
                                             for e in (path.elementAt(i) for i in range(path.elementCount()))))
 
 
+def fused_control_path(rects, fusion):
+    """Union round members with smooth, growing metaball necks.
+
+    At zero only the original circles remain. At one, aligned equal-height
+    slots form a capsule. Intermediate necks use tangential cubic curves,
+    rather than a rounded bounding rectangle or overlapping glass layers.
+    """
+    circles = [(QRectF(rect).center(), min(rect.width(), rect.height()) / 2.)
+               for rect in rects if not rect.isEmpty()]
+    path = QPainterPath()
+    for center, radius in circles:
+        circle = QPainterPath()
+        circle.addEllipse(center, radius, radius)
+        path = path.united(circle)
+    amount = min(1., max(0., float(fusion)))
+    if amount <= 0.:
+        return path
+    for (first, r1), (second, r2) in zip(circles, circles[1:]):
+        dx, dy = second.x() - first.x(), second.y() - first.y()
+        distance = math.hypot(dx, dy)
+        if distance <= abs(r1 - r2) or min(r1, r2) <= 0.:
+            continue
+        direction = math.atan2(dy, dx)
+        tangent = math.acos(min(1., max(-1., (r1 - r2) / distance)))
+        if distance < r1 + r2:
+            u1 = math.acos(min(1., max(-1., (r1*r1 + distance*distance - r2*r2) / (2.*r1*distance))))
+            u2 = math.acos(min(1., max(-1., (r2*r2 + distance*distance - r1*r1) / (2.*r2*distance))))
+        else:
+            u1 = u2 = 0.
+        angles = (direction + u1 + (tangent - u1) * amount,
+                  direction - u1 - (tangent - u1) * amount,
+                  direction + math.pi - u2 - (math.pi - u2 - tangent) * amount,
+                  direction - math.pi + u2 + (math.pi - u2 - tangent) * amount)
+        def point(center, radius, angle):
+            return center + QPointF(math.cos(angle) * radius, math.sin(angle) * radius)
+        p1a, p1b = (point(first, r1, angle) for angle in angles[:2])
+        p2a, p2b = (point(second, r2, angle) for angle in angles[2:])
+        span = math.hypot(p2a.x() - p1a.x(), p2a.y() - p1a.y())
+        handle = min(amount * 2.4, span / (r1 + r2)) * min(1., 2.*distance / (r1 + r2))
+        bridge = QPainterPath(p1a)
+        bridge.cubicTo(point(p1a, r1 * handle, angles[0] - math.pi / 2.),
+                       point(p2a, r2 * handle, angles[2] + math.pi / 2.), p2a)
+        bridge.lineTo(p2b)
+        bridge.cubicTo(point(p2b, r2 * handle, angles[3] - math.pi / 2.),
+                       point(p1b, r1 * handle, angles[1] + math.pi / 2.), p1b)
+        bridge.closeSubpath()
+        path = path.united(bridge)
+    return path
+
+
 def _restore_path(signature):
     path = QPainterPath()
     path.setFillRule(Qt.FillRule(signature[0]))
@@ -212,12 +263,19 @@ def control_geometry(w, h, radius, dpr, spec, signature=None):
         # Exact distance to flattened line segments avoids the prototype's
         # pixel x dense-boundary-point allocation and preserves disjoint bars.
         nearest = np.full((h, w), np.inf, np.float32)
+        # Fused chrome has hundreds of boundary segments. Compare squared
+        # distances and take one root per pixel instead of one per segment;
+        # retain the existing transport material's distance calculation.
+        squared = spec == GLASS_CLEAR
         for polygon in path.toSubpathPolygons(QTransform().scale(dpr, dpr)):
             points = list(polygon)
             for a, b in zip(points, points[1:] + points[:1]):
                 vx, vy = b.x() - a.x(), b.y() - a.y()
                 t = np.clip(((xx - a.x()) * vx + (yy - a.y()) * vy) / max(1e-10, vx * vx + vy * vy), 0., 1.)
-                nearest = np.minimum(nearest, np.hypot(xx - a.x() - t * vx, yy - a.y() - t * vy))
+                dx, dy = xx - a.x() - t * vx, yy - a.y() - t * vy
+                nearest = np.minimum(nearest, dx * dx + dy * dy if squared else np.hypot(dx, dy))
+        if squared:
+            np.sqrt(nearest, out=nearest)
         mask = QImage(w, h, QImage.Format.Format_Grayscale8)
         mask.fill(0)
         with QPainter(mask) as p:
@@ -278,13 +336,14 @@ def _sample_cached(channel, mapping):
     return top * (1. - fy) + bottom * fy
 
 
-def _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint):
+def _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint,
+           material_max_edge=GLASS_MATERIAL_MAX_EDGE, mask=True):
     geometry = control_geometry(*geometry_key)
     _, light, alpha = geometry
     h, w = alpha.shape
     pad = math.ceil((spec.lens * (1. + spec.chroma) + spec.blur * 3.) * dpr + 3.)
     full_w, full_h = w + 2 * pad, h + 2 * pad
-    ratio = min(1., GLASS_MATERIAL_MAX_EDGE / max(full_w, full_h))
+    ratio = min(1., material_max_edge / max(full_w, full_h))
     sw, sh = max(2, round(full_w * ratio)), max(2, round(full_h * ratio))
     area = rect.adjusted(-pad / dpr, -pad / dpr, pad / dpr, pad / dpr)
     crop = QImage(sw, sh, QImage.Format.Format_RGB32)
@@ -342,7 +401,7 @@ def _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint):
     np.clip(rgb, 0., 255., out=rgb)
     rgb += (255. - rgb) * light
     rgba = np.empty((h, w, 4), np.uint8)
-    rgba[..., :3], rgba[..., 3] = rgb, alpha * 255.
+    rgba[..., :3], rgba[..., 3] = rgb, alpha * 255. if mask else 255
     return QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
 
 
@@ -380,8 +439,17 @@ class GlassControlRenderer:
     def would_refresh(self, role, scene, now, pose, state):
         previous = self.patches.get(role)
         moving = state is not None and state.active(now)
-        interval = glass_style.GLASS_MOVING_REFRESH_SECONDS
-        throttled = (moving and interval > 0. and previous is not None and
+        # Capsule/morph geometry changes share the scene's 100 ms budget.
+        # A material-level change must still replace every face atomically.
+        bounded = len(pose) > 8 and pose[8]
+        interval = (GLASS_MATERIAL_FRAME_SECONDS if bounded and not moving else
+                    glass_style.GLASS_MOVING_REFRESH_SECONDS if moving else 0.)
+        material_changed = previous is not None and previous[0][3] != pose[3]
+        # Exact circular/shared endpoints cannot stretch the previous neck's
+        # baked rim into the capsule, even inside the shape refresh interval.
+        path_changed = (previous is not None and
+                        (previous[0][0][5] is None) != (pose[0][5] is None))
+        throttled = (interval > 0. and previous is not None and not material_changed and not path_changed and
                      0. <= now - previous[2] < interval)
         return not throttled and (previous is None or previous[0] != pose or
             (previous[1] != scene.cacheKey() and (moving or
@@ -402,10 +470,15 @@ class GlassControlRenderer:
 
     def paint(self, painter, rect, *, scene, scene_bounds, ink, now, role,
               state=None, hover=0., path=None, kind="circle", level=50,
-              selected=False, hover_clip=None, hover_segments=None):
+              selected=False, hover_clip=None, hover_segments=None, fusing=False):
         if self.frame_roles is not None:
             self.frame_roles.add(role)
-        spec = (GLASS_GLYPH if kind == "path" else GLASS_DJ if kind == "dj" else GLASS_CLEAR).at_level(level)
+        # Chrome paths retain the circular controls' Clear material; original
+        # transport silhouettes continue to use their existing glyph token.
+        base_spec = GLASS_CLEAR if fusing else GLASS_GLYPH if kind == "path" else GLASS_DJ if kind == "dj" else GLASS_CLEAR
+        spec = base_spec.at_level(level)
+        if fusing:
+            state = None
         dpr = max(CONTROL_COMPOSITE_DPR, min(3., painter.device().devicePixelRatioF()))
         rect = QRectF(rect)
         rect.moveCenter(QPointF(round(rect.center().x() * dpr) / dpr, round(rect.center().y() * dpr) / dpr))
@@ -420,16 +493,18 @@ class GlassControlRenderer:
                           rect.center().y() - (box.height() + 4.) / 2., box.width() + 4., box.height() + 4.)
         w, h = max(2, round(rect.width() * dpr)), max(2, round(rect.height() * dpr))
         # Blur/veil and tint cannot affect the geometry cache.
-        base_spec = GLASS_GLYPH if kind == "path" else GLASS_DJ if kind == "dj" else GLASS_CLEAR
         geometry_key = (w, h, round(min(rect.width(), rect.height()) / 2., 6), dpr, base_spec, signature)
         tint = DJ_TINT if kind == "dj" else (ink.red(), ink.green(), ink.blue())
+        material_max_edge = GLASS_CAPSULE_MATERIAL_MAX_EDGE if kind in {"capsule", "path"} else GLASS_MATERIAL_MAX_EDGE
         pose = (geometry_key, round(rect.x() * dpr), round(rect.y() * dpr), level, tint,
-                scene_bounds.width(), scene_bounds.height())
+                scene_bounds.width(), scene_bounds.height(), material_max_edge,
+                kind == "capsule" or fusing)
         previous = self.patches.get(role)
         if self.record_roles is not None:
             self.record_roles.append((role, pose, state))
         if self.would_refresh(role, scene, now, pose, state):
-            image = _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint)
+            image = _shade(scene, scene_bounds, rect, dpr, spec, geometry_key, tint,
+                           material_max_edge, mask=not (kind == "capsule" or fusing))
             if previous is not None:
                 self.bytes -= previous[3].sizeInBytes()
             self.patches[role] = (pose, scene.cacheKey(), now, image)
@@ -461,6 +536,9 @@ class GlassControlRenderer:
                     state is not None and (state.glow > .001 or abs(lift) > .001))
         if not overlays:
             painter.save()
+            if kind == "capsule" or fusing:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setClipPath(shape, Qt.ClipOperation.IntersectClip)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             painter.drawImage(grown, image)
             painter.restore()
@@ -472,6 +550,8 @@ class GlassControlRenderer:
             p.save()
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            if kind == "capsule" or fusing:
+                p.setClipPath(shape, Qt.ClipOperation.IntersectClip)
             p.drawImage(grown, image)
             p.setClipPath(shape)
             if selected:

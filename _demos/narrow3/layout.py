@@ -67,22 +67,60 @@ class NarrowLayout:
         return self._top_rects.get("library", QRectF())
 
     @property
-    def _top_rects(self):
+    def _capsule_metrics(self):
+        """Fit both frames before progressively disclosing collection actions.
+
+        The Back space stays reserved when ownership hides its button. This
+        keeps both capsules stable, especially the five indispensable B slots.
+        """
         side = self.button_size
-        # Only the missing library slot is reclaimed on the left. Window-mode
-        # stays after translation on the right, including capture-only use.
-        slots = ([("library", side)] if self.library_available else [])
-        slots += [("collection", side * 2), ("audio_output", side),
-                  ("playback_mode", side), ("content_layout", side),
-                  ("translation", side), ("return", side)]
-        if self.dj_available:
-            slots.append(("personal_dj", side))
-        gap = (self.width - 32 - sum(width for _key, width in slots)) / (len(slots) - 1)
-        left = 16.0
+        pad = gap = min(4.0, max(2.0, (self.width - 320.0) / 40.0))
+        dj = self.dj_available
+        collect = True
+
+        def required_width():
+            a = side * (2 if collect else 1) + (side + gap if dj else 0) + pad * 2
+            b = side * 5 + gap * 4 + pad * 2
+            return 32.0 + side + 16.0 + a + b
+
+        # Compress spacing first; optional DJ, then Collect, are the only
+        # actions allowed to yield. B always retains all five entries.
+        if required_width() > self.width:
+            pad = gap = 2.0
+        if required_width() > self.width:
+            dj = False
+        if required_width() > self.width:
+            collect = False
+        return side, pad, gap, dj, collect
+
+    @property
+    def capsule_a(self):
+        side, pad, gap, dj, collect = self._capsule_metrics
+        width = side * (2 if collect else 1) + (side + gap if dj else 0) + pad * 2
+        return QRectF(16.0 + side + 8.0, 16.0, width, side)
+
+    @property
+    def capsule_b(self):
+        side, pad, gap, _dj, _collect = self._capsule_metrics
+        width = side * 5 + gap * 4 + pad * 2
+        return QRectF(self.width - 16.0 - width, 16.0, width, side)
+
+    @property
+    def _top_rects(self):
+        side, pad, gap, dj, collect = self._capsule_metrics
         rects = {}
-        for key, width in slots:
-            rects[key] = QRectF(left, 16, width, side)
-            left += width + gap
+        if self.library_available:
+            rects["library"] = QRectF(16.0, 16.0, side, side)
+        a = self.capsule_a
+        collection_width = side * (2 if collect else 1)
+        rects["collection"] = QRectF(a.left() + pad, a.top(), collection_width, side)
+        if dj:
+            rects["personal_dj"] = QRectF(a.left() + pad + collection_width + gap,
+                                         a.top(), side, side)
+        left = self.capsule_b.left() + pad
+        for key in ("audio_output", "content_layout", "playback_mode", "translation", "return"):
+            rects[key] = QRectF(left, 16.0, side, side)
+            left += side + gap
         return rects
 
     @property
@@ -123,6 +161,14 @@ class NarrowLayout:
     @property
     def favorite(self):
         return self._top_rects["collection"]
+
+    @property
+    def collection_slots(self):
+        favorite = self.favorite
+        side = self.button_size
+        count = 2 if self._capsule_metrics[4] else 1
+        return tuple(QRectF(favorite.left() + index * side, favorite.top(), side, side)
+                     for index in range(count))
 
     @property
     def dj(self):

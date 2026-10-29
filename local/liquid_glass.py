@@ -25,6 +25,9 @@ from local.settings_store import MUSIC_GLASS_DEFAULT_LEVEL, normalize_music_glas
 
 GLASS_FACE_OPACITY = .80
 GLASS_MATERIAL_MAX_EDGE = 224
+# Shared chrome faces need a wider padded sample at DPR 2; retain the small
+# circle budget and the existing refresh cadence for all other controls.
+GLASS_CAPSULE_MATERIAL_MAX_EDGE = 384
 GLASS_MATERIAL_CACHE_MAX_BYTES = 4 * 1024 * 1024
 GLASS_MATERIAL_CACHE_MAX_ENTRIES = 64
 GLASS_MATERIAL_FRAME_SECONDS = .1

@@ -56,7 +56,7 @@ def check(variant, width, mode, dj):
     bottom = QRectF(0, layout.height - VeilOverlay.BOTTOM_HEIGHT,
                    width, VeilOverlay.BOTTOM_HEIGHT)
     top_controls = [layout.back, layout.favorite, *layout.top]
-    if dj:
+    if layout.dj.isValid():
         top_controls.append(layout.dj)
     header_content = [layout.cover, layout.text]
     if (layout.cover.width() < 84 or layout.cover.width() != layout.cover.height()
@@ -140,6 +140,42 @@ def check_timeline():
     return errors
 
 
+def check_capsules(width, dj, library):
+    layout = NarrowLayout(width, 640, library_available=library, dj_available=dj)
+    errors = []
+    rects = layout._top_rects
+    bounds = QRectF(8, 8, width - 16, 56)
+    if "translation" not in rects or len(layout.top) != 5:
+        errors.append("translation missing from five-slot chrome")
+    if ("library" in rects) != library:
+        errors.append("Back ignores owned-playback gate")
+    if library and layout.back != QRectF(16, 16, layout.button_size, layout.button_size):
+        errors.append("Back is not independent at (16,16)")
+    if layout.capsule_b.right() != width - 16:
+        errors.append("capsule B is not right aligned")
+    if layout.capsule_a.right() + 8 > layout.capsule_b.left() + .001:
+        errors.append("capsule frames overlap")
+    if any(not bounds.contains(rect) for rect in [*rects.values(), layout.capsule_a, layout.capsule_b]):
+        errors.append("chrome is outside the width budget")
+    if any(first.intersects(second) for first, second in itertools.combinations(rects.values(), 2)):
+        errors.append("chrome slots overlap")
+    b_keys = ("audio_output", "content_layout", "playback_mode", "translation", "return")
+    if any(not layout.capsule_b.contains(rects[key]) for key in b_keys):
+        errors.append("B lost a required slot")
+    if any(rects[first].right() > rects[second].left()
+           for first, second in zip(b_keys, b_keys[1:])):
+        errors.append("B order is not Device/Layout/PlayOrder/Translation/WindowSize")
+    if any(not layout.capsule_a.contains(rect) for rect in layout.collection_slots):
+        errors.append("collection slots escaped capsule A")
+    if layout.dj.isValid() and not layout.capsule_a.contains(layout.dj):
+        errors.append("DJ does not fit capsule A")
+    without_back = NarrowLayout(width, 640, library_available=False, dj_available=dj)
+    if (layout.capsule_a != without_back.capsule_a
+            or layout.capsule_b != without_back.capsule_b):
+        errors.append("hiding Back shifts capsules")
+    return errors
+
+
 def main():
     app = QApplication.instance() or QApplication([])
     failures = 0
@@ -150,6 +186,11 @@ def main():
     errors = check_timeline()
     failures += bool(errors)
     print(f"{'FAIL' if errors else 'PASS'} timing: {', '.join(errors) or 'shared 320ms curve, 1200ms idle and continuous reversal'}")
+    for width, dj, library in itertools.product((320, 336, 360, 480, 640), (False, True), (False, True)):
+        errors = check_capsules(width, dj, library)
+        failures += bool(errors)
+        print(f"{'FAIL' if errors else 'PASS'} capsules {width} dj={dj} back={library}: "
+              f"{', '.join(errors) or 'two frames, five B slots, no overlap or overflow'}")
     return int(bool(failures))
 
 

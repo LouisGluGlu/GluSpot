@@ -76,12 +76,13 @@ class NarrowBackPcRegressionTests(unittest.TestCase):
                 self.assertEqual(self.owner._music_login_callback.call_count,
                                  int(login_required))
 
-    def test_disabled_owned_playback_reclaims_top_left_without_widening(self):
+    def test_disabled_owned_playback_leaves_top_left_empty_without_widening(self):
         self.settings["v2_owned_playback_enabled"] = False
         point = self.top_left_probe()
         before = QRect(self.window.geometry())
         self.assertFalse(self.window._library_back_available())
         self.assertNotEqual(self.window._live_action_at(point), "return")
+        self.assertNotEqual(self.window._live_action_at(point), "favorite")
         with patch.object(self.window, "toggle_wide") as toggle, \
              patch.object(self.window, "_activate_song_collection"), \
              patch.object(self.window, "_seek_to_lyric"):
@@ -103,10 +104,12 @@ class NarrowBackPcRegressionTests(unittest.TestCase):
                                      dj_available=dj)._top_rects
                 self.assertGreater(rects["return"].left(), width / 2)
                 self.assertGreaterEqual(rects["return"].left(), rects["translation"].right())
+                self.assertIn("translation", rects)
                 self.assertFalse(rects["return"].contains(self.top_left_probe()))
                 if not owned:
-                    self.assertEqual(rects["collection"].topLeft(), QPointF(16, 16))
-                    self.assertEqual(self.window._live_action_at(self.top_left_probe()), "favorite")
+                    reference = NarrowLayout(width, 640, library_available=True, dj_available=dj)
+                    self.assertEqual(rects["collection"], reference.favorite)
+                    self.assertNotEqual(self.window._live_action_at(self.top_left_probe()), "favorite")
 
     def test_empty_top_left_with_hidden_controls_never_toggles_window_mode(self):
         self.settings["v2_owned_playback_enabled"] = False

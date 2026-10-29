@@ -23,7 +23,7 @@ class NarrowChromeSlideTests(unittest.TestCase):
         self.assertAlmostEqual(groups[0]['content_layout'].top(), layout.top[0].top() - VeilOverlay.TOP_END * .2)
         self.assertAlmostEqual(groups[2]['media:next'].top(), layout.next.top() + VeilOverlay.BOTTOM_HEIGHT * .2)
         self.assertEqual(window._live_action_at(groups[0]['return'].center()), 'return')
-        self.assertNotEqual(window._live_action_at(layout.top[4].center()), 'return')
+        self.assertNotEqual(window._live_action_at(layout.top[3].center()), 'return')
         window.visibility.progress = 0.
         self.assertTrue(all(not group for group in window.glass_groups()))
 

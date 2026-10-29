@@ -229,20 +229,26 @@ class NarrowCommitTests(unittest.TestCase):
             self.window.tick()
         self.window.study_timer.stop()
 
-    def test_first_capture_sample_settles_large_index_without_interpolating(self):
+    def test_first_capture_sample_selects_large_index_with_shared_viewport_motion(self):
         self.sample(100)
         before = self.window.diagnostic_snapshot()
-        self.owner.media_capture_epoch_id = 'fixture-epoch-1'
-        self.owner.media_is_first_sample = True
-        self.owner.media_position_sampled_at = 101
-        self.owner.lyric_last_sync_position = 175.14
-        self.owner.lyric_index = 58
-        self.owner.prev_lyric_index = 1
-        self.owner.lyric_changed_at = 101
+        # t149 mounts the production lyric renderer. Publish the physical
+        # source sample it reads instead of editing only the old view fields.
+        self.apply(lyric_track(capture_epoch_id='fixture-epoch-1', is_first_sample=True,
+                              position_seconds=175.14, position_sampled_at=101,
+                              position_observed_seconds=175.14))
         self.sample(101)
-        for instant in (101, 101.016, 101.05, 101.2):
+        poses = []
+        for frame in range(241):
+            instant = 101 + frame / 120
             with patch.object(narrow.time, 'monotonic', return_value=instant):
-                self.assertEqual(self.window.lyric_focus(), (58, 58.0))
+                focus, visual = self.window.lyric_focus()
+            self.assertEqual(focus, 58)
+            self.assertGreaterEqual(visual, 1)
+            self.assertLess(visual, len(self.window.source_lines()))
+            poses.append(visual)
+        self.assertGreater(poses[-1], poses[0])
+        self.assertEqual(poses[-1], 58)
         after = self.window.diagnostic_snapshot()
         self.assertEqual(after['settle_commits'] - before['settle_commits'], 1)
         self.assertEqual(after['snap_frames'] - before['snap_frames'], 0)
@@ -343,13 +349,28 @@ class NarrowCommitTests(unittest.TestCase):
         self.owner.lyric_changed_at = time.monotonic() - 1
         self.sample(time.monotonic())
         layout = NarrowLayout(360, 640)
-        with patch.object(narrow, 'paint_intro_countdown', wraps=presentation.paint_intro_countdown) as dots:
+        with patch.object(narrow, 'paint_intro_countdown', wraps=presentation.paint_intro_countdown) as dots, \
+             patch.object(self.window, 'paint_intro_dots', wraps=self.window.paint_intro_dots) as cached:
             image = QImage(360, 640, QImage.Format.Format_ARGB32_Premultiplied)
             image.fill(Qt.GlobalColor.transparent)
             with QPainter(image) as painter:
                 self.window.paint_live_lyrics(painter, layout, current_only=True)
         self.assertTrue(dots.called)
-        self.assertEqual(dots.call_args.kwargs['center'], QPointF(180, 320))
+        # The shared painter rasterizes a local tile; its draw position owns
+        # the active slot. Test both coordinate spaces and the rendered ink.
+        tile = self.window._intro_dot_image
+        ratio = tile.devicePixelRatio()
+        self.assertEqual(dots.call_args.kwargs['center'],
+                         QPointF(tile.width() / ratio / 2, tile.height() / ratio / 2))
+        center = cached.call_args.args[1]
+        self.assertEqual(center.y(), layout.lyric_anchor)
+        self.assertAlmostEqual(center.x(), layout.viewport.left()
+                               + presentation.intro_dot_radius(
+                                   presentation.surface_font(layout.lyric_font).pixelSize()) * (1.2 + 3.35))
+        ys, xs = np.nonzero(alpha_pixels(image) > 127)
+        self.assertGreater(len(xs), 0)
+        self.assertAlmostEqual((xs.min() + xs.max() + 1) / 2, center.x(), delta=1)
+        self.assertAlmostEqual((ys.min() + ys.max() + 1) / 2, layout.lyric_anchor, delta=1)
         self.assertEqual(dots.call_args.kwargs['pixel_size'], presentation.surface_font(layout.lyric_font).pixelSize())
 
     def test_lyric_cap_height_center_repeats_through_reveal(self):
@@ -383,21 +404,16 @@ class NarrowCommitTests(unittest.TestCase):
         self.assertEqual(self.window.diagnostic_snapshot()['snap_frames'], 0)
         self.assertEqual(self.window.diagnostic_snapshot()['settle_commits'], 1)
 
-    def test_same_line_highlight_after_settle_still_follows_owner_sample(self):
+    def test_next_line_after_settle_follows_shared_capture_sample(self):
         now = time.monotonic()
-        self.owner.media_capture_epoch_id = 9
-        self.owner.media_is_first_sample = True
-        self.owner.lyric_index = 30
-        self.owner.prev_lyric_index = 1
-        self.owner.lyric_changed_at = now
-        self.owner.lyric_last_sync_position = 90
+        self.apply(lyric_track(capture_epoch_id=9, is_first_sample=True,
+                              position_seconds=90, position_sampled_at=now,
+                              position_observed_seconds=90))
         self.sample(now)
         self.assertEqual(self.window.lyric_focus(), (30, 30.0))
-        self.owner.media_is_first_sample = False
-        self.owner.lyric_index = 31
-        self.owner.prev_lyric_index = 30
-        self.owner.lyric_changed_at = now + 3
-        self.owner.lyric_last_sync_position = 93.2
+        self.apply(lyric_track(capture_epoch_id=9, is_first_sample=False,
+                              position_seconds=93.2, position_sampled_at=now + 3,
+                              position_observed_seconds=93.2))
         with patch.object(narrow.time, 'monotonic', return_value=now + 3.12):
             focus, visual = self.window.lyric_focus()
         self.assertEqual(focus, 31)
@@ -411,7 +427,7 @@ class NarrowCommitTests(unittest.TestCase):
             self.assertAlmostEqual(dim, .18 * alpha)
             self.assertAlmostEqual(blur, 6 * alpha)
 
-    def test_control_paint_paths_match_narrow_baseline(self):
+    def test_control_paint_paths_share_capsule_material_and_preserve_transport(self):
         source = textwrap.dedent(inspect.getsource(type(self.window).paint_controls))
         tree = ast.parse(source)
         self.assertNotIn('paint_liquid_glass', source)
@@ -421,7 +437,7 @@ class NarrowCommitTests(unittest.TestCase):
         surface = [call for call in calls if isinstance(call.func, ast.Attribute)
                    and call.func.attr == '_paint_surface_glass']
         self.assertEqual({ast.unparse(call.args[1]) for call in surface},
-                         {'back', 'content', 'rect', 'dj'})
+                         {'back', 'rect', 'dj'})
         transport_loop = next(node for node in ast.walk(tree) if isinstance(node, ast.For)
                               and 'toggle_play_pause' in ast.unparse(node.iter))
         paint_calls = [node.func.attr for node in ast.walk(transport_loop)
@@ -429,11 +445,23 @@ class NarrowCommitTests(unittest.TestCase):
                        and node.func.attr.startswith('_paint')]
         self.assertEqual(paint_calls, ['_paint_transport_icon'])
         self.assertIn('layout.transport_icon(rect)', ast.unparse(transport_loop))
-        capsule = next(call for call in calls if ast.unparse(call.func) ==
-                       'self._clear_control_renderer.paint')
-        self.assertEqual(ast.unparse(capsule.args[1]), 'favorite')
+        capsules = [call for call in calls if isinstance(call.func, ast.Attribute)
+                    and call.func.attr == '_paint_chrome_capsule']
+        self.assertEqual({next(kw.value.value for kw in call.keywords if kw.arg == 'role')
+                          for call in capsules},
+                         {'chrome-utilities', 'chrome-collection', 'collection'})
+        # All compound faces enter the renderer once, including the actual
+        # fusion path; members only contribute hover segments and glyphs.
+        helper = ast.parse(textwrap.dedent(inspect.getsource(type(self.window)._paint_chrome_capsule)))
+        material = [call for call in ast.walk(helper) if isinstance(call, ast.Call)
+                    and ast.unparse(call.func) == 'self._clear_control_renderer.paint']
+        self.assertEqual(len(material), 1)
+        capsule = material[0]
+        self.assertEqual(ast.unparse(capsule.args[1]), 'face')
         keywords = {kw.arg: ast.unparse(kw.value) for kw in capsule.keywords}
-        self.assertEqual(keywords['kind'], "'capsule'")
+        self.assertEqual(keywords['kind'], "'path' if merging else 'capsule'")
+        self.assertEqual(keywords['path'], 'path')
+        self.assertIn('hover_segments', keywords)
         self.assertEqual(keywords['level'], 'self._surface_glass_level()')
         self.assertEqual(keywords['scene'], 'self._surface_glass_backdrop()')
 

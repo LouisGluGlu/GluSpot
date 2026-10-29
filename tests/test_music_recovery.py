@@ -8,8 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QRectF
-from PySide6.QtGui import QImage, QPainter
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 from api.cantonese import cantonese_phonetics, has_cantonese_evidence
@@ -82,10 +81,12 @@ class LyricRecoveryTests(unittest.TestCase):
         self.assertEqual(duet_estimated_read_start(192.0, "薛 : 我记", units, (4, 5, 6), peer_source_start=188.34), 192.0)
         self.assertEqual(duet_estimated_read_start(188.34, "薛 : 我记", (), (4, 5, 6), peer_source_start=188.34), 188.34)
 
-    def test_translation_button_spacing_matches_modes_and_shared_toggle(self):
+    def test_five_utility_circles_include_translation_and_shared_setting_still_toggles(self):
         owner = _LayerOwner()
+        owner.data_provider = SimpleNamespace(get_audio_route_snapshot=lambda: None)
         owner.set_enable_dual_line_lyrics = lambda enabled: setattr(owner, "enable_dual_line_lyrics", enabled)
         surface = MusicSurfaceWindow(owner)
+        surface._owned_playback_mode = "sequential"
         surface.resize(1190, 666)
         self.addCleanup(owner.close)
         self.addCleanup(surface.shutdown)
@@ -93,35 +94,60 @@ class LyricRecoveryTests(unittest.TestCase):
             surface._fullscreen = fullscreen
             surface._sync_window_control_rects()
             mode = surface._button_rects["mode" if fullscreen else "return"]
-            translation = surface._button_rects["translation"]
-            self.assertEqual(translation.size(), mode.size())
-            self.assertEqual(translation.top(), mode.top())
-            self.assertAlmostEqual(mode.left() - translation.right(), 12.0)
+            keys = ("audio_output", "content_layout", "playback_mode", "translation", "mode" if fullscreen else "return")
+            self.assertEqual(set(surface._button_rects), set(keys))
+            circles = [surface._button_rects[key] for key in keys]
+            for circle in circles:
+                self.assertEqual(circle.size(), mode.size())
+                self.assertEqual(circle.top(), mode.top())
+            for left, right in zip(circles, circles[1:]):
+                self.assertAlmostEqual(right.left() - left.right(), 12.0)
         self.assertTrue(owner.enable_dual_line_lyrics)
         surface._toggle_translation()
         self.assertFalse(owner.enable_dual_line_lyrics)
         surface._toggle_translation()
         self.assertTrue(owner.enable_dual_line_lyrics)
 
-    def test_enabled_translation_keeps_readable_ink_over_sampled_clear_glass(self):
+    def test_translation_setting_changes_real_bilingual_render_and_retains_chrome(self):
         owner = _LayerOwner()
+        owner.media_is_playing = False
+        owner.media_position_seconds = 4.0
+        owner.timed_lyrics = [(0., "A sentence continues through the evening\n翻译：晚风依然温柔"),
+                              (20., "Another sentence follows"),
+                              (40., "The third sentence follows"),
+                              (60., "The fourth sentence follows")]
+        owner.set_enable_dual_line_lyrics = lambda enabled: setattr(owner, "enable_dual_line_lyrics", enabled)
         surface = MusicSurfaceWindow(owner)
         surface.resize(1190, 666)
         self.addCleanup(owner.close)
         self.addCleanup(surface.shutdown)
-        image = QImage(1190, 666, QImage.Format.Format_ARGB32_Premultiplied)
-        image.fill(0)
-        painter = QPainter(image)
-        surface._paint_window_controls(painter, QRectF(0, 0, 1190, 666))
-        painter.end()
-        button = surface._button_rects["translation"]
-        inner = button.adjusted(13, 9, -13, -9).toRect()
-        pixels = [image.pixelColor(x, y) for x in range(inner.left(), inner.right())
-                  for y in range(inner.top(), inner.bottom())]
-        self.assertGreater(sum(pixel.alpha() > 240 for pixel in pixels), 10)
-        # Clear transmits already sampled RGB; alpha describes the silhouette.
-        self.assertEqual({pixel.alpha() for pixel in pixels}, {255})
-        self.assertGreater(len({pixel.getRgb() for pixel in pixels}), 3)
+
+        def render(now):
+            image = QImage(1190, 666, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            with patch("local.music_surface_window.time.monotonic", return_value=now), \
+                 patch.object(surface, "_draw_sprung_cached_wrapped_layout",
+                              wraps=surface._draw_sprung_cached_wrapped_layout) as whole, \
+                 patch.object(surface, "_draw_future_wrapped_layout",
+                              wraps=surface._draw_future_wrapped_layout) as future, \
+                 patch.object(surface, "_paint_wrapped_lifted_lyric",
+                              wraps=surface._paint_wrapped_lifted_lyric) as read:
+                surface.render(image)
+            texts = [call.args[3] for draw in (whole, future) for call in draw.call_args_list]
+            texts += [call.args[2] for call in read.call_args_list]
+            return image, texts
+
+        enabled, painted = render(100.)
+        self.assertIn("晚风依然温柔", painted)
+        self.assertIn("translation", surface._button_rects)
+        with patch("local.music_surface_window.time.monotonic", return_value=100.01):
+            surface._toggle_translation()
+        self.assertFalse(owner.enable_dual_line_lyrics)
+        disabled, painted = render(100.4)
+        self.assertNotIn("晚风依然温柔", painted)
+        self.assertIn("A sentence continues through the evening", painted)
+        self.assertNotEqual(bytes(enabled.constBits()), bytes(disabled.constBits()))
+        self.assertIn("translation", surface._button_rects)
 
 
 class ArtworkRecoveryTests(unittest.TestCase):

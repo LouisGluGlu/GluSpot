@@ -14,7 +14,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextLayout, QTransform
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QAbstractButton
 
 from api.models import ColorToken, TimedLyricLine, TimedLyricUnit
 from api.online_music import OnlineSong
@@ -38,6 +38,7 @@ else:
     from motion import EaseOutFade, Visibility
     from veil import VeilOverlay, BackgroundEdgeVeil
 from local.personal_dj_icon import paint_personal_dj_icon
+from local.music_control_glass import fused_control_path
 
 SONGS = [("夜航的信", "林间电台"), ("晚风经过", "陈小雨"), ("云与海之间", "南方来信"), ("星光落下来", "木子"), ("慢慢的旅程", "夏日回声"), ("下一站黎明", "白昼乐队"), ("你听见了吗", "无名旅人"), ("再见之前", "海边房间")]
 LYRICS = ["在夜色中慢慢走", "把心事交给晚风", "那些没有说完的话", "会在星光里重逢", "让时间轻轻流过", "我们还在这条路上", "等天边亮起微光", "再一起迎接远方", "城市把灯光放低", "远处有汽笛回响", "我把这首歌留给你", "天亮以前不要散场"]
@@ -60,6 +61,45 @@ COVERS = ("night_sea.jpg", "sunset_city.jpg", "pink_forest.jpg", "clip.jpg")
 # on a 50ms bucket so a paused source rebuilds nothing and advancing lyrics
 # still refresh the reading front well inside the 120ms seek budget.
 INK_BUCKET_SECONDS = .05
+
+
+class ChromeFocusButton(QAbstractButton):
+    """Accessible slot for a shared painted face; mouse geometry stays owned."""
+    def __init__(self, surface, key, name):
+        super().__init__(surface)
+        self.surface, self.key = surface, key
+        self.setAccessibleName(name)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.clicked.connect(self.activate)
+
+    def activate(self):
+        point = QPointF(self.geometry().center())
+        if self.surface.live:
+            self.surface._begin_live_press(point)
+            self.surface._finish_live_press(point)
+        else:
+            self.surface._press_at(point)
+
+    def focusInEvent(self, event):
+        self.surface.pointer_activity(QPointF(), time.monotonic(), focus=True)
+        self.surface.hovered_glass = self.key
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event):
+        self.surface._focus_reveal = False
+        self.surface.hovered_glass = ""
+        super().focusOutEvent(event)
+        self.update()
+
+    def paintEvent(self, event):
+        if self.hasFocus() and not self.surface._capturing_content_snapshot:
+            with QPainter(self) as painter:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(self.surface._scene_control_ink(), 1., Qt.PenStyle.DotLine))
+                painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 8, 8)
 
 
 class NarrowStudyWindow(MusicSurfaceWindow):
@@ -98,7 +138,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if (getattr(self, "_width_chrome_active", False)
                 and self.mode == "lyrics"):
             target = self._width_lyric_geometry(self.narrow, rect)
-            content, cover = (self._interpolate_rect(first, last, self._width_chrome_progress)
+            content_phase = (self._width_chrome_progress if self.narrow else
+                             self._chrome_phase(self._width_chrome_progress, .70, 1.))
+            content, cover = (self._interpolate_rect(first, last, content_phase)
                               for first, last in zip(self._width_content_from[:2], target[:2]))
             column = target[2]
             compact = self._width_chrome_progress if self.narrow else 1. - self._width_chrome_progress
@@ -130,6 +172,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._width_chrome_progress = 1.
         self._width_chrome_from = {}
         self._width_content_from = ()
+        self._width_glass_backdrop = None
+        self._chrome_backdrop = None
+        self._chrome_backdrop_key = None
+        self._chrome_backdrop_at = -math.inf
+        self._width_phase_from = (0., 0., 1.)
+        self._chrome_focus_buttons = {}
         self.live = live
         self._wide_lyrics_dirty = True
         self._source_lines_key = None
@@ -229,7 +277,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.move(80, 80)
         self.toggle_wide(False)
         self._width_chrome_animation = QVariantAnimation(self)
-        self._width_chrome_animation.setDuration(320)
+        self._width_chrome_animation.setDuration(420)
         self._width_chrome_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._width_chrome_animation.valueChanged.connect(self._advance_width_chrome)
         self._width_chrome_animation.finished.connect(self._finish_width_chrome)
@@ -249,6 +297,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 return False
         self._owner_paint_observer = OwnerPaintObserver(self)
         self.owner.installEventFilter(self._owner_paint_observer)
+        self._sync_chrome_accessibility()
         if not self.live:
             self.study_timer.start(40)
 
@@ -433,6 +482,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if target != self._diagnostic_target:
             self._diagnostics['controls_retargets'] += 1
             self._diagnostic_target = target
+        self._refresh_chrome_backdrop(now)
+        self._sync_chrome_accessibility()
         self.dj_motion.retarget(float(self.dj_available), now, .18)
         feedback = self._glass_feedback
         if (self.hovered_glass or any(feedback.hover.values())
@@ -452,6 +503,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                feedback.pose_key(), self.dj_motion.value(now), self.mode,
                self._queue_scroll, self.queue_snapshot(), self.dj_available,
                self.dj_enabled, self.loop_mode, self.owner.media_is_playing,
+               bool(self.owner.enable_dual_line_lyrics),
                self._library_back_available(),
                self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
                self.owner.secondary_color.rgba(), self.owner.track_title, self.owner.artist,
@@ -480,58 +532,243 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         else:
             self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
 
+    def _sync_chrome_accessibility(self):
+        if not hasattr(self, "visibility"):
+            return
+        names = {"library": "返回音乐库", "favorite": "喜欢", "playlist_add": "收藏到歌单",
+                 "personal_dj": "私人DJ", "audio_output": "音频设备", "content_layout": "内容布局",
+                 "playback_mode": "播放顺序", "translation": "中文翻译", "return": "窗口大小", "mode": "窗口大小",
+                 "media:previous": "上一首", "media:toggle_play_pause": "播放或暂停", "media:next": "下一首"}
+        slots = {key: rect for group in self.glass_groups() for key, rect in group.items()}
+        collection = slots.pop("collection", None)
+        if collection is not None:
+            layout = NarrowLayout(self.width(), self.height(), dj_available=self.dj_available)
+            count = len(layout.collection_slots) if self._chrome_phases()[1] > 0. else 2
+            for index, key in enumerate(("favorite", "playlist_add")[:count]):
+                slots[key] = QRectF(collection.left() + index * collection.width() / count,
+                                   collection.top(), collection.width() / count, collection.height())
+        for key, name in names.items():
+            button = self._chrome_focus_buttons.get(key)
+            if button is None:
+                button = self._chrome_focus_buttons[key] = ChromeFocusButton(self, key, name)
+            rect = slots.get(key)
+            button.setVisible(rect is not None and rect.isValid())
+            if rect is not None and rect.isValid():
+                button.setGeometry(rect.toAlignedRect())
+
+    def _top_control_hover_group(self, rect):
+        # Five utility entries remain reachable for capture and owned playback.
+        base, scale = self._window_control_base_rect(rect), self._surface_scale(rect)
+        return {"audio_output": self._audio_output_button_rect(base, scale),
+                "content_layout": self._content_layout_button_rect(base, scale),
+                "playback_mode": self._playback_mode_button_rect(base, scale),
+                "translation": self._translation_button_rect(base, scale),
+                "mode" if self._fullscreen else "return": base}
+
+    def _content_layout_button_rect(self, button, scale):
+        return self._preceding_control_rect(self._playback_mode_button_rect(button, scale), scale)
+
+    def _paint_window_controls(self, painter, rect, *, paint_ink=True):
+        super()._paint_window_controls(painter, rect, paint_ink=paint_ink)
+        if not paint_ink:
+            return
+        reveal = self._control_reveal_at(time.monotonic())
+        if reveal <= .001:
+            return
+        base, scale = self._window_control_base_rect(rect), self._surface_scale(rect)
+        painter.save()
+        painter.setOpacity(min(1., reveal / .2))
+        painter.translate(self._window_control_shift(base, reveal))
+        ink = self._scene_control_ink()
+        if self._owned_playback_mode is None:
+            button = self._playback_mode_button_rect(base, scale)
+            self._paint_surface_glass(painter, button, role="playback-mode")
+            side = button.width() * .55
+            paint_music_source_icon(painter, NarrowLayout.centered(button.center().x(), button.center().y(), side),
+                                    "sequence", tint=ink)
+        if not self._audio_output_available():
+            button = self._audio_output_button_rect(base, scale)
+            self._paint_surface_glass(painter, button, role="audio-output")
+            paint_audio_output_status(painter, button, (), ink, count=0)
+        painter.restore()
+
+    def _song_collection_geometry_uncached(self, rect, now=None, *, shifted=True):
+        result = super()._song_collection_geometry_uncached(rect, now, shifted=shifted)
+        if result.isValid():
+            return result
+        # Capture has no collection authority; retain the same disabled face.
+        scale = self._surface_scale(rect)
+        side, margin = max(36., 44. * scale), max(10., 18. * scale)
+        result = QRectF(rect.right() - margin - side * 2.5,
+                        rect.bottom() - margin - side, side * 2.5, side)
+        if shifted:
+            reveal = self._control_reveal_at(time.monotonic() if now is None else now)
+            result.translate(14. * scale * (1. - reveal),
+                             (rect.bottom() - result.top() + 4.) * (1. - reveal))
+        return result
+
+    def _personal_dj_geometry_uncached(self, rect, now, *, expansion=None, posed=True):
+        if not getattr(self, "dj_available", False):
+            return QRectF(), QRectF()
+        return super()._personal_dj_geometry_uncached(rect, now, expansion=expansion, posed=posed)
+
+    @staticmethod
+    def _chrome_phase(value, start, end):
+        return min(1., max(0., (value - start) / (end - start)))
+
+    def _chrome_phases(self):
+        if not self._width_chrome_active:
+            return (1., 1., 0.) if self.narrow else (0., 0., 1.)
+        phase = self._width_chrome_progress
+        from_b, from_a, from_bottom = self._width_phase_from
+        if self.narrow:
+            return (from_b + (1. - from_b) * self._chrome_phase(phase, .30, .55),
+                    from_a + (1. - from_a) * self._chrome_phase(phase, .55, 1.),
+                    from_bottom * (1. - self._chrome_phase(phase, 0., .30)))
+        # A fully withdraws before B splits. The bottom lane enters last.
+        return (from_b * (1. - self._chrome_phase(phase, .45, .70)),
+                from_a * (1. - self._chrome_phase(phase, 0., .45)),
+                from_bottom + (1. - from_bottom) * self._chrome_phase(phase, .70, 1.))
+
+    def _chrome_collection_reveal(self):
+        _fusion, top, bottom = self._chrome_phases()
+        return min(1., (top if top > 0. else bottom) / .2)
+
     def glass_groups(self):
         if not self.narrow and not self._width_chrome_active:
             self._sync_window_control_rects()
             groups = super()._glass_control_groups(time.monotonic())
             groups[0] = dict(self._button_rects)
             return groups
-        library_available = self._library_back_available()
-        layout = NarrowLayout(self.width(), self.height(), library_available=library_available,
-                              dj_available=self.dj_available)
-        top_keys = ("content_layout", "audio_output", "playback_mode", "translation", "return")
-        top = {key: rect for key, rect in zip(top_keys, layout.top)}
-        top["collection"] = layout.favorite
-        if self.dj_available:
-            top["personal_dj"] = layout.dj
+        layout = NarrowLayout(self.width(), self.height(),
+                              library_available=self._library_back_available(), dj_available=self.dj_available)
+        top = {key: rect for key, rect in layout._top_rects.items() if key != "library"}
+        _fusion, top_phase, bottom_phase = self._chrome_phases()
+        if self._width_chrome_active and top_phase <= 0. and bottom_phase > 0. and self.dj_available:
+            # A narrow target may yield DJ, but its wide endpoint must still
+            # finish the bottom exit/entry before that disclosure applies.
+            top["personal_dj"] = self._width_control_rects(False).get("personal_dj", QRectF())
+        if self._chrome_collection_reveal() < .75:
+            top.pop("collection", None)
+            top.pop("personal_dj", None)
         footer = {"media:previous": layout.previous, "media:toggle_play_pause": layout.play,
                   "media:next": layout.next}
         if self.visibility.progress < .75 and not getattr(self, "_capturing_chrome", False):
-            top, footer = {}, {}
-        groups = [top, {"library": layout.back}
-                  if library_available and (self.visibility.progress >= .75
-                                           or getattr(self, "_capturing_chrome", False)) else {}, footer]
-        return [{key: self.posed_rect(key, rect) for key, rect in group.items()}
+            return [{}, {}, {}]
+        groups = [top, {"library": layout.back} if self._library_back_available() else {}, footer]
+        return [{key: self.posed_rect(key, rect) for key, rect in group.items() if rect.isValid()}
                 for group in groups]
 
     def posed_rect(self, key, rect):
+        fusion, top, bottom = self._chrome_phases()
         if self._width_chrome_active:
             targets = self._width_control_rects(self.narrow)
             target = targets.get(key, rect)
-            rect = self._interpolate_rect(self._width_chrome_from.get(key, target), target,
-                                           self._width_chrome_progress)
+            source = self._width_chrome_from.get(key, target)
+            if key in {"collection", "personal_dj"}:
+                if top > 0.:
+                    layout = NarrowLayout(self.width(), self.height(),
+                                          library_available=self._library_back_available(), dj_available=self.dj_available)
+                    slot = layout._top_rects.get(key, QRectF())
+                    anchor = layout.capsule_b.left() - 8.
+                    # Right anchored emergence, then settle between Back and B.
+                    rect = QRectF(anchor + (slot.left() - anchor) * top, slot.top(),
+                                  max(.001, slot.width() * top), slot.height())
+                else:
+                    _from_b, from_top, from_bottom = self._width_phase_from
+                    travel = self.width() + 22.
+                    if self.narrow:
+                        # Reversal sources are already posed: add only the
+                        # remaining displacement, never a second full slide.
+                        rect = QRectF(source).translated(travel * (from_bottom - bottom), 0.)
+                    else:
+                        start = (QRectF(source) if from_top <= 0. else
+                                 QRectF(target).translated(travel * (1. - from_bottom), 0.))
+                        progress = (bottom - from_bottom) / max(.001, 1. - from_bottom)
+                        rect = self._interpolate_rect(start, target, progress)
+            else:
+                progress = self._chrome_phase(self._width_chrome_progress, * ((.30, .55) if self.narrow else (.45, .70)))
+                rect = self._interpolate_rect(source, target, progress)
         else:
             rect = QRectF(rect)
         if not getattr(self, "_capturing_chrome", False):
             hidden = 1. - self.visibility.progress
+            lower = key.startswith("media:") or (key in {"collection", "personal_dj"} and top <= 0.)
             rect.translate(0. if key.startswith("media:") else (self.width() + 22.) * hidden,
-                           (VeilOverlay.BOTTOM_HEIGHT if key.startswith("media:")
-                                else -VeilOverlay.TOP_END) * hidden)
+                           (VeilOverlay.BOTTOM_HEIGHT if lower else -VeilOverlay.TOP_END) * hidden)
         return rect
 
     def _width_control_rects(self, narrow):
         if narrow:
             layout = NarrowLayout(self.width(), self.height(),
-                                  library_available=self._library_back_available(),
-                                  dj_available=self.dj_available)
+                                  library_available=self._library_back_available(), dj_available=self.dj_available)
             return {**layout._top_rects, "media:previous": layout.previous,
                     "media:toggle_play_pause": layout.play, "media:next": layout.next}
         return {key: rect for group in super()._glass_control_groups(time.monotonic())
                 for key, rect in group.items()}
 
+    def _refresh_chrome_backdrop(self, now):
+        # Rasterize shared content into a cached, unfiltered backdrop without
+        # grabbing the widget or scheduling another visible paint. Width
+        # merges freeze this endpoint; blur remains owned by the renderer.
+        if (not self.isVisible() or self._width_chrome_active
+                or self._capturing_content_snapshot or self._capturing_transition_snapshot
+                or getattr(self, "_capturing_chrome", False)
+                or not hasattr(self, "visibility")):
+            return
+        raw = super()._surface_glass_backdrop()
+        key = (self.width(), self.height(), self.devicePixelRatioF(), self.mode,
+               self._visual_track_identity(), raw.cacheKey(), self.owner.album_art.cacheKey(),
+               self.source_lines(), self.ink_position(), self._queue_scroll,
+               self.visibility.progress)
+        if key == self._chrome_backdrop_key or now - self._chrome_backdrop_at < .1:
+            return
+        ratio = self.devicePixelRatioF()
+        image = QImage(round(self.width() * ratio), round(self.height() * ratio),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(ratio)
+        image.fill(Qt.GlobalColor.transparent)
+        self._capturing_content_snapshot = True
+        try:
+            with QPainter(image) as painter:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                painter.drawImage(QRectF(self.rect()), raw)
+                _content, cover, column = self._content_column_geometry()
+                if self.narrow and self.mode == "lyrics":
+                    self._paint_wide_lyrics_mounted(painter)
+                    self.paint_header(painter, NarrowLayout(self.width(), self.height()))
+                else:
+                    if cover.isValid():
+                        painter.save()
+                        path = QPainterPath()
+                        painted_cover = self._current_cover_rect(now)
+                        path.addRoundedRect(painted_cover, painted_cover.width() * .055, painted_cover.height() * .055)
+                        painter.setClipPath(path)
+                        painter.drawImage(painted_cover, self.owner.album_art)
+                        painter.restore()
+                    self._paint_lyric_column(painter, QRectF(self.rect()))
+                    if self.mode == "playlist":
+                        scale = self._surface_scale()
+                        self._paint_playback_queue(painter, column.adjusted(0., 8. * scale, 0., -4. * scale))
+        finally:
+            self._capturing_content_snapshot = False
+        self._chrome_backdrop = image
+        self._chrome_backdrop_key, self._chrome_backdrop_at = key, now
+
+    def _surface_glass_backdrop(self):
+        frozen = getattr(self, "_width_glass_backdrop", None)
+        if frozen is not None:
+            return frozen
+        backdrop = getattr(self, "_chrome_backdrop", None)
+        if backdrop is not None and not self._capturing_content_snapshot:
+            return backdrop
+        return super()._surface_glass_backdrop()
+
     def _advance_width_chrome(self, value):
         self._width_chrome_progress = float(value)
         self._controls_key = None
+        self._sync_chrome_accessibility()
         self.update()
 
     def _finish_width_chrome(self):
@@ -539,6 +776,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._width_chrome_progress = 1.
         self._width_chrome_from.clear()
         self._width_content_from = ()
+        self._width_glass_backdrop = None
+        self._controls_key = None
         self.update()
 
     def _width_breakpoint_animated_externally(self):
@@ -567,6 +806,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if narrow == previous or not hasattr(self, "_width_chrome_animation"):
             self.narrow = narrow
             return
+        old_phases = self._chrome_phases()
         old_rects = self._width_control_rects(previous)
         if self._width_chrome_active:
             self._capturing_chrome = True
@@ -583,7 +823,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 and not self._content_layout_resize_suspended
                 and self._pending_fullscreen is None
                 and not self._island_entering and not self._island_returning
-                and not self._capturing_transition_snapshot):
+                and not self._capturing_transition_snapshot
+                and not getattr(self, "_capturing_chrome", False)
+                and not getattr(self, "_glass_capture_depth", 0)):
+            self._width_phase_from = old_phases
+            self._width_glass_backdrop = QImage(self._surface_glass_backdrop())
             self._width_chrome_from = old_rects
             self._width_content_from = old_content
             self._width_chrome_progress = 0.
@@ -682,14 +926,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 veil_key = self._fade_veil_key if fading and self._fade_veil_key is not None else self.veil_key
                 self.veil.paint(painter, content, veil_key, visibility,
                                 scroll_delta=self.veil_scroll_delta)
-        if visibility > .001 and self._controls_bands is not None:
+        if visibility > .001 and self._controls_bands is not None and not self._capturing_content_snapshot:
             self._paint_chrome_bands(painter)
         if self.live and self.owner.media_position_source == "capture-unavailable":
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
             painter.setPen(QColor(255, 255, 255, 220))
             painter.drawText(QRectF(12, 8, self.width() - 24, 32), Qt.AlignmentFlag.AlignCenter,
                              "播放器进度不可用，歌词跟随已暂停")
-        if self.hints:
+        if self.hints and not self._capturing_content_snapshot:
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
             painter.setPen(QColor(255, 255, 255, 120))
             painter.drawText(QRectF(4, self.height() - 13, self.width() - 8, 13), Qt.AlignmentFlag.AlignCenter,
@@ -975,7 +1219,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         Keep the same sampled scene for the 300ms reveal. Resting controls
         refresh at 10Hz; input/feedback/layout changes invalidate immediately.
         """
-        if self.variant == "A":
+        if self.variant == "A" or self._width_chrome_active:
             return
         key = (self.width(), self.height(), self.devicePixelRatioF(),
                self._glass_feedback.pose_key(), self.dj_motion.value(now),
@@ -984,7 +1228,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self.loop_mode, self.mode, self.song_index, self.cover_index,
                self.owner.album_art.cacheKey(), self.owner.track_title, self.owner.artist,
                self._song_collection_state() if self.live else self.song_index in self.liked_songs,
-               self.owner.media_is_playing,
+               self.owner.media_is_playing, bool(self.owner.enable_dual_line_lyrics),
                self._scene_control_ink().rgba())
         hidden = (self.visibility.opacity.target <= 0
                   and self.visibility.progress <= .001)
@@ -1612,75 +1856,114 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             painter.drawText(QRectF(72, y + 29, self.width() - 92, 20), Qt.AlignmentFlag.AlignVCenter, artist)
         painter.restore()
 
+    def _paint_chrome_capsule(self, painter, slots, *, role, fusion=1., padding=0.):
+        """One refractive face; feedback stays clipped to each action's slot."""
+        valid = {key: slot for key, slot in slots.items() if slot.isValid()}
+        if not valid:
+            return
+        ordered = sorted(valid.values(), key=lambda slot: slot.left())
+        face = QRectF(ordered[0])
+        for slot in ordered[1:]:
+            face = face.united(slot)
+        face.adjust(-padding, 0., padding, 0.)
+        merging = self._width_chrome_active and fusion < .999
+        path_members = [QRectF(slot) for slot in ordered]
+        if len(path_members) > 1:
+            path_members[0].translate(-padding, 0.)
+            path_members[-1].translate(padding, 0.)
+        path = fused_control_path(path_members, fusion) if merging else None
+        if path is not None:
+            face = path.boundingRect()
+        states = [self._glass_feedback.state(key) for key in valid]
+        motion = max((state for state in states if state is not None),
+                     key=lambda state: (state.held, abs(state.lift), state.glow), default=None)
+        self._clear_control_renderer.paint(
+            painter, face, scene=self._surface_glass_backdrop(), scene_bounds=QRectF(self.rect()),
+            ink=self._scene_control_ink(), now=time.monotonic(), role=role,
+            state=None if self._width_chrome_active else motion, kind="path" if merging else "capsule", path=path,
+            fusing=self._width_chrome_active,
+            hover_segments=tuple((self._glass_feedback.hover.get(key, 0.), slot)
+                                 for key, slot in valid.items()), level=self._surface_glass_level())
+
     def paint_controls(self, painter, layout, opacity):
         if opacity <= .001:
             return
         painter.save()
-        painter.setOpacity(min(1.0, opacity / .2))
+        painter.setOpacity(min(1., opacity / .2))
         ink = self._scene_control_ink()
+        fusion, top, bottom = self._chrome_phases()
         if self._library_back_available():
             back = self.posed_rect("library", layout.back)
             self._paint_surface_glass(painter, back, role="library")
             paint_music_source_icon(painter, back.adjusted(8, 8, -8, -8), "library_back", tint=ink)
-        content = self.posed_rect("content_layout", layout.top[0])
-        self._paint_surface_glass(painter, content, role="content-layout")
-        self._paint_content_layout_icon(painter, content.adjusted(7, 7, -7, -7))
-        painter.restore()
-        roles = ("audio-output", "playback-mode", "translation", "window-mode")
-        keys = ("audio_output", "playback_mode", "translation", "return")
-        for index, (rect, role, key) in enumerate(zip(layout.top[1:], roles, keys)):
-            if opacity <= .001:
-                continue
-            painter.save()
-            painter.setOpacity(min(1.0, opacity / .2))
-            rect = self.posed_rect(key, rect)
-            self._paint_surface_glass(painter, rect, role=role)
+        keys = ("audio_output", "content_layout", "playback_mode", "translation", "return")
+        slots = {key: self.posed_rect(key, layout._top_rects[key]) for key in keys}
+        if fusion > .001:
+            self._paint_chrome_capsule(painter, slots, role="chrome-utilities", fusion=fusion,
+                                       padding=layout._capsule_metrics[1] * fusion)
+        else:
+            for key, rect in slots.items():
+                role = {"audio_output": "audio-output", "content_layout": "content-layout",
+                        "playback_mode": "playback-mode", "translation": "translation", "return": "window-mode"}[key]
+                self._paint_surface_glass(painter, rect, role=role)
+        for key, rect in slots.items():
             icon = rect.adjusted(8, 8, -8, -8)
-            if role == "audio-output":
-                paint_audio_output_status(painter, rect, (), ink, count=0)
-            elif role == "playback-mode":
-                paint_music_source_icon(painter, icon,
-                                        ("sequence", "shuffle", "repeat_one")[self.loop_mode], tint=ink)
-            elif role == "translation":
-                painter.save()
+            if key == "content_layout":
+                self._paint_content_layout_icon(painter, rect.adjusted(7, 7, -7, -7))
+            elif key == "audio_output":
+                paint_audio_output_status(painter, rect, self._audio_output_kinds, ink,
+                                          count=len(self._audio_output_kinds))
+            elif key == "playback_mode":
+                mode = self._owned_playback_mode if self.live else ("sequence", "shuffle", "repeat_one")[self.loop_mode]
+                asset = "personal_fm" if self._owned_personal_fm and mode == "sequential" else "sequence" if mode in {None, "sequential"} else mode
+                paint_music_source_icon(painter, icon, asset, tint=ink)
+            elif key == "translation":
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(ink)
-                painter.drawPath(self._translation_symbol_path(icon))
-                painter.restore()
+                painter.setBrush(self._surface_glass_ink(rect, active=bool(self.owner.enable_dual_line_lyrics)))
+                painter.drawPath(self._translation_symbol_path(QRectF(
+                    rect.center().x() - rect.width() * .29, rect.center().y() - rect.height() * .29,
+                    rect.width() * .58, rect.height() * .58)))
             else:
                 self._paint_window_mode_icon(painter, icon, self._fullscreen, ink)
-            painter.restore()
-        footer = opacity
-        if footer <= .001:
-            return
-        painter.save()
-        painter.setOpacity(min(1.0, footer / .2))
         for command, rect in (("previous", layout.previous),
                               ("toggle_play_pause", layout.play), ("next", layout.next)):
             rect = self.posed_rect("media:" + command, rect)
             self._paint_transport_icon(painter, layout.transport_icon(rect), command, ink)
+        collection_reveal = self._chrome_collection_reveal()
+        if collection_reveal <= .001:
+            painter.restore()
+            return
+        painter.setOpacity(painter.opacity() * collection_reveal)
         favorite = self.posed_rect("collection", layout.favorite)
-        self._clear_control_renderer.paint(
-            painter, favorite, scene=self._surface_glass_backdrop(),
-            scene_bounds=QRectF(self.rect()), ink=ink, now=time.monotonic(),
-            role="collection", state=self._glass_feedback.state("collection"),
-            kind="capsule", level=self._surface_glass_level())
+        count = len(layout.collection_slots) if top > 0. else 2
+        collection_slots = {key: QRectF(favorite.left() + index * favorite.width() / count,
+                                       favorite.top(), favorite.width() / count, favorite.height())
+                            for index, key in enumerate(("favorite", "playlist_add")[:count])}
+        dj_slot = layout.dj
+        if self._width_chrome_active and top <= 0. and bottom > 0. and self.dj_available:
+            dj_slot = self._width_control_rects(False).get("personal_dj", QRectF())
+        dj = self.posed_rect("personal_dj", dj_slot) if dj_slot.isValid() else QRectF()
+        if top > 0.:
+            self._paint_chrome_capsule(painter, {**collection_slots, **({"personal_dj": dj} if dj.isValid() else {})},
+                                       role="chrome-collection", fusion=top,
+                                       padding=layout._capsule_metrics[1] * top)
+        else:
+            self._paint_chrome_capsule(painter, collection_slots, role="collection")
+            if dj.isValid():
+                self._paint_surface_glass(painter, dj, role="dj-icon")
         collection_state = self._song_collection_state() if self.live else None
         liked = collection_state.liked is True if self.live else self.song_index in self.liked_songs
-        heart = "heart_filled" if liked else "heart_outline"
-        for index, icon in enumerate((heart, "playlist_add")):
-            side = favorite.height() * (.63 if index == 0 else .61)
-            center_x = favorite.left() + favorite.width() * (.25 + .5 * index)
-            glyph = QRectF(center_x - side / 2, favorite.center().y() - side / 2, side, side)
-            icon_ink = QColor("#ff3e4c") if index == 0 and liked else ink
+        for key, slot in collection_slots.items():
+            side = min(slot.width(), slot.height()) * (.63 if key == "favorite" else .61)
+            glyph = NarrowLayout.centered(slot.center().x(), slot.center().y(), side)
+            icon_ink = QColor("#ff3e4c") if key == "favorite" and liked else ink
             painter.save()
             if self.live and (not collection_state.available or collection_state.busy):
                 painter.setOpacity(painter.opacity() * .38)
-            paint_music_source_icon(painter, glyph, icon, tint=icon_ink)
+            paint_music_source_icon(painter, glyph, ("heart_filled" if liked else "heart_outline")
+                                    if key == "favorite" else "playlist_add", tint=icon_ink)
             painter.restore()
-        if self.dj_available:
-            dj = self.posed_rect("personal_dj", layout.dj)
-            self._paint_surface_glass(painter, dj, role="dj-icon")
+        if dj.isValid():
             if self.dj_enabled:
                 painter.save()
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1795,7 +2078,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(event.position()):
-                    self.hovered_glass = key
+                    self.hovered_glass = (self._live_action_at(event.position())
+                                          if key == "collection" else key)
         self.update()
 
     def pointer_activity(self, point, now, *, focus=False):
@@ -1841,6 +2125,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         super().enterEvent(event)
 
     def event(self, event):
+        # Keep the existing surface Tab shortcut before QWidget consumes it
+        # for child traversal. Tab delivered to a focused slot still traverses.
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Tab:
+            self.keyPressEvent(event)
+            event.accept()
+            return True
         if getattr(self, "narrow", False):
             if event.type() == QEvent.Type.TouchBegin:
                 self.touch_active = True
@@ -1901,7 +2191,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 for key, rect in group.items():
                     if rect.contains(position):
                         if key == "collection":
-                            return "favorite" if position.x() < rect.center().x() else "playlist_add"
+                            layout = NarrowLayout(self.width(), self.height(), dj_available=self.dj_available)
+                            single = self._chrome_phases()[1] > 0. and len(layout.collection_slots) == 1
+                            return "favorite" if single or position.x() < rect.center().x() else "playlist_add"
                         return key
         if self.mode == "playlist":
             for index, rect in self._queue_hit_rects.items():
@@ -1950,14 +2242,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._cycle_owned_playback_mode()
         elif action in {"favorite", "playlist_add"}:
             self._activate_song_collection(action, track, authority)
-        elif action == "personal_dj":
-            self._toggle_personal_dj()
         elif action == "translation":
             self._toggle_translation()
+        elif action == "personal_dj":
+            self._toggle_personal_dj()
         elif action == "audio_output":
             self._toggle_audio_output_panel()
         elif action == "library":
             self.return_to_library()
+        elif action == "mode":
+            self.toggle_presentation_mode()
         elif action == "return":
             self.toggle_wide()
         self.refresh_veil()
@@ -2001,6 +2295,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                     self.liked_songs.add(self.song_index)
             else:
                 self.playlist_songs.add(self.song_index)
+        elif footer_visible and action == 'translation':
+            self._toggle_translation()
         elif footer_visible and action == 'playback_mode':
             self.loop_mode = (self.loop_mode + 1) % 3
         elif footer_visible and action == 'content_layout':
