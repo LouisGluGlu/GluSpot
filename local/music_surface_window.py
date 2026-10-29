@@ -70,7 +70,8 @@ from local.music_lyric_motion import (
     sparse_glyph_frame,
 )
 from local.music_lyric_presentation import (
-    INTRO_COUNTDOWN_TEXT,
+    INTRO_COUNTDOWN_TEXT, SURFACE_FONT_FAMILIES, LYRIC_PIXEL_SIZE, LYRIC_BLUR_RADII,
+    surface_font, surface_pixel_size, intro_dot_radius, paint_intro_countdown,
     DuetLyricPresentation,
     split_display_layers,
 )
@@ -133,7 +134,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     LYRIC_RASTER_CACHE_MAX_ENTRIES = 128
     LYRIC_BLUR_CACHE_MAX_BYTES = 32 * 1024 * 1024
     LYRIC_BLUR_CACHE_MAX_ENTRIES = 96
-    LYRIC_BLUR_RADII = (0.0, 3.0, 6.0)
+    LYRIC_BLUR_RADII = LYRIC_BLUR_RADII
     LYRIC_BLUR_PREWARM_LEAD_SECONDS = 1.5
     LYRIC_BLUR_PREWARM_INTERVAL_SECONDS = 0.035
     BLURRED_LYRIC_DPR_CAP = 1.25
@@ -150,11 +151,11 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     DJ_OUTRO_IDLE_SECONDS = 2 * DJ_RING_CYCLE_SECONDS
     LIBRARY_EXPANSION_SECONDS = 0.36
     LOW_PERCEPTION_BLOCK_WIPE_SECONDS = 0.5
-    SURFACE_FONT_FAMILIES = ("Segoe UI", "Microsoft YaHei UI")
+    SURFACE_FONT_FAMILIES = SURFACE_FONT_FAMILIES
     REFERENCE_SURFACE_HEIGHT = 666.0
     MIN_SURFACE_SCALE = 0.5
     MAX_SURFACE_SCALE = 2.5
-    LYRIC_PIXEL_SIZE = 38
+    LYRIC_PIXEL_SIZE = LYRIC_PIXEL_SIZE
     TITLE_PIXEL_SIZE = 34
     ARTIST_PIXEL_SIZE = 22
     METADATA_MARQUEE_SECONDS = 5.0
@@ -4645,7 +4646,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     @staticmethod
     def _intro_dot_radius(font: QFont) -> float:
-        return max(4.0, font.pixelSize() * 0.17)
+        return intro_dot_radius(font.pixelSize())
 
     @classmethod
     def _lyric_blur_radius(cls, level: int) -> float:
@@ -4764,80 +4765,22 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         blur_level: int = 0,
         *, unread_color: QColor | None = None,
     ):
-        """Keep the three countdown dots equally sized across clear and blurred rows."""
-        layers = self._lyric_blur_layers(blur_level)
-        if len(layers) > 1:
-            opacity = painter.opacity()
-            for degree, weight in layers:
-                painter.save()
-                painter.setOpacity(opacity * weight)
-                self._paint_intro_countdown(
-                    painter, row, font, progress, degree, unread_color=unread_color,
-                )
-                painter.restore()
-            return
-        radius = self._intro_dot_radius(font)
-        degree = max(0, min(2, int(blur_level)))
+        """Adapt the established row/progress contract to the shared painter."""
         unread = QColor(unread_color) if unread_color is not None else self._future_lyric_color(row)
-        if degree:
-            dpr = max(1.0, float(self.devicePixelRatioF()))
-            ink = unread if progress <= 0.0 else QColor(255, 255, 255)
-            key = (("intro-countdown", font.pixelSize(), round(dpr, 3), int(ink.rgba())), degree)
-            cached = self._lyric_blur_cache.get(key)
-            if cached is None:
-                dot_radius = radius * (1.15 if degree == 1 else 1.30)
-                stride = radius * 3.35
-                bleed = self._lyric_blur_bleed(degree)
-                width = 2.0 * dot_radius + 2.0 * stride + 2.0 * bleed
-                height = 2.0 * dot_radius + 2.0 * bleed
-                source = QImage(
-                    max(1, int(math.ceil(width * dpr))),
-                    max(1, int(math.ceil(height * dpr))),
-                    QImage.Format.Format_ARGB32_Premultiplied,
-                )
-                source.setDevicePixelRatio(dpr)
-                source.fill(Qt.GlobalColor.transparent)
-                with QPainter(source) as layer:
-                    layer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                    layer.setPen(Qt.PenStyle.NoPen)
-                    layer.setBrush(ink)
-                    for index in range(3):
-                        layer.drawEllipse(
-                            QPointF(bleed + dot_radius + index * stride, bleed + dot_radius),
-                            dot_radius, dot_radius,
-                        )
-                image = self._blurred_lyric_raster(
-                    source, degree, ink, cache_key=key,
-                )
-            else:
-                image = cached[0]
-                dot_radius = radius * (1.15 if degree == 1 else 1.30)
-                bleed = self._lyric_blur_bleed(degree)
-            painter.drawImage(
-                QPointF(
-                    row.left() + radius * 1.2 - dot_radius - bleed,
-                    row.top() + row.height() * 0.48 - dot_radius - bleed,
-                ),
-                image,
-            )
-            return
-        stride = radius * 3.35
-        center_y = row.top() + row.height() * 0.48
-        origin_x = row.left() + radius * 1.2
+        radius = intro_dot_radius(font.pixelSize())
+        center = QPointF(row.left() + radius * (1.2 + 3.35), row.top() + row.height() * .48)
+        colors = []
         front = max(0.0, min(1.0, float(progress))) * 3.0
-        painter.save()
-        painter.setPen(Qt.PenStyle.NoPen)
         for index in range(3):
             local = max(0.0, min(1.0, front - index))
             eased = local * local * (3.0 - 2.0 * local)
-            painter.setBrush(QColor(
-                round(unread.red() + (255 - unread.red()) * eased),
-                round(unread.green() + (255 - unread.green()) * eased),
-                round(unread.blue() + (255 - unread.blue()) * eased),
-                round(unread.alpha() + (255 - unread.alpha()) * eased),
-            ))
-            painter.drawEllipse(QPointF(origin_x + index * stride, center_y), radius, radius)
-        painter.restore()
+            colors.append(QColor(*(round(channel + (255 - channel) * eased)
+                                   for channel in unread.getRgb())))
+        for degree, weight in self._lyric_blur_layers(blur_level):
+            ink = (unread if progress <= 0 else QColor(255, 255, 255)) if degree else colors
+            paint_intro_countdown(painter, center=center, pixel_size=font.pixelSize(),
+                                  color=ink, opacity=1., blur_layers=((degree, weight),),
+                                  scale=self.devicePixelRatioF())
 
     def _wrapped_lyric_runs(
         self,
@@ -5233,16 +5176,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             )
 
     def _surface_font(self, size: float, weight: QFont.Weight = QFont.Weight.Bold) -> QFont:
-        # The large music surface has its own restrained typography.  Do not
-        # inherit a decorative island lyric style here: Segoe UI gives Latin
-        # lyrics the reference proportions while Microsoft YaHei UI remains
-        # the explicit CJK fallback.
-        font = QFont()
-        font.setFamilies(list(self.SURFACE_FONT_FAMILIES))
-        font.setPixelSize(max(1, int(round(size))))
-        font.setWeight(weight)
-        font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-        return font
+        return surface_font(size, weight)
 
     def _surface_scale(self, rect: QRectF | None = None) -> float:
         width, height = (self.width(), self.height()) if rect is None else (rect.width(), rect.height())

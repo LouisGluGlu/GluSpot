@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRectF
+from local.music_lyric_presentation import surface_pixel_size, LYRIC_LINE_SPACING
 
 
 @dataclass(frozen=True)
@@ -32,11 +33,11 @@ class NarrowLayout:
     @property
     def lyric_font(self):
         # Restore the immersive reading size; visibility never changes it.
-        return min(40.0, max(26.0, self.width * .0875))
+        return surface_pixel_size(self.width)
 
     @property
     def lyric_step(self):
-        return self.lyric_font * 1.45
+        return self.lyric_font * LYRIC_LINE_SPACING
 
     @property
     def lyric_row(self):

@@ -17,6 +17,95 @@ from api.lyrics import is_structured_lyric_metadata
 from api.lyric_metadata import is_explicit_lyric_credit as _is_credit_line
 
 
+from functools import lru_cache
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PIL import Image, ImageFilter
+
+SURFACE_FONT_FAMILIES = ('Segoe UI', 'Microsoft YaHei UI')
+LYRIC_PIXEL_SIZE = 38
+LYRIC_LINE_SPACING = 1.45
+LYRIC_PREVIOUS_ALPHA = .35
+LYRIC_NEXT_ALPHA = .25
+LYRIC_BLUR_RADII = (0.0, 3.0, 6.0)
+
+
+def surface_pixel_size(width):
+    """One lyric/dot token, capped at the reference surface's 38px."""
+    return min(float(LYRIC_PIXEL_SIZE), max(26.0, float(width) * .0875))
+
+
+def surface_font(size, weight=QFont.Weight.Bold):
+    font = QFont()
+    font.setFamilies(list(SURFACE_FONT_FAMILIES))
+    font.setPixelSize(max(1, int(round(size))))
+    font.setWeight(weight)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    return font
+
+
+def intro_dot_radius(pixel_size):
+    return max(4.0, float(pixel_size) * .17)
+
+
+@lru_cache(maxsize=96)
+def _intro_raster(pixel_size, dpr, degree, rgba):
+    radius = intro_dot_radius(pixel_size)
+    dot_radius = radius * (1.15 if degree == 1 else 1.30)
+    stride = radius * 3.35
+    bleed = math.ceil(LYRIC_BLUR_RADII[degree] * 3.0)
+    width = 2 * dot_radius + 2 * stride + 2 * bleed
+    height = 2 * dot_radius + 2 * bleed
+    source = QImage(max(1, math.ceil(width * dpr)), max(1, math.ceil(height * dpr)),
+                    QImage.Format.Format_ARGB32_Premultiplied)
+    source.setDevicePixelRatio(dpr)
+    source.fill(Qt.GlobalColor.transparent)
+    ink = QColor.fromRgba(rgba)
+    with QPainter(source) as layer:
+        layer.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        layer.setPen(Qt.PenStyle.NoPen)
+        layer.setBrush(ink)
+        for index in range(3):
+            layer.drawEllipse(QPointF(bleed + dot_radius + index * stride, bleed + dot_radius),
+                              dot_radius, dot_radius)
+    source = source.convertToFormat(QImage.Format.Format_RGBA8888)
+    pixels = Image.frombytes('RGBA', (source.width(), source.height()), bytes(source.bits()))
+    alpha = pixels.getchannel('A').filter(ImageFilter.GaussianBlur(LYRIC_BLUR_RADII[degree] * dpr))
+    pixels = Image.new('RGBA', pixels.size, (ink.red(), ink.green(), ink.blue(), 0))
+    pixels.putalpha(alpha)
+    image = QImage(pixels.tobytes(), source.width(), source.height(), source.width() * 4,
+                   QImage.Format.Format_RGBA8888).copy()
+    image.setDevicePixelRatio(dpr)
+    return image, dot_radius, bleed
+
+
+def paint_intro_countdown(painter, *, center, pixel_size, color, opacity, blur_layers, scale):
+    """Paint three equal circles; scale is the source raster's device scale.
+
+    A three-color sequence preserves the wide countdown's per-dot reading ink.
+    Blur layers are (degree, weight) pairs from the existing lyric surface.
+    """
+    radius = intro_dot_radius(pixel_size)
+    stride = radius * 3.35
+    colors = (color,) * 3 if isinstance(color, QColor) else color
+    for degree, weight in blur_layers:
+        if weight <= 0:
+            continue
+        painter.save()
+        painter.setOpacity(painter.opacity() * opacity * weight)
+        if degree:
+            image, dot_radius, bleed = _intro_raster(
+                pixel_size, max(1.0, float(scale)), max(0, min(2, int(degree))), colors[0].rgba())
+            painter.drawImage(QPointF(center.x() - stride - dot_radius - bleed,
+                                     center.y() - dot_radius - bleed), image)
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            for index, ink in enumerate(colors):
+                painter.setBrush(ink)
+                painter.drawEllipse(QPointF(center.x() + (index - 1) * stride, center.y()), radius, radius)
+        painter.restore()
+
+
 INTRO_COUNTDOWN_TEXT = "· · ·"
 INTRO_COUNTDOWN_MIN_START_SECONDS = 5.0
 

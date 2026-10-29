@@ -24,7 +24,10 @@ from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_lyric_motion import MusicLyricFrame
-from local.music_lyric_presentation import split_display_layers
+from local.music_lyric_presentation import (
+    split_display_layers, INTRO_COUNTDOWN_TEXT, paint_intro_countdown,
+    LYRIC_PREVIOUS_ALPHA, LYRIC_NEXT_ALPHA,
+)
 if __package__:
     from .layout import NarrowLayout
     from .motion import EaseOutFade, Visibility
@@ -874,6 +877,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         blocks, cursor = [], 0.0
         for line in lines:
             layers = split_display_layers(line.text)
+            if line.text == INTRO_COUNTDOWN_TEXT:
+                blocks.append((cursor, layout.lyric_row, layers, ()))
+                cursor += layout.lyric_step
+                continue
             parts = [(layers.primary_text, font)]
             parts.extend((text, secondary) for text in
                          (layers.translation_text, layers.parenthetical_text,
@@ -913,8 +920,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             visual = visual_focus
         if not blocks:
             return ()
-        first_layout = blocks[focus][3][0][2]
-        ascent = first_layout.lineAt(0).ascent() if first_layout.lineCount() else 0
+        first_runs = blocks[focus][3]
+        first_layout = first_runs[0][2] if first_runs else None
+        ascent = (first_layout.lineAt(0).ascent() if first_layout and first_layout.lineCount()
+                  else QFontMetricsF(self._surface_font(layout.lyric_font)).ascent())
         origin = layout.lyric_anchor - ascent - self.real_scroll_offset(visual)
         return tuple((index, QRectF(layout.viewport.left(), origin + start,
                                     layout.viewport.width(), height), layers, runs)
@@ -944,6 +953,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             end = (lines[index + 1].time_seconds if index + 1 < len(lines)
                    else max(line.time_seconds + 1.0, self.owner.media_duration_seconds))
             progress = max(0.0, min(1.0, (position - line.time_seconds) / max(.001, end - line.time_seconds)))
+            if line.text == INTRO_COUNTDOWN_TEXT:
+                font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
+                baseline_offset = QFontMetricsF(font).ascent()
+                paint_intro_countdown(
+                    painter, center=QPointF(self.width() / 2, row.top() + baseline_offset),
+                    pixel_size=font.pixelSize(), color=QColor('white'),
+                    opacity=1. if index == focus else LYRIC_PREVIOUS_ALPHA if index < focus else LYRIC_NEXT_ALPHA,
+                    blur_layers=((0, 1.),), scale=self.devicePixelRatioF())
+                continue
             for part_index, (text, font, shaped, offset, height) in enumerate(runs):
                 target = QRectF(row.left(), row.top() + offset, row.width(), height)
                 if index == focus:
@@ -977,6 +995,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                          str(getattr(self.owner, "media_source_app", "")))
         lines = self.source_lines()
         for index, row, layers, runs in self.live_lyric_rows(layout):
+            if not runs:
+                continue
             if not row.intersects(layout.viewport):
                 continue
             self._lyric_hit_rects[index] = row.intersected(layout.viewport)
