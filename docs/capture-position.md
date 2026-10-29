@@ -587,3 +587,35 @@ Ignored local evidence: `.runtime/capture/netease-baseline-recheck.log`,
 `.runtime/capture/netease-ui-lazy-import-investigation.log` and
 `.runtime/capture/netease-final-summary.json`. The source hash precedes only
 this documentation commit. No EXE was built or pushed.
+
+## Capture wrap audit — 2026-10-29
+
+wuju confirmed `fbe1afa` precise NetEase progress, NetEase's own seeking and
+GluSpot word-click seeking (“效果很棒”). This is the human acceptance record for
+those three interactions; it does not establish End/auto-next behavior.
+
+At this exact source, `MusicSurfaceWindow._paint_media_controls` paints only
+previous/play-pause/next and retains only those transport hit rectangles. The
+island consumes `media_duration_seconds` for clock/lyric bounds but exposes no
+playback timeline hit target. A search of the production `local/` duration and
+position consumers found `LibraryProgress` as the only duration-based strip;
+it is display-only and was explicitly excluded from the requested change.
+Consequently no existing progress target was silently substituted or made
+interactive. A non-narrow seek strip requires the user's target/scope answer.
+The common fenced provider seek path remains the correct dispatch API.
+
+Fresh Box/offscreen verification of `fbe1afa`: **226 capture tests × 3**, all
+passing in **11.534 / 11.589 / 11.713 seconds**; the lyric/seek/UI focus passes
+**25 tests / 1.347 seconds**. Logs are outside the repository under
+`/workspace/gluspot/grok/final4/capture/`. No capture runtime code changed in
+this audit. The previous full-discovery inherited failure comparison above
+still applies; this documentation-only audit did not repeat full discovery.
+
+The current session exposes no PC relay/execution/transfer connector. No fresh
+PC tests, End/auto-next observation, or real-player screenshot is claimed.
+The guarded transfer/test handoff is
+`/workspace/gluspot/handoff/capture-narrow4/sync-and-test.ps1`; it verifies a
+clean `grok/capture` mirror and exact bundle tip before fast-forwarding and
+runs only `E:\gpt-island\.venv\Scripts\python.exe`. Its PowerShell parser check
+must run on the executor because PowerShell is unavailable on Box.
+No release version, package, player installation file or user settings changed.

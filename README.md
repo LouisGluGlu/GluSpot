@@ -316,6 +316,17 @@ is claimed.
 
 ### Current lyric wiring
 
+
+Capture wrap audit (2026-10-29): wuju accepted `fbe1afa` precise progress,
+NetEase own seek and GluSpot word-click seek. Fresh Box capture repetitions pass
+**226 × 3 / 11.534, 11.589, 11.713 s**; focused lyric/seek/UI passes
+**25 / 1.347 s**. No playback timeline target exists in the island/music surface
+at this source; the only duration strip is the explicitly excluded display-only
+`LibraryProgress`. Identifying a different control or adding a non-narrow strip
+awaits the user's scope answer. Fresh PC ×3 and End/auto-next remain unverified:
+this session has no PC connector. See the [wrap audit](docs/capture-position.md#capture-wrap-audit--2026-10-29).
+
+
 The October 29 seek investigation hardens the document-start shim and adds
 flushed capture-seek decisions to the normal `GluSpot-*.log`. The relaunch route
 uses its selected random port; `8178` and `39222` are observations from separate
