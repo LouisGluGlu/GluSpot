@@ -30,6 +30,9 @@ class LibraryBackOwnedPlaybackTests(unittest.TestCase):
         w = MusicSurfaceWindow.__new__(MusicSurfaceWindow)
         w.owner = owner
         w._library_loading = None
+        # Navigation routing does not need the initialized panel/cursor state.
+        w._dismiss_audio_output_panel = Mock(name="dismiss_audio_output_panel")
+        w._restore_idle_cursor = Mock(name="restore_idle_cursor")
         return w, owner
 
     def test_owned_false_hides_back(self):
