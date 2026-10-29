@@ -116,7 +116,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         super().__init__(owner)
         self.variant = variant
         self.lyrics_alignment = lyrics_alignment
-        self.narrow = True
+        self._sync_narrow_mode()
         self.mode = "lyrics"
         self.cover_index = 0
         self.song_index = 0
@@ -177,7 +177,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self.move(80, 80)
-        self.resize(360, 640)
+        self.toggle_wide(False)
         if not live:
             self.set_cover(0)
         self._sync_owned_playback_mode()
@@ -441,12 +441,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def posed_rect(self, key, rect):
         return QRectF(rect)
 
+    def _sync_narrow_mode(self):
+        self.narrow = self.width() < 960
+
     def resizeEvent(self, event):
-        ratio = self.width() / max(1, self.height())
-        if ratio < .9:
-            self.narrow = True
-        elif ratio > 1.1:
-            self.narrow = False
+        self._sync_narrow_mode()
         super().resizeEvent(event)
         if self.narrow and hasattr(self, "veil"):
             self.refresh_veil()
@@ -1465,14 +1464,30 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                    elapsed=time.monotonic() if self.dj_speaking else 0, neutral=ink)
         painter.restore()
 
+    def toggle_wide(self, wide=None):
+        wide = self.width() < 960 if wide is None else wide
+        width, height = (960, 540) if wide else (360, 640)
+        if wide:
+            # Let Qt apply both target dimensions without clamping to 560.
+            self.setMinimumHeight(540)
+        if (self.width(), self.height()) != (width, height):
+            self.resize(width, height)
+        if not wide:
+            self.setMinimumHeight(560)
+        self._sync_narrow_mode()
+
+    def return_to_island(self):
+        # The inherited wide controls use this entry for the return button.
+        self.toggle_wide()
+
     def keyPressEvent(self, event):
         key = event.key()
         if key == Qt.Key.Key_Escape:
             self.close()
         elif key == Qt.Key.Key_N:
-            self.resize(360, 640)
+            self.toggle_wide(False)
         elif key == Qt.Key.Key_W:
-            self.resize(960, 540)
+            self.toggle_wide(True)
         elif key in (Qt.Key.Key_L, Qt.Key.Key_P, Qt.Key.Key_Tab):
             if key == Qt.Key.Key_Tab:
                 self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
@@ -1695,8 +1710,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._toggle_translation()
         elif action == "audio_output":
             self._toggle_audio_output_panel()
-        elif action in {"library", "return"}:
-            self.resize(960, 540)
+        elif action == "library":
+            self.return_to_library()
+        elif action == "return":
+            self.toggle_wide()
         self.refresh_veil()
         self.refresh_controls(time.monotonic())
         self.update()
@@ -1714,7 +1731,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 if rect.contains(position):
                     self._glass_feedback.press(key, position, time.monotonic())
         if footer_visible and layout.back.contains(position):
-            self.resize(960, 540)
+            self.return_to_library()
+        elif footer_visible and layout.top[4].contains(position):
+            self.toggle_wide()
         elif footer_visible and layout.top[0].contains(position):
             self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
             self.set_content_layout(self.mode, animate=False)
