@@ -119,6 +119,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._list_layer_at = -float("inf")
         self._fade_background = None
         self._fade_background_key = None
+        self._fade_anchor_key = None
+        self._fade_veil_key = None
         self._fade_content_key = None
         self._fade_content_frames = None
         self._current_ink_key = None
@@ -442,8 +444,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         visibility = self.visibility.progress
         layout = NarrowLayout(self.width(), self.height())
         content = self.content_image(layout, include_current=self.live)
-        endpoint_key = (background_key, content.cacheKey(), self.veil_key)
-        if fading and endpoint_key == self._fade_content_key:
+        # The packed endpoints belong to one frozen fade basis. A live veil
+        # bucket or focus must never be part of this lookup, or a scroll step
+        # mid-fade drops back to a fresh partial-alpha composite and re-flashes.
+        if (fading and self._fade_anchor_key is not None
+                and self._fade_content_frames is not None):
             # Paused source rows are part of these exact endpoint pixels.
             # The advancing fixture run is painted separately below.
             painter.drawImage(QPointF(0, 0), self._fade_content_frames[0])
@@ -459,7 +464,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                        ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights,
                                        advance_frame=not fading)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            self.veil.paint(painter, content, self.veil_key, visibility,
+            # Blend from the frozen veil basis during a fade. Outside a fade
+            # (or before the first anchor) the live key is authoritative.
+            veil_key = self._fade_veil_key if fading and self._fade_veil_key is not None else self.veil_key
+            self.veil.paint(painter, content, veil_key, visibility,
                             scroll_delta=self.veil_scroll_delta)
         if self.mode == "lyrics" and not self.live:
             self.paint_current_lyrics(painter, layout)
@@ -623,21 +631,30 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._controls_key, self._controls_at = key, now
 
     def refresh_fade_background(self, now):
-        """Reuse the production background at native size for one 300ms fade.
+        """Reuse the production background at native size for one 320ms fade.
 
         This is the same raster, expanded once outside paint rather than
         bilinearly sampling it on every blend frame. Steady A/B use the normal
         production background path; no background filter is replaced.
+
+        The anchor is frozen for the whole fade generation: the animated
+        production background keeps advancing underneath, but a reveal or hide
+        must not swap the raster mid-blend. A retarget (reversal) starts a new
+        generation, so a new fade basis is captured from whatever is current.
         """
+        generation = (self.visibility.opacity.generation, self.width(),
+                      self.height(), self.devicePixelRatioF(),
+                      self.mode, self.owner.media_track_id)
         if self.visibility.settled(now):
             self._fade_background = self._fade_background_key = None
+            self._fade_anchor_key = self._fade_veil_key = None
             return
         if self._background_cache.isNull():
             return
+        if generation == self._fade_anchor_key:
+            return
         key = (self._background_cache.cacheKey(), self.width(), self.height(),
                self.devicePixelRatioF())
-        if key == self._fade_background_key:
-            return
         ratio = self.devicePixelRatioF()
         image = QImage(round(self.width() * ratio), round(self.height() * ratio),
                        QImage.Format.Format_ARGB32_Premultiplied)
@@ -651,6 +668,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                    ambient_colors=palette.ambient_colors,
                                    ambient_weights=palette.ambient_weights, advance_frame=False)
         self._fade_background_key, self._fade_background = key, image
+        self._fade_anchor_key = generation
+        # Freeze the blurred overlay for this fade too. Scroll may continue
+        # underneath; the veil source is re-blended only from prepared pixels.
+        self._fade_veil_key = self.veil_key
 
     def paint_current_lyrics(self, painter, layout):
         if self.owner.media_is_playing and not self.freeze_clock:
@@ -682,27 +703,43 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.drawImage(QPointF(0, top), image)
 
     def refresh_fade_content(self, now):
-        """Prepare fixed A/B content once; each fade frame only blends pixels.
+        """Prepare fixed A/B content once per fade; frames only blend pixels.
 
         Paused live lyrics can reuse their exact source-timed content too.
         Advancing live lyrics retain the ordinary compositor rather than
         freezing their variable-height reading run.
         At 360x640/DPR2 the two opaque endpoints occupy 7,372,800 bytes total.
         They are released as soon as the transition settles.
+
+        The endpoints belong to one frozen basis (background anchor plus the
+        veil key captured at fade start). Focus, scroll bucket or content that
+        changes mid-fade must not repack them: a repack is exactly the
+        partial-alpha background+veil rebuild that reads as a re-flash. The
+        lookup key mirrors paint_narrow, so a hit here is a hit there.
         """
         advancing_live_lyrics = self.live and self.mode == "lyrics" and self.owner.media_is_playing
-        if advancing_live_lyrics or self.visibility.settled(now) or self._fade_background is None:
+        if (advancing_live_lyrics or self.visibility.settled(now)
+                or self._fade_background is None or self._fade_veil_key is None):
             self._fade_content_key = self._fade_content_frames = None
             return
         content = self.content_image(NarrowLayout(self.width(), self.height()), include_current=self.live)
-        key = (self._fade_background_key, content.cacheKey(), self.veil_key)
-        if key == self._fade_content_key:
+        # Content identity that survives scroll: the source lines, font,
+        # alignment, theme and size. Focus, visual offset and ink bucket move
+        # with the scroll and must not repack a frozen fade endpoint.
+        layout = NarrowLayout(self.width(), self.height())
+        key = (self._fade_background_key, self._fade_veil_key,
+               self.mode, self.source_lines(), self.queue_snapshot(),
+               layout.lyric_font, self.lyrics_alignment,
+               self._future_lyric_color(layout.viewport).rgba(),
+               self.owner.album_color.rgba(), self.owner.secondary_color.rgba(),
+               self._scene_control_ink().rgba())
+        if self._fade_content_frames is not None and key == self._fade_content_key:
             return
         endpoints = []
         for opacity in (0.0, 1.0):
             image = self._fade_background.copy()
             with QPainter(image) as painter:
-                self.veil.paint(painter, content, self.veil_key, opacity,
+                self.veil.paint(painter, content, self._fade_veil_key, opacity,
                                 scroll_delta=self.veil_scroll_delta)
             endpoints.append(image)
         self._fade_content_key, self._fade_content_frames = key, tuple(endpoints)

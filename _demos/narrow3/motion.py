@@ -6,6 +6,10 @@ class Fade:
         self.start = self.target = value
         self.started = 0.0
         self.duration = 0.0
+        # Bumped on every real retarget. The narrow surface pins its fade
+        # background and prepared veil to one generation, so a reversal
+        # starts a new frozen basis instead of reusing the previous one.
+        self.generation = 0
 
     def value(self, now):
         if not self.duration:
@@ -19,6 +23,7 @@ class Fade:
             self.target = target
             self.started = now
             self.duration = duration
+            self.generation += 1
 
     def settled(self, now):
         return now >= self.started + self.duration
