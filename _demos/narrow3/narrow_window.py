@@ -443,7 +443,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                           self.devicePixelRatioF())
         visibility = self.visibility.progress
         layout = NarrowLayout(self.width(), self.height())
-        content = self.content_image(layout, include_current=self.live)
+        # Veil / neighbor layer never carries live reading ink. Ink advances in
+        # a sharp overlay after veil so the active line is never covered by a
+        # re-blurred copy of itself (GIF active_band ~23Hz flicker).
+        content = self.content_image(layout, include_current=False)
         # The packed endpoints belong to one frozen fade basis. A live veil
         # bucket or focus must never be part of this lookup, or a scroll step
         # mid-fade drops back to a fresh partial-alpha composite and re-flashes.
@@ -469,7 +472,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             veil_key = self._fade_veil_key if fading and self._fade_veil_key is not None else self.veil_key
             self.veil.paint(painter, content, veil_key, visibility,
                             scroll_delta=self.veil_scroll_delta)
-        if self.mode == "lyrics" and not self.live:
+        if self.mode == "lyrics" and self.live:
+            # Crisp active line + reading ink above veil (never under row blur).
+            self.paint_live_lyrics(painter, layout, current_only=True)
+        elif self.mode == "lyrics" and not self.live:
             self.paint_current_lyrics(painter, layout)
         if visibility > .001 and self._controls_bands is not None:
             painter.save()
@@ -513,8 +519,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             focus, visual = self.lyric_focus()
             if visual_focus is not None:
                 visual = visual_focus
+            # Static/veil layers key on a quantized scroll pose so sub-pixel
+            # spring motion does not rebuild neighbor rasters every tick.
+            # Reading ink is a separate overlay; only include_current sees the bucket.
+            scroll_key = round(visual, 3) if include_current else round(visual)
             frame_key = (self.width(), self.height(), self.devicePixelRatioF(),
-                         layout.lyric_font, focus, visual, self.lyrics_alignment,
+                         layout.lyric_font, focus, scroll_key, self.lyrics_alignment,
                          self._future_lyric_color(layout.viewport).rgba(),
                          self.ink_position() if include_current else None,
                          self.source_lines(),
@@ -722,7 +732,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 or self._fade_background is None or self._fade_veil_key is None):
             self._fade_content_key = self._fade_content_frames = None
             return
-        content = self.content_image(NarrowLayout(self.width(), self.height()), include_current=self.live)
+        content = self.content_image(NarrowLayout(self.width(), self.height()), include_current=False)
         # Content identity that survives scroll: the source lines, font,
         # alignment, theme and size. Focus, visual offset and ink bucket move
         # with the scroll and must not repack a frozen fade endpoint.
@@ -865,9 +875,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._scene_control_ink().rgba(), focus if self.mode == "lyrics" else 0, bucket,
         )
         # prepare accepts a source factory: a hit must not rasterize full content.
+        # Veil blur atlas samples static rows only. Live ink must not enter
+        # prepare(), or the active line is re-blurred into the chrome bands.
         self.veil.prepare(self.veil_key,
                           lambda: self.content_image(layout, canonical_visual, veil_source=True,
-                                                     include_current=self.live))
+                                                     include_current=False))
 
     def paint_header(self, painter, layout):
         cover = layout.cover
