@@ -5,13 +5,14 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(Path(__file__).parent)]
-from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
@@ -86,6 +87,53 @@ class LiveChecks(unittest.TestCase):
         self.window.last_tick -= 20
         self.window.tick()
         self.assertEqual(self.owner.media_position_seconds, before)
+
+    def test_unavailable_position_keeps_transport_playing_without_lyric_advancement(self):
+        self.apply(track(position_seconds=5, position_source='capture-model', is_playing=True))
+        self.wait_lines()
+        self.apply(track(position_seconds=5, position_source='capture-unavailable',
+                         position_confidence=0, position_observed_seconds=None,
+                         is_playing=True))
+        frozen = self.owner.media_position_seconds
+        now = time.monotonic()
+        positions, indices = [], []
+        with patch.object(self.owner, '_refresh_media_data', return_value=False):
+            for seconds in (0, .65, 3, 30):
+                with patch('narrow_window.time.monotonic', return_value=now + seconds):
+                    self.window.tick()
+                    positions.append(self.window.playback_position())
+                    indices.append(self.window.lyric_focus()[0])
+                    self.assertEqual(self.owner._estimated_media_position(now + seconds), frozen)
+                    self.assertEqual(self.owner._stable_lyric_source_position(now + seconds), frozen)
+        self.assertTrue(self.owner.media_is_playing)
+        self.assertEqual(positions, [frozen] * 4)
+        self.assertEqual(len(set(indices)), 1)
+
+    def test_async_partial_update_bursts_stay_within_the_visible_frame_cadence(self):
+        class PaintCounter(QObject):
+            paints = 0
+
+            def eventFilter(self, watched, event):
+                if event.type() == QEvent.Type.Paint:
+                    self.paints += 1
+                return False
+
+        self.apply(track())
+        self.wait_lines()
+        counter = PaintCounter(self.window)
+        self.window.installEventFilter(counter)
+        self.window.show()
+        QTest.qWait(400)
+        counter.paints = 0
+        started = time.monotonic()
+        for _ in range(100):
+            self.window.update(QRect(0, 0, 40, 40))
+            self.app.processEvents()
+        QTest.qWait(500)
+        elapsed = time.monotonic() - started
+        self.assertGreater(counter.paints, 3)
+        self.assertLessEqual(counter.paints, elapsed * 36 + 2,
+                             'partial updates escaped the live full-frame cadence')
 
     def test_absent_queue_and_generation_guard(self):
         self.assertIsNone(self.window.queue_snapshot())
@@ -435,6 +483,28 @@ class ImportChecks(unittest.TestCase):
         live = (ROOT / '_demos/narrow3/live.py').read_text(encoding='utf-8')
         self.assertNotIn('from local.settings import', live)
         self.assertNotIn('SettingsManager(', live)
+
+    def test_launch_log_keeps_recent_files_and_records_errors(self):
+        from live import session_log
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / 'logs'
+            logs.mkdir()
+            for index in range(12):
+                path = logs / f'NarrowLive-old-{index}.log'
+                path.write_text('old', encoding='utf-8')
+                os.utime(path, (index + 1, index + 1))
+            with self.assertRaisesRegex(RuntimeError, 'fixture startup error'):
+                with session_log(root) as path:
+                    print('fixture standard output')
+                    print('fixture standard error', file=sys.stderr)
+                    raise RuntimeError('fixture startup error')
+            text = path.read_text(encoding='utf-8')
+            self.assertIn('fixture standard output', text)
+            self.assertIn('fixture standard error', text)
+            self.assertIn('RuntimeError: fixture startup error', text)
+            self.assertEqual(len(tuple(logs.glob('NarrowLive-*.log'))), 10)
+            self.assertFalse((logs / 'NarrowLive-old-0.log').exists())
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

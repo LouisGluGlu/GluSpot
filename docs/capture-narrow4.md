@@ -13,6 +13,11 @@ ownership, a two-minute cooldown and normal-start recovery. Box capture passes
 5,709-test full run retains the baseline 17 failures / 11 errors / 31 skips.
 Native validation is still required before treating that repair as accepted.
 
+The later [narrow-live flicker correction](narrow-live-flicker.md) changes the
+safe default to attach an already-running NetEase debug endpoint and stabilizes
+unavailable progress and partial repaint cadence. Its Box evidence does not
+establish native acceptance; the PC checks below remain pending.
+
 ## Branch decision
 
 Keep both input branches intact and integrate on **`grok/capture-narrow-v4`**, in
@@ -48,15 +53,19 @@ From the integration checkout on Windows:
 
 ```powershell
 E:\gpt-island\.venv\Scripts\python.exe -X utf8 local/main.py --narrow-live
-# Explicitly opt into the approved capture/relaunch route:
-E:\gpt-island\.venv\Scripts\python.exe -X utf8 local/main.py --narrow-live --netease-relaunch --grab E:\grok-gluspot\_logs\narrow4-real
+# Optional timed diagnostic run; attaches an existing endpoint without relaunch:
+E:\gpt-island\.venv\Scripts\python.exe -X utf8 local/main.py --narrow-live --seconds 30 --trace E:\grok-gluspot\_logs\narrow-live-trace.json
 ```
 
 This source-only entry leaves ordinary application startup unchanged. It uses
 `WindowsMediaProvider` and `IslandStackVisual` with in-memory settings and private
 temporary lyric/art cache overrides. It never constructs `SettingsManager` or
-loads/saves account settings. Default launch follows external SMTC playback;
-the explicit relaunch flag enables the existing capture stack. The launcher
+loads/saves account settings. Default launch enables the shared capture stack
+and discovers a healthy debug endpoint from the running NetEase command line or
+existing owner record. Attach mode never stops, launches or restores a player.
+Usable SMTC/UIA observations remain fallbacks; an unavailable timeline freezes
+lyric following with a visible reason while retaining actual transport state.
+The explicit relaunch flag remains a separate opt-in. The launcher
 does not construct an owned player, so external sources without a queue or
 collection/DJ authority do not acquire fixture capabilities. An owner injected
 with the existing owned provider can expose those existing capabilities.
@@ -75,6 +84,9 @@ Top/bottom blur and dim increase without moving content. Three equal 44px
 transport slots sit above the lower utility row; the DJ-dependent utility shift
 is retained. Hidden/minimized live windows stop their study timer; the production
 16ms and status timers stay stopped. No narrow progress bar was introduced.
+Material/layout partial repaint requests are coalesced into the live study's
+33 ms full-frame cadence. Launch output, exceptions, Qt messages and bounded
+timing/visibility samples go to `logs/NarrowLive-*.log`, retaining ten launches.
 
 `--grab` waits up to 40 seconds for playing media with a positive duration, a real
 source, a nonempty source lyric model and a nonempty position source. Explicit

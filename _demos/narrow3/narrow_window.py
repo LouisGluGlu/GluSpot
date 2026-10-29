@@ -190,6 +190,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         super().closeEvent(event)
 
+    def update(self, *args):
+        # Production material completions and layout animations request their
+        # own (sometimes partial) paints. The narrow compositor advances the
+        # whole background, so those paints must share the study's full-frame
+        # cadence rather than interleave patches from different frames.
+        timer = getattr(self, "study_timer", None)
+        if self.live and timer is not None and timer.isActive():
+            return
+        return super().update(*args)
+
     def set_cover(self, index):
         if self.live:
             return
@@ -248,11 +258,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.refresh_veil()
             self.refresh_controls(now)
             self.refresh_fade_content(now)
-        self.update()
+        super().update()
         names = {"A": "静态", "B": "悬停"}
         fps = len([t for t in self.frame_times if now - t < 1.0])
         if self.live:
-            self.setWindowTitle(f"GluSpot · {self.owner.track_title}")
+            title = f"GluSpot · {self.owner.track_title}"
+            if title != self.windowTitle():
+                self.setWindowTitle(title)
         else:
             self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
 
@@ -347,6 +359,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             painter.drawImage(QPointF(0, 0), self._controls_bands[0])
             painter.drawImage(QPointF(0, self.height() - VeilOverlay.BOTTOM_HEIGHT), self._controls_bands[1])
             painter.restore()
+        if self.live and self.owner.media_position_source == "capture-unavailable":
+            painter.setFont(self._surface_font(12, QFont.Weight.Medium))
+            painter.setPen(QColor(255, 255, 255, 220))
+            painter.drawText(QRectF(12, 8, self.width() - 24, 32), Qt.AlignmentFlag.AlignCenter,
+                             "播放器进度不可用，歌词跟随已暂停")
         if self.hints:
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
             painter.setPen(QColor(255, 255, 255, 120))
