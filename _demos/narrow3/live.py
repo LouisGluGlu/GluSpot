@@ -1,4 +1,4 @@
-"""Isolated real-provider narrow window; never loads or saves account settings."""
+"""Narrow view of the shared app runtime, using temporary session settings."""
 from __future__ import annotations
 
 import argparse
@@ -78,16 +78,14 @@ def session_log(root):
 
 def run_live(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--netease-relaunch", action="store_true",
-                        help="Explicitly enable the existing NetEase capture/relaunch path")
     parser.add_argument("--grab", type=Path, help="Save idle/revealed frames only after real playback arrives")
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--trace", type=Path, help="Save playback, paint and visibility diagnostics on exit")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
     sys.path[:0] = [str(root), str(Path(__file__).parent)]
-    # Use the existing cache overrides. No SettingsManager or user's settings
-    # files are opened; the provider receives an in-memory settings getter.
+    # Use the shared SettingsManager with an explicit temporary path; neither
+    # its loader, migration nor delayed saver can touch the user's real file.
     with tempfile.TemporaryDirectory(prefix="gluspot-narrow-live-") as runtime:
         previous = {name: os.environ.get(name) for name in
                     ("GLUSPOT_LYRICS_CACHE_DIR", "GLUSPOT_ALBUM_ART_CACHE_DIR")}
@@ -95,7 +93,7 @@ def run_live(argv=None):
         os.environ["GLUSPOT_ALBUM_ART_CACHE_DIR"] = str(Path(runtime) / "artwork")
         try:
             with session_log(root):
-                return _run(args)
+                return _run(args, settings_path=Path(runtime) / "settings.json")
         finally:
             for name, value in previous.items():
                 if value is None:
@@ -104,35 +102,13 @@ def run_live(argv=None):
                     os.environ[name] = value
 
 
-def _run(args):
+def _run(args, *, settings_path):
     from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, qInstallMessageHandler
     from PySide6.QtGui import QCursor
-    from PySide6.QtWidgets import QApplication
-    from api.providers import WindowsMediaProvider
-    from local.island_stack_visual import IslandStackVisual
-    from narrow_window import NarrowStudyWindow
+    from local.app import bootstrap
 
-    app = QApplication.instance() or QApplication([])
-    app.setApplicationName("GluSpot")
-    settings = {
-        "v2_system_capture_enabled": True,
-        "v2_owned_playback_enabled": False,
-        "v2_capture_position_enabled": True,
-        "netease.cef.enabled": True,
-        "netease.transport": "relaunch" if args.netease_relaunch else "attach",
-        "v2_music_glass_level": 50,
-        "v2_enable_live_audio_analysis": False,
-        "v2_music_reactive_background_enabled": False,
-    }
-    getter = lambda key, default=None: settings.get(key, default)
-    provider = WindowsMediaProvider(settings_getter=getter)
-    owner = IslandStackVisual(data_provider=provider)
-    owner.settings_getter = getter
-    owner.timer.stop()
-    window = NarrowStudyWindow(owner, "B", "left", live=True)
-    window.hints = False
-    window._timer.stop()
-    window._audio_output_status_timer.stop()
+    runtime = bootstrap(view="narrow", capture="attach_only", settings_path=settings_path)
+    app, provider, owner, window = runtime.app, runtime.data_provider, runtime.window, runtime.view_window
     outcome = {"exit_code": 0}
     started = time.monotonic()
     evidence = []
@@ -164,9 +140,14 @@ def _run(args):
                 return
             self.last_sample = now
             index, visual = window.lyric_focus()
+            capture = provider.diagnostics().get("capture") or {}
+            source = owner.media_position_source
+            if source == "capture-model" and capture.get("position_route") == "cef":
+                source = "cef-playprogress"
             sample = dict(at=round(now - started, 3), track=owner.media_track_id,
                           position=round(window.playback_position(), 4), index=index,
-                          scroll=round(visual, 4), source=owner.media_position_source,
+                          scroll=round(visual, 4), source=source,
+                          owner_source=owner.media_position_source,
                           playing=owner.media_is_playing, paints=self.paints,
                           controls_target=window.visibility.footer.target)
             if self.samples:
@@ -223,8 +204,8 @@ def _run(args):
 
     def finish_grab():
         save_frame("narrow_B_mouse_moved.png")
-        report = {"source": "live WindowsMediaProvider", "platform": sys.platform,
-                  "capture_relaunch_enabled": args.netease_relaunch,
+        report = {"source": "shared PlaybackSourceProvider", "platform": sys.platform,
+                  "capture_relaunch_enabled": False,
                   "render": "native Qt window grab", "frames": evidence}
         (args.grab / "live-evidence.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -240,7 +221,7 @@ def _run(args):
                  and owner.media_source_app not in {"", "dependency", "system"}
                  and owner.media_position_source not in {"", "none", "capture-unavailable"}
                  and bool(window.source_lines()))
-        if ready and (not args.netease_relaunch or owner.media_position_source == "capture-model"):
+        if ready:
             wait.stop()
             QCursor.setPos(window.mapToGlobal(QPoint(-40, -40)))
             window._pointer_active_until = 0.0
@@ -259,7 +240,7 @@ def _run(args):
     if args.seconds:
         QTimer.singleShot(round(args.seconds * 1000), app.quit)
     try:
-        app.exec()
+        runtime.run()
     finally:
         window.study_timer.stop()
         try:
@@ -271,8 +252,9 @@ def _run(args):
         finally:
             window.shutdown()
             window.close()
+            owner._application_quitting = True
             owner.close()
-            provider.close_audio_outputs()
+            runtime.settings.save_now()
             qInstallMessageHandler(previous_qt_handler)
     return outcome["exit_code"]
 

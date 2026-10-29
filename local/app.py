@@ -6,6 +6,7 @@ import threading
 import time
 import traceback
 import ctypes
+import tempfile
 from functools import lru_cache
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -284,23 +285,41 @@ class MainThreadWatchdog:
 
 
 class LocalIslandApp:
-    def __init__(self, single_instance_guard: SingleInstanceGuard | None = None, *, installer_handoff=None, installer_sync=None):
+    def __init__(self, single_instance_guard: SingleInstanceGuard | None = None, *, installer_handoff=None, installer_sync=None,
+                 view="wide", capture=None, settings_path=None):
+        if view not in {"wide", "narrow"} or capture not in {None, "attach_only"}:
+            raise ValueError("Unsupported GluSpot view or capture mode")
+        self.view = view
+        self._temporary_settings = None
+        if (view == "narrow" or capture == "attach_only") and settings_path is None:
+            self._temporary_settings = tempfile.TemporaryDirectory(prefix="gluspot-session-")
+            settings_path = os.path.join(self._temporary_settings.name, "settings.json")
         self.single_instance_guard = single_instance_guard
         self._installer_handoff = installer_handoff
         self._installer_sync = installer_sync
         _set_windows_process_identity()
-        self.app = QApplication(sys.argv)
+        self.app = QApplication.instance() or QApplication(sys.argv)
         self.app.setApplicationName(APP_NAME)
-        self.app.setQuitOnLastWindowClosed(False)
+        self.app.setQuitOnLastWindowClosed(view == "narrow")
         self.watchdog = MainThreadWatchdog(self.app)
         self.gc_scheduler = install_gc_scheduler(self.app, busy=self._visual_animation_busy)
 
-        self.settings = SettingsManager()
+        self.settings = SettingsManager(settings_path=settings_path) if settings_path is not None else SettingsManager()
+        if capture == "attach_only":
+            # Session settings use the same manager/getter/setter as wide.
+            # The explicit provider guard also prevents a later setting edit
+            # or repair request from authorizing a player relaunch.
+            for key, value in (
+                ("v2_system_capture_enabled", True), ("v2_owned_playback_enabled", False),
+                ("v2_capture_position_enabled", True), ("netease.cef.enabled", True),
+                ("netease.transport", "attach"),
+            ):
+                self.settings.set(key, value)
         self.icon_paths = resolve_icon_paths(self.settings.get("v2_custom_icon_path", ""))
         self.app.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         set_theme_settings_getter(self.settings.get)
         IslandStackVisual.load_embedded_lyric_fonts()
-        self.system_provider = WindowsMediaProvider(settings_getter=self._runtime_setting)
+        self.system_provider = WindowsMediaProvider(settings_getter=self._runtime_setting, attach_only=capture == "attach_only")
         self.online_music = make_online_music_service()
         self.owned_player = OwnedMusicPlayer(self.online_music, self.system_provider.lyrics_store, self.app)
         self.owned_player.set_playback_mode(self.settings.get("v2_owned_playback_mode", "sequential"))
@@ -317,7 +336,7 @@ class LocalIslandApp:
         self.app.setFont(QFont(app_font_family, 9))
         self.window = IslandStackVisual(data_provider=self.data_provider)
         self.window._keep_minimum_surface = True
-        self.window._tray_hidden = False
+        self.window._tray_hidden = view == "narrow"
         self.window._application_quitting = False
         self.window.setWindowIcon(QIcon(str(self.icon_paths.app_icon)))
         self.window.settings_getter = self._runtime_setting
@@ -354,7 +373,16 @@ class LocalIslandApp:
         self.window.settings_changed_callback = self._save_visual_state
         self._setup_mydockfinder_listener()
         self.tray = None
-        self._setup_tray()
+        self.view_window = self.window
+        if view == "narrow":
+            # Runtime construction is complete before choosing a presentation.
+            from _demos.narrow3.narrow_window import NarrowStudyWindow
+            self.view_window = NarrowStudyWindow(self.window, "B", "left", live=True)
+            self.view_window.hints = False
+            self.window.music_fullscreen_overlay = self.view_window
+            self.window._music_surface_active = True
+        else:
+            self._setup_tray()
 
     def _music_login_required(self):
         if not self.settings.get("v2_owned_playback_enabled", True):
@@ -822,6 +850,9 @@ class LocalIslandApp:
         self.app.quit()
 
     def run(self):
+        if self.view == "narrow":
+            self.view_window.show()
+            return self.app.exec()
         handoff = self._logical_installer_handoff(self._installer_handoff)
         def start():
             if handoff is None:
@@ -851,6 +882,13 @@ class LocalIslandApp:
         return logical_handoff_rect(values, QGuiApplication.screens())
 
 
+def bootstrap(*, view="wide", capture=None, settings_path=None, single_instance_guard=None,
+              installer_handoff=None, installer_sync=None):
+    """Build the shared runtime, then select its wide or narrow view."""
+    return LocalIslandApp(single_instance_guard, view=view, capture=capture, settings_path=settings_path,
+                          installer_handoff=installer_handoff, installer_sync=installer_sync)
+
+
 def main(*, installer_handoff=None, installer_sync=None):
     if sys.platform == "win32":
         for stream in (sys.stdout, sys.stderr):
@@ -861,7 +899,7 @@ def main(*, installer_handoff=None, installer_sync=None):
     if not single_instance_guard.acquired:
         return
 
-    app = LocalIslandApp(single_instance_guard, installer_handoff=installer_handoff, installer_sync=installer_sync)
+    app = bootstrap(single_instance_guard=single_instance_guard, installer_handoff=installer_handoff, installer_sync=installer_sync)
     sys.exit(app.run())
 
 

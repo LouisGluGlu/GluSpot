@@ -193,7 +193,8 @@ class LiveChecks(unittest.TestCase):
             window.show()
             self.app.processEvents()
             self.assertTrue(window.isVisible())
-            self.assertFalse(window._timer.isActive())
+            self.assertTrue(window._timer.isActive())
+            self.assertTrue(window._audio_output_status_timer.isActive())
             self.assertTrue(window.study_timer.isActive())
             if via_escape:
                 QTest.keyClick(window, Qt.Key.Key_Escape)
@@ -203,42 +204,61 @@ class LiveChecks(unittest.TestCase):
             self.assertFalse(window.isVisible())
             self.assertFalse(window.study_timer.isActive())
 
-    def test_visibility_lifecycle_stops_refresh_and_base_timers(self):
-        def assert_timers(study_active):
-            self.assertEqual(self.window.study_timer.isActive(), study_active)
-            self.assertFalse(self.window._timer.isActive())
-            self.assertFalse(self.window._audio_output_status_timer.isActive())
-
+    def test_view_timer_never_polls_owner_or_stops_shared_clock(self):
+        # The owner keeps its normal clock. The view timer only coalesces paint.
+        self.owner.timer.start()
+        owner_timer = self.owner.timer
         with patch.object(self.owner, "_refresh_media_data") as refresh:
-            self.window.show()
+            self.window.tick()
+            refresh.assert_not_called()
+        for action, active in ((self.window.show, True), (self.window.hide, False),
+                               (self.window.show, True), (self.window.showMinimized, False),
+                               (self.window.showNormal, True)):
+            action()
             self.app.processEvents()
-            assert_timers(True)
-            QTest.qWait(100)
-            self.assertGreater(refresh.call_count, 0)
-            self.window.hide()
-            self.app.processEvents()
-            assert_timers(False)
-            hidden_count = refresh.call_count
-            QTest.qWait(100)
-            self.assertEqual(refresh.call_count, hidden_count)
-            self.window.show()
-            self.app.processEvents()
-            assert_timers(True)
-            QTest.qWait(100)
-            self.assertGreater(refresh.call_count, hidden_count)
-            self.window.showMinimized()
-            self.app.processEvents()
-            self.assertTrue(self.window.isMinimized())
-            assert_timers(False)
-            minimized_count = refresh.call_count
-            QTest.qWait(100)
-            self.assertEqual(refresh.call_count, minimized_count)
-            self.window.showNormal()
-            self.app.processEvents()
-            self.assertFalse(self.window.isMinimized())
-            assert_timers(True)
-            QTest.qWait(100)
-            self.assertGreater(refresh.call_count, minimized_count)
+            self.assertEqual(self.window.study_timer.isActive(), active)
+            if active:
+                self.assertTrue(self.window._timer.isActive())
+                self.assertTrue(self.window._audio_output_status_timer.isActive())
+            self.assertIs(self.owner.timer, owner_timer)
+            self.assertTrue(owner_timer.isActive())
+        self.window.close()
+        self.app.processEvents()
+        self.assertTrue(owner_timer.isActive())
+
+    def test_live_focus_and_position_follow_owner_identity(self):
+        self.apply(track())
+        self.wait_lines()
+        self.owner.lyric_last_sync_position = 2.0
+        self.owner.lyric_index = 2
+        self.owner.prev_lyric_index = 1
+        self.owner.lyric_changed_at = time.monotonic() - 1
+        self.assertEqual(self.window.playback_position(), 2.0)
+        self.assertEqual(self.window.lyric_focus(), (2, 2.0))
+        self.owner.lyric_index = 1
+        self.owner.prev_lyric_index = 1
+        self.assertEqual(self.window.lyric_focus(), (1, 1.0))
+
+    def test_live_lyric_frame_never_advances_private_clock(self):
+        self.owner.lyric_last_sync_position = 7.0
+        self.owner.lyric_index = 1
+        self.owner.prev_lyric_index = 0
+        self.owner.lyric_changed_at = 99.0
+        timed = [(0.0, 'fixture'), (100.0, 'different timing'), (200.0, 'later')]
+        with patch.object(self.window._lyric_motion, 'frame') as private_frame, \
+             patch.object(self.owner, '_stable_lyric_source_position') as source_clock:
+            frame = self.window._lyric_frame(timed, 100.0)
+            self.window._advance_lyric_animation(100.0)
+            private_frame.assert_not_called()
+            source_clock.assert_not_called()
+        self.assertEqual(frame.active_index, self.owner.lyric_index)
+        self.assertEqual(self.window._lyric_motion.last_position, 7.0)
+
+    def test_live_seek_uses_shared_surface_implementation(self):
+        from local.music_surface_window import MusicSurfaceWindow
+        self.assertIs(type(self.window)._seek_to_lyric, MusicSurfaceWindow._seek_to_lyric)
+        self.assertIs(self.window.owner, self.owner)
+        self.assertIs(self.window.owner.data_provider, self.provider)
 
     def test_measured_word_seek_offset_and_gesture_fences(self):
         self.apply(track())

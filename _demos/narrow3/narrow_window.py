@@ -22,10 +22,16 @@ from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_reading import LyricReadingRenderer
+from local.music_lyric_motion import MusicLyricFrame
 from local.music_lyric_presentation import split_display_layers
-from layout import NarrowLayout
-from motion import EaseOutFade, Visibility
-from veil import VeilOverlay
+if __package__:
+    from .layout import NarrowLayout
+    from .motion import EaseOutFade, Visibility
+    from .veil import VeilOverlay
+else:
+    from layout import NarrowLayout
+    from motion import EaseOutFade, Visibility
+    from veil import VeilOverlay
 from local.personal_dj_icon import paint_personal_dj_icon
 
 SONGS = [("夜航的信", "林间电台"), ("晚风经过", "陈小雨"), ("云与海之间", "南方来信"), ("星光落下来", "木子"), ("慢慢的旅程", "夏日回声"), ("下一站黎明", "白昼乐队"), ("你听见了吗", "无名旅人"), ("再见之前", "海边房间")]
@@ -114,7 +120,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.set_cover(0)
         self._sync_owned_playback_mode()
         self.set_content_layout("lyrics", animate=False)
-        self._layout_animation.stop()
         self._finish_content_layout()
         self._reset_control_idle()
         self.refresh_veil()
@@ -126,15 +131,20 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def playback_position(self):
         if not self.live:
             return self.owner.media_position_seconds
-        now = time.monotonic()
-        position = self.owner._stable_lyric_source_position(now)
-        return position + self.owner._effective_lyric_offset_seconds()
+        # The owner publishes this offset-applied position from its shared
+        # lyric tick. Rendering must never project or validate another clock.
+        return self.owner.lyric_last_sync_position
 
     def source_lines(self):
         if not self.live:
             return TIMED_LYRICS
+        track_key = self._visual_track_identity()
+        if track_key != self._browse_track_key:
+            self._browse_track_key = track_key
+            self._clear_lyric_browse()
+            self._hovered_lyric_index = None
         _text, timed = self._display_lyrics()
-        key = (self._visual_track_identity(), tuple(timed), self._display_timed_units,
+        key = (track_key, tuple(timed), self._display_timed_units,
                self._display_timed_kinds)
         if key != self._source_lines_key:
             units = self._display_timed_units
@@ -162,8 +172,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def showEvent(self, event):
         super().showEvent(event)
         if self.live:
-            self._timer.stop()
-            self._audio_output_status_timer.stop()
             if hasattr(self, "study_timer") and not self.isMinimized():
                 self.study_timer.start(33)
 
@@ -175,8 +183,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if getattr(self, "live", False) and hasattr(self, "study_timer"):
-            self._timer.stop()
-            self._audio_output_status_timer.stop()
             if self.isVisible() and not self.isMinimized():
                 self.study_timer.start(33)
             else:
@@ -230,7 +236,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def tick(self):
         now = time.monotonic()
         if self.live:
-            self.owner._refresh_media_data(now)
             self._sync_owned_playback_mode()
             self.dj_available = self._owned_personal_dj_enabled is not None
             self.dj_enabled = self._owned_personal_dj_enabled is True
@@ -238,9 +243,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             modes = ("sequential", "shuffle", "repeat_one")
             self.loop_mode = modes.index(self._owned_playback_mode) if self._owned_playback_mode in modes else 0
             self.shelf = self.footer_hover = now < self._pointer_active_until
-        elif self.owner.media_is_playing and not self.freeze_clock:
-            loop = len(TIMED_LYRICS) * 4.0
-            self.owner.media_position_seconds = (self.owner.media_position_seconds + now - self.last_tick) % loop
         self.last_tick = now
         self.visibility.advance(now, self.shelf or self.touch_active, self.footer_hover,
                                 self.mode == "playlist")
@@ -591,14 +593,47 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             endpoints.append(image)
         self._fade_content_key, self._fade_content_frames = key, tuple(endpoints)
 
+    def _advance_lyric_animation(self, now):
+        if self.live:
+            # Keep the production surface timer available for its visual
+            # controls/material work; shared owner state supplies lyric focus.
+            return
+        super()._advance_lyric_animation(now)
+
+    def _lyric_frame(self, timed, now):
+        if not self.live:
+            return super()._lyric_frame(timed, now)
+        # Wheel input and the inherited wide painter also request frames.
+        # Adapt the owner's published state without advancing surface motion.
+        track_key = self._visual_track_identity()
+        if track_key != self._browse_track_key:
+            self._browse_track_key = track_key
+            self._clear_lyric_browse()
+            self._hovered_lyric_index = None
+        position = self.playback_position()
+        # The inherited painter reads this field for word ink; it is only a
+        # mirror of the shared snapshot, never a separately projected clock.
+        self._lyric_motion.last_position = position
+        if not timed:
+            return MusicLyricFrame(0, 0.0, 0.0, 0.0)
+        focus = min(len(timed) - 1, max(0, self.owner.lyric_index))
+        previous = min(len(timed) - 1, max(0, self.owner.prev_lyric_index))
+        transition = min(1.0, max(0.0, (now - self.owner.lyric_changed_at) / .36))
+        eased = 1.0 - (1.0 - transition) ** 3
+        start = float(timed[focus][0])
+        end = (float(timed[focus + 1][0]) if focus + 1 < len(timed)
+               else max(start + 1.0, self.owner.media_duration_seconds))
+        progress = min(1.0, max(0.0, (position - start) / max(.001, end - start)))
+        return MusicLyricFrame(focus, previous + (focus - previous) * eased, progress, 0.0)
+
     def lyric_focus(self):
         lines = self.source_lines()
         if not lines:
             return 0, 0.0
-        position = self.playback_position()
         if self.live:
             frame = self._lyric_frame([(line.time_seconds, line.text) for line in lines], time.monotonic())
             return frame.active_index, frame.scroll_index
+        position = self.playback_position()
         focus = min(len(lines) - 1, max(0, bisect_right([line.time_seconds for line in lines], position) - 1))
         transition = min(1.0, max(0.0, (position - lines[focus].time_seconds) / .36))
         eased = 1.0 - (1.0 - transition) ** 3
