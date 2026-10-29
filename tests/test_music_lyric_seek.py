@@ -211,6 +211,65 @@ class MusicLyricSeekTests(unittest.TestCase):
             )
         )
 
+    def test_internal_type_error_never_retries_without_the_track_fence(self):
+        calls, unguarded_writes = [], []
+        owner = self.owner
+
+        class Provider:
+            def seek_playback_position(self, seconds, *, expected_track_id=None):
+                calls.append((seconds, expected_track_id))
+                if expected_track_id is not None:
+                    owner.media_source_app = 'owned'
+                    raise TypeError('failure inside a provider with the current interface')
+                unguarded_writes.append(seconds)
+                return True
+
+        self.owner.data_provider = Provider()
+        self.window._browse_track_key = self.owner.media_track_id
+        with self.assertLogs('GluSpot.capture.seek') as records:
+            self.window._seek_to_lyric(1)
+        self.assertEqual(calls, [(1.5, self.owner.media_track_id)])
+        self.assertFalse(unguarded_writes)
+        self.assertFalse(self.window._seek_pending)
+        self.assertTrue(any('stage=ui reason=request-error' in line for line in records.output))
+        self.assertTrue(any('stage=ui reason=completion-source-mismatch' in line for line in records.output))
+
+    def test_legacy_one_argument_provider_is_called_once_and_logged(self):
+        calls = []
+        self.owner.data_provider = SimpleNamespace(
+            seek_playback_position=lambda seconds: calls.append(seconds) or True)
+        self.window._browse_track_key = self.owner.media_track_id
+        with self.assertLogs('GluSpot.capture.seek') as records:
+            self.window._seek_to_lyric(1)
+        self.assertEqual(calls, [1.5])
+        self.assertFalse(self.window._seek_pending)
+        self.assertTrue(any('stage=ui reason=legacy-provider' in line for line in records.output))
+        self.assertTrue(any('stage=ui reason=succeeded' in line for line in records.output))
+
+    def test_ui_refusals_are_logged_before_provider_dispatch(self):
+        self.window._seek_pending = True
+        with self.assertLogs('GluSpot.capture.seek') as records:
+            self.window._seek_to_lyric(1)
+            self.window._seek_pending = False
+            self.window._seek_to_lyric(1000)
+            self.owner.data_provider = object()
+            self.window._seek_to_lyric(1)
+        self.assertTrue(any('stage=ui reason=pending' in line for line in records.output))
+        self.assertTrue(any('stage=ui reason=invalid-index' in line for line in records.output))
+        self.assertTrue(any('stage=ui reason=provider-unavailable' in line for line in records.output))
+        self.assertFalse(self.provider.calls)
+
+    def test_completion_for_replaced_track_does_not_publish_old_target(self):
+        self.window._browse_track_key = self.owner.media_track_id
+        previous_track_id = self.owner.media_track_id
+        self.owner.media_track_id = 'replacement-before-repaint'
+        self.window._seek_pending = True
+        with self.assertLogs('GluSpot.capture.seek') as records:
+            self.window._on_seek_finished(True, 42, previous_track_id)
+        self.assertFalse(self.window._seek_pending)
+        self.assertIsNone(self.window._pending_backward_seek)
+        self.assertTrue(any('stage=ui reason=completion-track-mismatch' in line for line in records.output))
+
 
 if __name__ == "__main__":
     unittest.main()

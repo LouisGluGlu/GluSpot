@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict, deque
 from bisect import bisect_left, bisect_right
 from functools import lru_cache
+import inspect
 import math
 import re
 import time
@@ -18,6 +19,7 @@ from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApp
 from PySide6.QtWidgets import QWidget
 
 from api.lyric_timeline import active_index_for_position
+from api.capture.seek import record_seek_decision
 from local.music_lyric_preparation import (
     coalesced_timed_lyrics, prepare_lyric_presentation, snapshot_lyric_input,
 )
@@ -10543,10 +10545,22 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 if (pressed_lyric_track_key == current_lyric_track_key
                         and release_lyric_word == pressed_lyric_word):
                     self._seek_to_lyric(pressed_lyric_word[0], pressed_lyric_word[2])
+                else:
+                    reason = ('gesture-track-mismatch' if not pressed_lyric_track_key or
+                              pressed_lyric_track_key[0] != current_lyric_track_key[0] else
+                              'gesture-source-mismatch' if pressed_lyric_track_key != current_lyric_track_key else
+                              'gesture-target-mismatch')
+                    record_seek_decision('ui', reason, target=pressed_lyric_word[2])
             elif (pressed_lyric_index is not None
                     and pressed_lyric_track_key == current_lyric_track_key
                     and release_lyric_index == pressed_lyric_index):
                 self._seek_to_lyric(pressed_lyric_index)
+            elif pressed_lyric_index is not None:
+                reason = ('gesture-track-mismatch' if not pressed_lyric_track_key or
+                          pressed_lyric_track_key[0] != current_lyric_track_key[0] else
+                          'gesture-source-mismatch' if pressed_lyric_track_key != current_lyric_track_key else
+                          'gesture-target-mismatch')
+                record_seek_decision('ui', reason)
             elif pressed_media_command and release_media_command == pressed_media_command:
                 self._start_transport_feedback(pressed_media_command)
                 self._send_media_command(pressed_media_command)
@@ -10595,6 +10609,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     def _seek_to_lyric(self, index: int, seconds: float | None = None):
         _lines, timed = self._display_lyrics()
         if self._seek_pending or not 0 <= index < len(timed):
+            record_seek_decision('ui', 'pending' if self._seek_pending else 'invalid-index', target=seconds)
             return
         offset = getattr(self.owner, "_effective_lyric_offset_seconds", None)
         lyric_offset = 0.0
@@ -10618,6 +10633,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         provider = getattr(self.owner, "data_provider", None)
         seek = getattr(provider, "seek_playback_position", None)
         if not callable(seek):
+            record_seek_decision('ui', 'provider-unavailable', target=seconds)
             self._clear_lyric_browse()
             self._hovered_lyric_index = None
             self.update()
@@ -10629,17 +10645,36 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._hovered_lyric_index = None
         self.update()
         self._seek_pending = True
-        self._seek_request_source_app = str(getattr(self.owner, "media_source_app", "") or "")
+        source_app = self._seek_request_source_app = str(getattr(self.owner, "media_source_app", "") or "")
+        record_seek_decision('ui', 'queued', target=seconds)
 
         def request():
             try:
+                # Inspect compatibility before invocation. An internal TypeError
+                # must never retry an already issued command without its fence.
+                guarded = True
                 try:
-                    result = bool(seek(seconds, expected_track_id=track_key))
-                except TypeError:
-                    # Third-party/fake providers may still implement the
-                    # original one-argument contract.
-                    result = bool(seek(seconds))
+                    signature = inspect.signature(seek)
+                except (TypeError, ValueError):
+                    pass  # Unknown callables receive the guarded contract once.
+                else:
+                    try:
+                        signature.bind(seconds, expected_track_id=track_key)
+                    except TypeError:
+                        signature.bind(seconds)
+                        guarded = False
+                current_track_id = str(getattr(self.owner, "media_track_id", "") or "")
+                if track_key and current_track_id and track_key != current_track_id:
+                    record_seek_decision('ui', 'gesture-track-mismatch', target=seconds)
+                    result = False
+                elif source_app != str(getattr(self.owner, "media_source_app", "") or ""):
+                    record_seek_decision('ui', 'gesture-source-mismatch', target=seconds)
+                    result = False
+                else:
+                    record_seek_decision('ui', 'dispatch' if guarded else 'legacy-provider', target=seconds)
+                    result = bool(seek(seconds, expected_track_id=track_key) if guarded else seek(seconds))
             except Exception:
+                record_seek_decision('ui', 'request-error', target=seconds)
                 result = False
             self.seekFinished.emit(result, seconds, track_key)
 
@@ -10652,6 +10687,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     @Slot(bool, float, str)
     def _on_seek_finished(self, succeeded: bool, seconds: float, track_key: str):
         if self._closing_for_shutdown:
+            record_seek_decision('ui', 'closing', target=seconds)
             return
         self._seek_pending = False
         request_app = self._seek_request_source_app
@@ -10660,8 +10696,14 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # stacking. Any temporary player reveal restores the prior foreground
         # window inside the provider before this callback is delivered.
         source_app = str(getattr(self.owner, "media_source_app", "") or "")
-        if track_key != self._browse_track_key or request_app not in {None, source_app}:
+        current_track_id = str(getattr(self.owner, "media_track_id", "") or "")
+        if track_key != self._browse_track_key or (current_track_id and track_key != current_track_id):
+            record_seek_decision('ui', 'completion-track-mismatch', target=seconds)
             return
+        if request_app not in {None, source_app}:
+            record_seek_decision('ui', 'completion-source-mismatch', target=seconds)
+            return
+        record_seek_decision('ui', 'succeeded' if succeeded else 'failed', target=seconds)
         # A failed player seek must not leave the viewport permanently frozen
         # at its manual browse anchor. Resume from the actual media clock; only
         # a verified provider success is allowed to publish the target time.

@@ -8,6 +8,8 @@ import json
 import re
 import struct
 
+from api.capture.netease_js import EARLY_REVISION
+
 
 async def close_writer(writer):
     try:
@@ -37,6 +39,7 @@ class FakeCdpServer:
         self.reload_context_events = True
         self.require_early_shim = False
         self.early_shim_active = False
+        self.early_shim_revision = None
 
     async def __aenter__(self):
         self.server = await asyncio.start_server(self._accept, '127.0.0.1', 0)
@@ -132,13 +135,16 @@ class FakeCdpServer:
                 elif method == 'Page.reload':
                     self.reloads += 1
                     self.early_shim_active = bool(self.new_document_scripts)
+                    self.early_shim_revision = EARLY_REVISION if self.early_shim_active else None
                     reloaded = self.reload_context_events
                 elif method == 'Runtime.enable':
                     await self._send(writer, dict(method='Runtime.executionContextCreated',params={'context':{'id':1}}))
                 elif method == 'Runtime.evaluate':
                     expression = params.get('expression', '')
                     if expression.startswith('Boolean(globalThis.__gluspotNeteaseEarlyV1'):
-                        result = {'result': {'value': self.early_shim_active}}
+                        revision = re.search(r'\.revision === (\d+)', expression)
+                        compatible = not revision or self.early_shim_revision == int(revision.group(1))
+                        result = {'result': {'value': self.early_shim_active and compatible}}
                     elif '.seek(' in expression:
                         arguments = json.loads('[' + expression.split('.seek(', 1)[1][:-1] + ']')
                         self.sample = dict(self.sample, position=arguments[2], sequence=self.sample['sequence'] + 1)

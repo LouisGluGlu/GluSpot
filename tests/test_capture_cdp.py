@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from api.capture.cdp import CdpError, CdpSession, discover_target
 from api.capture.netease import NetEaseInstallation, NetEaseLocator
-from api.capture.netease_js import JsAdapterRegistry
+from api.capture.netease_js import EARLY_REVISION, JsAdapterRegistry
 from tests.capture_cdp_fake import FakeCdpServer, close_writer
 
 from tests.capture_async import CaptureAsyncTestCase
@@ -83,6 +83,32 @@ class CdpTests(CaptureAsyncTestCase):
             await asyncio.sleep(0.005)
         self.assertEqual(self.session.latest['position'], 44)
         self.assertGreaterEqual(self.session.latest['received_at'], before['received_at'])
+
+    async def test_old_ready_shim_is_replaced_by_reload_before_adapter_install(self):
+        self.server.early_shim_active = True
+        self.server.early_shim_revision = EARLY_REVISION - 1
+        await self.ready()
+        self.assertEqual(self.server.reloads, 1)
+        self.assertEqual(self.server.early_shim_revision, EARLY_REVISION)
+        commands = self.server.commands
+        checked = next(index for index, command in enumerate(commands)
+                       if command['method'] == 'Runtime.evaluate'
+                       and command['params']['expression'].startswith(
+                           'Boolean(globalThis.__gluspotNeteaseEarlyV1'))
+        self.assertIn(f'.revision === {EARLY_REVISION}', commands[checked]['params']['expression'])
+        reloaded = next(index for index, command in enumerate(commands)
+                        if command['method'] == 'Page.reload')
+        installed = next(index for index, command in enumerate(commands)
+                         if command['method'] == 'Runtime.evaluate'
+                         and command['params']['expression'] == self.session.adapter.install_expression())
+        self.assertLess(checked, reloaded)
+        self.assertLess(reloaded, installed)
+
+    async def test_current_ready_shim_is_reused_without_another_reload(self):
+        self.server.early_shim_active = True
+        self.server.early_shim_revision = EARLY_REVISION
+        await self.ready()
+        self.assertEqual(self.server.reloads, 0)
 
     async def test_parallel_commands_have_distinct_responses(self):
         await self.ready()
@@ -308,6 +334,312 @@ class AdapterJavascriptTests(unittest.TestCase):
         finally:
             if script_path is not None:
                 os.unlink(script_path)
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_early_chain_keeps_native_callback_metadata_and_player_self_seek(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const receiver = {}, nativeCalls = [], pushed = [], slots = {};
+const token = {}, metadata = Symbol('native-metadata');
+function nativeProgress(trackId, seconds, ratio) {
+  'use strict';
+  nativeCalls.push({receiver:this === receiver, trackId, seconds, ratio});
+  return token;
+}
+Object.defineProperty(nativeProgress, metadata, {value:token});
+function registerCall(key, callback) {
+  // Model a native bridge that dispatches the registered callback's arity.
+  slots[key] = callback;
+  return token;
+}
+Object.defineProperty(registerCall, metadata, {value:token});
+const call = function call(method, callback, args) {
+  if (method !== 'audioplayer.seek') throw Error('unexpected command');
+  const registered = slots['audioplayer.onPlayProgress'];
+  const progress = [args[0], args[2], args[2] / 100];
+  const result = Reflect.apply(registered, receiver, progress.slice(0, registered.length));
+  callback();
+  return result;
+};
+const bridge = {registerCall, call};
+eval(EARLY);
+globalThis.channel = bridge;
+const registeredResult = channel.registerCall('audioplayer.onPlayProgress', nativeProgress);
+const callback = slots['audioplayer.onPlayProgress'];
+const equivalent = (proxy, target) => proxy.length === target.length && proxy.name === target.name &&
+  Object.getPrototypeOf(proxy) === Object.getPrototypeOf(target) &&
+  Reflect.ownKeys(proxy).every(key => {
+    const actual = Object.getOwnPropertyDescriptor(proxy, key);
+    const expected = Object.getOwnPropertyDescriptor(target, key);
+    return actual.value === expected.value && actual.writable === expected.writable &&
+      actual.enumerable === expected.enumerable && actual.configurable === expected.configurable;
+  }) && Reflect.ownKeys(proxy).length === Reflect.ownKeys(target).length;
+globalThis.performance = {now: () => 100};
+globalThis.__gluspotNeteaseSample = value => pushed.push(JSON.parse(value));
+const probe = eval(SCRIPT), adapter = globalThis.__gluspotNeteaseV1;
+const selfSeek = channel.call('audioplayer.seek', () => {}, ['song', 'native-ui', 52]);
+const selfPosition = adapter.read().position;
+const gluspotSeek = adapter.seek('song', 'word-click', 61);
+const gluspotPosition = adapter.read().position;
+const health = adapter.health();
+adapter.close();
+console.log(JSON.stringify({probe, nativeCalls, selfPosition, gluspotPosition, gluspotSeek,
+  metadataPreserved:equivalent(callback, nativeProgress) && equivalent(channel.registerCall, registerCall),
+  registrationResult:registeredResult === token, selfSeekResult:selfSeek === token,
+  nativeCallUntouched:channel.call === call, callbackCount:health.originalCalls.PlayProgress,
+  pushed:pushed.filter(value => value.type === 'sample').map(value => value.position)}));
+'''.replace('EARLY', early), existing=False)
+        self.assertTrue(value['probe']['api'])
+        self.assertTrue(value['metadataPreserved'])
+        self.assertTrue(value['registrationResult'] and value['selfSeekResult'])
+        self.assertTrue(value['nativeCallUntouched'] and value['gluspotSeek'])
+        self.assertEqual(value['selfPosition'], 52)
+        self.assertEqual(value['gluspotPosition'], 61)
+        self.assertEqual(value['callbackCount'], 2)
+        self.assertEqual(value['pushed'], [52, 61])
+        self.assertEqual(value['nativeCalls'], [
+            dict(receiver=True, trackId='song', seconds=52, ratio=.52),
+            dict(receiver=True, trackId='song', seconds=61, ratio=.61),
+        ])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_early_registration_wraps_only_the_notification_callback_argument(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const received = [], observed = [];
+const token = {}, receiver = {};
+function notification(trackId, seconds, ratio) { 'use strict'; return this === receiver ? token : null; }
+function completion() { return 'completion'; }
+const bridge = {registerCall(key, callback, trailing, marker) {
+  received.push({key, callback, trailing, marker});
+  return token;
+}};
+eval(EARLY);
+globalThis.channel = bridge;
+globalThis.__gluspotNeteaseEarlyV1.activate((event, receiver, args) => observed.push({event, args}));
+const result = channel.registerCall('audioplayer.onPlayProgress', notification, completion, 'audioplayer.onEnd');
+const captured = received[0];
+const callbackResult = Reflect.apply(captured.callback, receiver, ['song', 4, .1]);
+console.log(JSON.stringify({registrationResult:result === token, callbackResult:callbackResult === token,
+  changed:captured.callback !== notification, trailingUntouched:captured.trailing === completion,
+  marker:captured.marker, observed, health:globalThis.__gluspotNeteaseEarlyV1.health()}));
+'''.replace('EARLY', early), existing=False)
+        self.assertTrue(value['registrationResult'] and value['callbackResult'])
+        self.assertTrue(value['changed'] and value['trailingUntouched'])
+        self.assertEqual(value['marker'], 'audioplayer.onEnd')
+        self.assertEqual(value['observed'], [dict(event='PlayProgress', args=['song', 4, .1])])
+        self.assertEqual(value['health']['caught'], ['PlayProgress'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_early_shim_leaves_commands_bare_events_and_other_namespaces_untouched(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const received = [], originalCalls = [];
+function callback(value) { originalCalls.push(value); return value; }
+const bridge = {
+  registerCall(...args) { received.push(args); return args; },
+  appendRegisterCall(...args) { received.push(args); return args; }
+};
+eval(EARLY);
+globalThis.channel = bridge;
+const cases = ['Load', 'load', 'onLoad', 'audioplayer.load', 'End', 'audioplayer.end',
+               'other.onLoad', 'audioplayer.seek'];
+for (const key of cases) channel.registerCall(key, callback);
+channel.registerCall('other', callback, 'audioplayer.onLoad');
+channel.appendRegisterCall('Load', 'other', callback);
+const unchanged = received.every(args => args.find(value => typeof value === 'function') === callback);
+for (const args of received) args.find(value => typeof value === 'function')('native');
+console.log(JSON.stringify({unchanged, nativeCalls:originalCalls.length,
+  health:globalThis.__gluspotNeteaseEarlyV1.health()}));
+'''.replace('EARLY', early), existing=False)
+        self.assertTrue(value['unchanged'])
+        self.assertEqual(value['nativeCalls'], 10)
+        self.assertEqual(value['health']['caught'], [])
+        self.assertEqual(value['health']['registrations'], [])
+        self.assertFalse(value['health']['api'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_failed_native_registration_preserves_exception_and_cannot_claim_ready(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const nativeError = new Error('native registration rejected');
+let fail = true, stored = null;
+const bridge = {registerCall(key, callback) {
+  if (fail) throw nativeError;
+  stored = callback;
+  return 'registered';
+}};
+eval(EARLY);
+globalThis.channel = bridge;
+let sameError = false;
+try { channel.registerCall('audioplayer.onPlayProgress', fake.originals.PlayProgress); }
+catch (error) { sameError = error === nativeError; }
+const failed = globalThis.__gluspotNeteaseEarlyV1.health();
+fail = false;
+const result = channel.registerCall('audioplayer.onPlayProgress', fake.originals.PlayProgress);
+stored('song', 5, .1);
+console.log(JSON.stringify({sameError, failed, result,
+  succeeded:globalThis.__gluspotNeteaseEarlyV1.health(), nativeCalls:fake.calls.length}));
+'''.replace('EARLY', early), existing=False)
+        self.assertTrue(value['sameError'])
+        self.assertFalse(value['failed']['api'])
+        self.assertEqual(value['failed']['caught'], [])
+        self.assertEqual(value['failed']['registrations'], [])
+        self.assertEqual(value['result'], 'registered')
+        self.assertTrue(value['succeeded']['api'])
+        self.assertEqual(value['succeeded']['caught'], ['PlayProgress'])
+        self.assertEqual(value['succeeded']['originalCalls']['PlayProgress'], 1)
+        self.assertEqual(value['nativeCalls'], 1)
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_nested_and_interleaved_registrations_deliver_each_native_event_once(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const slots = {}, observed = [], nativeCalls = [];
+const bridge = {
+  registerCall(key, callback) { slots[key] = callback; return callback; },
+  registerCallAdapter(key, callback, namespace) { return this.registerCall(key, callback); }
+};
+function first(...args) { nativeCalls.push({name:'first', args}); return 'first'; }
+function second(...args) { nativeCalls.push({name:'second', args}); return 'second'; }
+eval(EARLY);
+globalThis.channel = bridge;
+globalThis.__gluspotNeteaseEarlyV1.activate((event, receiver, args) => observed.push({event, args}));
+const key = 'audioplayer.onPlayProgress';
+const firstProxy = channel.registerCallAdapter(key, first, 'audioplayer');
+const secondProxy = channel.registerCallAdapter(key, second, 'audioplayer');
+const firstAgain = channel.registerCallAdapter(key, first, 'audioplayer');
+const firstResult = slots[key]('song', 4, .1);
+const secondAgain = channel.registerCallAdapter(key, secondProxy, 'audioplayer');
+const secondResult = slots[key]('song', 5, .2);
+// Reuse a captured callback under another notification without retaining its
+// former event observer or observing the same physical call twice.
+channel.registerCallAdapter('audioplayer.onPlayState', firstProxy, 'audioplayer');
+const stateResult = slots['audioplayer.onPlayState'](true);
+console.log(JSON.stringify({same:firstProxy === firstAgain && secondProxy === secondAgain,
+  firstResult, secondResult, stateResult, nativeCalls, observed,
+  health:globalThis.__gluspotNeteaseEarlyV1.health()}));
+'''.replace('EARLY', early), existing=False)
+        self.assertTrue(value['same'])
+        self.assertEqual((value['firstResult'], value['secondResult'], value['stateResult']),
+                         ('first', 'second', 'first'))
+        self.assertEqual(value['nativeCalls'], [
+            dict(name='first', args=['song', 4, .1]),
+            dict(name='second', args=['song', 5, .2]), dict(name='first', args=[True]),
+        ])
+        self.assertEqual(value['observed'], [
+            dict(event='PlayProgress', args=['song', 4, .1]),
+            dict(event='PlayProgress', args=['song', 5, .2]), dict(event='PlayState', args=[True]),
+        ])
+        self.assertEqual(value['health']['originalCalls'],
+                         dict(PlayProgress=2, PlayState=1, Load=0, End=0))
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_boot_discovery_restores_object_helpers_and_root_descriptors(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        for finish in ('complete', 'expiry'):
+            with self.subTest(finish=finish):
+                value = self.run_javascript(r'''
+const timers = new Map(); let timerId = 0;
+globalThis.setInterval = callback => { timers.set(++timerId, callback); return timerId; };
+globalThis.clearInterval = id => timers.delete(id);
+const helpers = ['defineProperty', 'defineProperties'].map(key => Object.getOwnPropertyDescriptor(Object, key));
+const empty = {};
+Object.defineProperty(globalThis, '_envAdapter', {value:empty, writable:true, enumerable:false, configurable:true});
+Object.defineProperty(globalThis, 'channel', {value:fake.channel, writable:true, enumerable:false, configurable:true});
+const channelDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'channel');
+const emptyDescriptor = Object.getOwnPropertyDescriptor(globalThis, '_envAdapter');
+eval(EARLY);
+const during = Object.getOwnPropertyDescriptor(globalThis, 'channel');
+if (FINISH === 'complete') {
+  for (const event of fake.events)
+    channel.registerCall('audioplayer.on' + event, fake.originals[event]);
+} else {
+  for (let tick = 0; tick < 100 && timers.size; tick++) timers.get(1)();
+}
+const equal = (left, right) => Reflect.ownKeys(left).length === Reflect.ownKeys(right).length &&
+  Reflect.ownKeys(left).every(key => left[key] === right[key]);
+console.log(JSON.stringify({
+  completeRootUntouched:equal(during, channelDescriptor),
+  channelRestored:equal(Object.getOwnPropertyDescriptor(globalThis, 'channel'), channelDescriptor),
+  emptyRestored:equal(Object.getOwnPropertyDescriptor(globalThis, '_envAdapter'), emptyDescriptor),
+  helpersRestored:['defineProperty', 'defineProperties'].every((key, index) =>
+    equal(Object.getOwnPropertyDescriptor(Object, key), helpers[index])),
+  absentRestored:!Object.hasOwn(globalThis, 'orpheus') && !Object.hasOwn(globalThis, 'legacyNativeCmder'),
+  remainingTimers:timers.size, health:globalThis.__gluspotNeteaseEarlyV1.health()}));
+'''.replace('EARLY', early).replace('FINISH', json.dumps(finish)), existing=False)
+                self.assertTrue(value['completeRootUntouched'] and value['channelRestored'])
+                self.assertTrue(value['emptyRestored'] and value['helpersRestored'])
+                self.assertTrue(value['absentRestored'])
+                self.assertEqual(value['remainingTimers'], 0)
+                self.assertFalse(value['health']['discovering'])
+                self.assertEqual(value['health']['api'], finish == 'complete')
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_boot_watch_keeps_native_writable_only_definition_semantics(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        for method in ('defineProperty', 'defineProperties'):
+            with self.subTest(method=method):
+                value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const empty = {};
+Object.defineProperty(globalThis, '_envAdapter', {value:empty, writable:true, enumerable:false, configurable:true});
+eval(EARLY);
+const define = (key, descriptor) => METHOD === 'defineProperty' ?
+  Object.defineProperty(globalThis, key, descriptor) : Object.defineProperties(globalThis, {[key]:descriptor});
+const existing = define('_envAdapter', {writable:false});
+const absent = define('orpheus', {writable:false});
+const data = Object.getOwnPropertyDescriptor(globalThis, '_envAdapter');
+const created = Object.getOwnPropertyDescriptor(globalThis, 'orpheus');
+console.log(JSON.stringify({returnedOwner:existing === globalThis && absent === globalThis,
+  existingData:data.value === empty && data.writable === false && data.enumerable === false &&
+    data.configurable === true && !('get' in data),
+  createdData:'value' in created && created.value === undefined && created.writable === false &&
+    created.enumerable === false && created.configurable === false && !('get' in created)}));
+'''.replace('EARLY', early).replace('METHOD', json.dumps(method)), existing=False)
+                self.assertEqual(value, dict(returnedOwner=True, existingData=True, createdData=True))
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_boot_discovery_never_invokes_root_or_child_bridge_accessors(self):
+        early = json.dumps(JsAdapterRegistry.select().early_install_expression())
+        for installation in ('before', 'after'):
+            with self.subTest(installation=installation):
+                value = self.run_javascript(r'''
+const timers = new Map(); let timerId = 0, rootReads = 0, childReads = 0;
+globalThis.setInterval = callback => { timers.set(++timerId, callback); return timerId; };
+globalThis.clearInterval = id => timers.delete(id);
+const bridge = {registerCall:fake.channel.registerCall};
+const rootGetter = () => { rootReads++; return bridge; };
+const childGetter = () => { childReads++; return bridge; };
+const install = () => {
+  for (const key of ['legacyNativeCmder', '_envAdapter', 'orpheus'])
+    Object.defineProperty(globalThis, key, {get:rootGetter, configurable:true});
+  for (const key of ['_envAdapter', 'channel', 'eventBridge'])
+    Object.defineProperty(bridge, key, {get:childGetter, configurable:true});
+  Object.defineProperty(globalThis, 'channel', {value:bridge, writable:true, configurable:true});
+};
+if (INSTALLATION === 'before') install();
+eval(EARLY);
+if (INSTALLATION === 'after') install();
+bridge.registerCall('audioplayer.onPlayProgress', fake.originals.PlayProgress);
+for (let tick = 0; tick < 100 && timers.size; tick++) timers.get(1)();
+const rootsPreserved = ['legacyNativeCmder', '_envAdapter', 'orpheus'].every(key =>
+  Object.getOwnPropertyDescriptor(globalThis, key).get === rootGetter);
+const childrenPreserved = ['_envAdapter', 'channel', 'eventBridge'].every(key =>
+  Object.getOwnPropertyDescriptor(bridge, key).get === childGetter);
+console.log(JSON.stringify({rootReads, childReads, rootsPreserved, childrenPreserved,
+  health:globalThis.__gluspotNeteaseEarlyV1.health()}));
+'''.replace('EARLY', early).replace('INSTALLATION', json.dumps(installation)), existing=False)
+                self.assertEqual(value['rootReads'], 0)
+                self.assertEqual(value['childReads'], 0)
+                self.assertTrue(value['rootsPreserved'] and value['childrenPreserved'])
+                self.assertTrue(value['health']['api'])
+                self.assertEqual(value['health']['caught'], ['PlayProgress'])
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_document_start_shim_wraps_late_registration_and_detach_keeps_original(self):
@@ -715,6 +1047,44 @@ console.log(JSON.stringify({first,second,third,sameWrappers,timers,result,sameRe
         self.assertTrue(value['health']['chainIntact'])
         self.assertEqual(value['health']['originalCalls'], dict(PlayProgress=1, PlayState=1, Load=1, End=1))
         self.assertEqual(value['ordering'][0], ['earlier', 'PlayProgress'])
+
+    @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
+    def test_late_queue_callback_preserves_native_metadata_and_restores_original(self):
+        value = self.run_javascript(r'''
+globalThis.setInterval = () => 1; globalThis.clearInterval = () => {};
+const token = {}, receiver = {}, marker = Symbol('native-metadata'), calls = [];
+function nativeProgress(trackId, seconds, ratio) {
+  'use strict';
+  calls.push({receiver:this === receiver, trackId, seconds, ratio});
+  return token;
+}
+Object.defineProperty(nativeProgress, marker, {value:token});
+const queue = legacyNativeCmder.registerCallMap['audioplayer.onPlayProgress'];
+Object.defineProperty(queue, '0', {value:nativeProgress, writable:true, enumerable:false, configurable:false});
+const before = Object.getOwnPropertyDescriptor(queue, '0');
+const probe = eval(SCRIPT), adapter = globalThis.__gluspotNeteaseV1, proxy = queue[0];
+const metadataPreserved = proxy.length === nativeProgress.length && proxy.name === nativeProgress.name &&
+  Object.getPrototypeOf(proxy) === Object.getPrototypeOf(nativeProgress) &&
+  Reflect.ownKeys(proxy).length === Reflect.ownKeys(nativeProgress).length &&
+  Reflect.ownKeys(proxy).every(key => {
+    const actual = Object.getOwnPropertyDescriptor(proxy, key);
+    const expected = Object.getOwnPropertyDescriptor(nativeProgress, key);
+    return Reflect.ownKeys(actual).every(field => actual[field] === expected[field]);
+  });
+const result = registered.PlayProgress.call(receiver, 'song', 7, .1);
+const read = adapter.read();
+adapter.close();
+const after = Object.getOwnPropertyDescriptor(queue, '0');
+console.log(JSON.stringify({probe, metadataPreserved, result:result === token, read, calls,
+  restored:Reflect.ownKeys(before).every(key => before[key] === after[key]),
+  registrations:fake.registrations.length}));
+''')
+        self.assertTrue(value['probe']['api'])
+        self.assertEqual(value['probe']['hook'], 'existing-websdk-chain-v1')
+        self.assertTrue(value['metadataPreserved'] and value['result'] and value['restored'])
+        self.assertEqual(value['read']['position'], 7)
+        self.assertEqual(value['calls'], [dict(receiver=True, trackId='song', seconds=7, ratio=.1)])
+        self.assertEqual(value['registrations'], 0)
 
     @unittest.skipUnless(shutil.which('node'), 'optional existing Node runtime unavailable')
     def test_unreachable_native_owner_refuses_without_displacement(self):

@@ -2,12 +2,55 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
 
 from api.capture.contracts import SeekBackend, TimelineSample
+
+
+_log = logging.getLogger('GluSpot.capture.seek')
+_log.setLevel(logging.INFO)
+# launch.bat redirects stderr into the normal GluSpot-*.log. Other capture
+# callers have no logging setup; a dedicated handler keeps decisions visible
+# without enabling unrelated library logs. StreamHandler flushes every record.
+if not _log.handlers and sys.stderr is not None:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter('%(asctime)s %(name)s %(message)s'))
+    _log.addHandler(_handler)
+    _log.propagate = False
+
+
+def record_seek_decision(stage, reason, *, target=None, backend='', port=None, error_seconds=None):
+    """Record decisions and physical error, never player metadata or payloads."""
+    if stage not in {'source', 'transport', 'restore', 'provider', 'provider-guard', 'runtime', 'runtime-result', 'cef', 'ui'}:
+        return
+    if reason not in {
+        'owned-active', 'system-disabled', 'system-selected', 'relaunch-port-bound',
+        'previous-request-uncertain', 'busy', 'uia-worker-busy', 'legacy-route',
+        'invalid-target', 'unavailable', 'expected-track-mismatch', 'owning-thread',
+        'loop-unavailable', 'capture-disabled', 'track-changed', 'source-changed',
+        'session-unavailable', 'session-source-mismatch', 'metadata-mismatch', 'queued',
+        'wait-timeout', 'request-error', 'succeeded', 'failed', 'binding-unavailable',
+        'track-mismatch', 'cef-seek-disabled', 'no-current-observation', 'executing',
+        'identity-changed', 'verified', 'unverified', 'fake-ack', 'request-timeout', 'cancelled',
+        'pending', 'no-connection', 'no-progress', 'native-acknowledged', 'native-rejected',
+        'invalid-index', 'provider-unavailable', 'dispatch', 'legacy-provider',
+        'gesture-track-mismatch', 'gesture-source-mismatch', 'gesture-target-mismatch',
+        'completion-track-mismatch', 'completion-source-mismatch', 'closing',
+    }:
+        return
+    backend = backend if backend in {'owned', 'cef', 'smtc', 'uia'} else ''
+    fields = ['stage=%s' % stage, 'reason=%s' % reason]
+    if backend:
+        fields.append('backend=%s' % backend)
+    for key, value in (('target_seconds', target), ('port', port), ('error_seconds', error_seconds)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            fields.append('%s=%s' % (key, value))
+    _log.info(' '.join(fields))
 
 
 class SeekState(str, Enum):

@@ -13,7 +13,7 @@ import time
 from urllib.parse import urlsplit
 
 from api.capture._websocket import LoopbackWebSocket
-from api.capture.netease_js import BINDING_NAME, EARLY_GLOBAL, JsAdapterRegistry
+from api.capture.netease_js import BINDING_NAME, EARLY_GLOBAL, EARLY_REVISION, JsAdapterRegistry
 
 TARGET_URL = 'orpheus://orpheus/pub/app.html'
 _HOOK_FAILURES = frozenset({'native-events-unavailable', 'unsafe-previous-adapter',
@@ -240,6 +240,7 @@ class CdpSession:
                     status = await self._evaluate(
                         f"Boolean(globalThis.{EARLY_GLOBAL} && "
                         f"globalThis.{EARLY_GLOBAL}.status && "
+                        f"globalThis.{EARLY_GLOBAL}.revision === {EARLY_REVISION} && "
                         f"globalThis.{EARLY_GLOBAL}.status().api === true)")
                     early_ready = status is True
                 except CdpError:

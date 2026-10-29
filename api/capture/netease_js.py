@@ -15,6 +15,7 @@ from dataclasses import dataclass
 BINDING_NAME = '__gluspotNeteaseSample'
 ADAPTER_GLOBAL = '__gluspotNeteaseV1'
 EARLY_GLOBAL = '__gluspotNeteaseEarlyV1'
+EARLY_REVISION = 2
 
 
 @dataclass(frozen=True)
@@ -57,12 +58,13 @@ _EARLY_SHIM = r"""(() => {
   const name = '__gluspotNeteaseEarlyV1';
   const events = ['PlayProgress', 'PlayState', 'Load', 'End'];
   const existing = globalThis[name];
-  if (existing && existing.hookKind === 'load-time-native-chain-v1') return existing.status();
+  if (existing && existing.revision === 2 && existing.hookKind === 'load-time-native-chain-v1') return existing.status();
   if (existing) return {api:false, reason:'unsafe-previous-early-shim'};
   const hooks = new Map();
   const originalCalls = Object.fromEntries(events.map(event => [event, 0]));
   const registrations = [];
   const patched = new WeakMap();
+  const callbacks = new WeakMap(), callbackProxies = new WeakMap();
   const paths = new WeakMap();
   const defineProperty = Object.defineProperty, defineProperties = Object.defineProperties;
   const setBootInterval = globalThis.setInterval, clearBootInterval = globalThis.clearInterval;
@@ -70,41 +72,72 @@ _EARLY_SHIM = r"""(() => {
   const registrationMethods = ['registerCallAdapter', 'registerCall', 'appendRegisterCall'];
   const roots = new Set([globalThis]);
   try { if (globalThis.window) roots.add(globalThis.window); } catch (_) {}
+  const watches = new Map(), definitionHooks = [];
   let bootTimer = null;
+  let discovering = true;
+  const unwatch = (root, key) => {
+    const slots = watches.get(root), slot = slots && slots.get(key);
+    if (!slot) return;
+    slots.delete(key);
+    const current = Object.getOwnPropertyDescriptor(root, key);
+    if (!current || current.get !== slot.get || current.set !== slot.set) return;
+    if (slot.descriptor || slot.assigned)
+      Reflect.apply(defineProperty, Object, [root, key,
+        {...(slot.descriptor || {writable:true, enumerable:true, configurable:true}), value:slot.value}]);
+    else delete root[key];
+  };
   const stopBootScan = () => {
     if (bootTimer !== null) {
       Reflect.apply(clearBootInterval, globalThis, [bootTimer]);
       bootTimer = null;
     }
+    discovering = false;
+    for (const [root, slots] of watches)
+      for (const key of [...slots.keys()]) { try { unwatch(root, key); } catch (_) {} }
+    for (const hook of definitionHooks) {
+      try {
+        const current = Object.getOwnPropertyDescriptor(Object, hook.method);
+        if (current && current.value === hook.wrapper)
+          Reflect.apply(defineProperty, Object, [Object, hook.method, hook.descriptor]);
+      } catch (_) {}
+    }
   };
   let listener = null;
   const keyEvent = value => {
     if (typeof value !== 'string') return null;
-    const match = /^(?:audioplayer\.)?(?:on)?(PlayProgress|PlayState|Load|End)$/i.exec(value);
+    const match = /^audioplayer\.on(PlayProgress|PlayState|Load|End)$/.exec(value);
     if (!match) return null;
     return events.find(item => item.toLowerCase() === match[1].toLowerCase()) || null;
   };
-  const registration = args => {
-    let event = null, callback = -1;
-    for (let index = 0; index < args.length; index++) {
-      if (typeof args[index] === 'function') callback = index;
-      if (!event) event = keyEvent(args[index]);
-    }
-    if (!event && args.some(value => value === 'audioplayer'))
-      event = args.map(keyEvent).find(Boolean) || null;
-    return event && callback >= 0 ? {event, callback} : null;
+  const registration = (method, args) => {
+    // Only the established registration signatures. Bare Load/End (and
+    // audioplayer.load commands) are not native playback notifications.
+    const append = method === 'appendRegisterCall';
+    const event = append && args[1] === 'audioplayer' ?
+      events.find(value => value === args[0]) : (!append ? keyEvent(args[0]) : null);
+    const callback = append ? 2 : 1;
+    return event && typeof args[callback] === 'function' ? {event, callback} : null;
   };
   const wrapped = (event, original) => {
     if (typeof original !== 'function') return original;
-    const prior = hooks.get(event);
-    if (prior && (prior.original === original || prior.wrapper === original)) return prior.wrapper;
-    const wrapper = function(...args) {
-      const result = Reflect.apply(original, this, args);
-      originalCalls[event]++;
-      try { if (listener) listener(event, this, args); } catch (_) {}
+    const proxy = callbackProxies.get(original);
+    if (proxy && proxy.event === event) return original;
+    if (proxy) original = proxy.original;
+    let byEvent = callbacks.get(original);
+    if (!byEvent) { byEvent = new Map(); callbacks.set(original, byEvent); }
+    if (byEvent.has(event)) return byEvent.get(event);
+    // A callable proxy retains length/name/prototype and native registration
+    // metadata. Rest-argument functions changed every callback's arity to 0.
+    const wrapper = new Proxy(original, {apply(target, receiver, args) {
+      const result = Reflect.apply(target, receiver, args);
+      try {
+        originalCalls[event]++;
+        if (listener) listener(event, receiver, args);
+      } catch (_) {}
       return result;
-    };
-    hooks.set(event, {original, wrapper});
+    }});
+    byEvent.set(event, wrapper);
+    callbackProxies.set(wrapper, {event, original});
     return wrapper;
   };
   const descriptor = (owner, key) => {
@@ -124,16 +157,17 @@ _EARLY_SHIM = r"""(() => {
     if (!found || typeof found.descriptor.value !== 'function') return;
     if (methods.get(method) === found.descriptor.value) return;
     const original = found.descriptor.value;
-    const wrapper = function(...args) {
-      const item = registration(args);
-      if (!item) return Reflect.apply(original, this, args);
+    const wrapper = new Proxy(original, {apply(target, receiver, args) {
+      const item = registration(method, args);
+      if (!item) return Reflect.apply(target, receiver, args);
       const next = args.slice();
       next[item.callback] = wrapped(item.event, next[item.callback]);
+      const result = Reflect.apply(target, receiver, next);
+      hooks.set(item.event, next[item.callback]);
       registrations.push({path, method, event:item.event});
-      const result = Reflect.apply(original, this, next);
       try { if (hooks.size === events.length) stopBootScan(); } catch (_) {}
       return result;
-    };
+    }});
     try {
       Reflect.apply(defineProperty, Object, [owner, method, {...found.descriptor, value:wrapper}]);
       methods.set(method, wrapper);
@@ -149,28 +183,49 @@ _EARLY_SHIM = r"""(() => {
       try { patch(owner, method, path); } catch (_) {}
     }
     for (const key of ['_envAdapter', 'channel', 'eventBridge']) {
-      try { inspect(owner[key], path + '.' + key, seen); } catch (_) {}
+      try {
+        const found = descriptor(owner, key);
+        if (found && 'value' in found.descriptor)
+          inspect(found.descriptor.value, path + '.' + key, seen);
+      } catch (_) {}
     }
   };
   const watch = (root, key) => {
+    if (!discovering) return;
+    if (watches.has(root) && watches.get(root).has(key)) return;
     let found;
     try { found = Object.getOwnPropertyDescriptor(root, key); } catch (_) { return; }
-    try { inspect(root[key], key); } catch (_) {}
+    try { if (found && 'value' in found) inspect(found.value, key); } catch (_) {}
     if (found && (!found.configurable || !('value' in found) || !found.writable)) return;
-    let current = found && 'value' in found ? found.value : undefined;
+    // Complete bridge objects need no accessor. A temporary boot setter only
+    // catches the first assignment, then publishes an ordinary data property.
+    if (found && found.value && registrationMethods.some(method => descriptor(found.value, method))) return;
+    const slot = {descriptor:found, value:found && found.value, assigned:false};
+    slot.get = () => slot.value;
+    slot.set = value => {
+      slot.value = value; slot.assigned = true;
+      try { unwatch(root, key); } catch (_) {}
+      try { inspect(value, key); } catch (_) {}
+    };
     try {
       Reflect.apply(defineProperty, Object, [root, key, {
         configurable: !found || found.configurable !== false,
         enumerable: found ? !!found.enumerable : true,
-        get() { return current; },
-        set(value) { current = value; try { inspect(value, key); } catch (_) {} }
+        get:slot.get, set:slot.set
       }]);
+      if (!watches.has(root)) watches.set(root, new Map());
+      watches.get(root).set(key, slot);
     } catch (_) {}
   };
   const scan = () => {
     for (const root of roots) {
       for (const key of rootKeys) {
-        try { inspect(root[key], key); } catch (_) {}
+        try {
+          const found = Object.getOwnPropertyDescriptor(root, key);
+          const slot = watches.has(root) && watches.get(root).get(key);
+          if (slot) inspect(slot.value, key);
+          else if (found && 'value' in found) inspect(found.value, key);
+        } catch (_) {}
       }
     }
   };
@@ -195,12 +250,13 @@ _EARLY_SHIM = r"""(() => {
   };
   const state = {
     hookKind: 'load-time-native-chain-v1',
+    revision: 2,
     status() {
       const caught = events.filter(event => hooks.has(event));
       // Progress is the capture source. State/end improve it when registered;
       // 3.1.42 need not register Load during boot.
       return {api:hooks.has('PlayProgress'), caught, registrations:registrations.slice(),
-              hook:'load-time-native-chain-v1'};
+              hook:'load-time-native-chain-v1', revision:2, discovering};
     },
     activate(next) { listener = typeof next === 'function' ? next : null; return this.status(); },
     deactivate() { listener = null; },
@@ -210,11 +266,20 @@ _EARLY_SHIM = r"""(() => {
   for (const root of roots) for (const key of rootKeys) watch(root, key);
   for (const [method, original] of [['defineProperty', defineProperty], ['defineProperties', defineProperties]]) {
     const found = Object.getOwnPropertyDescriptor(Object, method);
-    const wrapper = function(...args) {
-      const result = Reflect.apply(original, this, args);
+    const wrapper = new Proxy(original, {apply(target, receiver, args) {
+      // Restore our temporary accessor before the native descriptor operation;
+      // writable-only updates must apply to the player's real data descriptor.
+      try {
+        if (roots.has(args[0])) {
+          if (method === 'defineProperty' && typeof args[1] === 'string') unwatch(args[0], args[1]);
+          else for (const key of rootKeys) { try { unwatch(args[0], key); } catch (_) {} }
+        }
+      } catch (_) {}
+      const result = Reflect.apply(target, receiver, args);
       try { defined(args[0], method === 'defineProperty' ? args[1] : null); } catch (_) {}
       return result;
-    };
+    }});
+    definitionHooks.push({method, descriptor:found, wrapper});
     Reflect.apply(defineProperty, Object, [Object, method, {...found, value:wrapper}]);
   }
   // Discovery only: no player-state reads or native registration. Revisit
@@ -276,15 +341,15 @@ _INSTALL = r"""(() => {
       const index = String(queue.length - 1), descriptor = data(queue, index);
       if (!descriptor.writable) return null;
       const original = descriptor.value;
-      const wrapper = function(...args) {
+      const wrapper = new Proxy(original, {apply(target, receiver, args) {
         // Preserve NetEase's receiver, arguments, result and exceptions. All
         // preceding queue entries and this original run before our observer.
-        const result = Reflect.apply(original, this, args);
+        const result = Reflect.apply(target, receiver, args);
         try {
           if (active) { originalCalls[event]++; listeners[event](...args); }
         } catch (_) {} // GluSpot must never throw into NetEase's dispatcher.
         return result;
-      };
+      }});
       prepared.push({event,map,stubs,key,queue,stub,index,descriptor,wrapper});
     }
     return prepared;

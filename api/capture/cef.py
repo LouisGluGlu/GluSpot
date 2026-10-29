@@ -13,7 +13,7 @@ import time
 from dataclasses import replace
 
 from api.capture.contracts import TimelineSample
-from api.capture.seek import SeekPolicy
+from api.capture.seek import SeekPolicy, record_seek_decision
 
 
 CEF_SEEK_POLICY = SeekPolicy(tolerance_seconds=0.05, read_delays=(0.04, 0.04, 0.06),
@@ -227,5 +227,9 @@ class CefSeekBackend:
         self._request_sequence = self.source.progress_sequence
         if sample.end_seconds > sample.start_seconds:
             position_seconds = min(sample.end_seconds, position_seconds)
-        return bool(await self.source.session.seek(self.source.native_track_id, request_id,
-                                                   max(sample.start_seconds, position_seconds)))
+        acknowledged = bool(await self.source.session.seek(self.source.native_track_id, request_id,
+                                                           max(sample.start_seconds, position_seconds)))
+        record_seek_decision('cef', 'native-acknowledged' if acknowledged else 'native-rejected',
+                             target=position_seconds, backend='cef',
+                             port=getattr(self.source.session, 'port', None))
+        return acknowledged

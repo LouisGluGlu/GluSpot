@@ -10,7 +10,7 @@ from dataclasses import replace
 
 from api.capture.capabilities import capability_for
 from api.capture.position import PositionModel
-from api.capture.seek import SeekExecutor, seek_policy
+from api.capture.seek import SeekExecutor, record_seek_decision, seek_policy
 from api.capture.smtc import SmtcCollector, SmtcSessionSource
 
 
@@ -247,8 +247,11 @@ class CaptureRuntime:
         source = self.source
         identity = self.identity
         if self._closed or source is None or identity is None or identity[1] != track_id:
+            record_seek_decision('runtime', 'binding-unavailable' if self._closed or source is None or identity is None
+                                 else 'track-mismatch', target=target)
             return False
         if self._seek_task is not None or (self._uia_worker is not None and self._uia_worker.busy):
+            record_seek_decision('runtime', 'busy' if self._seek_task is not None else 'uia-worker-busy', target=target)
             return False
         task = asyncio.current_task()
         self._seek_task = task
@@ -275,13 +278,25 @@ class CaptureRuntime:
                     from api.capture.cef import CEF_SEEK_POLICY
                     primary, primary_name, policy = self._cef_backend, 'cef', CEF_SEEK_POLICY
                 elif not self._smtc_timeline_valid:
+                    record_seek_decision('runtime', 'cef-seek-disabled' if not self._cef_seek_enabled else
+                                         'no-current-observation', target=target, backend='cef',
+                                         port=getattr(self.cef_session, 'port', None))
                     return False
+            record_seek_decision('runtime', 'executing', target=target, backend=primary_name,
+                                 port=getattr(self.cef_session, 'port', None) if primary_name == 'cef' else None)
             result = await self.executor.execute(target, identity=identity,
                                                  request_id=secrets.token_hex(12), smtc=primary,
                                                  fallback=fallback, guard=current,
                                                  policy=policy, optimistic=optimistic,
                                                  primary_name=primary_name, fallback_name=fallback_name)
-            if primary_name == 'cef' and not result.succeeded:
+            record_seek_decision('runtime-result', result.reason, target=target, backend=primary_name,
+                                 port=getattr(self.cef_session, 'port', None) if primary_name == 'cef' else None,
+                                 error_seconds=result.error_seconds)
+            # A refused stale gesture or missing preflight observation says
+            # nothing about CEF's physical seek support. Only a failed native
+            # attempt degrades that route. Executor uncertainty remains shared
+            # across bindings and prevents another physical write.
+            if primary_name == 'cef' and result.reason in {'unverified', 'fake-ack', 'request-timeout', 'request-error'}:
                 self._cef_seek_enabled = False
             if result.succeeded:
                 self.smtc_trust = result.backend == 'smtc'

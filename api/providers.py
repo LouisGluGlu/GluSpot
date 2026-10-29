@@ -27,6 +27,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
 
 from api.capture import capture_enabled
+from api.capture.seek import record_seek_decision
 from api.audio_analyzer import LiveAudioAnalyzer
 from api.audio_routes import AudioRouteSnapshot
 from api.artwork_sources import (
@@ -367,8 +368,13 @@ class PlaybackSourceProvider:
 
     def seek_playback_position(self, position_seconds, expected_track_id=None):
         if self._owned_active():
+            record_seek_decision('source', 'owned-active', target=position_seconds, backend='owned')
             return self.owned.seek_playback_position(position_seconds, expected_track_id)
-        return self._system_enabled() and self.system.seek_playback_position(position_seconds, expected_track_id)
+        if not self._system_enabled():
+            record_seek_decision('source', 'system-disabled', target=position_seconds)
+            return False
+        record_seek_decision('source', 'system-selected', target=position_seconds)
+        return self.system.seek_playback_position(position_seconds, expected_track_id)
 
     def _request_immediate_media_refresh(self):
         if self._owned_active():
@@ -725,6 +731,7 @@ class WindowsMediaProvider:
         runtime = getattr(self, "_capture_runtime", None)
         executor = getattr(self, "_capture_executor", None) or getattr(runtime, "executor", None)
         if executor is not None and (executor.busy or executor.uncertain):
+            record_seek_decision('transport', 'previous-request-uncertain' if executor.uncertain else 'busy')
             return False
         async with self._netease_lifecycle_lock():
             cdp = getattr(self, "_netease_cdp_session", None)
@@ -779,6 +786,7 @@ class WindowsMediaProvider:
             if not self._netease_cef_enabled():
                 return None
             cdp = CdpSession(launch.port, adapter=adapter, version=installation.version)
+            record_seek_decision('transport', 'relaunch-port-bound', port=launch.port, backend='cef')
             await cdp.start()
             self._netease_cdp_session = cdp
             self._netease_started_at = time.monotonic()
@@ -798,6 +806,7 @@ class WindowsMediaProvider:
             return
         self._netease_restore_status = "pending"
         source = CefPositionSource(cdp)
+        error_seconds = None
         try:
             if not await cdp.wait_ready(timeout=10.0):
                 self._netease_restore_status = "no-connection"
@@ -828,11 +837,14 @@ class WindowsMediaProvider:
                 request_id="restore-" + secrets.token_hex(12), smtc=CefSeekBackend(source),
                 fallback=None, guard=current, policy=CEF_SEEK_POLICY, primary_name="cef")
             self._netease_restore_status = result.reason
+            error_seconds = result.error_seconds
         except asyncio.CancelledError:
             raise
         except Exception:
             self._netease_restore_status = "unavailable"
         finally:
+            record_seek_decision('restore', self._netease_restore_status, target=track.position_seconds,
+                                 backend='cef', port=getattr(cdp, 'port', None), error_seconds=error_seconds)
             source.close()
 
     async def _bind_capture_session(self, session, track):
@@ -2412,13 +2424,17 @@ class WindowsMediaProvider:
     def seek_playback_position(self, position_seconds: float, expected_track_id: str | None = None) -> bool:
         executor = getattr(self, "_capture_executor", None)
         worker = getattr(self, "_capture_uia_worker", None)
-        if ((executor is not None and (executor.busy or executor.uncertain))
-                or (worker is not None and worker.busy)):
+        reason = ('previous-request-uncertain' if executor is not None and executor.uncertain else
+                  'busy' if executor is not None and executor.busy else
+                  'uia-worker-busy' if worker is not None and worker.busy else '')
+        if reason:
             # A flag/profile toggle cannot cancel a previous native write.
             # This gate also protects a return to the legacy SMTC route.
+            record_seek_decision('provider', reason, target=position_seconds)
             return False
         if self._capture_is_enabled() and getattr(self, "_capture_runtime", None) is not None:
             return self._seek_capture_position(position_seconds, expected_track_id)
+        record_seek_decision('provider', 'legacy-route', target=position_seconds, backend='smtc')
         try:
             position = max(0.0, float(position_seconds))
         except (TypeError, ValueError):
@@ -2479,37 +2495,69 @@ class WindowsMediaProvider:
         try:
             target = float(position_seconds)
         except (TypeError, ValueError):
+            record_seek_decision('provider', 'invalid-target')
             return False
         runtime = getattr(self, "_capture_runtime", None)
         loop = getattr(self, "_loop", None)
         data = getattr(self, "_last_data", None)
         if runtime is None or loop is None or data is None or not math.isfinite(target):
+            record_seek_decision('provider', 'unavailable' if math.isfinite(target) else 'invalid-target', target=target)
             return False
         track = data.track
         if expected_track_id and expected_track_id != track.track_id:
+            record_seek_decision('provider', 'expected-track-mismatch', target=target)
             return False
         # A synchronous wait from the owning event loop would deadlock.
         if threading.current_thread() is getattr(self, "_thread", None):
+            record_seek_decision('provider', 'owning-thread', target=target)
+            return False
+        if not loop.is_running() or loop.is_closed():
+            record_seek_decision('provider', 'loop-unavailable', target=target)
             return False
 
-        async def current():
+        def current_data_reason():
             current_data = getattr(self, "_last_data", None)
-            selected = await self._get_session()
-            return (self._capture_is_enabled() and current_data is not None
-                    and current_data.track.track_id == track.track_id
-                    and current_data.track.source_app_id == track.source_app_id
-                    and selected is not None
-                    and str(getattr(selected, "source_app_user_model_id", "")) == track.source_app_id
-                    and await self._seek_session_matches_track(selected, track.title, track.artist, ""))
+            return ('capture-disabled' if not self._capture_is_enabled() else
+                    'track-changed' if current_data is None or current_data.track.track_id != track.track_id else
+                    'source-changed' if current_data.track.source_app_id != track.source_app_id else '')
 
-        future = asyncio.run_coroutine_threadsafe(runtime.seek(max(0.0, target), track.track_id, current), loop)
+        async def current():
+            selected = await self._get_session()
+            reason = current_data_reason()
+            if not reason:
+                if selected is None:
+                    reason = 'session-unavailable'
+                elif str(getattr(selected, "source_app_user_model_id", "")) != track.source_app_id:
+                    reason = 'session-source-mismatch'
+            if not reason and not await self._seek_session_matches_track(selected, track.title, track.artist, ""):
+                reason = 'metadata-mismatch'
+            if not reason:
+                # Metadata reads also await native I/O. Recheck the provider's
+                # authority after that final await, immediately before return.
+                reason = current_data_reason()
+            if reason:
+                record_seek_decision('provider-guard', reason, target=target)
+            return not reason
+
+        record_seek_decision('provider', 'queued', target=target,
+                             port=getattr(getattr(runtime, 'cef_session', None), 'port', None))
+        coroutine = runtime.seek(max(0.0, target), track.track_id, current)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            record_seek_decision('provider', 'loop-unavailable', target=target)
+            return False
         try:
             result = bool(future.result(timeout=5.0))
         except FutureTimeoutError:
             future.cancel()
+            record_seek_decision('provider', 'wait-timeout', target=target)
             return False
         except Exception:
+            record_seek_decision('provider', 'request-error', target=target)
             return False
+        record_seek_decision('provider', 'succeeded' if result else 'failed', target=target)
         if result:
             self._request_immediate_media_refresh()
         return result
