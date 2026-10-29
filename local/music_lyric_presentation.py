@@ -45,7 +45,7 @@ def surface_font(size, weight=QFont.Weight.Bold):
 
 
 def intro_dot_radius(pixel_size):
-    return max(4.0, float(pixel_size) * .17)
+    return max(4.0, max(1, round(pixel_size)) * .17)
 
 
 @lru_cache(maxsize=96)

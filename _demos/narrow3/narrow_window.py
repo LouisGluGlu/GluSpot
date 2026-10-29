@@ -622,7 +622,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
             shaped = self.reading_renderer.whole_line(self.source_lines()[focus].text, font)
             ascent = shaped.lineAt(0).ascent()
-            top = math.floor(layout.lyric_anchor + (focus - visual) * layout.lyric_step - ascent - 16)
+            top = math.floor(layout.lyric_anchor + QFontMetricsF(font).capHeight() / 2
+                             + (focus - visual) * layout.lyric_step - ascent - 16)
             height = math.ceil(layout.lyric_row + 32)
             image = QImage(round(self.width() * ratio), round(height * ratio),
                            QImage.Format.Format_ARGB32_Premultiplied)
@@ -834,6 +835,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         step = layout.lyric_step
         row = layout.lyric_row
         font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
+        anchor += QFontMetricsF(font).capHeight() / 2
         metrics_layout = self.reading_renderer.whole_line(lines[focus].text, font)
         ascent = metrics_layout.lineAt(0).ascent()
         painter.save()
@@ -844,6 +846,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             line = lines[index]
             y = anchor + (index - visual_focus) * step - ascent
             if y + row < viewport.top() - 16 - overscan or y > viewport.bottom() + 16 + overscan:
+                continue
+            if line.text == INTRO_COUNTDOWN_TEXT:
+                paint_intro_countdown(
+                    painter, center=QPointF(self.width() / 2,
+                        layout.lyric_anchor + (index - visual_focus) * step),
+                    pixel_size=font.pixelSize(), color=QColor('white'),
+                    opacity=1. if index == focus else LYRIC_PREVIOUS_ALPHA if index < focus else LYRIC_NEXT_ALPHA,
+                    blur_layers=((0, 1.),), scale=self.devicePixelRatioF())
                 continue
             x = viewport.left()
             if self.lyrics_alignment == "center":
@@ -931,7 +941,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         first_layout = first_runs[0][2] if first_runs else None
         ascent = (first_layout.lineAt(0).ascent() if first_layout and first_layout.lineCount()
                   else QFontMetricsF(self._surface_font(layout.lyric_font)).ascent())
-        origin = layout.lyric_anchor - ascent - self.real_scroll_offset(visual)
+        cap_height = QFontMetricsF(self._surface_font(layout.lyric_font)).capHeight()
+        origin = layout.lyric_anchor + cap_height / 2 - ascent - self.real_scroll_offset(visual)
         return tuple((index, QRectF(layout.viewport.left(), origin + start,
                                     layout.viewport.width(), height), layers, runs)
                      for index, (start, height, layers, runs) in enumerate(blocks))
@@ -962,7 +973,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             progress = max(0.0, min(1.0, (position - line.time_seconds) / max(.001, end - line.time_seconds)))
             if line.text == INTRO_COUNTDOWN_TEXT:
                 font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
-                baseline_offset = QFontMetricsF(font).ascent()
+                metrics = QFontMetricsF(font)
+                baseline_offset = metrics.ascent() - metrics.capHeight() / 2
                 paint_intro_countdown(
                     painter, center=QPointF(self.width() / 2, row.top() + baseline_offset),
                     pixel_size=font.pixelSize(), color=QColor('white'),
@@ -980,9 +992,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                                      progress, real_progresses=real)
                 else:
                     color = QColor("white") if index < focus else self._future_lyric_color(target)
-                    level = 0 if abs(index - focus) <= 2 else self._lyric_group_blur_level(index, focus)
+                    level = 0
+                    painter.save()
+                    painter.setOpacity(painter.opacity() * (LYRIC_PREVIOUS_ALPHA if index < focus else LYRIC_NEXT_ALPHA))
                     self._draw_cached_wrapped_layout(painter, shaped, target.topLeft(), text,
                                                      font, target.width(), height, color, level)
+                    painter.restore()
         painter.restore()
 
     def live_model_key(self):

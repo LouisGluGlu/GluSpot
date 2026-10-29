@@ -45,8 +45,8 @@ class NarrowLayout:
 
     @property
     def lyric_anchor(self):
-        # Baseline, rather than the center of a font-dependent row rectangle.
-        return self.height * .33
+        # The active cap-height centre and intro dots share one fixed slot.
+        return round(self.height * .5)
 
     @property
     def list_heading(self):

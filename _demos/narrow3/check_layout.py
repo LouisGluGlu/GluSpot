@@ -28,10 +28,10 @@ def check(variant, width, mode, dj):
                 or pose.list_top != layout.list_top
                 or pose.list_step(8) != layout.list_step(8)):
             errors.append("content geometry changes with visibility")
-    if abs(layout.lyric_anchor - 211) > .5:
-        errors.append("current lyric baseline")
-    if not 26 <= layout.lyric_font <= 40:
-        errors.append("immersive lyric font outside 26–40px")
+    if abs(layout.lyric_anchor - 320) > .5:
+        errors.append("current lyric cap-height centre")
+    if not 26 <= layout.lyric_font <= 38:
+        errors.append("immersive lyric font outside 26–38px")
     if width == 360 and abs(layout.lyric_font - 31.5) > .001:
         errors.append("360px lyrics lost the 31.5px immersive size")
     if layout.lyric_row <= layout.lyric_font or layout.lyric_step <= layout.lyric_row:
@@ -93,6 +93,8 @@ def check(variant, width, mode, dj):
         visibility.advance(0, True, True, mode == "playlist")
         if visibility.opacity.value(1) != 0:
             errors.append("A chrome is visible")
+    if NarrowLayout(width, 900).lyric_anchor != 450:
+        errors.append("900px current lyric centre")
     return errors
 
 
@@ -106,9 +108,9 @@ def check_timeline():
     if not (visibility.footer is visibility.opacity
             and all(fade is visibility.opacity for fade in visibility.top)):
         errors.append("veil and controls use different fades")
-    if abs(visibility.opacity.value(3.15) - .875) > 1e-9:
-        errors.append("300ms cubic ease-out")
-    if not visibility.settled(3.3) or abs(visibility.opacity.value(3.3) - 1) > 1e-9:
+    if abs(visibility.opacity.value(3.16) - .875) > 1e-9:
+        errors.append("320ms cubic ease-out")
+    if not visibility.settled(3.32) or abs(visibility.opacity.value(3.32) - 1) > 1e-9:
         errors.append("reveal duration")
     visibility.advance(4, False, False, True)
     visibility.advance(5.199, False, False, True)
@@ -125,8 +127,8 @@ def check_timeline():
         errors.append("re-entry does not continue the current fade")
     visibility.advance(6, False, False, False)
     visibility.advance(7.2, False, False, False)
-    if abs(visibility.opacity.value(7.5)) > 1e-9:
-        errors.append("300ms fade-out")
+    if abs(visibility.opacity.value(7.52)) > 1e-9:
+        errors.append("320ms fade-out")
     utility = EaseOutFade(1)
     utility.retarget(0, 0, .18)
     if not (0 < utility.value(.09) < .5 and utility.value(.18) == 0):
@@ -143,7 +145,7 @@ def main():
         print(f"{'FAIL' if errors else 'PASS'} {variant} {width} {mode} dj={dj}: {', '.join(errors) or 'fixed geometry and bands'}")
     errors = check_timeline()
     failures += bool(errors)
-    print(f"{'FAIL' if errors else 'PASS'} timing: {', '.join(errors) or 'shared 300ms curve, 1200ms idle and continuous reversal'}")
+    print(f"{'FAIL' if errors else 'PASS'} timing: {', '.join(errors) or 'shared 320ms curve, 1200ms idle and continuous reversal'}")
     return int(bool(failures))
 
 
