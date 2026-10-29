@@ -1681,7 +1681,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def _live_action_at(self, position):
         if self.visibility.progress >= .75:
-            for group in self.glass_groups():
+            groups = self.glass_groups()
+            # Navigation owns its painted slot even if another control's
+            # target overlaps it during a handoff.
+            if self._library_back_available():
+                for group in groups:
+                    back = group.get("library")
+                    if back is not None and back.contains(position):
+                        return "library"
+            for group in groups:
                 for key, rect in group.items():
                     if rect.contains(position):
                         if key == "collection":

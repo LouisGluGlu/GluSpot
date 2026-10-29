@@ -69,6 +69,8 @@ class NarrowLayout:
     @property
     def _top_rects(self):
         side = self.button_size
+        # Only the missing library slot is reclaimed on the left. Window-mode
+        # stays after translation on the right, including capture-only use.
         slots = ([("library", side)] if self.library_available else [])
         slots += [("collection", side * 2), ("audio_output", side),
                   ("playback_mode", side), ("content_layout", side),

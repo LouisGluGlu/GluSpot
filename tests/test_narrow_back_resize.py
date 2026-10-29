@@ -21,6 +21,10 @@ class NarrowBackResizeTests(unittest.TestCase):
         self.provider = EmptyIslandDataProvider()
         self.owner = IslandStackVisual(data_provider=self.provider)
         self.owner.timer.stop()
+        self.settings = {"v2_owned_playback_enabled": True}
+        self.owner.settings_getter = lambda key, default=None: self.settings.get(key, default)
+        self.owner._music_library_back_callback = Mock()
+        self.owner._music_login_required = lambda: False
         self.window = NarrowStudyWindow(self.owner, 'B', 'left', live=True)
         self.window._timer.stop()
         self.window.study_timer.stop()
@@ -59,11 +63,15 @@ class NarrowBackResizeTests(unittest.TestCase):
                 self.window.live = live
                 for available in (False, True):
                     with self.subTest(live=live, available=available):
-                        self.provider._owned_active = lambda: available
+                        self.settings["v2_owned_playback_enabled"] = available
                         callback.reset_mock()
                         self.window.resize(483, 560)
                         before = QRect(self.window.geometry())
-                        self.click_narrow('library')
+                        if available:
+                            self.click_narrow('library')
+                        else:
+                            self.assertFalse(self.window._library_back_available())
+                            self.assertTrue(all('library' not in group for group in self.window.glass_groups()))
                         self.assertEqual(self.window.geometry(), before)
                         self.assertTrue(self.window.narrow)
                         self.assertEqual(callback.call_count, int(available))
