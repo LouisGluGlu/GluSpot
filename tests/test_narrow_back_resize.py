@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.providers import EmptyIslandDataProvider
 from local.island_stack_visual import IslandStackVisual
+from local.music_surface_window import MUSIC_WINDOW_ASPECT_RATIO, constrained_window_size
 from _demos.narrow3.narrow_window import NarrowStudyWindow
 
 
@@ -98,8 +99,12 @@ class NarrowBackResizeTests(unittest.TestCase):
         for width, height in ((483, 560), (959, 540), (960, 900), (1000, 900)):
             with self.subTest(width=width, height=height):
                 self.window.resize(width, height)
+                animation = self.window._width_chrome_animation
+                animation.setCurrentTime(animation.duration())
+                animation.setCurrentTime(animation.duration())
                 self.assertEqual(self.window.narrow, self.window._width_breakpoint_narrow())
         self.window.resize(959, 540)
+        self.window._width_chrome_animation.setCurrentTime(self.window._width_chrome_animation.duration())
         self.assertFalse(self.window.narrow)
         self.window.resize(960, 900)
         self.assertTrue(self.window.narrow)
@@ -156,7 +161,12 @@ class NarrowBackResizeTests(unittest.TestCase):
                     before = QRect(self.window.geometry())
                     self.drag(QPointF(self.window.width() - 2, self.window.height() / 2), QPoint(41, 0))
                     self.assertEqual(self.window.width(), before.width() + 41)
-                    self.assertEqual(self.window.height(), before.height())
+                    expected_height = before.height()
+                    if (before.width() + 41) > round(before.height() * MUSIC_WINDOW_ASPECT_RATIO):
+                        expected_height = constrained_window_size(
+                            before.width() + 41, before.height(), self.window.minimumSize(),
+                            self.window._available_geometry().size()).height()
+                    self.assertEqual(self.window.height(), expected_height)
                     self.assertEqual(self.window.pos(), before.topLeft())
                     self.assertFalse(self.window._moving)
                     self.assertFalse(self.window._resize_edges)

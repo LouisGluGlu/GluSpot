@@ -45,6 +45,7 @@ class MusicWidthBreakpointTests(unittest.TestCase):
         for width in (entry + 4, entry - 3, entry + 8, entry):
             self.window.resize(width, 640)
             self.assertTrue(self.window._content_layout_is_narrow())
+        self.window._width_layout_animation.setCurrentTime(self.window._width_layout_animation.duration())
         font = self.window._surface_font(self.window.LYRIC_PIXEL_SIZE * self.window._surface_scale(), QFont.Weight.Bold)
         deadband = cjk_unit(font)
         self.window.resize(entry + round(deadband) + 10, 640)
@@ -55,6 +56,7 @@ class MusicWidthBreakpointTests(unittest.TestCase):
 
     def _entry_and_exit(self, height):
         self.window.resize(1800, height)
+        self.window._finish_width_layout()
         self.assertFalse(self.window._width_breakpoint_narrow())
         for width in range(1799, 329, -1):
             self.window.resize(width, height)
@@ -64,6 +66,7 @@ class MusicWidthBreakpointTests(unittest.TestCase):
         else:
             self.fail("No content breakpoint")
         font = self.window._surface_font(self.window.LYRIC_PIXEL_SIZE * self.window._surface_scale(), QFont.Weight.Bold)
+        self.window._width_layout_animation.setCurrentTime(self.window._width_layout_animation.duration())
         for width in range(entry, 1801):
             self.window.resize(width, height)
             if not self.window._width_breakpoint_narrow():
@@ -94,26 +97,30 @@ class MusicWidthBreakpointTests(unittest.TestCase):
         self.assertEqual(animation.currentTime(), 160)
         self.assertEqual(self.window._width_layout_fraction, fraction)
 
-    def test_external_modes_animate_one_cover_keep_live_columns_and_reverse(self):
+    def test_external_modes_move_all_geometry_and_finish_before_reversal(self):
         for layout in ("lyrics", "playlist"):
             with self.subTest(layout=layout):
+                self.window.hide()
                 self.window.resize(1300, 640)
-                self.window._finish_width_layout()
+                self.window._resize_content_layout()
                 self.window.set_content_layout(layout, animate=False)
+                self.window.show()
+                self.app.processEvents()
                 self.saved.clear()
                 self.window.resize(700, 640)
                 animation = self.window._width_layout_animation
                 self.assertEqual(animation.state(), QAbstractAnimation.State.Running)
-                _, source, target_column = self.window._content_column_geometry()
+                source = self.window._content_column_geometry()
                 animation.setCurrentTime(animation.duration() // 2)
-                _, middle, live_column = self.window._content_column_geometry()
-                self.assertNotEqual(source, middle)
-                self.assertEqual(target_column, live_column)
+                middle = self.window._content_column_geometry()
+                self.assertTrue(all(first != second for first, second in zip(source, middle)))
                 fraction = self.window._width_layout_fraction
-                self.assertGreater(fraction, 0.)
-                self.assertLess(fraction, 1.)
                 self.window.resize(1300, 640)
-                self.assertAlmostEqual(animation.startValue(), fraction)
+                self.assertEqual(animation.endValue(), 1.)
+                self.assertEqual(self.window._width_layout_fraction, fraction)
+                animation.setCurrentTime(animation.duration())
+                self.assertEqual(animation.state(), QAbstractAnimation.State.Running)
+                self.assertEqual(animation.startValue(), 1.)
                 self.assertEqual(animation.endValue(), 0.)
                 animation.setCurrentTime(animation.duration())
                 self.assertEqual(self.window._width_layout_fraction, 0.)

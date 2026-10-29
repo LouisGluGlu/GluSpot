@@ -42,6 +42,48 @@ def music_control_fill_color(ink, alpha=24):
     return QColor(246, 247, 248, alpha) if ink.lightness() < 128 else QColor(18, 20, 24, alpha)
 
 
+# Reused by the GUI-thread sampler. Sampling reads pixels directly and never
+# allocates/copies a QImage or rebuilds the frozen blur material.
+_chrome_luma_scratch = [0.] * 16
+
+
+class ChromeBackdropTint:
+    """Sixteen live backdrop samples per face, bounded and throttled to 10 Hz."""
+    def __init__(self):
+        self.samples = OrderedDict()
+
+    def clear(self):
+        self.samples.clear()
+
+    def sample(self, scene, scene_bounds, rect, now, *, role=None):
+        if scene is None or scene.isNull() or scene_bounds.isEmpty():
+            return None
+        key = (scene.cacheKey(), rect.getRect(), scene.devicePixelRatioF(),
+               scene.size().width(), scene.size().height(), scene_bounds.getRect())
+        slot = role if role is not None else rect.getRect()
+        previous = self.samples.get(slot)
+        if previous is not None and (previous[0] == key or now - previous[1] < GLASS_MATERIAL_FRAME_SECONDS):
+            return previous[2:]
+        for row in range(4):
+            y = rect.top() + (row + .5) * rect.height() / 4.
+            py = min(scene.height() - 1, max(0, int((y - scene_bounds.top()) * scene.height() / scene_bounds.height())))
+            for column in range(4):
+                x = rect.left() + (column + .5) * rect.width() / 4.
+                px = min(scene.width() - 1, max(0, int((x - scene_bounds.left()) * scene.width() / scene_bounds.width())))
+                pixel = scene.pixel(px, py)
+                _chrome_luma_scratch[row * 4 + column] = (
+                    .2126 * ((pixel >> 16) & 255) + .7152 * ((pixel >> 8) & 255) + .0722 * (pixel & 255)) / 255.
+        luma = sum(_chrome_luma_scratch) / 16.
+        alpha = round(max(14., min(42., 14. + 40. * abs(luma - .5))))
+        fill = music_control_fill_color(QColor('white' if luma >= .5 else 'black'), alpha)
+        border = QColor(18, 20, 24, round(alpha * 1.2)) if luma >= .5 else QColor(246, 247, 248, round(alpha * 1.2))
+        self.samples[slot] = (key, now, luma, fill, border)
+        self.samples.move_to_end(slot)
+        while len(self.samples) > 64:
+            self.samples.popitem(last=False)
+        return luma, fill, border
+
+
 @contextmanager
 def synchronous_glass_capture(owner):
     """QWidget.render/grab redirect painting without changing painter.device()."""

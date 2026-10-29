@@ -5,13 +5,14 @@ import math
 import time
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QTransform
 
 from local.liquid_glass import paint_liquid_glass
 from local.glass_style import GLASS_SELECTED_INK
 from local.music_lyric_motion import LogicalLineSpringChain
 from local.music_lyric_fit import fits as lyric_column_fits
 from local.artwork_skeleton import paint_artwork_skeleton
+from local.music_width_transition import WidthMarks, WidthTransition
 
 
 CONTENT_LAYOUTS = ("cover", "cover_lyrics", "lyrics", "playlist")
@@ -79,9 +80,13 @@ class MusicContentLayoutMixin:
         self._layout_animation.finished.connect(self._finish_content_layout)
         self._width_layout_fraction = None
         self._width_layout_animation = QVariantAnimation(self)
-        self._width_layout_animation.setDuration(320)
-        self._width_layout_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._width_layout_animation.setDuration(500)
+        self._width_layout_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._width_layout_animation.valueChanged.connect(self._advance_width_layout)
+        self._width_layout_animation.finished.connect(self._width_layout_completed)
+        self._width_transition = None
+        self._width_resize_marks = None
+        self._width_transition_history = []
         self._queue_scroll = 0.
         self._queue_hit_rects = {}
         self._queue_pressed = None
@@ -131,28 +136,102 @@ class MusicContentLayoutMixin:
     def _content_layout_is_narrow(self):
         return self._width_breakpoint_narrow()
 
+    def _width_breakpoint_width(self, height=None):
+        """Invert the existing shaped wide-column fit; never persist this width."""
+        height = float(self.height() if height is None else height)
+        key = (height, self.LYRIC_PIXEL_SIZE, tuple(self.SURFACE_FONT_FAMILIES),
+               self.devicePixelRatioF(), self.logicalDpiX(), self.logicalDpiY())
+        if key == getattr(self, "_width_breakpoint_inverse_key", None):
+            return self._width_breakpoint_inverse
+        def fits(width):
+            rect = QRectF(0., 0., width, height)
+            column = self._wide_content_column_geometry(rect)[2]
+            font = self._surface_font(self.LYRIC_PIXEL_SIZE * self._surface_scale(rect), QFont.Weight.Bold)
+            return lyric_column_fits(column.width(), font, previous=None, dpr=self.devicePixelRatioF())
+        low, high = 1., max(640., height * 2.)
+        while not fits(high) and high < 65536.:
+            high *= 2.
+        for _ in range(24):
+            middle = (low + high) * .5
+            if fits(middle):
+                high = middle
+            else:
+                low = middle
+        self._width_breakpoint_inverse_key = key
+        self._width_breakpoint_inverse = high
+        return high
+
+    def _begin_width_resize(self):
+        if self._width_resize_marks is not None:
+            return
+        from local.music_surface_window import MUSIC_WINDOW_ASPECT_RATIO
+        height = self.height()
+        breakpoint = self._width_breakpoint_width(height)
+        minimum = float(self.WINDOW_MIN_WIDTH)
+        if breakpoint - minimum < 60.:
+            minimum = breakpoint - 60.
+        maximum = min(self._available_geometry().width(), round(height * MUSIC_WINDOW_ASPECT_RATIO))
+        self._width_resize_marks = WidthMarks(minimum, breakpoint, maximum, height)
+        if self._width_transition is None:
+            self._width_transition = WidthTransition(bool(self._content_layout_fit_narrow))
+        self._width_transition._sample = None
+        self._width_transition.drag_speed = 0.
+        self._width_transition.sample(self._width_resize_marks.mark(self.width()), time.monotonic())
+        self._content_layout_fit_key = None
+        self._record_width_transition()
+
+    def _end_width_resize(self):
+        # Adopt the gesture's requested endpoint as the independent font-fit
+        # hysteresis baseline. Releasing exactly at 25 must not queue a merge
+        # just because widening originally needed another half CJK of room.
+        if self._width_resize_marks is not None and self._width_transition is not None:
+            self._content_layout_measured_narrow = self._width_transition.want_narrow
+        self._width_resize_marks = None
+        self._content_layout_fit_key = None
+
+    def _record_width_transition(self):
+        transition = self._width_transition
+        if transition is None:
+            return
+        event = dict(state=transition.state, at=time.monotonic(), duration=transition.duration,
+                     want_narrow=transition.want_narrow)
+        self._width_transition_history.append(event)
+        del self._width_transition_history[:-64]
+        diagnostics = getattr(self, "_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.update(width_state=transition.state, width_duration=transition.duration,
+                               width_want_narrow=transition.want_narrow, width_speed=transition.drag_speed)
+            if self._width_resize_marks is not None:
+                marks = self._width_resize_marks
+                diagnostics.update(width_breakpoint=marks.breakpoint,
+                                   width_mark=marks.mark(self.width()), split_unreachable=marks.split_unreachable)
+
     def _width_breakpoint_narrow(self):
-        # Both external modes use the hypothetical wide lyric font as their
-        # yardstick, so switching to the width-coupled narrow font cannot
-        # change the decision that caused the switch.
+        # The hypothetical wide font remains the measurement yardstick. The
+        # rendered column and its four shaping poses move independently.
         scale = self._surface_scale()
         assert math.isfinite(scale) and scale > 0., "Invalid lyric surface scale"
-        # Fit is queried by controls, cover and lyrics during one paint. Font
-        # shaping is stable until the exact size/font/device inputs change;
-        # retain only this current result, rather than accumulate resize keys.
         key = (self.width(), self.height(), scale, self.LYRIC_PIXEL_SIZE,
                tuple(self.SURFACE_FONT_FAMILIES), self.devicePixelRatioF(),
-               self.logicalDpiX(), self.logicalDpiY())
+               self.logicalDpiX(), self.logicalDpiY(), self._width_resize_marks)
         if key == getattr(self, "_content_layout_fit_key", None):
             return self._content_layout_fit_narrow
         _content, _cover, column = self._wide_content_column_geometry()
         font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
-        previous = getattr(self, "_content_layout_fit_narrow", None)
+        previous = getattr(self, "_content_layout_measured_narrow", None)
+        narrow = not lyric_column_fits(column.width(), font, previous=previous, dpr=self.devicePixelRatioF())
+        self._content_layout_measured_narrow = narrow
+        marks = self._width_resize_marks
+        if marks is not None:
+            if self._width_transition is None:
+                self._width_transition = WidthTransition(narrow)
+            self._width_transition.request_mark(marks.mark(self.width()), time.monotonic(),
+                                                unreachable=marks.split_unreachable)
+            narrow = self._width_transition.want_narrow
+        self._retarget_width_layout(narrow)
         self._content_layout_fit_key = key
-        self._content_layout_fit_narrow = not lyric_column_fits(
-            column.width(), font, previous=previous, dpr=self.devicePixelRatioF())
-        if previous is None or previous != self._content_layout_fit_narrow:
-            self._retarget_width_layout(self._content_layout_fit_narrow)
+        self._content_layout_fit_narrow = self._width_transition.narrow
+        self._record_width_transition()
         return self._content_layout_fit_narrow
 
     def _width_breakpoint_animated_externally(self):
@@ -161,29 +240,78 @@ class MusicContentLayoutMixin:
     def _retarget_width_layout(self, narrow):
         target = float(narrow)
         animation = self._width_layout_animation
-        animation.stop()
         fraction = self._width_layout_fraction
-        if (self._width_breakpoint_animated_externally()
-                or fraction is None or not self.isVisible()
+        if self._width_transition is None:
+            self._width_transition = WidthTransition(narrow)
+        transition = self._width_transition
+        snap = (fraction is None or not self.isVisible()
                 or self._content_layout not in {"lyrics", "playlist"}
                 or self._content_layout_resize_suspended
                 or self._pending_fullscreen is not None
                 or self._island_entering or self._island_returning
-                or self._capturing_transition_snapshot):
+                or self._capturing_transition_snapshot)
+        if snap:
+            animation.stop()
+            transition.settle(narrow)
             self._width_layout_fraction = target
             return
+        transition.request(narrow)
+        if self._width_breakpoint_animated_externally():
+            self._width_layout_fraction = float(transition.narrow)
+            return
+        if not transition.active or animation.state() == QVariantAnimation.State.Running:
+            return
+        animation.setDuration(round(transition.duration * 1000.))
         animation.setStartValue(fraction)
-        animation.setEndValue(target)
+        animation.setEndValue(float(transition.narrow))
         animation.start()
 
     def _advance_width_layout(self, value):
         self._width_layout_fraction = float(value)
         self.update()
 
+    def _width_layout_completed(self):
+        transition = self._width_transition
+        if transition is None:
+            return
+        again = transition.complete()
+        self._content_layout_fit_narrow = transition.narrow
+        self._content_layout_fit_key = None
+        self._record_width_transition()
+        if again:
+            self._retarget_width_layout(transition.want_narrow)
+        self.update()
+
     def _finish_width_layout(self):
         self._width_layout_animation.stop()
         if hasattr(self, "_content_layout_fit_narrow"):
+            if self._width_transition is not None:
+                self._content_layout_fit_narrow = self._width_transition.want_narrow
+                self._width_transition.settle(self._content_layout_fit_narrow)
             self._width_layout_fraction = float(self._content_layout_fit_narrow)
+            self._content_layout_fit_key = None
+
+    def _width_lyric_render_pose(self, rect, column, scale):
+        """Four shaped canvases; all intermediate frames transform cached ink."""
+        if not getattr(self, "_width_chrome_active", False):
+            return None
+        phase = self._width_chrome_progress
+        key_phase = round(max(0., min(1., phase)) * 3.) / 3.
+        source = self._width_content_from[2]
+        target = self._width_content_to[2]
+        logical = self._interpolate_rect(source, target, key_phase)
+        logical.setWidth(max(1., logical.width()))
+        logical.setHeight(max(1., logical.height()))
+        start_scale, end_scale = self._width_font_scales
+        font_scale = start_scale + (end_scale - start_scale) * key_phase
+        transform = QTransform()
+        transform.translate(column.left(), column.top())
+        transform.scale(column.width() / logical.width(), column.height() / logical.height())
+        transform.translate(-logical.left(), -logical.top())
+        diagnostics = getattr(self, "_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics['width_shaping_key'] = round(key_phase * 3.)
+        return QRectF(logical), logical, font_scale, transform
 
     def _content_column_geometry(self, rect=None):
         """Width changes the external column arrangement, never its mode."""
@@ -199,14 +327,24 @@ class MusicContentLayoutMixin:
             stacked_cover = QRectF(stacked_content.left(), stacked_content.top(), side, side)
             column_top = stacked_cover.bottom() + 24. * scale
             bottom = max(column_top + 1., surface.bottom() - 156. * scale)
-            if narrow:
-                column = QRectF(stacked_content.left(), column_top, stacked_content.width(), bottom - column_top)
-            # Keep live lyric/queue columns reflowing at their target width;
-            # only the artwork and its surrounding content geometry travel.
+            stacked_column = QRectF(stacked_content.left(), column_top, stacked_content.width(), bottom - column_top)
+            # Content, artwork and the reading viewport share one pose.
             fraction = self._width_layout_fraction
             content = self._interpolate_rect(content, stacked_content, fraction)
             cover = self._interpolate_rect(cover, stacked_cover, fraction)
+            column = self._interpolate_rect(column, stacked_column, fraction)
+            column = self._separate_width_column(cover, column)
         return content, cover, column
+
+    @staticmethod
+    def _separate_width_column(cover, column):
+        if cover.isValid() and column.intersects(cover):
+            column = QRectF(column)
+            if column.center().x() >= cover.right():
+                column.setLeft(max(column.left(), cover.right() + 1.))
+            else:
+                column.setTop(max(column.top(), cover.bottom() + 1.))
+        return column
 
     def _wide_content_column_geometry(self, rect=None):
         """Unadapted two-column geometry also supplies the fit measurement."""

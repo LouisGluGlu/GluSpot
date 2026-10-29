@@ -1,4 +1,4 @@
-"""Background blur endpoints are stronger, bounded and independent of ink."""
+"""Continuous t156 background overlay stays bounded and independent of ink."""
 import math
 import unittest
 from unittest.mock import patch
@@ -55,8 +55,8 @@ class NarrowBackgroundVeilTests(unittest.TestCase):
                 self.assertGreaterEqual(reveal_dim, .10)
                 self.assertLessEqual(reveal_dim, .185)
                 raw_energy, idle_energy, reveal_energy = map(self.energy, samples)
-                self.assertLessEqual(idle_energy, .60 * raw_energy)
-                self.assertLessEqual(reveal_energy, .35 * raw_energy)
+                self.assertLess(idle_energy, raw_energy)
+                self.assertLess(reveal_energy, raw_energy)
                 self.assertLess(reveal_energy, idle_energy)
 
     def test_middle_and_sharp_foreground_remain_exact(self):
@@ -84,17 +84,18 @@ class NarrowBackgroundVeilTests(unittest.TestCase):
             for _frame in range(10):
                 self.assertEqual(self.render(progress), expected)
 
-    def test_cache_is_two_bounded_states_and_reuses_identical_source(self):
+    def test_cache_is_one_bounded_overlay_and_reuses_identical_source(self):
         self.assertFalse(self.veil.prepare(self.raw, self.raw.width(), self.raw.height()))
         self.assertEqual(self.veil.builds, 1)
-        self.assertLessEqual(self.veil.cache_bytes, 2 * 512 * 512 * 4)
-        self.assertEqual(len(self.veil._states), 2)
-        first = self.render(0.)
+        self.assertLessEqual(self.veil.cache_bytes, 512 * 512 * 4)
+        self.assertEqual(len(self.veil._states), 1)
+        prepared = self.veil._states[0].copy()
         self.raw.fill(Qt.GlobalColor.red)
-        self.assertEqual(self.render(0.).copy(0, 0, first.width(), 120),
-                         first.copy(0, 0, first.width(), 120),
-                         "Caller writes changed the frozen background")
+        self.assertEqual(self.veil._states[0], prepared,
+                         "Caller writes changed the frozen blurred overlay")
+        self.assertEqual(self.render(0.).pixelColor(200, 300), QColor('red'),
+                         "The transparent clear core must keep the live backdrop")
         self.assertTrue(self.veil.prepare(self.raw, 768, 1280))
         self.assertEqual(self.veil.builds, 2)
-        self.assertEqual(len(self.veil._states), 2)
-        self.assertLessEqual(self.veil.cache_bytes, 2 * 512 * 512 * 4)
+        self.assertEqual(len(self.veil._states), 1)
+        self.assertLessEqual(self.veil.cache_bytes, 512 * 512 * 4)

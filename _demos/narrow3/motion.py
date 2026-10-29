@@ -52,8 +52,24 @@ class Visibility:
         self.top_enter = None
         self.idle_since = None
         self.progress = 0.0
+        self.resize_hold = False
+
+    def hold_resize(self, held, now):
+        self.resize_hold = bool(held)
+        self.top_enter = self.idle_since = None
+        if held:
+            if self.opacity.target != 1.:
+                self.opacity.generation += 1
+            self.opacity.start = self.opacity.target = self.progress = 1.
+            self.opacity.started = now
+            self.opacity.duration = 0.
+        else:
+            self.idle_since = now
 
     def advance(self, now, top_hover, bottom_hover, playlist):
+        if self.resize_hold:
+            self.progress = 1.
+            return
         previous_target = self.opacity.target
         active = self.enabled and (top_hover or bottom_hover)
         if active:

@@ -58,7 +58,23 @@ def write(path, value):
     temporary.replace(path)
 
 
-def main():
+def attach_readiness(*, playing, duration, position_source, source_lines,
+                     position, initial_position, elapsed):
+    """Keep the advancing-playback gate independent of lyric availability."""
+    playback_ready = bool(playing and duration > 0
+                          and position_source not in {"", "none", "capture-unavailable"})
+    lyric_ready = bool(source_lines)
+    advancing = (initial_position is not None and position - initial_position >= .1)
+    if playback_ready and advancing and lyric_ready:
+        return "full"
+    if elapsed >= 45:
+        if playback_ready and advancing:
+            return "degraded"
+        raise RuntimeError("No advancing real playback with source lyrics; physical acceptance unavailable")
+    return None
+
+
+def main(*, observer_script=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
@@ -68,7 +84,9 @@ def main():
     state = dict(schema=1, passed=False, errors=[], phase="preflight", callbacks=[],
                  frames_expected=[], mode_cycles={}, width_samples=[], forbidden_actions=[],
                  entry="run_live([]), attach_only", settings_scope="temporary profile only",
-                 capture="PIL.ImageGrab physical desktop", model="sol")
+                 capture="PIL.ImageGrab physical desktop", model="sol",
+                 attach_mode="waiting", source_lines=0,
+                 word_click=dict(status="UNVERIFIED", reason="Attach-only probe forbids lyric seek"))
     result_path = args.out / "native-result.json"
     observer = None
     original_bootstrap = None
@@ -89,6 +107,7 @@ def main():
         from local.music_surface_layout import CONTENT_LAYOUTS
         from local.music_lyric_fit import cjk_unit, fits, required_width
         from local.music_lyric_motion import GLYPH_FLOAT_LIFT
+        from local.music_surface_window import MUSIC_WINDOW_ASPECT_RATIO
         from local.settings_store import DEFAULT_SETTINGS
         import local.app as app_module
 
@@ -106,7 +125,7 @@ def main():
             ["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True).strip()
         original_bootstrap = app_module.bootstrap
         observer = subprocess.Popen(
-            [str(PYTHON), "-X", "utf8", str(Path(__file__).with_name("screen_observer.py")),
+            [str(PYTHON), "-X", "utf8", str(observer_script or Path(__file__).with_name("screen_observer.py")),
              "--out", str(args.out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         def instrumented_bootstrap(**kwargs):
@@ -142,12 +161,24 @@ def main():
 
             def publish():
                 widget = target_widget[0]
+                transition = getattr(window, "_width_transition", None)
+                marks = getattr(window, "_width_resize_marks", None)
                 message = dict(capture_state, phase=state["phase"], probe_pid=os.getpid(),
+                               attach_mode=state["attach_mode"], source_lines=len(window.source_lines()),
                                hwnd=int(widget.winId()), geometry=geometry(),
                                narrow=bool(window.narrow), visibility=float(window.visibility.progress),
                                width_chrome_progress=getattr(window, "_width_chrome_progress", None),
                                width_chrome_active=bool(getattr(window, "_width_chrome_active", False)),
                                width_layout_fraction=getattr(window, "_width_layout_fraction", None),
+                               resize_chrome_hold=bool(getattr(window, "_resize_chrome_hold", False)),
+                               dpr=float(window.devicePixelRatioF()),
+                               width_transition_state=transition.state if transition is not None else None,
+                               width_transition_duration=transition.duration if transition is not None else None,
+                               width_transition_history=getattr(window, "_width_transition_history", []),
+                               width_marks=(dict(minimum=marks.minimum, breakpoint=marks.breakpoint,
+                                   maximum=marks.maximum, height=marks.height,
+                                   current=marks.mark(window.width()), split_unreachable=marks.split_unreachable)
+                                   if marks is not None else None),
                                rects={key: list(rect.getRect()) for key, rect in groups().items()})
                 write(args.out / "probe-state.json", message)
 
@@ -280,6 +311,7 @@ def main():
             def width_sample(width):
                 window.resize(width, 640)
                 record_width_sample(width, "resize")
+                QTimer.singleShot(40, guarded(lambda: capture("width-sweep-" + str(width))))
 
             def record_width_sample(width, method):
                 state["width_samples"].append(dict(width=width, narrow=bool(window.narrow),
@@ -354,6 +386,8 @@ def main():
                 drag_event(QEvent.Type.MouseMove, point, Qt.MouseButton.LeftButton)
                 drag["last"] = point
                 record_width_sample(width, "Qt mouse edge drag")
+                index = len(state["width_samples"])
+                QTimer.singleShot(15, guarded(lambda: capture(f"width-drag-{index}-{width}")))
 
             def finish_drag():
                 drag_event(QEvent.Type.MouseButtonRelease, drag["last"], Qt.MouseButton.NoButton)
@@ -362,6 +396,14 @@ def main():
                 state["width_drag_pass"] = bool(
                     samples and {sample["narrow"] for sample in samples} == {False, True}
                     and all(sample["actual_width"] == sample["width"] and sample["snapshots_null"] for sample in samples))
+
+            def drag_mark(mark):
+                marks = window._width_resize_marks
+                if marks is None:
+                    raise RuntimeError("Width gesture did not publish its frozen marks")
+                width = (marks.minimum + (mark - 10.) * (marks.breakpoint - marks.minimum) / 15.
+                         if mark <= 25. else marks.breakpoint + (mark - 25.) * (marks.maximum - marks.breakpoint) / 25.)
+                drag_to(round(width))
 
             def reading_evidence():
                 retired = ("v2_music_surface_reading_strategy", "v2_music_surface_reading_lift_level")
@@ -413,6 +455,7 @@ def main():
                     state["player_pids_before"]).issubset(state["player_pids_after"])
                 state["port_13371_after"] = port_present()
                 state["diagnostics"] = window.diagnostic_snapshot()
+                state["width_transition_history"] = getattr(window, "_width_transition_history", [])
                 state["phase"] = "done"
                 publish_timer.stop()
                 publish()
@@ -440,19 +483,34 @@ def main():
                 add(250, "reading-evidence", reading_evidence)
                 add(0, "width-sweep-setup", lambda: capture_state.update(capture_sequence=True))
                 entry, exit_width = breakpoint["entry"]["width"], breakpoint["exit"]["width"]
+                state["t156_breakpoint"] = window._width_breakpoint_width(height=640)
                 low, high = max(330, entry - 70), exit_width + 70
                 if high + 120 > window._available_geometry().width():
                     raise RuntimeError("Desktop too narrow for this DPI's breakpoint drag; use a larger work area")
-                for width in (high, exit_width + 2, entry + 2, entry, entry - 2, low,
+                for width in (330, 400, round(state["t156_breakpoint"]), 460, 640,
+                              high, exit_width + 2, entry + 2, entry, entry - 2, low,
                               entry - 2, entry + 2, exit_width - 2, exit_width, exit_width + 2, high):
-                    add(120, "width-sweep", lambda width=width: width_sample(width))
+                    add(600, "width-sweep", lambda width=width: width_sample(width))
                 add(450, "width-drag-setup", lambda: configure(high, 640))
                 add(40, "width-drag", start_drag)
                 drag_widths = list(range(high, low - 1, -4)) + [low]
                 drag_widths += list(range(low, high + 1, 4)) + [high]
                 for width in drag_widths:
-                    add(25, "width-drag", lambda width=width: drag_to(width))
-                add(450, "width-drag-settle", finish_drag)
+                    add(75, "width-drag", lambda width=width: drag_to(width))
+                add(1100, "width-drag-settle", finish_drag)
+                add(650, "seam-360x640", lambda: configure(360, 640))
+                add(150, "seam-360x640", lambda: capture("seam-360x640"))
+                add(650, "seam-480x800", lambda: configure(480, 800))
+                add(150, "seam-480x800", lambda: capture("seam-480x800"))
+                add(650, "fast-drag-setup", lambda: configure(330, 640))
+                add(40, "fast-drag", start_drag)
+                add(650, "fast-drag", lambda: drag_to(min(window._available_geometry().width() - 120, round(640 * MUSIC_WINDOW_ASPECT_RATIO))))
+                add(650, "fast-drag-settle", finish_drag)
+                add(800, "return-drag-setup", lambda: configure(330, 640))
+                add(2500, "return-drag", start_drag)
+                add(20, "return-drag", lambda: drag_mark(30))
+                add(1300, "return-drag", lambda: drag_mark(18))
+                add(650, "return-drag-settle", finish_drag)
                 add(650, "back-enabled-setup", lambda: (capture_state.update(capture_sequence=False), enable_back()))
                 add(250, "back-enabled-before", lambda: capture("owned-true-back-before"))
                 add(800, "back-enabled-click", click_back)
@@ -460,20 +518,30 @@ def main():
                 advance()
 
             def poll():
-                ready = (owner.media_is_playing and owner.media_duration_seconds > 0
-                         and owner.media_position_source not in {"", "none", "capture-unavailable"}
-                         and bool(window.source_lines()))
+                elapsed = time.monotonic() - started
+                playback_ready = (owner.media_is_playing and owner.media_duration_seconds > 0
+                                  and owner.media_position_source not in {"", "none", "capture-unavailable"})
+                source_lines = len(window.source_lines())
+                state.update(playback_ready=bool(playback_ready), lyric_ready=bool(source_lines),
+                             source_lines=source_lines)
+                if playback_ready:
+                    state.setdefault("playback_ready_after_seconds", round(elapsed, 3))
+                if source_lines:
+                    state.setdefault("lyric_ready_after_seconds", round(elapsed, 3))
                 position = window.playback_position()
-                if ready and poll_start[0] is None:
+                if playback_ready and poll_start[0] is None:
                     poll_start[0] = position
-                if ready and poll_start[0] is not None and position - poll_start[0] >= .1:
+                mode = attach_readiness(playing=owner.media_is_playing,
+                    duration=owner.media_duration_seconds, position_source=owner.media_position_source,
+                    source_lines=source_lines, position=position, initial_position=poll_start[0], elapsed=elapsed)
+                if mode is not None:
                     timer.stop()
                     state["real_playback_ready"] = True
+                    state["attach_mode"] = mode
+                    if mode == "degraded":
+                        state["word_click"] = dict(status="UNVERIFIED", reason="No source lyrics after 45 seconds; degraded attach")
                     state["position_source"] = owner.media_position_source
                     begin()
-                elif time.monotonic() - started >= 45:
-                    timer.stop()
-                    raise RuntimeError("No advancing real playback with source lyrics; physical acceptance unavailable")
 
             timer = QTimer(window)
             timer.timeout.connect(guarded(poll))
@@ -488,7 +556,8 @@ def main():
     finally:
         if app_module is not None and original_bootstrap is not None:
             app_module.bootstrap = original_bootstrap
-        write(args.out / "probe-state.json", dict(done=True))
+        write(args.out / "probe-state.json", dict(done=True,
+              attach_mode=state["attach_mode"], source_lines=state["source_lines"]))
         if observer is not None:
             try:
                 state["observer_exit"] = observer.wait(timeout=15)

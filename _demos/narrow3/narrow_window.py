@@ -21,7 +21,7 @@ from api.online_music import OnlineSong
 from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
-from local.music_surface_window import MusicSurfaceWindow
+from local.music_surface_window import MusicSurfaceWindow, MUSIC_WINDOW_ASPECT_RATIO, constrained_window_size
 from local.music_surface_layout import normalize_content_layout
 from local.music_lyric_reading import LyricReadingRenderer
 from local.lyric_unit_timing import timed_unit_reading_front
@@ -138,14 +138,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if (getattr(self, "_width_chrome_active", False)
                 and self.mode == "lyrics"):
             target = self._width_lyric_geometry(self.narrow, rect)
-            content_phase = (self._width_chrome_progress if self.narrow else
-                             self._chrome_phase(self._width_chrome_progress, .70, 1.))
-            content, cover = (self._interpolate_rect(first, last, content_phase)
-                              for first, last in zip(self._width_content_from[:2], target[:2]))
-            column = target[2]
-            compact = self._width_chrome_progress if self.narrow else 1. - self._width_chrome_progress
+            phase = self._width_chrome_progress
+            content, cover, column = (self._interpolate_rect(first, last, phase)
+                                     for first, last in zip(self._width_content_from, target))
+            compact = phase if self.narrow else 1. - phase
             cover.translate(0., -VeilOverlay.TOP_END * (1. - self.visibility.progress) * compact)
-            return content, cover, column
+            return content, cover, self._separate_width_column(cover, column)
         if not self._narrow_lyrics_mount:
             content, cover, column = super()._content_column_geometry(rect)
             if (getattr(self, "narrow", False) and self.mode == "playlist"
@@ -277,10 +275,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.move(80, 80)
         self.toggle_wide(False)
         self._width_chrome_animation = QVariantAnimation(self)
-        self._width_chrome_animation.setDuration(420)
-        self._width_chrome_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._width_chrome_animation.setDuration(500)
+        self._width_chrome_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._width_chrome_animation.valueChanged.connect(self._advance_width_chrome)
-        self._width_chrome_animation.finished.connect(self._finish_width_chrome)
+        self._width_chrome_animation.finished.connect(self._complete_width_chrome)
         if not live:
             self.set_cover(0)
         self._sync_owned_playback_mode()
@@ -314,7 +312,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         result['is_first_sample'] = getattr(self.owner, 'media_is_first_sample', False)
         result['reveal_progress'] = self.visibility.progress
         result['dim'] = .04 + .14 * self.visibility.progress
-        result['blur'] = 12. + 12. * self.visibility.progress
+        result['blur'] = VeilOverlay.MAX_BLUR
+        result['veil_prepares'] = self.background_veil.veil_prepares
+        result['veil_seam_max_step'] = self.background_veil.veil_seam_max_step
+        result['veil_seam_metric'] = 'profile-only; physical centerline measured separately'
+        result['resize_chrome_hold'] = self._resize_chrome_hold
         result['veil_cache_hit_ratio'] = self.veil.hits / max(1, self.veil.hits + self.veil.misses)
         result['controls_translate'] = -VeilOverlay.TOP_END * (1. - self.visibility.progress)
         result['controls_scale'] = 1.
@@ -476,8 +478,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.shelf = self.footer_hover = (
                 self._pointer_hover or self._focus_reveal or now < self._pointer_active_until)
         self.last_tick = now
-        self.visibility.advance(now, self.shelf or self.touch_active, self.footer_hover,
-                                self.mode == "playlist")
+        if not self._width_chrome_active:
+            self.visibility.advance(now, self.shelf or self.touch_active, self.footer_hover,
+                                    self.mode == "playlist")
         target = self.visibility.footer.target
         if target != self._diagnostic_target:
             self._diagnostics['controls_retargets'] += 1
@@ -631,6 +634,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 from_bottom + (1. - from_bottom) * self._chrome_phase(phase, .70, 1.))
 
     def _chrome_collection_reveal(self):
+        if getattr(self, '_resize_chrome_hold', False):
+            return 1.
         _fusion, top, bottom = self._chrome_phases()
         return min(1., (top if top > 0. else bottom) / .2)
 
@@ -643,6 +648,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         layout = NarrowLayout(self.width(), self.height(),
                               library_available=self._library_back_available(), dj_available=self.dj_available)
         top = {key: rect for key, rect in layout._top_rects.items() if key != "library"}
+        if getattr(self, '_resize_chrome_hold', False) and self.dj_available:
+            top['personal_dj'] = self._width_control_rects(True)['personal_dj']
         _fusion, top_phase, bottom_phase = self._chrome_phases()
         if self._width_chrome_active and top_phase <= 0. and bottom_phase > 0. and self.dj_available:
             # A narrow target may yield DJ, but its wide endpoint must still
@@ -665,7 +672,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             targets = self._width_control_rects(self.narrow)
             target = targets.get(key, rect)
             source = self._width_chrome_from.get(key, target)
-            if key in {"collection", "personal_dj"}:
+            if key in {"collection", "personal_dj"} and getattr(self, '_resize_chrome_hold', False):
+                rect = self._interpolate_rect(source, target, self._width_chrome_progress)
+                rect.moveLeft(min(max(0., rect.left()), max(0., self.width() - rect.width())))
+                rect.moveTop(min(max(0., rect.top()), max(0., self.height() - rect.height())))
+            elif key in {"collection", "personal_dj"}:
                 if top > 0.:
                     layout = NarrowLayout(self.width(), self.height(),
                                           library_available=self._library_back_available(), dj_available=self.dj_available)
@@ -702,12 +713,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if narrow:
             layout = NarrowLayout(self.width(), self.height(),
                                   library_available=self._library_back_available(), dj_available=self.dj_available)
-            return {**layout._top_rects, "media:previous": layout.previous,
-                    "media:toggle_play_pause": layout.play, "media:next": layout.next}
+            rects = {**layout._top_rects, "media:previous": layout.previous,
+                     "media:toggle_play_pause": layout.play, "media:next": layout.next}
+            if getattr(self, '_resize_chrome_hold', False) and self.dj_available and 'personal_dj' not in rects:
+                rects['personal_dj'] = QRectF(self.width() - 16. - layout.button_size,
+                                              62., layout.button_size, layout.button_size)
+            return rects
         return {key: rect for group in super()._glass_control_groups(time.monotonic())
                 for key, rect in group.items()}
 
     def _refresh_chrome_backdrop(self, now):
+        self._clear_control_renderer.live_tint_scene = self._background_cache
         # Rasterize shared content into a cached, unfiltered backdrop without
         # grabbing the widget or scheduling another visible paint. Width
         # merges freeze this endpoint; blur remains owned by the renderer.
@@ -766,12 +782,21 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         return super()._surface_glass_backdrop()
 
     def _advance_width_chrome(self, value):
+        # Animation frames only repaint the posed geometry. Material/controls
+        # targets remain pinned for this complete handoff.
         self._width_chrome_progress = float(value)
-        self._controls_key = None
-        self._sync_chrome_accessibility()
         self.update()
 
-    def _finish_width_chrome(self):
+    def _complete_width_chrome(self):
+        self._clear_width_chrome()
+        if self._width_transition is not None:
+            self._width_transition.complete()
+            self._content_layout_fit_narrow = self._width_transition.narrow
+            self._content_layout_fit_key = None
+            self._record_width_transition()
+        self._sync_narrow_mode()
+
+    def _clear_width_chrome(self):
         self._width_chrome_active = False
         self._width_chrome_progress = 1.
         self._width_chrome_from.clear()
@@ -779,6 +804,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._width_glass_backdrop = None
         self._controls_key = None
         self.update()
+
+    def _finish_width_chrome(self):
+        if hasattr(self, '_width_chrome_animation'):
+            self._width_chrome_animation.stop()
+        self._clear_width_chrome()
+        if self._width_transition is not None:
+            self._width_transition.settle(getattr(self, "narrow", True))
 
     def _width_breakpoint_animated_externally(self):
         return True
@@ -830,8 +862,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._width_glass_backdrop = QImage(self._surface_glass_backdrop())
             self._width_chrome_from = old_rects
             self._width_content_from = old_content
+            self._width_content_to = self._width_lyric_geometry(narrow)
+            self._width_shaping_height = self.height()
+            wide_scale = self._surface_scale()
+            narrow_scale = NarrowLayout(self.width(), self.height()).lyric_font / self.LYRIC_PIXEL_SIZE
+            self._width_font_scales = (wide_scale, narrow_scale) if narrow else (narrow_scale, wide_scale)
             self._width_chrome_progress = 0.
             self._width_chrome_active = True
+            self._width_chrome_animation.setDuration(round(self._width_transition.duration * 1000.))
+            self._record_width_transition()
             self._width_chrome_animation.setStartValue(0.)
             self._width_chrome_animation.setEndValue(1.)
             self._width_chrome_animation.start()
@@ -957,14 +996,24 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # is the raw AlbumFlow raster; it cannot contain lyric/control ink.
         key = (self._visual_track_identity(), self.width(), self.height(),
                self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
-               self.owner.secondary_color.rgba(), self.visibility.opacity.generation)
+               self.owner.secondary_color.rgba(), self.visibility.opacity.generation,
+               self._background_cache.cacheKey())
+        if (getattr(self, '_resize_chrome_hold', False) or self._width_chrome_active) and self.background_veil.ready:
+            if key != self._background_veil_key:
+                self._diagnostics['veil_stale_frames'] = self._diagnostics.get('veil_stale_frames', 0) + 1
+            return
+        if self.background_veil.ready and now - getattr(self, '_background_veil_at', -math.inf) < .1:
+            return
         if key != self._background_veil_key or not self.background_veil.ready:
             self.background_veil.prepare(self._background_cache, self.width(), self.height())
             self._background_veil_key = key
+            self._background_veil_at = now
+            self._diagnostics['veil_prepares'] = self.background_veil.prepare_count
 
     def _paint_background(self, painter, rect, primary, secondary, now, **kwargs):
         narrow = (getattr(self, "narrow", False) or self._width_chrome_active) and hasattr(self, "background_veil")
-        if narrow and not self.visibility.settled(now):
+        if narrow and (not self.visibility.settled(now) or self._width_chrome_active
+                       or getattr(self, '_resize_chrome_hold', False)):
             kwargs['advance_frame'] = False
         super()._paint_background(painter, rect, primary, secondary, now, **kwargs)
         if narrow:
@@ -1496,6 +1545,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         Reading ink advances in the sharp lyric layer. The blurred overlay is
         prepared only for a changed row/scroll bucket, never for word progress.
         """
+        if ((getattr(self, '_resize_chrome_hold', False) or self._width_chrome_active)
+                and self.veil_key is not None):
+            return
         if self._narrow_lyrics_mount or self.mode != "lyrics":
             return
         layout = NarrowLayout(self.width(), self.height())
@@ -1935,18 +1987,23 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         painter.setOpacity(painter.opacity() * collection_reveal)
         favorite = self.posed_rect("collection", layout.favorite)
-        count = len(layout.collection_slots) if top > 0. else 2
+        count = len(layout.collection_slots) if top > 0. and not getattr(self, '_resize_chrome_hold', False) else 2
         collection_slots = {key: QRectF(favorite.left() + index * favorite.width() / count,
                                        favorite.top(), favorite.width() / count, favorite.height())
                             for index, key in enumerate(("favorite", "playlist_add")[:count])}
         dj_slot = layout.dj
+        if getattr(self, '_resize_chrome_hold', False) and self.dj_available:
+            dj_slot = self._width_control_rects(True)['personal_dj']
         if self._width_chrome_active and top <= 0. and bottom > 0. and self.dj_available:
             dj_slot = self._width_control_rects(False).get("personal_dj", QRectF())
         dj = self.posed_rect("personal_dj", dj_slot) if dj_slot.isValid() else QRectF()
+        separate_dj = getattr(self, '_resize_chrome_hold', False) and not layout.dj.isValid()
         if top > 0.:
-            self._paint_chrome_capsule(painter, {**collection_slots, **({"personal_dj": dj} if dj.isValid() else {})},
+            self._paint_chrome_capsule(painter, {**collection_slots, **({"personal_dj": dj} if dj.isValid() and not separate_dj else {})},
                                        role="chrome-collection", fusion=top,
                                        padding=layout._capsule_metrics[1] * top)
+            if separate_dj and dj.isValid():
+                self._paint_surface_glass(painter, dj, role="dj-icon")
         else:
             self._paint_chrome_capsule(painter, collection_slots, role="collection")
             if dj.isValid():
@@ -2063,8 +2120,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 # would move the opposite edge on top/left inward drags.
                 width = max(self.minimumWidth(), min(available.width(), requested_width))
                 height = max(self.minimumHeight(), min(available.height(), requested_height))
+                if width > round(height * MUSIC_WINDOW_ASPECT_RATIO):
+                    size = constrained_window_size(width, height, self.minimumSize(), available.size())
+                    width, height = size.width(), size.height()
                 x = original.right() - width + 1 if "left" in edges else original.left()
                 y = original.bottom() - height + 1 if "top" in edges else original.top()
+                self._set_resize_chrome_hold(True)
                 self._content_layout_user_resizing = True
                 try:
                     self.setGeometry(x, y, width, height)
@@ -2173,6 +2234,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                     self._narrow_drag = bool(self._moving or self._resize_edges)
                     self._drag_origin = event.globalPosition().toPoint()
                     self._drag_geometry = self.geometry()
+                    if self._resize_edges:
+                        self._set_resize_chrome_hold(True)
                 event.accept()
             return
         self._press_at(event.position())
@@ -2192,7 +2255,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                     if rect.contains(position):
                         if key == "collection":
                             layout = NarrowLayout(self.width(), self.height(), dj_available=self.dj_available)
-                            single = self._chrome_phases()[1] > 0. and len(layout.collection_slots) == 1
+                            single = (self._chrome_phases()[1] > 0. and len(layout.collection_slots) == 1
+                                      and not getattr(self, '_resize_chrome_hold', False))
                             return "favorite" if single or position.x() < rect.center().x() else "playlist_add"
                         return key
         if self.mode == "playlist":
@@ -2316,6 +2380,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.update()
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._set_resize_chrome_hold(False)
         if not (self.narrow or self._width_chrome_active) and not self._narrow_drag:
             super().mouseReleaseEvent(event)
             return

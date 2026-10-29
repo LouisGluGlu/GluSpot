@@ -206,6 +206,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._drag_origin = QPoint()
         self._drag_geometry = QRect()
         self._resize_edges: set[str] = set()
+        self._resize_chrome_hold = False
         self._moving = False
         self._closing_for_shutdown = False
         self._button_rects: dict[str, QRectF] = {}
@@ -1079,6 +1080,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         return True
 
     def hideEvent(self, event):
+        self._set_resize_chrome_hold(False)
         self._finish_width_layout()
         self._glass_feedback.reset()
         self._reset_window_compact()
@@ -1265,8 +1267,17 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._restore_idle_cursor()
         super().focusOutEvent(event)
 
+    def event(self, event):
+        if event.type() in (QEvent.Type.Leave, QEvent.Type.WindowDeactivate):
+            self._set_resize_chrome_hold(False)
+            if event.type() == QEvent.Type.WindowDeactivate:
+                self._resize_edges = set()
+                self._moving = False
+        return super().event(event)
+
     def changeEvent(self, event):
         if event.type() == QEvent.Type.WindowDeactivate:
+            self._set_resize_chrome_hold(False)
             self._restore_idle_cursor()
             if hasattr(self, "_compact_animation") and not self._compact_snapshot.isNull() and not self._compact_committing:
                 self._moving = False
@@ -1490,6 +1501,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _control_reveal_at(self, now: float) -> float:
         """Return 1 for visible controls and 0 after mode-specific pointer idling."""
+        if getattr(self, '_resize_chrome_hold', False):
+            return 1.
         instant = float(now)
         panel = getattr(self, "_audio_output_panel", None)
         collection = getattr(self, "_song_playlist_panel", None)
@@ -7069,6 +7082,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                                    or navigation_capture and cover_lyrics_layout)
         lyric_transform = QTransform()
         lyric_cover = painted_cover
+        pose = None
+        if not cover_lyrics_layout:
+            pose = self._width_lyric_render_pose(rect, side_column, surface_scale)
+            if pose is not None:
+                content, side_column, surface_scale, lyric_transform = pose
+                text_left = side_column.left()
+                text_width = max(1., side_column.width())
         if cover_lyrics_layout:
             # Reuse the real lyric timing/translation/duet rendering inside
             # one stable logical cover. Controls and pause animate the art
@@ -7434,7 +7454,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         )
         # Sentence spacing leaves a clear entrance lane for annotations;
         # wrapping within a sentence retains its tighter visual-line rhythm.
-        row_gap = max(18.0 * surface_scale, rect.height() * 0.035)
+        shaping_height = getattr(self, '_width_shaping_height', rect.height()) if pose is not None else rect.height()
+        row_gap = max(18.0 * surface_scale, shaping_height * 0.035)
         layouts, row_tops = self._song_lyric_layouts(
             paint_lines, lyric_font, text_width, row_gap,
             defer=holding_loaded_lyrics or bool(previous and transition < 0.35) or len(paint_lines) > 48,
@@ -7750,6 +7771,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             painter.setClipRect(lyric_ink_clip, Qt.ClipOperation.IntersectClip)
             if unobscured_path is not None:
                 painter.setClipPath(unobscured_path, Qt.ClipOperation.IntersectClip)
+            painter.setWorldTransform(lyric_transform, True)
         lyric_slide = 0. if cover_lyrics_layout else self._lyric_horizontal_slide(cover_fraction, rect.right(), text_left)
         painter.translate(lyric_slide, 0.0)
         visual_ends = self._song_visual_ends if layouts else ()
@@ -7902,7 +7924,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                     row.width() + 2.0 * glow_bleed,
                     max(1.0, painted_bottom - painted_top) + 2.0 * glow_bleed,
                 )
-                if cover_lyrics_layout:
+                if not lyric_transform.isIdentity():
                     ink_bounds = lyric_transform.mapRect(ink_bounds)
                 if not paint_region.intersects(ink_bounds.toAlignedRect()):
                     continue
@@ -8410,6 +8432,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 painter.setClipRect(lyric_ink_clip, Qt.ClipOperation.IntersectClip)
                 if unobscured_path is not None:
                     painter.setClipPath(unobscured_path, Qt.ClipOperation.IntersectClip)
+                painter.setWorldTransform(lyric_transform, True)
             painter.translate(lyric_slide, 0.0)
             self._paint_lyric_loading(
                 painter, lyric_clip, lyric_now, 1. if cover_lyrics_layout else max(0.0, 1.0 - cover_fraction),
@@ -8545,6 +8568,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _surface_glass_backdrop(self) -> QImage:
         """Live visible glass, with a separate stable snapshot for exit blur."""
+        self._clear_control_renderer.live_tint_scene = self._background_cache
         prewarm = getattr(self, "_glass_prewarm_backdrop", None)
         if prewarm is not None:
             return prewarm
@@ -10311,7 +10335,38 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             )
         over_button = bool(self._pressed_window_button or self._pressed_media_command or self._pressed_lyric_index is not None or self._queue_pressed is not None)
         self._moving = not self._fullscreen and not self._resize_edges and not over_button and event.position().y() <= self.TITLE_BAR_HEIGHT
+        if self._resize_edges:
+            self._set_resize_chrome_hold(True)
         event.accept()
+
+    def _set_resize_chrome_hold(self, held):
+        """A drag owns reveal until release, including lost native releases."""
+        held = bool(held)
+        if held == getattr(self, '_resize_chrome_hold', False):
+            return
+        self._resize_chrome_hold = held
+        now = time.monotonic()
+        visibility = getattr(self, 'visibility', None)
+        if visibility is not None:
+            visibility.hold_resize(held, now)
+            if hasattr(self, '_diagnostic_target'):
+                self._diagnostic_target = visibility.opacity.target
+        if held:
+            begin = getattr(self, '_begin_width_resize', None)
+            if callable(begin):
+                begin()
+            self._pointer_exit_at = None
+            self._reset_control_idle()
+        else:
+            end = getattr(self, '_end_width_resize', None)
+            if callable(end):
+                end()
+            activity = getattr(self, 'pointer_activity', None)
+            if callable(activity):
+                self._pointer_hover = False
+                self._pointer_anchor = None
+                activity(QPointF(self.mapFromGlobal(QCursor.pos())), now)
+        self.update()
 
     def mouseMoveEvent(self, event):
         self._glass_feedback.move(event.position())
@@ -10392,6 +10447,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             return
         if not self._resize_edges:
             return
+        self._set_resize_chrome_hold(True)
         original = QRect(self._drag_geometry)
         requested_width = original.width() + (delta.x() if "right" in self._resize_edges else -delta.x() if "left" in self._resize_edges else 0)
         requested_height = original.height() + (delta.y() if "bottom" in self._resize_edges else -delta.y() if "top" in self._resize_edges else 0)
@@ -10406,6 +10462,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 return
         size = QSize(max(minimum.width(), min(available.width(), requested_width)),
                      max(minimum.height(), min(available.height(), requested_height)))
+        if size.width() > round(size.height() * MUSIC_WINDOW_ASPECT_RATIO):
+            size = constrained_window_size(size.width(), size.height(), minimum, available.size())
         x = original.right() - size.width() + 1 if "left" in self._resize_edges else original.left()
         y = original.bottom() - size.height() + 1 if "top" in self._resize_edges else original.top()
         self._content_layout_user_resizing = True
@@ -10417,6 +10475,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self._set_resize_chrome_hold(False)
             self._glass_feedback.release()
         if self._compact_committing:
             event.accept()
@@ -10674,6 +10733,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        self._set_resize_chrome_hold(False)
         self._update_metadata_hover(None, time.monotonic())
         self._restore_idle_cursor()
         self._hovered_window_button = ""

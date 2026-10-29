@@ -18,8 +18,8 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter
 
 
-# The full cover/title header ends at y=166. Fade its veil over 48px;
-# start the bottom fade 80px before the transport plateau.
+# Legacy distances remain chrome travel aliases only; blur geometry is
+# proportional to the current height and never uses these fixed shelves.
 TOP_END = 214.0
 TOP_FEATHER_START = 166.0
 BOTTOM_HEIGHT = 192.0
@@ -27,7 +27,9 @@ BOTTOM_FEATHER = 80.0
 MAX_BLUR = 6.0
 DIM_ALPHA = .18
 DIM_COLOR = QColor.fromRgbF(0.0, 0.0, 0.0, DIM_ALPHA)
-BLUR_LEVELS = int(MAX_BLUR / 2)
+BLUR_LEVELS = 8
+PLATEAU_FRACTION = .14
+RAMP_FRACTION = .20
 CACHE_LIMIT = 6
 RASTER_SCALE = .5
 # Half of the largest 58px lyric step, with room for interpolation.
@@ -102,11 +104,10 @@ class VeilOverlay:
 
     @staticmethod
     def band_strength(y, height=640.0):
-        """One smoothstep profile for radius and dim, flat at both ends."""
-        if y < TOP_END:
-            return VeilOverlay._smoothstep((TOP_END - y) / (TOP_END - TOP_FEATHER_START))
-        bottom = float(height) - BOTTOM_HEIGHT
-        return VeilOverlay._smoothstep((y - bottom) / BOTTOM_FEATHER)
+        """Symmetric, height-normalized edge blur with zero-slope joins."""
+        height = max(1., float(height))
+        distance = min(float(y), height - float(y)) / height
+        return 1. - VeilOverlay._smoothstep((distance - PLATEAU_FRACTION) / RAMP_FRACTION)
 
     @staticmethod
     def progress(opacity):
@@ -125,13 +126,14 @@ class VeilOverlay:
         """Support of one radius weight along the shared smoothstep."""
         low = VeilOverlay._inverse_smoothstep((degree - 1) / BLUR_LEVELS)
         high = VeilOverlay._inverse_smoothstep((degree + 1) / BLUR_LEVELS)
+        feather = RAMP_FRACTION * height
+        end = (PLATEAU_FRACTION + RAMP_FRACTION) * height
         if top:
-            feather = TOP_END - TOP_FEATHER_START
-            return (0.0 if degree == BLUR_LEVELS else TOP_END - high * feather,
-                    TOP_END - low * feather)
-        start = height - BOTTOM_HEIGHT
-        return (start + low * BOTTOM_FEATHER,
-                height if degree == BLUR_LEVELS else start + high * BOTTOM_FEATHER)
+            return (0.0 if degree == BLUR_LEVELS else end - high * feather,
+                    end - low * feather)
+        start = height - end
+        return (start + low * feather,
+                height if degree == BLUR_LEVELS else start + high * feather)
 
     def prepare(self, key, source: QImage | Callable[[], QImage]):
         """Filter a half-resolution canonical pose once, outside paint.
@@ -165,7 +167,7 @@ class VeilOverlay:
         reduced.setDevicePixelRatio(scale)
         pixels = Image.frombytes("RGBA", (reduced.width(), reduced.height()), bytes(reduced.bits()))
         pending = []
-        for degree in range(1, int(MAX_BLUR / 2) + 1):
+        for degree in range(1, BLUR_LEVELS + 1):
             # A Gaussian with σ≥4 has no useful detail at the original sample
             # frequency.  This affects storage after the exact filter only.
             reduction = (1.0 if degree == 1 else .5 if degree < 4 else .25) * min(1.0, 1.0 / dpr)
@@ -177,7 +179,7 @@ class VeilOverlay:
                 source_end = target_end + SCROLL_GUARD
                 first = math.floor(source_start * scale)
                 last = math.ceil(source_end * scale)
-                radius = degree * 2 * scale
+                radius = degree * MAX_BLUR / BLUR_LEVELS * scale
                 padding = math.ceil(radius * 3)
                 crop = Image.new("RGBA", (reduced.width(), last - first + 2 * padding))
                 available_first = max(0, first - padding)
@@ -233,9 +235,10 @@ class VeilOverlay:
             self._paint_band(layer, original, provisional, 1.0, True, 0.0, include_clear=False)
             self._paint_band(layer, original, provisional, 1.0, False, 0.0, include_clear=False)
         settled_pixels = Image.frombytes("RGBA", (settled.width(), settled.height()), bytes(settled.bits()))
-        top_first, top_last = round(TOP_FEATHER_START * dpr), round(TOP_END * dpr)
-        bottom_first = round((height - BOTTOM_HEIGHT) * dpr)
-        bottom_last = round((height - BOTTOM_HEIGHT + BOTTOM_FEATHER) * dpr)
+        top_first = round(PLATEAU_FRACTION * height * dpr)
+        top_last = round((PLATEAU_FRACTION + RAMP_FRACTION) * height * dpr)
+        bottom_first = round((1. - PLATEAU_FRACTION - RAMP_FRACTION) * height * dpr)
+        bottom_last = round((1. - PLATEAU_FRACTION) * height * dpr)
         top_feather = settled_pixels.crop((0, top_first, settled.width(), top_last))
         bottom_feather = settled_pixels.crop((0, bottom_first, settled.width(), bottom_last))
         # Feather samples contain only radius >=2px ink. The smooth profile
@@ -274,8 +277,8 @@ class VeilOverlay:
     @staticmethod
     @lru_cache(maxsize=144)
     def _weight_mask(degree, top, height, local_start):
-        start = TOP_FEATHER_START if top else height - BOTTOM_HEIGHT
-        end = TOP_END if top else start + BOTTOM_FEATHER
+        start = PLATEAU_FRACTION * height if top else (1. - PLATEAU_FRACTION - RAMP_FRACTION) * height
+        end = (PLATEAU_FRACTION + RAMP_FRACTION) * height if top else (1. - PLATEAU_FRACTION) * height
         gradient = QLinearGradient(0, start - local_start, 0, end - local_start)
         # Shared sample locations preserve a partition of unity between all
         # Gaussian levels. Include every radius knot so the cropped supports
@@ -291,8 +294,8 @@ class VeilOverlay:
     @staticmethod
     @lru_cache(maxsize=16)
     def _dim_mask(top, height):
-        start = TOP_FEATHER_START if top else height - BOTTOM_HEIGHT
-        end = TOP_END if top else start + BOTTOM_FEATHER
+        start = PLATEAU_FRACTION * height if top else (1. - PLATEAU_FRACTION - RAMP_FRACTION) * height
+        end = (PLATEAU_FRACTION + RAMP_FRACTION) * height if top else (1. - PLATEAU_FRACTION) * height
         gradient = QLinearGradient(0, start, 0, end)
         for i in range(65):
             t = i / 64
@@ -303,8 +306,8 @@ class VeilOverlay:
     def _paint_band(self, painter, source, cached, opacity, top, delta, *, include_clear=True):
         """Blend transparent ink additively before compositing on the scene."""
         dpr = source.devicePixelRatio()
-        y = 0.0 if top else cached.height - BOTTOM_HEIGHT
-        band_height = TOP_END if top else BOTTOM_HEIGHT
+        band_height = (PLATEAU_FRACTION + RAMP_FRACTION) * cached.height
+        y = 0.0 if top else cached.height - band_height
         band = QImage(source.width(), max(1, round(band_height * dpr)),
                       QImage.Format.Format_ARGB32_Premultiplied)
         band.setDevicePixelRatio(dpr)
@@ -317,12 +320,12 @@ class VeilOverlay:
             layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
             layer.setOpacity(opacity)
             if cached.feathers is not None and abs(delta) < .000001:
-                feather_y = TOP_FEATHER_START if top else cached.height - BOTTOM_HEIGHT
-                feather_height = TOP_END - TOP_FEATHER_START if top else BOTTOM_FEATHER
+                feather_y = PLATEAU_FRACTION * cached.height if top else cached.height - band_height
+                feather_height = RAMP_FRACTION * cached.height
                 layer.drawImage(QRectF(0, feather_y - y, cached.width, feather_height), cached.image,
                                 cached.feathers[0 if top else 1])
-                plateau_start = 0.0 if top else cached.height - BOTTOM_HEIGHT + BOTTOM_FEATHER
-                plateau_end = TOP_FEATHER_START if top else cached.height
+                plateau_start = 0.0 if top else (1. - PLATEAU_FRACTION) * cached.height
+                plateau_end = PLATEAU_FRACTION * cached.height if top else cached.height
                 strip = next(s for s in cached.strips if s.degree == BLUR_LEVELS and s.top == top)
                 sample = QRectF(strip.rect.x(), strip.rect.y() + (plateau_start - strip.source_start) * strip.scale_y,
                                 strip.rect.width(), (plateau_end - plateau_start) * strip.scale_y)
@@ -389,14 +392,15 @@ class VeilOverlay:
         # A narrow lyric viewport can extend below the transport plateau.
         # Preserve those rows sharply; the caller derives this clip from its
         # layout, without changing the transport's geometry or paint path.
-        bottom = height - BOTTOM_HEIGHT
+        bottom = (1. - PLATEAU_FRACTION - RAMP_FRACTION) * height
         if bottom_start is not None:
             bottom = min(height, max(bottom, float(bottom_start)))
         painter.save()
         if cached is None:
             painter.drawImage(QPointF(0, 0), sharp_content)
         else:
-            middle = QRectF(0, TOP_END, width, max(0.0, bottom - TOP_END))
+            top_end = (PLATEAU_FRACTION + RAMP_FRACTION) * height
+            middle = QRectF(0, top_end, width, max(0.0, bottom - top_end))
             painter.drawImage(middle, sharp_content, self._source_rect(middle, dpr))
             self._paint_band(painter, sharp_content, cached, alpha, True, scroll_delta)
             painter.save()
@@ -409,25 +413,26 @@ class VeilOverlay:
 
     def paint_dim(self, painter, width, height, opacity, *, bottom_start=None):
         """Dim belongs to the window, independently of moving lyric ink."""
-        bottom = height - BOTTOM_HEIGHT if bottom_start is None else bottom_start
+        edge_end = (PLATEAU_FRACTION + RAMP_FRACTION) * height
+        bottom = height - edge_end if bottom_start is None else bottom_start
         painter.save()
         painter.setOpacity(painter.opacity() * opacity)
-        painter.fillRect(QRectF(0, 0, width, TOP_END), self._dim_mask(True, height))
+        painter.fillRect(QRectF(0, 0, width, edge_end), self._dim_mask(True, height))
         painter.fillRect(QRectF(0, bottom, width, max(0., height - bottom)),
                          self._dim_mask(False, height))
         painter.restore()
 
 
 class BackgroundEdgeVeil:
-    """Two bounded edge treatments prepared from raw background pixels only.
+    """One continuous masked backdrop veil above the caller's live sharp base.
 
-    The caller owns background epochs and freezes this preparation during a
-    chrome transition. Live lyric and control layers are painted afterwards;
-    this helper never samples a widget, scratch frame or foreground ink.
+    Preparation is frozen by the caller during drag/reveal. The clear core
+    stays transparent, so it continues showing the current animated backdrop.
+    No cropped shelf, source replacement or per-paint raster is involved.
     """
 
-    IDLE_RADIUS = 12.0
-    REVEAL_RADIUS = 24.0
+    IDLE_RADIUS = MAX_BLUR
+    REVEAL_RADIUS = MAX_BLUR
     IDLE_DIM = .04
     REVEAL_DIM = .18
     MAX_SAMPLE_SIDE = 512
@@ -436,7 +441,15 @@ class BackgroundEdgeVeil:
         self._key = None
         self._source = QImage()
         self._states = ()
+        self._alpha_profile = ()
         self.builds = 0
+        self.veil_prepares = 0
+        self.veil_stale_frames = 0
+        self.veil_seam_max_step = 0.
+
+    @property
+    def prepare_count(self):
+        return self.veil_prepares
 
     @property
     def ready(self):
@@ -449,16 +462,10 @@ class BackgroundEdgeVeil:
     @staticmethod
     def progress(progress):
         amount = max(0., min(1., float(progress)))
-        return (.04 + .14 * amount, 12. + 12. * amount)
+        return (.04 + .14 * amount, MAX_BLUR)
 
     def prepare(self, source, width, height):
-        """Prepare idle/revealed scale-space endpoints, never during paint.
-
-        Radius is measured in logical window pixels even when the background
-        provider supplies a much smaller raster. Only two current endpoint
-        images and one bounded source copy are retained; no frame history is
-        accumulated while a song or window changes.
-        """
+        """Eight blur samples interpolate continuously into one masked raster."""
         if source.isNull() or width <= 0 or height <= 0:
             return False
         key = (source.cacheKey(), float(width), float(height))
@@ -472,60 +479,50 @@ class BackgroundEdgeVeil:
         sampled = sampled.convertToFormat(QImage.Format.Format_RGBA8888_Premultiplied)
         pixels = Image.frombytes("RGBA", (sample_width, sample_height),
                                  bytes(sampled.constBits()), "raw", "RGBA", sampled.bytesPerLine())
+        profile = tuple(VeilOverlay.band_strength((y + .5) * height / sample_height, height)
+                        for y in range(sample_height))
         sample_scale = sample_width / float(width)
-        # Six logical pixels between Gaussian levels gives continuous radius
-        # blending without a filter per destination row or animation frame.
-        levels = (pixels,) + tuple(pixels.filter(ImageFilter.GaussianBlur(radius * sample_scale))
-                                   for radius in (6., 12., 18., 24.))
-        states = []
-        for radius, dim in ((self.IDLE_RADIUS, self.IDLE_DIM),
-                            (self.REVEAL_RADIUS, self.REVEAL_DIM)):
-            endpoint = pixels.copy()
-            for y in range(sample_height):
-                strength = VeilOverlay.band_strength((y + .5) * height / sample_height, height)
-                if strength <= 0.:
-                    continue
-                degree = radius * strength / 6.
-                lower = min(len(levels) - 1, int(degree))
-                upper = min(len(levels) - 1, lower + 1)
-                box = (0, y, sample_width, y + 1)
-                row = Image.blend(levels[lower].crop(box), levels[upper].crop(box), degree - lower)
-                darken = [round(value * (1. - dim * strength)) for value in range(256)]
-                # Work on premultiplied RGB channels and preserve coverage.
-                row = row.point(darken * 3 + list(range(256)))
-                endpoint.paste(row, (0, y))
-            data = endpoint.tobytes()
-            states.append(QImage(data, sample_width, sample_height, sample_width * 4,
-                                 QImage.Format.Format_RGBA8888_Premultiplied).copy())
-        self._key, self._source, self._states = key, sampled, tuple(states)
+        levels = (pixels,) + tuple(
+            pixels.filter(ImageFilter.GaussianBlur(MAX_BLUR * level / BLUR_LEVELS * sample_scale))
+            for level in range(1, BLUR_LEVELS + 1))
+        endpoint = Image.new("RGBA", pixels.size)
+        for y, strength in enumerate(profile):
+            if strength <= 0.:
+                continue
+            degree = strength * BLUR_LEVELS
+            lower = min(BLUR_LEVELS, int(degree))
+            upper = min(BLUR_LEVELS, lower + 1)
+            box = (0, y, sample_width, y + 1)
+            row = Image.blend(levels[lower].crop(box), levels[upper].crop(box), degree - lower)
+            # Premultiplied RGB and alpha use the same continuous mask. The
+            # clear-core alpha is zero; native sharp pixels stay untouched.
+            rgb = [round(value * strength * (1. - self.REVEAL_DIM * strength))
+                   for value in range(256)]
+            alpha = [round(value * strength) for value in range(256)]
+            endpoint.paste(row.point(rgb * 3 + alpha), (0, y))
+        data = endpoint.tobytes()
+        image = QImage(data, sample_width, sample_height, sample_width * 4,
+                       QImage.Format.Format_RGBA8888_Premultiplied).copy()
+        self._key, self._source, self._states = key, sampled, (image,)
+        self._alpha_profile = profile
         self.builds += 1
+        self.veil_prepares += 1
+        # Profile-only diagnostic. PC seam scans report actual image luma,
+        # including real artwork detail, separately from mask continuity.
+        self.veil_seam_max_step = max((abs(a - b) * self.REVEAL_DIM * 255
+                                      for a, b in zip(profile, profile[1:])), default=0.)
         return True
 
     def paint(self, painter, rect, progress):
-        """Blend prepared background bands without filtering or new rasters."""
+        """One whole-frame overlay after the caller's one sharp-background draw."""
         if not self.ready or rect.isEmpty():
             return
         amount = max(0., min(1., float(progress)))
+        density = self.IDLE_DIM / self.REVEAL_DIM
+        density += (1. - density) * amount
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        opacity = painter.opacity()
-        # Cropping full bounded endpoints at exact logical edges avoids a
-        # second rescale of feather rows and leaves the clear middle alone.
-        bands = ((0., min(TOP_END, rect.height())),
-                 (max(0., rect.height() - BOTTOM_HEIGHT), rect.height()))
-        for index, (image, alpha) in enumerate(((self._states[0], 1.), (self._states[1], amount))):
-            if alpha <= 0.:
-                continue
-            # Replace the raw edge first. Fractional image resampling can
-            # round alpha below255; SourceOver would leak a changing base
-            # through an otherwise frozen endpoint by one colour level.
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source
-                                       if index == 0
-                                       else QPainter.CompositionMode.CompositionMode_SourceOver)
-            painter.setOpacity(opacity * alpha)
-            for top, bottom in bands:
-                target = QRectF(rect.left(), rect.top() + top, rect.width(), bottom - top)
-                source = QRectF(0., top * image.height() / rect.height(), image.width(),
-                                (bottom - top) * image.height() / rect.height())
-                painter.drawImage(target, image, source)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setOpacity(painter.opacity() * density)
+        painter.drawImage(rect, self._states[0])
         painter.restore()

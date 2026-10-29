@@ -24,7 +24,8 @@ from local.glass_style import (CONTROL_COMPOSITE_DPR, DJ_TINT, GLASS_CLEAR, GLAS
                                GLASS_GLYPH, GLASS_SELECTED_ALPHA, PRESS_DAMPING,
                                PRESS_GROWTH, PRESS_HOLD_SECONDS, PRESS_STIFFNESS)
 from local.liquid_glass import (GLASS_CAPSULE_MATERIAL_MAX_EDGE,
-                                GLASS_MATERIAL_FRAME_SECONDS, GLASS_MATERIAL_MAX_EDGE)
+                                GLASS_MATERIAL_FRAME_SECONDS, GLASS_MATERIAL_MAX_EDGE,
+                                ChromeBackdropTint)
 
 
 def paint_control_overlay(painter, bounds, draw):
@@ -415,6 +416,8 @@ class GlassControlRenderer:
         self.frame_roles = None
         self.versions = {}
         self.record_roles = None
+        self.backdrop_tint = ChromeBackdropTint()
+        self.live_tint_scene = None
 
     def begin_frame(self, now):
         # Reserve refreshes for the oldest eligible patches, independent of paint order.
@@ -435,6 +438,8 @@ class GlassControlRenderer:
         self.seen_roles.clear()
         self.frame_roles = None
         self.versions.clear()
+        self.backdrop_tint.clear()
+        self.live_tint_scene = None
 
     def would_refresh(self, role, scene, now, pose, state):
         previous = self.patches.get(role)
@@ -531,6 +536,17 @@ class GlassControlRenderer:
             shape = transform.map(shape)
         else:
             shape.addRoundedRect(grown, grown.height() / 2., grown.height() / 2.)
+        adaptive = None
+        if kind in {'circle', 'capsule'} or fusing:
+            adaptive = self.backdrop_tint.sample(
+                self.live_tint_scene if self.live_tint_scene is not None else scene,
+                scene_bounds, rect, now, role=role)
+        def paint_tint(p):
+            if adaptive is not None:
+                p.fillPath(shape, adaptive[1])
+                p.setPen(QPen(adaptive[2], 1.))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPath(shape)
         overlays = (selected or hover > .001 or
                     any(amount > .001 for amount, _rect in (hover_segments or ())) or
                     state is not None and (state.glow > .001 or abs(lift) > .001))
@@ -541,6 +557,7 @@ class GlassControlRenderer:
                 painter.setClipPath(shape, Qt.ClipOperation.IntersectClip)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             painter.drawImage(grown, image)
+            paint_tint(painter)
             painter.restore()
             return
         # Composite every edge and feedback layer at >=2x, even when callers
@@ -553,6 +570,7 @@ class GlassControlRenderer:
             if kind == "capsule" or fusing:
                 p.setClipPath(shape, Qt.ClipOperation.IntersectClip)
             p.drawImage(grown, image)
+            paint_tint(p)
             p.setClipPath(shape)
             if selected:
                 p.fillRect(grown, QColor(255, 255, 255, round(255 * GLASS_SELECTED_ALPHA)))
