@@ -1,7 +1,7 @@
 """Immutable, display-only lyric preparation. No Qt objects or provider writes."""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from bisect import bisect_left, bisect_right
 import math
 import sys
@@ -217,8 +217,11 @@ def prepare_lyric_presentation(source: LyricPresentationInput) -> PreparedLyricP
     else:
         island_duet = analyze_duet_lyric_rows(source.timed, singer_names=source.artist)
         island_plans = _row_plans(source.timed, source.units, source.kinds, source.artist, island_duet)
-    layers = tuple(split_display_layers(row.body_text, source_text=mapped_sources[index],
-                                       show_translation=source.translated) for index, row in enumerate(duet.rows))
+    layers = tuple(replace(
+        split_display_layers(row.body_text, source_text=mapped_sources[index],
+                             show_translation=source.translated),
+        role_tag=row.role_tag,
+    ) for index, row in enumerate(duet.rows))
     genuine = any(kind == "unit" and genuinely_timed_unit_row(units)
                   for kind, units in zip(mapped_kinds, mapped_units))
     return PreparedLyricPresentation(

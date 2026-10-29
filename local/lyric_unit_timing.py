@@ -432,7 +432,20 @@ def _aligned_offsets(text: str, units: Sequence[object]) -> tuple[int, ...] | No
             offsets.append(offsets[-1] + len(str(getattr(unit, "text", ""))))
         return tuple(offsets)
     if " ".join(source.split()) != " ".join(text.split()):
-        return None
+        # Some providers keep the role in the row but omit it from genuine
+        # units. Reuse the shared classification; arbitrary mismatches still
+        # fail closed and source unit text/clocks remain untouched.
+        from local.music_lyric_presentation import split_display_layers
+        role = split_display_layers(text).role_tag
+        if role is None:
+            return None
+        body_start = len(text) - len(text.lstrip()) + len(role) + 2
+        body_start += len(text[body_start:]) - len(text[body_start:].lstrip())
+        body = text[body_start:]
+        if " ".join(source.split()) != " ".join(body.split()):
+            return None
+        offsets = _aligned_offsets(body, units)
+        return tuple(body_start + offset for offset in offsets) if offsets is not None else None
     # Reconstruct a boundary mapping rather than assuming a collapsed source
     # space occupies the same number of display characters.
     mapping = [0] * (len(source) + 1)

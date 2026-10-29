@@ -24,6 +24,7 @@ from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_surface_layout import normalize_content_layout
 from local.music_lyric_reading import LyricReadingRenderer
+from local.lyric_unit_timing import timed_unit_reading_front
 from local.music_lyric_presentation import (
     split_display_layers, INTRO_COUNTDOWN_TEXT, intro_dot_radius, paint_intro_countdown,
     LYRIC_PREVIOUS_ALPHA, LYRIC_NEXT_ALPHA,
@@ -1300,7 +1301,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         row = layout.lyric_row
         font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
         anchor += QFontMetricsF(font).capHeight() / 2
-        metrics_layout = self.reading_renderer.whole_line(lines[focus].text, font)
+        metrics_layout = self.reading_renderer.whole_line(split_display_layers(lines[focus].text).primary_text, font)
         ascent = metrics_layout.lineAt(0).ascent()
         painter.save()
         painter.setClipRect(viewport.adjusted(-18, -overscan, 18, overscan))
@@ -1309,6 +1310,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if (static_only and (index == focus or dots)) or (current_only and index != focus and not dots):
                 continue
             line = lines[index]
+            layers = split_display_layers(line.text)
+            text = layers.primary_text
             y = anchor + (index - visual_focus) * step - ascent
             if y + row < viewport.top() - 16 - overscan or y > viewport.bottom() + 16 + overscan:
                 continue
@@ -1319,15 +1322,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 continue
             x = viewport.left()
             if self.lyrics_alignment == "center":
-                width = QFontMetricsF(font).horizontalAdvance(line.text)
+                width = QFontMetricsF(font).horizontalAdvance(text)
                 x += (viewport.width() - width) / 2
+            if layers.role_tag:
+                self._paint_lyric_role_tag(painter, layers.role_tag, font, QPointF(x, y))
             if index != focus:
-                text_layout = QTextLayout(line.text, font)
+                text_layout = QTextLayout(text, font)
                 text_layout.beginLayout()
                 text_layout.createLine().setLineWidth(viewport.width())
                 text_layout.endLayout()
                 color = QColor(255, 255, 255) if index < focus else self._future_lyric_color(viewport)
-                image, padding = self._lyric_raster(line.text, font, viewport.width(), row, text_layout, color)
+                image, padding = self._lyric_raster(text, font, viewport.width(), row, text_layout, color)
                 # Filter the same resting ink that the clear side displays.
                 # A sharp-only veil source would revive distant rows midway
                 # through the feather and expose a horizontal change in focus.
@@ -1337,12 +1342,20 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 continue
             end = (lines[index + 1].time_seconds if index + 1 < len(lines)
                    else max(line.time_seconds + 1.0, getattr(self.owner, "media_duration_seconds", 0.0)))
+            source_primary = self._primary_timed_lyric_text(line.text)
+            source_front = timed_unit_reading_front(
+                source_primary, line.units, position, tuple(range(len(source_primary) + 1)),
+                line_end=end,
+            ) if layers.role_tag and line.units else None
+            primary_front = (self._project_source_front(source_front, layers.primary_source_offsets)
+                             if source_front is not None else None)
             self.reading_renderer.paint(
-                painter, QRectF(x, y, viewport.width(), row), x, line.text, font,
+                painter, QRectF(x, y, viewport.width(), row), x, text, font,
                 max(0.0, min(1.0, (position - line.time_seconds) / max(.001, end - line.time_seconds))),
                 self._future_lyric_color(viewport), QColor(255, 255, 255),
                 timed_units=line.units, timed_position=position,
                 timed_line_end=end,
+                timed_character_front=primary_front,
             )
         painter.restore()
 
@@ -1446,6 +1459,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 continue
             for part_index, (text, font, shaped, offset, height) in enumerate(runs):
                 target = QRectF(row.left(), row.top() + offset, row.width(), height)
+                if part_index == 0 and layers.role_tag:
+                    self._paint_lyric_role_tag(painter, layers.role_tag, font, target.topLeft())
                 if index == focus:
                     real = (self._real_visual_line_progresses(
                         text, shaped, line.units, position, line_end=end,

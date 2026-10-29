@@ -158,6 +158,7 @@ _INLINE_SINGLE_WORD_TRANSLATION_RE = re.compile(
 _SINGER_JOIN_RE = re.compile(r"\s*(?:[+＋＆&、/,，]|与|和)\s*")
 _POSSIBLE_SINGER_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]{2,6}\Z")
 _PAREN_CONTENT_RE = re.compile(r"\(([^()]*)\)|（([^（）]*)）")
+_ROLE_TAGS = frozenset(("男", "女", "合", "男声", "女声", "合唱"))
 _PAREN_METADATA_RE = re.compile(
     r"^(?:feat(?:uring)?\.?|ft\.?|prod(?:uced)?\.?|remix|live|instrumental|"
     r"作词|作曲|编曲|演唱|翻译|译者)(?:\s|[:：.]|$)",
@@ -176,6 +177,7 @@ class SingerLyricRow:
     singer: str | None = None
     alignment: str = "left"
     dual_group_index: int | None = None
+    role_tag: str | None = None
 
 
 @dataclass(frozen=True)
@@ -205,15 +207,30 @@ class DisplayLyricLayers:
     translation_text: str | None = None
     parenthetical_text: str | None = None
     parenthetical_translation_text: str | None = None
+    role_tag: str | None = None
 
 
-def _split_parenthetical_subrow(text: str) -> tuple[str, str | None, tuple[int, ...]]:
+def _split_parenthetical_subrow(text: str) -> tuple[str, str | None, tuple[int, ...], str | None]:
     annotations: list[str] = []
     kept: list[tuple[str, int]] = []
     cursor = 0
     scanned = 0
     nesting = 0
+    role_tag = None
+    # Role tags are one classification of the shared parenthetical scanner.
+    # Width normalization is only for matching; source offsets stay raw.
+    leading = len(text) - len(text.lstrip())
+    role_match = _PAREN_CONTENT_RE.match(text.translate(str.maketrans("（）", "()")), leading)
+    if role_match is not None and role_match.group(1) in _ROLE_TAGS:
+        if not text[role_match.end():].strip():
+            # A standalone token has no sung remainder: retain it as content.
+            return text, None, tuple(range(len(text))), None
+        role_tag = role_match.group(1)
+        cursor = role_match.end()
+        scanned = cursor
     for match in _PAREN_CONTENT_RE.finditer(text):
+        if match.start() < cursor:
+            continue
         for char in text[scanned:match.start()]:
             if char in "(（":
                 nesting += 1
@@ -250,6 +267,7 @@ def _split_parenthetical_subrow(text: str) -> tuple[str, str | None, tuple[int, 
         "".join(char for char, _index in compact),
         " ".join(annotations) or None,
         tuple(source_index for _char, source_index in compact),
+        role_tag,
     )
 
 
@@ -293,14 +311,14 @@ def split_display_layers(
         index for index, part in enumerate(parts) if _PARENTHETICAL_LABEL_RE.match(part)
     )
     explicit_translations = _explicit_translation_payloads(source_text or original)
-    first_content_index = next((index for index, (body, paren, _offsets) in enumerate(split_parts) if body or paren), None)
+    first_content_index = next((index for index, (body, paren, _offsets, _role) in enumerate(split_parts) if body or paren), None)
     if first_content_index is None:
         return DisplayLyricLayers(
             original, "\n".join(parts), "",
             primary_source_offsets=(0,),
-            parenthetical_text=" ".join(paren for _body, paren, _offsets in split_parts if paren) or None,
+            parenthetical_text=" ".join(paren for _body, paren, _offsets, _role in split_parts if paren) or None,
         )
-    first_body_index = next((index for index, (body, _paren, _offsets) in enumerate(split_parts) if body), None)
+    first_body_index = next((index for index, (body, _paren, _offsets, _role) in enumerate(split_parts) if body), None)
     if (
         not split_parts[first_content_index][0]
         and first_body_index is not None
@@ -312,7 +330,7 @@ def split_display_layers(
         # A leading backing-vocal annotation can precede a normal original.
         # It owns the whole row only when the next body is its translation.
         first_content_index = first_body_index
-    first_body, first_parenthetical, _first_offsets = split_parts[first_content_index]
+    first_body, first_parenthetical, _first_offsets, role_tag = split_parts[first_content_index]
     first_content = first_body or first_parenthetical or ""
     # A separately timed backing vocal can be attached to the preceding sung
     # row by the song presenter. Keep its explicitly paired, parenthesized
@@ -345,7 +363,7 @@ def split_display_layers(
     primary_parentheses: list[str] = []
     translated_parentheses: list[str] = []
     translated_body: str | None = None
-    for index, (source, (body, parenthetical, offsets)) in enumerate(zip(parts, split_parts)):
+    for index, (source, (body, parenthetical, offsets, _role)) in enumerate(zip(parts, split_parts)):
         if index in parenthetical_pairs:
             primary_parentheses.append(parenthetical or "")
             continue
@@ -397,6 +415,7 @@ def split_display_layers(
         translation_text=translated_body,
         parenthetical_text=" ".join(primary_parentheses) or None,
         parenthetical_translation_text=" ".join(translated_parentheses) or None,
+        role_tag=role_tag,
     )
 
 
@@ -464,13 +483,20 @@ def analyze_duet_lyric_rows(
     initial: list[SingerLyricRow] = []
     for index, (start, text) in enumerate(rows):
         value = str(text or "")
-        prefix = _line_singer_prefix(value, aliases)
-        singer, body = prefix if prefix is not None else (None, value)
-        initial.append(SingerLyricRow(index, float(start), value, body, singer))
+        role_tag = split_display_layers(value).role_tag
+        if role_tag is not None:
+            singer = {"男声": "男", "女声": "女", "合唱": "合"}.get(role_tag, role_tag)
+            # Classification already established the exact closed token.
+            # Remove only it, retaining backing vocals and companion subrows.
+            body = value.lstrip()[len(role_tag) + 2:].lstrip()
+        else:
+            prefix = _line_singer_prefix(value, aliases)
+            singer, body = prefix if prefix is not None else (None, value)
+        initial.append(SingerLyricRow(index, float(start), value, body, singer, role_tag=role_tag))
 
     solo_names = list(dict.fromkeys(
         row.singer for row in initial
-        if row.singer is not None and "+" not in row.singer
+        if row.singer is not None and "+" not in row.singer and row.singer != "合"
     ))
     first_sung_index = next(
         (row.source_index for row in initial if row.original_text != INTRO_COUNTDOWN_TEXT),
@@ -486,7 +512,7 @@ def analyze_duet_lyric_rows(
     inherited_side = "left"
     for row in initial:
         if row.singer is not None:
-            inherited_side = "left" if "+" in row.singer else sides[row.singer]
+            inherited_side = "left" if "+" in row.singer or row.singer == "合" else sides[row.singer]
         aligned.append(replace(row, alignment=inherited_side))
 
     groups: list[DualLyricGroup] = []
@@ -496,6 +522,8 @@ def analyze_duet_lyric_rows(
         if (
             first.singer is not None
             and second.singer is not None
+            and (first.role_tag is None and second.role_tag is None
+                 or {first.singer, second.singer} == {"男", "女"})
             and math.isfinite(first.start_seconds)
             and math.isfinite(second.start_seconds)
             and 0.0 <= second.start_seconds - first.start_seconds <= 1.0
@@ -791,7 +819,7 @@ def present_timed_lyric_rows(
         ) if value}
         for part_index, part in enumerate(parts):
             payload = _TRANSLATION_LABEL_RE.sub("", part).strip()
-            body, parenthetical, _offsets = _split_parenthetical_subrow(payload)
+            body, parenthetical, _offsets, _role = _split_parenthetical_subrow(payload)
             if (body or parenthetical) in companions:
                 translated_subrows.add((row_index, part_index))
 
@@ -906,7 +934,7 @@ def _attach_standalone_parenthetical_rows(
             while insertion < len(parts) and _PARENTHETICAL_LABEL_RE.match(parts[insertion]):
                 insertion += 1
                 if insertion < len(parts) and _TRANSLATION_LABEL_RE.match(parts[insertion]):
-                    body, parenthetical, _offsets = _split_parenthetical_subrow(
+                    body, parenthetical, _offsets, _role = _split_parenthetical_subrow(
                         _TRANSLATION_LABEL_RE.sub("", parts[insertion]),
                     )
                     if not body and parenthetical:

@@ -3186,7 +3186,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 self._visual_lyric_layers = self._prepared_lyric_layers
                 self._visual_lyric_cache_key = key
                 return self._visual_lyric_layers
-            source = (row.body_text for row in duet.rows) if use_duet else lines
+            source = (
+                row.original_text if row.role_tag else row.body_text
+                for row in duet.rows
+            ) if use_duet else lines
             self._visual_lyric_layers = tuple(
                 split_display_layers(
                     text,
@@ -3211,6 +3214,35 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         if start < 0 or len(layers.primary_source_offsets) != len(layers.primary_text) + 1:
             return None
         return tuple(start + offset for offset in layers.primary_source_offsets)
+
+    @staticmethod
+    def _paint_lyric_role_tag(painter, role_tag, font, origin):
+        """Paint a dim role pill before the primary, outside its shaped run.
+
+        The primary origin, width and character hit map stay authoritative.
+        Single-character labels also fit the narrow surface's leading inset.
+        """
+        if not role_tag:
+            return QRectF()
+        label_font = QFont(font)
+        label_font.setPixelSize(max(8, round(font.pixelSize() * .32)))
+        label_font.setWeight(QFont.Weight.Normal)
+        label = role_tag[0]
+        metrics = QFontMetricsF(label_font)
+        primary_metrics = QFontMetricsF(font)
+        width = metrics.horizontalAdvance(label) + 4.0
+        height = metrics.height() + 2.0
+        center_y = origin.y() + primary_metrics.ascent() - primary_metrics.capHeight() / 2.0
+        pill = QRectF(origin.x() - width - 2.0, center_y - height / 2.0, width, height)
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 24))
+        painter.drawRoundedRect(pill, 3.0, 3.0)
+        painter.setFont(label_font)
+        painter.setPen(QColor(255, 255, 255, 150))
+        painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, label)
+        painter.restore()
+        return pill
 
     @staticmethod
     def _project_source_front(front: float, offsets: tuple[int, ...]) -> float:
@@ -7974,6 +8006,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 ))
             if primary_paint_y:
                 painter.translate(0.0, primary_paint_y)
+            if visual_layers[index].role_tag and layout.lineCount():
+                first_line = layout.lineAt(0)
+                self._paint_lyric_role_tag(
+                    painter, visual_layers[index].role_tag, lyric_font,
+                    QPointF(row.left() + first_line.x(),
+                            row.top() + first_line.y() + (line_offsets[0] if line_offsets else 0.0)),
+                )
             if blur_level and self.devicePixelRatioF() > self.BLURRED_LYRIC_DPR_CAP:
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             reading_focused = (
