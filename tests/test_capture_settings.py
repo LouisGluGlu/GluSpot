@@ -29,6 +29,14 @@ class CaptureSettingsTests(unittest.TestCase):
         self.addCleanup(manager._save_timer.stop)
         return manager, path
 
+    def test_attach_transport_roundtrips_as_canonical_value(self):
+        manager, path = self.manager({})
+        manager.set('netease.transport', ' ATTACH ')
+        manager.save_now()
+        self.assertEqual(json.loads(path.read_text())['netease.transport'], 'attach')
+        manager.load()
+        self.assertEqual(manager.get('netease.transport'), 'attach')
+
     def test_flag_off_does_not_migrate_capture_envelope(self):
         legacy = {'netease': {'path': 'C:/cloudmusic.exe', 'sync_enabled': False}}
         manager, _path = self.manager({'v2_music_app_profiles': legacy})

@@ -468,7 +468,8 @@ class WindowsMediaProvider:
     CURRENT_ART_PREVIEW_SIDE = 320
     QUEUE_ART_MAX_BYTES = 8 * 1024 * 1024
 
-    def __init__(self, fallback=None, settings_getter=None):
+    def __init__(self, fallback=None, settings_getter=None, *, attach_only=False):
+        self.attach_only = bool(attach_only)
         if fallback is None:
             fallback = EmptyIslandDataProvider()
         self.fallback = fallback
@@ -660,7 +661,7 @@ class WindowsMediaProvider:
         if not callable(getter) or not self._capture_is_enabled():
             return False
         transport = str(getter("netease.transport", "off") or "off").strip().casefold()
-        if getter("netease.cef.enabled", False) is not True or transport not in {"attach", "relaunch"}:
+        if getter("netease.cef.enabled", False) is not True or (not getattr(self, "attach_only", False) and transport not in {"attach", "relaunch"}):
             return False
         from api.capture.capabilities import capability_for, capture_profile
         return capture_profile(getter, capability_for("cloudmusic.exe")) != "off"
@@ -717,7 +718,7 @@ class WindowsMediaProvider:
                 if reason:
                     state, message = "degraded", "无法安全监听网易云进度；暂用系统进度"
             else:
-                if str(self.settings_getter("netease.transport", "off")).strip().casefold() == "attach":
+                if getattr(self, "attach_only", False) or str(self.settings_getter("netease.transport", "off")).strip().casefold() == "attach":
                     state, message = "degraded", "未发现可连接的网易云进度；播放器保持运行"
                 else:
                     state, message = "repair", "未连接；可修复并重启网易云"
@@ -789,7 +790,7 @@ class WindowsMediaProvider:
                 return None
             track = getattr(getattr(self, "_last_data", None), "track", None)
             transport = str(self.settings_getter("netease.transport", "off") or "off").strip().casefold()
-            if transport == "attach":
+            if getattr(self, "attach_only", False) or transport == "attach":
                 launch = await locator.attach(installation)
                 if launch is None:
                     self._netease_launch_error = "No existing NetEase debug endpoint; player left running"

@@ -114,6 +114,23 @@ class NetEaseAttachProviderTests(CaptureAsyncTestCase):
         first.start.assert_awaited_once()
         self.assert_no_process_changes(provider)
 
+    async def test_attach_only_overrides_persisted_relaunch_even_on_start_failure(self):
+        for fails in (False, True):
+            with self.subTest(start_fails=fails):
+                provider = self.provider()
+                provider.attach_only = True
+                provider._attach_test_settings['netease.transport'] = 'relaunch'
+                session = Session(13371)
+                if fails:
+                    session.start.side_effect = OSError('fixture startup failure')
+                with patch('api.capture.cdp.CdpSession', return_value=session):
+                    result = await provider._ensure_netease_cdp()
+                    self.assertIsNone(result) if fails else self.assertIs(result, session)
+                    if not fails:
+                        await asyncio.sleep(0)
+                provider._netease_locator.attach.assert_awaited_once()
+                self.assert_no_process_changes(provider)
+
     async def test_no_existing_port_stays_disconnected_without_relaunch(self):
         provider = self.provider()
         provider._netease_locator.attach.return_value = None

@@ -449,38 +449,43 @@ _REMOVED_VISUAL_SETTING_KEYS = {
 class SettingsManager(QObject):
     setting_changed = Signal(str, object)
 
-    def __init__(self):
+    def __init__(self, *, settings_path=None):
         super().__init__()
+        # An explicit fixture/session path never reads or migrates account
+        # settings. Keep the normal path unchanged for ordinary launches.
+        self.settings_path = os.fspath(settings_path) if settings_path is not None else SETTINGS_FILE
+        self._explicit_settings_path = settings_path is not None
         self._settings = copy.deepcopy(DEFAULT_SETTINGS)
         self._dirty = False
         self._save_timer = QTimer()
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._do_save)
         self._ensure_dir()
-        self._import_legacy_settings_if_needed()
+        if not self._explicit_settings_path:
+            self._import_legacy_settings_if_needed()
         self.load()
 
     def _ensure_dir(self):
-        os.makedirs(APP_DATA_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self.settings_path)), exist_ok=True)
 
     def _import_legacy_settings_if_needed(self):
-        if os.path.exists(SETTINGS_FILE):
+        if os.path.exists(self.settings_path):
             return
         for legacy_dir in legacy_app_data_dirs():
             legacy_file = os.path.join(legacy_dir, "settings.json")
             if not os.path.exists(legacy_file):
                 continue
             try:
-                shutil.copy2(legacy_file, SETTINGS_FILE)
+                shutil.copy2(legacy_file, self.settings_path)
             except OSError:
                 return
             return
 
     def load(self):
-        if not os.path.exists(SETTINGS_FILE):
+        if not os.path.exists(self.settings_path):
             return
         try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            with open(self.settings_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
                 return
@@ -505,7 +510,7 @@ class SettingsManager(QObject):
                     self._settings[key] = default
                     migrated = True
             transport = self._settings.get("netease.transport", "off")
-            if not isinstance(transport, str) or transport.strip().casefold() not in {"off", "relaunch", "port", "pipe"}:
+            if not isinstance(transport, str) or transport.strip().casefold() not in {"off", "attach", "relaunch", "port", "pipe"}:
                 self._settings["netease.transport"] = "off"
                 migrated = True
             else:
@@ -600,11 +605,11 @@ class SettingsManager(QObject):
         if not self._dirty:
             return
         self._ensure_dir()
-        temp_file = SETTINGS_FILE + ".tmp"
+        temp_file = self.settings_path + ".tmp"
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(self._settings, f, indent=2, ensure_ascii=False)
-            os.replace(temp_file, SETTINGS_FILE)
+            os.replace(temp_file, self.settings_path)
             self._dirty = False
         except OSError:
             pass
@@ -632,7 +637,7 @@ class SettingsManager(QObject):
             from api.capture.capabilities import normalize_capture_profiles
             value = normalize_capture_profiles(getattr(self, "_capture_legacy_profiles", None), value)
         if key == "netease.transport":
-            if not isinstance(value, str) or value.strip().casefold() not in {"off", "relaunch", "port", "pipe"}:
+            if not isinstance(value, str) or value.strip().casefold() not in {"off", "attach", "relaunch", "port", "pipe"}:
                 return
             value = value.strip().casefold()
         if key == "netease.cef.enabled":
