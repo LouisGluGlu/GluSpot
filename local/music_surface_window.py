@@ -6936,6 +6936,93 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 center_plan["artist_layout"].draw(painter, centered_artist_rect.topLeft())
                 painter.restore()
 
+        self._paint_lyric_column(
+            painter, rect, paint_region=paint_region,
+            painted_cover=painted_cover, center_plan=center_plan,
+            cover_fraction=cover_fraction, normal_opacity=normal_opacity,
+            center_opacity=center_opacity, unobscured_path=unobscured_path,
+            previous=previous, transition=transition,
+            navigation_capture=navigation_capture,
+        )
+
+        if self._effective_content_layout() == "playlist":
+            self._paint_playback_queue(painter, side_column.adjusted(0.,8.*surface_scale,0.,-4.*surface_scale))
+        else:
+            self._queue_view_rect = QRectF(); self._queue_hit_rects = {}
+
+        window_control_exposed = paint_region is None or paint_region.intersects(
+            QRectF(rect.right() - 420.0 * surface_scale, 0.0, 420.0 * surface_scale, 100.0 * surface_scale).toAlignedRect()
+        )
+        content_snapshot = self._capturing_content_snapshot
+        if not content_snapshot and (paint_region is None or paint_region.intersects(self._library_damage_rect(rect))):
+            self._paint_library_back(painter, rect)
+        self._paint_window_controls(painter, rect, paint_ink=window_control_exposed and not content_snapshot)
+        controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
+        normal_controls_bottom = rect.bottom() - self._personal_dj_footer_height(rect) - 18.0 * surface_scale
+        controls_top = min(
+            normal_controls_bottom - controls_height,
+            artist_rect.bottom() + 12.0 * surface_scale,
+        )
+        if cover_fraction > 0.0:
+            # Keep transport below the central artwork while information
+            # remains in its established lower-left home.
+            controls_top = min(
+                normal_controls_bottom - controls_height,
+                max(controls_top, cover.bottom() + 6.0 * surface_scale * cover_fraction),
+            )
+        panel_width = metadata_width - 50.0
+        if cover.bottom() > controls_top:
+            panel_width = min(
+                panel_width,
+                max(145.0 * surface_scale, cover.left() - (content.left() + 7.0) - 8.0 * surface_scale),
+            )
+        normal_controls_rect = QRectF(content.left() + 7.0, controls_top, panel_width, controls_height)
+        transport_rect = self._interpolate_rect(normal_controls_rect, centered_controls_rect, cover_fraction)
+        # DJ avoidance must see this frame's transport geometry, including
+        # the first compact paint after a resize or content-mode switch.
+        self._media_control_panel_rect = QRectF(transport_rect)
+        if not content_snapshot and (paint_region is None or paint_region.intersects(self._personal_dj_damage_rect(rect))):
+            self._paint_personal_dj_control(painter, rect)
+        collection_damage = self._song_collection_geometry(rect).adjusted(-4., -4., 4., 4.)
+        if not content_snapshot and (paint_region is None or paint_region.intersects(collection_damage.toAlignedRect())):
+            self._paint_song_collection_control(painter, rect)
+        normal_control_region = QRectF(
+            0.0, rect.bottom() - self.CONTROL_BOTTOM_REGION_HEIGHT * surface_scale,
+            505.0 * surface_scale, self.CONTROL_BOTTOM_REGION_HEIGHT * surface_scale,
+        )
+        media_control_exposed = paint_region is None or (
+            paint_region.intersects(normal_control_region.toAlignedRect())
+            or paint_region.intersects(centered_controls_rect.adjusted(-5.0, -5.0, 5.0, 5.0).toAlignedRect())
+            or paint_region.intersects(transport_rect.adjusted(-5.0, -5.0, 5.0, 5.0).toAlignedRect())
+        )
+        self._paint_media_controls(
+            painter,
+            transport_rect,
+            primary,
+            secondary,
+            paint_ink=media_control_exposed and not content_snapshot,
+        )
+        if self._control_prewarm_requested and (window_control_exposed or media_control_exposed):
+            self._control_prewarm_requested = False
+            self._control_prewarm_remaining = max(0, self._control_prewarm_remaining - 1)
+        if not content_snapshot and not navigation_capture:
+            self._paint_content_layout_transition(painter)
+        self._apply_surface_edge_alpha(painter)
+        painter.end()
+        self._record_paint_cost(paint_started, _event)
+
+    def _paint_lyric_column(
+        self, painter: QPainter, rect: QRectF, *, paint_region=None,
+        painted_cover: QRectF | None = None, center_plan=None,
+        cover_fraction: float = 0.0, normal_opacity: float = 0.0,
+        center_opacity: float = 0.0, unobscured_path=None,
+        previous=None, transition: float = 1.0, navigation_capture: bool = False,
+    ):
+        """Paint shared side/cover lyrics with the surface's timing and ink."""
+        surface_scale = self._surface_scale(rect)
+        content, column_cover, side_column = self._content_column_geometry(rect)
+        if painted_cover is None:
+            painted_cover = column_cover
         text_left = side_column.left()
         text_width = max(1.0, side_column.width())
         cover_lyrics_layout = self._effective_content_layout() == "cover_lyrics"
@@ -8314,72 +8401,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 painter, lyric_clip, lyric_now, 1. if cover_lyrics_layout else max(0.0, 1.0 - cover_fraction),
             )
             painter.restore()
-
-        if self._effective_content_layout() == "playlist":
-            self._paint_playback_queue(painter, side_column.adjusted(0.,8.*surface_scale,0.,-4.*surface_scale))
-        else:
-            self._queue_view_rect = QRectF(); self._queue_hit_rects = {}
-
-        window_control_exposed = paint_region is None or paint_region.intersects(
-            QRectF(rect.right() - 420.0 * surface_scale, 0.0, 420.0 * surface_scale, 100.0 * surface_scale).toAlignedRect()
-        )
-        content_snapshot = self._capturing_content_snapshot
-        if not content_snapshot and (paint_region is None or paint_region.intersects(self._library_damage_rect(rect))):
-            self._paint_library_back(painter, rect)
-        self._paint_window_controls(painter, rect, paint_ink=window_control_exposed and not content_snapshot)
-        controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
-        normal_controls_bottom = rect.bottom() - self._personal_dj_footer_height(rect) - 18.0 * surface_scale
-        controls_top = min(
-            normal_controls_bottom - controls_height,
-            artist_rect.bottom() + 12.0 * surface_scale,
-        )
-        if cover_fraction > 0.0:
-            # Keep transport below the central artwork while information
-            # remains in its established lower-left home.
-            controls_top = min(
-                normal_controls_bottom - controls_height,
-                max(controls_top, cover.bottom() + 6.0 * surface_scale * cover_fraction),
-            )
-        panel_width = metadata_width - 50.0
-        if cover.bottom() > controls_top:
-            panel_width = min(
-                panel_width,
-                max(145.0 * surface_scale, cover.left() - (content.left() + 7.0) - 8.0 * surface_scale),
-            )
-        normal_controls_rect = QRectF(content.left() + 7.0, controls_top, panel_width, controls_height)
-        transport_rect = self._interpolate_rect(normal_controls_rect, centered_controls_rect, cover_fraction)
-        # DJ avoidance must see this frame's transport geometry, including
-        # the first compact paint after a resize or content-mode switch.
-        self._media_control_panel_rect = QRectF(transport_rect)
-        if not content_snapshot and (paint_region is None or paint_region.intersects(self._personal_dj_damage_rect(rect))):
-            self._paint_personal_dj_control(painter, rect)
-        collection_damage = self._song_collection_geometry(rect).adjusted(-4., -4., 4., 4.)
-        if not content_snapshot and (paint_region is None or paint_region.intersects(collection_damage.toAlignedRect())):
-            self._paint_song_collection_control(painter, rect)
-        normal_control_region = QRectF(
-            0.0, rect.bottom() - self.CONTROL_BOTTOM_REGION_HEIGHT * surface_scale,
-            505.0 * surface_scale, self.CONTROL_BOTTOM_REGION_HEIGHT * surface_scale,
-        )
-        media_control_exposed = paint_region is None or (
-            paint_region.intersects(normal_control_region.toAlignedRect())
-            or paint_region.intersects(centered_controls_rect.adjusted(-5.0, -5.0, 5.0, 5.0).toAlignedRect())
-            or paint_region.intersects(transport_rect.adjusted(-5.0, -5.0, 5.0, 5.0).toAlignedRect())
-        )
-        self._paint_media_controls(
-            painter,
-            transport_rect,
-            primary,
-            secondary,
-            paint_ink=media_control_exposed and not content_snapshot,
-        )
-        if self._control_prewarm_requested and (window_control_exposed or media_control_exposed):
-            self._control_prewarm_requested = False
-            self._control_prewarm_remaining = max(0, self._control_prewarm_remaining - 1)
-        if not content_snapshot and not navigation_capture:
-            self._paint_content_layout_transition(painter)
-        self._apply_surface_edge_alpha(painter)
-        painter.end()
-        self._record_paint_cost(paint_started, _event)
 
     @staticmethod
     def _background_role_color(source: QColor) -> QColor:

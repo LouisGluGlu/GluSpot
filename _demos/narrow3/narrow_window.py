@@ -17,14 +17,12 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient,
 from PySide6.QtWidgets import QApplication
 
 from api.models import ColorToken, TimedLyricLine, TimedLyricUnit
-from api.lyric_timeline import active_index_for_position
 from api.online_music import OnlineSong
 from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_reading import LyricReadingRenderer
-from local.music_lyric_motion import MusicLyricFrame
 from local.music_lyric_presentation import (
     split_display_layers, INTRO_COUNTDOWN_TEXT, intro_dot_radius, paint_intro_countdown,
     LYRIC_PREVIOUS_ALPHA, LYRIC_NEXT_ALPHA,
@@ -63,8 +61,29 @@ INK_BUCKET_SECONDS = .05
 
 
 class NarrowStudyWindow(MusicSurfaceWindow):
+    @property
+    def _narrow_lyrics_mount(self):
+        return getattr(self, "narrow", False) and getattr(self, "mode", None) == "lyrics"
+
+    def _content_column_geometry(self, rect=None):
+        if not self._narrow_lyrics_mount:
+            return super()._content_column_geometry(rect)
+        surface = QRectF(self.rect()) if rect is None else QRectF(rect)
+        viewport = NarrowLayout(surface.width(), surface.height()).viewport
+        viewport.translate(surface.topLeft())
+        return QRectF(viewport), QRectF(-10000., 0., 0., 0.), viewport
+
+    def _content_layout_is_narrow(self):
+        if self._narrow_lyrics_mount:
+            return False
+        return super()._content_layout_is_narrow()
+
+    def _paint_wide_lyrics_mounted(self, painter):
+        self._paint_lyric_column(painter, QRectF(self.rect()))
+
     def __init__(self, owner, variant, lyrics_alignment, *, live=False):
         self.live = live
+        self._wide_lyrics_dirty = True
         self._source_lines_key = None
         self._source_lines = ()
         self._real_layout_key = None
@@ -299,6 +318,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # cadence rather than interleave patches from different frames.
         timer = getattr(self, "study_timer", None)
         if self.live and timer is not None and timer.isActive():
+            if self._narrow_lyrics_mount:
+                self._wide_lyrics_dirty = True
             return
         return super().update(*args)
 
@@ -376,10 +397,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self.owner.secondary_color.rgba(), self.owner.track_title, self.owner.artist,
                self.width(), self.height(), self.devicePixelRatioF(),
                getattr(self.owner, 'media_position_source', ''), self.hovered_glass)
-        if self.live and key == self._commit_key:
+        if (self.live and key == self._commit_key
+                and not (self._narrow_lyrics_mount and self._wide_lyrics_dirty)):
             self._diagnostics['noop_paints'] += 1
             return
         self._commit_key = key
+        self._wide_lyrics_dirty = False
         self._diagnostics['commits'] += 1
         assert self._diagnostics['commits'] <= self._diagnostics['samples']
         if self.narrow:
@@ -466,18 +489,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                           self.devicePixelRatioF())
         visibility = self.visibility.progress
         layout = NarrowLayout(self.width(), self.height())
-        # Veil / neighbor layer never carries live reading ink. Ink advances in
-        # a sharp overlay after veil so the active line is never covered by a
-        # re-blurred copy of itself (GIF active_band ~23Hz flicker).
         focus, visual = self.lyric_focus()
         scrolling = self.mode == "lyrics" and abs(focus - visual) > .001
         self._diagnostics['paint_source'] = ("SCROLL" if scrolling else
                                              "LIVE" if self.owner.media_is_playing else "IDLE_CACHE")
-        content = (self.content_image(layout, focus, include_current=False, overscan=self._scroll_guard)
-                   if self.mode == "lyrics" else self.content_image(layout, include_current=False))
+        mounted = self._narrow_lyrics_mount
+        content = None if mounted else self.content_image(layout, include_current=False)
         # Resting paused content can blend opaque endpoints. Moving content
         # always uses the same stanza compositor as ordinary playback.
-        if (fading and not scrolling and self._fade_anchor_key is not None
+        if (not mounted and fading and not scrolling and self._fade_anchor_key is not None
                 and self._fade_content_frames is not None
                 and self._fade_content_key == self.fade_content_key()):
             # Paused source rows are part of these exact endpoint pixels.
@@ -495,19 +515,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                        ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights,
                                        advance_frame=not fading)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-            # Blend from the frozen veil basis during a fade. Outside a fade
-            # (or before the first anchor) the live key is authoritative.
-            veil_key = self._fade_veil_key if fading and self._fade_veil_key is not None else self.veil_key
-            if self.mode == "lyrics":
-                self.paint_scroll_surface(painter, layout, content, visibility)
+            if mounted:
+                self._paint_wide_lyrics_mounted(painter)
             else:
+                veil_key = self._fade_veil_key if fading and self._fade_veil_key is not None else self.veil_key
                 self.veil.paint(painter, content, veil_key, visibility,
                                 scroll_delta=self.veil_scroll_delta)
-        if self.mode == "lyrics" and self.live:
-            # Crisp active line + reading ink above veil (never under row blur).
-            self.paint_live_lyrics(painter, layout, current_only=True)
-        elif self.mode == "lyrics" and not self.live:
-            self.paint_current_lyrics(painter, layout)
         if visibility > .001 and self._controls_bands is not None:
             painter.save()
             painter.setOpacity(visibility)
@@ -526,7 +539,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                              "L 歌词  P 列表  N/W 窄/宽  1–4 封面  H 隐藏")
         painter.end()
         if self.live and self.mode == "lyrics":
-            self.publish_live_lyric_hits(layout)
+            # The shared painter publishes the geometry the listener saw.
+            self._painted_live_model = self.live_model_key()
             self._painted_track = self._visual_track_identity()
             source_track = self._source_lines_key[0] if self._source_lines_key else None
             if source_track != self._painted_track:
@@ -871,6 +885,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         viewport mask and dim. They are prepared only at a settled scroll pose;
         a new source/focus invalidates them before another present.
         """
+        if self._narrow_lyrics_mount:
+            self._fade_content_key = self._fade_content_frames = None
+            return
         advancing_live_lyrics = self.live and self.mode == "lyrics" and self.owner.media_is_playing
         focus, visual = self.lyric_focus()
         scrolling = self.mode == "lyrics" and abs(focus - visual) > .001
@@ -916,10 +933,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 self.lyric_focus()[0] if self.mode == "lyrics" else None)
 
     def _advance_lyric_animation(self, now):
-        if self.live:
-            # Keep the production surface timer available for its visual
-            # controls/material work; shared owner state supplies lyric focus.
-            return
         super()._advance_lyric_animation(now)
 
     def _refresh_live_position_route(self):
@@ -939,59 +952,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             pass
 
     def _lyric_frame(self, timed, now):
-        if not self.live:
-            return super()._lyric_frame(timed, now)
-        self._prepare_live_commit()
-        # Wheel input and the inherited wide painter also request frames.
-        # Adapt the owner's published state without advancing surface motion.
-        track_key = self._visual_track_identity()
-        if track_key != self._browse_track_key:
-            self._browse_track_key = track_key
-            self._clear_lyric_browse()
-            self._hovered_lyric_index = None
-        position = self.playback_position()
-        # The inherited painter reads this field for word ink; it is only a
-        # mirror of the shared snapshot, never a separately projected clock.
-        self._lyric_motion.last_position = position
-        if not timed:
-            self._live_scroll_index = self._live_scroll_at = None
-            self._live_lyric_diagnostics = {}
-            return MusicLyricFrame(0, 0.0, 0.0, 0.0)
-        source = str(getattr(self.owner, "media_position_source", "") or "").lower()
-        uia = source.endswith("-uia-lyrics")
-        cef = not uia and (
-            "cef" in source or "playprogress" in source
-            or source == "capture-model" and self._live_position_route == "cef")
-        lead = 0.0 if uia or source == "capture-unavailable" else .12
-        focus = min(len(timed) - 1, max(0, self.owner.lyric_index))
-        if cef:
-            lead = max(lead, .28)
-            focus = active_index_for_position(timed, position, lead_seconds=lead)
-        # Highlight switches immediately. Only an existing fractional scroll
-        # pose eases, and a full-row displacement always snaps.
-        scroll = self._live_scroll_index
-        previous_at = self._live_scroll_at
-        if scroll is None or previous_at is None or abs(focus - scroll) >= 1.0:
-            scroll = float(focus)
-        else:
-            elapsed = max(0.0, now - previous_at)
-            scroll += (focus - scroll) * -math.expm1(-elapsed / .12)
-            if abs(focus - scroll) < .001:
-                scroll = float(focus)
-        self._live_scroll_index = scroll
-        self._live_scroll_at = now if previous_at is None else max(now, previous_at)
-        start = float(timed[focus][0])
-        end = (float(timed[focus + 1][0]) if focus + 1 < len(timed)
-               else max(start + 1.0, self.owner.media_duration_seconds))
-        progress = min(1.0, max(0.0, (position - start) / max(.001, end - start)))
-        self._live_lyric_diagnostics = dict(
-            t_mono=now, lyric_index=focus, scroll_index=scroll,
-            position_ms=position * 1000.0, lead_s=lead,
-            position_source=source, position_route=self._live_position_route,
-            owner_lyric_index=self.owner.lyric_index,
-            highlighted_line_start_ms=start * 1000.0,
-            lag_ms=(start - position) * 1000.0)
-        return MusicLyricFrame(focus, scroll, progress, 0.0)
+        return super()._lyric_frame(timed, now)
 
     def _prepare_live_commit(self):
         """Invalidate a track/epoch in one UI transaction, before any painting."""
@@ -1035,6 +996,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                     getattr(self.owner, 'media_position_sampled_at', 0))
 
     def lyric_focus(self):
+        if self._narrow_lyrics_mount:
+            _lines, timed = self._display_lyrics()
+            frame = self._lyric_frame(timed, time.monotonic())
+            return frame.active_index, frame.scroll_index
         lines = self.source_lines()
         if not lines:
             return 0, 0.0
@@ -1064,6 +1029,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         Reading ink advances in the sharp lyric layer. The blurred overlay is
         prepared only for a changed row/scroll bucket, never for word progress.
         """
+        if self._narrow_lyrics_mount:
+            return
         layout = NarrowLayout(self.width(), self.height())
         if self.mode == "playlist":
             self.content_image(layout, refresh=True)
