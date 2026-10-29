@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from collections import OrderedDict, deque
 from bisect import bisect_left, bisect_right
+from dataclasses import replace
 from functools import lru_cache
 import inspect
+import logging
 import math
 import re
 import time
@@ -3616,7 +3618,37 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             for index in range(first, last)
         )
 
+    @staticmethod
+    def _lyric_lead_seconds(backend) -> float:
+        """Compensate CEF progress delivery for highlight selection only."""
+        backend = str(backend or "").casefold()
+        if "uia" in backend:
+            return 0.0
+        return 0.28 if "cef" in backend or "playprogress" in backend else 0.0
+
     def _lyric_frame(self, timed: list[tuple[float, str]], now: float):
+        source = str(getattr(self.owner, "media_position_source", "") or "")
+        backend = source
+        if source == "capture-model":
+            # Narrow already caches this route per tick. Other surfaces read
+            # the provider's published diagnostics, never the physical clock.
+            backend = getattr(self, "_live_position_route", None)
+            if backend is None:
+                backend = ""
+                diagnostics = getattr(getattr(self.owner, "data_provider", None), "diagnostics", None)
+                if callable(diagnostics):
+                    try:
+                        backend = str(diagnostics().get("capture", {}).get("position_route", ""))
+                    except Exception:
+                        pass
+        lead_seconds = self._lyric_lead_seconds(backend)
+        lead_marker = (source, backend, lead_seconds)
+        if lead_marker != getattr(self, "_lyric_lead_marker", None):
+            logging.getLogger("GluSpot.MusicSurface").info(
+                "lyric lead window=%s backend=%s lead_seconds=%.2f",
+                type(self).__name__, backend or source or "unknown", lead_seconds,
+            )
+            self._lyric_lead_marker = lead_marker
         try:
             media_position = float(self.owner._estimated_media_position(now))
         except (AttributeError, TypeError, ValueError):
@@ -3657,7 +3689,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 # player clock. Remap row indexes at the validated position
                 # without accepting an unconfirmed source spike.
                 remapped = active_index_for_position(
-                    timed, self._lyric_motion.last_position, lead_seconds=0.0,
+                    timed, self._lyric_motion.last_position, lead_seconds=lead_seconds,
                 ) if timed else 0
                 self._lyric_motion.active_index = remapped
                 # Reindex the same physical sentence, preserving any roll in
@@ -3684,7 +3716,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # foreground clock spike. Verified seeks and a fresh raw SDK event
         # while already paused can bypass confirmation; row labels cannot.
         # One interpolated provider sample painted 80 times is still one sample.
-        source = str(getattr(self.owner, "media_position_source", "") or "")
         source_app = str(getattr(self.owner, "media_source_app", "") or "")
         if source_app != self._lyric_source_app:
             # Identical track IDs can survive an app handoff. Clock evidence
@@ -3761,7 +3792,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             owner_timed = getattr(self.owner, "timed_lyrics", ()) or timed
             if owner_timed:
                 anchor = max(0.0, float(getattr(self.owner, "media_position_seconds", 0.0) or 0.0))
-                anchor_index = active_index_for_position(owner_timed, anchor, lead_seconds=0.0)
+                anchor_index = active_index_for_position(owner_timed, anchor, lead_seconds=lead_seconds)
                 if anchor_index + 1 < len(owner_timed):
                     next_start = float(owner_timed[anchor_index + 1][0])
                     position_ceiling = max(0.0, max(anchor, next_start - 0.08))
@@ -3800,6 +3831,22 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._obo_advanced_focus_index = None
             self._obo_advanced_focus_pose = None
             self._obo_advanced_handoff_last_at = None
+        if timed and lead_seconds > 0.0:
+            # Lead only the highlighted row. Word reading and the snapped
+            # scroll target retain the validated, un-led presentation clock.
+            position = self._lyric_motion.last_position
+            active_index = active_index_for_position(timed, position, lead_seconds=lead_seconds)
+            scroll_index = active_index_for_position(
+                timed, position, lead_seconds=self._lyric_lead_seconds(""),
+            )
+            self._lyric_motion.active_index = scroll_index
+            self._lyric_motion.scroll_index = float(scroll_index)
+            self._lyric_motion.velocity = 0.0
+            frame = replace(
+                frame, active_index=active_index, scroll_index=float(scroll_index),
+                reading_progress=frame.reading_progress if active_index == frame.active_index else 0.0,
+                scroll_velocity=0.0,
+            )
         return frame
 
     def on_lyric_offset_changed(self) -> None:
