@@ -2,21 +2,17 @@
 from __future__ import annotations
 
 import argparse
-import os
+import math
+from bisect import bisect_right
 import sys
-import tempfile
 import time
 from pathlib import Path
-from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
-SANDBOX = tempfile.TemporaryDirectory(prefix="gluspot-narrow3-")
-for name in ("HOME", "APPDATA", "LOCALAPPDATA"):
-    os.environ[name] = SANDBOX.name
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextLayout
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QTextLayout, QTransform
 from PySide6.QtWidgets import QApplication
 
 from api.models import ColorToken, TimedLyricLine, TimedLyricUnit
@@ -26,9 +22,7 @@ from local.audio_output_icons import paint_audio_output_status
 from local.music_source_icons import paint_music_source_icon
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_reading import LyricReadingRenderer
-from test_music_surface_transition import _TransitionOwner
-from test_owned_playback_surface import _Provider
-from test_song_collection_surface import Collection
+from local.music_lyric_presentation import split_display_layers
 from layout import NarrowLayout
 from motion import EaseOutFade, Visibility
 from veil import VeilOverlay
@@ -54,7 +48,16 @@ COVERS = ("night_sea.jpg", "sunset_city.jpg", "pink_forest.jpg", "clip.jpg")
 
 
 class NarrowStudyWindow(MusicSurfaceWindow):
-    def __init__(self, owner, variant, lyrics_alignment):
+    def __init__(self, owner, variant, lyrics_alignment, *, live=False):
+        self.live = live
+        self._source_lines_key = None
+        self._source_lines = ()
+        self._real_layout_key = None
+        self._real_blocks = ()
+        self._pointer_active_until = 0.0
+        self._live_press = None
+        self._painted_live_model = None
+        self._painted_live_hit_pose = None
         super().__init__(owner)
         self.variant = variant
         self.lyrics_alignment = lyrics_alignment
@@ -66,7 +69,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.playlist_songs = set()
         self.shelf = False
         self.footer_hover = False
-        self.dj_available = True
+        self.dj_available = not live
         self.dj_enabled = False
         self.dj_speaking = False
         self.dj_motion = EaseOutFade(1.0)
@@ -86,6 +89,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._list_layer_at = -float("inf")
         self._fade_background = None
         self._fade_background_key = None
+        self._fade_content_key = None
+        self._fade_content_frames = None
+        self._current_ink_key = None
+        self._current_ink_image = None
         self.touch_active = False
         self.hovered_glass = ""
         self.hints = True
@@ -103,7 +110,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self.move(80, 80)
         self.resize(360, 640)
-        self.set_cover(0)
+        if not live:
+            self.set_cover(0)
         self._sync_owned_playback_mode()
         self.set_content_layout("lyrics", animate=False)
         self._layout_animation.stop()
@@ -112,9 +120,79 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.refresh_veil()
         self.study_timer = QTimer(self)
         self.study_timer.timeout.connect(self.tick)
-        self.study_timer.start(33)
+        if not self.live:
+            self.study_timer.start(33)
+
+    def playback_position(self):
+        if not self.live:
+            return self.owner.media_position_seconds
+        now = time.monotonic()
+        position = self.owner._stable_lyric_source_position(now)
+        return position + self.owner._effective_lyric_offset_seconds()
+
+    def source_lines(self):
+        if not self.live:
+            return TIMED_LYRICS
+        _text, timed = self._display_lyrics()
+        key = (self._visual_track_identity(), tuple(timed), self._display_timed_units,
+               self._display_timed_kinds)
+        if key != self._source_lines_key:
+            units = self._display_timed_units
+            kinds = self._display_timed_kinds
+            self._source_lines = tuple(
+                TimedLyricLine(start, text, units[index] if index < len(units) else (),
+                               kinds[index] if index < len(kinds) else "line")
+                for index, (start, text) in enumerate(timed)
+            )
+            self._source_lines_key = key
+        return self._source_lines
+
+    def queue_snapshot(self):
+        if not self.live:
+            return (0, self.song_index, tuple(
+                OnlineSong("netease", str(i), title, artist=artist)
+                for i, (title, artist) in enumerate(SONGS)))
+        getter = getattr(self.owner.data_provider, "get_owned_playback_queue", None)
+        return getter() if callable(getter) else None
+
+    def queue_rows(self):
+        snapshot = self.queue_snapshot()
+        return snapshot[2] if snapshot is not None else ()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.live:
+            self._timer.stop()
+            self._audio_output_status_timer.stop()
+            if hasattr(self, "study_timer") and not self.isMinimized():
+                self.study_timer.start(33)
+
+    def hideEvent(self, event):
+        if self.live and hasattr(self, "study_timer"):
+            self.study_timer.stop()
+        super().hideEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if getattr(self, "live", False) and hasattr(self, "study_timer"):
+            self._timer.stop()
+            self._audio_output_status_timer.stop()
+            if self.isVisible() and not self.isMinimized():
+                self.study_timer.start(33)
+            else:
+                self.study_timer.stop()
+
+    def closeEvent(self, event):
+        if self.live:
+            self.study_timer.stop()
+            self.shutdown()
+            event.accept()
+            return
+        super().closeEvent(event)
 
     def set_cover(self, index):
+        if self.live:
+            return
         self.cover_index = index
         path = Path(__file__).parent / "covers" / COVERS[index]
         image = QImage(str(path)).convertToFormat(QImage.Format.Format_RGB32)
@@ -128,6 +206,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.update()
 
     def select_song(self, index):
+        if self.live:
+            snapshot = self.queue_snapshot()
+            if snapshot is not None and 0 <= index < len(snapshot[2]):
+                self._select_playback_queue(index, snapshot[0])
+            return
         self.song_index = index % len(SONGS)
         self.owner.track_title, self.owner.artist = SONGS[self.song_index]
         self.owner.media_track_id = f"owned:netease:{self.song_index + 1}"
@@ -136,7 +219,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def tick(self):
         now = time.monotonic()
-        if self.owner.media_is_playing and not self.freeze_clock:
+        if self.live:
+            self.owner._refresh_media_data(now)
+            self._sync_owned_playback_mode()
+            self.dj_available = self._owned_personal_dj_enabled is not None
+            self.dj_enabled = self._owned_personal_dj_enabled is True
+            self.dj_speaking = self._owned_dj_speaking
+            modes = ("sequential", "shuffle", "repeat_one")
+            self.loop_mode = modes.index(self._owned_playback_mode) if self._owned_playback_mode in modes else 0
+            self.shelf = self.footer_hover = now < self._pointer_active_until
+        elif self.owner.media_is_playing and not self.freeze_clock:
             loop = len(TIMED_LYRICS) * 4.0
             self.owner.media_position_seconds = (self.owner.media_position_seconds + now - self.last_tick) % loop
         self.last_tick = now
@@ -155,10 +247,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.refresh_fade_background(now)
             self.refresh_veil()
             self.refresh_controls(now)
+            self.refresh_fade_content(now)
         self.update()
         names = {"A": "静态", "B": "悬停"}
         fps = len([t for t in self.frame_times if now - t < 1.0])
-        self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
+        if self.live:
+            self.setWindowTitle(f"GluSpot · {self.owner.track_title}")
+        else:
+            self.setWindowTitle(f"GluSpot 窄窗v3 · 方案{self.variant} {names[self.variant]} · {fps} fps")
 
     def glass_groups(self):
         layout = NarrowLayout(self.width(), self.height())
@@ -195,6 +291,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def paintEvent(self, event):
         start = time.perf_counter()
         if not self.narrow:
+            self._painted_live_hit_pose = None
             super().paintEvent(event)
         else:
             self.paint_narrow()
@@ -220,22 +317,30 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         fading = not self.visibility.settled(now)
         background_key = (self._background_cache.cacheKey(), self.width(), self.height(),
                           self.devicePixelRatioF())
-        if fading and background_key == self._fade_background_key:
-            painter.drawImage(QPointF(0, 0), self._fade_background)
-        else:
-            self._paint_background(painter, QRectF(self.rect()), QColor(palette.primary), QColor(palette.secondary), now,
-                                   ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights,
-                                   advance_frame=not fading)
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         visibility = self.visibility.footer.value(now)
         layout = NarrowLayout(self.width(), self.height())
-        content = self.content_image(layout, include_current=False)
-        self.veil.paint(painter, content, self.veil_key, visibility,
-                        scroll_delta=self.veil_scroll_delta)
-        if self.mode == "lyrics":
-            # The timed reading run always stays in the clear middle. Paint
-            # only that run live; surrounding, stationary rows reuse pixels.
-            self.paint_lyrics(painter, layout, current_only=True)
+        content = self.content_image(layout, include_current=self.live)
+        endpoint_key = (background_key, content.cacheKey(), self.veil_key)
+        if fading and endpoint_key == self._fade_content_key:
+            # Paused source rows are part of these exact endpoint pixels.
+            # The advancing fixture run is painted separately below.
+            painter.drawImage(QPointF(0, 0), self._fade_content_frames[0])
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setOpacity(visibility)
+            painter.drawImage(QPointF(0, 0), self._fade_content_frames[1])
+            painter.setOpacity(1.0)
+        else:
+            if fading and background_key == self._fade_background_key:
+                painter.drawImage(QPointF(0, 0), self._fade_background)
+            else:
+                self._paint_background(painter, QRectF(self.rect()), QColor(palette.primary), QColor(palette.secondary), now,
+                                       ambient_colors=palette.ambient_colors, ambient_weights=palette.ambient_weights,
+                                       advance_frame=not fading)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            self.veil.paint(painter, content, self.veil_key, visibility,
+                            scroll_delta=self.veil_scroll_delta)
+        if self.mode == "lyrics" and not self.live:
+            self.paint_current_lyrics(painter, layout)
         if visibility > .001 and self._controls_bands is not None:
             painter.save()
             painter.setOpacity(visibility)
@@ -248,6 +353,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             painter.drawText(QRectF(4, self.height() - 13, self.width() - 8, 13), Qt.AlignmentFlag.AlignCenter,
                              "L 歌词  P 列表  N/W 窄/宽  1–4 封面  H 隐藏")
         painter.end()
+        if self.live and self.mode == "lyrics":
+            self.publish_live_lyric_hits(layout)
 
     def content_image(self, layout, visual_focus=None, *, veil_source=False,
                       include_current=True, refresh=False):
@@ -256,7 +363,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # face is prepared by refresh_veil at a bounded 10Hz refresh.
             # Paint consumes those pixels without rasterizing glass again.
             key = (self.width(), self.height(), self.devicePixelRatioF(),
-                   self.song_index, self._scene_control_ink().rgba())
+                   self.song_index, self.queue_snapshot(), self._queue_scroll, self._scene_control_ink().rgba())
             now = time.monotonic()
             if (self._list_layer is not None
                     and (not refresh or (key == self._list_layer_key
@@ -270,7 +377,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             frame_key = (self.width(), self.height(), self.devicePixelRatioF(),
                          layout.lyric_font, focus, visual, self.lyrics_alignment,
                          self._future_lyric_color(layout.viewport).rgba(),
-                         self.owner.media_position_seconds if include_current else None,
+                         self.playback_position() if include_current else None,
+                         self.source_lines(),
                          include_current, veil_source)
             if frame_key == self._content_frame_key:
                 return self._content_frame
@@ -282,11 +390,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         layer = QPainter(image)
         layer.setRenderHint(QPainter.RenderHint.Antialiasing)
         layer.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        if self.mode == "lyrics":
+        if self.mode == "lyrics" and self.live:
+            self.paint_live_lyrics(layer, layout, visual_focus=visual_focus,
+                                   static_only=not include_current)
+            area = layout.viewport
+            fade = min(88, area.height() * .16)
+        elif self.mode == "lyrics":
             layer.save()
             layer.setClipRect(layout.viewport.adjusted(-18, 0, 18, 0))
             base_key = (self.width(), self.height(), ratio, layout.lyric_font,
-                        focus, self.lyrics_alignment, veil_source,
+                        focus, self.lyrics_alignment, veil_source, self.source_lines(),
                         self._future_lyric_color(layout.viewport).rgba())
             if base_key != self._lyric_static_key:
                 guard = layout.lyric_step
@@ -347,8 +460,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self.dj_available, self.dj_enabled,
                int(now * 30) if self.dj_speaking else 0,
                self.loop_mode, self.mode, self.song_index, self.cover_index,
-               self.owner.album_art.cacheKey(),
-               self.song_index in self.liked_songs, self.owner.media_is_playing,
+               self.owner.album_art.cacheKey(), self.owner.track_title, self.owner.artist,
+               self._song_collection_state() if self.live else self.song_index in self.liked_songs,
+               self.owner.media_is_playing,
                self._scene_control_ink().rgba())
         hidden = (self.visibility.opacity.target <= 0
                   and self.visibility.opacity.value(now) <= .001)
@@ -406,10 +520,70 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                    ambient_weights=palette.ambient_weights, advance_frame=False)
         self._fade_background_key, self._fade_background = key, image
 
+    def paint_current_lyrics(self, painter, layout):
+        if self.owner.media_is_playing and not self.freeze_clock:
+            self.paint_lyrics(painter, layout, current_only=True)
+            return
+        # Paused source timing has no changing reading front. Retain just the
+        # current row's ink rather than rebuilding its word masks every tick.
+        focus, visual = self.lyric_focus()
+        ratio = self.devicePixelRatioF()
+        key = (self.source_lines(), self.playback_position(), focus, visual,
+               self.width(), self.height(), ratio,
+               self._future_lyric_color(layout.viewport).rgba())
+        if key != self._current_ink_key:
+            font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
+            shaped = self.reading_renderer.whole_line(self.source_lines()[focus].text, font)
+            ascent = shaped.lineAt(0).ascent()
+            top = math.floor(layout.lyric_anchor + (focus - visual) * layout.lyric_step - ascent - 16)
+            height = math.ceil(layout.lyric_row + 32)
+            image = QImage(round(self.width() * ratio), round(height * ratio),
+                           QImage.Format.Format_ARGB32_Premultiplied)
+            image.setDevicePixelRatio(ratio)
+            image.fill(Qt.GlobalColor.transparent)
+            with QPainter(image) as layer:
+                layer.translate(0, -top)
+                self.paint_lyrics(layer, layout, current_only=True)
+            self._current_ink_key, self._current_ink_image = key, (image, top)
+        image, top = self._current_ink_image
+        painter.drawImage(QPointF(0, top), image)
+
+    def refresh_fade_content(self, now):
+        """Prepare fixed A/B content once; each fade frame only blends pixels.
+
+        Paused live lyrics can reuse their exact source-timed content too.
+        Advancing live lyrics retain the ordinary compositor rather than
+        freezing their variable-height reading run.
+        At 360x640/DPR2 the two opaque endpoints occupy 7,372,800 bytes total.
+        They are released as soon as the transition settles.
+        """
+        advancing_live_lyrics = self.live and self.mode == "lyrics" and self.owner.media_is_playing
+        if advancing_live_lyrics or self.visibility.settled(now) or self._fade_background is None:
+            self._fade_content_key = self._fade_content_frames = None
+            return
+        content = self.content_image(NarrowLayout(self.width(), self.height()), include_current=self.live)
+        key = (self._fade_background_key, content.cacheKey(), self.veil_key)
+        if key == self._fade_content_key:
+            return
+        endpoints = []
+        for opacity in (0.0, 1.0):
+            image = self._fade_background.copy()
+            with QPainter(image) as painter:
+                self.veil.paint(painter, content, self.veil_key, opacity,
+                                scroll_delta=self.veil_scroll_delta)
+            endpoints.append(image)
+        self._fade_content_key, self._fade_content_frames = key, tuple(endpoints)
+
     def lyric_focus(self):
-        position = self.owner.media_position_seconds
-        focus = min(len(TIMED_LYRICS) - 1, max(0, int(position // 4)))
-        transition = min(1.0, max(0.0, (position - focus * 4.0) / .36))
+        lines = self.source_lines()
+        if not lines:
+            return 0, 0.0
+        position = self.playback_position()
+        if self.live:
+            frame = self._lyric_frame([(line.time_seconds, line.text) for line in lines], time.monotonic())
+            return frame.active_index, frame.scroll_index
+        focus = min(len(lines) - 1, max(0, bisect_right([line.time_seconds for line in lines], position) - 1))
+        transition = min(1.0, max(0.0, (position - lines[focus].time_seconds) / .36))
         eased = 1.0 - (1.0 - transition) ** 3
         return focus, focus - (1.0 - eased) if focus else 0.0
 
@@ -417,22 +591,42 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def veil_scroll_delta(self):
         visual = self.lyric_focus()[1] if self.mode == "lyrics" else 0.0
         step = NarrowLayout(self.width(), self.height()).lyric_step
+        if self.live and self.mode == "lyrics":
+            offset = self.real_scroll_offset(visual)
+            canonical = self.real_visual_for_offset(round(offset / 32.0) * 32.0)
+            return self.real_scroll_offset(canonical) - offset
         return -(visual - round(visual)) * step
 
     def refresh_veil(self):
         """Prepare only when layout/theme/DPR/current line/scroll bucket changes.
 
         Called from the timer/input/capture preparation, never paintEvent.
-        Word highlighting is confined to the clear middle and is not a cache key.
+        Fixture word highlighting stays separate. Live wrapped reading can
+        extend behind controls, so its veil source is refreshed at most 10Hz.
         """
         layout = NarrowLayout(self.width(), self.height())
         if self.mode == "playlist":
             self.content_image(layout, refresh=True)
         focus, visual = self.lyric_focus()
         bucket = round(visual) if self.mode == "lyrics" else 0
+        canonical_visual = bucket
+        if self.live and self.mode == "lyrics":
+            # Real wrapped groups have variable height. Quantize in pixels so
+            # the residual always fits the atlas's fixed 32px source guard.
+            bucket = round(self.real_scroll_offset(visual) / 32.0) * 32.0
+            canonical_visual = self.real_visual_for_offset(bucket)
+        live_read_bucket = None
+        if (self.live and self.mode == "lyrics"
+                and (not self.owner.media_is_playing
+                     or self.visibility.footer.value(time.monotonic()) > .001)):
+            # A current wrapped block can extend under the controls. Its blur
+            # snapshot follows the real reading clock at a bounded 10Hz.
+            live_read_bucket = int(self.playback_position() * 10)
         self.veil_key = (
-            self.mode, self.width(), self.height(), layout.lyric_font,
-            layout.lyric_step, self.lyrics_alignment, tuple(LYRICS), tuple(SONGS),
+            live_read_bucket, self.mode, self.width(), self.height(), layout.lyric_font,
+            self._queue_scroll if self.live and self.mode == "playlist" else 0,
+            layout.lyric_step, self.lyrics_alignment, self.source_lines(), self.queue_snapshot(),
+            self._visual_track_identity(),
             self.song_index, self.cover_index, self.devicePixelRatioF(),
             self.owner.album_color.rgba(), self.owner.secondary_color.rgba(),
             self._future_lyric_color(layout.viewport).rgba(),
@@ -440,8 +634,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         )
         # prepare accepts a source factory: a hit must not rasterize full content.
         self.veil.prepare(self.veil_key,
-                          lambda: self.content_image(layout, bucket, veil_source=True,
-                                                     include_current=False))
+                          lambda: self.content_image(layout, canonical_visual, veil_source=True,
+                                                     include_current=self.live))
 
     def paint_header(self, painter, layout):
         cover = layout.cover
@@ -464,8 +658,21 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def paint_lyrics(self, painter, layout, visual_focus=None, *,
                      static_only=False, current_only=False, overscan=0,
                      veil_source=False):
+        if self.live:
+            self.paint_live_lyrics(painter, layout, visual_focus=visual_focus,
+                                   static_only=static_only, current_only=current_only,
+                                   overscan=overscan)
+            return
         viewport = layout.viewport
-        position = self.owner.media_position_seconds
+        position = self.playback_position()
+        lines = self.source_lines()
+        if not lines:
+            if not static_only:
+                painter.setFont(self._surface_font(20, QFont.Weight.Bold))
+                painter.setPen(self._scene_control_ink())
+                painter.drawText(viewport, Qt.AlignmentFlag.AlignCenter,
+                                 "\n".join(self._display_lyrics()[0]))
+            return
         focus, actual_visual_focus = self.lyric_focus()
         if visual_focus is None:
             visual_focus = actual_visual_focus
@@ -473,14 +680,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         step = layout.lyric_step
         row = layout.lyric_row
         font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
-        metrics_layout = self.reading_renderer.whole_line(TIMED_LYRICS[focus].text, font)
+        metrics_layout = self.reading_renderer.whole_line(lines[focus].text, font)
         ascent = metrics_layout.lineAt(0).ascent()
         painter.save()
         painter.setClipRect(viewport.adjusted(-18, -overscan, 18, overscan))
-        for index in ((focus,) if current_only else range(len(TIMED_LYRICS))):
+        for index in ((focus,) if current_only else range(len(lines))):
             if (static_only and index == focus) or (current_only and index != focus):
                 continue
-            line = TIMED_LYRICS[index]
+            line = lines[index]
             y = anchor + (index - visual_focus) * step - ascent
             if y + row < viewport.top() - 16 - overscan or y > viewport.bottom() + 16 + overscan:
                 continue
@@ -502,19 +709,166 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 image = self._blurred_lyric_raster(image, level, color)
                 painter.drawImage(QPointF(x - padding, y - padding), image)
                 continue
+            end = (lines[index + 1].time_seconds if index + 1 < len(lines)
+                   else max(line.time_seconds + 1.0, getattr(self.owner, "media_duration_seconds", 0.0)))
             self.reading_renderer.paint(
                 painter, QRectF(x, y, viewport.width(), row), x, line.text, font,
-                max(0.0, min(1.0, (position - line.time_seconds) / 4.0)),
+                max(0.0, min(1.0, (position - line.time_seconds) / max(.001, end - line.time_seconds))),
                 self._future_lyric_color(viewport), QColor(255, 255, 255),
                 timed_units=line.units, timed_position=position,
-                timed_line_end=line.time_seconds + 4.0,
+                timed_line_end=end,
             )
         painter.restore()
 
+    def real_lyric_blocks(self, layout):
+        lines = self.source_lines()
+        key = (lines, layout.viewport.width(), layout.lyric_font)
+        if key == self._real_layout_key:
+            return self._real_blocks
+        font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
+        secondary = self._surface_font(max(12, layout.lyric_font * .55), QFont.Weight.Medium)
+        blocks, cursor = [], 0.0
+        for line in lines:
+            layers = split_display_layers(line.text)
+            parts = [(layers.primary_text, font)]
+            parts.extend((text, secondary) for text in
+                         (layers.translation_text, layers.parenthetical_text,
+                          layers.parenthetical_translation_text) if text)
+            runs, height = [], 0.0
+            for text, part_font in parts:
+                shaped, part_height = self._wrapped_lyric_layout(text, part_font, layout.viewport.width())
+                runs.append((text, part_font, shaped, height, part_height))
+                height += part_height + 8.0
+            blocks.append((cursor, max(layout.lyric_row, height - 8.0), layers, tuple(runs)))
+            cursor += max(layout.lyric_step, height + 8.0)
+        self._real_layout_key, self._real_blocks = key, tuple(blocks)
+        return self._real_blocks
+
+    def real_scroll_offset(self, visual):
+        blocks = self.real_lyric_blocks(NarrowLayout(self.width(), self.height()))
+        if not blocks:
+            return 0.0
+        index = max(0, min(len(blocks) - 1, int(visual)))
+        following = min(len(blocks) - 1, index + 1)
+        return blocks[index][0] + (blocks[following][0] - blocks[index][0]) * (visual - index)
+
+    def real_visual_for_offset(self, offset):
+        blocks = self.real_lyric_blocks(NarrowLayout(self.width(), self.height()))
+        if not blocks:
+            return 0.0
+        starts = [block[0] for block in blocks]
+        index = max(0, min(len(starts) - 1, bisect_right(starts, offset) - 1))
+        if index + 1 >= len(starts):
+            return float(index)
+        return index + (offset - starts[index]) / (starts[index + 1] - starts[index])
+
+    def live_lyric_rows(self, layout, visual_focus=None):
+        blocks = self.real_lyric_blocks(layout)
+        focus, visual = self.lyric_focus()
+        if visual_focus is not None:
+            visual = visual_focus
+        if not blocks:
+            return ()
+        first_layout = blocks[focus][3][0][2]
+        ascent = first_layout.lineAt(0).ascent() if first_layout.lineCount() else 0
+        origin = layout.lyric_anchor - ascent - self.real_scroll_offset(visual)
+        return tuple((index, QRectF(layout.viewport.left(), origin + start,
+                                    layout.viewport.width(), height), layers, runs)
+                     for index, (start, height, layers, runs) in enumerate(blocks))
+
+    def paint_live_lyrics(self, painter, layout, visual_focus=None, *,
+                          static_only=False, current_only=False, overscan=0):
+        lines = self.source_lines()
+        if not lines:
+            if not static_only:
+                painter.setFont(self._surface_font(20, QFont.Weight.Bold))
+                painter.setPen(self._scene_control_ink())
+                painter.drawText(layout.viewport, Qt.AlignmentFlag.AlignCenter,
+                                 "\n".join(self._display_lyrics()[0]))
+            return
+        focus = self.lyric_focus()[0]
+        position = self.playback_position()
+        painter.save()
+        clip = layout.viewport.adjusted(-18, -overscan, 18, overscan)
+        painter.setClipRect(clip)
+        for index, row, layers, runs in self.live_lyric_rows(layout, visual_focus):
+            if (static_only and index == focus) or (current_only and index != focus):
+                continue
+            if row.bottom() < clip.top() - 18 or row.top() > clip.bottom() + 18:
+                continue
+            line = lines[index]
+            end = (lines[index + 1].time_seconds if index + 1 < len(lines)
+                   else max(line.time_seconds + 1.0, self.owner.media_duration_seconds))
+            progress = max(0.0, min(1.0, (position - line.time_seconds) / max(.001, end - line.time_seconds)))
+            for part_index, (text, font, shaped, offset, height) in enumerate(runs):
+                target = QRectF(row.left(), row.top() + offset, row.width(), height)
+                if index == focus:
+                    real = (self._real_visual_line_progresses(
+                        text, shaped, line.units, position, line_end=end,
+                        source_text=line.text, visible_source_offsets=layers.primary_source_offsets)
+                            if part_index == 0 and line.units else None)
+                    self._paint_wrapped_lifted_lyric(painter, target, text, font, shaped,
+                                                     progress, real_progresses=real)
+                else:
+                    color = QColor("white") if index < focus else self._future_lyric_color(target)
+                    level = 0 if abs(index - focus) <= 2 else self._lyric_group_blur_level(index, focus)
+                    self._draw_cached_wrapped_layout(painter, shaped, target.topLeft(), text,
+                                                     font, target.width(), height, color, level)
+        painter.restore()
+
+    def live_model_key(self):
+        return (self._visual_track_identity(), str(getattr(self.owner, "media_source_app", "")),
+                self.source_lines(), self.width(), self.height(), self.mode)
+
+    def publish_live_lyric_hits(self, layout):
+        # Reading ink changes without moving the shaped source geometry. Keep
+        # that painted hit map until its model or scroll pose actually changes.
+        pose = (self.live_model_key(), self.lyric_focus())
+        if (pose == self._painted_live_hit_pose
+                and self._lyric_word_hit_track_key == pose[0][:2]):
+            return
+        self._lyric_word_hit_rects.clear()
+        self._lyric_hit_rects.clear()
+        self._lyric_word_hit_track_key = (self._visual_track_identity(),
+                                         str(getattr(self.owner, "media_source_app", "")))
+        lines = self.source_lines()
+        for index, row, layers, runs in self.live_lyric_rows(layout):
+            if not row.intersects(layout.viewport):
+                continue
+            self._lyric_hit_rects[index] = row.intersected(layout.viewport)
+            text, _font, shaped, _offset, height = runs[0]
+            primary = QRectF(row.left(), row.top(), row.width(), height)
+            self._populate_lyric_word_hit_rects(
+                index, text, lines[index].text, layers, shaped, tuple(lines[index].units),
+                primary, (), QTransform(), layout.viewport, 0.0,
+                visible_source_offsets=layers.primary_source_offsets)
+        self._painted_live_model = pose[0]
+        self._painted_live_hit_pose = pose
+
+    def live_lyric_action_at(self, point):
+        # Input may only use a layout the listener has actually seen. A same-
+        # track timing/translation enrichment must wait for the next paint.
+        if self._painted_live_model != self.live_model_key():
+            return None
+        word = self._lyric_word_target_at(point)
+        if word is not None:
+            return ("lyric", word[0], word[2], self._painted_live_model)
+        for index, rect in self._lyric_hit_rects.items():
+            if rect.contains(point):
+                return ("lyric", index, None, self._painted_live_model)
+        return None
+
     def paint_list(self, painter, layout):
         viewport = layout.viewport
-        step = layout.list_step(len(SONGS))
+        if self.live:
+            self._paint_playback_queue(painter, viewport)
+            return
+        snapshot = self.queue_snapshot()
+        songs = self.queue_rows()
+        step = layout.list_step(len(songs))
         top = layout.list_top
+        current = snapshot[1] if snapshot is not None else self.song_index
+        first = 0
         ink = self._scene_control_ink()
         if layout.list_heading > 1:
             painter.setPen(ink)
@@ -522,10 +876,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             painter.drawText(QRectF(20, viewport.top(), self.width() - 40, 28), Qt.AlignmentFlag.AlignVCenter, "播放列表")
         painter.save()
         painter.setClipRect(QRectF(0, top, self.width(), max(0, viewport.bottom() - top)))
-        for index, (title, artist) in enumerate(SONGS):
-            y = top + index * step
+        for index in range(first, len(songs)):
+            song = songs[index]
+            title, artist = song.title, song.artist
+            y = top + (index - first) * step
+            if y > viewport.bottom():
+                break
             row_height = min(52.0, step - 4)
-            if index == self.song_index:
+            if index == current:
                 row = QRectF(12, y + 2, self.width() - 24, row_height)
                 self._clear_control_renderer.paint(painter, row, scene=self._surface_glass_backdrop(),
                     scene_bounds=QRectF(self.rect()), ink=ink, now=time.monotonic(), role="queue-selection",
@@ -541,7 +899,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             clip = QPainterPath()
             clip.addRoundedRect(art, 5, 5)
             painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
-            painter.drawImage(art, self.cover_images[index % len(COVERS)])
+            if not self.live:
+                painter.drawImage(art, self.cover_images[index % len(COVERS)])
             painter.restore()
             painter.setPen(row_ink)
             painter.setFont(self._surface_font(15, QFont.Weight.DemiBold))
@@ -603,13 +962,19 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             scene_bounds=QRectF(self.rect()), ink=ink, now=time.monotonic(),
             role="collection", state=self._glass_feedback.state("collection"),
             kind="capsule", level=self._surface_glass_level())
-        heart = "heart_filled" if self.song_index in self.liked_songs else "heart_outline"
+        collection_state = self._song_collection_state() if self.live else None
+        liked = collection_state.liked is True if self.live else self.song_index in self.liked_songs
+        heart = "heart_filled" if liked else "heart_outline"
         for index, icon in enumerate((heart, "playlist_add")):
             side = favorite.height() * (.63 if index == 0 else .61)
             center_x = favorite.left() + favorite.width() * (.25 + .5 * index)
             glyph = QRectF(center_x - side / 2, favorite.center().y() - side / 2, side, side)
-            icon_ink = QColor("#ff3e4c") if index == 0 and self.song_index in self.liked_songs else ink
+            icon_ink = QColor("#ff3e4c") if index == 0 and liked else ink
+            painter.save()
+            if self.live and (not collection_state.available or collection_state.busy):
+                painter.setOpacity(painter.opacity() * .38)
             paint_music_source_icon(painter, glyph, icon, tint=icon_ink)
+            painter.restore()
         loop, mode = layout.utility(self.dj_motion.value(time.monotonic()))
         loop = self.posed_rect("footer_loop", loop)
         mode = self.posed_rect("footer_layout", mode)
@@ -651,6 +1016,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 self.mode = "lyrics" if key == Qt.Key.Key_L else "playlist"
             self.set_content_layout(self.mode, animate=False)
             self._finish_content_layout()
+        elif self.live and key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Space):
+            command = {Qt.Key.Key_Left: "previous", Qt.Key.Key_Right: "next",
+                       Qt.Key.Key_Space: "toggle_play_pause"}[key]
+            self._send_media_command(command)
+        elif self.live and key in (Qt.Key.Key_D, Qt.Key.Key_S):
+            return
         elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             self.select_song(self.song_index + (1 if key == Qt.Key.Key_Right else -1))
         elif Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
@@ -675,6 +1046,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if not self.narrow:
             super().mouseMoveEvent(event)
             return
+        self._pointer_active_until = time.monotonic() + .15
         self._glass_feedback.move(event.position())
         self.shelf = True
         self.hovered_glass = ""
@@ -687,6 +1059,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def enterEvent(self, event):
         if self.narrow:
+            self._pointer_active_until = time.monotonic() + .15
             self.shelf = True
             self.visibility.advance(time.monotonic(), True, True, self.mode == "playlist")
         super().enterEvent(event)
@@ -706,6 +1079,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 return True
             elif event.type() in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
                 self.touch_active = False
+                if self.live:
+                    if event.type() == QEvent.Type.TouchEnd and event.points():
+                        self._finish_live_press(event.points()[0].position())
+                    else:
+                        self._live_press = None
                 self._glass_feedback.release()
                 self.visibility.advance(time.monotonic(), self.shelf, self.footer_hover,
                                         self.mode == "playlist")
@@ -718,9 +1096,85 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if not self.narrow:
             super().mousePressEvent(event)
             return
+        if self.live:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._begin_live_press(event.position())
+                event.accept()
+            return
         self._press_at(event.position())
 
+    def _live_action_at(self, position):
+        if self.visibility.footer.value(time.monotonic()) >= .75:
+            for group in self.glass_groups():
+                for key, rect in group.items():
+                    if rect.contains(position):
+                        if key == "collection":
+                            return "favorite" if position.x() < rect.center().x() else "playlist_add"
+                        return key
+        if self.mode == "playlist":
+            for index, rect in self._queue_hit_rects.items():
+                if rect.contains(position):
+                    token = self._queue_snapshot[0] if self._queue_snapshot is not None else None
+                    return ("queue", index, token)
+        if self.mode == "lyrics":
+            return self.live_lyric_action_at(position)
+        return None
+
+    def _begin_live_press(self, position):
+        # Keep the source and controller authority the listener actually pressed.
+        action = self._live_action_at(position)
+        track = self._visual_track_identity()
+        source = str(getattr(self.owner, "media_source_app", ""))
+        authority = self._capture_song_collection_authority(track)
+        self._live_press = (action, track, source, authority)
+        self._pointer_active_until = time.monotonic() + .15
+        self.visibility.advance(time.monotonic(), True, True, self.mode == "playlist")
+        if isinstance(action, str):
+            key = "collection" if action in {"favorite", "playlist_add"} else action
+            self._glass_feedback.press(key, position, time.monotonic())
+        self.update()
+
+    def _finish_live_press(self, position):
+        pressed, self._live_press = self._live_press, None
+        self._glass_feedback.release()
+        if pressed is None:
+            return
+        action, track, source, authority = pressed
+        if (action is None or action != self._live_action_at(position)
+                or track != self._visual_track_identity()
+                or source != str(getattr(self.owner, "media_source_app", ""))):
+            return
+        if isinstance(action, tuple):
+            if action[0] == "lyric":
+                self._seek_to_lyric(action[1], action[2])
+            else:
+                self._select_playback_queue(action[1], action[2])
+        elif action.startswith("media:"):
+            self._send_media_command(action.removeprefix("media:"))
+        elif action in {"content_layout", "footer_layout"}:
+            self.mode = "playlist" if self.mode == "lyrics" else "lyrics"
+            self.set_content_layout(self.mode, animate=False)
+            self._finish_content_layout()
+        elif action in {"playback_mode", "footer_loop"}:
+            self._cycle_owned_playback_mode()
+        elif action in {"favorite", "playlist_add"}:
+            self._activate_song_collection(action, track, authority)
+        elif action == "personal_dj":
+            self._toggle_personal_dj()
+        elif action == "translation":
+            self._toggle_translation()
+        elif action == "audio_output":
+            self._toggle_audio_output_panel()
+        elif action in {"library", "return"}:
+            self.resize(960, 540)
+        self.refresh_veil()
+        self.refresh_controls(time.monotonic())
+        self.update()
+
     def _press_at(self, position):
+        if self.live:
+            self._begin_live_press(position)
+            return
         visibility = self.visibility.footer.value(time.monotonic())
         self.visibility.advance(time.monotonic(), True, True, self.mode == "playlist")
         layout = NarrowLayout(self.width(), self.height(), visibility)
@@ -772,17 +1226,38 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if not self.narrow:
             super().mouseReleaseEvent(event)
             return
+        if self.live:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._finish_live_press(event.position())
+            event.accept()
+            return
         self._glass_feedback.release()
         self.update()
+
+    def wheelEvent(self, event):
+        if self.live and self.narrow and self.mode == "playlist":
+            self._scroll_playback_queue(event)
+            self._list_layer_key = None
+            self._list_layer = None
+            self.refresh_veil()
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     def leaveEvent(self, event):
         self.hovered_glass = ""
         self.shelf = False
         self.footer_hover = False
+        self._pointer_active_until = 0.0
         super().leaveEvent(event)
 
 
 def make_owner():
+    from unittest.mock import Mock
+    from test_music_surface_transition import _TransitionOwner
+    from test_owned_playback_surface import _Provider
+    from test_song_collection_surface import Collection
+
     owner = _TransitionOwner()
     owner.media_track_id = "owned:netease:1"
     owner.track_title, owner.artist = SONGS[0]

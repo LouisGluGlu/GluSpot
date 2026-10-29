@@ -70,6 +70,15 @@ def synthetic_checks(dpr):
         overlay.prepare(key, lambda: (_ for _ in ()).throw(AssertionError("cache-hit factory called")))
         fades = [rgba(compose(overlay, source, key, value)) for value in (0, .25, .5, .75, 1)]
     full = fades[-1]
+    # Painting an equal, separately constructed key must use the same atlas;
+    # clearing the cache must also invalidate the most recently prepared key.
+    equal_key = tuple(list(key))
+    assert equal_key == key and equal_key is not key
+    assert np.array_equal(full, rgba(compose(overlay, source, equal_key, 1)))
+    overlay.clear()
+    assert np.array_equal(rgba(compose(overlay, source, key, 1)),
+                          rgba(compose(VeilOverlay(), source, key, 1))), "clear retained prepared bands"
+    overlay.prepare(key, source)
     top_end = VeilOverlay.TOP_END
     top_start = VeilOverlay.TOP_FEATHER_START
     bottom_start = 640 - VeilOverlay.BOTTOM_HEIGHT
@@ -394,6 +403,7 @@ def paint_benchmark(window, frames, mode):
             "scroll_fade_overlap_p95_ms": scroll_p95,
             "fade_cpu_percent": cpu_percent, "fade_cadence_ms": app_interval*1000,
             "stress_60hz_cpu_percent": stress_cpu_percent, "veil_fade_cpu_percent_60hz": veil_cpu,
+            "fade_cpu_scenario": "paused source at the actual 33ms app cadence",
             "cpu_target_met": cpu_percent <= 15,
             "paint_target_met": p95 <= 16.7 and p99 <= 24}
 
@@ -432,10 +442,7 @@ def run_dpr(args):
     print(json.dumps(results, ensure_ascii=False), flush=True)
     for mode, report in results["modes"].items():
         assert report["paint_target_met"], (mode, "paint target", report)
-        if not report["cpu_target_met"] and args.dpr == 2:
-            print(f"WARNING: {mode} DPR2 fade CPU target exceeded: {report['fade_cpu_percent']:.2f}%", flush=True)
-        else:
-            assert report["cpu_target_met"], (mode, "fade CPU target", report)
+        assert report["cpu_target_met"], (mode, "fade CPU target", report)
 
 
 def main():

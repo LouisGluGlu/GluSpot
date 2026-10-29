@@ -106,6 +106,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-10-29: Source-only capture/narrow integration is isolated on `grok/capture-narrow-v4`, preserving `grok/capture` and `grok/narrow-v3`. The real-provider narrow entry is `local/main.py --narrow-live`; no release/version change. Fixture fade CPU passes the 15% gate at both DPRs, but the live performance gate, native PC tests, End/auto-next, real playback screenshots and the absent non-narrow drag target remain pending. The full Linux suite still has inherited failures. See [implementation, branch choice and exact verification limits](docs/capture-narrow4.md).
+
 - 2026-10-22：6.417 发布与主线整理。应用及构建输入保持已验收字节，仅更新发布说明；旧分支与未提交旧源码通过[归档索引](docs/branch-archive-6.417.md)保留 GitHub 记录。分支清理须在 Release 附件完整性和 main／开发分支一致性确认后执行，最终保留 main，版本为 6.417。
 
 - 2026-10-21：`codex/lyric-glass-fluidity` 完成 **6.417 本地测试版**：括号词高光及跨句清晰保留、译文／岛态字形缓存复用、玻璃连续跟色和控件对比、失真封面的背景配色。**5,773 项／318.684 秒**回归、双 DPR 各 **165 检查**、425 项包审计及 10 个隔离安装场景通过；8,399 个 ZIP 项通过 CRC／逐文件 SHA-256。安装程序与便携包在本工作区及 `E:/gpt-island/release` 双份保存，6.416 源码及程序保留。物理屏幕流畅度与真实播放仍待验；高 DPI 重场景稳定 60Hz 尚未达标。清单、文件及哈希见[本轮报告](docs/lyric-glass-6.417.md)。

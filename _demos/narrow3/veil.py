@@ -79,6 +79,8 @@ class VeilOverlay:
         self.misses = 0
         self.builds = 0
         self.cache_bytes = 0
+        self._prepared_key = None
+        self._prepared_bands = None
 
     @property
     def cache_size(self):
@@ -108,6 +110,8 @@ class VeilOverlay:
     def clear(self):
         self.cache.clear()
         self.cache_bytes = 0
+        self._prepared_key = None
+        self._prepared_bands = None
 
     @staticmethod
     @lru_cache(maxsize=144)
@@ -131,10 +135,15 @@ class VeilOverlay:
         filtering, keeping six DPR 2 entries below 2.8 MB.  Filtering uses
         premultiplied channels, preventing dirty transparent color fringes.
         """
+        if self._prepared_bands is not None and key == self._prepared_key:
+            self.hits += 1
+            self._prepared_key = key
+            return self._prepared_bands.image
         cached = self.cache.pop(key, None)
         if cached is not None:
             self.hits += 1
             self.cache[key] = cached
+            self._prepared_key, self._prepared_bands = key, cached
             return cached.image
         self.misses += 1
         original = source() if callable(source) else source
@@ -242,6 +251,7 @@ class VeilOverlay:
                        QImage.Format.Format_RGBA8888_Premultiplied).copy()
         cached = _Bands(image, width, height, scale, tuple(strips), feathers)
         self.cache[key] = cached
+        self._prepared_key, self._prepared_bands = key, cached
         self.cache_bytes += image.sizeInBytes()
         self.builds += 1
         while len(self.cache) > CACHE_LIMIT:
@@ -363,7 +373,7 @@ class VeilOverlay:
         if alpha <= 0:
             painter.drawImage(QPointF(0, 0), sharp_content)
             return
-        cached = self.cache.get(key)
+        cached = self._prepared_bands if key is self._prepared_key else self.cache.get(key)
         dpr = sharp_content.devicePixelRatio()
         width = sharp_content.width() / dpr
         height = sharp_content.height() / dpr

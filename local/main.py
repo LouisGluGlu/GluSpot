@@ -9,6 +9,9 @@ if ROOT_DIR not in sys.path:
 
 def main(argv: list[str] | None = None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--narrow-live":
+        from _demos.narrow3.live import run_live
+        return run_live(arguments[1:])
     if "--legacy-package-check" in arguments:
         if len(arguments) != 2 or arguments[0] != "--legacy-package-check":
             if sys.stderr is not None:
