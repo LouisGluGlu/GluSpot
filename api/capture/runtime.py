@@ -204,7 +204,10 @@ class CaptureRuntime:
     def _publish(self, sample):
         self._last_received_at = self.clock()
         with self._lock:
+            was_valid = self._valid
             self._valid = sample is not None and sample.identity == self.identity
+            if was_valid and not self._valid:
+                self._capture_epoch_source = None
             if self._valid:
                 if sample.source == 'uia':
                     self._valid = self.model.calibrate(sample)

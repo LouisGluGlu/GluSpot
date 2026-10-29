@@ -169,6 +169,8 @@ class VeilOverlay:
             # A Gaussian with σ≥4 has no useful detail at the original sample
             # frequency.  This affects storage after the exact filter only.
             reduction = (1.0 if degree == 1 else .5 if degree < 4 else .25) * min(1.0, 1.0 / dpr)
+            if dpr > 1 and degree == BLUR_LEVELS:
+                reduction *= .875
             for top in (True, False):
                 target_start, target_end = self._profile_region(degree, top, height)
                 source_start = target_start - SCROLL_GUARD

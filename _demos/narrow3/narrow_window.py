@@ -83,6 +83,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._settled_epoch = None
         self._snap_change = None
         self._diagnostics.update(settle_commits=0, first_sample_settle_outlier=0)
+        self._diagnostics.update(stale_frames=0)
+        self._painted_track = None
         super().__init__(owner)
         self.variant = variant
         self.lyrics_alignment = lyrics_alignment
@@ -161,6 +163,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             for widget in QApplication.topLevelWidgets()
             if isinstance(widget, MusicSurfaceWindow) or widget is self.owner)
         result['lyric_bounds'] = NarrowLayout(self.width(), self.height()).viewport.getRect()
+        result['painted_track'] = self._painted_track
+        result['capture_epoch_id'] = getattr(self.owner, 'media_capture_epoch_id', 0)
+        result['is_first_sample'] = getattr(self.owner, 'media_is_first_sample', False)
+        result['reveal_progress'] = self.visibility.progress
+        result['dim'], result['blur'] = self.veil.progress(self.visibility.progress)
+        result['controls_translate'] = 0.
+        result['controls_scale'] = 1.
         return result
 
     def playback_position(self):
@@ -301,6 +310,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # next real input starts with the same elapsed time as before.
             feedback.last_tick = now
         key = (self.playback_position(), self.lyric_focus(), self._visual_track_identity(),
+               self._settled_epoch,
                self.source_lines(), self.visibility.progress,
                feedback.pose_key(), self.dj_motion.value(now), self.mode,
                self._queue_scroll, self.queue_snapshot(), self.dj_available,
@@ -391,6 +401,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def paint_narrow(self):
         now = time.monotonic()
+        if self.live:
+            self._prepare_live_commit()
+            focus, visual = self.lyric_focus()
+            if (self._snap_change == (self._visual_track_identity(), self.owner.lyric_changed_at)
+                    and abs(focus - visual) > .000001):
+                self._diagnostics['snap_frames'] += 1
         self._frame_control_color_at = now
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -443,6 +459,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         painter.end()
         if self.live and self.mode == "lyrics":
             self.publish_live_lyric_hits(layout)
+            self._painted_track = self._visual_track_identity()
+            source_track = self._source_lines_key[0] if self._source_lines_key else None
+            if source_track != self._painted_track:
+                self._diagnostics['stale_frames'] += 1
 
     def content_image(self, layout, visual_focus=None, *, veil_source=False,
                       include_current=True, refresh=False):
@@ -1280,6 +1300,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def enterEvent(self, event):
         if self.narrow:
             self._pointer_anchor = None
+            self._pointer_active_until = time.monotonic() + .2
+            if not self.live:
+                self.shelf = self.footer_hover = True
         super().enterEvent(event)
 
     def event(self, event):
