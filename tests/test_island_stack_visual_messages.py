@@ -9659,7 +9659,6 @@ class IslandStackVisualMessageTests(unittest.TestCase):
             (TimedLyricUnit(14.0, None, "Good night"),),
         ]
         visual.timed_lyric_timing_kinds = ["unit", "unit"]
-        visual.music_surface_reading_strategy = "low_perception"
         visual.lyric_index = 0
         visual.lyric_changed_at = 10.0
         visual.lyric_last_phase_index = -1

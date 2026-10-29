@@ -53,13 +53,9 @@ from local.settings_store import (
     DEFAULT_SETTINGS,
     DEFAULT_MUSIC_APP_PROFILES,
     MUSIC_READING_GRADIENT_DEFAULT_STEPS,
-    MUSIC_READING_LIFT_DEFAULT_LEVEL,
-    MUSIC_READING_STRATEGY_DEFAULT,
     PLACEMENT_MODE_LABELS,
     PLACEMENT_FAMILY_LABELS,
     normalize_music_reading_gradient_steps,
-    normalize_music_reading_lift_level,
-    normalize_music_reading_strategy,
     normalize_music_glass_level,
     normalize_music_ambience_style,
     normalize_finder_bar_style,
@@ -2381,35 +2377,14 @@ class SettingsWindow(QDialog):
         hint.setStyleSheet(self._hint_style(2, 8))
         c.addWidget(hint)
 
-        self.music_surface_reading_strategy = self._combo(
-            [("金标读字", "gold"), ("低感知方案", "low_perception")],
-            normalize_music_reading_strategy(getattr(
-                self.island_widget,
-                "music_surface_reading_strategy",
-                self._setting_value("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT),
-            )),
-            self._set_music_surface_reading_strategy,
-        )
-        self._row(c, "歌词读字方案", self.music_surface_reading_strategy)
         strategy_hint = QLabel(
-            "金标读字：真实逐字优先，只有行时间时按行内均分读字。"
-            "低感知方案：全曲有真实逐字时间时全曲读字，缺少逐字时间的句子按行估算；全曲没有真实逐字时间则整行切换。"
-            "金标读字保留金色涟漪反馈，音乐页不显示额外图标或金标。"
+            "低感知方案：有可靠时间的歌词逐字读亮，缺少可靠读字时间时按整行呈现。"
+            "读字抬升固定为原高度。"
         )
         strategy_hint.setWordWrap(True)
         strategy_hint.setStyleSheet(self._hint_style(2, 8))
         c.addWidget(strategy_hint)
 
-        self.music_surface_reading_lift_level = self._combo(
-            [("0（不抬升）", 0), ("原高度的 1/4", 1), ("原高度的 1/2", 2), ("原高度", 4)],
-            normalize_music_reading_lift_level(getattr(
-                self.island_widget,
-                "music_surface_reading_lift_level",
-                self._setting_value("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL),
-            )),
-            self._set_music_surface_reading_lift_level,
-        )
-        self._row(c, "读字抬升高度", self.music_surface_reading_lift_level)
         self.music_surface_reading_gradient_steps = self._slider_row(
             c, "读字渐变范围", 0, 30,
             normalize_music_reading_gradient_steps(getattr(
@@ -2630,14 +2605,6 @@ class SettingsWindow(QDialog):
             (self.lyric_chinese_conversion, str(self._setting_value("v2_lyric_chinese_conversion", "off") or "off")),
             (self.dual_line_secondary_source, str(self._setting_value("v2_dual_line_secondary_source", "translation") or "translation")),
             (self.cantonese_secondary_priority, str(self._setting_value("v2_cantonese_secondary_priority", "phonetic_first"))),
-            (self.music_surface_reading_strategy, normalize_music_reading_strategy(getattr(
-                self.island_widget, "music_surface_reading_strategy",
-                self._setting_value("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT),
-            ))),
-            (self.music_surface_reading_lift_level, normalize_music_reading_lift_level(getattr(
-                self.island_widget, "music_surface_reading_lift_level",
-                self._setting_value("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL),
-            ))),
         ):
             self._set_combo_data(control, value)
         for control, value in (
@@ -4221,30 +4188,6 @@ class SettingsWindow(QDialog):
             self.island_widget.lyric_font_size = size
             self.island_widget.update()
         self._save("v2_lyric_font_size", size)
-
-    def _set_music_surface_reading_strategy(self, _index: int = -1):
-        strategy = normalize_music_reading_strategy(self.music_surface_reading_strategy.currentData())
-        setter = getattr(self.island_widget, "set_music_surface_reading_strategy", None)
-        if callable(setter):
-            setter(strategy, notify=False)
-        else:
-            self.island_widget.music_surface_reading_strategy = strategy
-            surface = getattr(self.island_widget, "music_fullscreen_overlay", None)
-            if surface is not None:
-                surface.update()
-        self._save("v2_music_surface_reading_strategy", strategy)
-
-    def _set_music_surface_reading_lift_level(self, _index: int = -1):
-        level = normalize_music_reading_lift_level(self.music_surface_reading_lift_level.currentData())
-        setter = getattr(self.island_widget, "set_music_surface_reading_lift_level", None)
-        if callable(setter):
-            setter(level, notify=False)
-        else:
-            self.island_widget.music_surface_reading_lift_level = level
-            surface = getattr(self.island_widget, "music_fullscreen_overlay", None)
-            if surface is not None:
-                surface.update()
-        self._save("v2_music_surface_reading_lift_level", level)
 
     def _set_music_surface_reading_gradient_steps(self, value: int):
         steps = normalize_music_reading_gradient_steps(value)

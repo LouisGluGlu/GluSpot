@@ -89,16 +89,14 @@ class LyricRecoveryTests(unittest.TestCase):
         surface.resize(1190, 666)
         self.addCleanup(owner.close)
         self.addCleanup(surface.shutdown)
-        for strategy in ("gold", "low_perception"):
-            owner.music_surface_reading_strategy = strategy
-            for fullscreen in (True, False):
-                surface._fullscreen = fullscreen
-                surface._sync_window_control_rects()
-                mode = surface._button_rects["mode" if fullscreen else "return"]
-                translation = surface._button_rects["translation"]
-                self.assertEqual(translation.size(), mode.size())
-                self.assertEqual(translation.top(), mode.top())
-                self.assertAlmostEqual(mode.left() - translation.right(), 12.0)
+        for fullscreen in (True, False):
+            surface._fullscreen = fullscreen
+            surface._sync_window_control_rects()
+            mode = surface._button_rects["mode" if fullscreen else "return"]
+            translation = surface._button_rects["translation"]
+            self.assertEqual(translation.size(), mode.size())
+            self.assertEqual(translation.top(), mode.top())
+            self.assertAlmostEqual(mode.left() - translation.right(), 12.0)
         self.assertTrue(owner.enable_dual_line_lyrics)
         surface._toggle_translation()
         self.assertFalse(owner.enable_dual_line_lyrics)

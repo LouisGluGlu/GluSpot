@@ -51,11 +51,7 @@ from local.music_lyric_reading import (
 )
 from local.settings_store import (
     MUSIC_READING_GRADIENT_DEFAULT_STEPS,
-    MUSIC_READING_LIFT_DEFAULT_LEVEL,
-    MUSIC_READING_STRATEGY_DEFAULT,
     normalize_music_reading_gradient_steps,
-    normalize_music_reading_lift_level,
-    normalize_music_reading_strategy,
 )
 from local.music_lyric_motion import (
     GLYPH_FLOAT_LIFT,
@@ -173,7 +169,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     TRANSPORT_LIGHT_SPRITE_SIZE = 384
     ARTWORK_SCALE_CACHE_LIMIT = 24
     ARTWORK_SCALE_CACHE_BYTES = 64 * 1024 * 1024
-    OBO_REVEAL_SECONDS = 3.0
     ANIMATION_FRAME_MS = 16
     EMPHASIS_FRAME_MS = 4
     LYRIC_LAYOUT_BATCH_SECONDS = 0.0025
@@ -249,8 +244,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._transport_light_ink_regions: dict[str, QRegion] = {}
         self._transport_light_origins: dict[str, QPointF] = {}
         self._transport_light_sprite = QImage()
-        self._obo_reveal_light_sprite = QImage()
-        self._obo_reveal_track_key = None
         self._art_loading_track_key = None
         self._art_loading_waiting = False
         self._art_loading_preview_key = None
@@ -1663,10 +1656,10 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         """Conservatively bound the sprite's painted annulus, including sampling bleed."""
         origin = self._transport_light_origin(now)
         radius = self._transport_light_max_radius(origin, now) * radius_fraction
-        # The actual cached sprites are transparent inside 0.53 (gold) or
-        # 0.66 (ordinary) of their radius. Eight logical pixels protect the
+        # The ordinary profile is transparent inside 0.66 of its radius.
+        # Eight logical pixels protect the
         # antialiasing and bilinear edges at native/high display DPR.
-        inner_fraction = 0.53 if command == "obo_reveal" else 0.66
+        inner_fraction = 0.66
         outer = radius + 8.0
         bounds = QRectF(
             origin.x() - outer, origin.y() - outer,
@@ -1853,13 +1846,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._transport_feedback.pop("art_loading", None)
         if not old_ink.isEmpty():
             self.update(old_ink)
-        old_gold_dirty = self._transport_light_dirty_regions.pop("obo_reveal", QRect())
-        old_gold_ink = self._transport_light_ink_regions.pop("obo_reveal", QRegion(old_gold_dirty))
-        self._transport_light_origins.pop("obo_reveal", None)
-        self._transport_feedback.pop("obo_reveal", None)
-        if not old_gold_ink.isEmpty():
-            self.update(old_gold_ink)
-        self._obo_reveal_track_key = None
         self._art_loading_track_key = identity
         image = QImage(getattr(self.owner, "album_art", QImage()))
         source = str(getattr(self.owner, "album_art_source", "") or "")
@@ -1887,8 +1873,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                     started += cycles * expand_seconds
                     self._transport_feedback[command] = (started, center, scale, duration)
             frame = self._transport_feedback_frame(now - started, duration)
-            if command == "obo_reveal" and self._reading_strategy() != "gold":
-                frame = None
             if frame is None:
                 self._transport_feedback.pop(command, None)
             old_dirty = self._transport_light_dirty_regions.get(command, QRect())
@@ -1926,37 +1910,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 )
                 if now - started >= expand_seconds:
                     self._begin_art_loading_ring(now)
-        self._maybe_start_obo_reveal(now)
-
-    def _maybe_start_obo_reveal(self, now: float):
-        """Follow the last artwork wave once genuinely timed lyrics are ready."""
-        if self._track_visual is None or self._reading_strategy() != "gold":
-            return
-        identity = self._track_visual[0]
-        if identity == self._obo_reveal_track_key or self._art_loading_waiting:
-            return
-        if any(command in self._transport_feedback for command in ("previous", "next", "art_loading")):
-            return
-        if self._artwork_is_loading():
-            return
-        lines, timed = self._display_lyrics()
-        if self._lyrics_lookup_pending(lines, timed) or not self._has_genuine_obo_timing(lines, timed):
-            return
-        duration = animation_duration(
-            self.OBO_REVEAL_SECONDS,
-            speed=getattr(self.owner, "animation_speed", 1.0),
-            minimum=2.0,
-        )
-        self._obo_reveal_track_key = identity
-        self._transport_feedback["obo_reveal"] = (
-            float(now), self._transport_light_origin(now), self._surface_scale(), duration,
-        )
-        dirty = self._transport_light_dirty_rect(0.0, now)
-        self._transport_light_dirty_regions["obo_reveal"] = dirty
-        ink = self._transport_light_ink_region("obo_reveal", 0.0, now)
-        self._transport_light_ink_regions["obo_reveal"] = ink
-        self._transport_light_origins["obo_reveal"] = self._transport_light_origin(now)
-        self.update(ink)
 
     def _on_animation_tick(self):
         if getattr(self, "_library_loading", None) is not None:
@@ -3159,11 +3112,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._display_timing_quality = None
         self._visual_lyric_cache_key = None
         return self._display_lyrics_cache
-
-    def _reading_strategy(self) -> str:
-        return normalize_music_reading_strategy(getattr(
-            self.owner, "music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT,
-        ))
 
     def _visual_lyric_layers_for_rows(
         self, lines: list[str], timed: list[tuple[float, str]], *, outgoing: bool,
@@ -4428,10 +4376,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 painter.drawImage(origin, read)
 
     def _reading_lift_height(self) -> float:
-        level = normalize_music_reading_lift_level(getattr(
-            self.owner, "music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL,
-        ))
-        return GLYPH_FLOAT_LIFT * level / 4.0
+        """Original full reading lift, shared by wide and narrow surfaces."""
+        return GLYPH_FLOAT_LIFT
 
     def _paint_sparse_glyph_run(
         self, painter: QPainter, origin: QPointF, line_height: float,
@@ -7158,7 +7104,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             # A search marker is state, not lyric ink. Its timed result can
             # arrive on the next provider poll without waiting for artwork.
             lines, timed = [], []
-        low_perception = self._reading_strategy() == "low_perception"
         centered_target = self._no_lyrics_cover_target() and not cover_lyrics_layout
         outgoing_lyrics = None
         if centered_target:
@@ -7288,7 +7233,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             else ()
         )
         source_active_units = active_units
-        unverified_unit_row = active_kind == "unit" and not genuinely_timed_unit_row(active_units)
         suppress_estimated_highlight = (
             outgoing_lyrics is None and self._has_only_unverified_unit_timing(timed)
         )
@@ -7320,7 +7264,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         song_has_real_units = bool(
             timed and outgoing_lyrics is None and self._has_genuine_obo_timing(lines, timed)
         )
-        song_reads_internally = bool(active_plan.has_reading_timing) or not low_perception
+        song_reads_internally = bool(active_plan.has_reading_timing)
         estimated_end = None
         if (
             active_plan.quality == "estimated" and active_pair_first is None
@@ -7431,18 +7375,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             if active_kind == "unit" else (),
             active_source_offsets,
         )
-        emphasis = lyric_emphasis_plan(
-            active_visible_primary,
-            float(timed[active][0]),
-            active_reading_end,
-            min_seconds_per_unit=getattr(
-                self.owner, "music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT
-            ),
-        ) if active_kind == "line" and not low_perception and not unverified_unit_row and not suppress_estimated_highlight and timed and 0 <= active < len(timed) else None
-        active_priority_mode = (
-            "scatter_glow" if real_groups else
-            emphasis.mode if emphasis is not None else "none"
-        )
+        active_priority_mode = "scatter_glow" if real_groups else "none"
         self._last_lyric_emphasis_mode = active_priority_mode
         if real_groups:
             current_group = next((
@@ -7456,10 +7389,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 ).stage if current_group is not None else "done"
             )
         else:
-            self._active_glow_stage = (
-                lyric_glow_phase(active_reading_progress).stage
-                if emphasis is not None and emphasis.mode != "none" else "done"
-            )
+            self._active_glow_stage = "done"
         lyric_top = content.top() + max(8.0, rect.height() * 0.018)
         lyric_height = max(1.0, content.height() - max(12.0, rect.height() * 0.035))
         if cover_lyrics_layout:
@@ -7646,24 +7576,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                         self._primary_timed_lyric_text(str(timed[candidate][1])), candidate_units,
                     )
                     candidate_mode = "scatter_glow" if candidate_groups else "none"
-                elif candidate_kind == "synthetic":
-                    candidate_mode = "none"
-                elif low_perception or unverified_candidate or suppress_estimated_highlight:
-                    candidate_mode = "none"
                 else:
-                    candidate_read_end = (
-                        source_read_ends[candidate]
-                        if candidate < len(source_read_ends) else None
-                    )
-                    candidate_mode = lyric_emphasis_plan(
-                        paint_lines[candidate],
-                        float(timed[candidate][0]),
-                        candidate_read_end if candidate_read_end is not None else
-                        float(timed[candidate + 1][0]) if candidate + 1 < len(timed) else None,
-                        min_seconds_per_unit=getattr(
-                            self.owner, "music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT
-                        ),
-                    ).mode
+                    candidate_mode = "none"
             if candidate_mode == "none":
                 if (
                     reading_candidate is None
@@ -8067,7 +7981,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             reversed_unit_order = reading_focused and self._has_reversed_lyric_unit_order(text)
             whole_row_reading = (
                 reversed_unit_order or row_kind == "synthetic"
-                or (low_perception and not row_plan.has_reading_timing)
+                or not row_plan.has_reading_timing
             )
             # Low perception retains its restrained emphasis/typography, but
             # no longer forces line-timed songs into a half-second block wipe.
@@ -8294,7 +8208,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                     # The original branch already drew this translation as
                     # part of its one shared diagonal wipe.
                     pass
-                elif reading_focused and timed and low_perception and whole_row_reading:
+                elif reading_focused and timed and whole_row_reading:
                     self._draw_sprung_cached_wrapped_layout(
                         painter, secondary_layout, secondary_origin,
                         secondary_text, secondary_font, row_width,
@@ -10013,47 +9927,27 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     @staticmethod
     @lru_cache(maxsize=2)
-    def _transport_light_gradient(gold: bool = False) -> QRadialGradient:
+    def _transport_light_gradient() -> QRadialGradient:
         """One normalized profile, rasterized at the actual display resolution."""
         light = QRadialGradient(QPointF(0.0, 0.0), 1.0)
-        if gold:
-            # This one-off confirmation wave is roughly twice as thick
-            # as the ordinary artwork ripple, with a warm radial blend.
-            for stop, color in (
-                (0.0, QColor(190, 128, 20, 0)),
-                (0.53, QColor(190, 128, 20, 0)),
-                (0.58, QColor(204, 139, 27, 10)),
-                (0.62, QColor(218, 158, 36, 25)),
-                (0.66, QColor(232, 181, 49, 48)),
-                (0.71, QColor(245, 209, 87, 68)),
-                (0.77, QColor(255, 234, 150, 80)),
-                (0.80, QColor(255, 246, 187, 84)),
-                (0.84, QColor(253, 223, 110, 77)),
-                (0.89, QColor(234, 183, 55, 57)),
-                (0.94, QColor(210, 146, 27, 37)),
-                (0.98, QColor(188, 122, 18, 12)),
-                (1.0, QColor(188, 122, 18, 0)),
-            ):
-                light.setColorAt(stop, color)
-        else:
-            # Keep a readable thick crest without washing across half of
-            # the music surface. The shoulders stay translucent.
-            light.setColorAt(0.0, QColor(255, 255, 255, 0))
-            light.setColorAt(0.66, QColor(255, 255, 255, 0))
-            light.setColorAt(0.69, QColor(239, 225, 255, 10))
-            light.setColorAt(0.73, QColor(246, 234, 255, 32))
-            light.setColorAt(0.77, QColor(250, 244, 255, 65))
-            light.setColorAt(0.80, QColor(255, 252, 255, 78))
-            light.setColorAt(0.83, QColor(255, 255, 255, 70))
-            light.setColorAt(0.87, QColor(250, 251, 255, 45))
-            light.setColorAt(0.91, QColor(236, 240, 255, 16))
-            light.setColorAt(0.94, QColor(218, 226, 255, 0))
-            light.setColorAt(1.0, QColor(218, 226, 255, 0))
+        # Keep a readable thick crest without washing across half of
+        # the music surface. The shoulders stay translucent.
+        light.setColorAt(0.0, QColor(255, 255, 255, 0))
+        light.setColorAt(0.66, QColor(255, 255, 255, 0))
+        light.setColorAt(0.69, QColor(239, 225, 255, 10))
+        light.setColorAt(0.73, QColor(246, 234, 255, 32))
+        light.setColorAt(0.77, QColor(250, 244, 255, 65))
+        light.setColorAt(0.80, QColor(255, 252, 255, 78))
+        light.setColorAt(0.83, QColor(255, 255, 255, 70))
+        light.setColorAt(0.87, QColor(250, 251, 255, 45))
+        light.setColorAt(0.91, QColor(236, 240, 255, 16))
+        light.setColorAt(0.94, QColor(218, 226, 255, 0))
+        light.setColorAt(1.0, QColor(218, 226, 255, 0))
         return light
 
-    def _cached_transport_light_sprite(self, *, gold: bool = False) -> QImage:
+    def _cached_transport_light_sprite(self) -> QImage:
         """Small reference raster for previews; live waves use the native profile."""
-        cached = self._obo_reveal_light_sprite if gold else self._transport_light_sprite
+        cached = self._transport_light_sprite
         if not cached.isNull():
             return cached
         side = self.TRANSPORT_LIGHT_SPRITE_SIZE
@@ -10062,11 +9956,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         with QPainter(image) as layer:
             layer.translate(side * 0.5, side * 0.5)
             layer.scale(side * 0.5, side * 0.5)
-            layer.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0), self._transport_light_gradient(gold))
-        if gold:
-            self._obo_reveal_light_sprite = image
-        else:
-            self._transport_light_sprite = image
+            layer.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0), self._transport_light_gradient())
+        self._transport_light_sprite = image
         return image
 
     def _paint_transport_spatial_light(self, painter: QPainter, rect: QRectF, now: float):
@@ -10094,8 +9985,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # illuminate only the space behind it, never the thumbnail or plate.
         painter.setClipPath(space.subtracted(occluder), Qt.ClipOperation.IntersectClip)
         for command, (started, _button_center, _scale, duration) in self._transport_feedback.items():
-            if command == "obo_reveal" and self._reading_strategy() != "gold":
-                continue
             frame = self._transport_feedback_frame(now - started, duration)
             if frame is None or frame[1] <= 0.0 or frame[2] <= 0.0:
                 continue
@@ -10108,7 +9997,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             painter.translate(origin)
             painter.scale(radius, radius)
             painter.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0),
-                             self._transport_light_gradient(command == "obo_reveal"))
+                             self._transport_light_gradient())
             painter.restore()
         painter.restore()
 

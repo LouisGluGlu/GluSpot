@@ -26,7 +26,6 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
         self.provider = _RouteProvider()
         self.owner.data_provider = self.provider
         self.owner.music_flow_intensity = 1.0
-        self.owner.music_surface_reading_strategy = "gold"
         self.owner.media_track_id = "album-flow-output-integration"
         self.owner.track_title = "Album colours"
         self.owner.artist = "GluSpot test fixture"

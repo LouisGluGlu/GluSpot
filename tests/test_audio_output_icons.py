@@ -332,7 +332,6 @@ class MusicSurfaceCircleControlTests(unittest.TestCase):
         active = self._controls()
         self.assertEqual(bytes(inactive.constBits()), bytes(active.constBits()))
         self.assertEqual(controls, self.window._button_rects)
-        self.owner.music_surface_reading_strategy = "low_perception"
         low_perception = self._controls()
         self.assertEqual(bytes(active.constBits()), bytes(low_perception.constBits()))
         self.assertEqual(controls, self.window._button_rects)

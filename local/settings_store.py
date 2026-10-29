@@ -19,9 +19,6 @@ SETTINGS_FILE = settings_file_for()
 
 
 MUSIC_READING_GRADIENT_DEFAULT_STEPS = 30
-MUSIC_READING_LIFT_DEFAULT_LEVEL = 2
-MUSIC_READING_LIFT_LEVELS = (0, 1, 2, 4)
-MUSIC_READING_STRATEGY_DEFAULT = "gold"
 MUSIC_GLASS_DEFAULT_LEVEL = 50
 
 
@@ -42,25 +39,6 @@ def normalize_system_lyric_offset(value) -> float:
         return max(-12.0, min(12.0, number)) if math.isfinite(number) else 0.0
     except (TypeError, ValueError, OverflowError):
         return 0.0
-
-
-def normalize_music_reading_strategy(value) -> str:
-    """Keep the current interpolated reading unless low-perception is selected."""
-    return value if isinstance(value, str) and value in {"gold", "low_perception"} else MUSIC_READING_STRATEGY_DEFAULT
-
-
-def normalize_music_reading_lift_level(value) -> int:
-    """Quarter units of the original reading lift height."""
-    try:
-        if isinstance(value, bool):
-            return MUSIC_READING_LIFT_DEFAULT_LEVEL
-        number = float(value)
-        if not math.isfinite(number) or not number.is_integer():
-            return MUSIC_READING_LIFT_DEFAULT_LEVEL
-        level = int(number)
-    except (TypeError, ValueError, OverflowError):
-        return MUSIC_READING_LIFT_DEFAULT_LEVEL
-    return level if level in MUSIC_READING_LIFT_LEVELS else MUSIC_READING_LIFT_DEFAULT_LEVEL
 
 
 def normalize_music_reading_gradient_steps(value) -> int:
@@ -329,9 +307,7 @@ DEFAULT_SETTINGS = {
     "v2_expand_direction": "auto",
     "v2_lyric_offset_seconds": 0.0,
     "v2_lyric_font_size": 18,
-    "v2_music_surface_reading_lift_level": MUSIC_READING_LIFT_DEFAULT_LEVEL,
     "v2_music_surface_reading_gradient_steps": MUSIC_READING_GRADIENT_DEFAULT_STEPS,
-    "v2_music_surface_reading_strategy": MUSIC_READING_STRATEGY_DEFAULT,
     "v2_music_sparse_highlight_seconds_per_unit": SPARSE_MIN_SECONDS_PER_UNIT,
     "v2_music_surface_preload_count": 6,
     "v2_music_intro_cleanup_enabled": True,
@@ -429,6 +405,8 @@ FIXED_DEFAULT_SETTING_KEYS = frozenset({
 
 _REMOVED_MUSIC_AMBIENCE_STYLES = {"yaoguang", "bilateral_diffraction"}
 _REMOVED_VISUAL_SETTING_KEYS = {
+    "v2_music_surface_reading_strategy",
+    "v2_music_surface_reading_lift_level",
     "v2_diffraction_frequency",
     "v2_yaoguang_outer_color",
     "v2_yaoguang_blur_strength",
@@ -572,18 +550,10 @@ class SettingsManager(QObject):
             raw_sparse_threshold = self._settings.get("v2_music_sparse_highlight_seconds_per_unit")
             self._settings["v2_music_sparse_highlight_seconds_per_unit"] = normalize_sparse_seconds_per_unit(raw_sparse_threshold)
             migrated = migrated or raw_sparse_threshold != self._settings["v2_music_sparse_highlight_seconds_per_unit"]
-            raw_lift_level = self._settings.get("v2_music_surface_reading_lift_level")
-            lift_level = normalize_music_reading_lift_level(raw_lift_level)
-            self._settings["v2_music_surface_reading_lift_level"] = lift_level
-            migrated = migrated or raw_lift_level != lift_level
             raw_gradient_steps = self._settings.get("v2_music_surface_reading_gradient_steps")
             gradient_steps = normalize_music_reading_gradient_steps(raw_gradient_steps)
             self._settings["v2_music_surface_reading_gradient_steps"] = gradient_steps
             migrated = migrated or raw_gradient_steps != gradient_steps
-            raw_reading_strategy = self._settings.get("v2_music_surface_reading_strategy")
-            reading_strategy = normalize_music_reading_strategy(raw_reading_strategy)
-            self._settings["v2_music_surface_reading_strategy"] = reading_strategy
-            migrated = migrated or raw_reading_strategy != reading_strategy
             for key in FIXED_DEFAULT_SETTING_KEYS:
                 default = DEFAULT_SETTINGS[key]
                 migrated = migrated or self._settings.get(key) != default
@@ -679,12 +649,8 @@ class SettingsManager(QObject):
             value = normalize_system_lyric_offset(value)
         if key == "v2_music_glass_level":
             value = normalize_music_glass_level(value)
-        if key == "v2_music_surface_reading_lift_level":
-            value = normalize_music_reading_lift_level(value)
         if key == "v2_music_surface_reading_gradient_steps":
             value = normalize_music_reading_gradient_steps(value)
-        if key == "v2_music_surface_reading_strategy":
-            value = normalize_music_reading_strategy(value)
         if self._settings.get(key) == value:
             return
         self._settings[key] = value

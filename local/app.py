@@ -32,8 +32,6 @@ from local.settings_store import (
     DEFAULT_SETTINGS,
     DEFAULT_MUSIC_AMBIENCE_VALUES,
     FIXED_DEFAULT_SETTING_KEYS,
-    MUSIC_READING_LIFT_DEFAULT_LEVEL,
-    MUSIC_READING_STRATEGY_DEFAULT,
     SettingsManager,
 )
 from local.startup import StartupManager, build_startup_command, normalize_startup_mode
@@ -611,14 +609,8 @@ class LocalIslandApp:
         self.window.set_expand_direction(str(saved_setting("v2_expand_direction", "auto")), notify=False)
         self.window.set_lyric_offset_seconds(float(saved_setting("v2_lyric_offset_seconds", 0.0)), notify=False)
         self.window.set_lyric_font_size(int(saved_setting("v2_lyric_font_size", 18)), notify=False)
-        self.window.set_music_surface_reading_lift_level(
-            saved_setting("v2_music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL), notify=False
-        )
         self.window.set_music_surface_reading_gradient_steps(
             saved_setting("v2_music_surface_reading_gradient_steps", 30), notify=False
-        )
-        self.window.set_music_surface_reading_strategy(
-            saved_setting("v2_music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT), notify=False
         )
         self.window.set_music_sparse_highlight_seconds_per_unit(
             saved_setting("v2_music_sparse_highlight_seconds_per_unit", 0.8), notify=False

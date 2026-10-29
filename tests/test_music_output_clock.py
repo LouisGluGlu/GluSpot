@@ -277,7 +277,6 @@ class MusicSurfaceOutputClockTests(unittest.TestCase):
         self.owner.data_provider = SimpleNamespace(get_audio_route_snapshot=lambda: self.route)
         self.owner._effective_lyric_offset_seconds = self._offset
         self.owner.enable_dual_line_lyrics = False
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.timed_lyrics = [(index * 2.0, f"这是第 {index} 句歌词") for index in range(30)]
         self.owner.timed_lyric_units = [()] * 30
         self.owner.timed_lyric_timing_kinds = ["line"] * 30

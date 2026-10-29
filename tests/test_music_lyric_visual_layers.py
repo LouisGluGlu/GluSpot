@@ -20,7 +20,6 @@ class _LayerOwner(QWidget):
         self._music_windowed_preference = False
         self.music_intro_cleanup_enabled = False
         self.enable_dual_line_lyrics = True
-        self.music_surface_reading_strategy = "gold"
         self.track_title = "Visual layers"
         self.artist = "Test singer"
         self.media_track_id = "visual-layers"
@@ -71,7 +70,6 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
 
     def _reading_lane_lyrics(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.media_position_seconds = 25.0
         self.owner.timed_lyrics = [
             (0.0, "Past line\n翻译：过去"),
@@ -429,7 +427,6 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertAlmostEqual(painted["照耀我"][1], expected, places=4)
 
     def test_low_perception_line_timing_reads_estimated_primary_and_translation(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self._four_rows("One line to sing\n一句歌词")
         self.owner.media_position_seconds = 1.0
         lifted = {}
@@ -456,7 +453,6 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertLess(lifted["一句歌词"][0], 1.0)
 
     def test_low_perception_real_unit_timing_reads_primary_and_translation(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self._four_rows("Hello world\n你好世界")
         self.owner.timed_lyric_units[0] = (
             SimpleNamespace(start_seconds=0.0, end_seconds=0.8, text="Hello "),

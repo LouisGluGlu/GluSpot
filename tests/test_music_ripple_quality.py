@@ -48,7 +48,7 @@ class MusicRippleQualityTests(unittest.TestCase):
 
     def test_large_high_dpi_waves_never_expand_the_small_reference_bitmap(self):
         for dpr in (1.0, 1.5, 2.0):
-            for command in ("next", "obo_reveal"):
+            for command in ("next", "previous", "art_loading"):
                 self.window._transport_feedback = {command: (20.0, QPointF(), 1.0, 1.72)}
                 image = self._image(dpr)
                 with patch.object(self.window, "_cached_transport_light_sprite", side_effect=AssertionError("fixed bitmap upscale")):

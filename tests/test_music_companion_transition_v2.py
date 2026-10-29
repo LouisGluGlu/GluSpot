@@ -45,7 +45,6 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
             classifier.start()
             self.addCleanup(classifier.stop)
         self.owner = _LayerOwner()
-        self.owner.music_surface_reading_lift_level = 0
         self.owner.media_position_source = "local-seek"
         self.owner.media_position_sampled_at = 100.0
         self.owner.set_enable_dual_line_lyrics = lambda enabled: setattr(
@@ -376,7 +375,6 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         )
 
     def test_low_perception_translation_toggle_keeps_shared_half_second_read_front(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.enable_dual_line_lyrics = False
         self.window._translation_setting = False
         main = "月光照耀着我今晚仍会继续轻轻歌唱"

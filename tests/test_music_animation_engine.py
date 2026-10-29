@@ -22,7 +22,6 @@ class MusicAnimationEngineIntegrationTests(unittest.TestCase):
 
     def setUp(self):
         self.owner = _LayerOwner()
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.music_sparse_highlight_seconds_per_unit = 2.0
         self.owner.enable_dual_line_lyrics = False
         self.owner.media_position_source = "local-seek"

@@ -135,7 +135,6 @@ class CoverLyricContinuityTests(unittest.TestCase):
 
     def test_cover_translation_respects_toggle_and_keeps_multiline_companion_inside_cover(self):
         self.lyrics(4)
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.media_is_playing = False
         with patch("local.music_surface_window.time.monotonic", return_value=100.0):
             self.render()

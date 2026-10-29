@@ -17,7 +17,6 @@ class _Owner(QWidget):
         self._music_windowed_preference = False
         self.music_intro_cleanup_enabled = False
         self.enable_dual_line_lyrics = True
-        self.music_surface_reading_strategy = "gold"
         self.media_is_playing = True
         self.media_track_id = "annotation-focus"
         self.media_position_source = "player"

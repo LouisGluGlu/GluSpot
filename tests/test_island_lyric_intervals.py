@@ -30,7 +30,6 @@ class IslandLyricIntervalsTests(unittest.TestCase):
         visual.prev_lyric_index = 0
         visual.media_is_playing = True
         visual.enable_dual_line_lyrics = True
-        visual.music_surface_reading_strategy = "gold"
         visual.lyric_flow_style = "wave_stream"
         visual._stable_lyric_source_position = lambda _now: 12.5
         visual._effective_lyric_offset_seconds = lambda: 0.

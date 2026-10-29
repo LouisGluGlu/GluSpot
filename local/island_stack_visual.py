@@ -189,12 +189,8 @@ from local.mydockfinder import MYDOCKFINDER_PROCESS_NAMES, FinderGlassMaterial, 
 from local.settings_store import (
     DEFAULT_MYDOCKFINDER_LISTEN_PROCESS_NAMES,
     MUSIC_READING_GRADIENT_DEFAULT_STEPS,
-    MUSIC_READING_LIFT_DEFAULT_LEVEL,
-    MUSIC_READING_STRATEGY_DEFAULT,
     normalize_music_ambience_style,
     normalize_music_reading_gradient_steps,
-    normalize_music_reading_lift_level,
-    normalize_music_reading_strategy,
     normalize_finder_bar_style,
     normalize_finder_bar_center_ratio,
 )
@@ -646,9 +642,7 @@ class IslandStackVisual(QWidget):
         self._island_dj_outro_track = ""
         self._island_visible_before_music_surface = True
         self._music_windowed_preference = False
-        self.music_surface_reading_lift_level = MUSIC_READING_LIFT_DEFAULT_LEVEL
         self.music_surface_reading_gradient_steps = MUSIC_READING_GRADIENT_DEFAULT_STEPS
-        self.music_surface_reading_strategy = MUSIC_READING_STRATEGY_DEFAULT
         self.music_sparse_highlight_seconds_per_unit = SPARSE_MIN_SECONDS_PER_UNIT
         self.show_seconds = True
         self.expanded = False
@@ -2985,29 +2979,8 @@ class IslandStackVisual(QWidget):
             self._notify_settings_changed()
         self.update()
 
-    def set_music_surface_reading_lift_level(self, level: int, notify: bool = True):
-        self.music_surface_reading_lift_level = normalize_music_reading_lift_level(level)
-        surface = getattr(self, "music_fullscreen_overlay", None)
-        if surface is not None:
-            surface.update()
-        if notify:
-            self._notify_settings_changed()
-
     def set_music_surface_reading_gradient_steps(self, steps: int, notify: bool = True):
         self.music_surface_reading_gradient_steps = normalize_music_reading_gradient_steps(steps)
-        surface = getattr(self, "music_fullscreen_overlay", None)
-        if surface is not None:
-            surface.update()
-        if notify:
-            self._notify_settings_changed()
-
-    def set_music_surface_reading_strategy(self, strategy: str, notify: bool = True):
-        self.music_surface_reading_strategy = normalize_music_reading_strategy(strategy)
-        self.lyric_last_phase_index = -1
-        self.lyric_last_phase_progress = 0.0
-        self.ember_last_phase_index = -1
-        self.ember_last_phase_progress = 0.0
-        self.update()
         surface = getattr(self, "music_fullscreen_overlay", None)
         if surface is not None:
             surface.update()
@@ -4516,14 +4489,8 @@ class IslandStackVisual(QWidget):
             "v2_expand_direction": self.expand_direction,
             "v2_lyric_offset_seconds": round(float(getattr(self, "lyric_offset_seconds", 0.0)), 3),
             "v2_lyric_font_size": int(getattr(self, "lyric_font_size", 18)),
-            "v2_music_surface_reading_lift_level": normalize_music_reading_lift_level(
-                getattr(self, "music_surface_reading_lift_level", MUSIC_READING_LIFT_DEFAULT_LEVEL)
-            ),
             "v2_music_surface_reading_gradient_steps": normalize_music_reading_gradient_steps(
                 getattr(self, "music_surface_reading_gradient_steps", MUSIC_READING_GRADIENT_DEFAULT_STEPS)
-            ),
-            "v2_music_surface_reading_strategy": normalize_music_reading_strategy(
-                getattr(self, "music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT)
             ),
             "v2_music_sparse_highlight_seconds_per_unit": normalize_sparse_seconds_per_unit(
                 getattr(self, "music_sparse_highlight_seconds_per_unit", SPARSE_MIN_SECONDS_PER_UNIT)
@@ -14358,11 +14325,6 @@ class IslandStackVisual(QWidget):
         kind = kinds[index] if 0 <= index < len(kinds) else "line"
         if kind == "synthetic":
             return True
-        strategy = normalize_music_reading_strategy(getattr(
-            self, "music_surface_reading_strategy", MUSIC_READING_STRATEGY_DEFAULT,
-        ))
-        if strategy != "low_perception":
-            return False
         plan = self._island_display_row_timing(index)
         return plan is None or not plan.has_reading_timing
 

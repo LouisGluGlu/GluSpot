@@ -177,31 +177,29 @@ class IslandParentheticalHighlightTests(unittest.TestCase):
                         TimedLyricUnit(5., 7., 'world'))
         expected = resolve_display_row_timing(text, source_units, 'unit', start=1., next_start=9.)
         for style in ('wave_stream', 'gelv_songscatter', 'ember_fade'):
-            for strategy in ('gold_reading', 'low_perception'):
-                with self.subTest(style=style, strategy=strategy):
-                    visual = fixtures.MusicLyricReadingTests._visual()
-                    visual.lyric_flow_style = style
-                    visual.music_surface_reading_strategy = strategy
-                    visual.media_track_id = 'parenthetical-source-anchors'
-                    visual.timed_lyrics = [(1., text), (9., 'Next')]
-                    visual.timed_lyric_units = [source_units, ()]
-                    visual.timed_lyric_timing_kinds = ['unit', 'line']
-                    visual.lyric_index = 0
-                    visual.lyric_changed_at = 100.
-                    visual.media_is_playing = True
-                    visual._effective_lyric_offset_seconds = lambda: 0.
-                    position = [4.]
-                    visual._stable_lyric_source_position = lambda _now: position[0]
-                    phase = visual._lyric_phase(103.)
-                    self.assertEqual(phase['timed_units'], expected.display_units)
-                    self.assertEqual(phase['progress'], expected.reading_progress(4.))
-                    self.assertNotIn('whole_block_progress', phase)
-                    visual.media_is_playing = False
-                    self.assertEqual(visual._lyric_phase(120.)['progress'], phase['progress'])
-                    position[0] = 2.
-                    visual.media_position_source = 'local-seek'
-                    self.assertEqual(visual._lyric_phase(121.)['progress'], expected.reading_progress(2.))
-                    self.assertIs(visual.timed_lyric_units[0], source_units)
+            with self.subTest(style=style):
+                visual = fixtures.MusicLyricReadingTests._visual()
+                visual.lyric_flow_style = style
+                visual.media_track_id = 'parenthetical-source-anchors'
+                visual.timed_lyrics = [(1., text), (9., 'Next')]
+                visual.timed_lyric_units = [source_units, ()]
+                visual.timed_lyric_timing_kinds = ['unit', 'line']
+                visual.lyric_index = 0
+                visual.lyric_changed_at = 100.
+                visual.media_is_playing = True
+                visual._effective_lyric_offset_seconds = lambda: 0.
+                position = [4.]
+                visual._stable_lyric_source_position = lambda _now: position[0]
+                phase = visual._lyric_phase(103.)
+                self.assertEqual(phase['timed_units'], expected.display_units)
+                self.assertEqual(phase['progress'], expected.reading_progress(4.))
+                self.assertNotIn('whole_block_progress', phase)
+                visual.media_is_playing = False
+                self.assertEqual(visual._lyric_phase(120.)['progress'], phase['progress'])
+                position[0] = 2.
+                visual.media_position_source = 'local-seek'
+                self.assertEqual(visual._lyric_phase(121.)['progress'], expected.reading_progress(2.))
+                self.assertIs(visual.timed_lyric_units[0], source_units)
 
 
 if __name__ == '__main__':

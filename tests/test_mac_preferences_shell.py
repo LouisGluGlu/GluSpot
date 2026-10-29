@@ -432,100 +432,43 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertFalse(DEFAULT_SETTINGS["v2_music_reactive_background_enabled"])
         self.assertEqual(DEFAULT_SETTINGS["v2_music_reactive_background_intensity"], 55)
 
-    def test_music_surface_reading_lift_level_has_four_saved_choices(self):
+    def test_retired_reading_controls_are_absent(self):
         from local.settings_store import DEFAULT_SETTINGS
         from local.settings_window import SettingsWindow
 
-        island = FakeIslandWidget()
-        settings = FakeSettingsManager()
-        self.assertEqual(DEFAULT_SETTINGS["v2_music_surface_reading_lift_level"], 2)
-        self.assertNotIn("v2_fullscreen_reading_effect", DEFAULT_SETTINGS)
-        window = SettingsWindow(island, settings)
+        keys = ("v2_music_surface_reading_strategy", "v2_music_surface_reading_lift_level")
+        self.assertTrue(set(keys).isdisjoint(DEFAULT_SETTINGS))
+        window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
         try:
-            combo = window.music_surface_reading_lift_level
-            self.assertEqual([combo.itemData(index) for index in range(combo.count())], [0, 1, 2, 4])
-            self.assertEqual(combo.currentData(), 2)
-            self.assertNotIn("渐进高亮", [combo.itemText(index) for index in range(combo.count())])
-            for index, level in enumerate((0, 1, 2, 4)):
-                with self.subTest(level=level):
-                    combo.setCurrentIndex(index)
-                    self.assertEqual(settings.get("v2_music_surface_reading_lift_level"), level)
-                    self.assertEqual(island.music_surface_reading_lift_level, level)
+            self.assertFalse(hasattr(window, "music_surface_reading_strategy"))
+            self.assertFalse(hasattr(window, "music_surface_reading_lift_level"))
+            window.sync_from_widget()
         finally:
             window.close()
 
-    def test_music_surface_reading_strategy_is_saved_and_defaults_to_gold(self):
-        from local.settings_store import DEFAULT_SETTINGS
-        from local.settings_window import SettingsWindow
-
-        island = FakeIslandWidget()
-        settings = FakeSettingsManager()
-        self.assertEqual(DEFAULT_SETTINGS["v2_music_surface_reading_strategy"], "gold")
-        window = SettingsWindow(island, settings)
-        try:
-            combo = window.music_surface_reading_strategy
-            self.assertEqual(
-                [combo.itemData(index) for index in range(combo.count())],
-                ["gold", "low_perception"],
-            )
-            self.assertEqual(combo.currentData(), "gold")
-            combo.setCurrentIndex(1)
-            self.assertEqual(settings.get("v2_music_surface_reading_strategy"), "low_perception")
-            self.assertEqual(island.music_surface_reading_strategy, "low_perception")
-        finally:
-            window.close()
-
-    def test_music_surface_reading_strategy_normalizes_invalid_saved_values(self):
+    def test_retired_reading_settings_are_filtered_without_a_load_time_disk_write(self):
         from local import settings_store
 
+        keys = ("v2_music_surface_reading_strategy", "v2_music_surface_reading_lift_level",
+                "v2_fullscreen_reading_effect")
         with tempfile.TemporaryDirectory() as temporary:
-            settings_file = Path(temporary) / "settings.json"
-            with mock.patch.object(settings_store, "SETTINGS_FILE", str(settings_file)), \
-                 mock.patch.object(settings_store, "APP_DATA_DIR", temporary):
-                settings_file.write_text(json.dumps({
-                    "v2_music_surface_reading_strategy": "unexpected",
-                }), encoding="utf-8")
-                settings = settings_store.SettingsManager()
-                self.assertEqual(settings.get("v2_music_surface_reading_strategy"), "gold")
-                settings.set("v2_music_surface_reading_strategy", "low_perception")
-                self.assertEqual(settings.get("v2_music_surface_reading_strategy"), "low_perception")
-                settings.set("v2_music_surface_reading_strategy", "unexpected")
-                self.assertEqual(settings.get("v2_music_surface_reading_strategy"), "gold")
-
-    def test_music_surface_lift_level_normalizes_disk_values_and_removes_old_effect(self):
-        from local import settings_store
-
-        with tempfile.TemporaryDirectory() as temporary:
-            settings_file = Path(temporary) / "settings.json"
-            with mock.patch.object(settings_store, "SETTINGS_FILE", str(settings_file)), \
-                 mock.patch.object(settings_store, "APP_DATA_DIR", temporary):
-                for raw, expected in (("bad", 2), (None, 2), (-1, 2), (1.5, 2), (3, 2), (True, 2), ("4", 4), (0, 0)):
-                    with self.subTest(raw=raw):
-                        settings_file.write_text(json.dumps({
-                            "v2_fullscreen_reading_effect": "highlight",
-                            "v2_music_surface_reading_lift_level": raw,
-                        }), encoding="utf-8")
-                        settings = settings_store.SettingsManager()
-                        self.assertEqual(settings.get("v2_music_surface_reading_lift_level"), expected)
-                        self.assertIsNone(settings.get("v2_fullscreen_reading_effect"))
-                        settings.set("v2_music_surface_reading_lift_level", 1)
-                        self.assertEqual(settings.get("v2_music_surface_reading_lift_level"), 1)
-                        settings.set("v2_fullscreen_reading_effect", "highlight")
-                        settings.save_now()
-                        saved = json.loads(settings_file.read_text(encoding="utf-8"))
-                        self.assertEqual(saved["v2_music_surface_reading_lift_level"], 1)
-                        self.assertNotIn("v2_fullscreen_reading_effect", saved)
-                settings_file.write_text(json.dumps({
-                    "v2_fullscreen_reading_effect": "highlight",
-                    "v2_lyric_font_size": 21,
-                }), encoding="utf-8")
-                settings = settings_store.SettingsManager()
-                self.assertEqual(settings.get("v2_music_surface_reading_lift_level"), 2)
-                self.assertEqual(settings.get("v2_lyric_font_size"), 18)
-                settings.save_now()
-                saved = json.loads(settings_file.read_text(encoding="utf-8"))
-                self.assertEqual(saved["v2_music_surface_reading_lift_level"], 2)
-                self.assertNotIn("v2_fullscreen_reading_effect", saved)
+            path = Path(temporary) / "settings.json"
+            for old_scheme in ("gold", "gold_reading", "unexpected"):
+                for level in (0, 1, 2, 4, "bad"):
+                    with self.subTest(old_scheme=old_scheme, level=level):
+                        original = json.dumps(dict(zip(keys, (old_scheme, level, "highlight"))))
+                        path.write_text(original, encoding="utf-8")
+                        settings = settings_store.SettingsManager(settings_path=path)
+                        try:
+                            self.assertTrue(set(keys).isdisjoint(settings._settings))
+                            self.assertEqual(path.read_text(encoding="utf-8"), original)
+                            for key in keys:
+                                settings.set(key, "stale-export")
+                                self.assertIsNone(settings.get(key))
+                            settings.save_now()  # This is an isolated temporary fixture only.
+                            self.assertTrue(set(keys).isdisjoint(json.loads(path.read_text(encoding="utf-8"))))
+                        finally:
+                            settings._save_timer.stop()
 
     def test_music_surface_reading_gradient_has_its_own_sidebar_page_and_saves(self):
         from local.settings_store import DEFAULT_SETTINGS

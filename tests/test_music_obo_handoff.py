@@ -17,7 +17,6 @@ class _Owner(QWidget):
         self._music_windowed_preference = False
         self.music_intro_cleanup_enabled = False
         self.enable_dual_line_lyrics = True
-        self.music_surface_reading_strategy = "gold"
         self.media_is_playing = True
         self.media_track_id = "obo-handoff"
         self.media_position_source = "player"
@@ -191,7 +190,10 @@ class MusicOboHandoffTests(unittest.TestCase):
         self.assertGreater(poses[5], poses[0])
         self.assertTrue(all(right >= left - 0.01 for left, right in zip(poses[:6], poses[1:6])))
         self.assertLess(abs(poses[6] - poses[5]), 0.15)
-        self.assertLess(max(right - left for left, right in zip(poses[:6], poses[1:6])), 1.0)
+        # The locked original lift doubles the former default half-height.
+        # Bound each 10 ms step relative to the full prepared displacement.
+        self.assertLess(max(right - left for left, right in zip(poses[:6], poses[1:6])),
+                        abs(poses[5] - poses[0]) * .5)
 
     def test_paused_gap_holds_unread_pose_and_zero_gap_never_early_focuses(self):
         self._render(1.2)
@@ -247,7 +249,6 @@ class MusicOboHandoffTests(unittest.TestCase):
         self.assertIsNone(self.window._obo_advanced_focus_pose)
 
     def test_low_perception_mixed_timing_song_prepares_next_unread_row(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         focus, painted = self._render(1.5)
         self.assertEqual(focus, 1)
         self.assertEqual(self.window._lyric_motion.active_index, 0)
@@ -256,7 +257,6 @@ class MusicOboHandoffTests(unittest.TestCase):
         self.assertEqual(next_row[1], 0.0)
 
     def test_low_perception_without_real_units_switches_whole_lines_only(self):
-        self.owner.music_surface_reading_strategy = "low_perception"
         self.owner.timed_lyric_units = [(), (), (), ()]
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
         focus, painted = self._render(2.3)

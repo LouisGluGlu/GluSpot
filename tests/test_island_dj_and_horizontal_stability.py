@@ -72,7 +72,6 @@ class IslandDjAndHorizontalTests(unittest.TestCase):
 
     def test_actual_low_perception_phase_stays_stable_with_paused_source_clock(self):
         visual = fixtures.IslandLyricFollowGeometryTests._visual()
-        visual.music_surface_reading_strategy = "low_perception"
         visual.media_position_seconds = 2.
         visual.media_is_playing = False
         poses, fronts = [], []

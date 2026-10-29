@@ -28,7 +28,6 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
         visual.font_shrink_scale = 1.0
         visual.high_quality_font_rendering = False
         visual.music_ambience_style = "sea_level"
-        visual.music_surface_reading_strategy = "gold_reading"
         visual.location_mode = "free"
         visual.top_notch_height_mode = "standard"
         visual.lyric_font_size = 18
@@ -135,9 +134,8 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
         self.assertEqual(calls_by_style[0], calls_by_style[1])
 
     @staticmethod
-    def _phase_visual(style: str, *, real_units: bool, strategy: str, position: float):
+    def _phase_visual(style: str, *, real_units: bool, position: float):
         visual = IslandSharedLyricStylesTests._visual(style)
-        visual.music_surface_reading_strategy = strategy
         visual.timed_lyrics = [(0.0, "Shine softly\n春风轻拂"), (4.0, "Then glow\n随后闪耀"), (8.0, "Following")]
         visual.timed_lyric_units = [
             (TimedLyricUnit(0.0, 0.8, "Shine "), TimedLyricUnit(0.8, 0.8, "softly")) if real_units else (), (), (),
@@ -150,23 +148,22 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
         return visual
 
     def test_true_unit_front_and_finished_sentence_focus_match_wave(self):
-        for strategy in ("gold_reading", "low_perception"):
-            for position in (0.2, 0.9, 1.8, 3.0):
-                with self.subTest(strategy=strategy, position=position):
-                    wave = self._phase_visual("wave_stream", real_units=True, strategy=strategy, position=position)
-                    gelv = self._phase_visual("gelv_songscatter", real_units=True, strategy=strategy, position=position)
-                    wave_phase, gelv_phase = wave._lyric_phase(100.0), gelv._lyric_phase(100.0)
-                    self.assertEqual(gelv_phase, wave_phase)
-                    self.assertFalse(gelv_phase["whole_row"])
-                    self.assertEqual(gelv.lyric_index, 0)
-                    self.assertIn("timed_units", gelv_phase)
-                    if position >= 1.8:
-                        self.assertEqual(gelv_phase["visual_focus_index"], 1)
+        for position in (0.2, 0.9, 1.8, 3.0):
+            with self.subTest(position=position):
+                wave = self._phase_visual("wave_stream", real_units=True, position=position)
+                gelv = self._phase_visual("gelv_songscatter", real_units=True, position=position)
+                wave_phase, gelv_phase = wave._lyric_phase(100.0), gelv._lyric_phase(100.0)
+                self.assertEqual(gelv_phase, wave_phase)
+                self.assertFalse(gelv_phase["whole_row"])
+                self.assertEqual(gelv.lyric_index, 0)
+                self.assertIn("timed_units", gelv_phase)
+                if position >= 1.8:
+                    self.assertEqual(gelv_phase["visual_focus_index"], 1)
 
     def test_line_only_low_perception_phase_matches_shared_word_reading(self):
         for position in (0.1, 0.25, 0.75):
-            wave = self._phase_visual("wave_stream", real_units=False, strategy="low_perception", position=position)
-            gelv = self._phase_visual("gelv_songscatter", real_units=False, strategy="low_perception", position=position)
+            wave = self._phase_visual("wave_stream", real_units=False, position=position)
+            gelv = self._phase_visual("gelv_songscatter", real_units=False, position=position)
             phase = gelv._lyric_phase(100.0)
             self.assertEqual(phase, wave._lyric_phase(100.0))
             self.assertFalse(phase["whole_row"])
@@ -176,21 +173,20 @@ class IslandSharedLyricStylesTests(unittest.TestCase):
                 "Shine softly", start=0., next_start=4.,
             ).reading_progress(position))
 
-    def test_mixed_timing_song_estimates_missing_row_units_for_both_strategies(self):
-        for strategy in ("gold_reading", "low_perception"):
-            phases = []
-            for style in ("wave_stream", "gelv_songscatter"):
-                visual = self._phase_visual(style, real_units=True, strategy=strategy, position=5.0)
-                visual.lyric_index = 1
-                phase = visual._lyric_phase(100.0)
-                self.assertFalse(phase["whole_row"])
-                self.assertGreater(phase["progress"], 0)
-                self.assertLess(phase["progress"], 1)
-                self.assertNotIn("whole_block_progress", phase)
-                self.assertTrue(phase["timed_units"])
-                self.assertTrue(all(unit.estimated for unit in phase["timed_units"]))
-                phases.append(phase)
-            self.assertEqual(phases[0], phases[1])
+    def test_mixed_timing_song_estimates_missing_row_units_with_shared_reading(self):
+        phases = []
+        for style in ("wave_stream", "gelv_songscatter"):
+            visual = self._phase_visual(style, real_units=True, position=5.0)
+            visual.lyric_index = 1
+            phase = visual._lyric_phase(100.0)
+            self.assertFalse(phase["whole_row"])
+            self.assertGreater(phase["progress"], 0)
+            self.assertLess(phase["progress"], 1)
+            self.assertNotIn("whole_block_progress", phase)
+            self.assertTrue(phase["timed_units"])
+            self.assertTrue(all(unit.estimated for unit in phase["timed_units"]))
+            phases.append(phase)
+        self.assertEqual(phases[0], phases[1])
 
     def test_skipped_rows_have_identical_spring_pose_and_seek_reversal(self):
         sequences = []

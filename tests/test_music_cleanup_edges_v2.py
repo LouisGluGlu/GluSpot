@@ -184,7 +184,6 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
         owner.media_track_id = "native-bracket-source-mapping"
         owner.enable_dual_line_lyrics = True
         owner.music_intro_cleanup_enabled = False
-        owner.music_surface_reading_strategy = "gold"
         original = "I (love) love"
         units = tuple(SimpleNamespace(start_seconds=start, end_seconds=end, text=word) for start, end, word in (
             (10.0, 10.5, "I "), (10.5, 11.0, "(love) "), (11.0, 12.0, "love"),
@@ -232,7 +231,6 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
         owner.media_track_id = "bracket-read-boundary"
         owner.enable_dual_line_lyrics = True
         owner.music_intro_cleanup_enabled = False
-        owner.music_surface_reading_strategy = "gold"
         owner.music_sparse_highlight_seconds_per_unit = 100.0
         owner.media_is_playing = True
         owner.media_duration_seconds = 18.0
@@ -383,7 +381,6 @@ class MusicAnnotationBoundaryAuditV2Tests(unittest.TestCase):
         island.artist = "Solo"
         island.enable_dual_line_lyrics = True
         island.music_intro_cleanup_enabled = False
-        island.music_surface_reading_strategy = "gold"
         island.lyric_flow_style = "wave_stream"
         island.media_is_playing = True
         island.lyric_index = 0
