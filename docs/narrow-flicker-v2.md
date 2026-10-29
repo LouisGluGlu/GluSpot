@@ -27,3 +27,29 @@ The same external `/tmp/gluspot-narrow-measure.py` captured 480 deterministic Qt
 Lyric layer builds decrease 128 → 15; skipped duplicate ticks increase 82 → 231. Sixty fixed-pose frames produce one hash cluster and SSIM 1.0 on both versions. That fixed-pose check does not establish absence of moving ghosts. The fixture MAD gate remains unmet, including worse bottom-row variation. No physical PC executor is exposed, so the prescribed native capture and live lag acceptance cannot be claimed.
 
 Generated logs/captures remain outside source control in `/tmp/gluspot-narrow-baseline-e152b5e/`, `/tmp/gluspot-narrow-commit1-roi/` and `/tmp/gluspot-narrow-commit1-veil/`. The external measurement script's SHA-256 is `426c276b2c50569838d7116b065a4c6bf9fb92a70fff19ad368c38317100a0d1`. No build, version change or push.
+
+## Immediate live focus
+
+The live `_lyric_frame` no longer interpolates from `owner.prev_lyric_index` over 360 ms. Highlight binds immediately to the selected index. A stored scroll pose uses exponential easing with 120 ms tau only for fractional movement; a displacement of at least one row snaps. Track/first-sample changes reset that pose before rendering. Multiple frame requests at one timestamp are idempotent, and the small scroll tail settles to enable duplicate-frame skipping.
+
+For position sources containing `cef` or `playprogress`, focus comes from the existing `active_index_for_position(timed, playback_position(), lead_seconds=.28)`. Real capture publishes `capture-model`, so the view reads the existing provider's cached `capture.position_route` once per tick to recognize its CEF route. This is diagnostic state lookup, not player polling or another playback clock. Other sources retain the owner's index, including UIA and unavailable capture. Word timing and seek position continue to read the unmodified shared position. No lead settings, rolling calibration or new source observer is introduced: the current adapter has no independent NetEase highlighted-index observation to calibrate against.
+
+The diagnostic snapshot adds selected/owner indices, scroll index, source/route, position, effective lead and highlighted-line start. Its `lag_ms` is line-start minus position, a phase observation; it does not measure synchronization against an independent NetEase UI timestamp.
+
+Fifteen new `tests.test_narrow_live_lag` cases pass. Together with timeline and capture integration, 28 focused checks pass. The combined narrow/flicker/shared-runtime command runs 45 tests with 43 passes and two failures: the baseline intro-center assertion described above and `test_same_line_highlight_after_settle_still_follows_owner_sample`, whose strict `30 < scroll < 31` expectation is superseded by the explicitly requested `>=1` snap (`31.0`). Both existing test files remain unchanged. All 27 unchanged live checks, five input checks and 25 layout checks pass. An AST comparison confirms `paint_controls`, `paint_header` and `refresh_controls` match baseline exactly.
+
+Both final full-discovery attempts ended with exit 139 in the already documented Qt SIGSEGV at `ArtworkPlayerUrlUpgradeTests.test_normalized_original_cache_wins_supplied_preview`, before producing a suite summary. The second used `PYTHONFAULTHANDLER=1`; its stack stops in `api/providers.py:_album_art_min_side` while validating image bytes, outside the changed narrow code. Logs are `/tmp/gluspot-narrow-v2-final-full.log` and `/tmp/gluspot-narrow-v2-final-full-faulthandler.log`. No causal diagnosis or clean full-suite result is claimed.
+
+The unchanged 480-frame/22 ms fixture harness after both sections reports:
+
+| ROI | Final MAD std / max |
+| --- | ---: |
+| lyric_left | 1.4247 / 9.3744 |
+| lyric_mid | 1.1296 / 7.5228 |
+| active_band | 3.9397 / 26.2880 |
+| chrome_top | 0.0187 / 0.1761 |
+| bottom_lyric | 0.0173 / 0.1436 |
+
+The full run including its static phase has 580 samples, 225 commits, 355 no-ops, 15 lyric builds and 0.9336 veil cache-hit ratio. Fixed-pose frames again have one hash cluster and SSIM 1.0 in every ROI. The active-band std and maximum-spike gates remain unmet; this fixture does not establish physical flicker, moving-ghost acceptance or the prescribed native ≥40-flip/three-minute ≤150 ms timing gate. Final artifacts are in `/tmp/gluspot-narrow-v2-final-roi/`.
+
+Final unchanged `check_veil.py --frames 180` passes at both DPRs. Lyrics paint P95 is 1.817 / 4.992 ms and paused-fade CPU is 5.82% / 11.05%, within the existing gates. This carries a paint-cost regression from baseline P95 0.532 / 1.095 ms; scroll+fade P95 is 3.673 / 6.281 ms. Reports are in `/tmp/gluspot-narrow-v2-final-veil/`. Compilation and whitespace checks pass.

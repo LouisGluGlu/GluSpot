@@ -17,6 +17,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient,
 from PySide6.QtWidgets import QApplication
 
 from api.models import ColorToken, TimedLyricLine, TimedLyricUnit
+from api.lyric_timeline import active_index_for_position
 from api.online_music import OnlineSong
 from api.providers import WindowsMediaProvider
 from local.audio_output_icons import paint_audio_output_status
@@ -85,6 +86,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._committed_track = None
         self._settled_epoch = None
         self._snap_change = None
+        self._live_position_route = ""
+        self._live_scroll_index = None
+        self._live_scroll_at = None
+        self._live_lyric_diagnostics = {}
         self._diagnostics.update(settle_commits=0, first_sample_settle_outlier=0)
         self._diagnostics.update(stale_frames=0)
         self._painted_track = None
@@ -174,6 +179,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def diagnostic_snapshot(self):
         result = dict(self._diagnostics)
+        result.update(self._live_lyric_diagnostics)
         result['visible_windows'] = sum(
             widget.isVisible() and not widget.isMinimized()
             for widget in QApplication.topLevelWidgets()
@@ -331,6 +337,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._pointer_exit_at = None
         if self.live:
             self._prepare_live_commit()
+            self._refresh_live_position_route()
             self._sync_owned_playback_mode()
             self.dj_available = self._owned_personal_dj_enabled is not None
             self.dj_enabled = self._owned_personal_dj_enabled is True
@@ -915,6 +922,22 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         super()._advance_lyric_animation(now)
 
+    def _refresh_live_position_route(self):
+        """Cache the provider's published route; never poll a physical clock."""
+        self._live_position_route = ""
+        if getattr(self.owner, "media_position_source", "") != "capture-model":
+            return
+        diagnostics = getattr(self.owner.data_provider, "diagnostics", None)
+        if not callable(diagnostics):
+            return
+        try:
+            snapshot = diagnostics()
+            self._live_position_route = str(snapshot.get("capture", {}).get("position_route", ""))
+        except Exception:
+            # Ancillary diagnostics must not stop lyric following. The owner
+            # remains the focus authority when a route cannot be identified.
+            pass
+
     def _lyric_frame(self, timed, now):
         if not self.live:
             return super()._lyric_frame(timed, now)
@@ -931,18 +954,44 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # mirror of the shared snapshot, never a separately projected clock.
         self._lyric_motion.last_position = position
         if not timed:
+            self._live_scroll_index = self._live_scroll_at = None
+            self._live_lyric_diagnostics = {}
             return MusicLyricFrame(0, 0.0, 0.0, 0.0)
+        source = str(getattr(self.owner, "media_position_source", "") or "").lower()
+        uia = source.endswith("-uia-lyrics")
+        cef = not uia and (
+            "cef" in source or "playprogress" in source
+            or source == "capture-model" and self._live_position_route == "cef")
+        lead = 0.0 if uia or source == "capture-unavailable" else .12
         focus = min(len(timed) - 1, max(0, self.owner.lyric_index))
-        previous = min(len(timed) - 1, max(0, self.owner.prev_lyric_index))
-        if self._snap_change == (track_key, self.owner.lyric_changed_at):
-            previous = focus
-        transition = min(1.0, max(0.0, (now - self.owner.lyric_changed_at) / .36))
-        eased = 1.0 - (1.0 - transition) ** 3
+        if cef:
+            lead = max(lead, .28)
+            focus = active_index_for_position(timed, position, lead_seconds=lead)
+        # Highlight switches immediately. Only an existing fractional scroll
+        # pose eases, and a full-row displacement always snaps.
+        scroll = self._live_scroll_index
+        previous_at = self._live_scroll_at
+        if scroll is None or previous_at is None or abs(focus - scroll) >= 1.0:
+            scroll = float(focus)
+        else:
+            elapsed = max(0.0, now - previous_at)
+            scroll += (focus - scroll) * -math.expm1(-elapsed / .12)
+            if abs(focus - scroll) < .001:
+                scroll = float(focus)
+        self._live_scroll_index = scroll
+        self._live_scroll_at = now if previous_at is None else max(now, previous_at)
         start = float(timed[focus][0])
         end = (float(timed[focus + 1][0]) if focus + 1 < len(timed)
                else max(start + 1.0, self.owner.media_duration_seconds))
         progress = min(1.0, max(0.0, (position - start) / max(.001, end - start)))
-        return MusicLyricFrame(focus, previous + (focus - previous) * eased, progress, 0.0)
+        self._live_lyric_diagnostics = dict(
+            t_mono=now, lyric_index=focus, scroll_index=scroll,
+            position_ms=position * 1000.0, lead_s=lead,
+            position_source=source, position_route=self._live_position_route,
+            owner_lyric_index=self.owner.lyric_index,
+            highlighted_line_start_ms=start * 1000.0,
+            lag_ms=(start - position) * 1000.0)
+        return MusicLyricFrame(focus, scroll, progress, 0.0)
 
     def _prepare_live_commit(self):
         """Invalidate a track/epoch in one UI transaction, before any painting."""
@@ -952,6 +1001,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         settled = bool(epoch) and (track, epoch) != self._settled_epoch
         if track == self._committed_track and not settled:
             return
+        self._live_scroll_index = self._live_scroll_at = None
+        self._live_lyric_diagnostics = {}
+        if swapped:
+            self._live_position_route = ""
         if swapped or settled:
             for name in ('_source_lines_key', '_real_layout_key', '_content_frame_key',
                          '_lyric_static_key', '_current_ink_key', '_controls_key',
