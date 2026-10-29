@@ -7,6 +7,8 @@ from PySide6.QtCore import QRectF
 from PySide6.QtGui import QFont, QFontMetricsF
 from PySide6.QtWidgets import QApplication
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from layout import NarrowLayout
 from motion import EaseOutFade, Visibility
 from veil import VeilOverlay

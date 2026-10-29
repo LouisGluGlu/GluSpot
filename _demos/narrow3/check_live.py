@@ -131,7 +131,8 @@ class LiveChecks(unittest.TestCase):
             self.app.processEvents()
         QTest.qWait(500)
         elapsed = time.monotonic() - started
-        self.assertGreater(counter.paints, 3)
+        self.assertGreater(self.window.diagnostic_snapshot()['noop_paints'], 3,
+                           'paused duplicate samples were not coalesced')
         self.assertLessEqual(counter.paints, elapsed * 36 + 2,
                              'partial updates escaped the live full-frame cadence')
 
@@ -154,6 +155,7 @@ class LiveChecks(unittest.TestCase):
         fade = self.window.visibility.footer
         fade.start = fade.target = 1
         fade.duration = 0
+        self.window.visibility.advance(time.monotonic(), True, True, False)
         point = next(group['media:next'].center() for group in self.window.glass_groups() if 'media:next' in group)
         self.window._begin_live_press(point)
         self.window._finish_live_press(point)
@@ -180,10 +182,10 @@ class LiveChecks(unittest.TestCase):
             self.window.mouseMoveEvent(event)
             self.window.tick()
         self.assertTrue(self.window.shelf)
-        with patch('narrow_window.time.monotonic', return_value=100.16):
+        with patch('narrow_window.time.monotonic', return_value=100.21):
             self.window.tick()
         self.assertFalse(self.window.shelf)
-        with patch('narrow_window.time.monotonic', return_value=101.37):
+        with patch('narrow_window.time.monotonic', return_value=101.42):
             self.window.tick()
         self.assertEqual(self.window.visibility.opacity.target, 0)
 
@@ -418,7 +420,7 @@ class LiveChecks(unittest.TestCase):
         self.window._pointer_active_until = now + 10.0
         with patch('narrow_window.time.monotonic', return_value=now):
             self.window.tick()
-        self.assertEqual(fade.duration, .300)
+        self.assertEqual(fade.duration, .320)
         self.assertEqual(fade.started, now)
         self.assertIsNotNone(self.window._fade_background)
         self.assertIsNotNone(self.window._fade_content_frames)

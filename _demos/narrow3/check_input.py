@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import time
+import sys
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +11,8 @@ from PySide6.QtCore import QCoreApplication, QEvent, QPointF, Qt
 from PySide6.QtGui import QEnterEvent, QInputDevice, QMouseEvent, QPaintEvent, QTouchEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from layout import NarrowLayout
 from narrow_window import MusicSurfaceWindow, NarrowStudyWindow, make_owner
@@ -44,6 +48,7 @@ class NarrowInputChecks(unittest.TestCase):
         fade = self.window.visibility.opacity
         fade.start = fade.target = 1.0
         fade.duration = 0
+        self.window.visibility.progress = 1.0
 
     def touch(self, action, position):
         sequence = QTest.touchEvent(self.window, self.device)
@@ -61,6 +66,7 @@ class NarrowInputChecks(unittest.TestCase):
         point = QPointF(180, 300)
         event = QEnterEvent(point, point, QPointF(window.mapToGlobal(point.toPoint())))
         QCoreApplication.sendEvent(window, event)
+        window.tick()
         self.assertTrue(window.shelf)
         self.assertEqual(fade.target, 1)
         after = NarrowLayout(window.width(), window.height(), 1)

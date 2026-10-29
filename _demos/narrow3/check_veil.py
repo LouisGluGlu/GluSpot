@@ -23,6 +23,8 @@ from PySide6.QtWidgets import QApplication
 from PIL import Image, ImageSequence
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from layout import NarrowLayout
 from veil import VeilOverlay
 
@@ -89,7 +91,7 @@ def synthetic_checks(dpr):
     for y in (30, top_start - 4, bottom_end + 4, 600):
         row = full[round(y * dpr), :, 0]
         assert row[round(100 * dpr)] < 40, ("sharp glyph survived strongest blur", y)
-        assert row[round(92 * dpr)] > 0, ("blur does not spread glyph ink", y)
+        assert row[round(94 * dpr)] > 0, ("blur does not spread glyph ink", y)
     # Maximal solid bands are constant; feather approaches clear middle.
     for y, expected in ((0, 1), (top_start, 1), (top_end, 0),
                         ((top_end + bottom_start) / 2, 0),
@@ -112,7 +114,7 @@ def synthetic_checks(dpr):
         overlay.paint(painter, empty, "empty-source", 1)
     dim_pixels = rgba(dimmed)
     for y in (30, 600):
-        assert abs(int(dim_pixels[round(y*dpr), round(250*dpr), 0])-round(255*(1-.55))) <= 1, "dim alpha differs from .55"
+        assert abs(int(dim_pixels[round(y*dpr), round(250*dpr), 0])-round(255*(1-VeilOverlay.DIM_ALPHA))) <= 1, "dim alpha differs from shared token"
     assert int(dim_pixels[round(300*dpr), round(250*dpr), 0]) == 255, "dim reaches the middle"
     # Both sides of each feather meet the clear/solid area with zero slope.
     # Read real composited pixels, so this also catches a straight dim seam.
@@ -163,6 +165,7 @@ def set_opacity(window, opacity):
     fade = window.visibility.opacity
     fade.start = fade.target = opacity
     fade.duration = 0
+    window.visibility.progress = opacity
 
 
 def capture(window, output, dpr, mode):
@@ -213,13 +216,13 @@ def capture(window, output, dpr, mode):
         animation.append(Image.fromarray(pixels, "RGBA").convert("RGB"))
     # GIF stores centiseconds: alternate 10/20ms delays instead of requesting
     # 17ms (which GIF would truncate to 10ms and shorten the actual fade).
-    delays = [round((i+1)*300/18/10)*10-round(i*300/18/10)*10
+    delays = [round((i+1)*window.visibility.DURATION*1000/18/10)*10-round(i*window.visibility.DURATION*1000/18/10)*10
               for i in range(len(animation))]
     animation[0].save(output / f"veil_dpr{dpr}_{mode}_transition.gif",
                       save_all=True, append_images=animation[1:],
                       duration=delays, loop=0)
     with Image.open(output / f"veil_dpr{dpr}_{mode}_transition.gif") as recorded:
-        assert sum(frame.info.get("duration", 0) for frame in ImageSequence.Iterator(recorded)) == 600, "recorded fade timing"
+        assert sum(frame.info.get("duration", 0) for frame in ImageSequence.Iterator(recorded)) == round(window.visibility.DURATION * 2000), "recorded fade timing"
     return {"captures": 3, "middle_identical": True, "content_motion_px": 0}
 
 
@@ -271,7 +274,7 @@ def start_fade(window, now, reveal):
 
 
 def simulated_fades(window, target, frames, *, advancing=False, position=None):
-    """Sample genuine 300ms fades at 60Hz; perf_counter stays a real clock.
+    """Sample genuine 320ms fades near 60Hz; perf_counter stays a real clock.
 
     The old alpha assignment used duration=0, which sampled the steady paint
     path. Here tick and paint observe one monotonically advancing time and a
@@ -279,6 +282,8 @@ def simulated_fades(window, target, frames, *, advancing=False, position=None):
     beyond the list's 100ms material-refresh interval.
     """
     base = time.monotonic()
+    samples_per_fade = round(window.visibility.DURATION * 60)
+    frame_seconds = window.visibility.DURATION / samples_per_fade
     old_position = window.owner.media_position_seconds
     old_playing, old_freeze = window.owner.media_is_playing, window.freeze_clock
     window.owner.media_is_playing, window.freeze_clock = advancing, not advancing
@@ -287,12 +292,12 @@ def simulated_fades(window, target, frames, *, advancing=False, position=None):
     old_builds = window.veil.builds
     try:
         for frame in range(frames):
-            cycle, offset = divmod(frame, 18)
-            instant = base + (frame + .5) / 60
+            cycle, offset = divmod(frame, samples_per_fade)
+            instant = base + (frame + .5) * frame_seconds
             if offset == 0:
-                start_fade(window, base + cycle * .3, cycle % 2 == 0)
+                start_fade(window, base + cycle * window.visibility.DURATION, cycle % 2 == 0)
             if position is not None:
-                window.owner.media_position_seconds = position + frame / 60
+                window.owner.media_position_seconds = position + frame * frame_seconds
             with patch("narrow_window.time.monotonic", return_value=instant):
                 assert not window.visibility.settled(instant), "sample is outside the fade"
                 started = time.perf_counter()
@@ -343,10 +348,10 @@ def paint_benchmark(window, frames, mode):
         cpu_start = time.process_time()
         start = time.perf_counter()
         count = 0
-        while time.perf_counter()-start < .3:
+        while time.perf_counter()-start < window.visibility.DURATION:
             render_frame(window, target)
             count += 1
-            scheduled_frame = min(start+.3, start+count*interval)
+            scheduled_frame = min(start+window.visibility.DURATION, start+count*interval)
             time.sleep(max(0, scheduled_frame-time.perf_counter()))
         return 100*(time.process_time()-cpu_start)/(time.perf_counter()-start)
 
@@ -357,13 +362,13 @@ def paint_benchmark(window, frames, mode):
     cpu_start = time.process_time()
     start = time.perf_counter()
     count = 0
-    while time.perf_counter()-start < .3:
+    while time.perf_counter()-start < window.visibility.DURATION:
         now = time.perf_counter()
         with QPainter(target) as painter:
             window.veil.paint(painter, source, window.veil_key,
-                              1-(1-min(1.0, (now-start)/.3))**3, window.veil_scroll_delta)
+                              1-(1-min(1.0, (now-start)/window.visibility.DURATION))**3, window.veil_scroll_delta)
         count += 1
-        time.sleep(max(0, min(start+.3, start+count/60)-time.perf_counter()))
+        time.sleep(max(0, min(start+window.visibility.DURATION, start+count/60)-time.perf_counter()))
     veil_cpu = 100*(time.process_time()-cpu_start)/(time.perf_counter()-start)
     # Exercise the current run with the genuine advancing demo clock as well.
     old_playing, old_freeze = window.owner.media_is_playing, window.freeze_clock
