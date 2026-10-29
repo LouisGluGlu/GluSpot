@@ -241,11 +241,18 @@ QT_QPA_PLATFORM=offscreen /tmp/gluspot-capture-fix-venv/bin/python -X faulthandl
 QT_QPA_PLATFORM=offscreen /tmp/gluspot-capture-fix-venv/bin/python -X faulthandler -m unittest discover tests -v
 ```
 
-The requested **PC capture suite × 3**, NetEase self-seek, GluSpot word click
-and GluSpot progress drag remain **pending** in this investigation until their
-actual results are recorded. The current session has no PC execution/file relay
-or forwarded live CDP endpoint. Historical PC passes above do not validate this
-repair.
+PC verification at `5517574` on `E:\grok-gluspot\_wt_capture2` with
+`E:\gpt-island\.venv\Scripts\python.exe`: capture discovery **226 × 3** pass
+(**20.782 / 18.846 / 18.725 s**); focused lyric/seek/routing/UI **34 / 3.357 s** OK.
+Live CDP on product port **8178** after installing early revision 2: `revision:2`,
+`discovering:false`, `Object.defineProperty` restored to native, `channel` is a
+data property again, `channel.registerCall.length === 2` (was 0 under rest wrappers).
+Probe **passed**: **84 samples / 10 s ≈ 8.4 Hz**, seeks **1 / 22 / 5 ms**, restore
+**0 ms**, native PlayProgress firing, chain intact. Direct `audioplayer.seek` via
+the adapter also moved the playhead. Full GluSpot UI word-click and NetEase's own
+lyric/timeline click still need wuju's eyes after restarting GluSpot +
+**修复 / 重启网易云** so the product session binds revision 2. Progress-bar drag
+remains the open `LibraryProgress` identification item (display-only today).
 
 For wuju's re-test:
 
