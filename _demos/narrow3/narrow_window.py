@@ -90,6 +90,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._real_blocks = ()
         self._pointer_active_until = 0.0
         self._live_press = None
+        self._narrow_drag = False
         self._painted_live_model = None
         self._painted_live_hit_pose = None
         self._diagnostics = dict(samples=0, commits=0, swap_commits=0,
@@ -1506,8 +1507,33 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.update()
 
     def mouseMoveEvent(self, event):
-        if not self.narrow:
+        # Keep the press path until release if resizing switches to wide mode.
+        if not self.narrow and not self._narrow_drag:
             super().mouseMoveEvent(event)
+            return
+        if (self.live and event.buttons() & Qt.MouseButton.LeftButton
+                and (self._moving or self._resize_edges)):
+            delta = event.globalPosition().toPoint() - self._drag_origin
+            original = self._drag_geometry
+            if self._moving:
+                self.move(original.topLeft() + delta)
+            else:
+                edges = self._resize_edges
+                requested_width = original.width() + (delta.x() if "right" in edges else -delta.x() if "left" in edges else 0)
+                requested_height = original.height() + (delta.y() if "bottom" in edges else -delta.y() if "top" in edges else 0)
+                available = self._available_geometry()
+                # Clamp before anchoring: Qt's minimum-size correction alone
+                # would move the opposite edge on top/left inward drags.
+                width = max(self.minimumWidth(), min(available.width(), requested_width))
+                height = max(self.minimumHeight(), min(available.height(), requested_height))
+                x = original.right() - width + 1 if "left" in edges else original.left()
+                y = original.bottom() - height + 1 if "top" in edges else original.top()
+                self._content_layout_user_resizing = True
+                try:
+                    self.setGeometry(x, y, width, height)
+                finally:
+                    self._content_layout_user_resizing = False
+            event.accept()
             return
         self.pointer_activity(event.position(), time.monotonic())
         self._glass_feedback.move(event.position())
@@ -1594,7 +1620,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         if self.live:
             if event.button() == Qt.MouseButton.LeftButton:
-                self._begin_live_press(event.position())
+                action = self._live_action_at(event.position())
+                if action is not None:
+                    self._begin_live_press(event.position())
+                else:
+                    self._resize_edges = self._edge_set(event.position())
+                    self._moving = not self._fullscreen and not self._resize_edges
+                    self._narrow_drag = bool(self._moving or self._resize_edges)
+                    self._drag_origin = event.globalPosition().toPoint()
+                    self._drag_geometry = self.geometry()
                 event.accept()
             return
         self._press_at(event.position())
@@ -1719,12 +1753,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.update()
 
     def mouseReleaseEvent(self, event):
-        if not self.narrow:
+        if not self.narrow and not self._narrow_drag:
             super().mouseReleaseEvent(event)
             return
         if self.live:
             if event.button() == Qt.MouseButton.LeftButton:
                 self._finish_live_press(event.position())
+                if self._moving or self._resize_edges:
+                    self._normal_geometry = self.geometry()
+                self._moving = False
+                self._resize_edges = set()
+                self._narrow_drag = False
             event.accept()
             return
         self._glass_feedback.release()
