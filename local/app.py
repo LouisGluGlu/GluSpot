@@ -376,6 +376,7 @@ class LocalIslandApp:
         self.view_window = self.window
         if view == "narrow":
             # Runtime construction is complete before choosing a presentation.
+            self.window.hide()
             from _demos.narrow3.narrow_window import NarrowStudyWindow
             self.view_window = NarrowStudyWindow(self.window, "B", "left", live=True)
             self.view_window.hints = False

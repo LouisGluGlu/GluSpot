@@ -69,6 +69,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                  hidden_owner_paints=0, controls_retargets=0,
                                  lyric_layer_builds=0, paints=0)
         self._diagnostic_target = 0.0
+        self._commit_key = None
+        self._pointer_anchor = None
+        self._pointer_hover = False
+        self._pointer_exit_at = None
+        self._focus_reveal = False
         super().__init__(owner)
         self.variant = variant
         self.lyrics_alignment = lyrics_alignment
@@ -130,6 +135,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.refresh_veil()
         self.study_timer = QTimer(self)
         self.study_timer.timeout.connect(self.tick)
+        class OwnerPaintObserver(QObject):
+            def eventFilter(observer, watched, event):
+                if event.type() == QEvent.Type.Paint and not watched.isVisible():
+                    self._diagnostics['hidden_owner_paints'] += 1
+                return False
+        self._owner_paint_observer = OwnerPaintObserver(self)
+        self.owner.installEventFilter(self._owner_paint_observer)
         if not self.live:
             self.study_timer.start(33)
 
@@ -250,7 +262,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def tick(self):
         now = time.monotonic()
         self._diagnostics['samples'] += 1
-        self._diagnostics['commits'] += 1
+        if self._pointer_exit_at is not None and now - self._pointer_exit_at >= .2:
+            self._pointer_hover = False
+            self._pointer_exit_at = None
         if self.live:
             self._sync_owned_playback_mode()
             self.dj_available = self._owned_personal_dj_enabled is not None
@@ -258,7 +272,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.dj_speaking = self._owned_dj_speaking
             modes = ("sequential", "shuffle", "repeat_one")
             self.loop_mode = modes.index(self._owned_playback_mode) if self._owned_playback_mode in modes else 0
-            self.shelf = self.footer_hover = now < self._pointer_active_until
+            self.shelf = self.footer_hover = (
+                self._pointer_hover or self._focus_reveal or now < self._pointer_active_until)
         self.last_tick = now
         self.visibility.advance(now, self.shelf or self.touch_active, self.footer_hover,
                                 self.mode == "playlist")
@@ -275,6 +290,21 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # Resting springs have no work. Keep their clock current so the
             # next real input starts with the same elapsed time as before.
             feedback.last_tick = now
+        key = (self.playback_position(), self.lyric_focus(), self._visual_track_identity(),
+               self.source_lines(), self.visibility.footer.value(now),
+               feedback.pose_key(), self.dj_motion.value(now), self.mode,
+               self._queue_scroll, self.queue_snapshot(), self.dj_available,
+               self.dj_enabled, self.loop_mode, self.owner.media_is_playing,
+               self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
+               self.owner.secondary_color.rgba(), self.owner.track_title, self.owner.artist,
+               self.width(), self.height(), self.devicePixelRatioF(),
+               getattr(self.owner, 'media_position_source', ''), self.hovered_glass)
+        if self.live and key == self._commit_key:
+            self._diagnostics['noop_paints'] += 1
+            return
+        self._commit_key = key
+        self._diagnostics['commits'] += 1
+        assert self._diagnostics['commits'] <= self._diagnostics['samples']
         if self.narrow:
             self.refresh_fade_background(now)
             self.refresh_veil()
@@ -690,9 +720,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             bucket = round(self.real_scroll_offset(visual) / 32.0) * 32.0
             canonical_visual = self.real_visual_for_offset(bucket)
         live_read_bucket = None
-        if (self.live and self.mode == "lyrics"
-                and (not self.owner.media_is_playing
-                     or self.visibility.footer.value(time.monotonic()) > .001)):
+        if self.live and self.mode == "lyrics":
             # A current wrapped block can extend under the controls. Its blur
             # snapshot follows the real reading clock at a bounded 10Hz.
             live_read_bucket = int(self.playback_position() * 10)
@@ -1120,22 +1148,52 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if not self.narrow:
             super().mouseMoveEvent(event)
             return
-        self._pointer_active_until = time.monotonic() + .15
+        self.pointer_activity(event.position(), time.monotonic())
         self._glass_feedback.move(event.position())
-        self.shelf = True
         self.hovered_glass = ""
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(event.position()):
                     self.hovered_glass = key
-        self.footer_hover = True
         self.update()
+
+    def pointer_activity(self, point, now, *, focus=False):
+        """Input hysteresis, advanced by the existing visual tick only."""
+        if focus:
+            self._focus_reveal = True
+            self.visibility.advance(now, True, True, self.mode == 'playlist')
+            return
+        layout = NarrowLayout(self.width(), self.height())
+        zones = (QRectF(0, 0, self.width(), VeilOverlay.TOP_END),
+                 QRectF(0, self.height() - VeilOverlay.BOTTOM_HEIGHT,
+                        self.width(), VeilOverlay.BOTTOM_HEIGHT))
+        entered = any(rect.adjusted(8, 8, -8, -8).contains(point) for rect in zones)
+        retained = any(rect.adjusted(-24, -24, 24, 24).contains(point) for rect in zones)
+        if entered:
+            self._pointer_hover = True
+            self._pointer_exit_at = None
+        elif self._pointer_hover and not retained:
+            if self._pointer_exit_at is None:
+                self._pointer_exit_at = now
+        elif retained:
+            self._pointer_exit_at = None
+        if self._pointer_anchor is None or (point - self._pointer_anchor).manhattanLength() >= 8:
+            self._pointer_anchor = QPointF(point)
+            self._pointer_active_until = now + .2
+
+    def focusInEvent(self, event):
+        if event.reason() in (Qt.FocusReason.TabFocusReason, Qt.FocusReason.BacktabFocusReason,
+                              Qt.FocusReason.ShortcutFocusReason):
+            self.pointer_activity(QPointF(), time.monotonic(), focus=True)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._focus_reveal = False
+        super().focusOutEvent(event)
 
     def enterEvent(self, event):
         if self.narrow:
-            self._pointer_active_until = time.monotonic() + .15
-            self.shelf = True
-            self.visibility.advance(time.monotonic(), True, True, self.mode == "playlist")
+            self._pointer_anchor = None
         super().enterEvent(event)
 
     def event(self, event):
