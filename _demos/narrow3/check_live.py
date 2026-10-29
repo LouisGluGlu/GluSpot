@@ -23,6 +23,7 @@ from local.island_stack_visual import IslandStackVisual
 from narrow_window import NarrowStudyWindow
 from layout import NarrowLayout
 from local.song_collection_controller import SongCollectionState
+from local.music_lyric_motion import MusicLyricFrame
 
 LINES = (TimedLyricLine(1.25, 'first words', (TimedLyricUnit(1.25, 1.8, 'first '), TimedLyricUnit(1.8, 2.4, 'words')), 'word'),
          TimedLyricLine(4.7, 'second line', (TimedLyricUnit(4.7, 5.1, 'second '), TimedLyricUnit(5.1, 6.3, 'line')), 'word'),
@@ -135,6 +136,46 @@ class LiveChecks(unittest.TestCase):
                            'paused duplicate samples were not coalesced')
         self.assertLessEqual(counter.paints, elapsed * 36 + 2,
                              'partial updates escaped the live full-frame cadence')
+
+    def test_frame_key_ignores_clock_but_advances_ink_bucket(self):
+        lines = self.apply(track()) or self.wait_lines()
+        window = self.window
+        self.assertGreaterEqual(len(lines), 2)
+        window.resize(360, 640)
+        self.app.processEvents()
+        self.window.owner.lyric_index = self.window.owner.prev_lyric_index = 0
+        self.assertEqual(window.lyric_focus()[0], 0)
+        layouts = (NarrowLayout(360, 640),)
+        builds = window._diagnostics['lyric_layer_builds']
+
+        def key_at(position, *, frame):
+            self.owner.lyric_last_sync_position = position
+            with patch.object(window, '_lyric_frame', return_value=frame):
+                image = window.content_image(layouts[0], include_current=True)
+            window._frame_lyric_cache = None
+            return (window._content_frame_key, image)
+
+        first_key, first = key_at(1.30, frame=MusicLyricFrame(0, 0.0, .01, 0.0))
+        same_bucket_key, same = key_at(1.32, frame=MusicLyricFrame(0, 0.0, .02, 0.0))
+        self.assertEqual(first_key, same_bucket_key,
+                         'live clock leaked into the lyric frame key')
+        self.assertIs(first, same, 'same bucket rebuilt the lyric layer')
+        self.assertEqual(window._diagnostics['lyric_layer_builds'], builds + 1,
+                         'same bucket rasterized more than once')
+        later_key, _ = key_at(1.38, frame=MusicLyricFrame(0, 0.0, .03, 0.0))
+        self.assertNotEqual(first_key, later_key, 'ink bucket never advances')
+        self.assertEqual(window._diagnostics['lyric_layer_builds'], builds + 2)
+        # The painted ink itself reads the bucket, not the exact clock.
+        with patch.object(window, '_lyric_frame', return_value=MusicLyricFrame(0, 0.0, .02, 0.0)):
+            self.owner.lyric_last_sync_position = 1.32
+            self.assertAlmostEqual(window.ink_position(), 1.30)
+            self.owner.lyric_last_sync_position = 1.38
+            self.assertAlmostEqual(window.ink_position(), 1.40)
+        # A finished row paints the same ink at every clock value: its key is
+        # the row start, so a paused source rebuilds nothing.
+        self.owner.lyric_last_sync_position = 1.9
+        with patch.object(window, '_lyric_frame', return_value=MusicLyricFrame(1, 1.0, 1.0, 0.0)):
+            self.assertAlmostEqual(window.ink_position(), LINES[1].time_seconds)
 
     def test_absent_queue_and_generation_guard(self):
         self.assertIsNone(self.window.queue_snapshot())

@@ -55,6 +55,10 @@ TIMED_LYRICS = tuple(
     for index, text in enumerate(LYRICS * 4)
 )
 COVERS = ("night_sea.jpg", "sunset_city.jpg", "pink_forest.jpg", "clip.jpg")
+# Active-word ink is the only frame content that reads the live clock.  Key it
+# on a 50ms bucket so a paused source rebuilds nothing and advancing lyrics
+# still refresh the reading front well inside the 120ms seek budget.
+INK_BUCKET_SECONDS = .05
 
 
 class NarrowStudyWindow(MusicSurfaceWindow):
@@ -177,6 +181,35 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # The owner publishes this offset-applied position from its shared
         # lyric tick. Rendering must never project or validate another clock.
         return self.owner.lyric_last_sync_position
+
+    def ink_position(self):
+        """Clock granularity the active-word ink actually reads.
+
+        The frame key must not carry the exact live clock: the layer then
+        rebuilt on every tick even when its content fields were identical.
+        An idle row (scroll stopped, reading front complete) paints the same
+        pixels at every clock value, so it keys on the line start. A row still
+        being read keys on a nearest 50ms bucket, which stays well inside the
+        120ms seek budget and keeps the bucket value itself stable.
+        """
+        position = self.playback_position()
+        if not self.live:
+            return position
+        lines = self.source_lines()
+        if not lines:
+            return 0.0
+        focus, visual = self.lyric_focus()
+        focus = min(len(lines) - 1, max(0, focus))
+        start = float(lines[focus].time_seconds)
+        end = (float(lines[focus + 1].time_seconds) if focus + 1 < len(lines)
+               else max(start + 1.0, self.owner.media_duration_seconds))
+        if math.floor(visual) == focus and (position <= start or position >= end):
+            return start
+        # Nearest bucket keeps the ink within half the bucket of the clock;
+        # the key compares exactly, so the bucket value itself must be stable.
+        # Step in integer milliseconds: position/bucket lands just below an
+        # integer for ordinary clock values and would round one bucket early.
+        return round(position * 1000.0 / (INK_BUCKET_SECONDS * 1000)) / (1000.0 / (INK_BUCKET_SECONDS * 1000))
 
     def source_lines(self):
         if not self.live:
@@ -475,7 +508,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             frame_key = (self.width(), self.height(), self.devicePixelRatioF(),
                          layout.lyric_font, focus, visual, self.lyrics_alignment,
                          self._future_lyric_color(layout.viewport).rgba(),
-                         self.playback_position() if include_current else None,
+                         self.ink_position() if include_current else None,
                          self.source_lines(),
                          include_current, veil_source)
             if frame_key == self._content_frame_key:
@@ -965,7 +998,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                  "\n".join(self._display_lyrics()[0]))
             return
         focus = self.lyric_focus()[0]
-        position = self.playback_position()
+        # Match the frame key: live ink reads the quantized bucket, never the
+        # exact clock the key deliberately ignores.
+        position = self.ink_position()
         painter.save()
         clip = layout.viewport.adjusted(-18, -overscan, 18, overscan)
         painter.setClipRect(clip)
