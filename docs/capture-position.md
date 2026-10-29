@@ -162,6 +162,123 @@ line-timed song's fallback. The automated provider integration proves CEF seek
 selection and replacement-track fencing; it does not establish physical-screen
 alignment. No version or package was changed, and nothing was pushed.
 
+## Seek recovery investigation (2026-10-29)
+
+Repair source and regressions: `e84a5ea`. Version and package inputs are unchanged.
+
+The `d6818ce` live report supersedes the earlier assumption that healthy progress
+capture established usable UI seeking. Settings showed **精确进度已连接** and
+lyrics followed playback, while NetEase's own seek UI and the reported GluSpot
+gestures did not move playback. Native callback counts and successful attach
+alone do not establish either UI path.
+
+A saved diagnostic from that same source on the product-launched **`:8178`**
+session reported `adapter.seek` accepted and physical position moving from
+**59.236 s to 72.397 s**, after requesting approximately **71.24 s** and waiting
+about 1.2 s. This supports the established
+`channel.call('audioplayer.seek', callback, [nativeTrackId, requestId, seconds])`
+shape under the old shim. It is not a new-source acceptance result or a measured
+seek error, and does not prove NetEase's own controls worked. The current runtime
+already passes `NetEaseLaunch.port` into `CdpSession` and binds that same session
+to `CaptureRuntime`; neither `8178` nor the older diagnostic port `39222` is a
+product constant.
+
+Code review found concrete semantic hazards in the old document-start shim:
+rest-argument wrappers changed the registration function and callback
+`length`/`name`, bare `Load`/`End` names could be mistaken for audio events,
+only the most recent callback per event was remembered, and property-definition
+hooks and global accessors remained installed after boot. Revision 2 uses
+callable proxies, caches wrappers per original callback and event, limits
+matching to established audio registration signatures, restores assignment
+watchers to data properties, and restores still-owned Object helpers when boot
+discovery completes or expires. Original callbacks still run first with their
+receiver, arguments, return value and exceptions preserved. The late queue path
+is not selected when the early shim is active. These are verified code defects
+and corrections; their role in the reported NetEase UI failure still needs a
+clean-player comparison and live re-test. CDP now checks the early revision so
+reconnecting new Python cannot silently reuse the old shim.
+
+The provider/runtime investigation found additional scoped defects. A cancelled
+preflight could permanently disable CEF seeking despite issuing no native seek;
+only a failed physical attempt now degrades that route. The provider's identity
+guard now rechecks current track/source after both awaited operations: selected
+session lookup and metadata matching. The lyric worker also checks a provider's
+signature before invoking it; an internal `TypeError` no longer triggers a
+second, unfenced call through the old one-argument compatibility path. Existing
+expected-track, source, thread, busy and uncertain-mutation fences remain in force.
+
+`GluSpot.capture.seek` writes fixed decision codes, selected route/port, numeric
+target and physical error to stderr with a flushed handler. `launch.bat` already
+captures this stream in the normal `logs/GluSpot-*.log`; no global logging setup
+is required. Records cover lyric gesture rejection, dispatch and completion,
+source selection, provider refusal/queueing, runtime routing, native
+acknowledgement and verification. `error_seconds * 1000`
+is the verifier's readback error in milliseconds. Logs exclude song metadata,
+page payloads and credentials.
+
+The only playback progress control found in the current tree is
+`LibraryProgress` beside the music-library search editor. It displays the owned
+player's track, contracts into the search-close button and has no seek handler.
+No progress-drag behavior was added: the reported control still needs to be
+identified with wuju. Dragging that display-only strip does not dispatch a seek
+or produce a seek decision record. This remains an open item, separate from the
+lyric/provider corrections.
+
+Final Box verification uses Python 3.13.5 / Qt 6.12.0 with
+`QT_QPA_PLATFORM=offscreen` and ordinary cyclic GC. Capture discovery passes
+**226 tests × 3 / 11.620, 11.480, 11.415 s**; the focused capture/lyric/position
+command below passes **68 / 1.539 s**. Standard full discovery completes
+**5,691 / 154.171 s**, with **26 failures, 11 errors and 31 skips**. The unchanged
+`d6818ce` archive under the same interpreter completes **5,667 / 154.863 s**;
+all 37 failure/error identities match exactly, with zero new or resolved.
+The full suite is not a clean pass. Compilation and whitespace checks pass.
+Logs and the machine-readable comparison are under ignored
+`.runtime/seek-recovery/`; the external handoff retains copies.
+
+```bash
+QT_QPA_PLATFORM=offscreen /tmp/gluspot-capture-fix-venv/bin/python -X faulthandler -m unittest discover -s tests -p 'test_capture*.py' -v
+QT_QPA_PLATFORM=offscreen /tmp/gluspot-capture-fix-venv/bin/python -X faulthandler -m unittest -v tests.test_capture_lyric_integration tests.test_music_lyric_seek tests.test_capture_seek_routing tests.test_media_position_pipeline tests.test_music_playback_sync tests.test_lyric_unit_timing tests.test_capture_netease_ui
+QT_QPA_PLATFORM=offscreen /tmp/gluspot-capture-fix-venv/bin/python -X faulthandler -m unittest discover tests -v
+```
+
+The requested **PC capture suite × 3**, NetEase self-seek, GluSpot word click
+and GluSpot progress drag remain **pending** in this investigation until their
+actual results are recorded. The current session has no PC execution/file relay
+or forwarded live CDP endpoint. Historical PC passes above do not validate this
+repair.
+
+For wuju's re-test:
+
+1. Fast-forward only `E:\grok-gluspot\_wt_capture2` on `grok/capture` to the exact
+   Box commit using its verified bundle. Run capture discovery three times and
+   the focused lyric/seek tests with `E:\gpt-island\.venv\Scripts\python.exe`.
+2. Close the mirror GluSpot instance and restart it to load the new Python. Use
+   isolated `APPDATA` and `LOCALAPPDATA` roots for the test process; the source
+   app normally uses the real Windows AppData settings. Do not copy or edit
+   wuju's real settings. The external handoff includes an isolated-launch script.
+3. In that isolated app, open **设置 → 媒体控制 → 播放来源 → 网易云精确进度（实验）**.
+   Use **启用并重启网易云**, or **修复 / 重启网易云** if already enabled. Restarting
+   NetEase removes the old document-start script and installs revision 2. Merely
+   reloading Python while leaving the old page alive is insufficient. Use the
+   resulting random loopback port; do not force `39222` or add
+   `--remote-allow-origins`. If a program-owned track is active, disable
+   **程序内播放** in the isolated settings to follow external NetEase.
+4. With an ordinary seekable track playing, first drag NetEase's own timeline
+   and click its own timed lyric. Confirm the audible playhead moves and
+   continues advancing. Record both targets/readbacks before testing GluSpot.
+5. Wait for **精确进度已连接**, confirm the same track, then click a later timed
+   word in GluSpot. Record the `runtime-result` reason, route/port and
+   `error_seconds` from that run's `GluSpot-*.log`. Identify the reported progress
+   control before repeating the drag; if it is the library strip described
+   above, record the missing seek behavior as unresolved. For a dispatched seek,
+   record the same fields or its refusal code.
+
+The sync/test and isolated-launch scripts are kept outside source control in
+the Box handoff directory. They do not write to the NetEase installation,
+change another worktree, build an executable or push a branch. Live acceptance
+requires the three UI checks above; a successful channel probe alone does not
+replace them.
+
 ## Evidence and acceptance limits
 
 `tests/fixtures/capture/` contains 41 deterministic mock timeline events and

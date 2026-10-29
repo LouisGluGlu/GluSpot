@@ -316,6 +316,19 @@ is claimed.
 
 ### Current lyric wiring
 
+The October 29 seek investigation hardens the document-start shim and adds
+flushed capture-seek decisions to the normal `GluSpot-*.log`. The relaunch route
+uses its selected random port; `8178` and `39222` are observations from separate
+sessions. The saved `d6818ce` probe on `:8178` moved playback through the native
+seek call, but did not validate NetEase's own UI or GluSpot gestures. The current
+repair still requires PC repetition and all three live checks. See
+[causes, verification limits and restart/re-test steps](docs/capture-position.md#seek-recovery-investigation-2026-10-29).
+Box verification: **226 capture tests × 3** pass (11.620 / 11.480 / 11.415 s),
+plus **68 focused tests / 1.539 s**. Full discovery completes **5,691 / 154.171 s**
+with exactly the same 26 failures, 11 errors and 31 skips as unchanged `d6818ce`
+(5,667 / 154.863 s). The library progress strip has no seek handler; the reported
+drag control remains to be identified. PC/live acceptance is pending.
+
 The existing opt-in flags bind `CaptureRuntime` to the selected NetEase session
 and its load-time CEF source. `CaptureRuntime.project` publishes real progress as
 `capture-model` through the provider and `_apply_visual_data` into the island and
