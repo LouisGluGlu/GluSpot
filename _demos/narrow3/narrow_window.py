@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import logging
 from bisect import bisect_right
 import sys
 import time
@@ -74,6 +75,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._pointer_hover = False
         self._pointer_exit_at = None
         self._focus_reveal = False
+        self._committed_track = None
+        self._settled_epoch = None
+        self._snap_change = None
+        self._diagnostics.update(settle_commits=0, first_sample_settle_outlier=0)
         super().__init__(owner)
         self.variant = variant
         self.lyrics_alignment = lyrics_alignment
@@ -266,6 +271,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._pointer_hover = False
             self._pointer_exit_at = None
         if self.live:
+            self._prepare_live_commit()
             self._sync_owned_playback_mode()
             self.dj_available = self._owned_personal_dj_enabled is not None
             self.dj_enabled = self._owned_personal_dj_enabled is True
@@ -655,6 +661,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def _lyric_frame(self, timed, now):
         if not self.live:
             return super()._lyric_frame(timed, now)
+        self._prepare_live_commit()
         # Wheel input and the inherited wide painter also request frames.
         # Adapt the owner's published state without advancing surface motion.
         track_key = self._visual_track_identity()
@@ -670,6 +677,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return MusicLyricFrame(0, 0.0, 0.0, 0.0)
         focus = min(len(timed) - 1, max(0, self.owner.lyric_index))
         previous = min(len(timed) - 1, max(0, self.owner.prev_lyric_index))
+        if self._snap_change == (track_key, self.owner.lyric_changed_at):
+            previous = focus
         transition = min(1.0, max(0.0, (now - self.owner.lyric_changed_at) / .36))
         eased = 1.0 - (1.0 - transition) ** 3
         start = float(timed[focus][0])
@@ -677,6 +686,39 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                else max(start + 1.0, self.owner.media_duration_seconds))
         progress = min(1.0, max(0.0, (position - start) / max(.001, end - start)))
         return MusicLyricFrame(focus, previous + (focus - previous) * eased, progress, 0.0)
+
+    def _prepare_live_commit(self):
+        """Invalidate a track/epoch in one UI transaction, before any painting."""
+        track = self._visual_track_identity()
+        epoch = getattr(self.owner, 'media_capture_epoch_id', 0)
+        swapped = self._committed_track is not None and track != self._committed_track
+        settled = bool(epoch) and (track, epoch) != self._settled_epoch
+        if track == self._committed_track and not settled:
+            return
+        if swapped or settled:
+            for name in ('_source_lines_key', '_real_layout_key', '_content_frame_key',
+                         '_lyric_static_key', '_current_ink_key', '_controls_key',
+                         '_fade_content_key', '_painted_live_model', '_painted_live_hit_pose'):
+                setattr(self, name, None)
+            self._lyric_word_hit_rects.clear()
+            self._lyric_hit_rects.clear()
+            self._clear_lyric_browse()
+            self.veil.clear()
+        if swapped:
+            self._display_lyrics_cache_key = self._display_lyrics_cache = None
+            self._frame_lyric_cache = None
+            self._diagnostics['swap_commits'] += 1
+        self._committed_track = track
+        self._snap_change = (track, self.owner.lyric_changed_at)
+        if settled:
+            self._settled_epoch = (track, epoch)
+            self._diagnostics['settle_commits'] += 1
+            if self.playback_position() > 30 and self.owner.lyric_index > 20:
+                self._diagnostics['first_sample_settle_outlier'] += 1
+                logging.getLogger('GluSpot.NarrowLive').info(
+                    'first_sample_settle_outlier epoch=%s position=%.3f index=%s sampled_at=%s',
+                    epoch, self.playback_position(), self.owner.lyric_index,
+                    getattr(self.owner, 'media_position_sampled_at', 0))
 
     def lyric_focus(self):
         lines = self.source_lines()

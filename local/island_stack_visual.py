@@ -951,6 +951,8 @@ class IslandStackVisual(QWidget):
         self.media_position_source = position_plan.position_source
         self.media_position_sampled_at = float(getattr(track, "position_sampled_at", 0.0) or 0.0)
         self.media_position_observed_seconds = getattr(track, "position_observed_seconds", None)
+        self.media_capture_epoch_id = getattr(track, 'capture_epoch_id', 0)
+        self.media_is_first_sample = getattr(track, 'is_first_sample', False)
         self.media_position_plan_reason = position_plan.reason
         self.media_position_confidence = position_plan.position_confidence
         self.media_position_interactive = position_plan.position_interactive

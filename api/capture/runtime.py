@@ -59,6 +59,10 @@ class CaptureRuntime:
         self._position_route = 'smtc'
         self._next_uia_read = 0.0
         self._last_projection = None
+        self.capture_epoch_id = 0
+        self._capture_epoch_source = None
+        self._projected_epoch_id = 0
+        self._first_projected_observation = None
 
     async def bind(self, session, track, matches, *, mode=None):
         if self._closed:
@@ -88,6 +92,7 @@ class CaptureRuntime:
             if self.identity != identity:
                 self.model = PositionModel()
                 self._valid = False
+                self._capture_epoch_source = None
             self.identity = identity
         if self._calibration_task is not None:
             self._calibration_task.cancel()
@@ -186,7 +191,15 @@ class CaptureRuntime:
             with self._lock:
                 self.model.observe(sample, lyric_duration=self._duration)
                 self._valid = self.model.sample is sample
+                self._accept_epoch(sample)
                 self._last_received_at = self.clock()
+
+    def _accept_epoch(self, sample):
+        # Called under the model lock, only for accepted physical evidence.
+        source = (sample.identity, sample.source)
+        if self._valid and source != self._capture_epoch_source:
+            self.capture_epoch_id += 1
+            self._capture_epoch_source = source
 
     def _publish(self, sample):
         self._last_received_at = self.clock()
@@ -198,6 +211,7 @@ class CaptureRuntime:
                 else:
                     self.model.observe(sample, lyric_duration=self._duration)
                     self._valid = self.model.sample is sample
+                self._accept_epoch(sample)
         if (sample is not None and sample.source != 'uia' and self.fallback is not None
                 and not self._cef_route_requested
                 and self._seek_task is None and not self._closed
@@ -226,6 +240,15 @@ class CaptureRuntime:
         with self._lock:
             fresh = self._valid and (paused_cef_fresh or instant - self._last_received_at <= 2.0)
             snapshot = self.model.snapshot(instant) if fresh else None
+            epoch = self.capture_epoch_id
+            if snapshot is not None and snapshot.identity == identity:
+                observation = self.model.sample.observed_at
+                if epoch != self._projected_epoch_id:
+                    self._projected_epoch_id = epoch
+                    self._first_projected_observation = observation
+                first_sample = observation == self._first_projected_observation
+            else:
+                first_sample = False
         if snapshot is None or snapshot.identity != identity or str(track.track_id).startswith('owned:'):
             if (self._cef_route_requested and self.identity == identity
                     and not str(track.track_id).startswith('owned:')):
@@ -255,7 +278,8 @@ class CaptureRuntime:
         return replace(data, track=replace(
             track, position_seconds=position, is_playing=snapshot.is_playing,
             position_source='capture-model', position_confidence=0.95,
-            position_sampled_at=sampled_at, position_observed_seconds=observed_seconds))
+            position_sampled_at=sampled_at, position_observed_seconds=observed_seconds,
+            capture_epoch_id=epoch, is_first_sample=first_sample))
 
     async def seek(self, target, track_id, guard):
         """Optimistically project a target while verifying independent raw state."""
@@ -346,6 +370,7 @@ class CaptureRuntime:
     def diagnostics(self):
         with self._lock:
             result = dict(enabled=True, valid=self._valid, identity=self.identity,
+                          capture_epoch_id=self.capture_epoch_id,
                           reanchors=self.model.reanchors,
                           position_error_seconds=self.model.last_error_seconds)
             result['players'] = {key: dict(values) for key, values in self._player_metrics.items()}
