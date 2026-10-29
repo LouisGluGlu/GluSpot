@@ -154,7 +154,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._owner_paint_observer = OwnerPaintObserver(self)
         self.owner.installEventFilter(self._owner_paint_observer)
         if not self.live:
-            self.study_timer.start(33)
+            self.study_timer.start(40)
 
     def diagnostic_snapshot(self):
         result = dict(self._diagnostics)
@@ -217,7 +217,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         super().showEvent(event)
         if self.live:
             if hasattr(self, "study_timer") and not self.isMinimized():
-                self.study_timer.start(33)
+                self.study_timer.start(40)
 
     def hideEvent(self, event):
         if self.live and hasattr(self, "study_timer"):
@@ -228,7 +228,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         super().changeEvent(event)
         if getattr(self, "live", False) and hasattr(self, "study_timer"):
             if self.isVisible() and not self.isMinimized():
-                self.study_timer.start(33)
+                self.study_timer.start(40)
             else:
                 self.study_timer.stop()
 
