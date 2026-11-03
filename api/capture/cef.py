@@ -16,7 +16,10 @@ from api.capture.contracts import TimelineSample
 from api.capture.seek import SeekPolicy, record_seek_decision
 
 
-CEF_SEEK_POLICY = SeekPolicy(tolerance_seconds=0.05, read_delays=(0.04, 0.04, 0.06),
+# Native progress arrives at up to 10 Hz and includes dispatch/CDP latency.
+# Accept at most 250 ms of independent physical error, with 500 ms for a new
+# progress event. An acknowledgement alone still cannot verify a mutation.
+CEF_SEEK_POLICY = SeekPolicy(tolerance_seconds=0.25, read_delays=(0.1, 0.15, 0.25),
                              request_timeout=0.8, read_timeout=0.15)
 
 

@@ -11730,11 +11730,6 @@ class IslandStackVisual(QWidget):
         metric = QFontMetrics(self._wave_stream_font(size, QFont.Weight.Bold, shrink=False))
         fade_space = self._u(24) if getattr(self, "finder_bar_style", "transparent") == "fade" else 0.
         padding = self._u(40 if dj_presenting else 30) + fade_space
-        status = str(getattr(self, "_island_dj_status", "")
-            or getattr(self, "_finder_dj_retained_status", "")) if dj_presenting else ""
-        if status:
-            caption = {"failed": "失败", "ready": "已就绪"}.get(status, "加载中")
-            padding += QFontMetrics(self._font(11, QFont.Weight.Medium, shrink=False)).horizontalAdvance(caption) + self._u(12)
         width = max(self._u(180), min(self._u(700), metric.horizontalAdvance(text)) + side + padding)
         if dj_presenting:
             normal_size = self._fit_island_lyric_row_size(normal_text, 18, True, max(1., height - 2.))
@@ -11884,7 +11879,9 @@ class IslandStackVisual(QWidget):
             failed = isinstance(state, dict) and state.get("introduction_failed") is True
             pending = pending and not state.get("is_preview", False)
             failed = failed and not state.get("is_preview", False)
-            presenting = speaking or pending or failed
+            # Only actual narration can replace the lyric surface. Preparing
+            # or skipping a DJ voice must not take over the listening view.
+            presenting = speaking
             title = str(state.get("next_title", "")) if presenting else ""
             token = state.get("token") if presenting else None
         except Exception:
@@ -11977,8 +11974,7 @@ class IslandStackVisual(QWidget):
         return changed
 
     def _personal_dj_island_presenting(self) -> bool:
-        return bool(getattr(self, "_island_dj_speaking", False)
-            or getattr(self, "_island_dj_status", ""))
+        return bool(getattr(self, "_island_dj_speaking", False))
 
     def _personal_dj_island_outro_progress(self) -> float:
         if not float(getattr(self, "_island_dj_outro_until", 0.0)):
@@ -12000,10 +11996,7 @@ class IslandStackVisual(QWidget):
                 self._effective_music_ambience_style())
             painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
         self.music_button_rects = {}
-        status = str(getattr(self, "_island_dj_status", "")
-            or (getattr(self, "_finder_dj_retained_status", "") if bar_compact else ""))
-        compact_status = bool(status) and (bar_compact or rect.height() < self._u(72))
-        icon_area = rect.adjusted(0., 0., 0., -self._u(20)) if status and not compact_status else rect
+        icon_area = rect
         side = min(icon_area.height() * .90, self._u(100))
         icon = QRectF(rect.left() + self._u(13), icon_area.center().y() - side / 2, side, side)
         ink = self._personal_dj_island_color()
@@ -12015,7 +12008,6 @@ class IslandStackVisual(QWidget):
             max_lightening=float(getattr(self, "_island_dj_lightening", .60)),
             backdrop=lambda ring: self._personal_dj_island_backdrop(ring, surface_rect=rect),
             elapsed=max(0., time.monotonic() - started))
-        status_text = {"failed": "播报加载失败", "ready": "播报已准备好"}.get(status, "播报加载中")
         if bar_compact:
             # Both bars use the fitted timed-lyric row. Reserve their bounded
             # height instead of the top/free title-and-artist stack.
@@ -12029,19 +12021,6 @@ class IslandStackVisual(QWidget):
                 title_left = max(title_left, rect.left() + rect.width() * self._finder_bar_fade_positions(rect)[1] + self._u(4))
             title_rect = QRectF(title_left, rect.top() + 1.,
                 max(0., rect.right() - title_left - self._u(13)), max(1., rect.height() - 2.))
-            if status:
-                # Keep genuine preparation/failure evidence visible without
-                # squeezing the song metadata into two tiny rows.
-                from local.personal_dj_icon import personal_dj_status_color
-                status_font = self._font(11, QFont.Weight.Medium, shrink=False)
-                caption = {"failed": "失败", "ready": "已就绪"}.get(status, "加载中")
-                status_width = float(QFontMetrics(status_font).horizontalAdvance(caption)) + self._u(4)
-                status_rect = QRectF(max(title_rect.left(), title_rect.right() - status_width),
-                    title_rect.top(), min(title_rect.width(), status_width), title_rect.height())
-                title_rect.setRight(max(title_rect.left(), status_rect.left() - self._u(8)))
-                painter.setFont(status_font)
-                painter.setPen(personal_dj_status_color(status) or self._music_meta_text_color(190))
-                painter.drawText(status_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, caption)
             size = self._fit_island_lyric_row_size(label, 18, True, title_rect.height())
             font = self._wave_stream_font(size, QFont.Weight.Bold, shrink=False)
             painter.setFont(font)
@@ -12050,17 +12029,10 @@ class IslandStackVisual(QWidget):
             painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
             painter.restore()
             return
-        if status and not compact_status:
-            # Loading/fault evidence is independent of idle controls, and is
-            # never represented as measured speech or a completed intro.
-            painter.setFont(self._font(8, QFont.Weight.Medium))
-            painter.setPen(self._music_meta_text_color(190))
-            painter.drawText(QRectF(icon.left(), rect.bottom() - self._u(19), icon.width(), self._u(15)),
-                Qt.AlignmentFlag.AlignCenter, status_text)
         title_rect = QRectF(icon.right() + self._u(16), rect.top(),
                             max(0., rect.right() - icon.right() - self._u(32)), rect.height())
         artist = str(getattr(self, "_island_dj_artist", "") or getattr(self, "artist", "") or "")
-        if artist or compact_status:
+        if artist:
             block_height = min(rect.height() - self._u(4), self._u(64))
             title_rect.setTop(rect.center().y() - block_height / 2)
             title_rect.setHeight(block_height * .58)
@@ -12070,7 +12042,7 @@ class IslandStackVisual(QWidget):
         title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
         title = QFontMetrics(font).elidedText(title, Qt.TextElideMode.ElideRight, max(1, int(title_rect.width())))
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, title)
-        if artist or compact_status:
+        if artist:
             gap = min(self._u(4), block_height * .05)
             artist_rect = QRectF(title_rect.left(), title_rect.bottom() + gap,
                 title_rect.width(), block_height - title_rect.height() - gap)
@@ -12078,13 +12050,6 @@ class IslandStackVisual(QWidget):
             artist_font = self._font(artist_size, QFont.Weight.Medium)
             painter.setFont(artist_font)
             painter.setPen(self._music_meta_text_color(176))
-            if compact_status:
-                # A taskbar-height shell cannot fit a full caption beneath its
-                # rings. Reserve actual text width beside the artist instead.
-                status_width = min(artist_rect.width(), float(QFontMetrics(artist_font).horizontalAdvance(status_text)) + self._u(2))
-                status_rect = QRectF(artist_rect.right() - status_width, artist_rect.top(), status_width, artist_rect.height())
-                painter.drawText(status_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, status_text)
-                artist_rect.setRight(max(artist_rect.left(), status_rect.left() - self._u(8)))
             artist = QFontMetrics(artist_font).elidedText(artist, Qt.TextElideMode.ElideRight, max(1, int(artist_rect.width())))
             painter.drawText(artist_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter, artist)
         painter.restore()

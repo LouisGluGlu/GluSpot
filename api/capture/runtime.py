@@ -317,7 +317,11 @@ class CaptureRuntime:
                 # in the new transport chain is deliberately read-only.
                 fallback = None
                 if self._cef_seek_enabled and self._cef_fresh():
-                    from api.capture.cef import CEF_SEEK_POLICY
+                    from api.capture.cef import CEF_SEEK_POLICY, CefSeekBackend
+                    # Verification fences belong to one gesture. In particular
+                    # a paused/unverified previous seek must not gate the next
+                    # request's preflight on that old request's progress edge.
+                    self._cef_backend = CefSeekBackend(self._cef_source)
                     primary, primary_name, policy = self._cef_backend, 'cef', CEF_SEEK_POLICY
                 elif not self._smtc_timeline_valid:
                     record_seek_decision('runtime', 'cef-seek-disabled' if not self._cef_seek_enabled else
@@ -334,11 +338,11 @@ class CaptureRuntime:
             record_seek_decision('runtime-result', result.reason, target=target, backend=primary_name,
                                  port=getattr(self.cef_session, 'port', None) if primary_name == 'cef' else None,
                                  error_seconds=result.error_seconds)
-            # A refused stale gesture or missing preflight observation says
-            # nothing about CEF's physical seek support. Only a failed native
-            # attempt degrades that route. Executor uncertainty remains shared
-            # across bindings and prevents another physical write.
-            if primary_name == 'cef' and result.reason in {'unverified', 'fake-ack', 'request-timeout', 'request-error'}:
+            # Completed readback failure can be transient: the next explicit
+            # gesture may retry with fresh evidence. Only an uncertain native
+            # write disables this route; the executor also blocks all writes
+            # across bindings until that uncertainty is resolved.
+            if primary_name == 'cef' and result.reason in {'request-timeout', 'request-error'}:
                 self._cef_seek_enabled = False
             if result.succeeded:
                 self.smtc_trust = result.backend == 'smtc'

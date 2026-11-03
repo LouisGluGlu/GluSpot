@@ -225,6 +225,94 @@ class CefSourceTests(CaptureAsyncTestCase):
         self.assertEqual(len(self.session.writes), 1)
 
 
+class CefVerificationTests(CaptureAsyncTestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.session = FakeCdp(self.clock)
+        self.session.latest = dict(self.session.latest, sequence=1)
+        self.source = CefPositionSource(self.session, session_id='cloudmusic.exe',
+                                        track_id='provider-song', clock=self.clock)
+
+    def tearDown(self):
+        self.source.close()
+
+    async def execute(self, executor, *, request_id='one', policy=CEF_SEEK_POLICY):
+        async def current():
+            return True
+
+        return await executor.execute(
+            80, identity=('cloudmusic.exe', 'provider-song'), request_id=request_id,
+            smtc=CefSeekBackend(self.source), fallback=None, guard=current,
+            policy=policy, primary_name='cef')
+
+    async def result_with_native_error(self, error):
+        async def seek(track_id, request_id, seconds):
+            self.session.writes.append((track_id, request_id, seconds))
+            self.clock.value += .2
+            self.session.emit(self.session.payload(
+                seconds + .2 + error, sequence=self.session.latest['sequence'] + 1))
+            return True
+
+        async def no_delay(_):
+            await asyncio.sleep(0)
+
+        self.session.seek = seek
+        executor = SeekExecutor(clock=self.clock, sleep=no_delay)
+        return await self.execute(executor, request_id=str(error))
+
+    async def test_fresh_native_progress_accepts_delivery_error_within_250ms(self):
+        for error in (-.249, -.17, -.08, .08, .17, .249):
+            with self.subTest(error=error):
+                result = await self.result_with_native_error(error)
+                self.assertTrue(result.succeeded)
+                self.assertEqual(result.backend, 'cef')
+                self.assertAlmostEqual(result.error_seconds, error)
+
+    async def test_fresh_native_progress_rejects_error_outside_250ms(self):
+        for error in (-.5, -.251, .251, .5):
+            with self.subTest(error=error):
+                result = await self.result_with_native_error(error)
+                self.assertFalse(result.succeeded)
+                self.assertEqual(result.reason, 'unverified')
+                self.assertAlmostEqual(result.error_seconds, error)
+
+    async def test_native_event_after_old_140ms_window_can_verify_seek(self):
+        started = self.clock()
+
+        async def seek(track_id, request_id, seconds):
+            self.session.writes.append((track_id, request_id, seconds))
+            return True
+
+        async def deliver_after_native_latency(delay):
+            self.clock.value += delay
+            elapsed = self.clock() - started
+            if elapsed >= .2 and self.session.latest['sequence'] == 1:
+                self.session.emit(self.session.payload(80 + elapsed, sequence=2))
+            await asyncio.sleep(0)
+
+        self.session.seek = seek
+        executor = SeekExecutor(clock=self.clock, sleep=deliver_after_native_latency)
+        result = await self.execute(executor)
+        self.assertTrue(result.succeeded)
+        self.assertGreater(self.source.progress_observed_at - started, .14)
+        self.assertEqual(len(self.session.writes), 1)
+
+    async def test_uncertain_cef_mutation_prevents_another_native_write(self):
+        async def seek(track_id, request_id, seconds):
+            self.session.writes.append((track_id, request_id, seconds))
+            await asyncio.Future()
+
+        self.session.seek = seek
+        executor = SeekExecutor(clock=self.clock)
+        policy = replace(CEF_SEEK_POLICY, request_timeout=.01)
+        first = await self.execute(executor, policy=policy)
+        second = await self.execute(executor, request_id='two', policy=policy)
+        self.assertEqual(first.state, SeekState.UNCERTAIN)
+        self.assertEqual(first.reason, 'request-timeout')
+        self.assertEqual(second.reason, 'previous-request-uncertain')
+        self.assertEqual(len(self.session.writes), 1)
+
+
 class CefRuntimeTests(CaptureAsyncTestCase):
     async def test_resume_after_long_pause_does_not_project_paused_interval(self):
         clock = Clock()

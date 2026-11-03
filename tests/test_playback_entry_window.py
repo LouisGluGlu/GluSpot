@@ -140,7 +140,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                                     "汽水音乐尚无已验证且可随本项目分发的扫码适配器"))
             for item in ENTRY_SOURCES
         ))
-        self.assertEqual(self.window.message_label.text(), "没有可用音乐来源；请安装在线音乐运行时；汽水音乐、Spotify、Apple Music即将支持。")
+        self.assertEqual(self.window.message_label.text(), "没有可用音乐来源；请安装在线音乐运行时。")
 
     def test_source_recovery_clears_diagnostic_and_restores_selectable_tile(self):
         self.window.set_sources((SimpleNamespace(source_id="netease", available=False,

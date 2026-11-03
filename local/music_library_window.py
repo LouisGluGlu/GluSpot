@@ -926,7 +926,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def set_notice(self, message):
         self._notice = str(message or '')
-        self._layout(); self.update()
+        self.scroll.setToolTip(self._notice)
 
     def _toggle_library_expanded(self, expanded):
         self.set_library_expanded(expanded, animate=True)
@@ -999,6 +999,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._finish_section_motion()
             self._selected_group_key=None;self._peer_order=[]
             self._notice = self._message = self._error = ""
+            self.scroll.setToolTip("")
             self._artwork.clear()
             self._artwork_pending.clear()
             self._catalog = ()
@@ -1377,7 +1378,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         has_items = bool(self._visual_items())
         skeleton = bool(self._catalog_loading if not query else "search" in self._catalog_loading)
         skeleton = skeleton or (self._loading and not has_items)
-        footer = 44 if (has_items or skeleton) and (self._error or self._notice) else 12
+        footer = 44 if (has_items or skeleton) and self._error else 12
         self.scroll.setGeometry(16, 210, self.width()-32,max(1,self.height()-210-footer))
         peer_layout = bool(self._selected_group_key and not self._library_expanded and not query)
         block_height = sum(224 for _ in self._shelves) + 124*len(self._rows)
@@ -1776,8 +1777,8 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
                 else:
                     painter.drawText(QRectF(24, self.scroll.y(), self.width() - 48, self.scroll.height()),
                                      Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, message)
-            elif self._error or self._notice:
+            elif self._error:
                 painter.setFont(_entry_font(13))
-                painter.setPen(QColor("#e4b5ad") if self._error else QColor("#969cab"))
+                painter.setPen(QColor("#e4b5ad"))
                 painter.drawText(QRectF(24, self.height() - 36, self.width() - 48, 25), Qt.AlignmentFlag.AlignCenter,
-                                 painter.fontMetrics().elidedText(self._error or self._notice or self._message, Qt.TextElideMode.ElideRight, self.width() - 48))
+                                 painter.fontMetrics().elidedText(self._error, Qt.TextElideMode.ElideRight, self.width() - 48))

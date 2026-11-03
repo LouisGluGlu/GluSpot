@@ -169,7 +169,7 @@ class CaptureSeekRoutingTests(CaptureAsyncTestCase):
         finally:
             await runtime.close()
 
-    async def test_failed_physical_cef_attempt_still_degrades_that_route(self):
+    async def test_unverified_cef_attempt_allows_next_gesture_without_rebind(self):
         clock = Clock()
         cdp = FakeCdp(clock)
         cdp.move = False
@@ -179,6 +179,12 @@ class CaptureSeekRoutingTests(CaptureAsyncTestCase):
             self.assertFalse(await runtime.seek(42, 'song', AsyncMock(return_value=True)))
             self.assertEqual(runtime.executor.last_result.reason, 'unverified')
             self.assertEqual(len(cdp.writes), 1)
-            self.assertFalse(runtime._cef_seek_enabled)
+            self.assertTrue(runtime._cef_seek_enabled)
+            # Even a paused clock with no progress after the failed request
+            # can preflight the next gesture; only its readback needs an edge.
+            cdp.move = True
+            self.assertTrue(await runtime.seek(60, 'song', AsyncMock(return_value=True)))
+            self.assertEqual(len(cdp.writes), 2)
+            self.assertEqual(runtime.executor.last_result.backend, 'cef')
         finally:
             await runtime.close()

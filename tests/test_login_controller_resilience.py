@@ -211,7 +211,7 @@ class LoginControllerResilienceTests(unittest.TestCase):
         self.assertEqual(sum(call == ("account", "netease", True) for call in service.calls), 4)
         self.assertTrue(window.isVisible())
         self.assertFalse(window.search.isEnabled())
-        self.assertIn("本地快照已保留", window._notice)
+        self.assertIn("本地快照已保留", window._error)
         self.assertEqual(entry.calls, [])
         self.assertEqual(player.calls, [])
 

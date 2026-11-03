@@ -11,7 +11,7 @@ from PySide6.QtSvg import QSvgRenderer
 from local.branding import ROOT_DIR
 
 
-MUSIC_SOURCE_ICON_KEYS = frozenset({"qq", "qishui", "kugou", "netease", "search", "logout", "switch"})
+MUSIC_SOURCE_ICON_KEYS = frozenset({"qq", "qishui", "kugou", "netease", "spotify", "apple_music", "search", "logout", "switch"})
 MUSIC_CONTROL_ICON_KEYS = frozenset({"library", "library_back", "shuffle", "sequence", "repeat_one", "personal_fm",
                                     "queue_next", "playlist_add", "heart_filled", "heart_outline", "login"})
 

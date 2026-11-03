@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter
+from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 from local.island_stack_visual import IslandStackVisual
@@ -117,22 +117,24 @@ class IslandDjOutroTests(unittest.TestCase):
         self.sync(visual, finished, 101.)
         self.assertFalse(visual.expanded)
 
-    def test_genuine_loading_and_failure_remain_visible_without_claiming_speech(self):
-        for state, field in (("loading", "introduction_pending"), ("ready", "introduction_pending"),
-                ("failed", "introduction_failed")):
-            visual = self.visual()
-            snapshot = {"speaking": False, "state": state, field: True,
-                "next_title": "Next song", "token": 4}
-            self.sync(visual, snapshot, 100.)
-            self.assertFalse(visual._island_dj_speaking)
-            self.assertTrue(visual._personal_dj_island_presenting())
-            self.assertTrue(visual._active_visual_animation_plan(100.).active)
-            self.assertEqual(visual._island_dj_title, "Next song")
-            visual.data_provider.get_owned_personal_dj_audio_frame.assert_not_called()
-            snapshot[field] = False
-            self.sync(visual, snapshot, 102.1)
-            self.assertFalse(visual._personal_dj_island_presenting())
-            self.assertFalse(visual.expanded)
+    def test_loading_ready_and_failure_never_replace_normal_lyrics_with_dj(self):
+        for state, field in (("loading", "introduction_pending"), ("ready", "introduction_pending"), ("failed", "introduction_failed")):
+            with self.subTest(state=state):
+                visual = self.visual()
+                snapshot = {"speaking": False, "state": state, field: True,
+                    "next_title": "Next song", "token": 4}
+                original_track, original_title = visual.media_track_id, visual.track_title
+                self.sync(visual, snapshot, 100.)
+                self.assertFalse(visual._island_dj_speaking)
+                self.assertFalse(visual._personal_dj_island_presenting())
+                self.assertEqual(visual._island_dj_title, "")
+                self.assertEqual(visual.media_track_id, original_track)
+                self.assertEqual(visual.track_title, original_title)
+                self.assertFalse(visual.expanded)
+                visual.data_provider.get_owned_personal_dj_audio_frame.assert_not_called()
+                snapshot[field] = False
+                self.sync(visual, snapshot, 102.1)
+                self.assertFalse(visual._personal_dj_island_presenting())
 
     def test_future_preload_and_preview_do_not_announce_current_song_loading(self):
         for snapshot in ({"speaking": False, "next_preload_state": "ready"},
@@ -260,31 +262,24 @@ class IslandDjOutroTests(unittest.TestCase):
         self.assertTrue(all(a.width() >= b.width() for a, b in zip(poses, poses[1:])))
         self.assertEqual(poses[-1], QRectF(visual._u(16), visual._u(14), visual._u(58), visual._u(58)))
 
-    def test_short_shell_loading_states_reserve_legible_complete_caption(self):
+    def test_short_shell_metadata_keeps_full_width_without_preload_captions(self):
         visual = self.visual()
         visual._island_dj_title = "Next song"
         visual._island_dj_artist = "Actual singer with a long name"
         for height in (40, 48, 60):
-            for state, caption in (("loading", "播报加载中"), ("ready", "播报已准备好"), ("failed", "播报加载失败")):
+            boxes = []
+            for state in ("", "loading", "ready", "failed"):
                 visual._island_dj_status = state
                 shell = QRectF(0., 0., 440., visual._u(height))
                 image = QImage(440, 112, QImage.Format.Format_ARGB32_Premultiplied)
                 image.fill(Qt.GlobalColor.transparent)
-                painted = []
-                with QPainter(image) as painter:
-                    original = painter.drawText
-                    def record(*args):
-                        painted.append((QRectF(args[0]), args[-1], QFontMetrics(painter.font())))
-                        return original(*args)
-                    with patch.object(painter, "drawText", side_effect=record):
-                        visual._paint_personal_dj_island(painter, shell)
-                matches = [item for item in painted if item[1] == caption]
-                self.assertEqual(len(matches), 1, (height, state))
-                box, text, metrics = matches[0]
-                self.assertTrue(shell.contains(box))
-                self.assertGreaterEqual(box.width(), metrics.horizontalAdvance(text))
-                artist_box = painted[-1][0]
-                self.assertLess(artist_box.right(), box.left())
+                with QPainter(image) as painter, patch.object(painter, "drawText", wraps=painter.drawText) as text:
+                    visual._paint_personal_dj_island(painter, shell)
+                self.assertEqual(len(text.call_args_list), 2, (height, state))
+                self.assertTrue(all(shell.contains(call.args[0]) for call in text.call_args_list))
+                self.assertFalse(any("播报" in call.args[-1] for call in text.call_args_list))
+                boxes.append(tuple(QRectF(call.args[0]) for call in text.call_args_list))
+            self.assertTrue(all(box == boxes[0] for box in boxes[1:]))
 
 
 if __name__ == "__main__":

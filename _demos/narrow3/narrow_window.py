@@ -103,6 +103,8 @@ class ChromeFocusButton(QAbstractButton):
 
 
 class NarrowStudyWindow(MusicSurfaceWindow):
+    LYRIC_SCROLL_SHARP_SECONDS = .35
+
     @property
     def mode(self):
         return self._effective_content_layout()
@@ -190,6 +192,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._real_layout_key = None
         self._real_blocks = ()
         self._pointer_active_until = 0.0
+        self._lyric_scroll_sharp_until = 0.0
         self._live_press = None
         self._narrow_drag = False
         self._painted_live_model = None
@@ -1036,11 +1039,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.paint_header(painter, layout)
         if visibility > .001 and self._controls_bands is not None and not self._capturing_content_snapshot:
             self._paint_chrome_bands(painter)
-        if self.live and self.owner.media_position_source == "capture-unavailable":
-            painter.setFont(self._surface_font(12, QFont.Weight.Medium))
-            painter.setPen(QColor(255, 255, 255, 220))
-            painter.drawText(QRectF(12, 8, self.width() - 24, 32), Qt.AlignmentFlag.AlignCenter,
-                             "播放器进度不可用，歌词跟随已暂停")
         if self.hints and not self._capturing_content_snapshot:
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
             painter.setPen(QColor(255, 255, 255, 120))
@@ -2495,6 +2493,11 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._glass_feedback.release()
         self.update()
 
+    def _lyric_browse_blur_clear(self):
+        if not self.narrow:
+            return super()._lyric_browse_blur_clear()
+        return time.monotonic() < self._lyric_scroll_sharp_until
+
     def wheelEvent(self, event):
         if self.live and self.narrow and self.mode == "playlist":
             self._scroll_playback_queue(event)
@@ -2503,7 +2506,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.refresh_veil()
             event.accept()
             return
+        previous = self._browse_until
         super().wheelEvent(event)
+        if self.narrow and self.mode in {"lyrics", "cover_lyrics"} and self._browse_until != previous:
+            # Row ink alone becomes sharp while browsing. The independently
+            # prepared chrome veil/control glass keeps its normal material.
+            self._lyric_scroll_sharp_until = time.monotonic() + self.LYRIC_SCROLL_SHARP_SECONDS
 
     def leaveEvent(self, event):
         self.hovered_glass = ""

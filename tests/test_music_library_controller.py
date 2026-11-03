@@ -442,6 +442,22 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.controller.queue_next(hidden)
         self.assertEqual(len(self.player.queue), 2)
 
+    def test_queue_next_retry_clears_its_error_but_preserves_other_actionable_errors(self):
+        self.open()
+        self.search("query")
+        row = self.controller._rows((self.song,))[0]
+        self.window.set_search_results((row,))
+        self.player.enqueue_next = Mock(return_value=False)
+        self.controller.queue_next(row)
+        self.assertIn("请先播放", self.window._error)
+        self.player.enqueue_next.return_value = True
+        self.controller.queue_next(row)
+        self.assertEqual(self.window._error, "")
+        self.assertIn("下一首", self.window.scroll.toolTip())
+        self.window.set_error("请求失败，请重试或重新进入当前平台")
+        self.controller.queue_next(row)
+        self.assertIn("请求失败", self.window._error)
+
     def test_search_song_selection_keeps_current_search_song_queue_and_selected_index(self):
         self.open()
         second = OnlineSong("netease", "song-2", "second")

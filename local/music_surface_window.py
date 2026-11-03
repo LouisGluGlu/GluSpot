@@ -82,7 +82,7 @@ from local.music_surface_palette import (
 )
 from local.audio_output_panel import AudioOutputPanel
 from local.audio_output_icons import paint_audio_output_status
-from local.audio_output_status import OutputMember, OutputMembershipTracker
+from local.audio_output_status import OutputMembershipTracker
 from local.audio_output_motion import OutputConnectionMotion, connection_capsule_rect, paint_connection_pose
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.music_mode_controls import PRESENTATION_GLYPH_STATES, paint_presentation_glyph
@@ -4731,6 +4731,9 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         distance = abs(row_group - focus_group)
         return 0 if distance == 0 else 1 if distance <= 2 else 2
 
+    def _lyric_browse_blur_clear(self) -> bool:
+        return self._browse_index is not None or self._browse_return_from is not None
+
     def _lyric_blur_follow_levels(
         self, token: object, focus: int, positions: tuple[float, ...],
         targets: tuple[float, ...], visual_ranges: tuple[tuple[int, int], ...],
@@ -4756,7 +4759,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             tuple(float(self._lyric_group_blur_level(row, focus, pair_starts)) for row in range(len(visual_ranges)))
             if resetting or state["focus"] != focus else state["desired"]
         )
-        if self._browse_index is not None or self._browse_return_from is not None:
+        if self._lyric_browse_blur_clear():
             # Wheel browsing makes every visible sentence readable, including
             # while the existing viewport animation returns to the real clock.
             # Keep current positions so leaving browse cannot revive an old
@@ -9165,18 +9168,15 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         return QRectF(right - width, icon.center().y() - height / 2, width, height)
 
     def _personal_dj_status_reveal_at(self, now: float) -> float:
-        if self._dj_voice_selector_active or self._owned_dj_speaking:
-            return 0.0
-        waiting = self._dj_introduction_pending or self._dj_introduction_failed
-        return (1.0 if waiting else self._personal_dj_outro_reveal_at(now)) * (1.0 - self._personal_dj_activity_at(now))
+        # Preload/availability is informational. The icon's existing colored
+        # outline and hover description carry it without a caption takeover.
+        return 0.0
 
     def _personal_dj_reveal_at(self, now: float) -> float:
         if self._owned_personal_dj_enabled is None:
             return 0.0
         return max(self._control_reveal_at(now), self._personal_dj_activity_at(now),
-                   self._personal_dj_outro_reveal_at(now),
-                   float(self._owned_personal_dj_enabled is True
-                       and (self._dj_introduction_pending or self._dj_introduction_failed)))
+                   self._personal_dj_outro_reveal_at(now))
 
     def _sync_personal_dj_state(self):
         provider = getattr(self.owner, "data_provider", None)
@@ -9292,7 +9292,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             return "私人漫游 · 私人DJ已关闭 · 点击开启"
         if self._dj_voice_selector_active:
             return "私人漫游 · 私人DJ已开启 · 点击光环关闭，下方选择音色"
-        return "私人漫游 · 私人DJ已开启 · 点击展开"
+        status = (self._personal_dj_pending_status_text()
+                  if self._dj_introduction_pending or self._dj_introduction_failed
+                  else self._personal_dj_outro_status_text())
+        return f"私人漫游 · 私人DJ已开启 · {status} · 点击展开"
 
     def _personal_dj_icon_contains(self, position, now: float) -> bool:
         rect = QRectF(self.rect())
@@ -9467,33 +9470,17 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         elif not update.held_pending:
             self._audio_output_motion.reconcile(update.current, now,
                 removed=tuple(member.id for member in update.removed))
-            for member in update.added:
-                if now - self._audio_output_recent_announced.get(member.id, -100.0) < 4.0:
-                    continue
-                self._audio_output_motion.announce(member, update.previous, update.current, now)
-                self._audio_output_recent_announced[member.id] = now
         if kinds == self._audio_output_kinds and not update.changed:
             return
         self._audio_output_kinds = kinds
         self._update_audio_output_region()
 
     def on_audio_device_event(self, snapshot, device) -> None:
-        """Window/fullscreen device arrivals replace the island's global toast."""
+        """Refresh confirmed output glyphs without an arrival announcement."""
         self._sync_audio_output_status(snapshot)
         if snapshot.event_serial <= self._audio_output_event_serial:
             return
         self._audio_output_event_serial = snapshot.event_serial
-        if device is None or not self.isVisible() or self.isMinimized():
-            return
-        now = time.monotonic()
-        if now - self._audio_output_recent_announced.get(device.id, -100.0) < 4.0:
-            return
-        # An available endpoint may arrive without becoming playback output.
-        # Animate its name/glyph, then return to the confirmed route/count.
-        state = self._audio_output_membership.current
-        self._audio_output_motion.announce(OutputMember.from_device(device), state, state, now)
-        self._audio_output_recent_announced[device.id] = now
-        self._update_audio_output_region()
 
     def _advance_audio_output_motion(self, now: float):
         if not self._geometry_transition_snapshot.isNull():

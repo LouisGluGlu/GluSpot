@@ -81,6 +81,23 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self.assertEqual([group.title for group in self.window._groups], ["为你精选", "个人歌单"])
         self.assertEqual(self.window._rows, [])
 
+    def test_informational_notice_is_hover_only_without_moving_library(self):
+        geometry = self.window.scroll.geometry()
+        message = "正在核验登录，当前显示本地快照"
+        self.window.set_notice(message)
+        self.window._layout()
+        self.assertEqual(self.window.scroll.geometry(), geometry)
+        self.assertEqual(self.window.scroll.toolTip(), message)
+        self.assertEqual(self.window._error, "")
+        self.window.set_error("请求失败，请重试")
+        self.assertLess(self.window.scroll.height(), geometry.height())
+        self.window.set_notice("")
+        self.assertEqual(self.window.scroll.toolTip(), "")
+        self.assertEqual(self.window._error, "请求失败，请重试")
+        self.window.set_notice(message)
+        self.window.set_account(AccountSnapshot("qq", True, "other", "另一个账号", state="verified"))
+        self.assertEqual(self.window.scroll.toolTip(), "")
+
     def test_legacy_toolbar_fraction_never_changes_horizontal_collection_cards(self):
         self._show_personal_rows()
         shelf=self.window._shelves[0]

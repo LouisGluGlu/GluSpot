@@ -89,6 +89,31 @@ class PlatformEntryTests(unittest.TestCase):
                 self.assertFalse(name.intersects(enter))
                 self.assertFalse(avatar.intersects(enter))
 
+    def test_qr_composition_is_centered_and_narrow_status_has_its_own_lane(self):
+        self.window.set_sources(tuple(SimpleNamespace(source_id=s.source_id, available=True)
+                                      for s in ENTRY_SOURCES))
+        self.window.select_source("netease")
+        self.window._expansion.stop()
+        self.window._expanded = 1.
+        for width, height in ((433, 550), (433, 720), (960, 540)):
+            with self.subTest(size=(width, height)):
+                self.window.setMinimumSize(0, 0)
+                self.window.resize(width, height)
+                self.window._layout_children()
+                qr, detail = self.window._login_content_rects()
+                pane = self.window._source_pane_rect()
+                title, helper, message, action = self.window._login_detail_geometry()
+                if width < 480:
+                    self.assertTrue(self.window._stacked_login_layout())
+                    self.assertAlmostEqual(qr.center().x(), pane.center().x())
+                    self.assertAlmostEqual(action.center().x(), pane.center().x())
+                    self.assertGreater(title.top(), qr.bottom())
+                else:
+                    self.assertAlmostEqual((qr.left() + detail.right()) / 2, pane.center().x())
+                    self.assertGreater(detail.left() - qr.right(), 24)
+                self.assertFalse(helper.intersects(message))
+                self.assertFalse(message.intersects(action))
+
 
 class PlatformBackRouteTests(unittest.TestCase):
     def setUp(self):

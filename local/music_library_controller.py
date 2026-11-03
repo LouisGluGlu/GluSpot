@@ -624,7 +624,7 @@ class MusicLibraryController(QObject):
         count = self._catalog_retry_counts.get(kind, 0)
         if kind == "account" and count >= 3:
             self.window.set_loading(False)
-            self.window.set_notice("网络暂不可用，本地快照已保留；可返回账号页重试核验")
+            self.window.set_error("网络暂不可用，本地快照已保留；可返回账号页重试核验")
             return
         self._catalog_retry_counts[kind] = min(count + 1, 6)
         self._catalog_retry_at[kind] = time.monotonic() + min(30., 2. ** min(count, 5))
@@ -706,13 +706,17 @@ class MusicLibraryController(QObject):
                 or row.kind != "song" or row.song is None or row.song.source_id != self._source
                 or row.key not in {r.key for r in self.window.collections}):
             return
+        disabled = "请先在设置中开启程序内播放"
+        not_ready = "请先播放一首歌曲；加载歌曲期间请稍后再添加"
         if not self.settings.get("v2_owned_playback_enabled", True):
-            self.window.set_notice("请先在设置中开启程序内播放")
+            self.window.set_error(disabled)
             return
         if self.player.enqueue_next(row.song):
+            if getattr(self.window, "_error", "") in {disabled, not_ready}:
+                self.window.set_error("")
             self.window.set_notice("已加入播放列表，将在下一首播放")
         else:
-            self.window.set_notice("请先播放一首歌曲；加载歌曲期间请稍后再添加")
+            self.window.set_error(not_ready)
 
     def _fetch_recommended(self):
         if self._recommended_pending or self._source not in {"netease", "qq"}:
