@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -217,6 +217,109 @@ class NarrowContentLayoutTests(unittest.TestCase):
         self.window.visibility.opacity.target = 0.
         with patch.object(self.window, "_surface_glass_backdrop", side_effect=AssertionError("hidden backdrop")):
             self.window._refresh_chrome_backdrop(100.)
+
+    def hide_chrome(self):
+        self.window.visibility.progress = 0.
+        fade = self.window.visibility.opacity
+        fade.start = fade.target = 0.
+        fade.duration = 0
+        self.window.shelf = self.window.footer_hover = False
+        self.window._pointer_hover = self.window._focus_reveal = False
+        self.window._pointer_active_until = 0.
+        self.window.freeze_clock = True
+
+    def test_hidden_art_and_provider_colors_refresh_palette_veil_and_ink_without_reveal(self):
+        self.hide_chrome()
+        for artwork, album, companion in ((Qt.GlobalColor.red, "#ea4030", "#603020"),
+                                          (Qt.GlobalColor.green, "#50d060", "#204030")):
+            with self.subTest(artwork=artwork):
+                old_controls = self.window._controls_key
+                self.owner.album_art.fill(artwork)
+                self.owner.album_color = QColor(album)
+                self.owner.secondary_color = QColor(companion)
+                self.window._chrome_backdrop = QImage(self.owner.album_art)
+                identity = (self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
+                            self.owner.secondary_color.rgba())
+                with patch.object(self.owner, "_run_background", side_effect=lambda _name, action: action()), \
+                        patch("_demos.narrow3.narrow_window.time.monotonic", return_value=100.):
+                    for _ in range(100):
+                        self.window.tick()
+                        self.app.processEvents()
+                        if self.window._art_palette_cache_key == identity:
+                            break
+                        QTest.qWait(10)
+                    self.window.grab()
+                    self.window.refresh_controls(100.2)
+                self.assertEqual(self.window._art_palette_cache_key, identity)
+                self.assertEqual(self.window._background_veil_key[3], (*identity, identity))
+                self.assertEqual(self.window._background_veil_key[-1], self.window._background_cache.cacheKey())
+                self.assertEqual(self.window._scene_control_ink_key[0], self.window._background_cache.cacheKey())
+                self.assertNotEqual(self.window._controls_key, old_controls)
+                self.assertEqual(self.window.visibility.progress, 0.)
+                self.assertIsNone(self.window._chrome_backdrop)
+
+    def test_same_image_provider_color_change_invalidates_hidden_controls(self):
+        self.hide_chrome()
+        self.window.refresh_controls(100.)
+        key = self.window._controls_key
+        artwork = self.owner.album_art.cacheKey()
+        self.owner.album_color = QColor("#f0d040")
+        self.owner.secondary_color = QColor("#703020")
+        self.window.refresh_controls(100.01)
+        self.assertEqual(self.owner.album_art.cacheKey(), artwork)
+        self.assertNotEqual(self.window._controls_key, key)
+
+    def test_hidden_palette_safety_check_recovers_drift_at_ten_seconds(self):
+        self.hide_chrome()
+        self.window._sync_artwork_palette(100.)
+        self.window.refresh_background_veil(100.)
+        self.window.refresh_controls(100.)
+        self.window._background_veil_key = ("stale",)
+        self.window._controls_palette_key = ("stale",)
+        self.window._controls_key = self.window._commit_key = "cached"
+        self.window._sync_artwork_palette(109.99)
+        self.assertEqual(self.window._commit_key, "cached")
+        self.window._sync_artwork_palette(110.)
+        self.assertIsNone(self.window._commit_key)
+        self.assertIsNone(self.window._controls_key)
+        self.window.refresh_background_veil(110.)
+        self.window.refresh_controls(110.)
+        self.assertEqual(self.window._background_veil_key, self.window._background_veil_identity())
+        self.assertEqual(self.window._controls_palette_key, self.window._palette_sync_key)
+
+    def test_steady_hidden_palette_safety_check_adds_no_veil_preparations(self):
+        self.hide_chrome()
+        with patch.object(self.window, "_art_palette", return_value=self.window._art_palette()):
+            self.window._sync_artwork_palette(100.)
+            self.window.refresh_background_veil(100.)
+            self.window.refresh_controls(100.)
+            prepares = self.window.background_veil.prepare_count
+            bands = self.window._controls_bands
+            for sample in range(1, 661):
+                now = 100. + sample / 30.
+                self.window._sync_artwork_palette(now)
+                self.window.refresh_background_veil(now)
+                self.window.refresh_controls(now)
+        self.assertEqual(self.window.background_veil.prepare_count, prepares)
+        self.assertIs(self.window._controls_bands, bands)
+
+    def test_hidden_moving_background_keeps_existing_veil_preparation_cadence(self):
+        self.hide_chrome()
+        self.owner.media_is_playing = True
+        palette = self.window._art_palette()
+        with patch.object(self.window, "_art_palette", return_value=palette):
+            self.window._background_veil_at = -float("inf")
+            prepares = self.window.background_veil.prepare_count
+            sources = set()
+            for frame in range(61):
+                now = 100. + frame / 30.
+                with patch("_demos.narrow3.narrow_window.time.monotonic", return_value=now):
+                    self.window.tick()
+                    self.window.grab()
+                sources.add(self.window._background_cache.cacheKey())
+        self.assertGreater(len(sources), 1)
+        self.assertLessEqual(self.window.background_veil.prepare_count - prepares, 21)
+        self.assertEqual(self.window.visibility.progress, 0.)
 
 
 if __name__ == "__main__":

@@ -30,14 +30,46 @@ Copy-Item -LiteralPath $NodePath -Destination (Join-Path $runtimeRoot "node.exe"
 $noticesRoot = Join-Path $runtimeRoot "licenses"
 New-Item -ItemType Directory -Path $noticesRoot -Force | Out-Null
 $nodeLicense = Join-Path $noticesRoot "Node-LICENSE.txt"
+$nodeNotice = Join-Path $noticesRoot "Node-LICENSE-unavailable.txt"
+$verifyArguments = @($runtimeRoot)
 if ($NodeLicensePath) {
     Copy-Item -LiteralPath (Resolve-Path -LiteralPath $NodeLicensePath).Path -Destination $nodeLicense -Force
 } else {
-    # Node's release-specific LICENSE also contains its bundled dependency notices.
-    $licenseUrl = "https://raw.githubusercontent.com/nodejs/node/$nodeVersion/LICENSE"
-    Invoke-WebRequest -Uri $licenseUrl -OutFile $nodeLicense
+    $localLicense = @("LICENSE", "LICENSE.txt", "Node-LICENSE.txt") |
+        ForEach-Object { Join-Path (Split-Path -Parent $NodePath) $_ } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    if ($localLicense) {
+        Copy-Item -LiteralPath $localLicense -Destination $nodeLicense -Force
+    } else {
+        # Prefer the matching local distribution's full third-party notices.
+        # A failed notice download must not undo a working npm ci/Node copy:
+        # retain an explicit development-only notice and still verify adapters.
+        # Packaging continues to require the full Node-LICENSE.txt.
+        $licenseUrl = "https://raw.githubusercontent.com/nodejs/node/$nodeVersion/LICENSE"
+        $licenseDownload = "$nodeLicense.download"
+        try {
+            Invoke-WebRequest -Uri $licenseUrl -OutFile $licenseDownload -TimeoutSec 20
+            Move-Item -LiteralPath $licenseDownload -Destination $nodeLicense -Force
+        } catch {
+            Remove-Item -LiteralPath $nodeLicense -Force -ErrorAction SilentlyContinue
+            @"
+GluSpot optional Node.js runtime: full release LICENSE unavailable.
+Node.js $nodeVersion; source: $licenseUrl
+The license download failed. This notice is not the Node.js license.
+For distribution, retain the complete release LICENSE using -NodeLicensePath.
+"@ | Set-Content -LiteralPath $nodeNotice -Encoding UTF8
+            $verifyArguments += "--allow-node-license-notice"
+            Write-Warning "Node LICENSE download unavailable; retained a notice. Full release LICENSE is required before packaging."
+        } finally {
+            Remove-Item -LiteralPath $licenseDownload -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+if (Test-Path -LiteralPath $nodeLicense) {
+    Remove-Item -LiteralPath $nodeNotice -Force -ErrorAction SilentlyContinue
 }
 # Record hashes and retain package licenses for reproducible optional packaging.
-& (Join-Path $runtimeRoot "node.exe") (Join-Path $PSScriptRoot "verify-runtime.cjs") $runtimeRoot
+& (Join-Path $runtimeRoot "node.exe") (Join-Path $PSScriptRoot "verify-runtime.cjs") @verifyArguments
 if ($LASTEXITCODE -ne 0) { throw "Online music runtime verification failed" }
 Write-Output "GluSpot optional online music runtime prepared at $runtimeRoot"

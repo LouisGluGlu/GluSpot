@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
 from api.online_music import AccountSnapshot
-from local.playback_entry_window import ENTRY_SOURCES, PlaybackEntryWindow
+from local.playback_entry_window import ENTRY_SOURCES, MusicSourceButton, PlaybackEntryWindow
 
 
 def _source(source_id, available=True):
@@ -141,6 +141,44 @@ class PlaybackEntryWindowTests(unittest.TestCase):
             for item in ENTRY_SOURCES
         ))
         self.assertEqual(self.window.message_label.text(), "没有可用音乐来源；请安装在线音乐运行时。")
+
+    def test_disabled_source_faces_dim_and_cannot_paint_armed_rings(self):
+        reason = "在线音乐适配依赖未安装，请运行 prepare-runtime.ps1"
+        self.window.set_sources((SimpleNamespace(source_id="netease", available=False, reason=reason),))
+        button = self.window.source_buttons["netease"]
+        button.resize(140, 88)
+        button.show_caption = False
+        faces, icons = [], []
+
+        def face(painter, rect, **kwargs):
+            faces.append((painter.opacity(), kwargs))
+            painter.fillRect(rect, QColor("white"))
+
+        def icon(painter, *_args):
+            icons.append(painter.opacity())
+
+        with patch("local.playback_entry_window.paint_liquid_glass", side_effect=face), \
+                patch("local.playback_entry_window.paint_music_source_icon", side_effect=icon), \
+                patch("local.playback_entry_window.widget_glass_backdrop", return_value=(QImage(), QRectF())), \
+                patch.object(MusicSourceButton, "hasFocus", return_value=True):
+            button.setChecked(True)
+            checked = button.grab().toImage()
+            button.setChecked(False)
+            self.assertEqual(button.grab().toImage(), checked)
+            self.assertTrue(faces)
+            self.assertTrue(icons)
+            self.assertTrue(all(.40 <= opacity <= .55 for opacity, _ in faces))
+            self.assertTrue(all(.40 <= opacity <= .55 for opacity in icons))
+            self.assertTrue(all(not data["active"] and not data["hovered"] and not data["pressed"]
+                                for _, data in faces))
+            self.window.set_sources((_source("netease"),))
+            button.setChecked(True)
+            button.grab()
+            self.assertEqual(faces[-1][0], 1.)
+            self.assertTrue(faces[-1][1]["active"])
+        self.window.set_sources((SimpleNamespace(source_id="netease", available=False, reason=reason),))
+        self.assertIn(reason, button.toolTip())
+        self.assertIn(reason, button.accessibleDescription())
 
     def test_source_recovery_clears_diagnostic_and_restores_selectable_tile(self):
         self.window.set_sources((SimpleNamespace(source_id="netease", available=False,

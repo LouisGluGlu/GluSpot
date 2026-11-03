@@ -262,6 +262,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._controls_key = None
         self._controls_bands = None
         self._controls_at = -float("inf")
+        self._palette_sync_key = None
+        self._palette_resync_at = -math.inf
+        self._controls_palette_key = None
         self._list_layer_key = None
         self._list_layer = None
         self._list_layer_at = -float("inf")
@@ -505,6 +508,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if target != self._diagnostic_target:
             self._diagnostics['controls_retargets'] += 1
             self._diagnostic_target = target
+        self._sync_artwork_palette(now)
         self._refresh_chrome_backdrop(now)
         self._sync_chrome_accessibility()
         self.dj_motion.retarget(float(self.dj_available), now, .18)
@@ -530,6 +534,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self._library_back_available(),
                self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
                self.owner.secondary_color.rgba(), self.owner.track_title, self.owner.artist,
+               self._art_palette_cache_key,
                self.width(), self.height(), self.devicePixelRatioF(), self._width_chrome_progress,
                getattr(self.owner, 'media_position_source', ''), self.hovered_glass)
         if self.live and key == self._commit_key and not self._wide_lyrics_dirty:
@@ -541,7 +546,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         assert self._diagnostics['commits'] <= self._diagnostics['samples']
         if self.narrow or self._width_chrome_active:
             self.refresh_fade_background(now)
-            self.refresh_background_veil(now)
             self.refresh_veil()
             self.refresh_controls(now)
             self.refresh_fade_content(now)
@@ -564,6 +568,36 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.dj_speaking = self._owned_dj_speaking
         modes = ("sequential", "shuffle", "repeat_one")
         self.loop_mode = modes.index(self._owned_playback_mode) if self._owned_playback_mode in modes else 0
+
+    def _sync_artwork_palette(self, now):
+        # Palette acquisition belongs to the presentation clock, including
+        # fully hidden chrome. Extraction retains the shared single worker.
+        self._art_palette()
+        identity = (self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
+                    self.owner.secondary_color.rgba(), self._art_palette_cache_key)
+        changed = identity != self._palette_sync_key
+        self._palette_sync_key = identity
+        if changed:
+            self._chrome_backdrop = self._chrome_backdrop_key = None
+            self._controls_key = None
+            self._scene_control_ink_key = None
+        if now - self._palette_resync_at < 10.:
+            return
+        self._palette_resync_at = now
+        if not (self.narrow or self._width_chrome_active):
+            return
+        # Compare identities only: a healthy hidden scene does no raster work.
+        # Invalidating on drift still obeys the normal veil throttle and resize
+        # freeze; never force a veil preparation on each presentation tick.
+        veil_drift = (not self._background_cache.isNull()
+                      and self._background_veil_key != self._background_veil_identity())
+        controls_drift = self.variant != "A" and self._controls_palette_key != identity
+        if veil_drift or controls_drift:
+            self._chrome_backdrop = self._chrome_backdrop_key = None
+            self._controls_key = self._commit_key = None
+            self._scene_control_ink_key = None
+            if veil_drift:
+                self._background_veil_key = None
 
     def _sync_chrome_accessibility(self):
         if not hasattr(self, "visibility"):
@@ -1056,15 +1090,18 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def _paint_surface_frame(self, event):
         super()._paint_surface_frame(event, paint_chrome=not (self.narrow or self._width_chrome_active))
 
+    def _background_veil_identity(self):
+        return (self._visual_track_identity(), self.width(), self.height(),
+                (self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
+                 self.owner.secondary_color.rgba(), self._art_palette_cache_key),
+                self.visibility.opacity.generation, self._background_cache.cacheKey())
+
     def refresh_background_veil(self, now, *, force=False):
         if self._background_cache.isNull():
             return
         # Pin both endpoints for the whole reveal/hide generation. The source
         # is the raw AlbumFlow raster; it cannot contain lyric/control ink.
-        key = (self._visual_track_identity(), self.width(), self.height(),
-               self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
-               self.owner.secondary_color.rgba(), self.visibility.opacity.generation,
-               self._background_cache.cacheKey())
+        key = self._background_veil_identity()
         if (not force and (getattr(self, '_lyric_resize_frozen', False)
                 or ((getattr(self, '_resize_chrome_hold', False) or self._width_chrome_active)
                     and self.background_veil.ready))):
@@ -1072,7 +1109,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if key != self._background_veil_key:
                 self._diagnostics['veil_stale_frames'] = self._diagnostics.get('veil_stale_frames', 0) + 1
             return
-        if not force and self.background_veil.ready and now - getattr(self, '_background_veil_at', -math.inf) < .1:
+        same_palette = self._background_veil_key is not None and key[3] == self._background_veil_key[3]
+        if (not force and same_palette and self.background_veil.ready
+                and now - getattr(self, '_background_veil_at', -math.inf) < .1):
             return
         if force or key != self._background_veil_key or not self.background_veil.ready:
             self.background_veil.prepare(self._background_cache, self.width(), self.height(), force=force)
@@ -1082,6 +1121,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
 
     def _paint_background(self, painter, rect, primary, secondary, now, **kwargs):
         narrow = (getattr(self, "narrow", False) or self._width_chrome_active) and hasattr(self, "background_veil")
+        previous_basis = self._background_cache_key
         if narrow and (not self.visibility.settled(now) or self._width_chrome_active
                        or getattr(self, '_resize_chrome_hold', False)):
             kwargs['advance_frame'] = False
@@ -1096,6 +1136,14 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         else:
             super()._paint_background(painter, rect, primary, secondary, now, **kwargs)
         if narrow:
+            if self._background_cache_key != previous_basis:
+                self._background_veil_key = self._controls_key = None
+                self._chrome_backdrop = self._chrome_backdrop_key = None
+                self._wide_lyrics_dirty = True
+            # Sample after the shared painter publishes its new raw raster.
+            # A palette change may bypass the cadence once; moving frames keep
+            # the existing 100ms preparation limit and frozen resize endpoint.
+            self.refresh_background_veil(now)
             self.background_veil.paint(painter, rect, self.visibility.progress)
 
     def _paint_chrome_bands(self, painter):
@@ -1349,12 +1397,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         """
         if self.variant == "A" or self._width_chrome_active:
             return
+        palette_identity = (self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
+                            self.owner.secondary_color.rgba(), self._art_palette_cache_key)
         key = (self.width(), self.height(), self.devicePixelRatioF(),
                self._glass_feedback.pose_key(), self.dj_motion.value(now),
                self.dj_available, self.dj_enabled, self._library_back_available(),
                int(now * 30) if self.dj_speaking else 0,
                self.loop_mode, self.mode, self.song_index, self.cover_index,
-               self.owner.album_art.cacheKey(), self.owner.track_title, self.owner.artist,
+               palette_identity,
+               self.owner.track_title, self.owner.artist,
                self._song_collection_state() if self.live else self.song_index in self.liked_songs,
                self.owner.media_is_playing, bool(self.owner.enable_dual_line_lyrics),
                not self._layout_snapshot.isNull(),
@@ -1391,6 +1442,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                 image.copy(0, round((self.height() - VeilOverlay.BOTTOM_HEIGHT) * ratio),
                                            image.width(), round(VeilOverlay.BOTTOM_HEIGHT * ratio)))
         self._controls_key, self._controls_at = key, now
+        self._controls_palette_key = palette_identity
 
     def refresh_fade_background(self, now):
         """Reuse the production background at native size for one 320ms fade.
@@ -1434,6 +1486,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # Playlist fades retain this prepared veil basis. Lyrics own one
         # canonical stanza source and invalidate it only on a line/model change.
         self._fade_veil_key = self.veil_key
+        self.refresh_background_veil(now)
 
     def paint_current_lyrics(self, painter, layout):
         if self.owner.media_is_playing and not self.freeze_clock:

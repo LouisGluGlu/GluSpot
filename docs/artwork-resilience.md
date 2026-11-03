@@ -39,9 +39,13 @@ fetch call also benefits from the HTTP fallback and completeness checks.
 
 ## Changes
 
-Owned playback retries `network`, `timeout`, `incomplete`, `invalid_image` and
-worker `busy` results at most twice per retained image key. Retry delays are
-0.75 and 1.5 seconds after the preceding result. The owner's single-shot timer
+The t179 follow-up permits at most three retries for `network`, `timeout` and
+`incomplete` (four total jobs), with delays of 0.75, 1.5 and 2.25 seconds after
+the preceding result. `invalid_image`, worker `busy` and tiny-image upgrades
+retain the two-retry budget. These limits share the retained image key's
+attempt counter; changing error categories cannot reset it. The displayed
+cover state stays `pending` through scheduled/inflight retries and becomes
+`failed` only on terminal failure or budget exhaustion. The owner's single-shot timer
 runs independently of the visible song page or island. Invalid URLs, byte or
 dimension limits, authentication failures and missing HTTP resources remain
 terminal. Retry work keeps the existing two-request concurrency cap and queue

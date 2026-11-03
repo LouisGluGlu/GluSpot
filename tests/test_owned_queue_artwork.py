@@ -130,18 +130,18 @@ class OwnedQueueArtworkTests(unittest.TestCase):
         self.assertFalse(self.provider.prefetch_owned_queue_artwork((50,), self.token))
         self.assertNotIn(self.owned._art_key(self.songs[50]), self.owned._art_window)
 
-    def test_visible_transient_failure_retries_twice_without_repaint_reset(self):
+    def test_visible_network_failure_retries_three_times_without_repaint_reset(self):
         self.hint((50,))
         self.drain(exclude=("50",))
         before = self.notified.call_count
-        for attempt in range(3):
+        for attempt in range(4):
             token = next(token for token, _ in reversed(self.artwork.jobs)
                          if token[2][1] == "50" and token[3] in self.owned._art_running)
             self.complete(token, error="network")
             self.assertTrue(self.hint((50,)))
-            if attempt < 2:
+            if attempt < 3:
                 self.retry()
-        self.assertEqual(sum(token[2][1] == "50" for token, _ in self.artwork.jobs), 3)
+        self.assertEqual(sum(token[2][1] == "50" for token, _ in self.artwork.jobs), 4)
         self.assertFalse(self.owned._art_retry_at)
         self.assertEqual(self.notified.call_count, before)
         self.assertEqual(self.provider.get_owned_queue_artwork(self.songs[50]), b"")
@@ -196,11 +196,12 @@ class OwnedQueueArtworkTests(unittest.TestCase):
         self.owned.select_queue_index(50, self.token)
         self.drain(exclude=("50",))
         thumbnail = self.owned.track.album_art_bytes
-        for attempt in range(3):
+        for attempt in range(4):
             token = next(token for token, _ in reversed(self.artwork.jobs)
                          if token[2][1] == "50" and token[3] in self.owned._art_running)
             self.complete(token, error="network")
-            if attempt < 2:
+            if attempt < 3:
+                self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
                 self.retry()
         self.assertEqual(self.owned.track.album_art_bytes, thumbnail)
         self.assertEqual(self.owned.track.album_art_source, "thumbnail")

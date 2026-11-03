@@ -88,6 +88,7 @@ class OwnedMusicPlayer(QObject):
     DJ_PREFETCH_FILES = 2
     DJ_CATALOG_TRANSIENT_RETRIES = 2
     ARTWORK_TRANSIENT_RETRIES = 2
+    ARTWORK_NETWORK_RETRIES = 3
     ARTWORK_RETRY_SECONDS = .75
     AUDIO_PREPARATION_BUSY_SECONDS = 3.0
     changed = Signal()
@@ -1890,7 +1891,7 @@ class OwnedMusicPlayer(QObject):
             source_app_id="GluSpot", position_sampled_at=time.monotonic(), position_observed_seconds=0.0,
             album_art_source="thumbnail" if visual_preview else "original" if visual_cached else "",
             album_art_lookup_state=("pending" if visual_pending else "failed") if visual_preview
-                else "original" if visual_cached else "failed" if self._art_key(visual_song) in self._art_failed
+                else "original" if visual_cached else "failed" if visual_key in self._art_failed and not visual_pending
                 else "pending" if visual_song.artwork_url else "miss",
             album_queue=self._album_queue(),
         ))
@@ -2767,22 +2768,23 @@ class OwnedMusicPlayer(QObject):
             if not accepted:
                 self._art_running.pop(request, None)
                 self._art_request_targets.pop(request, None)
-                self._art_failed.add(key)
-                self._schedule_artwork_retry(key)
+                if not self._schedule_artwork_retry(key):
+                    self._art_failed.add(key)
                 if key == current:
-                    self.track = replace(self.track, album_art_lookup_state="failed")
-                    self.changed.emit()
+                    self._apply_cached_artwork()
         if self._art_retry_at:
             delay = max(.01, min(self._art_retry_at.values()) - time.monotonic())
             self._art_retry_timer.start(max(1, round(delay * 1000)))
 
-    def _schedule_artwork_retry(self, key):
+    def _schedule_artwork_retry(self, key, *, error=None):
         count = self._art_retry_counts.get(key, 0)
-        if count >= self.ARTWORK_TRANSIENT_RETRIES or key not in self._art_window:
-            return
+        limit = self.ARTWORK_NETWORK_RETRIES if error in {"network", "timeout", "incomplete"} else self.ARTWORK_TRANSIENT_RETRIES
+        if count >= limit or key not in self._art_window:
+            return False
         self._art_retry_counts[key] = count + 1
         self._art_retry_at[key] = time.monotonic() + self.ARTWORK_RETRY_SECONDS * (count + 1)
         self._art_retry_timer.start(max(1, round(self.ARTWORK_RETRY_SECONDS * 1000)))
+        return True
 
     def _artwork_completed(self, epoch, extra, result, error):
         key, request = extra
@@ -2792,9 +2794,10 @@ class OwnedMusicPlayer(QObject):
         if epoch == self._queue_epoch and key in self._art_window and self.track is not None:
             published = None
             if error or not result or len(result[0]) > ONLINE_ARTWORK_MAX_BYTES:
-                self._art_failed.add(key)
-                if error in {"network", "timeout", "incomplete", "invalid_image", "busy"}:
-                    self._schedule_artwork_retry(key)
+                retrying = (error in {"network", "timeout", "incomplete", "invalid_image", "busy"}
+                            and self._schedule_artwork_retry(key, error=error))
+                if not retrying:
+                    self._art_failed.add(key)
             else:
                 self._art_failed.discard(key)
                 side = result[3] if len(result) > 3 else 0
@@ -2845,8 +2848,11 @@ class OwnedMusicPlayer(QObject):
             changes.update(album_art_bytes=cached[0], album_color=cached[1], secondary_color=cached[2],
                            album_art_source="thumbnail" if preview else "original",
                            album_art_lookup_state="pending" if preview and pending else "failed" if preview else "original")
-        elif visual_song is not None and self._art_key(visual_song) in self._art_failed:
-            changes["album_art_lookup_state"] = "failed"
+        elif visual_song is not None:
+            key = self._art_key(visual_song)
+            pending = key in self._art_retry_at or (self._queue_epoch, key) in self._art_running.values()
+            changes["album_art_lookup_state"] = ("pending" if pending else "failed" if key in self._art_failed
+                                                 else "pending" if visual_song.artwork_url else "miss")
         self.track = replace(self.track, **changes)
         self.changed.emit()
 

@@ -20,7 +20,9 @@
 .\native\online_music\prepare-runtime.ps1
 ```
 
-可以通过 `-NodePath`、`-NpmPath` 指定现有可执行文件，通过 `-NodeLicensePath` 指定对应 Node 发行版的原始 LICENSE；默认从 Node 精确版本的官方源码标签取得 LICENSE。脚本以 `npm ci --ignore-scripts --omit=dev --no-audit --no-fund` 安装固定锁文件，复制 Node，再运行 `verify-runtime.cjs`。安装输出只在 ignored `build/online-music`，不进入 Git。
+可以通过 `-NodePath`、`-NpmPath` 指定现有可执行文件，通过 `-NodeLicensePath` 指定对应 Node 发行版的原始 LICENSE；默认优先使用 Node 可执行文件旁的 `LICENSE`、`LICENSE.txt` 或 `Node-LICENSE.txt`，否则从 Node 精确版本的官方源码标签取得 LICENSE。脚本以 `npm ci --ignore-scripts --omit=dev --no-audit --no-fund` 安装固定锁文件，复制 Node，再运行 `verify-runtime.cjs`。安装输出只在 ignored `build/online-music`，不进入 Git。
+
+LICENSE 下载失败不会撤销已经可用的本地开发运行时：脚本保留明确的 `licenses/Node-LICENSE-unavailable.txt`，以 `--allow-node-license-notice` 继续核验适配器；`SOURCE.json` 将 Node 的 `license_status` 记为 `unavailable`，并记录该说明的路径和哈希。说明不能代替完整许可证；普通 verifier 仍要求完整 LICENSE，Windows 打包仍因缺少 `Node-LICENSE.txt` 而拒绝收纳该运行时。补齐对应发行版的完整 LICENSE 后重新准备即可。
 
 本次实际准备使用 Node `v24.19.0`，安装 397 个包，保留 378 份 LICENSE、NOTICE 或 ATTRIBUTION 文件（包含 Node 完整 LICENSE 及其自带第三方声明）。`SOURCE.json` 逐包记录版本、来源、integrity、许可证元数据和保留文件哈希，同时记录 Node 可执行文件、Node LICENSE 与锁文件的 SHA-256。部分传递依赖使用其他许可证，因此不能把“直接适配器为 MIT”描述成“全部依赖均为 MIT”。缺少独立声明文件的包仍保留其原始安装目录和元数据。
 

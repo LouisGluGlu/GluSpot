@@ -1030,6 +1030,12 @@ class OwnedPlaybackTests(unittest.TestCase):
                 token, action = self.artwork_tasks.jobs[-1]
                 if accepted:
                     self.artwork_tasks.completed.emit(token, result, error)
+                else:
+                    self.assertEqual(self.player.track.album_art_lookup_state, "pending")
+                    for _ in range(self.player.ARTWORK_TRANSIENT_RETRIES):
+                        due = max(self.player._art_retry_at.values())
+                        with patch("local.owned_music_player.time.monotonic", return_value=due + .01):
+                            self.player._pump_artwork()
                 self.assertEqual(self.player.track.album_art_lookup_state, "failed")
                 self.assertEqual(self.player.track.album_art_bytes, b"")
 

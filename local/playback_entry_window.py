@@ -275,15 +275,17 @@ class MusicSourceButton(QAbstractButton):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             upcoming = not self.source.login_supported
+            enabled = self.isEnabled() and not upcoming
+            checked = enabled and self.isChecked()
             face = QRectF(self.rect()).adjusted(1, 1, -1, -1)
             backdrop, source = widget_glass_backdrop(self, face)
-            painter.setOpacity(.40 if upcoming else 1.0)
-            border = QColor(self.source.color) if self.isChecked() else QColor("#3c3e44")
+            painter.setOpacity(1.0 if enabled else .45)
+            border = QColor(self.source.color) if checked else QColor("#3c3e44")
             paint_liquid_glass(painter, face, radius=14,
                               backdrop=backdrop, backdrop_rect=source, refractive=True, cache_token=id(self),
                               material_level=widget_glass_level(self), border_color=border,
-                              hovered=self.underMouse(), pressed=self.isDown(), active=self.isChecked())
-            if self.isChecked() or self.hasFocus():
+                              hovered=enabled and self.underMouse(), pressed=enabled and self.isDown(), active=checked)
+            if enabled and (checked or self.hasFocus()):
                 painter.setPen(QPen(border, 1.5))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(face.adjusted(1, 1, -1, -1), 13, 13)

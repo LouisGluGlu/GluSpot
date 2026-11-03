@@ -61,8 +61,10 @@ class OwnedArtworkRetryTests(unittest.TestCase):
         self.owned.play_queue((self.song,))
         identity, lyrics = self.owned.track.track_id, self.owned.track.lyrics
         self.complete(error="network")
+        self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
         self.assertTrue(self.owned._art_retry_timer.isActive())
         self.retry()
+        self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
         self.complete(picture(640))
         self.assertEqual(len(self.artwork.jobs), 2)
         self.assertEqual((self.owned.track.track_id, self.owned.track.lyrics), (identity, lyrics))
@@ -77,7 +79,7 @@ class OwnedArtworkRetryTests(unittest.TestCase):
         self.assertEqual(len(self.artwork.jobs), 2)
         self.assertEqual(self.owned.track.album_art_lookup_state, "original")
 
-    def test_transient_failures_and_rejected_workers_have_two_retry_limit(self):
+    def test_corrupt_images_and_rejected_workers_keep_two_retry_limit(self):
         for rejected in (False, True):
             with self.subTest(rejected=rejected):
                 self.owned.stop()
@@ -86,11 +88,53 @@ class OwnedArtworkRetryTests(unittest.TestCase):
                 self.owned.play_queue((self.song,))
                 for _ in range(3):
                     if not rejected:
-                        self.complete(error="timeout")
+                        self.complete(error="invalid_image")
                     self.retry()
                 self.assertEqual(len(self.artwork.jobs), 3)
                 self.assertFalse(self.owned._art_retry_at)
                 self.assertEqual(self.owned.track.album_art_lookup_state, "failed")
+
+    def test_network_timeout_and_incomplete_get_three_bounded_backoffs_before_failure(self):
+        for error in ("network", "timeout", "incomplete"):
+            with self.subTest(error=error):
+                self.owned.stop()
+                self.artwork.jobs.clear()
+                self.owned.play_queue((self.song,))
+                key = self.owned._art_key(self.song)
+                for attempt, delay in enumerate((.75, 1.5, 2.25), start=1):
+                    with patch("local.owned_music_player.time.monotonic", return_value=100.):
+                        self.complete(error=error)
+                    self.assertEqual(self.owned._art_retry_at[key], 100. + delay)
+                    self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
+                    self.retry()
+                    self.assertEqual(len(self.artwork.jobs), attempt + 1)
+                    self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
+                self.complete(error=error)
+                self.assertFalse(self.owned._art_retry_at)
+                self.assertEqual(self.owned.track.album_art_lookup_state, "failed")
+                self.owned._pump_artwork()
+                self.assertEqual(len(self.artwork.jobs), 4)
+
+    def test_last_network_retry_can_recover_without_showing_terminal_failure(self):
+        states = []
+        self.owned.changed.connect(lambda: states.append(self.owned.track.album_art_lookup_state)
+                                   if self.owned.track else None)
+        self.owned.play_queue((self.song,))
+        for error in ("timeout", "incomplete", "network"):
+            self.complete(error=error)
+            self.retry()
+        self.complete(picture(640))
+        self.assertNotIn("failed", states)
+        self.assertEqual(states[-1], "original")
+
+    def test_rejected_initial_worker_stays_pending_until_its_budget_expires(self):
+        self.artwork.accepted = False
+        self.owned.play_queue((self.song,))
+        self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
+        self.retry()
+        self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
+        self.retry()
+        self.assertEqual(self.owned.track.album_art_lookup_state, "failed")
 
     def test_terminal_failures_do_not_retry(self):
         for error in ("invalid_response", "access_denied", "not_found", None):
