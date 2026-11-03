@@ -74,3 +74,84 @@ independent of the default small offscreen screen.
 Earlier t160 ordinary full-suite/native-GC and offscreen geometry limitations
 remain documented in the README; focused success is not a whole-suite or PC
 acceptance claim. No unrelated behavior is changed to bypass those limits.
+
+
+## Broader baseline evidence
+
+The additional eight startup/island/surface/collection/queue modules run **845
+tests** on both A and isolated base `3df61ef`: **20 failure identities and one
+error identity match exactly**, with no new failures/errors. Reports and the
+machine comparison are `A-lifecycle*.json` in the external handoff. Most are
+old font/style expectations or offscreen geometry/aspect-ratio assumptions.
+Ordinary full discovery on the isolated base terminates with SIGSEGV (`-11`)
+after 138 test starts while `ArtworkVisualPriorityTests` calls image decoding
+through the provider. It produces no complete unittest summary. Fault logs and
+exact command metadata are retained; no GC/test workaround or full-suite pass
+is claimed.
+
+
+## Platform entries and settings (B)
+
+The login page inventories six intended platforms. Real account support remains
+with the existing service/controller/Node bridge; UI-only placeholders never
+create a backend account or QR flow, even if a malformed catalog says available.
+
+| Platform | Account backend | Entry behavior |
+| --- | --- | --- |
+| 网易云音乐 | Pinned NetEase API adapter | Existing QR login, verified status, logout, catalog/playback; enabled only when runtime is available |
+| 酷狗音乐 | Pinned Kugou adapter | Existing QR login, status/logout/catalog/playback; runtime gated |
+| QQ 音乐 | Pinned QQ adapter | Existing QR login, status/logout/catalog/playback; runtime gated |
+| 汽水音乐 | None verified | Disabled, 即将支持 |
+| Spotify | No owned-login backend | Disabled, 即将支持 |
+| Apple Music | No owned-login backend | Disabled, 即将支持 |
+
+NetEase has prior end-to-end user validation; QQ and Kugou implement real
+backends but still need broader account/desktop acceptance. This change does
+not claim fresh real-platform login testing. Optional pinned runtime absence
+continues to explain disabled real entries. Six entries use two rows below
+720 px and one row at wider sizes. The current account/login gate now follows
+the pending library selection, current owned track, then saved supported source;
+another platform's authenticated account cannot bypass it. Back opens that
+platform through the existing login controller.
+
+Settings now has five Chinese navigation pages, using the existing controls,
+search registration and callbacks: 账号与平台 / 播放与采集 / 歌词与显示 /
+窗口与布局 / 高级. Account actions reuse the existing source/login page.
+Diagnostic page indexing and search destinations follow their new page.
+The shell/cards use a dark translucent palette; switches have a local dark
+paint override for readable labels when the saved app theme is light. The
+island/background-follow still reads the saved app theme. Obsolete gold-reading
+prose is removed; there are no new gold/lift controls or store migrations.
+
+An old-settings fixture is compared against the existing manager-normalized
+snapshot across UI construction, all page visits, widget sync, save and reload.
+All values, unknown nested extension data and the legacy dock path survive
+without additional loss. The store's preexisting retirement of gold/lift keys
+is preserved, not reimplemented by this UI change.
+
+
+Final combined verification runs all 32 A/B modules: **501 tests at each DPR
+1/2 pass, with zero failures/errors and one skip** for the unavailable prepared
+pinned online runtime (31.496 s / 33.370 s). The runtime-independent provider,
+controller, login/logout and placeholder regressions still execute. Final
+reports are `final-focus-dpr1.json` and `final-focus-dpr2.json` in the handoff;
+all module names and the exact skip identity are recorded there. The entry test
+fixtures explicitly provide a normal logical work area at both DPRs while
+preserving separate short-screen cases. Both the window and controller enforce
+placeholder gates, including malformed-catalog regression coverage.
+
+Reviewed fixture renders cover narrow 433 × 550, wide, skeleton, six-entry login
+at 330/433/wide, and every settings page at 860 × 620. These are named OFFSCREEN
+in the external handoff and do not substitute for native PC screenshots.
+
+
+Ordinary discovery on the B candidate reached **4572 test starts**, then made
+no log progress for more than 60 s in `OwnedPlaybackTests` setup. SIGINT did not
+finish it; the identified test process was manually aborted to capture stacks
+(exit -6, not a spontaneous crash). The current thread was in
+`owned_music_player.py:107` construction. No complete summary was produced and
+no root cause is established. `full-final.log` and metadata retain this limit.
+That broader run began before the final placeholder-controller guard and test
+screen-fixture corrections; the 501-test dual-DPR reports cover the final source.
+The clean-base ordinary run separately crashed earlier. No whole-suite pass or
+whole-suite failure-equivalence claim is made.

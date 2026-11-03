@@ -710,9 +710,11 @@ class SettingsWindow(QDialog):
     )
 
     SETTINGS_SIDEBAR_ICON_FILES = {
-        "基础设置": {"dark": "基础设置（白）.svg", "light": "基础设置 (黑).svg"},
-        "媒体控制": {"dark": "媒体控制（白）.svg", "light": "媒体控制（黑）.svg"},
-        "全屏歌词": {"dark": "全屏歌词（白）.svg", "light": "全屏歌词（黑）.svg"},
+        "账号与平台": {"dark": "关于我（白）.svg", "light": "关于我（黑）.svg"},
+        "播放与采集": {"dark": "媒体控制（白）.svg", "light": "媒体控制（黑）.svg"},
+        "歌词与显示": {"dark": "全屏歌词（白）.svg", "light": "全屏歌词（黑）.svg"},
+        "窗口与布局": {"dark": "基础设置（白）.svg", "light": "基础设置 (黑).svg"},
+        "高级": {"dark": "插件设置（白）.svg", "light": "插件设置（黑）.svg"},
         "插件设置": {"dark": "插件设置（白）.svg", "light": "插件设置（黑）.svg"},
         "通知设置": {"dark": "通知设置（白）.svg", "light": "通知设置（黑）.svg"},
         "关于我": {"dark": "关于我（白）.svg", "light": "关于我（黑）.svg"},
@@ -865,7 +867,7 @@ class SettingsWindow(QDialog):
         self._plugin_page_index = -1
         self._barrage_adjust_generation = 0
         self._barrage_page_index = -1
-        self._diagnostics_page_index = 3
+        self._diagnostics_page_index = 4
         self._diagnostic_labels: dict[str, QLabel] = {}
         self._music_cache_clear_job = None
         self._detail_panels: list[tuple[QPushButton, QFrame]] = []
@@ -901,7 +903,16 @@ class SettingsWindow(QDialog):
         self._apply_settings_font()
 
     def _theme(self) -> dict[str, str]:
-        return mac_preferences_theme()
+        # Settings keeps the player's dark glass surface. The saved interface
+        # theme still controls the island and its background-follow behavior.
+        theme = mac_preferences_theme(True)
+        theme.update(
+            window="#181d29", sidebar="rgba(30, 36, 49, 218)",
+            sidebar_border="rgba(224, 235, 255, 28)", content="transparent",
+            titlebar="rgba(28, 34, 48, 140)", card="rgba(53, 62, 80, 160)",
+            card_border="rgba(224, 235, 255, 32)", detail_body="rgba(22, 28, 40, 150)",
+        )
+        return theme
 
     def _apply_theme(self):
         if getattr(self, "_applying_theme", False):
@@ -909,13 +920,21 @@ class SettingsWindow(QDialog):
         self._applying_theme = True
         t = self._theme()
         try:
-            self.setStyleSheet(mac_preferences_stylesheet(t))
+            self.setStyleSheet(mac_preferences_stylesheet(t) + """
+                QFrame#MacWindowShell {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                        stop:0 #252f43, stop:0.55 #1b2030, stop:1 #262137);
+                    border: 1px solid rgba(225, 235, 255, 32);
+                }
+            """)
             self._refresh_glass_buttons()
         finally:
             self._applying_theme = False
 
     def _refresh_glass_buttons(self):
         light = not self._settings_dark_mode()
+        for switch in self.findChildren(IosSwitch):
+            switch.setProperty("darkMode", not light)
         for button in self.findChildren(GlassPushButton):
             if isinstance(button, ColorButton):
                 continue
@@ -968,8 +987,7 @@ class SettingsWindow(QDialog):
         self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def _settings_dark_mode(self) -> bool:
-        getter = self.settings.get if self.settings is not None and hasattr(self.settings, "get") else None
-        return app_dark_mode(getter)
+        return True
 
     def _settings_sidebar_icon_path(self, title: str) -> Path | None:
         files = self.SETTINGS_SIDEBAR_ICON_FILES.get(str(title or ""))
@@ -1087,10 +1105,11 @@ class SettingsWindow(QDialog):
         root.addWidget(content, 1)
 
         pages = (
-            ("基础设置", self._basic_settings_page()),
-            ("媒体控制", self._media_page()),
-            ("全屏歌词", self._music_surface_lyrics_page()),
-            ("关于我", self._about_page()),
+            ("账号与平台", self._accounts_page()),
+            ("播放与采集", self._media_page()),
+            ("歌词与显示", self._music_surface_lyrics_page()),
+            ("窗口与布局", self._window_layout_page()),
+            ("高级", self._advanced_page()),
         )
         colors = mac_sidebar_icon_colors()
         for index, (name, page) in enumerate(pages):
@@ -2135,8 +2154,82 @@ class SettingsWindow(QDialog):
             return f"已检测到 {detail}。"
         return "仅检测 dock.exe / Dock_64.exe 主程序。尚未检测到，请确认 MyDockFinder 已启动。"
 
-    def _basic_settings_page(self) -> QWidget:
-        page = self._page("基础设置")
+    def _accounts_page(self) -> QWidget:
+        page = self._page("账号与平台")
+        layout: QVBoxLayout = page._content_layout
+        c = self._card(layout).layout()
+        c.addWidget(self._section_label("音乐平台", 2, 8))
+        self.online_login_button = GlassPushButton("登录音乐来源")
+        self.online_login_button.clicked.connect(self._open_online_music_login)
+        c.addWidget(self.online_login_button)
+        self.personal_dj_voice_button = GlassPushButton("私人DJ音色")
+        self.personal_dj_voice_button.clicked.connect(self._open_personal_dj_voices)
+        c.addWidget(self.personal_dj_voice_button)
+
+        hint = QLabel("在音乐来源页查看各平台登录状态、扫码登录或退出账号。私人 DJ 当前适用于网易云音乐私人漫游。")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        c.addWidget(hint)
+        user_id = str(self._setting_value("v2_user_id", "") or Path.home().name or "local-user")
+        self._row(c, "用户 ID", self._readonly_value(user_id))
+        layout.addStretch(1)
+        return page
+
+    def _media_page(self) -> QWidget:
+        page = self._page("播放与采集")
+        layout: QVBoxLayout = page._content_layout
+        c = self._card(layout).layout()
+        c.addWidget(self._section_label("播放来源", 2, 8))
+        self.owned_playback_switch = self._check(
+            "程序内播放", bool(self._setting_value("v2_owned_playback_enabled", True)),
+            lambda enabled: self._set_playback_source("v2_owned_playback_enabled", enabled),
+        )
+        self.system_capture_switch = self._check(
+            "系统抓取", bool(self._setting_value("v2_system_capture_enabled", False)),
+            lambda enabled: self._set_playback_source("v2_system_capture_enabled", enabled),
+        )
+        c.addWidget(self.owned_playback_switch)
+        c.addWidget(self.system_capture_switch)
+        if owned_playback_only():
+            self._set_switch_checked(self.owned_playback_switch, True)
+            self._set_switch_checked(self.system_capture_switch, False)
+            self.owned_playback_switch.setEnabled(False)
+            self.system_capture_switch.setEnabled(False)
+            self.system_capture_switch.setToolTip(system_media_unavailable_reason())
+        player_hint = QLabel("外部播放通过 Windows 系统媒体会话（SMTC）读取，无需填写播放器路径。若播放时没有会话，请在播放器中开启系统媒体控制；无法据此判断播放器内部开关。")
+        if owned_playback_only():
+            player_hint.setText(system_media_unavailable_reason())
+        player_hint.setWordWrap(True)
+        player_hint.setMaximumWidth(600)
+        player_hint.setStyleSheet(self._hint_style(2, 12))
+        c.addWidget(player_hint)
+        from local.netease_capture_settings import NetEaseCaptureSettings
+        self.netease_capture_settings = NetEaseCaptureSettings(
+            self._setting_value, self._save, self._system_media_provider,
+            platform='unsupported' if owned_playback_only() else None,
+            lamp=self._status_indicator(False))
+        c.addWidget(self.netease_capture_settings)
+        self.music_app_profile_controls = {}
+        self.system_lyric_offset = self._slider_row(
+            c, "系统歌词偏移", -12000, 12000,
+            round(float(self._setting_value("v2_system_lyric_offset_seconds", 0.0)) * 1000),
+            self._set_system_lyric_offset, " ms",
+        )
+        if owned_playback_only():
+            self.system_lyric_offset.setEnabled(False)
+
+        c = self._card(layout).layout()
+        c.addWidget(self._section_label("播放预载", 2, 8))
+        self.music_surface_preload_count = self._slider_row(
+            c, "音乐页预载歌曲", 1, 6,
+            max(1, min(6, int(self._setting_value("v2_music_surface_preload_count", 6)))),
+            self._set_music_surface_preload_count, " 首",
+        )
+        layout.addStretch(1)
+        return page
+
+    def _window_layout_page(self) -> QWidget:
+        page = self._page("窗口与布局")
         layout: QVBoxLayout = page._content_layout
         self._begin_compact_appearance_page(page)
         c = self._card(layout).layout()
@@ -2147,13 +2240,6 @@ class SettingsWindow(QDialog):
             self._set_theme_mode,
         )
         self._row(c, "界面模式", self.theme_mode)
-        self.startup_mode = self._combo(
-            list(self.STARTUP_MODES),
-            normalize_startup_mode(str(self._setting_value("v2_startup_mode", "none") or "none")),
-            self._set_startup_mode,
-        )
-        self.startup_mode.setToolTip("计划任务更适合随用户登录启动；服务模式不适合带界面的托盘应用。")
-        self._row(c, "开机启动", self.startup_mode)
         self.theme_dark_start = QLineEdit(str(self._setting_value("v2_theme_dark_start", "22:00") or "22:00"))
         self.theme_dark_start.setPlaceholderText("22:00")
         self.theme_dark_start.editingFinished.connect(self._set_theme_dark_start)
@@ -2178,80 +2264,7 @@ class SettingsWindow(QDialog):
         )
         self.music_glass_level.setToolTip("窗口与全屏共用。越高越不透明，映射的背景模糊越强；越低越透明，背景模糊越弱。文字和图标保持清晰。")
 
-        c = self._card(layout).layout()
-        c.addWidget(self._section_label("动画", 2, 6))
-        self.animation_speed = self._combo(
-            list(self.ANIMATION_SPEEDS), float(getattr(self.island_widget, "animation_speed", 1.0)),
-            self._set_animation_speed,
-        )
-        self._row(c, "动画倍速", self.animation_speed)
-        fps_cap = self._display_refresh_rate_fps_cap()
-        self.fps_slider = self._slider_row(
-            c, "默认动画帧率", 30, fps_cap,
-            self._fps_setting_value(getattr(self.island_widget, "animation_fps", 60)),
-            self._set_animation_fps, " FPS",
-        )
-        self._bind_fps_slider_label(self.fps_slider)
-        self.lyric_fps_slider = self._slider_row(
-            c, "歌词动画帧率", 30, fps_cap,
-            self._fps_setting_value(getattr(self.island_widget, "lyric_animation_fps", self._setting_value("v2_lyric_animation_fps", 120))),
-            self._set_lyric_animation_fps, " FPS",
-        )
-        self._bind_fps_slider_label(self.lyric_fps_slider)
         self._end_compact_appearance_page()
-        layout.addStretch(1)
-        return page
-
-    def _media_page(self) -> QWidget:
-        page = self._page("媒体控制")
-        layout: QVBoxLayout = page._content_layout
-        c = self._card(layout).layout()
-        c.addWidget(self._section_label("播放来源", 2, 8))
-        self.owned_playback_switch = self._check(
-            "程序内播放", bool(self._setting_value("v2_owned_playback_enabled", True)),
-            lambda enabled: self._set_playback_source("v2_owned_playback_enabled", enabled),
-        )
-        self.system_capture_switch = self._check(
-            "系统抓取", bool(self._setting_value("v2_system_capture_enabled", False)),
-            lambda enabled: self._set_playback_source("v2_system_capture_enabled", enabled),
-        )
-        c.addWidget(self.owned_playback_switch)
-        c.addWidget(self.system_capture_switch)
-        if owned_playback_only():
-            self._set_switch_checked(self.owned_playback_switch, True)
-            self._set_switch_checked(self.system_capture_switch, False)
-            self.owned_playback_switch.setEnabled(False)
-            self.system_capture_switch.setEnabled(False)
-            self.system_capture_switch.setToolTip(system_media_unavailable_reason())
-        self.online_login_button = GlassPushButton("登录音乐来源")
-        self.online_login_button.clicked.connect(self._open_online_music_login)
-        c.addWidget(self.online_login_button)
-        self.personal_dj_voice_button = GlassPushButton("私人DJ音色")
-        self.personal_dj_voice_button.clicked.connect(self._open_personal_dj_voices)
-        c.addWidget(self.personal_dj_voice_button)
-
-        player_hint = QLabel("外部播放通过 Windows 系统媒体会话（SMTC）读取，无需填写播放器路径。若播放时没有会话，请在播放器中开启系统媒体控制；无法据此判断播放器内部开关。")
-        if owned_playback_only():
-            player_hint.setText(system_media_unavailable_reason())
-        player_hint.setWordWrap(True)
-        player_hint.setMaximumWidth(600)
-        player_hint.setStyleSheet(self._hint_style(2, 12))
-        c.addWidget(player_hint)
-        from local.netease_capture_settings import NetEaseCaptureSettings
-        self.netease_capture_settings = NetEaseCaptureSettings(
-            self._setting_value, self._save, self._system_media_provider,
-            platform='unsupported' if owned_playback_only() else None,
-            lamp=self._status_indicator(False))
-        c.addWidget(self.netease_capture_settings)
-        self.music_app_profile_controls = {}
-        self.system_lyric_offset = self._slider_row(
-            c, "系统歌词偏移", -12000, 12000,
-            round(float(self._setting_value("v2_system_lyric_offset_seconds", 0.0)) * 1000),
-            self._set_system_lyric_offset, " ms",
-        )
-        if owned_playback_only():
-            self.system_lyric_offset.setEnabled(False)
-
         c = self._card(layout).layout()
         c.addWidget(self._section_label("MyDockFinder 监听", 2, 8))
         self.mydockfinder_monitor_switch = self._check(
@@ -2333,23 +2346,6 @@ class SettingsWindow(QDialog):
         self.reset_album_record_button.clicked.connect(self._reset_album_island_record)
         c.addWidget(self.reset_album_record_button)
 
-        c = self._card(layout).layout()
-        c.addWidget(self._section_label("歌词与预载", 2, 8))
-        self.music_surface_preload_count = self._slider_row(
-            c, "音乐页预载歌曲", 1, 6,
-            max(1, min(6, int(self._setting_value("v2_music_surface_preload_count", 6)))),
-            self._set_music_surface_preload_count, " 首",
-        )
-        self.lyric_chinese_conversion = self._combo(
-            list(self.LYRIC_CHINESE_CONVERSIONS),
-            str(self._setting_value("v2_lyric_chinese_conversion", "off") or "off"),
-            self._set_lyric_chinese_conversion,
-        )
-        self._row(c, "歌词繁简转换", self.lyric_chinese_conversion)
-        hint = QLabel("会根据当前播放器优先选择歌词源；线上歌词会写入用户缓存，本地 .lrc 可继续手动放入项目 lyrics 目录。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(self._hint_style(2, 8))
-        c.addWidget(hint)
         self._update_music_ambience_controls()
         self._update_lyric_flow_controls()
         self._update_previews()
@@ -2367,12 +2363,12 @@ class SettingsWindow(QDialog):
         return f"拉丁 {value / 10:.1f} 字 / 中文 {value / 15:.1f} 字"
 
     def _music_surface_lyrics_page(self) -> QWidget:
-        page = self._page("全屏歌词")
+        page = self._page("歌词与显示")
         layout: QVBoxLayout = page._content_layout
         card = self._card(layout)
         c = card.layout()
 
-        hint = QLabel("读字方案同步全屏、窗口和灵动岛；金标读字用金色涟漪反馈，不显示额外徽标。其余参数调整全屏与窗口音乐页。")
+        hint = QLabel("歌词显示同步全屏、窗口和音乐岛；读字、译文与音译沿用同一套设置。")
         hint.setWordWrap(True)
         hint.setStyleSheet(self._hint_style(2, 8))
         c.addWidget(hint)
@@ -2426,19 +2422,57 @@ class SettingsWindow(QDialog):
         cantonese_hint.setWordWrap(True)
         cantonese_hint.setStyleSheet(self._hint_style(2, 8))
         secondary_card.addWidget(cantonese_hint)
+        c = self._card(layout).layout()
+        c.addWidget(self._section_label("歌词来源与文字", 2, 8))
+        self.lyric_chinese_conversion = self._combo(
+            list(self.LYRIC_CHINESE_CONVERSIONS),
+            str(self._setting_value("v2_lyric_chinese_conversion", "off") or "off"),
+            self._set_lyric_chinese_conversion,
+        )
+        self._row(c, "歌词繁简转换", self.lyric_chinese_conversion)
+        hint = QLabel("会根据当前播放器优先选择歌词源；线上歌词会写入用户缓存，本地 .lrc 可继续手动放入项目 lyrics 目录。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(self._hint_style(2, 8))
+        c.addWidget(hint)
         c.addStretch(1)
         layout.addStretch(1)
         return page
 
-    def _about_page(self) -> QWidget:
-        page = self._page("关于我")
+    def _advanced_page(self) -> QWidget:
+        page = self._page("高级")
         layout: QVBoxLayout = page._content_layout
 
-        account_card = self._card(layout)
-        a = account_card.layout()
-        user_id = str(self._setting_value("v2_user_id", "") or Path.home().name or "local-user")
-        self._row(a, "用户 ID", self._readonly_value(user_id))
-        self._row(a, "作者信息", self._readonly_value(APP_NAME))
+        c = self._card(layout).layout()
+        c.addWidget(self._section_label("启动", 2, 8))
+        self.startup_mode = self._combo(
+            list(self.STARTUP_MODES),
+            normalize_startup_mode(str(self._setting_value("v2_startup_mode", "none") or "none")),
+            self._set_startup_mode,
+        )
+        self.startup_mode.setToolTip("计划任务更适合随用户登录启动；服务模式不适合带界面的托盘应用。")
+        self._row(c, "开机启动", self.startup_mode)
+        c = self._card(layout).layout()
+        c.addWidget(self._section_label("动画", 2, 6))
+        self.animation_speed = self._combo(
+            list(self.ANIMATION_SPEEDS), float(getattr(self.island_widget, "animation_speed", 1.0)),
+            self._set_animation_speed,
+        )
+        self._row(c, "动画倍速", self.animation_speed)
+        fps_cap = self._display_refresh_rate_fps_cap()
+        self.fps_slider = self._slider_row(
+            c, "默认动画帧率", 30, fps_cap,
+            self._fps_setting_value(getattr(self.island_widget, "animation_fps", 60)),
+            self._set_animation_fps, " FPS",
+        )
+        self._bind_fps_slider_label(self.fps_slider)
+        self.lyric_fps_slider = self._slider_row(
+            c, "歌词动画帧率", 30, fps_cap,
+            self._fps_setting_value(getattr(self.island_widget, "lyric_animation_fps", self._setting_value("v2_lyric_animation_fps", 120))),
+            self._set_lyric_animation_fps, " FPS",
+        )
+        self._bind_fps_slider_label(self.lyric_fps_slider)
+        c = self._card(layout).layout()
+        self._row(c, "作者信息", self._readonly_value(APP_NAME))
 
         icon_card = self._card(layout)
         icon_layout = icon_card.layout()
@@ -2932,25 +2966,27 @@ class SettingsWindow(QDialog):
 
     def _sync_music_background_to_theme(self, force: bool = False) -> bool:
         enabled = bool(self._setting_value("v2_music_background_follow_theme", False))
+        getter = self.settings.get if self.settings is not None and hasattr(self.settings, "get") else None
+        app_theme_dark = app_dark_mode(getter)
         current_style = self._current_music_ambience_style()
         previous_style = self._music_background_follow_previous_style()
         if current_style == "system" and not previous_style:
             self._update_previews()
             return False
         target_style = normalize_music_ambience_style(music_ambience_style_for_theme(
-            self._settings_dark_mode(),
+            app_theme_dark,
             current_style,
             follow_enabled=enabled,
             previous_dark_style=previous_style,
         ))
         if target_style == current_style:
-            if self._settings_dark_mode() and previous_style:
+            if app_theme_dark and previous_style:
                 self._set_music_background_follow_previous_style("")
             return False
-        if not self._settings_dark_mode() and music_ambience_theme_category(current_style) == "dark":
+        if not app_theme_dark and music_ambience_theme_category(current_style) == "dark":
             self._set_music_background_follow_previous_style(current_style)
         changed = self._set_music_background_style_for_theme(target_style)
-        if self._settings_dark_mode():
+        if app_theme_dark:
             self._set_music_background_follow_previous_style("")
         return changed
 

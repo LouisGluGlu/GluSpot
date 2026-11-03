@@ -106,6 +106,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-03: t165 follow-up lists NetEase/Kugou/QQ real account backends alongside disabled 即将支持 entries for Qishui/Spotify/Apple Music. Back/login follows the current platform even when another account is signed in. Settings reuses its controls under 账号与平台 / 播放与采集 / 歌词与显示 / 窗口与布局 / 高级, with a dark glass palette and no new settings migration. Platform matrix, compatibility and validation limits are recorded in [t165 evidence](docs/narrow-release-skeleton-t165.md).
+
 - 2026-11-03: t165/t166 routes the release music overlay through the same responsive Liquid Glass window as narrow-live, preserving saved layouts and real owner capabilities/lifecycle. Width motion fades lyric/list ink to current-width skeleton bars in 180 ms; after 150 ms quiet and final queued handoff it commits at most one lyric rebuild, then reveals live ink in 180 ms. The width style animation now uses 1.0–0.4 s. Verification and native PC limits are recorded in [t165 evidence](docs/narrow-release-skeleton-t165.md). No version or provider change.
 
 - 2026-11-03: t160 freezes the shared lyric column during live width motion and queued split/merge handoffs. A DPR-aware column snapshot preserves wrapping; after 150 ms quiet, equal wraps reuse their shaped rows and changed wraps rebuild once with a 140 ms column-only blend. Prepared veil and its sharp/tint source stay pinned until the same settle tick. Karaoke progress and lyric clicks pause during the freeze. Dual-DPR focused verification and physical acceptance limits are recorded in [t160 evidence](docs/lyric-resize-freeze-t160.md). No version, provider or transport change.

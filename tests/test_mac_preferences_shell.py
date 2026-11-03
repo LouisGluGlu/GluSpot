@@ -151,7 +151,7 @@ class MacPreferencesShellTests(unittest.TestCase):
             self.assertGreaterEqual(window.nav.iconSize().width(), 22)
             self.assertGreaterEqual(window.nav.iconSize().height(), 22)
             icon_paths = [page.get("icon_path", "") for page in window._settings_pages]
-            self.assertEqual(len(icon_paths), 4)
+            self.assertEqual(len(icon_paths), 5)
             self.assertTrue(all("assets" in str(path) and "seeting" in str(path) for path in icon_paths))
             self.assertTrue(all(Path(str(path)).exists() for path in icon_paths))
         finally:
@@ -479,7 +479,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         window = SettingsWindow(island, settings)
         try:
             page_names = [page["title"] for page in window._settings_pages]
-            self.assertEqual(page_names[2], "全屏歌词")
+            self.assertEqual(page_names[2], "歌词与显示")
             self.assertEqual(DEFAULT_SETTINGS["v2_music_surface_reading_gradient_steps"], 30)
             slider = window.music_surface_reading_gradient_steps
             self.assertEqual((slider.minimum(), slider.maximum(), slider.value()), (0, 30, 30))
@@ -722,7 +722,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("_apply_rounded_window_mask", source)
         self.assertIn("setMask", source)
 
-    def test_basic_settings_page_uses_denser_local_layout(self):
+    def test_window_layout_page_uses_denser_local_layout(self):
         source = self._source("local/settings_window.py")
 
         self.assertIn("APPEARANCE_ROW_VPAD = 6", source)
@@ -732,8 +732,8 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("layout.setSpacing(14)", source)
         self.assertIn("layout.setContentsMargins(12, 7, 12, 7)", source)
         self.assertIn("layout.setContentsMargins(16, 10, 16, 10)", source)
-        appearance_start = source.index("def _basic_settings_page")
-        appearance_end = source.index("def _media_page", appearance_start)
+        appearance_start = source.index("def _window_layout_page")
+        appearance_end = source.index("def _system_media_provider", appearance_start)
         appearance_source = source[appearance_start:appearance_end]
         self.assertIn("self._begin_compact_appearance_page(page)", appearance_source)
         self.assertIn("self._end_compact_appearance_page()", appearance_source)
@@ -823,7 +823,7 @@ class MacPreferencesShellTests(unittest.TestCase):
                 window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
                 try:
                     window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
-                    window.nav.setCurrentRow(1)
+                    window.nav.setCurrentRow(3)
                     window.show()
                     for width, height in ((688, 496), (860, 620)):
                         window.resize(width, height)
@@ -1001,7 +1001,7 @@ class MacPreferencesShellTests(unittest.TestCase):
             self.assertIn("背景样式", titles)
             window.search_input.clear()
             self.assertIsNot(window.stack.currentWidget(), window.settings_search_page)
-            self.assertEqual(normal_nav, ["基础设置", "媒体控制", "全屏歌词", "关于我"])
+            self.assertEqual(normal_nav, ["账号与平台", "播放与采集", "歌词与显示", "窗口与布局", "高级"])
         finally:
             window.close()
 
@@ -1143,27 +1143,28 @@ class MacPreferencesShellTests(unittest.TestCase):
         self.assertIn("QComboBox QAbstractItemView::item:disabled", style)
 
 
-    def test_media_page_explains_smtc_before_island_appearance(self):
+    def test_playback_page_keeps_smtc_and_preload_separate_from_window_appearance(self):
         source = self._source("local/settings_window.py")
         start = source.index("def _media_page")
-        media = source[start:source.index("def _music_surface_lyrics_page", start)]
+        media = source[start:source.index("def _window_layout_page", start)]
         self.assertNotIn("音乐软件监听", media)
         self.assertNotIn("_build_music_app_profile_panel", media)
-        self.assertLess(media.index("SMTC"), media.index("音乐岛样式"))
-        self.assertLess(media.index("音乐岛样式"), media.index("歌词与预载"))
+        self.assertIn("SMTC", media)
+        self.assertIn("播放预载", media)
+        self.assertNotIn("音乐岛样式", media)
 
-    def test_settings_window_is_arranged_by_four_function_pages(self):
+    def test_settings_window_is_arranged_by_five_function_pages(self):
         from local.settings_window import SettingsWindow
 
         window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
         try:
             titles = [page["title"] for page in window._settings_pages]
-            self.assertEqual(titles, ["基础设置", "媒体控制", "全屏歌词", "关于我"])
+            self.assertEqual(titles, ["账号与平台", "播放与采集", "歌词与显示", "窗口与布局", "高级"])
             self.assertEqual([window.nav.item(i).text() for i in range(window.nav.count())], titles)
             window.sync_from_widget()
-            window.nav.setCurrentRow(3)
-            self.assertEqual(window._diagnostics_page_index, 3)
-            self.assertIs(window.stack.currentWidget(), window._settings_pages[3]["page"])
+            window.nav.setCurrentRow(4)
+            self.assertEqual(window._diagnostics_page_index, 4)
+            self.assertIs(window.stack.currentWidget(), window._settings_pages[4]["page"])
         finally:
             window.close()
 
@@ -1224,7 +1225,7 @@ class MacPreferencesShellTests(unittest.TestCase):
                                v2_mydockfinder_listener_process_names=["dock.exe"])
         window = SettingsWindow(island, settings)
         try:
-            basic, media = (window._settings_pages[i]["page"] for i in (0, 1))
+            basic, media = (window._settings_pages[i]["page"] for i in (1, 3))
             self.assertFalse(basic.isAncestorOf(window.mydockfinder_monitor_switch))
             self.assertTrue(media.isAncestorOf(window.mydockfinder_monitor_switch))
             for removed in ("mydockfinder_path_input", "mydockfinder_path_row", "mydockfinder_process_checkboxes",
@@ -1279,7 +1280,7 @@ class MacPreferencesShellTests(unittest.TestCase):
 
         window = SettingsWindow(FakeIslandWidget(), FakeSettingsManager())
         try:
-            media = window._settings_pages[1]["page"]
+            media = window._settings_pages[3]["page"]
             self.assertTrue(media.isAncestorOf(window.placement_mode))
             self.assertTrue(media.isAncestorOf(window.finder_bar_style))
             self.assertEqual(window.finder_bar_style.currentData(), "transparent")
@@ -1693,7 +1694,7 @@ class MacPreferencesShellTests(unittest.TestCase):
         with mock.patch.object(SettingsWindow, "_display_refresh_rate_fps_cap", return_value=144):
             window = SettingsWindow(island, settings)
             try:
-                basic = window._settings_pages[0]["page"]
+                basic = window._settings_pages[4]["page"]
                 for control in (window.animation_speed, window.fps_slider, window.lyric_fps_slider):
                     self.assertTrue(basic.isAncestorOf(control))
                     self.assertFalse(control.isHidden())

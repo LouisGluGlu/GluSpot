@@ -35,6 +35,13 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        # Physical offscreen screens shrink to 400 logical px at DPR 2. Most
+        # cases specify their own window size, so provide a normal work area;
+        # short-display cases override this fixture explicitly below.
+        screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 1920, 1080))
+        self.screen_patch = patch.object(QGuiApplication, "screenAt", return_value=screen)
+        self.screen_patch.start()
+        self.addCleanup(self.screen_patch.stop)
         self.window = PlaybackEntryWindow()
 
     def tearDown(self):
@@ -95,7 +102,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
 
     def test_source_order_and_unsupported_source_are_explicit(self):
         self.window.set_sources(tuple(_source(item.source_id, item.source_id != "qishui") for item in ENTRY_SOURCES))
-        self.assertEqual(tuple(self.window.source_buttons), ("netease", "kugou", "qq", "qishui"))
+        self.assertEqual(tuple(self.window.source_buttons), ("netease", "kugou", "qq", "qishui", "spotify", "apple_music"))
         self.assertFalse(self.window.source_buttons["qishui"].isEnabled())
         self.assertIn("暂无经过验证", self.window.source_buttons["qishui"].toolTip())
         spy = QSignalSpy(self.window.sourceSelected)
@@ -115,10 +122,10 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         qishui = self.window.source_buttons["qishui"]
         self.assertEqual(netease.availability_status, "需安装运行时")
         self.assertEqual(kugou.availability_status, "需安装运行时")
-        self.assertEqual(qishui.availability_status, "暂不支持")
+        self.assertEqual(qishui.availability_status, "即将支持")
         self.assertIn("需安装运行时", netease.accessibleName())
         self.assertIn("在线音乐运行时未安装", netease.accessibleDescription())
-        self.assertIn("暂不支持", qishui.accessibleName())
+        self.assertIn("即将支持", qishui.accessibleName())
         self.assertIn("汽水音乐尚无已验证", qishui.accessibleDescription())
         self.assertFalse(netease.isEnabled())
         self.assertFalse(kugou.isEnabled())
@@ -133,7 +140,7 @@ class PlaybackEntryWindowTests(unittest.TestCase):
                                     "汽水音乐尚无已验证且可随本项目分发的扫码适配器"))
             for item in ENTRY_SOURCES
         ))
-        self.assertEqual(self.window.message_label.text(), "没有可用音乐来源；请安装在线音乐运行时；汽水音乐暂不支持。")
+        self.assertEqual(self.window.message_label.text(), "没有可用音乐来源；请安装在线音乐运行时；汽水音乐、Spotify、Apple Music即将支持。")
 
     def test_source_recovery_clears_diagnostic_and_restores_selectable_tile(self):
         self.window.set_sources((SimpleNamespace(source_id="netease", available=False,
@@ -252,7 +259,11 @@ class PlaybackEntryWindowTests(unittest.TestCase):
     def test_installer_island_expands_at_the_same_anchor_and_releases_snapshot(self):
         self.window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
         origin = QRect(510, 12, 340, 52)
-        self.window.show_choices_from(origin)
+        # Anchor behavior needs room for the expanded page; the default Box
+        # offscreen screen is only 800 px wide and correctly clamps this pose.
+        screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 1920, 1080))
+        with patch.object(QGuiApplication, "screenAt", return_value=screen):
+            self.window.show_choices_from(origin)
         self.window.show()
         self.assertEqual(self.window.geometry(), origin)
         self.assertFalse(self.window._page_morph_to.isNull())
@@ -612,8 +623,8 @@ class PlaybackEntryWindowTests(unittest.TestCase):
             self.window._expansion.stop()
             for fraction in (0.0, .3, .65, 1.0):
                 self.window._set_expanded(fraction)
-                self.assertEqual(self.window.source_buttons["netease"].geometry().y(), 112)
-                self.assertEqual(self.window.source_buttons["netease"].height(), 96)
+                self.assertEqual(self.window.source_buttons["netease"].geometry().y(), 72)
+                self.assertEqual(self.window.source_buttons["netease"].height(), 64)
 
 
 if __name__ == "__main__":

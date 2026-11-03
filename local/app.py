@@ -383,17 +383,33 @@ class LocalIslandApp:
         else:
             self._setup_tray()
 
+    def _music_login_source(self):
+        """Match the library's pending/current account before saved preference."""
+        from local.playback_entry_window import LOGIN_SOURCE_IDS
+        supported = LOGIN_SOURCE_IDS
+        library = getattr(self, "music_library", None)
+        library_source = getattr(library, "_source", "")
+        track = getattr(self.owned_player, "track", None)
+        if (getattr(library, "_opening", None) is not None or track is None) and library_source in supported:
+            return library_source
+        track_id = str(getattr(track, "track_id", ""))
+        if track_id.startswith("owned:"):
+            source = track_id.split(":", 2)[1]
+            if source in supported:
+                return source
+        saved = self.settings.get("v2_online_music_source", "netease")
+        return saved if saved in supported else "netease"
+
     def _music_login_required(self):
         if not self.settings.get("v2_owned_playback_enabled", True):
             return False
         # Cached account snapshots are lock-only. No disk/network access from paint.
-        from local.playback_entry_window import ENTRY_SOURCES
-        return not any(self.online_music.account_status(source.source_id).logged_in
-                       for source in ENTRY_SOURCES)
+        return not self.online_music.account_status(self._music_login_source()).logged_in
 
     def _open_music_login(self):
         if not self._music_login_required():
             return False
+        source = self._music_login_source()
         from local.music_navigation_transition import MusicNavigationTransition
         if self.playback_entry._navigation is None:
             self.playback_entry._navigation = MusicNavigationTransition()
@@ -403,7 +419,7 @@ class LocalIslandApp:
             self.window._restore_island_from_music_surface()
         self.window.hide()
         self.playback_entry._library_origin = frame
-        self.playback_entry.show_login()
+        self.playback_entry.show_login(source)
         return True
 
     def _runtime_setting(self, key, default=None):

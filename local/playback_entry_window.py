@@ -32,6 +32,7 @@ class EntrySource:
     source_id: str
     name: str
     color: str
+    login_supported: bool = True
 
 
 @dataclass(frozen=True)
@@ -48,8 +49,11 @@ ENTRY_SOURCES = (
     EntrySource("netease", "网易云音乐", "#df2a16"),
     EntrySource("kugou", "酷狗音乐", "#368bff"),
     EntrySource("qq", "QQ 音乐", "#efd700"),
-    EntrySource("qishui", "汽水音乐", "#183d30"),
+    EntrySource("qishui", "汽水音乐", "#183d30", False),
+    EntrySource("spotify", "Spotify", "#1db954", False),
+    EntrySource("apple_music", "Apple Music", "#fa5268", False),
 )
+LOGIN_SOURCE_IDS = frozenset(source.source_id for source in ENTRY_SOURCES if source.login_supported)
 
 
 def _entry_font(pixels: int, *, heavy: bool = False) -> QFont:
@@ -285,33 +289,44 @@ class MusicSourceButton(QAbstractButton):
                 painter.setPen(QPen(QColor(self.source.color), 1.5))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(QRectF(self.rect()).adjusted(2, 2, -2, -2), 15, 15)
-            # Reserve a small text lane for disabled-source diagnostics while
-            # keeping the four source tiles at their existing geometry.
+            # Reserve a text lane for disabled-source diagnostics.
             compact = self.height() < 80
+            short = self.height() < 64
             side = min((24.0 if self._availability_status else 28.0) if compact else
                        (34.0 if self._availability_status else 40.0), rect.width(), rect.height())
+            if short:
+                side = min(side, 16 if self.height() < 56 else 20)
             icon_y = 5 if self._availability_status else 7
+            if short:
+                icon_y = 2
             icon = QRectF(rect.center().x() - side / 2, icon_y if compact else rect.center().y() - side / 2, side, side)
-            paint_music_source_icon(painter, icon, self.source.source_id)
+            if self.source.source_id in {"spotify", "apple_music"}:
+                painter.setFont(_entry_font(round(side)))
+                painter.setPen(QColor(self.source.color))
+                painter.drawText(icon, Qt.AlignmentFlag.AlignCenter, "♪")
+            else:
+                paint_music_source_icon(painter, icon, self.source.source_id)
             title_bottom = self.height() - 25
             if self._availability_status:
                 title_bottom = self.height() - 39
             if compact:
                 title_bottom = 28 if self._availability_status else 37
+            if short:
+                title_bottom = (18 if self.height() < 56 else 24) if self._availability_status else self.height() - 18
             painter.setOpacity(1.0 if self.isEnabled() else .8)
-            painter.setFont(_entry_font(11 if self._availability_status else 12))
+            painter.setFont(_entry_font(10 if short else 11 if self._availability_status else 12))
             painter.setPen(QColor("#e2e3e7"))
             title = self.source.name
             if self.show_caption:
-                painter.drawText(QRectF(2, title_bottom, self.width() - 4, 18), Qt.AlignmentFlag.AlignCenter, title)
+                painter.drawText(QRectF(2, title_bottom, self.width() - 4, 12 if short else 18), Qt.AlignmentFlag.AlignCenter, title)
                 if self._availability_status:
                     # Disabled artwork keeps its quiet tone; the diagnostic
                     # still needs to be legible before a user hovers the tile.
                     painter.setOpacity(.78)
                     painter.setFont(_entry_font(10))
                     painter.setPen(QColor("#b9bcc6"))
-                    painter.drawText(QRectF(2, self.height() - 19 if compact else self.height() - 21,
-                                           self.width() - 4, 16), Qt.AlignmentFlag.AlignCenter, self._availability_status)
+                    painter.drawText(QRectF(2, self.height() - 14 if short else self.height() - 19 if compact else self.height() - 21,
+                                           self.width() - 4, 12 if short else 16), Qt.AlignmentFlag.AlignCenter, self._availability_status)
 
 
 class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
@@ -427,7 +442,11 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         self.source_buttons = {source.source_id: MusicSourceButton(source, self) for source in ENTRY_SOURCES}
         for source_id, button in self.source_buttons.items():
             button.setEnabled(False)
-            button.setToolTip(f"{button.source.name}：正在确认服务状态")
+            if button.source.login_supported:
+                button.setToolTip(f"{button.source.name}：正在确认服务状态")
+            else:
+                button.setToolTip(f"{button.source.name}：即将支持，暂未提供登录适配器")
+                button.set_availability_status("即将支持", "暂未提供登录适配器")
             button.clicked.connect(lambda checked=False, sid=source_id: self.select_source(sid))
         for button in (self.refresh_button, self.enter_button):
             button.setGlassLight(False)
@@ -667,9 +686,13 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         catalog = {str(getattr(source, "source_id", "")): source for source in sources}
         for source_id, button in self.source_buttons.items():
             source = catalog.get(source_id)
-            available = bool(source is not None and getattr(source, "available", False))
+            available = bool(button.source.login_supported and source is not None and getattr(source, "available", False))
             reason = str(getattr(source, "reason", "") or "当前服务不可用") if not available else ""
-            status = self._source_availability_status(source_id, reason) if not available else ""
+            if not button.source.login_supported:
+                reason = str(getattr(source, "reason", "") or "暂未提供登录适配器")
+                status = "即将支持"
+            else:
+                status = self._source_availability_status(source_id, reason) if not available else ""
             self._source_available[source_id] = available
             self._source_reasons[source_id] = reason
             button.setEnabled(available)
@@ -684,7 +707,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     def _source_availability_status(source_id: str, reason: str) -> str:
         """Map provider diagnostics to a short source-page status label."""
         text = str(reason or "")
-        if source_id == "qishui" or "不支持" in text or "尚无已验证" in text:
+        if "不支持" in text or "尚无已验证" in text:
             return "暂不支持"
         if "版本不匹配" in text or "更新" in text:
             return "需更新运行时"
@@ -701,8 +724,10 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             hints.append("请安装在线音乐运行时")
         elif "需更新运行时" in statuses:
             hints.append("请更新在线音乐运行时")
-        if "暂不支持" in statuses:
-            hints.append("汽水音乐暂不支持")
+        upcoming = [button.source.name for button in self.source_buttons.values()
+                    if not button.source.login_supported]
+        if upcoming:
+            hints.append("、".join(upcoming) + "即将支持")
         if not hints:
             return "没有可用音乐来源，请稍后重试或返回系统抓取"
         return "没有可用音乐来源；" + "；".join(hints) + "。"
@@ -854,26 +879,40 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                                                (self._expanded > .85 and self.height() < 480))
 
     def _source_pane_rect(self) -> QRectF:
-        top = 152 if self._compact_login_layout() else 232
+        top = max(rect.bottom() for rect in self._source_tile_rects()) + (16 if self._compact_login_layout() else 24)
         return QRectF(32, top, self.width() - 64, max(1, self.height() - top - 24))
+
+    def _source_tile_rects(self) -> tuple[QRectF, ...]:
+        """Keep every platform visible without compressing its label or target."""
+        columns = 6 if self.width() >= 720 else 3
+        compact = self._compact_login_layout()
+        top = 64 if compact else 112 if columns == 6 else 72
+        height = (44 if self.height() < 380 else 56) if compact else 96 if columns == 6 else 64
+        gap = 8 if columns == 3 else 12
+        tile_width = (self.width() - 64 - gap * (columns - 1)) / columns
+        return tuple(QRectF(32 + (index % columns) * (tile_width + gap),
+                            top + (index // columns) * (height + gap), tile_width, height)
+                     for index in range(len(self.source_buttons)))
 
     def _login_content_rects(self) -> tuple[QRectF, QRectF]:
         """QR and its status/action share one pane at short display heights."""
         pane = self._source_pane_rect()
-        side = min(192, max(96, (self.width() - 112) * .45), max(96, pane.height() - 48))
-        qr = QRectF(56, pane.center().y() - side / 2, side, side)
-        detail_x = qr.right() + 24
-        return qr, QRectF(detail_x, pane.top() + (14 if self._compact_login_layout() else 28),
-                         max(1, self.width() - 56 - detail_x), max(1, pane.height() - 42))
+        compact = self._compact_login_layout()
+        side = max(96, min(128 if compact else 192, pane.height() - 24,
+                           (self.width() - 96) * .42))
+        qr = QRectF(48, pane.center().y() - side / 2, side, side)
+        detail_x = qr.right() + 16
+        return qr, QRectF(detail_x, pane.top() + (8 if compact else 28),
+                         max(1, self.width() - 32 - detail_x), max(1, pane.height() - 42))
 
     def _login_detail_geometry(self) -> tuple[QRectF, QRectF, QRectF, QRectF]:
         _qr, detail = self._login_content_rects()
         compact = self._compact_login_layout()
-        title = QRectF(detail.x(), detail.y(), detail.width(), 28 if compact else 32)
-        helper_height = 62 if detail.width() < 150 else 32 if compact else 48
-        helper = QRectF(detail.x(), detail.y() + (34 if compact else 40), detail.width(), helper_height)
+        title = QRectF(detail.x(), detail.y(), detail.width(), 24 if compact else 32)
+        helper_height = 48 if detail.width() < 150 else 32 if compact else 48
+        helper = QRectF(detail.x(), title.bottom() + (4 if compact else 8), detail.width(), helper_height)
         action_y = self._source_pane_rect().bottom() - (8 if compact else 16) - 44
-        message_y = helper.bottom() + 6
+        message_y = helper.bottom() + (4 if compact else 6)
         message = QRectF(detail.x(), message_y, detail.width(), max(24, min(76, action_y - 8 - message_y)))
         action = QRectF(detail.x(), action_y, min(152, detail.width()), 44)
         return title, helper, message, action
@@ -930,11 +969,9 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             hint_x = action_x + 94
             self.mode_hint.setFont(_entry_font(13))
             self.mode_hint.setGeometry(hint_x, body.bottom() + 1 - 62, body.right() + 1 - hint_x - inset, 38)
-        for index, button in enumerate(self.source_buttons.values()):
+        for button, rect in zip(self.source_buttons.values(), self._source_tile_rects()):
             button.setVisible(not modes)
-            tile_width = (self.width() - 112) // 4
-            button.setGeometry(32 + index * (tile_width + 16), 72 if self._compact_login_layout() else 112,
-                               tile_width, 64 if self._compact_login_layout() else 96)
+            button.setGeometry(rect.toAlignedRect())
         expanded = not modes and self._expanded > .85
         account_card = expanded and self._account is not None
         self.message_label.setVisible(not modes and not account_card)
@@ -946,7 +983,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         else:
             self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.message_label.setFont(_entry_font(14))
-            self.message_label.setGeometry(32, 224, self.width() - 64, 24)
+            message_top = round(max(rect.bottom() for rect in self._source_tile_rects()) + 16)
+            self.message_label.setGeometry(32, message_top, self.width() - 64, 24)
         self.refresh_button.setVisible(expanded and self.login_state != "confirmed")
         self.refresh_button.setEnabled(self.login_state not in {"starting", "loading", "unavailable", "unsupported"})
         self.refresh_button.setText(self._login_action_text())
@@ -1154,7 +1192,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                 painter.setPen(QColor("#f1f2f5"))
                 painter.drawText(QRectF(84 if self.back_button.isVisible() else 24, 20, self.width() - 168, 36),
                                  Qt.AlignmentFlag.AlignVCenter, "音乐来源")
-                if not self._compact_login_layout():
+                if not self._compact_login_layout() and self.width() >= 720:
                     painter.setFont(_entry_font(13))
                     painter.setPen(QColor("#b8bdc7"))
                     painter.drawText(QRectF(32, 76, self.width() - 64, 24), Qt.AlignmentFlag.AlignVCenter,
@@ -1234,5 +1272,12 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                             helper = "请重试连接，或在上方\n选择其他音乐来源。"
                         else:
                             helper = f"打开{source.name} App\n扫描左侧二维码登录"
+                        if helper_rect.width() < 150:
+                            # Minimum-width pages have two short helper lines;
+                            # preserve the separate backend-status/action rows.
+                            helper = ("确认账号与\n登录服务…" if self.login_state in {"starting", "loading"}
+                                      else "请在手机上\n确认登录" if self.login_state == "scanned"
+                                      else "请重试连接" if self._qr_image.isNull()
+                                      else "打开音乐 App\n扫描二维码")
                         painter.drawText(helper_rect,
                                          Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, helper)

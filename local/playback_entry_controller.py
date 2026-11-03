@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QTransform
 
 from api.online_music import LoginSnapshot
 from local.music_tasks import MusicTasks
-from local.playback_entry_window import ChoicePlacement, PlaybackEntryWindow
+from local.playback_entry_window import ChoicePlacement, LOGIN_SOURCE_IDS, PlaybackEntryWindow
 from local.music_navigation_transition import MusicNavigationTransition
 from local.runtime_platform import normalize_playback_selection, owned_playback_only, system_media_unavailable_reason
 
@@ -176,7 +176,7 @@ class PlaybackEntryController(QObject):
             # DPAPI/disk work remains off the GUI thread. This checks persisted
             # account records without waiting for a live internet validation.
             return tuple(source.source_id for source in self.service.list_sources()
-                         if self.service.has_login_record(source.source_id))
+                         if source.source_id in LOGIN_SOURCE_IDS and self.service.has_login_record(source.source_id))
         if not self.tasks.submit(("accounts", generation), accounts):
             self._accounts_ready = True
         self._probe_timer.start()
@@ -242,6 +242,8 @@ class PlaybackEntryController(QObject):
             self.window.set_sources(())
 
     def select_source(self, source_id):
+        if source_id not in LOGIN_SOURCE_IDS:
+            return
         if self.login_callback is None:
             self.begin_login(source_id)
             return
@@ -269,7 +271,7 @@ class PlaybackEntryController(QObject):
             self.window.set_login_snapshot(LoginSnapshot("", source_id, "error", message="服务繁忙，请稍后重试"))
 
     def enter_account(self, source_id):
-        if self._closed or self._shell_hidden():
+        if self._closed or self._shell_hidden() or source_id not in LOGIN_SOURCE_IDS:
             return
         if self.login_callback is None:
             self._show_island()
@@ -284,7 +286,8 @@ class PlaybackEntryController(QObject):
         self.login_callback(source_id)
 
     def begin_login(self, source_id):
-        if self._closed or source_id not in {source.source_id for source in self._sources if source.available}:
+        if (self._closed or source_id not in LOGIN_SOURCE_IDS
+                or source_id not in {source.source_id for source in self._sources if source.available}):
             return
         self._cancel_login()
         self._attempt_source = source_id
@@ -346,8 +349,8 @@ class PlaybackEntryController(QObject):
         if generation != self._generation:
             return
         if kind == "sources":
-            self._sources = result or ()
-            self.window.set_sources(self._sources)
+            self._sources = tuple(source for source in (result or ()) if source.source_id in LOGIN_SOURCE_IDS)
+            self.window.set_sources(result or ())
             source, enter_saved = getattr(self, "_select_after_sources", ("", False))
             self._select_after_sources = ("", False)
             if source in {s.source_id for s in self._sources if s.available}:
