@@ -43,6 +43,9 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.screen_patch.start()
         self.addCleanup(self.screen_patch.stop)
         self.window = PlaybackEntryWindow()
+        # Keep the original layout's geometry regressions explicitly scoped.
+        # Shipping-default sidebar coverage lives in test_login_layout_variants.
+        self.window.set_login_variant("classic")
 
     def tearDown(self):
         self.window.close()
@@ -151,9 +154,9 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.window.set_sources((_source("netease"),))
         self.assertTrue(button.isEnabled())
         self.assertEqual(button.availability_status, "")
-        self.assertEqual(button.accessibleName(), "网易云音乐")
-        self.assertEqual(button.accessibleDescription(), "")
-        self.assertEqual(button.toolTip(), "网易云音乐")
+        self.assertEqual(button.accessibleName(), "网易云音乐（未登录）")
+        self.assertEqual(button.accessibleDescription(), "网易云音乐（未登录）")
+        self.assertEqual(button.toolTip(), "网易云音乐（未登录）")
         self.assertEqual(self.window.message_label.text(), "选择音乐来源")
         spy = QSignalSpy(self.window.sourceSelected)
         button.click()

@@ -59,7 +59,7 @@ class PlatformEntryTests(unittest.TestCase):
         self.window.select_source("netease")
         self.window._expansion.stop()
         self.window._expanded = 1.0
-        for width, height in ((330, 400), (433, 550), (960, 540), (560, 360)):
+        for width, height in ((330, 400), (433, 550), (391, 508), (960, 540), (560, 360)):
             with self.subTest(size=(width, height)):
                 self.window.setMinimumSize(0, 0)
                 self.window.resize(width, height)
@@ -73,7 +73,7 @@ class PlatformEntryTests(unittest.TestCase):
                     self.assertFalse(button.isHidden())
                     for other in buttons[index + 1:]:
                         self.assertFalse(button.geometry().intersects(other.geometry()))
-                    self.assertLess(button.geometry().bottom(), self.window._source_pane_rect().top())
+                    self.assertLess(button.geometry().right(), self.window._source_pane_rect().left())
                 qr, _detail = self.window._login_content_rects()
                 title, helper, message, action = self.window._login_detail_geometry()
                 for rect in (qr, title, helper, message, action):

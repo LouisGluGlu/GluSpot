@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.online_music import AccountSnapshot
 from local.playback_entry_window import ENTRY_SOURCES, PlaybackEntryWindow
+from local.liquid_glass import GlassPushButton
 from tests.test_playback_entry_window import _image_bytes
 
 
@@ -45,7 +46,7 @@ class LoginLayoutVariantTests(unittest.TestCase):
         self.window.resize(width, height)
 
     def test_env_selection_default_and_invalid_fallback(self):
-        for value, expected in (("", "classic"), ("unknown", "classic"), ("sidebar", "sidebar"),
+        for value, expected in (("", "sidebar"), ("unknown", "sidebar"), ("sidebar", "sidebar"),
                                 ("focus", "focus"), ("hero", "hero"), ("classic", "classic")):
             with self.subTest(value=value), patch.dict(os.environ, {"GLUSPOT_LOGIN_VARIANT": value}):
                 window = PlaybackEntryWindow()
@@ -56,6 +57,14 @@ class LoginLayoutVariantTests(unittest.TestCase):
                 finally:
                     window.close()
                     window.deleteLater()
+        with patch.dict(os.environ):
+            os.environ.pop("GLUSPOT_LOGIN_VARIANT", None)
+            window = PlaybackEntryWindow()
+            try:
+                self.assertEqual(window.login_variant, "sidebar")
+            finally:
+                window.close()
+                window.deleteLater()
 
     def test_switch_preserves_live_qr_widgets_and_signals(self):
         self.prepare("sidebar")
@@ -102,7 +111,8 @@ class LoginLayoutVariantTests(unittest.TestCase):
 
     def test_requested_sizes_keep_login_states_and_account_actions_contained(self):
         for variant in ("sidebar", "focus", "hero"):
-            for width, height in ((960, 540), (433, 550)):
+            sizes = ((960, 540), (433, 550), (391, 508)) if variant == "sidebar" else ((960, 540), (433, 550))
+            for width, height in sizes:
                 with self.subTest(variant=variant, size=(width, height)):
                     self.prepare(variant, width, height)
                     pane = self.window._source_pane_rect()
@@ -166,6 +176,147 @@ class LoginLayoutVariantTests(unittest.TestCase):
         self.assertEqual(self.window._background_frame.cacheKey(), backdrop)
         self.assertLessEqual(self.window._background_frame.width(), 256)
         self.assertFalse(self.window._frame_timer.isActive())
+
+    def test_sidebar_keeps_all_platforms_in_vertical_rail_and_detail_on_right(self):
+        for width, height in ((960, 540), (433, 550), (391, 508), (330, 400), (560, 360)):
+            with self.subTest(size=(width, height)):
+                self.prepare("sidebar", width, height)
+                self.window._layout_children()
+                pane = self.window._source_pane_rect()
+                buttons = tuple(self.window.source_buttons.values())
+                for index, button in enumerate(buttons):
+                    self.assertFalse(button.isHidden())
+                    self.assertTrue(self.window.rect().contains(button.geometry()))
+                    self.assertGreaterEqual(button.width(), 44)
+                    self.assertGreaterEqual(button.height(), 44)
+                    self.assertLess(button.geometry().right(), pane.left())
+                    self.assertEqual(button.login_style, "sidebar" if width >= 720 else "sidebar-icons")
+                    self.assertIn(button.source.name, button.toolTip())
+                    self.assertIn(button.connection_status, button.accessibleName())
+                    for other in buttons[index + 1:]:
+                        self.assertGreater(other.y(), button.y())
+                        self.assertFalse(button.geometry().intersects(other.geometry()))
+                    self.assertEqual(button.status_rect().isEmpty(), not button.source.login_supported)
+
+    def test_source_status_remembers_other_accounts_without_replacing_selected_details(self):
+        self.prepare("sidebar")
+        self.window.set_account(AccountSnapshot("netease", True, "n", "NetEase", state="verified"))
+        self.window.select_source("qq")
+        self.assertEqual(self.window._source_status["netease"], "connected")
+        self.assertEqual(self.window._source_status["qq"], "signed_out")
+        self.window.set_account(AccountSnapshot("kugou", True, "k", "Kugou"))
+        self.assertEqual(self.window._source_status["kugou"], "connected")
+        self.assertIsNone(self.window._account)
+        self.assertEqual(self.window.selected_source, "qq")
+        for state in ("error", "expired"):
+            self.window.set_account(AccountSnapshot("netease", True, "n", state=state))
+            self.assertEqual(self.window._source_status["netease"], "error")
+        self.window.set_account(AccountSnapshot("netease"))
+        self.assertEqual(self.window._source_status["netease"], "signed_out")
+        self.window.set_login_snapshot(SimpleNamespace(source_id="qq", state="confirmed"))
+        self.assertEqual(self.window._source_status["qq"], "signed_out")
+        for state in ("expired", "error"):
+            self.window.set_login_snapshot(SimpleNamespace(source_id="qq", state=state))
+            self.assertEqual(self.window._source_status["qq"], "error")
+        self.window.set_sources(tuple(SimpleNamespace(source_id=s.source_id, available=True) for s in ENTRY_SOURCES))
+        self.assertEqual(self.window._source_status["qq"], "error")
+        self.assertIn("异常", self.window.source_buttons["qq"].accessibleName())
+        for source in ENTRY_SOURCES:
+            if not source.login_supported:
+                self.window.set_account(AccountSnapshot(source.source_id, True, "forged"))
+                self.assertEqual(self.window._source_status[source.source_id], "upcoming")
+
+    def test_pulse_invalidates_only_connected_dots_without_rebuilding_backdrop(self):
+        self.prepare("sidebar")
+        self.window.set_account(AccountSnapshot("netease", True, "n", state="verified"))
+        self.window.show()
+        self.app.processEvents()
+        self.assertTrue(self.window._status_timer.isActive())
+        self.assertFalse(self.window._frame_timer.isActive())
+        backdrop = self.window._background_frame.cacheKey()
+        button = self.window.source_buttons["netease"]
+        with patch.object(button, "update") as dirty, patch.object(self.window, "update") as window_dirty, \
+                patch.object(self.window, "_source_backdrop") as rebuild, \
+                patch.object(self.window.source_buttons["qq"], "update") as signed_out_dirty:
+            for offset, opacity in ((0., .55), (1., 1.), (2., .55)):
+                self.window._advance_status_pulse(self.window._status_pulse_started_at + offset)
+                self.assertAlmostEqual(button.status_opacity, opacity)
+                self.assertEqual(dirty.call_args.args, (button.status_rect(),))
+            self.assertEqual(dirty.call_count, 3)
+            window_dirty.assert_not_called()
+            rebuild.assert_not_called()
+            signed_out_dirty.assert_not_called()
+        self.assertEqual(self.window._background_frame.cacheKey(), backdrop)
+        self.assertLessEqual(button.status_rect().width(), 12)
+        self.assertLessEqual(button.status_rect().height(), 12)
+
+    def test_pulse_stops_without_visible_green_dots_or_when_leaving_sources(self):
+        self.prepare("sidebar")
+        self.window.show()
+        self.app.processEvents()
+        self.assertFalse(self.window._status_timer.isActive())
+        self.window.set_account(AccountSnapshot("netease", True, "n"))
+        self.assertTrue(self.window._status_timer.isActive())
+        self.window.set_login_snapshot(SimpleNamespace(source_id="netease", state="error"))
+        self.assertFalse(self.window._status_timer.isActive())
+        self.window.set_account(AccountSnapshot("netease", True, "n"))
+        for variant in ("classic", "focus", "hero"):
+            self.window.set_login_variant(variant)
+            self.assertFalse(self.window._status_timer.isActive())
+        self.window.set_login_variant("sidebar")
+        self.assertTrue(self.window._status_timer.isActive())
+        self.window.source_buttons["netease"].hide()
+        self.window._advance_status_pulse()
+        self.assertFalse(self.window._status_timer.isActive())
+        self.window._layout_children()
+        self.assertTrue(self.window._status_timer.isActive())
+        self.window.hide()
+        self.assertFalse(self.window._status_timer.isActive())
+        self.window.show()
+        self.assertTrue(self.window._status_timer.isActive())
+        self.window.show_modes()
+        self.assertFalse(self.window._status_timer.isActive())
+
+    def test_status_colors_render_and_only_connected_dot_changes_with_phase(self):
+        self.prepare("sidebar")
+        self.window.show()
+        self.app.processEvents()
+        button = self.window.source_buttons["netease"]
+        self.window.set_account(AccountSnapshot("netease", True, "n"))
+        self.window._status_timer.stop()
+        self.window._advance_status_pulse(self.window._status_pulse_started_at + 1.)
+        center = button._status_dot_rect().center().toPoint()
+        green = button.grab().toImage().pixelColor(center)
+        self.assertGreater(green.green(), green.red() * 1.5)
+        bright = button.grab().toImage()
+        self.window._advance_status_pulse(self.window._status_pulse_started_at)
+        dim = button.grab().toImage()
+        self.assertLess(dim.pixelColor(center).green(), green.green())
+        changed = [(x, y) for y in range(dim.height()) for x in range(dim.width())
+                   if dim.pixel(x, y) != bright.pixel(x, y)]
+        self.assertTrue(changed)
+        self.assertTrue(all(button.status_rect().contains(x, y) for x, y in changed))
+        for snapshot in (AccountSnapshot("netease"), AccountSnapshot("netease", state="expired")):
+            self.window.set_account(snapshot)
+            first = button.grab().toImage()
+            self.window._advance_status_pulse(self.window._status_pulse_started_at)
+            self.assertEqual(first, button.grab().toImage())
+        error = button.grab().toImage().pixelColor(center)
+        self.assertGreater(error.red(), error.green())
+
+    def test_account_and_retry_actions_keep_shared_glass_capsule_material(self):
+        self.prepare("sidebar")
+        styles = [button.styleSheet() for button in (self.window.enter_button, self.window.refresh_button)]
+        self.window.set_account(AccountSnapshot("netease", True, "n"))
+        self.window.select_source("qq")
+        self.window.set_login_snapshot(SimpleNamespace(source_id="qq", state="error"))
+        for button, style in zip((self.window.enter_button, self.window.refresh_button), styles):
+            self.assertIsInstance(button, GlassPushButton)
+            self.assertTrue(button.property("glassRefractive"))
+            self.assertTrue(button.property("glassLight"))
+            self.assertEqual(button.property("glassRadius"), 22.)
+            self.assertEqual(button.styleSheet(), style)
+            self.assertNotIn("#df2a16", style)
 
 
 if __name__ == "__main__":

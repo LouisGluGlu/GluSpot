@@ -13,6 +13,7 @@ class LoginVariantLayout:
     pane: QRectF
     upcoming: QRectF
     centered: bool
+    rail: QRectF | None = None
 
     def login_content(self) -> tuple[QRectF, QRectF]:
         pane = self.pane
@@ -64,13 +65,29 @@ def login_variant_layout(name: str, width: int, height: int, supported: tuple[bo
     active = [index for index, enabled in enumerate(supported) if enabled]
     upcoming = [index for index, enabled in enumerate(supported) if not enabled]
     tiles = [QRectF() for _ in supported]
-    if name == "sidebar" and wide:
-        for row, index in enumerate(active):
-            tiles[index] = QRectF(36, 118 + row * 68, 184, 58)
-        for row, index in enumerate(upcoming):
-            tiles[index] = QRectF(36, 350 + row * 48, 184, 44)
-        return LoginVariantLayout(tuple(tiles), QRectF(252, 104, width - 276, height - 128),
-                                  QRectF(48, 324, 164, 20), False)
+    if name == "sidebar":
+        if wide:
+            for row, index in enumerate(active):
+                tiles[index] = QRectF(36, 118 + row * 68, 184, 58)
+            for row, index in enumerate(upcoming):
+                tiles[index] = QRectF(36, 350 + row * 48, 184, 44)
+            return LoginVariantLayout(tuple(tiles), QRectF(252, 104, width - 276, height - 128),
+                                      QRectF(48, 324, 164, 20), False,
+                                      QRectF(24, 104, 208, height - 128))
+        # Keep the platform axis vertical even on the smallest music window.
+        # Compact spacing also fits all six 44 px targets on a 360 px display.
+        top = 84 if height >= 440 else 72
+        rail = QRectF(16, top, 64, height - top - 16)
+        gap = min(10., max(0., (rail.height() - len(supported) * 44 - 8) / max(1, len(supported))))
+        y = rail.top() + 4
+        for index in active + upcoming:
+            if index == (upcoming[0] if upcoming else -1):
+                y += gap
+            tiles[index] = QRectF(24, y, 48, 44)
+            y += 44 + gap
+        pane = QRectF(96, top, width - 112, height - top - 24)
+        return LoginVariantLayout(tuple(tiles), pane, QRectF(),
+                                  pane.width() < 400 and pane.height() >= 280, rail)
     if name == "hero" and not short:
         for row, index in enumerate(active):
             tiles[index] = QRectF(32 if wide else 24, (164 if wide else 142) + row * (64 if wide else 50),
@@ -82,8 +99,8 @@ def login_variant_layout(name: str, width: int, height: int, supported: tuple[bo
         return LoginVariantLayout(tuple(tiles), pane,
                                   QRectF(44 if wide else 24, 346 if wide else 294,
                                          276 if wide else width - 48, 20), False)
-    # A narrow sidebar becomes chips; focus uses one compact segmented row at
-    # both widths. Unsupported adapters share one quiet, noninteractive line.
+    # Focus uses one compact segmented row at both widths. Unsupported
+    # adapters share one quiet, noninteractive line.
     switch_width = min(216. if name == "focus" else 408., width - 48)
     chip_width = (switch_width - 12) / max(1, len(active))
     for column, index in enumerate(active):

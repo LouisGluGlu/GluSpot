@@ -106,7 +106,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
-- 2026-11-03: `grok/login-variants` adds three opt-in source/login compositions in the real `PlaybackEntryWindow`: A `sidebar`, B `focus`, C `hero`. `classic` remains the default. The environment flag, runtime setter, isolated renderer and comparison paths are documented under [登录页布局对比](#登录页布局对比); no version or provider change.
+- 2026-11-03: `grok/login-variants` ships A2 `sidebar` as the default source/login page: labeled wide sidebar, vertical narrow icon rail, per-platform status lights with a dot-only breathing clock, and shared frosted Liquid Glass panes/actions. `classic`, B `focus` and C `hero` remain selectable. The environment flag, runtime setter, isolated A2 renderer and evidence paths are documented under [登录页布局对比](#登录页布局对比); no version or provider change.
 
 - 2026-11-03: t168/t169/t170 B accepts independently observed CEF seeks within 250 ms, permits a later explicit retry after completed unverified readback, and preserves uncertain-write blocking. Narrow wheel browsing clears only lyric-row blur for 350 ms; routine capture/library/DJ/output status no longer takes over content. Owned unit setup injects both decoders, and login shares dark glass with centered responsive QR/platform cards. Focused results, the native initialization cause, inherited fixture failures and pending PC acceptance are recorded in [B evidence](docs/music-surface-t168-t170-b.md). No version, build, player restart or live playback-mode change.
 
@@ -241,32 +241,41 @@ The combined directory has its own Python environment and native HomePod helper 
 
 ### 登录页布局对比
 
-`PlaybackEntryWindow` 的音乐来源页提供三种可选布局，默认 `classic` 保留原有布局与交互。选择只影响登录页，无需写入设置。
+`PlaybackEntryWindow` 的音乐来源页默认使用 A2 `sidebar`，并保留 `classic`、`focus`、`hero` 可选。选择只影响登录页，无需写入设置。
 
 | 方案 | 标记 | 布局 |
 | --- | --- | --- |
-| A | `sidebar` | 宽屏左侧平台栏、右侧详情；窄屏顶部平台芯片、下方详情 |
+| A2（默认） | `sidebar` | 宽屏左侧带名称的平台栏；窄屏左侧垂直图标栏；账号／扫码／错误详情始终在右侧 |
 | B | `focus` | 紧凑图标切换胶囊，居中突出账号或扫码卡片 |
 | C | `hero` | 本地头像柔化色彩背景、平台状态列表与内嵌详情卡片 |
 
-启动前设置 `GLUSPOT_LOGIN_VARIANT=sidebar`、`focus`、`hero` 或 `classic`；空值或未知环境值回退为 `classic`。运行中调用 `window.set_login_variant("focus")`，读取 `window.login_variant`；无效的 setter 参数抛出 `ValueError`。切换保留当前二维码、账号与信号接口；未适配平台仍不可选择，显示“即将支持”。
+启动前设置 `GLUSPOT_LOGIN_VARIANT=sidebar`、`focus`、`hero` 或 `classic`；未设置、空值或未知环境值均回退为 `sidebar`。运行中调用 `window.set_login_variant("classic")`，读取 `window.login_variant`；无效的 setter 参数抛出 `ValueError`。切换保留当前二维码、账号与信号接口；未适配平台仍不可选择，宽屏显示“即将支持”，窄屏保持垂直暗化图标与完整提示。
 
-离屏对比使用真实窗口与本地测试头像、测试二维码图案，覆盖 960×540 / 433×550 的已连接、等待扫码、错误状态。重现命令：
+支持的平台使用 7 px 状态灯：已登录为柔绿，未登录为暗灰，账号或登录错误／过期为静态柔红；未适配平台没有灯。状态按平台记忆，切换不清除其他账号的已知状态；未知账号默认未登录。绿灯以 2 秒周期在 0.55–1.0 不透明度之间呼吸，独立 90 ms 时钟仅请求按钮内约 11×11 px 的脏区。来源页隐藏、退出或无可见绿灯时停止；背景仍是原有静态有界栅格。侧栏、详情与胶囊操作复用 `paint_liquid_glass` / `GlassPushButton`，账号按钮不再添加品牌色描边样式表。
+
+A2 离屏对比使用真实窗口与本地测试头像、测试二维码图案，覆盖 960×540 / 433×550 / 391×508 的已连接、等待扫码、错误状态。重现命令：
 
 ```bash
-/workspace/gluspot/qtvenv/bin/python tools/render_login_variants.py
+/workspace/gluspot/qtvenv/bin/python tools/render_login_variants.py --a2
 ```
 
-提交的脚本为 `tools/render_login_variants.py`，默认从 `/workspace/gluspot/wt-login-variants` 导入，使用私有临时 APPDATA/XDG 目录；支持 `--repo` 与 `--output`。交付副本为 `/workspace/gluspot/handoff/login-variants/render_variants.py`。截图不纳入 Git：
+提交的脚本为 `tools/render_login_variants.py`，默认从 `/workspace/gluspot/wt-login-variants` 导入，强制离屏并使用私有临时 APPDATA/XDG 目录；支持 `--repo` 与 `--output`。交付副本为 `/workspace/gluspot/handoff/login-variants/render_variants.py`；不加 `--a2` 仍可重现 A/B/C。截图不纳入 Git：
+
+- A2 三列三行：`/workspace/gluspot/handoff/login-variants/variant-A2.png`
+- A2 绿灯最低／最高相位裁图：`/workspace/gluspot/handoff/login-variants/variant-A2-pulse.png`（直接推进实际绿灯时钟，3 倍最近邻放大）
+- A2 单图：`/workspace/gluspot/handoff/login-variants/shots-a2/sidebar-{960x540|433x550|391x508}-{connected|waiting|error}.png`
+- A2 验证日志：`/workspace/gluspot/handoff/login-variants/focused-a2.log`
+
+A2 的 179 项聚焦测试通过（2 项因固定版本 QQ SDK 不可用而跳过），覆盖来源窗口／控制器、登录恢复与取消、布局和共享玻璃控件。状态灯测试验证两秒相位、仅绿灯变化、其他来源账号记忆、错误优先、脏区更新、静态背景和隐藏生命周期。
 
 - A：`/workspace/gluspot/handoff/login-variants/variant-A.png`
 - B：`/workspace/gluspot/handoff/login-variants/variant-B.png`
 - C：`/workspace/gluspot/handoff/login-variants/variant-C.png`
 - 单图：`/workspace/gluspot/handoff/login-variants/shots/{sidebar|focus|hero}-{960x540|433x550}-{connected|waiting|error}.png`
 
-112 项来源窗口、控制器、平台与布局测试通过。经典布局在两种尺寸、三种状态下与 `1246878` 基线逐像素一致（6/6）。离屏证据仅验证布局与交互，不代表真实账号登录或原生桌面显示验收。
+A/B/C 初版曾通过 112 项来源窗口、控制器、平台与布局测试；当时经典布局在两种尺寸、三种状态下与 `1246878` 基线逐像素一致（6/6）。A2 修改了所有方案的操作按钮材质与状态可访问名称，该历史像素比较不适用于 A2。离屏证据仅验证布局与交互，不代表真实账号登录或原生桌面显示验收。
 
-完整发现运行 5,955 项（181.900 秒），54 失败、48 错误、31 跳过，来源／布局测试无失败；18 个受影响模块在 `1246878` 临时源码副本中分组复验（658＋540 项），复现全部 54 失败／48 错误。完整日志为 `/workspace/gluspot/handoff/login-variants/full-suite.log`，后一组基线日志为 `baseline-remaining.log`。完整运行期间新测试的屏幕替身缺少 `geometry()`，曾触发其他遗留窗口的计时回调异常；已补全替身接口并重跑最终 112 项通过，产品代码未因该测试夹具修改。
+A/B/C 初版完整发现运行 5,955 项（181.900 秒），54 失败、48 错误、31 跳过，来源／布局测试无失败；18 个受影响模块在 `1246878` 临时源码副本中分组复验（658＋540 项），复现全部 54 失败／48 错误。完整日志为 `/workspace/gluspot/handoff/login-variants/full-suite.log`，后一组基线日志为 `baseline-remaining.log`。完整运行期间新测试的屏幕替身缺少 `geometry()`，曾触发其他遗留窗口的计时回调异常；已补全替身接口并重跑最终 112 项通过，产品代码未因该测试夹具修改。A2 按本次要求运行聚焦验证，不重跑完整发现。
 
 ## Windows Test Build
 
