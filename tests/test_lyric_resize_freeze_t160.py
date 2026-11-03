@@ -395,6 +395,9 @@ class LyricResizeFreezeTests(unittest.TestCase):
                 expected.setDevicePixelRatio(ratio)
                 expected.fill(Qt.GlobalColor.transparent)
                 with QPainter(expected) as painter:
+                    # Match the snapshot capture's fractional-edge coverage.
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                     painter.translate(-column.left(), -column.top())
                     window._paint_lyric_column(painter, QRectF(window.rect()))
                 window._enter_lyric_resize()

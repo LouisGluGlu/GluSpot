@@ -156,7 +156,7 @@ class CoverLyricContinuityTests(unittest.TestCase):
             self.render()
             self.assertTrue(all(layer is None for layer in self.window._song_secondary_layouts))
 
-    def test_external_lyric_pixels_and_blur_flow_past_internal_insets_to_real_window_edges(self):
+    def test_external_lyric_blur_crosses_horizontal_insets_but_clears_bottom_controls(self):
         self.window.resize(1190, 666)
         self.window._fullscreen = True
         self.window.set_content_layout("lyrics", animate=False)
@@ -177,8 +177,11 @@ class CoverLyricContinuityTests(unittest.TestCase):
             return sum(normal.pixel(x, y) != absent.pixel(x, y)
                        for y in range(max(0, int(region.top() * dpr)), min(normal.height(), int(region.bottom() * dpr)))
                        for x in range(max(0, int(region.left() * dpr)), min(normal.width(), int(region.right() * dpr))))
-        self.assertGreater(different(QRectF(clip.left(), 0., clip.width(), clip.top())), 0)
-        self.assertGreater(different(QRectF(clip.left(), clip.bottom(), clip.width(), self.window.height() - clip.bottom())), 0)
+        column = self.window._content_column_geometry()[2]
+        self.assertGreater(different(clip), 0)
+        self.assertLess(clip.bottom(), self.window._media_control_panel_rect.top())
+        self.assertEqual(different(QRectF(clip.left(), column.bottom() + 1., clip.width(),
+                                        self.window.height() - column.bottom() - 1.)), 0)
         # Real cached blur spreads into the left inset instead of stopping at
         # the text column. It remains naturally bounded by its finite kernel.
         self.assertGreater(different(QRectF(clip.left() - 24., 0., 24., self.window.height())), 0)

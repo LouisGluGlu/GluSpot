@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
@@ -13,6 +15,7 @@ from local.music_surface_layout import CONTENT_LAYOUTS, normalize_content_layout
 from local.music_surface_window import MusicSurfaceWindow
 from tests.test_music_surface_transition import _TransitionOwner
 from tests.test_owned_playback_surface import _Provider
+from tests.test_song_collection_surface import Collection
 
 
 class MusicSurfaceLayoutTests(unittest.TestCase):
@@ -48,6 +51,151 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         self.window._finish_content_layout()
         self.window._cover_layout_from = self.window._cover_layout_to = float(self.window._no_lyrics_cover_target())
         self.render()
+
+    def prepare_bottom_clearance_song(self):
+        self.owner.media_track_id = "owned:netease:1"
+        self.owner._song_collection_controller = Collection()
+        self.owner.media_is_playing = False
+        self.owner.timed_lyrics = [(float(i * 10), f"Readable row {i:02d}") for i in range(12)]
+        self.owner.lyrics = [text for _, text in self.owner.timed_lyrics]
+        self.window.set_content_layout("lyrics", animate=False)
+
+    def render_lyric_ink(self, *, faded=True):
+        ratio = self.window.devicePixelRatioF()
+        ink = QImage(round(self.window.width() * ratio), round(self.window.height() * ratio),
+                     QImage.Format.Format_ARGB32_Premultiplied)
+        ink.setDevicePixelRatio(ratio)
+        ink.fill(Qt.GlobalColor.transparent)
+        with QPainter(ink) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            paint = (self.window._paint_live_lyric_column if faded else
+                     getattr(self.window, "_paint_lyric_column_ink", self.window._paint_live_lyric_column))
+            paint(painter, QRectF(self.window.rect()))
+        return ink
+
+    def test_wide_lyric_viewport_and_ink_clear_transport_and_collection(self):
+        self.prepare_bottom_clearance_song()
+        for size in ((640, 360), (960, 540), (1040, 600), (1280, 720)):
+            self.window.resize(*size)
+            self.assertFalse(self.window._content_layout_is_narrow())
+            surface = QRectF(self.window.rect())
+            column = self.window._content_column_geometry()[2]
+            region_top = surface.bottom() - self.window.CONTROL_BOTTOM_REGION_HEIGHT * self.window._surface_scale()
+            self.assertAlmostEqual(column.bottom(), region_top)
+            for active in (0, 5, 11):
+                with self.subTest(size=size, active=active):
+                    self.owner.media_position_seconds = active * 10. + 1.
+                    with patch.object(self.window, "_lyric_view_anchor", return_value=(float(active), active, True)):
+                        self.render()
+                        ink = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                        ink.fill(Qt.GlobalColor.transparent)
+                        clips = []
+                        original = self.window._draw_future_wrapped_layout
+                        def observe(painter, *args, **kwargs):
+                            clips.append(painter.clipBoundingRect())
+                            return original(painter, *args, **kwargs)
+                        with QPainter(ink) as painter, \
+                                patch.object(self.window, "_draw_future_wrapped_layout", side_effect=observe):
+                            self.window._paint_live_lyric_column(painter, surface)
+                    controls = self.window._media_control_panel_rect
+                    collection = self.window._song_collection_geometry(surface, shifted=False)
+                    self.assertTrue(collection.isValid())
+                    for boundary in (controls.top(), collection.top()):
+                        self.assertLess(self.window._lyric_clip_rect.bottom(), boundary)
+                        self.assertLess(self.window._lyric_hit_rects[active].bottom(), boundary)
+                        self.assertTrue(all(row.bottom() < boundary for row in self.window._lyric_hit_rects.values() if row.isValid()))
+                    self.assertTrue(clips)
+                    self.assertTrue(all(clip.bottom() <= column.bottom() for clip in clips))
+                    self.assertTrue(all(not clip.intersects(controls) for clip in clips))
+                    # Check actual premultiplied ink, independently of hit geometry.
+                    bottom = ink.copy(0, int(column.bottom()) + 1, ink.width(), ink.height() - int(column.bottom()) - 1)
+                    rgba = bottom.convertToFormat(QImage.Format.Format_RGBA8888)
+                    self.assertFalse(any(bytes(rgba.constBits())[3::4]))
+
+    def test_wide_bottom_rows_fade_before_their_glyphs_or_blur_are_clipped(self):
+        self.prepare_bottom_clearance_song()
+        self.owner.media_position_seconds = 51.
+        with patch.object(self.window, "_lyric_view_anchor", return_value=(5., 5, True)), \
+                patch.object(self.window, "_lyric_blur_follow_levels", return_value=((0.,) * 12, False)):
+            plain = self.render_lyric_ink(faded=False).convertToFormat(QImage.Format.Format_RGBA8888)
+            faded = self.render_lyric_ink().convertToFormat(QImage.Format.Format_RGBA8888)
+        alpha_plain = np.frombuffer(plain.constBits(), np.uint8).reshape(plain.height(), plain.width(), 4)[:, :, 3]
+        alpha_faded = np.frombuffer(faded.constBits(), np.uint8).reshape(faded.height(), faded.width(), 4)[:, :, 3]
+        self.assertTrue(np.any((alpha_faded > 0) & (alpha_faded < alpha_plain)))
+        self.assertTrue(np.all(alpha_faded <= alpha_plain))
+        column = self.window._content_column_geometry()[2]
+        fade_top = column.bottom() - min(88. * self.window._surface_scale(), column.height() * .16)
+        unchanged_bottom = int(fade_top * self.window.devicePixelRatioF())
+        self.assertTrue(np.array_equal(alpha_plain[:unchanged_bottom], alpha_faded[:unchanged_bottom]))
+
+    def test_bottom_fade_preserves_readable_lines_of_a_tall_active_row(self):
+        self.prepare_bottom_clearance_song()
+        self.owner.timed_lyrics[5] = (50., "A long active lyric wraps across many visual lines. " * 12)
+        self.owner.lyrics = [text for _, text in self.owner.timed_lyrics]
+        self.owner.media_position_seconds = 51.
+        with patch.object(self.window, "_lyric_view_anchor", return_value=(5., 5, True)), \
+                patch.object(self.window, "_lyric_blur_follow_levels", return_value=((0.,) * 12, False)):
+            plain = self.render_lyric_ink(faded=False)
+            faded = self.render_lyric_ink()
+        column = self.window._content_column_geometry()[2]
+        self.assertGreater(self.window._song_layouts[5][0].lineCount(), 4)
+        ratio = self.window.devicePixelRatioF()
+        core = QRect(round(column.left() * ratio), round((column.top() + 10.) * ratio),
+                     round(column.width() * ratio), round(column.height() * .55 * ratio))
+        self.assertTrue(any(bytes(faded.copy(core).constBits())))
+        self.assertEqual(faded.copy(core), plain.copy(core))
+
+    def test_reused_lyric_shapes_keep_ink_clip_at_the_physical_column_edges(self):
+        self.prepare_bottom_clearance_song()
+        self.render()
+        column = self.window._content_column_geometry()[2]
+        clips = []
+        original = self.window._draw_future_wrapped_layout
+        def observe(painter, *args, **kwargs):
+            self.assertFalse(painter.worldTransform().isIdentity())
+            clips.append(painter.worldTransform().mapRect(painter.clipBoundingRect()))
+            return original(painter, *args, **kwargs)
+        with patch.object(self.window, "_lyric_resize_reuse_scale", self.window._surface_scale() * .5), \
+                patch.object(self.window, "_draw_future_wrapped_layout", side_effect=observe):
+            self.render_lyric_ink(faded=False)
+        self.assertTrue(clips)
+        for clip in clips:
+            self.assertAlmostEqual(clip.top(), column.top())
+            self.assertAlmostEqual(clip.bottom(), column.bottom())
+
+    def test_wide_bottom_reserve_is_stable_through_dj_and_control_reveals(self):
+        self.prepare_bottom_clearance_song()
+        for size in ((640, 360), (960, 540), (1280, 720)):
+            self.window.resize(*size)
+            surface = QRectF(self.window.rect())
+            expected = None
+            for enabled in (False, True):
+                self.window._owned_personal_dj_enabled = enabled
+                if expected is None:
+                    expected = self.window._content_column_geometry()[2]
+                for reveal in (0., .5, 1.):
+                    with self.subTest(size=size, enabled=enabled, reveal=reveal):
+                        self.window._control_reveal_from = self.window._control_reveal_target = reveal
+                        self.window._footer_lane_from = self.window._footer_lane_target = 400.
+                        self.window._footer_lane_started = 100.
+                        self.window._dj_activity_from = self.window._dj_activity_to = 1.
+                        self.assertEqual(self.window._content_column_geometry()[2], expected)
+                        self.assertEqual(self.window._personal_dj_footer_height(surface), 0.)
+                        for expansion in (0., .5, 1.):
+                            icon, caption = self.window._personal_dj_geometry(surface, 100., expansion=expansion, posed=False)
+                            self.assertLessEqual(expected.bottom(), min(icon.top(), caption.top()))
+
+    def test_stacked_lyric_viewport_keeps_existing_bottom_reservation(self):
+        self.prepare_bottom_clearance_song()
+        for size in ((372, 432), (433, 550), (480, 640)):
+            with self.subTest(size=size):
+                self.window.resize(*size)
+                self.assertTrue(self.window._content_layout_is_narrow())
+                self.render()
+                column = self.window._content_column_geometry()[2]
+                self.assertAlmostEqual(column.bottom(), self.window.height() - 156. * self.window._surface_scale())
+                self.assertLessEqual(self.window._lyric_clip_rect.bottom(), column.bottom())
 
     def test_resolved_no_lyrics_temporarily_animates_cover_and_restores_saved_layout(self):
         self.window.show()

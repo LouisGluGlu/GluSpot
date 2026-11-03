@@ -1,7 +1,66 @@
-# t179: login availability, hidden palette and artwork recovery
+# t179: lyric clearance, login availability, hidden palette and artwork recovery
 
 Source follow-through from `1246878` on `grok/capture-narrow-v4`, November 3,
 2026. Product implementation: sol. No version change or executable build.
+
+## Lyric bottom clearance (item 1)
+
+The item-1 follow-up starts from `e0ee9ca`. Wide lyrics previously used the
+outer content height (only a `60 * scale` bottom margin), so bottom ink reached
+the transport/collection painted afterward. Shortening the column alone was
+insufficient: follow/hit/ink bounds also used that outer content rectangle.
+
+Wide reading columns now reserve `CONTROL_BOTTOM_REGION_HEIGHT * scale` and,
+when DJ is available, its stable fully expanded envelope including its minimum
+36 px targets. Control reveal, DJ enable/status/hover animation do not change
+the reserve. Stacked columns retain their existing `156 * scale` reservation.
+The renderer uses column vertical bounds and maps its ink clip through the
+existing width/reuse transform. Cover lyrics retain their own cover viewport.
+
+A reusable ink-only QImage applies a bottom alpha gradient, preserving readable
+parts of tall wrapped rows and the existing narrow veil. Its origin aligns to
+physical pixels; frozen resize snapshots capture the same masked endpoint,
+including a direct wide-to-narrow crossover. It adds no shaping or blur filter.
+
+At 960 x 540 without DJ, the reading column bottom moves from y=491.351 to
+y=381.892, above transport y=476.757 and collection y=489.405. With expanded DJ,
+the column ends at y=375.243 above its icon y=381.730. Paired fixture renders
+reduce lyric pixels below the earliest chrome boundary from 4,516 to zero
+(960 x 540), 3,165 to zero (640 x 360), and 28,216 to zero (960 x 540 with DJ).
+
+Evidence is outside Git in `/workspace/gluspot/handoff/t179/`:
+
+- `item1-{before,after}-{960x540,640x360}.png` and corresponding
+  `-annotated.png`; `item1-{before,after}-960x540-dj-annotated.png`.
+- `item1-{before,after}-geometry.json` and `item1_render_proof.py` reproduce
+  paired shared-renderer fixtures against the clean baseline archive.
+- Six new `MusicSurfaceLayoutTests` cover wide viewport/ink clearance,
+  feathered pixels, tall active rows, transformed clip bounds, stable expanded
+  DJ clearance and the stacked reservation. Five fail on unchanged `e0ee9ca`;
+  the tall-row test also passes baseline and guards the new alpha mask.
+- The existing continuity regression now asserts bottom chrome clearance
+  while retaining horizontal blur/inset checks. The resize snapshot fixture
+  enables the same painter hints as production before exact image comparison.
+
+Final focused verification passes 131 tests at DPR 1 and 40 at DPR 2 (six new
+cases plus chrome/resize/width motion). The broader DPR-2 layout/continuity run
+passes 62 of 64; both wide-display fixture failures reproduce on unchanged
+`e0ee9ca` with offscreen screen-size clamping. Reports are
+`item1-final-focus.json`, `item1-review-item1-motion-final-dpr2.json` and
+`item1-review-wide-fixture-baseline-dpr2.json`. Compilation and whitespace
+checks pass. Forty warmed fixture paints per scene reuse the same ink buffer
+with zero additional lyric relayouts; synthetic P95 is 6.038 ms at 960 x 540
+without DJ (baseline 5.760 ms). These are offscreen raster samples.
+
+Ordinary full discovery completes **5,970 tests / 187.082 s**, versus **5,964 /
+187.025 s** on clean `e0ee9ca`. Both report **54 failures, 48 errors and 32
+skips**, with identical identities and ordering; zero added or removed.
+All six new regressions and the updated continuity case pass. The inherited
+whole-branch failures remain; `item1-full-{final,baseline}.{log,json}` and
+`item1-full-comparison.json` preserve the comparison.
+
+Parent PC restart and physical acceptance remain pending. This session does
+not resume other numbered items.
 
 ## Platform login (item 5)
 
@@ -110,5 +169,5 @@ over 22 seconds, preparations and control bands remain unchanged. A separate
 at most 21 veil preparations, preserving the existing 10 Hz budget. These are
 controlled offscreen checks, not physical-display or long-session PC acceptance.
 
-Items 1–2 remain deferred: neither repository notes nor the prior t179 plan
-specifies their behavior. No additional product scope was inferred.
+Item 1 is handled by the separately scoped follow-up above. Item 2 remains
+deferred; its behavior is not specified by this task.

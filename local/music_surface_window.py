@@ -7146,7 +7146,48 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         painter.fillRect(painted_cover, shade)
         painter.restore()
 
-    def _paint_live_lyric_column(
+    def _paint_live_lyric_column(self, painter: QPainter, rect: QRectF, **kwargs):
+        """Feather only external wide ink, preserving readable wrapped rows."""
+        wide = (getattr(self, "_lyric_bottom_fade_active", False) if self._lyric_resize_capturing else
+                self._effective_content_layout() == "lyrics" and not self._content_layout_is_narrow())
+        if not self._lyric_resize_capturing and not self._lyric_resize_probe:
+            self._lyric_bottom_fade_active = wide
+        if not wide or self._lyric_resize_probe or getattr(self, "_lyric_resize_committing", False):
+            return self._paint_lyric_column_ink(painter, rect, **kwargs)
+        column = (self._lyric_resize_last_geometry['column'] if self._lyric_resize_capturing
+                  else self._content_column_geometry(rect)[2])
+        bounds = QRectF(rect.left(), column.top(), rect.width(), column.height()).intersected(rect)
+        if bounds.isEmpty():
+            return self._paint_lyric_column_ink(painter, rect, **kwargs)
+        # One reusable, viewport-sized ink buffer; no filtering or reshaping.
+        # The album/background/chrome never enter the alpha mask. All callers,
+        # including frozen-width snapshots, see the same feathered endpoint.
+        ratio = self.devicePixelRatioF()
+        # Keep the buffer on the physical glyph grid. A fractional origin
+        # would resample otherwise unchanged text on the final image blit.
+        bounds = QRectF(QPointF(math.floor(bounds.left() * ratio) / ratio, math.floor(bounds.top() * ratio) / ratio),
+                        QPointF(math.ceil(bounds.right() * ratio) / ratio, math.ceil(bounds.bottom() * ratio) / ratio))
+        size = QSize(max(1, round(bounds.width() * ratio)), max(1, round(bounds.height() * ratio)))
+        ink = getattr(self, "_lyric_bottom_ink", QImage())
+        if ink.size() != size or ink.devicePixelRatioF() != ratio:
+            ink = QImage(size, QImage.Format.Format_ARGB32_Premultiplied)
+            ink.setDevicePixelRatio(ratio)
+            self._lyric_bottom_ink = ink
+        ink.fill(Qt.GlobalColor.transparent)
+        with QPainter(ink) as layer:
+            layer.setRenderHints(painter.renderHints())
+            layer.translate(-bounds.left(), -bounds.top())
+            self._paint_lyric_column_ink(layer, rect, **kwargs)
+            fade = min(88. * self._surface_scale(rect), column.height() * .16)
+            gradient = QLinearGradient(0., column.bottom() - fade, 0., column.bottom())
+            gradient.setColorAt(0., QColor(255, 255, 255, 255))
+            gradient.setColorAt(.55, QColor(255, 255, 255, 150))
+            gradient.setColorAt(1., QColor(255, 255, 255, 0))
+            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            layer.fillRect(bounds, gradient)
+        painter.drawImage(bounds.topLeft(), ink)
+
+    def _paint_lyric_column_ink(
         self, painter: QPainter, rect: QRectF, *, paint_region=None,
         painted_cover: QRectF | None = None, center_plan=None,
         cover_fraction: float = 0.0, normal_opacity: float = 0.0,
@@ -7543,8 +7584,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             )
         else:
             self._active_glow_stage = "done"
-        lyric_top = content.top() + max(8.0, rect.height() * 0.018)
-        lyric_height = max(1.0, content.height() - max(12.0, rect.height() * 0.035))
+        lyric_top = side_column.top() + max(8.0, rect.height() * 0.018)
+        lyric_height = max(1.0, side_column.height() - max(12.0, rect.height() * 0.035))
         if cover_lyrics_layout:
             lyric_top = lyric_cover.top() + lyric_cover.height() * .42
             lyric_height = max(1., lyric_cover.height() * .55)
@@ -7563,11 +7604,12 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         # ink. Blur and the highlight halo must cross either horizontal inset
         # naturally instead of ending at a visible vertical cut. The existing
         # cover mask and real window edge still bound the composed surface.
-        lyric_ink_clip = QRectF(rect)
+        lyric_ink_clip = lyric_transform.mapRect(rect)
         # Width remains uncut for blur/halos. Vertical content bounds keep
         # lyric ink out of the album/title and transport chrome at any width.
-        lyric_ink_clip.setTop(content.top())
-        lyric_ink_clip.setBottom(content.bottom())
+        ink_column = lyric_transform.mapRect(side_column)
+        lyric_ink_clip.setTop(ink_column.top())
+        lyric_ink_clip.setBottom(ink_column.bottom())
         self._lyric_animation_rect = QRectF(
             lyric_clip.left() - glow_bleed, rect.top(),
             lyric_clip.width() + 2.0 * glow_bleed, rect.height(),
