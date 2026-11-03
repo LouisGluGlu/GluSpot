@@ -134,35 +134,44 @@ class LyricResizeFreezeTests(unittest.TestCase):
             window.resize(width, 640)
             with patch('local.music_lyric_resize.time.monotonic', return_value=started + .2), \
                     patch.object(window, '_paint_live_lyric_column', side_effect=AssertionError('live ink during motion')), \
+                    patch.object(window, '_paint_lyric_loading', wraps=window._paint_lyric_loading) as loading, \
                     patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton:
                 self.render()
                 skeleton.assert_called()
+                loading.assert_called()
                 target = skeleton.call_args.args[1]
-                bars = window._lyric_resize_skeleton_rects(target)
-                self.assertTrue(bars)
-                self.assertTrue(all(target.contains(bar) for bar in bars))
-                self.assertAlmostEqual(bars[0].width(), (target.width() - 2 * min(24., target.width() * .08)) * .82)
+                load_args = loading.call_args
+                self.assertEqual(load_args.kwargs.get('force'), True)
+                self.assertAlmostEqual(load_args.args[1].width(), target.width(), delta=1)
                 self.assertTrue(window._lyric_resize_snapshot.isNull())
                 self.assertEqual(window._lyric_resize_ink_weights(), (0., 1., 0.))
 
-    def test_skeleton_raster_has_grey_rows_subtle_shimmer_and_clear_gaps(self):
-        target = QRectF(10, 10, 180, 120)
+    def test_skeleton_raster_reuses_lyric_loading_rows_and_animates(self):
+        """Resize handoff must paint MusicSurfaceWindow._paint_lyric_loading."""
+        target = QRectF(10, 10, 180, 220)
         images = []
-        for now in (100., 100.6):
-            image = QImage(200, 140, QImage.Format.Format_ARGB32_Premultiplied)
+        window = self.window
+        # Pin the loader clock so the 3s row-sweep actually advances between frames.
+        window._lyric_loading_started_at = 90.0
+        window._lyric_loading_cycle_end_at = 0.0
+        window._lyric_loading_release_at = 0.0
+        window._lyric_loading_waiting = False
+        window._lyric_loading_has_shown = True
+        window._lyric_loading_hold_centered = False
+        for now in (100.0, 102.9):
+            image = QImage(200, 240, QImage.Format.Format_ARGB32_Premultiplied)
             image.fill(Qt.GlobalColor.transparent)
-            with patch('local.music_lyric_resize.time.monotonic', return_value=now):
+            with patch('local.music_lyric_resize.time.monotonic', return_value=now), \
+                    patch.object(window, '_paint_lyric_loading', wraps=window._paint_lyric_loading) as loading:
                 with QPainter(image) as painter:
-                    window = self.window
                     window._paint_lyric_resize_skeleton(painter, target)
-            bar = window._lyric_resize_skeleton_rects(target)[0]
-            color = image.pixelColor(bar.center().toPoint())
-            self.assertGreater(color.alpha(), 30)
-            self.assertLessEqual(color.alpha(), 66)
-            self.assertLess(abs(color.red() - color.blue()), 15)
+                loading.assert_called_once()
+                self.assertTrue(loading.call_args.kwargs.get('force'))
+            opaque = sum(1 for y in range(image.height()) for x in range(image.width())
+                         if image.pixelColor(x, y).alpha() > 20)
+            self.assertGreater(opaque, 80)
             self.assertEqual(image.pixelColor(2, 2).alpha(), 0)
-            self.assertEqual(image.pixelColor(round(bar.center().x()), round(bar.bottom() + 4)).alpha(), 0)
-            images.append(image)
+            images.append(image.copy())
         self.assertNotEqual(images[0], images[1])
 
     def test_a3_font_change_and_return_reuse_wrap_equivalent_shapes(self):
@@ -352,13 +361,16 @@ class LyricResizeFreezeTests(unittest.TestCase):
         from local.music_surface_layout import MusicContentLayoutMixin
         with patch('local.music_lyric_resize.time.monotonic', return_value=started + .2), \
                 patch.object(MusicContentLayoutMixin, '_paint_playback_queue', side_effect=AssertionError('list rebuilt during drag')), \
+                patch.object(window, '_paint_lyric_loading', wraps=window._paint_lyric_loading) as loading, \
                 patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton:
             window.resize(1080, 640)
             self.render()
             skeleton.assert_called()
+            loading.assert_called()
             self.assertFalse(window._queue_hit_rects)
-            self.assertTrue(all(window._queue_view_rect.contains(bar)
-                                for bar in window._lyric_resize_skeleton_rects(window._queue_view_rect)))
+            target = skeleton.call_args.args[1]
+            self.assertTrue(window._queue_view_rect.contains(target.center()))
+            self.assertTrue(loading.call_args.kwargs.get('force'))
         self.wait_settle()
         self.assertIsNotNone(window._lyric_resize_crossfade_at)
 

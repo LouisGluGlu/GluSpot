@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
 
 
 class LyricResizeProbeReady(Exception):
@@ -327,34 +327,11 @@ class MusicLyricResizeMixin:
         painter.drawImage(self._lyric_resize_source_rect.topLeft(), self._lyric_resize_snapshot)
         painter.restore()
 
-    @staticmethod
-    def _lyric_resize_skeleton_rects(target):
-        """Only arithmetic: bars always fit the current lyric/list column."""
-        if target.width() < 8. or target.height() < 8.:
-            return ()
-        margin = min(24., target.width() * .08)
-        width = target.width() - 2. * margin
-        height = min(18., max(8., target.width() * .045))
-        gap = height * 2.8
-        ratios = (.82, .96, .66, .88, .72)
-        return tuple(QRectF(target.left() + margin, y, width * ratios[index % len(ratios)], height)
-                     for index in range(max(0, int((target.height() - margin - height) / gap) + 1))
-                     if (y := target.top() + margin + index * gap) + height <= target.bottom())
-
     def _paint_lyric_resize_skeleton(self, painter, target):
-        phase = (time.monotonic() % 1.8) / 1.8
-        shimmer = QLinearGradient(target.left() - target.width() + 3. * target.width() * phase,
-                                  0., target.left() + 3. * target.width() * phase, 0.)
-        shimmer.setColorAt(0., QColor(174, 178, 184, 38))
-        shimmer.setColorAt(.5, QColor(202, 206, 212, 66))
-        shimmer.setColorAt(1., QColor(174, 178, 184, 38))
-        painter.save()
-        painter.setClipRect(target, Qt.ClipOperation.IntersectClip)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(shimmer)
-        for bar in self._lyric_resize_skeleton_rects(target):
-            painter.drawRoundedRect(bar, bar.height() * .5, bar.height() * .5)
-        painter.restore()
+        """Reuse the shared lyric loading skeleton (MusicSurfaceWindow._paint_lyric_loading)."""
+        # force=True keeps the established seven-row loader and its sweep
+        # motion without depending on a lyric-lookup pending gate.
+        self._paint_lyric_loading(painter, QRectF(target), time.monotonic(), 1.0, force=True)
 
     def _lyric_resize_ink_weights(self, now=None):
         now = time.monotonic() if now is None else now

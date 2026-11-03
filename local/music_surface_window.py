@@ -2551,14 +2551,21 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         motion = max(0.0, min(1.0, (within - 2.48) / 0.52))
         return cycle, motion * motion * (3.0 - 2.0 * motion)
 
-    def _paint_lyric_loading(self, painter: QPainter, column: QRectF, now: float, opacity: float) -> None:
-        """Seven album-tinted rows move up once every three seconds."""
+    def _paint_lyric_loading(self, painter: QPainter, column: QRectF, now: float, opacity: float, *, force: bool = False) -> None:
+        """Seven album-tinted rows move up once every three seconds.
+
+        force=True paints the same loader outside the lyric-lookup gate so
+        width-resize handoffs reuse this exact skeleton and its transitions.
+        """
         if opacity <= 0.001 or column.isEmpty():
             return
         cycle, phase = self._lyric_loading_phase(now)
-        if not self._lyric_loading_visible(now):
+        if not force and not self._lyric_loading_visible(now):
             return
-        entrance, exit_phase = self._lyric_loading_reveal(now)
+        if force:
+            entrance, exit_phase = 1.0, 0.0
+        else:
+            entrance, exit_phase = self._lyric_loading_reveal(now)
         scale = self._surface_scale()
         height = min(42.0 * scale, max(17.0 * scale, column.height() * 0.067))
         step = min(height * 1.75, column.height() / 7.45)
