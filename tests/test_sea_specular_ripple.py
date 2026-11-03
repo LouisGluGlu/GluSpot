@@ -1,4 +1,4 @@
-"""Item 7: real levels, silver expanded ripple, and temporary lyricless cover."""
+"""Item 7: real levels, palette water/light, and temporary lyricless cover."""
 from contextlib import contextmanager
 import ctypes
 import math
@@ -240,36 +240,88 @@ class ExpandedRippleRenderTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_saturated_covers_cannot_tint_expanded_sea_and_damage_is_bounded(self):
+    @staticmethod
+    def _render(renderer, *, dpr=1, body=True):
+        image = QImage(520 * dpr, 136 * dpr, QImage.Format.Format_ARGB32_Premultiplied)
+        image.setDevicePixelRatio(dpr)
+        image.fill(QColor("black"))
+        with QPainter(image) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if body:
+                renderer.paint_sea_level_ambience(painter, QRectF(0, 0, 520, 136), 24, True)
+            renderer.paint_sea_level_wave(painter, QRectF(0, 0, 520, 136), 24, True)
+        return image
+
+    @staticmethod
+    def _rgb(image):
+        image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        return np.frombuffer(image.constBits(), np.uint8).reshape(image.height(), image.bytesPerLine() // 4, 4)[:, :image.width(), :3].copy()
+
+    def test_palette_body_and_light_keep_hue_and_all_motion_stays_in_strip(self):
         renders = []
-        for color in (QColor("red"), QColor("magenta"), QColor("blue")):
+        for color in (QColor("#ca102d"), QColor("#c01a91"), QColor("#087d86")):
             host = PaintHost({})
-            host._solid_album_background_color = lambda: color
-            host._sea_wave_state = SeaWaveState()
-            for n in range(60):
-                host._sea_wave_state.update_ripple(.64, n / 30)
+            host._xiaomi_duotone_palette = lambda: (color, color, color)
             renderer = NativeMusicBackgroundRenderer(host)
             rect = QRectF(0, 0, 520, 136)
-            image = QImage(520, 136, QImage.Format.Format_ARGB32_Premultiplied)
-            image.fill(QColor(0, 0, 0))
-            painter = QPainter(image)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            renderer.paint_sea_level_ambience(painter, rect, 24, True)
-            before = QImage(image)
-            renderer.paint_sea_level_wave(painter, rect, 24, True)
-            painter.end()
+            images = []
+            for peak in (.0004, .81):
+                host._sea_wave_state = SeaWaveState()
+                for n in range(90):
+                    host._sea_wave_state.update_ripple(peak, n / 30)
+                image = self._render(renderer)
+                images.append(self._rgb(image))
+                body_pixel = image.pixelColor(260, 77)
+                self.assertLess(abs(body_pixel.hslHueF() - color.hslHueF()), .025)
+                crest = images[-1][50:80, 20:500]
+                brightest = crest.reshape(-1, 3)[np.argmax(crest.sum(axis=2))].astype(int)
+                self.assertGreater(np.ptp(brightest), 15)
+                self.assertGreater(brightest.max(), 145)
             strip = renderer.sea_level_wave_strip(rect).toAlignedRect()
-            for y in range(image.height()):
-                for x in range(image.width()):
-                    pixel = image.pixelColor(x, y)
-                    self.assertEqual(pixel.red(), pixel.green())
-                    self.assertEqual(pixel.green(), pixel.blue())
-                    if not strip.contains(x, y):
-                        self.assertEqual(pixel, before.pixelColor(x, y))
-            self.assertGreater(max(image.pixelColor(260, y).red() for y in range(136)), 200)
-            renders.append(image)
-        self.assertEqual(renders[0], renders[1])
-        self.assertEqual(renders[1], renders[2])
+            self.assertTrue(np.array_equal(images[0][:strip.top()], images[1][:strip.top()]))
+            self.assertTrue(np.array_equal(images[0][strip.bottom()+1:], images[1][strip.bottom()+1:]))
+            self.assertFalse(np.array_equal(images[0], images[1]))
+            renders.append(images[1])
+        self.assertFalse(np.array_equal(renders[0], renders[1]))
+        self.assertFalse(np.array_equal(renders[1], renders[2]))
+
+    def test_audio_grows_downward_glow_depth_and_crest_brightness(self):
+        for dpr in (1, 2):
+            columns = []
+            for peak in (0., .81):
+                host = PaintHost({})
+                color = QColor("#c01a91")
+                host._xiaomi_duotone_palette = lambda: (color, color, color)
+                state = host._sea_wave_state = SeaWaveState()
+                for n in range(90):
+                    state.update_ripple(peak, n / 30)
+                # Hold geometry flat to measure light independently of height.
+                state.ripple_displacement = lambda _pos: 0.
+                columns.append(self._rgb(self._render(NativeMusicBackgroundRenderer(host), dpr=dpr, body=False))[:, 260*dpr].max(axis=1))
+            low, high = columns
+            crest = round(136 * .495 * dpr)
+            self.assertGreater(high.max(), low.max() + 25)
+            self.assertEqual(np.count_nonzero(low[crest+2*dpr:] > 8), 0)
+            self.assertGreater(np.count_nonzero(high[crest+2*dpr:] > 8), 7*dpr)
+
+    def test_dark_palette_is_lifted_without_losing_hue_or_neutrality(self):
+        for source in (QColor("#180305"), QColor("#181313"), QColor("#04031c"), QColor("#031816"), QColor("#080808"), QColor("#f7f7f7")):
+            host = PaintHost({})
+            host._xiaomi_duotone_palette = lambda: (source, source, source)
+            renderer = NativeMusicBackgroundRenderer(host)
+            sea, line = renderer._sea_level_colors(renderer.render_context("sea_level", expanded=True))
+            self.assertGreater(sea.lightnessF(), .25)
+            self.assertGreater(line.lightnessF(), .8)
+            if source.hslSaturationF() > .04:
+                self.assertAlmostEqual(sea.hslHueF(), source.hslHueF(), places=3)
+                self.assertAlmostEqual(line.hslHueF(), source.hslHueF(), places=3)
+                self.assertGreater(sea.hslSaturationF(), source.hslSaturationF() * .95)
+                self.assertGreater(line.hslSaturationF(), .2)
+            else:
+                self.assertEqual(sea.red(), sea.green())
+                self.assertEqual(line.red(), line.green())
+            host._sea_wave_state = SeaWaveState()
+            self.assertGreater(self._rgb(self._render(renderer)).max(), 145)
 
     def test_resolved_miss_uses_cover_and_recovery_holds_without_settings_write(self):
         visual = IslandStackVisual(EmptyIslandDataProvider())
@@ -328,28 +380,21 @@ class ExpandedRippleRenderTests(unittest.TestCase):
         host._music_metadata_scrolls = True
         self.assertIsNone(IslandStackVisual._sea_wave_only_damage(host, 10.))
 
-    def test_high_dpi_light_remains_neutral_and_tracks_new_levels(self):
+    def test_high_dpi_light_invalidates_same_state_raster_on_palette_change(self):
         host = PaintHost({})
         state = host._sea_wave_state = SeaWaveState()
         renderer = NativeMusicBackgroundRenderer(host)
         images = []
-        for level in (0., .81):
-            for n in range(90):
-                state.update_ripple(level, len(images) * 3 + n / 30)
-            image = QImage(1040, 272, QImage.Format.Format_ARGB32_Premultiplied)
-            image.setDevicePixelRatio(2)
-            image.fill(QColor("black"))
-            with QPainter(image) as painter:
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                renderer.paint_sea_level_wave(painter, QRectF(0, 0, 520, 136), 24, True)
-            images.append(image)
+        for n in range(90):
+            state.update_ripple(.81, n / 30)
+        for color in (QColor("#ca102d"), QColor("#087d86")):
+            host._xiaomi_duotone_palette = lambda: (color, color, color)
+            images.append(self._render(renderer, dpr=2, body=False))
         self.assertNotEqual(images[0], images[1])
-        self.assertGreater(max(images[1].pixelColor(520, y).red() for y in range(272)), 180)
         for image in images:
-            for y in range(0, 272, 3):
-                pixel = image.pixelColor(520, y)
-                self.assertEqual(pixel.red(), pixel.green())
-                self.assertEqual(pixel.green(), pixel.blue())
+            pixels = self._rgb(image).astype(int)
+            self.assertGreater(pixels.max(), 180)
+            self.assertGreater(np.ptp(pixels, axis=2).max(), 15)
 
     def test_explicit_preview_spectrum_still_shapes_the_surface(self):
         host = PaintHost({})

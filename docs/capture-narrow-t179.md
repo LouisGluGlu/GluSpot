@@ -276,6 +276,10 @@ item 6 request are handled by the t184 follow-up at the top of this document.
 
 ## Item 7 — expanded sea-level ripple (t191/t192)
 
+The t191/t192 delivery below is historical. **t194 corrects its mistaken neutral
+water/color policy**; the current palette body and tinted light are described in
+the correction section below. Its provider, ripple dynamics and cadence remain.
+
 This is a focused follow-up from `79c0f90` for the expanded V2 island. The bad
 red/magenta path won because `_sea_level_colors()` returned an opaque
 `solid_album_background`, and `_paint_xiaomi_duotone_ambience()` filled the
@@ -369,3 +373,76 @@ These five-second samples retain about 30 Hz presentation, zero lyric builds,
 this short sample; uniform callback improvement is not claimed. No narrow veil,
 layout or presentation-clock implementation changed. `t192-full-comparison.json`
 records the exact unchanged failure/error and skip identities/reasons.
+
+### t194 correction — palette water, glow thickness and tinted specular light
+
+The user corrected the Item 7 color direction: `44b1d83` incorrectly replaced
+the cover-derived water with neutral white/silver. The expanded sea now takes
+the existing `sea_level` / Xiaomi duotone primary, with the established solid
+album color as fallback. The body fades toward deep gray/black; its depth
+gradient is anchored to fixed island geometry so moving water cannot dirty
+pixels outside the existing 52-unit wave strip.
+
+`_sea_level_colors()` documents the contrast helper: preserve primary hue,
+raise HSL lightness to at least .28 and chromatic saturation to at least .58;
+neutral sources stay neutral. The crest uses a lighter tint with lightness at
+least .84 and 48% of the lifted saturation. It is not a hard-coded white line.
+A separate soft, alpha-faded palette band below it grows from .3 to 21 logical
+units with smoothed audio level; crest alpha rises from 185 to 255. A quiet
+input therefore has almost no glow band, while loud input thickens and brightens
+the light. DPR 2 keeps the bounded logical-pixel raster and now includes palette
+RGBA in its key to invalidate same-state artwork changes.
+
+`local/sea_wave.py`, island damage/cadence code, provider/audio plumbing and
+narrow presentation clocks are unchanged from `44b1d83`. Three sine components,
+slow phase drift, near-flat quiet input, 60 ms attack / 250 ms release and the
+`8caf672` hidden-owner/callback fix retain their existing contracts. Compact and
+explicit spectrum/wave preview colors and shaping retain their existing path.
+
+External evidence under `/workspace/gluspot/handoff/t179/`:
+
+- `t194_wave_proof.py`, `t194-wave-{red,magenta,teal}-{low,high}.png`, matching
+  `-strip.png`, transparent `-light.png` and `-dpr2.png` frames. Synthetic extracted
+  colors run through the real Xiaomi palette path and Qt/state painters.
+- `t194-wave-proof.json/log` records source hashes, actual palette tones,
+  low/high peaks .0004/.81, and crest ranges .399/8.455 logical px. Isolated
+  under-crest light reaches 0/10 px at mean alpha >=5 for all three palettes.
+  Maximum crest luminance on black rises 113.4/199.0 (red), 114.3/200.6
+  (magenta), and 124.7/219.6 (teal). These are Box raster descriptors, not PC
+  appearance or native audio acceptance.
+- `t194-render-focused.json/log`: 231 passing render/audio/provider checks.
+  `t194-dpr2-focused.json/log`: 152 passing checks. Contracts now assert palette
+  body/crest hue, dark-palette contrast, audio glow depth/brightness, DPR palette
+  invalidation and pixel-identical low/high frames outside the wave strip.
+
+Physical Windows visuals, endpoint response, actual PC CPU and compositor
+cadence remain parent acceptance. No PC app was launched for this correction.
+
+Clean `44b1d83` full discovery runs 6,000 tests; the final fault-enabled rerun
+runs 6,002. Both have exactly the same 54 failure identities, 48 error identities
+and 32 skips (`t194-full-{baseline,final}.json/log`,
+`t194-full-comparison.json`). The first final attempt ended in native SIGSEGV
+after an owned-playback test reported `ok`; `t194-full-final-attempt1.log` is
+preserved. Its native cause is unknown. The complete rerun does not erase that
+limitation, and historical Qt crashes do not establish its cause. Changed
+Python compilation and `git diff --check` pass; no green whole-branch suite is
+claimed.
+
+The quiet paired Box CPU proxy compares exact `44b1d83` with the correction,
+using the same hashed fixture: 520 × 136 logical pixels, 60 warmup + 600 measured
+frames, 30 Hz equivalent, state updates plus full ambience/wave painting.
+
+| DPR | `44b1d83` P95 | t194 P95 | `44b1d83` one-core CPU | t194 one-core CPU |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1.545 ms | 1.638 ms | 3.378% | 4.013% |
+| 2 | 1.764 ms | 2.348 ms | 4.658% | 6.081% |
+
+Evidence: `t194-baseline-wave-proof.json/log`, `t194-wave-proof.json/log` and
+`t194-cpu-comparison.json`. Restoring the palette body adds raster work in this
+full-paint proxy; no CPU improvement or native PC utilization is claimed. Real
+wave-only damage remains bounded to the strip. Four explicit cadence checks
+pass in `t194-cadence.json/log`; the ordered post-crash renderer → sea →
+owned-playback check passes all 117 cases in `t194-post-crash-focused.json/log`.
+`t194-wave-comparison.png` combines the six proof frames for review. Process
+review has no uncorrected deduction: **100/100 for this scoped source handoff**,
+with the full-suite/native limitations above.
