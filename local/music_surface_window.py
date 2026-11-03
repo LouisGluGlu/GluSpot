@@ -20,6 +20,7 @@ from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QPoint, QPo
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QRegion, QTextCharFormat, QTextLayout, QTextOption, QTransform
 from PySide6.QtWidgets import QWidget
 
+from api.artwork_sources import artwork_text_key, log_artwork_event
 from api.lyric_timeline import active_index_for_position
 from api.capture.seek import record_seek_decision
 from local.music_lyric_preparation import (
@@ -252,6 +253,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         self._art_loading_track_key = None
         self._art_loading_waiting = False
         self._art_loading_preview_key = None
+        self._art_loading_preview_at = None
+        self._art_loading_observed_at = 0.0
+        self._art_loading_metadata_key = None
+        self._artwork_display_log_state = None
         self._hovered_window_button = ""
         self._hovered_media_command = ""
         self._pressed_media_command = ""
@@ -1808,16 +1813,24 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         return image.cacheKey()
 
     def _should_blur_preview(self, image: QImage) -> bool:
-        failed = str(getattr(self.owner, "album_art_lookup_state", "") or "").casefold() == "failed"
-        if (not self._art_loading_waiting and not failed) or image.isNull():
-            return False
-        if self._track_visual is None or self._art_loading_track_key != self._track_visual[0]:
-            return False
+        state = str(getattr(self.owner, "album_art_lookup_state", "") or "").casefold()
         source = str(getattr(self.owner, "album_art_source", "") or "")
-        return source == "thumbnail" or (
-            self._art_loading_preview_key is not None
-            and self._artwork_display_key(image) == self._art_loading_preview_key
+        side = min(image.width(), image.height()) if not image.isNull() else 0
+        age = (self._art_loading_observed_at - self._art_loading_preview_at
+               if self._art_loading_preview_at is not None else 0.0)
+        blur = bool(
+            state == "pending" and self._art_loading_waiting and side > 0
+            and (side < 96 or age < 2.5)
+            and self._track_visual is not None and self._art_loading_track_key == self._track_visual[0]
+            and (source == "thumbnail" or self._artwork_display_key(image) == self._art_loading_preview_key)
         )
+        identity = "|".join(artwork_text_key(getattr(self.owner, name, "")) for name in ("track_title", "artist"))
+        signature = (identity, source, side, state, blur)
+        if signature != self._artwork_display_log_state:
+            self._artwork_display_log_state = signature
+            log_artwork_event("display", identity,
+                              source, side, state or "unknown", blur=blur)
+        return blur
 
     def _begin_art_loading_ring(self, now: float):
         if "art_loading" in self._transport_feedback:
@@ -1856,6 +1869,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             )
         )
         self._art_loading_preview_key = None if image.isNull() else self._artwork_display_key(image)
+        self._art_loading_preview_at = time.monotonic() if not image.isNull() else None
         self._art_loading_waiting = True
         self._begin_art_loading_ring(time.monotonic())
         self.update()
@@ -1871,6 +1885,12 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         image = QImage(getattr(self.owner, "album_art", QImage()))
         source = str(getattr(self.owner, "album_art_source", "") or "")
         self._art_loading_preview_key = self._artwork_display_key(image) if source == "thumbnail" and not image.isNull() else None
+        metadata_key = tuple(artwork_text_key(getattr(self.owner, name, "")) for name in ("track_title", "artist"))
+        if metadata_key != self._art_loading_metadata_key:
+            self._art_loading_preview_at = now if self._art_loading_preview_key is not None else None
+        elif self._art_loading_preview_key is not None and self._art_loading_preview_at is None:
+            self._art_loading_preview_at = now
+        self._art_loading_metadata_key = metadata_key
         self._art_loading_waiting = self._artwork_is_loading()
         # An already-running click wave remains visible across the song
         # change. Otherwise an automatic skip gets its own cover-origin ring.
@@ -2902,6 +2922,13 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         self.update()
 
     def _track_transition(self, now: float, primary: QColor, secondary: QColor) -> float:
+        self._art_loading_observed_at = now
+        metadata_key = tuple(artwork_text_key(getattr(self.owner, name, "")) for name in ("track_title", "artist"))
+        if metadata_key != self._art_loading_metadata_key:
+            self._art_loading_metadata_key = metadata_key
+            image = QImage(getattr(self.owner, "album_art", QImage()))
+            source = str(getattr(self.owner, "album_art_source", "") or "")
+            self._art_loading_preview_at = now if source == "thumbnail" and not image.isNull() else None
         identity = str(getattr(self.owner, "media_track_id", "") or "") or (
             str(getattr(self.owner, "track_title", "") or ""),
             str(getattr(self.owner, "artist", "") or ""),
@@ -2933,6 +2960,11 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             source = str(getattr(self.owner, "album_art_source", "") or "")
             if source == "thumbnail" and not visual[3].isNull():
                 # Includes a late first preview and a real same-song downgrade.
+                if self._art_loading_preview_at is None or not self._art_loading_waiting:
+                    # A failed lookup retry keeps the same preview's age.
+                    previous_source = str(getattr(self, "_last_art_loading_source", "") or "")
+                    if self._art_loading_preview_at is None or "original" in previous_source:
+                        self._art_loading_preview_at = now
                 self._art_loading_preview_key = self._artwork_display_key(visual[3])
             still_loading = self._artwork_is_loading()
             if self._art_loading_waiting and not still_loading:
@@ -2944,6 +2976,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 # changes to geometry or device-pixel ratio do not.
                 self._art_loading_waiting = True
                 self._begin_art_loading_ring(now)
+        self._last_art_loading_source = str(getattr(self.owner, "album_art_source", "") or "")
         self._track_visual = visual
         return max(0.0, min(1.0, (now - self._track_transition_at) / 0.36)) if self._previous_track_visual else 1.0
 

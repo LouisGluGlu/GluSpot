@@ -4920,7 +4920,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._update_transport_feedback_regions(10.1)
         self.assertNotIn("obo_reveal", self.window._transport_feedback)
 
-    def test_failed_thumbnail_finishes_ring_and_preserves_soft_fallback(self):
+    def test_failed_thumbnail_finishes_ring_and_preserves_sharp_fallback(self):
         self.window.resize(960, 540)
         self.owner.media_track_id = "failed-thumbnail"
         self.owner.track_title = "Timed song"
@@ -4940,7 +4940,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.owner.album_art_lookup_state = "failed"
         self.window._track_transition(11.6, QColor(61, 39, 80), QColor(29, 25, 44))
         self.assertFalse(self.window._art_loading_waiting)
-        self.assertTrue(self.window._should_blur_preview(self.owner.album_art))
+        self.assertFalse(self.window._should_blur_preview(self.owner.album_art))
         self.assertEqual(self.window._transport_feedback["art_loading"], ring)
         self.window._update_transport_feedback_regions(15.0)
         self.assertNotIn("art_loading", self.window._transport_feedback)
@@ -4951,7 +4951,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             patch.object(self.window, "_blurred_preview_cover", wraps=self.window._blurred_preview_cover) as blur,
         ):
             self.window.render(target)
-            blur.assert_called()
+            blur.assert_not_called()
         self.assertEqual(self.owner.album_art.cacheKey(), image_key)
         self.assertEqual(self.window._display_lyrics()[1], self.owner.timed_lyrics)
 
@@ -4991,6 +4991,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.owner.track_title = "Second"
         self.owner.media_track_id = "second"
         self.owner.album_art_source = "thumbnail"
+        self.owner.album_art_lookup_state = "pending"
         with (
             patch("local.music_surface_window.time.monotonic", return_value=21.0),
             patch.object(self.window, "_blurred_preview_cover", wraps=self.window._blurred_preview_cover) as blur,
@@ -5002,6 +5003,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         replacement.fill(QColor(21, 21, 21))
         self.owner.album_art = replacement
         self.owner.album_art_source = "original"
+        self.owner.album_art_lookup_state = "ready"
         with (
             patch("local.music_surface_window.time.monotonic", return_value=21.2),
             patch.object(self.window, "_blurred_preview_cover", wraps=self.window._blurred_preview_cover) as blur,

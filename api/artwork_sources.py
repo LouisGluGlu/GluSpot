@@ -8,9 +8,12 @@ release-group front; otherwise reject the ambiguous artwork.
 from __future__ import annotations
 
 from collections import OrderedDict
+import hashlib
 import json
+import logging
 import math
 import re
+import sys
 import threading
 import time
 import unicodedata
@@ -21,6 +24,16 @@ from uuid import UUID
 
 ARTWORK_USER_AGENT = "GluSpot/internal-test (Windows non-commercial artwork fallback)"
 ARTWORK_JSON_BYTE_LIMIT = 2 * 1024 * 1024
+
+# The launcher redirects stderr to the normal GluSpot log. Match capture
+# decisions' flushed logging without enabling unrelated dependency logs.
+_artwork_log = logging.getLogger("GluSpot.artwork")
+_artwork_log.setLevel(logging.INFO)
+if not _artwork_log.handlers and sys.stderr is not None:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(message)s"))
+    _artwork_log.addHandler(_handler)
+    _artwork_log.propagate = False
 
 
 def normalize_artwork_url(url: str, size: int = 2560) -> str:
@@ -41,7 +54,7 @@ def normalize_artwork_url(url: str, size: int = 2560) -> str:
         ):
             return value
         params = parse_qsl(parsed.query, keep_blank_values=True)
-        if any(key.casefold() != "param" for key, _value in params):
+        if any(key.casefold() not in {"param", "imageview", "thumbnail", "type", "quality"} for key, _value in params):
             return value
         requested_side = max(320, min(4096, int(size)))
     except (TypeError, ValueError):
@@ -50,6 +63,17 @@ def normalize_artwork_url(url: str, size: int = 2560) -> str:
         parsed.scheme, parsed.netloc, parsed.path,
         urlencode({"param": f"{requested_side}y{requested_side}"}), parsed.fragment,
     ))
+
+
+def log_artwork_event(stage: str, track: str, source: str, min_side: int,
+                      state: str, err: str = "none", *, blur: bool | None = None) -> None:
+    """Log identity hashes and controlled labels, never URLs or exception text."""
+    identity = hashlib.sha256(str(track).encode("utf-8", errors="replace")).hexdigest()[:16]
+    labels = [re.sub(r"[^a-zA-Z0-9_.-]", "_", str(value))[:80]
+              for value in (stage, source or "none", state, err)]
+    _artwork_log.info("artwork stage=%s track=%s source=%s min_side=%d state=%s err=%s%s",
+                labels[0], identity, labels[1], int(min_side), labels[2], labels[3],
+                "" if blur is None else f" blur={int(blur)}")
 
 
 def read_artwork_response(response, deadline: float, *, clock=time.monotonic) -> bytes:

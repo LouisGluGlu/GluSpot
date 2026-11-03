@@ -56,7 +56,7 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         self.render(now)
         return preview
 
-    def test_failed_lookup_does_not_expose_pixelated_preview(self):
+    def test_failed_lookup_exposes_best_preview_without_forced_blur(self):
         preview = self.start("pending-track")
         self.assertTrue(self.window._art_loading_waiting)
         self.assertTrue(self.window._should_blur_preview(preview))
@@ -67,21 +67,52 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         self.owner.album_art_lookup_state = "failed"
         self.render(103.1)
         self.assertFalse(self.window._art_loading_waiting)
-        self.assertTrue(self.window._should_blur_preview(preview))
+        self.assertFalse(self.window._should_blur_preview(preview))
         self.assertIn("art_loading", self.window._transport_feedback)
         self.render(107.0)
         self.window._update_transport_feedback_regions(107.0)
         self.assertNotIn("art_loading", self.window._transport_feedback)
-        self.assertTrue(self.window._should_blur_preview(preview))
+        self.assertFalse(self.window._should_blur_preview(preview))
 
-    def test_elapsed_time_cannot_promote_a_small_preview(self):
+    def test_108_preview_blurs_only_while_pending_and_young_across_identity_churn(self):
+        self.start("smtc-first", 101.0)
+        preview = cover(108, QColor(70, 80, 90))
+        self.owner.album_art = preview
+        self.render(103.49)
+        self.assertTrue(self.window._should_blur_preview(preview))
+        self.owner.media_track_id = "smtc-enriched-album-duration"
+        self.render(103.51)
+        self.assertFalse(self.window._should_blur_preview(preview))
+        self.owner.album_art_lookup_state = "miss"
+        self.render(103.6)
+        self.assertFalse(self.window._should_blur_preview(preview))
+        self.assertFalse(self.window._art_loading_waiting)
+
+    def test_opening_failed_preview_then_retrying_does_not_restart_its_blur_age(self):
+        self.window.shutdown()
+        preview = cover(108, QColor(70, 80, 90))
+        self.owner.album_art = preview
+        self.owner.media_track_id = "failed-first"
+        self.owner.album_art_source = "thumbnail"
+        self.owner.album_art_lookup_state = "failed"
+        self.window = MusicSurfaceWindow(self.owner)
+        self.render(100.0)
+        self.assertFalse(self.window._should_blur_preview(preview))
+        self.owner.album_art_lookup_state = "pending"
+        self.render(105.0)
+        self.assertFalse(self.window._should_blur_preview(preview))
+        self.owner.media_track_id = "enriched-failed-first"
+        self.render(105.1)
+        self.assertFalse(self.window._should_blur_preview(preview))
+
+    def test_aged_preview_unblurs_while_upgrade_can_still_complete(self):
         preview = self.start("late-track")
         self.render(118.99)
         self.assertTrue(self.window._art_loading_waiting)
         # Twenty seconds exceeds the former fixed eighteen-second visual cap.
         self.render(121.01)
         self.assertTrue(self.window._art_loading_waiting)
-        self.assertTrue(self.window._should_blur_preview(preview))
+        self.assertFalse(self.window._should_blur_preview(preview))
         self.assertIn("art_loading", self.window._transport_feedback)
 
         final = cover(1200, QColor(25, 82, 111))
@@ -104,7 +135,7 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         self.owner.album_art_lookup_state = "ready"
         self.render(101.4)
         self.assertTrue(self.window._art_loading_waiting)
-        self.assertTrue(self.window._should_blur_preview(preview))
+        self.assertFalse(self.window._should_blur_preview(preview))
 
     def test_completed_original_can_reuse_the_same_displayable_preview_pixels(self):
         self.start("same-object-upgrade")
@@ -138,7 +169,7 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         self.owner.album_art_lookup_state = "failed"
         self.render(101.4)
         self.assertFalse(self.window._art_loading_waiting)
-        self.assertTrue(self.window._should_blur_preview(old_preview))
+        self.assertFalse(self.window._should_blur_preview(old_preview))
 
         new_preview = self.start("new-track", 101.6)
         self.assertTrue(self.window._art_loading_waiting)
@@ -190,12 +221,12 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         preview = self.start("retry-track")
         self.owner.album_art_lookup_state = "failed"
         self.render(101.5)
-        self.assertTrue(self.window._should_blur_preview(preview))
+        self.assertFalse(self.window._should_blur_preview(preview))
 
         self.owner.album_art_lookup_state = "pending"
         self.render(148.0)
         self.assertTrue(self.window._art_loading_waiting)
-        self.assertTrue(self.window._should_blur_preview(preview))
+        self.assertFalse(self.window._should_blur_preview(preview))
 
         final = cover(1800, QColor(26, 75, 108))
         self.owner.album_art = final
@@ -225,7 +256,7 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         self.render(101.3)
         self.assertEqual(self.window._track_visual[3].cacheKey(), large_thumbnail.cacheKey())
         self.assertTrue(self.window._art_loading_waiting)
-        self.assertTrue(self.window._should_blur_preview(large_thumbnail))
+        self.assertFalse(self.window._should_blur_preview(large_thumbnail))
 
     def test_large_high_dpi_surface_does_not_reject_final_source(self):
         self.start("high-dpi-track")
@@ -278,6 +309,7 @@ class ArtworkLoadingSurfaceTests(unittest.TestCase):
         preview = cover(160, QColor(42, 70, 109))
         self.owner.album_art = preview
         self.owner.album_art_source = "thumbnail"
+        self.owner.album_art_lookup_state = "pending"
         self.window._track_transition(100.3, QColor(42, 70, 109), QColor(20, 25, 40))
         self.assertTrue(self.window._art_loading_waiting)
         self.assertEqual(self.window._art_loading_preview_key, preview.cacheKey())
@@ -314,6 +346,7 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
         self.provider._current_art_url_by_track_id = {}
         self.provider._queue_art_lock = threading.Lock()
         self.provider._queue_art_failed_until = {}
+        self.provider._current_art_first_seen = {"song|artist": 0.0}
 
     def read(self):
         result = asyncio.run(self.provider._read_visual_data())
@@ -322,13 +355,13 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
 
     def test_track_data_reports_pending_failure_and_ready_without_losing_preview(self):
         first = self.read()
-        key = first.track_id
+        key = self.provider._artwork_track_key(first.title, first.artist)
         self.assertEqual(first.album_art_source, "thumbnail")
         self.assertEqual(first.album_art_lookup_state, "pending")
         with self.provider._current_art_lookup_lock:
             self.provider._current_art_lookup_failed_until[key] = time.monotonic() + 45.0
         failed = self.read()
-        self.assertEqual(failed.track_id, key)
+        self.assertEqual(failed.track_id, first.track_id)
         self.assertEqual(failed.album_art_lookup_state, "failed")
         self.assertEqual(failed.album_art_bytes, self.preview_bytes)
 
@@ -338,7 +371,7 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
         self.assertEqual(ready.album_art_bytes, self.original_bytes)
 
     def test_undersized_player_original_still_allows_an_artwork_upgrade(self):
-        self.provider._player_window_track_metadata = lambda *_args: SimpleNamespace(
+        self.provider._system_netease_artwork_track = lambda *_args: SimpleNamespace(
             title="Song", artist="Artist", album_title="Album",
             duration_seconds=240.0, album_art_bytes=self.preview_bytes,
         )
@@ -352,7 +385,7 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
     def test_next_track_does_not_inherit_prior_failure(self):
         first = self.read()
         with self.provider._current_art_lookup_lock:
-            self.provider._current_art_lookup_failed_until[first.track_id] = time.monotonic() + 45.0
+            self.provider._current_art_lookup_failed_until[self.provider._artwork_track_key(first.title, first.artist)] = time.monotonic() + 45.0
         self.assertEqual(self.read().album_art_lookup_state, "failed")
         self.provider._get_session = lambda: asyncio.sleep(
             0, result=FakeSession("cloudmusic.exe", "Another Song", "Artist", True, 1, 215)
@@ -388,14 +421,14 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
             self.assertEqual(failed.album_art_lookup_state, "failed")
             self.assertEqual(failed.album_art_bytes, self.preview_bytes)
             worker()
-            self.assertNotIn(pending.track_id, self.provider._current_art_url_by_track_id)
+            self.assertNotIn(self.provider._artwork_track_key(pending.title, pending.artist), self.provider._current_art_url_by_track_id)
             self.provider._schedule_queue_album_art_prefetch.assert_not_called()
 
     def test_download_failure_reports_failed_for_low_resolution_preview(self):
         first = self.read()
         url = "https://archive.org/download/matched/front.jpg"
         with self.provider._current_art_lookup_lock:
-            self.provider._current_art_url_by_track_id[first.track_id] = url
+            self.provider._current_art_url_by_track_id[self.provider._artwork_track_key(first.title, first.artist)] = url
         with self.provider._queue_art_lock:
             self.provider._queue_art_failed_until[url] = time.monotonic() + 30.0
         failed = self.read()
@@ -405,7 +438,7 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
 
     def test_real_1200_caa_cover_completes_without_requery_loop(self):
         first = self.read()
-        key = first.track_id
+        key = self.provider._artwork_track_key(first.title, first.artist)
         fallback_1200 = artwork_tests.ArtworkVisualPriorityTests.png(1200, 0xFF304060)
         self.provider._current_art_url_by_track_id = {key: "https://coverartarchive.org/release/one/front-1200"}
         self.provider._current_art_lookup_sources = {key: "cover-art-archive"}
@@ -431,7 +464,7 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
         # A 2560 request can return the source's real 1417-pixel original.
         # A decoded original is not a failed download of imaginary pixels.
         first = self.read()
-        key = first.track_id
+        key = self.provider._artwork_track_key(first.title, first.artist)
         url = "https://music.126.net/exact-album.jpg?param=2560y2560"
         source_art = artwork_tests.ArtworkVisualPriorityTests.png(1417, 0xFF304060)
         self.provider._current_art_url_by_track_id = {key: url}
@@ -460,7 +493,7 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
 
     def test_temporary_metadata_failure_can_retry_same_track_after_cooldown(self):
         first = self.read()
-        key = first.track_id
+        key = self.provider._artwork_track_key(first.title, first.artist)
         self.provider._current_art_lookup_failed_until[key] = time.monotonic() + 45.0
         self.provider._resolve_netease_art_url = Mock(return_value="https://example.test/recovered.jpg")
         self.provider._musicbrainz_artwork_resolver = SimpleNamespace(resolve=Mock(return_value=""))
@@ -475,7 +508,7 @@ class ArtworkLookupProviderStateTests(unittest.TestCase):
             self.assertEqual(artwork_tests.ManualThread.jobs, [])
             self.provider._current_art_lookup_failed_until[key] = time.monotonic() - 1.0
             retried = self.read()
-            self.assertEqual(retried.track_id, key)
+            self.assertEqual(retried.track_id, first.track_id)
             self.assertEqual(retried.album_art_lookup_state, "pending")
             self.assertEqual(len(artwork_tests.ManualThread.jobs), 1)
             artwork_tests.ManualThread.jobs.pop(0)()

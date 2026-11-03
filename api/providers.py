@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.client import IncompleteRead
 from ctypes import wintypes
 from dataclasses import replace
 from functools import lru_cache
@@ -33,7 +34,7 @@ from api.audio_analyzer import LiveAudioAnalyzer, RenderPeakMeter
 from api.audio_routes import AudioRouteSnapshot
 from api.artwork_sources import (
     ARTWORK_USER_AGENT, MusicBrainzArtworkResolver,
-    artwork_duration_matches, artwork_text_key, normalize_artwork_url, read_artwork_response,
+    artwork_duration_matches, artwork_text_key, log_artwork_event, normalize_artwork_url, read_artwork_response,
 )
 from api.lyrics import LocalLyricsStore
 from api.lyric_timeline import has_sufficient_word_timing
@@ -467,6 +468,7 @@ class WindowsMediaProvider:
     CURRENT_ART_LOOKUP_SIDE = 1200
     CURRENT_ART_PREVIEW_SIDE = 320
     QUEUE_ART_MAX_BYTES = 8 * 1024 * 1024
+    ARTWORK_RETRY_DELAYS = (0.75, 1.5, 5.0)
 
     def __init__(self, fallback=None, settings_getter=None, *, attach_only=False):
         self.attach_only = bool(attach_only)
@@ -502,6 +504,7 @@ class WindowsMediaProvider:
         self._queue_art_cache: dict[str, bytes] = {}
         self._queue_art_inflight: set[str] = set()
         self._queue_art_failed_until: dict[str, float] = {}
+        self._queue_art_attempts: dict[str, int] = {}
         self._queue_art_lock = threading.Lock()
         self._queue_art_slots = threading.BoundedSemaphore(3)
         self._artwork_cache_root = self._queue_art_disk_path("")
@@ -510,6 +513,9 @@ class WindowsMediaProvider:
         self._current_art_url_by_track_id: dict[str, str] = {}
         self._current_art_lookup_inflight: set[str] = set()
         self._current_art_lookup_failed_until: dict[str, float] = {}
+        self._current_art_lookup_attempts: dict[str, int] = {}
+        self._current_art_first_seen: dict[str, float] = {}
+        self._current_art_queue_urls: dict[str, str] = {}
         self._current_art_lookup_lock = threading.Lock()
         self._current_art_lookup_generations: dict[str, tuple[object, float]] = {}
         self._current_art_lookup_slots = threading.BoundedSemaphore(2)
@@ -1026,6 +1032,8 @@ class WindowsMediaProvider:
                         "_queue_art_inflight", "_current_art_url_by_track_id", "_current_art_lookup_inflight",
                         "_current_art_lookup_failed_until", "_current_art_lookup_generations",
                         "_current_art_lookup_sources", "_current_art_rejected_urls",
+                        "_queue_art_attempts", "_current_art_lookup_attempts", "_current_art_first_seen",
+                        "_current_art_queue_urls",
                     ):
                         values = getattr(self, name, None)
                         if isinstance(values, (dict, set)):
@@ -1039,7 +1047,6 @@ class WindowsMediaProvider:
                             task.get_loop().call_soon_threadsafe(task.cancel)
                         except (RuntimeError, AttributeError):
                             pass
-                    self._netease_art_source_failed_until = 0.0
                     resolver = getattr(self, "_musicbrainz_artwork_resolver", None)
                     if resolver is not None and callable(getattr(resolver, "clear_cache", None)):
                         resolver.clear_cache()
@@ -1948,6 +1955,41 @@ class WindowsMediaProvider:
                 break
         return tuple(entries)
 
+    @staticmethod
+    def _artwork_track_key(title: str, artist: str) -> str:
+        # SMTC album and duration often arrive after its first 108px preview.
+        # They remain candidate match filters, never the artwork cache key.
+        return "|".join((artwork_text_key(title), artwork_text_key(artist)))
+
+    def _system_netease_artwork_track(self, title: str, artist: str, duration: float):
+        """Read matching queue artwork only; do not enable a progress adapter."""
+        try:
+            reader = getattr(self, "netease_position", None) or getattr(self, "_netease_artwork_reader", None)
+            if reader is None:
+                reader = self._netease_artwork_reader = NeteasePositionReader()
+            track = reader.track_metadata(title, artist)
+            if (track is not None and self._track_object_matches_metadata(track, title, artist)
+                    and artwork_duration_matches(duration, getattr(track, "duration_seconds", 0.0))):
+                return track
+        except Exception as exc:
+            log_artwork_event("lookup", self._artwork_track_key(title, artist),
+                              "netease-queue", 0, "failed", type(exc).__name__)
+        return None
+
+    def _artwork_retry_after(self, kind: str, key: str) -> float:
+        # Called under the lookup/download's existing lock. Failure on one
+        # song or URL never suppresses another song's NetEase lookup.
+        name = "_current_art_lookup_attempts" if kind == "lookup" else "_queue_art_attempts"
+        attempts = getattr(self, name, None)
+        if not isinstance(attempts, dict):
+            attempts = {}
+            setattr(self, name, attempts)
+        count = min(attempts.get(key, 0) + 1, len(self.ARTWORK_RETRY_DELAYS))
+        attempts[key] = count
+        while len(attempts) > 64:
+            attempts.pop(next(iter(attempts)))
+        return time.monotonic() + self.ARTWORK_RETRY_DELAYS[count - 1]
+
     def _queue_album_art_bytes(self, track) -> bytes:
         epoch = int(getattr(self, "_artwork_cache_epoch", 0))
         data = getattr(track, "album_art_bytes", b"") or getattr(track, "image_bytes", b"") or b""
@@ -2012,7 +2054,7 @@ class WindowsMediaProvider:
                     self._schedule_queue_album_art_prefetch(original_url)
         return self._preferred_album_art_bytes(selected, data) if epoch == int(getattr(self, "_artwork_cache_epoch", 0)) else b""
 
-    def _reject_tiny_queue_art(self, url: str, content: bytes, *, cooldown: float = 30.0) -> bool:
+    def _reject_tiny_queue_art(self, url: str, content: bytes, *, cooldown: float | None = None) -> bool:
         if not 0 < self._album_art_min_side(content) < self.CURRENT_ART_PREVIEW_SIDE:
             return False
         lock = getattr(self, "_queue_art_lock", None)
@@ -2029,7 +2071,8 @@ class WindowsMediaProvider:
             if not isinstance(failures, dict):
                 failures = {}
                 self._queue_art_failed_until = failures
-            failures[url] = max(float(failures.get(url, 0.0) or 0.0), time.monotonic() + cooldown)
+            retry_at = self._artwork_retry_after("download", url) if cooldown is None else time.monotonic() + cooldown
+            failures[url] = max(float(failures.get(url, 0.0) or 0.0), retry_at)
             disk_path = self._queue_art_disk_path(url)
             if disk_path is not None:
                 try:
@@ -2042,6 +2085,10 @@ class WindowsMediaProvider:
         """Keep a known small URL as a preview until its source upgrade arrives."""
         if self._album_art_min_side(content) < self.CURRENT_ART_PREVIEW_SIDE:
             return True
+        # Any completed URL variant can be the source's real original. CDN
+        # responses often exceed their small requested size, or cap at 800px.
+        if getattr(self, "_queue_art_cache", {}).get(url) == content:
+            return False
         normalized = normalize_artwork_url(url, self.CURRENT_ART_TARGET_SIDE)
         if normalized == url:
             return False
@@ -2174,11 +2221,15 @@ class WindowsMediaProvider:
                     # A valid tiny image is still a preview. Use the same
                     # bounded rejection path as an invalid download, allowing
                     # a strict alternate source and later retry after cooldown.
-                    download_failed_until = max(download_failed_until, now + 45.0)
                     self._reject_tiny_queue_art(
-                        download_url, getattr(self, "_queue_art_cache", {}).get(download_url, b""), cooldown=45.0,
+                        download_url, getattr(self, "_queue_art_cache", {}).get(download_url, b""),
                     )
+                    download_failed_until = float(getattr(self, "_queue_art_failed_until", {}).get(download_url, 0.0) or 0.0)
                 if download_failed_until > now:
+                    # Retry the same authoritative URL before searching for
+                    # another cover. Tiny responses can use fallback now.
+                    if cached_side == 0 and getattr(self, "_queue_art_attempts", {}).get(download_url, 3) < 3:
+                        return False
                     rejected[track_id] = (download_failed_until, existing_url)
                     urls.pop(track_id, None)
                 else:
@@ -2191,24 +2242,24 @@ class WindowsMediaProvider:
             generations[track_id] = (token, deadline)
             epoch = int(getattr(self, "_artwork_cache_epoch", 0))
 
-        def expire():
+        def expire(error="TimeoutError"):
             with lock:
                 if generations.get(track_id, (None, 0.0))[0] is token:
                     generations.pop(track_id, None)
                     inflight.discard(track_id)
-                    failed_until[track_id] = time.monotonic() + 45.0
+                    failed_until[track_id] = self._artwork_retry_after("lookup", track_id)
                     while len(failed_until) > 64:
                         failed_until.pop(next(iter(failed_until)))
                     self._last_refresh_at = 0.0
+                    log_artwork_event("lookup", track_id, "metadata", 0, "failed", error)
 
         # A late thread cannot publish an expired attempt into a newer retry.
         # This is a delivery deadline, not cancellation of a blocking socket.
         expiry = threading.Timer(9.0, expire)
         expiry.daemon = True
-        expiry.start()
 
         def lookup():
-            url, source = "", ""
+            url, source, error = "", "", "none"
             try:
                 with lock:
                     if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
@@ -2216,16 +2267,15 @@ class WindowsMediaProvider:
                 # Artwork retrieval does not require an enabled progress-sync
                 # adapter. A NetEase GSMTC session still has the reference's
                 # cover fallback when its optional UIA reader is disabled.
-                if netease_art_source and float(getattr(self, "_netease_art_source_failed_until", 0.0) or 0.0) <= time.monotonic():
+                if netease_art_source:
                     try:
                         url = self._resolve_netease_art_url(
                             title, artist, album_title=album_title,
                             duration_seconds=duration_seconds, deadline=min(deadline, time.monotonic() + 3.0),
                         )
-                    except Exception:
-                        with lock:
-                            if generations.get(track_id, (None, 0.0))[0] is token:
-                                self._netease_art_source_failed_until = time.monotonic() + 45.0
+                    except Exception as exc:
+                        error = type(exc).__name__
+                        log_artwork_event("lookup", track_id, "netease", 0, "failed", error)
                     if url:
                         source = "netease"
                 rejected_until, rejected_url = rejected.get(track_id, (0.0, ""))
@@ -2237,8 +2287,9 @@ class WindowsMediaProvider:
                         source = "cover-art-archive"
                 if url and url == rejected_url and rejected_until > time.monotonic():
                     url = ""
-            except Exception:
+            except Exception as exc:
                 url = ""
+                error = type(exc).__name__
             finally:
                 expiry.cancel()
                 slots.release()
@@ -2251,27 +2302,32 @@ class WindowsMediaProvider:
                     urls[track_id] = url
                     sources[track_id] = source
                     failed_until.pop(track_id, None)
+                    getattr(self, "_current_art_lookup_attempts", {}).pop(track_id, None)
                     while len(urls) > 24:
                         removed = next(iter(urls))
                         urls.pop(removed)
                         sources.pop(removed, None)
                 else:
                     url = ""
-                    failed_until[track_id] = time.monotonic() + 45.0
+                    failed_until[track_id] = self._artwork_retry_after("lookup", track_id)
                 while len(failed_until) > 64:
                     failed_until.pop(next(iter(failed_until)))
                 while len(rejected) > 24:
                     rejected.pop(next(iter(rejected)))
+            log_artwork_event("lookup", track_id, source or "metadata", 0,
+                              "ready" if url else "miss" if error == "none" else "failed", error)
             if url:
                 self._schedule_queue_album_art_prefetch(url)
             self._last_refresh_at = 0.0
 
+        log_artwork_event("lookup", track_id, "metadata", 0, "pending")
         try:
+            expiry.start()
             threading.Thread(target=lookup, name="GluSpotCurrentArt", daemon=True).start()
         except RuntimeError:
             expiry.cancel()
             slots.release()
-            expire()
+            expire("RuntimeError")
             return False
         return True
 
@@ -2433,9 +2489,17 @@ class WindowsMediaProvider:
                 return False
             inflight.add(url)
             epoch = int(getattr(self, "_artwork_cache_epoch", 0))
+        track_id = next((key for key, value in getattr(self, "_current_art_url_by_track_id", {}).copy().items()
+                         if normalize_artwork_url(value, self.CURRENT_ART_TARGET_SIDE) == normalize_artwork_url(url, self.CURRENT_ART_TARGET_SIDE)), url)
+        try:
+            source = urlsplit(url).hostname or "unknown"
+        except ValueError:
+            source = "unknown"
+        log_artwork_event("download", track_id, source, 0, "pending")
 
         def download():
             content = b""
+            error = "none"
             slots = getattr(self, "_queue_art_slots", None)
             if slots is None:
                 slots = threading.BoundedSemaphore(3)
@@ -2446,19 +2510,28 @@ class WindowsMediaProvider:
                         return
                     request = Request(url, headers={"User-Agent": "GluSpot/1.0"})
                     with urlopen(request, timeout=3.0) as response:
+                        header = getattr(response, "headers", {}).get("Content-Length")
+                        expected = int(header) if header is not None else None
+                        if expected is not None and not 0 < expected <= self.QUEUE_ART_MAX_BYTES:
+                            raise ValueError("artwork size exceeds budget")
                         content = response.read(self.QUEUE_ART_MAX_BYTES + 1)
-                    if len(content) > self.QUEUE_ART_MAX_BYTES:
-                        content = b""
-                    if content and QImage.fromData(content).isNull():
-                        content = b""
-                except Exception:
+                    if expected is not None and len(content) != expected:
+                        raise IncompleteRead(content)
+                    if not content or len(content) > self.QUEUE_ART_MAX_BYTES or not self._is_valid_image_bytes(content):
+                        raise ValueError("invalid artwork response")
+                except Exception as exc:
                     content = b""
+                    error = type(exc).__name__
             with lock:
                 if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
                     return
                 inflight.discard(url)
                 if content:
                     failed_until.pop(url, None)
+                    # A decoded tiny response is usable preview evidence,
+                    # not a successful upgrade that resets retry backoff.
+                    if self._album_art_min_side(content) >= self.CURRENT_ART_PREVIEW_SIDE:
+                        getattr(self, "_queue_art_attempts", {}).pop(url, None)
                     cache = getattr(self, "_queue_art_cache", None)
                     if not isinstance(cache, dict):
                         cache = {}
@@ -2468,10 +2541,23 @@ class WindowsMediaProvider:
                         cache.pop(next(iter(cache)))
                     self._persist_queue_art(url, bytes(content))
                 else:
-                    failed_until[url] = time.monotonic() + 30.0
+                    failed_until[url] = self._artwork_retry_after("download", url)
+                while len(failed_until) > 64:
+                    failed_until.pop(next(iter(failed_until)))
+            side = self._album_art_min_side(content)
+            log_artwork_event("download", track_id, source, side,
+                              "ready" if side >= self.CURRENT_ART_PREVIEW_SIDE else "preview" if content else "failed", error)
             self._last_refresh_at = 0.0
 
-        threading.Thread(target=download, name="GluSpotQueueArt", daemon=True).start()
+        try:
+            threading.Thread(target=download, name="GluSpotQueueArt", daemon=True).start()
+        except RuntimeError as exc:
+            with lock:
+                if epoch == int(getattr(self, "_artwork_cache_epoch", 0)):
+                    inflight.discard(url)
+                    failed_until[url] = self._artwork_retry_after("download", url)
+            log_artwork_event("download", track_id, source, 0, "failed", type(exc).__name__)
+            return False
         return True
 
     def _ensure_lyrics_lookup_started(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0, allow_background: bool = True):
@@ -2925,7 +3011,8 @@ class WindowsMediaProvider:
         source_app = self._source_app_name(session)
         read_at = time.monotonic()
         # External playback has one authority: the Windows media session.
-        # Never inspect player processes, windows, UIA or saved app profiles.
+        # Artwork may read a matching NetEase queue URL below, independently
+        # of progress. Never inspect player windows/UIA or enable an adapter.
         source_app_foreground = False
         player_adapter = "system"
         player_position_reader = None
@@ -3025,6 +3112,12 @@ class WindowsMediaProvider:
         previous_position = max(0.0, float(previous_track.position_seconds)) if previous_track is not None else 0.0
         previous_duration = max(0.0, float(previous_track.duration_seconds)) if previous_track is not None else 0.0
         preserve_previous_lyrics = bool(same_track_as_previous and previous_track is not None and previous_track.timed_lyrics)
+        art_key = self._artwork_track_key(title, artist)
+        artwork_track = player_window_track
+        netease_artwork = self._is_netease_source(raw_source_app)
+        if artwork_track is None and netease_artwork and title and artist:
+            artwork_track = self._system_netease_artwork_track(title, artist, duration_seconds)
+        queue_url = str(getattr(artwork_track, "album_art_url", "") or "").strip()
         with cache_lock:
             if epoch != int(getattr(self, "_music_cache_epoch", 0)):
                 return None
@@ -3033,15 +3126,38 @@ class WindowsMediaProvider:
             )
             # These cache reads only schedule network work. A refresh from
             # before clear cannot start a download in the new cache epoch.
-            original_album_art = self._queue_album_art_bytes(player_window_track) if player_window_track is not None else b""
-            online_album_art = self._current_online_album_art_bytes(track_key)
+            if queue_url.startswith(("http://", "https://")):
+                lookup_lock = getattr(self, "_current_art_lookup_lock", None)
+                if lookup_lock is None:
+                    lookup_lock = self._current_art_lookup_lock = threading.Lock()
+                with lookup_lock:
+                    urls = self.__dict__.setdefault("_current_art_url_by_track_id", {})
+                    sources = self.__dict__.setdefault("_current_art_lookup_sources", {})
+                    queue_urls = self.__dict__.setdefault("_current_art_queue_urls", {})
+                    changed = queue_urls.get(art_key) != queue_url
+                    if changed:
+                        queue_urls[art_key] = queue_url
+                        urls[art_key], sources[art_key] = queue_url, "netease" if netease_artwork else "player"
+                        getattr(self, "_current_art_lookup_generations", {}).pop(art_key, None)
+                        getattr(self, "_current_art_lookup_inflight", set()).discard(art_key)
+                        getattr(self, "_current_art_lookup_failed_until", {}).pop(art_key, None)
+                    while len(queue_urls) > 64:
+                        queue_urls.pop(next(iter(queue_urls)))
+                    while len(urls) > 24:
+                        removed = next(iter(urls))
+                        urls.pop(removed)
+                        sources.pop(removed, None)
+                if changed:
+                    log_artwork_event("lookup", art_key, "netease-queue", 0, "ready")
+            original_album_art = self._queue_album_art_bytes(artwork_track) if artwork_track is not None else b""
+            online_album_art = self._current_online_album_art_bytes(art_key)
         # The configured player's original-art URL may disappear from its
         # window reader when focus moves away.  Keep the current track's
         # already-decoded source bytes rather than replacing the sharp cover
         # with a smaller Windows media thumbnail on the next refresh.
         retained_album_art = (
             previous_track.album_art_bytes
-            if same_track_as_previous and previous_track is not None
+            if previous_track is not None and self._same_track_metadata(previous_track, title, artist)
             else b""
         )
         album_art = self._preferred_album_art_bytes(original_album_art, retained_album_art)
@@ -3053,11 +3169,13 @@ class WindowsMediaProvider:
         album_art_source = ""
         if album_art:
             if album_art == original_album_art:
-                original_url = str(getattr(player_window_track, "album_art_url", "") or "").strip()
-                album_art_source = "thumbnail" if self._album_art_url_is_preview(original_url, album_art) else "original"
+                original_url = str(getattr(artwork_track, "album_art_url", "") or "").strip()
+                album_art_source = "thumbnail" if self._album_art_url_is_preview(original_url, album_art) else (
+                    "netease-original" if netease_artwork else "original"
+                )
             elif album_art == online_album_art:
-                source = str(getattr(self, "_current_art_lookup_sources", {}).get(track_key, "") or "")
-                online_url = str(getattr(self, "_current_art_url_by_track_id", {}).get(track_key, "") or "")
+                source = str(getattr(self, "_current_art_lookup_sources", {}).get(art_key, "") or "")
+                online_url = str(getattr(self, "_current_art_url_by_track_id", {}).get(art_key, "") or "")
                 album_art_source = "thumbnail" if self._album_art_url_is_preview(online_url, album_art) else (
                     f"{source}-original" if source else "original"
                 )
@@ -3069,22 +3187,36 @@ class WindowsMediaProvider:
                 return None
             if album_art:
                 album_art_source = "thumbnail"
+                smtc_signature = (art_key, hashlib.sha256(album_art).digest())
+                if smtc_signature != getattr(self, "_last_smtc_artwork_log", None):
+                    self._last_smtc_artwork_log = smtc_signature
+                    log_artwork_event("smtc", art_key, "thumbnail", self._album_art_min_side(album_art), "preview")
         if 0 < self._album_art_min_side(album_art) < self.CURRENT_ART_PREVIEW_SIDE:
             album_art_source = "thumbnail"
         # Keep the reference's async 1200-pixel lookup trigger separate from
         # original-source completion. It is neither a decode nor a UI gate.
-        if self._album_art_min_side(album_art) < self.CURRENT_ART_LOOKUP_SIDE:
+        first_seen = self.__dict__.setdefault("_current_art_first_seen", {})
+        first_seen.setdefault(art_key, read_at)
+        queue_grace = netease_artwork and not queue_url and read_at - first_seen[art_key] < 1.0
+        while len(first_seen) > 64:
+            first_seen.pop(next(iter(first_seen)))
+        if self._album_art_min_side(album_art) < self.CURRENT_ART_LOOKUP_SIDE and not queue_grace:
             with cache_lock:
                 if epoch != int(getattr(self, "_music_cache_epoch", 0)):
                     return None
                 self._schedule_current_netease_art_lookup(
-                    track_key, title, artist, album_title=album_title, duration_seconds=duration_seconds,
+                    art_key, title, artist, album_title=album_title, duration_seconds=duration_seconds,
                 )
         album_art_lookup_state = self._current_artwork_lookup_state(
-            track_key, album_art,
+            art_key, album_art,
             eligible=bool(getattr(self, "_online_current_art_lookup_enabled", False) and track_key and title and artist),
             online_art=online_album_art, source=album_art_source,
         )
+        display_signature = (art_key, hashlib.sha256(album_art).digest(), album_art_source, album_art_lookup_state)
+        if display_signature != getattr(self, "_last_display_artwork_log", None):
+            self._last_display_artwork_log = display_signature
+            log_artwork_event("display", art_key, album_art_source,
+                              self._album_art_min_side(album_art), album_art_lookup_state)
         # A newly recovered original is fresh evidence after both lookups
         # missed. Reopen only this song's terminal miss, once at this edge.
         if (same_track_as_previous and previous_track is not None

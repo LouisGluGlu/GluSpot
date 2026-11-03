@@ -580,8 +580,8 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         provider = self.provider(self.png(48, 0xFF806020))
         first = asyncio.run(provider._read_visual_data())
         provider._last_data = first
-        provider._current_art_url_by_track_id = {first.track.track_id: ART_URL}
-        provider._current_art_lookup_sources = {first.track.track_id: "cover-art-archive"}
+        provider._current_art_url_by_track_id = {provider._artwork_track_key("Song", "Artist"): ART_URL}
+        provider._current_art_lookup_sources = {provider._artwork_track_key("Song", "Artist"): "cover-art-archive"}
         provider._queue_album_art_bytes = lambda _track: original
         second = asyncio.run(provider._read_visual_data())
         self.assertEqual(second.track.album_art_source, "cover-art-archive-original")
@@ -630,6 +630,9 @@ class ArtworkVisualPriorityTests(unittest.TestCase):
         first = asyncio.run(provider._read_visual_data())
         self.assertEqual(first.track.album_art_source, "thumbnail")
         self.assertNotEqual(first.track.album_art_lookup_state, "ready")
+        provider._schedule_current_netease_art_lookup.assert_not_called()
+        provider._current_art_first_seen["song|artist"] -= 1.1
+        asyncio.run(provider._read_visual_data())
         provider._schedule_current_netease_art_lookup.assert_called_once()
 
     def test_1417_smtc_image_is_usable_without_new_search(self):

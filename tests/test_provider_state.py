@@ -1911,7 +1911,7 @@ class ProviderStateTests(unittest.TestCase):
         ]}}
         self.assertEqual(provider._resolve_netease_art_url("no space", "alextbh"), "https://example.test/matched.jpg")
 
-    def test_netease_api_denial_enters_source_cooldown_before_caa_fallback(self):
+    def test_netease_api_denial_does_not_block_another_tracks_lookup(self):
         provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
         provider._online_current_art_lookup_enabled = True
         provider._music_player_adapter = "netease"
@@ -1945,10 +1945,9 @@ class ProviderStateTests(unittest.TestCase):
             jobs.pop(0)()
             self.assertEqual(provider._current_art_lookup_sources["track"], "cover-art-archive")
             self.assertEqual(requested, ["https://archive.org/download/valid/front.jpg"])
-            self.assertGreater(provider._netease_art_source_failed_until, time.monotonic() + 40.0)
+            self.assertFalse(hasattr(provider, "_netease_art_source_failed_until"))
 
-            provider._current_art_url_by_track_id.pop("track")
-            self.assertTrue(provider._schedule_current_netease_art_lookup("track", "Song", "Artist", album_title="Album", duration_seconds=240))
+            self.assertTrue(provider._schedule_current_netease_art_lookup("other-track", "Song", "Artist", album_title="Album", duration_seconds=240))
             jobs.pop(0)()
             self.assertEqual(requested, ["https://archive.org/download/valid/front.jpg"] * 2)
 
@@ -2379,7 +2378,7 @@ class ProviderStateTests(unittest.TestCase):
         self.assertEqual(reader.upcoming_calls, [])
         self.assertEqual(data.track.album_queue, ())
 
-    def test_legacy_enabled_player_settings_cannot_start_readers_or_foreground_detection(self):
+    def test_legacy_settings_cannot_enable_progress_readers_but_artwork_can_read_queue(self):
         for app_id in ("cloudmusic.exe", "QQMusic.exe"):
             with self.subTest(app_id=app_id):
                 provider = WindowsMediaProvider.__new__(WindowsMediaProvider)
@@ -2410,10 +2409,13 @@ class ProviderStateTests(unittest.TestCase):
                              "_is_source_app_foreground", "_foreground_netease_track_metadata",
                              "_player_window_track_metadata"):
                     setattr(provider, name, lambda *_args, _name=name, **_kwargs: self.fail(_name))
-                with patch.object(providers_module, "NeteasePositionReader", side_effect=AssertionError("UIA reader")), patch.object(
+                queue_reader = SimpleNamespace(track_metadata=lambda *_args: None)
+                with patch.object(providers_module, "NeteasePositionReader", return_value=queue_reader) as reader_factory, patch.object(
                     providers_module, "QQPositionReader", side_effect=AssertionError("QQ UIA reader"),
                 ):
                     data = asyncio.run(provider._read_visual_data())
+                self.assertEqual(reader_factory.call_count, int(app_id == "cloudmusic.exe"))
+                self.assertIsNone(getattr(provider, "netease_position", None))
                 self.assertEqual(data.track.title, "System Song")
                 self.assertEqual(data.track.artist, "System Artist")
                 self.assertEqual(data.track.position_source, "windows-media")
@@ -3468,12 +3470,15 @@ class ProviderStateTests(unittest.TestCase):
         first = asyncio.run(provider._read_visual_data())
         self.assertEqual(first.track.album_art_bytes, thumbnail)
         self.assertEqual(first.track.album_art_source, "thumbnail")
+        self.assertEqual(requested, [])
+        provider._current_art_first_seen["song|artist"] -= 1.1
+        asyncio.run(provider._read_visual_data())
         self.assertEqual(len(requested), 1)
         self.assertEqual(requested[0][0][1:], ("Song", "Artist"))
         self.assertEqual(requested[0][1], {"album_title": "", "duration_seconds": 240.0})
 
         provider._last_data = first
-        provider._current_art_url_by_track_id = {first.track.track_id: "https://example.test/original.jpg"}
+        provider._current_art_url_by_track_id = {provider._artwork_track_key("Song", "Artist"): "https://example.test/original.jpg"}
         provider._queue_album_art_bytes = lambda _track: original
         second = asyncio.run(provider._read_visual_data())
         self.assertEqual(second.track.track_id, first.track.track_id)
@@ -3824,7 +3829,7 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
                 self.assertFalse(provider._album_art_url_is_preview(self.upgraded_url, original))
             self.assertEqual(jobs, [])
 
-    def test_known_500_preview_stays_pending_until_upgraded_source_arrives(self):
+    def test_downloaded_500_cover_is_original_while_larger_variant_can_arrive(self):
         provider = self.provider()
         preview, original = self.png(500), self.png(1417)
         provider._queue_art_cache[self.raw_url] = preview
@@ -3833,12 +3838,12 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         track = SimpleNamespace(album_art_url=self.raw_url, album_art_bytes=preview)
         self.assertEqual(provider._queue_album_art_bytes(track), preview)
         self.assertEqual(scheduled, [self.upgraded_url])
-        self.assertTrue(provider._album_art_url_is_preview(self.raw_url, preview))
+        self.assertFalse(provider._album_art_url_is_preview(self.raw_url, preview))
         provider._current_art_lookup_lock = threading.Lock()
         provider._current_art_url_by_track_id = {"track": self.raw_url}
         self.assertEqual(
-            provider._current_artwork_lookup_state("track", preview, eligible=True, online_art=preview, source="thumbnail"),
-            "pending",
+            provider._current_artwork_lookup_state("track", preview, eligible=True, online_art=preview, source="netease-original"),
+            "ready",
         )
         provider._queue_art_cache[self.upgraded_url] = original
         self.assertEqual(provider._queue_album_art_bytes(track), original)
@@ -3864,7 +3869,7 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         self.assertEqual(provider._current_artwork_lookup_state(
             "track", selected, eligible=True, online_art=selected, source="thumbnail"), "ready")
 
-    def test_visual_handoff_preserves_known_500_preview_provenance(self):
+    def test_visual_handoff_promotes_downloaded_500_cover_provenance(self):
         provider = self.provider()
         preview, original = self.png(500), self.png(1417)
         provider.fallback = EmptyIslandDataProvider(empty_visual_data())
@@ -3896,8 +3901,8 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
         provider._queue_art_cache[self.raw_url] = preview
         first = asyncio.run(provider._read_visual_data())
         self.assertEqual(first.track.album_art_bytes, preview)
-        self.assertEqual(first.track.album_art_source, "thumbnail")
-        self.assertNotEqual(first.track.album_art_lookup_state, "ready")
+        self.assertEqual(first.track.album_art_source, "netease-original")
+        self.assertEqual(first.track.album_art_lookup_state, "ready")
         provider._last_data = first
         provider._queue_art_cache[self.upgraded_url] = original
         second = asyncio.run(provider._read_visual_data())

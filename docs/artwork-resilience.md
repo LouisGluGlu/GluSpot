@@ -153,3 +153,79 @@ also passed. Ignored evidence is in `logs/artwork-resilience-focused.log`,
 controlled recovery and identity handling; they do not prove which response
 caused the supplied live screenshot or guarantee every remote CDN's uptime.
 No user artwork cache, account or credential was cleared for this work.
+
+## System capture URL priority — t196 Item 8
+
+This source-only follow-up starts from Job B's `f12fd4b` on
+`grok/capture-narrow-v4`. The live diagnosis is preserved at
+`/workspace/gluspot/handoff/t196/COVER_DIAG.md`: NetEase SMTC supplied a
+108×108 preview even though cloudsearch/CDN returned 800–1500px covers.
+
+System capture now reads the existing NetEase queue `track_metadata` and
+`album_art_url` for matching title/artist and compatible known duration.
+Only artwork uses this reader: SMTC metadata, timeline, transport and the
+existing optional CEF capture policy keep their existing authority. The
+reader uses its existing cached queue-file parser; it starts no UIA/window
+inspection, login, polling loop, CDP attachment or player process operation.
+If no queue URL arrives, ordinary provider refreshes start cloudsearch/CAA
+after approximately one second. Existing source candidate/version/duration
+matching remains. Known unsigned NetEase `imageView`/`thumbnail` transforms
+are replaced with `param=2560y2560`; signed and unknown queries retain their
+exact target. The existing compressed memory/disk caches and exact URL
+fallback remain, with declared HTTP length validation before publication.
+
+The artwork URL/lookup maps use normalized title/artist identity rather than
+SMTC album or duration. Current queue metadata has no song-ID field, so no
+song ID is fabricated. Album/duration remain candidate filters; an observed
+new queue URL can replace a stale URL. Repeated reads of the same queue URL
+cannot cancel an in-flight fallback or overwrite its result. A downloaded
+variant of at least 320px is `netease-original` or another `*-original`,
+including a CDN's smaller native original or exact small-URL fallback.
+The sharpest decoded same-song bytes remain visible through metadata churn.
+
+NetEase metadata failure has per-track backoff only. Metadata/download
+failures retry on later provider refreshes after 0.75, 1.5 and 5 seconds;
+subsequent failures retain the 5-second cap. These are earliest retry times,
+not additional background polling timers. Successful usable results clear
+attempt counters; repeated tiny responses retain their backoff and permit
+metadata fallback after the third failure. Every failed worker submission
+releases its pending marker; metadata timers and generation fences reject
+late completion, and cache epochs protect a new same-URL job. Existing
+MusicBrainz service rate/cooldown policy remains independent.
+
+Failed/missed previews display without forced blur immediately. Pending
+previews of at least 96px stop blurring after 2.5 seconds, measured from the
+first displayed preview; retries and SMTC album/duration identity changes
+cannot restart that age. Tiny images below 96px remain soft only while
+pending. A pending upgrade can continue after unblur. The existing recovered
+original → lyric-miss retry path remains in place without a layout/settings
+write or lyric skeleton reset.
+
+`GluSpot.artwork` writes flushed, timestamped stderr records into the normal
+launcher log: `artwork stage=smtc|lookup|download|display track=… source=…
+min_side=… state=… err=…`. Track values are stable hashes; sources are
+controlled labels or download hostnames, and errors are exception class names.
+No URL queries, cookies, tokens, response text or account data are logged.
+Music-surface display changes also include `blur=0|1`; unchanged display
+states are deduplicated. Existing `display_artwork_*` diagnostics remain.
+
+Focused verification covers mocked SMTC 108px → modern cloudsearch `al.picUrl`
+→ 800px original, queue-first URL upgrade, wrong queue identity rejection,
+album/duration churn, fallback publication across refreshes, tiny-response
+backoff, failure cleanup, incomplete decodable responses, sanitized logs,
+failed/missed/aged preview display and owned artwork/capture regressions.
+The 195-test focused selection passes offscreen; Python compilation and
+`git diff --check` pass. Final full discovery runs 6,026 tests in 194.336s,
+with 54 failures, 48 errors and 32 skips. Exact `f12fd4b` runs 6,013 tests in
+194.496s with identical failure/error/skip identities and skip reasons; all
+13 added tests pass. No native crash occurred. The existing branch-wide
+failures remain; this is not a green full-suite claim. Complete evidence and
+the exact baseline comparison are recorded in
+`/workspace/gluspot/handoff/t196/ITEM8.md` and `item8-*.log/json` alongside it.
+
+Parent PC acceptance remains pending: without restarting NetEase, measure
+the count of downloaded/displayed high-resolution covers and elapsed time
+from each SMTC preview to original display, including Trippin and Yours.
+Box mocks establish behavior, not live CDN latency or Windows display quality.
+No PC/app launch, key, completed login, user cache wipe, version/build or push
+was performed for this change.
