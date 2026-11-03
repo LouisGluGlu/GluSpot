@@ -18,6 +18,8 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 
 from local.music_lyric_motion import MotionSimulationClock
 from local.music_surface_palette import balanced_background_colors, relative_luminance, single_hue_background_colors
+from local.backdrop_variants import (BACKDROP_MAX_LUMINANCE, BACKDROP_VARIANTS,
+                                     paint_backdrop_variant, resolve_backdrop_variant)
 
 
 def _render_background_snapshot(snapshot) -> QImage:
@@ -53,7 +55,10 @@ class AlbumFlowBackgroundRenderer:
     # the reference's light gray while all moving pigments satisfy this cap.
     MAX_LUMINANCE = 0.265
 
-    def __init__(self):
+    def __init__(self, backdrop_variant: str | None = None):
+        self._backdrop_variant_override = backdrop_variant
+        self._variant_frame = QImage()
+        self._variant_key = None
         self._clock = MotionSimulationClock()
         self._motion_seconds = 0.0
         self._geometry_seconds = 0.0
@@ -70,6 +75,24 @@ class AlbumFlowBackgroundRenderer:
         self._frame_key: tuple | None = None
         self._palette_input_key: tuple | None = None
         self._async_epoch = 0
+        self._async_domain = None
+
+    @property
+    def backdrop_variant(self) -> str:
+        return resolve_backdrop_variant(self._backdrop_variant_override)
+
+    def set_backdrop_variant(self, name: str | None):
+        """Select a style; None resumes environment selection. Fence old jobs."""
+        if name is not None:
+            name = str(name).strip().lower()
+            if name not in BACKDROP_VARIANTS:
+                raise ValueError(f"Unknown backdrop variant: {name!r}")
+        self._backdrop_variant_override = name
+        self._variant_frame = QImage()
+        self._variant_key = None
+        self._frame = QImage()
+        self._frame_key = None
+        self._async_epoch += 1
         self._async_domain = None
 
     @classmethod
@@ -299,12 +322,35 @@ class AlbumFlowBackgroundRenderer:
         this luminance remains readable as the masses change position.
         External test/reference rasters keep their own spatial sampling.
         """
+        if not self._variant_frame.isNull() and displayed.cacheKey() == self._variant_frame.cacheKey():
+            # Dither adds less than two display levels above the field cap.
+            value = round((1.055 * (BACKDROP_MAX_LUMINANCE ** (1. / 2.4)) - .055) * 255) + 2
+            return QColor(value, value, value)
         if self._frame.isNull() or displayed.cacheKey() != self._frame.cacheKey():
             return None
         return QColor(max(self._from_colors + self._target_colors, key=relative_luminance))
 
     def render(self, size: QSize, colors: tuple[QColor, ...], now: float, intensity: float = 0.74,
                *, weights: tuple[float, ...] = (), material_owner=None, material_scene=None) -> QImage:
+        variant = self.backdrop_variant
+        if variant != "classic":
+            valid = tuple(index for index, color in enumerate(colors[:self.MAX_COLORS]) if color.isValid())
+            weights = tuple(weights[index] for index in valid) if len(weights) == len(colors) else ()
+            colors = tuple(QColor(colors[index]) for index in valid)
+            raster_size = self._raster_size(size)
+            key = (raster_size.width(), raster_size.height(), tuple(color.rgba() for color in colors), weights, variant)
+            if key != self._variant_key or self._variant_frame.isNull():
+                # Static styles never submit workers or depend on wall time,
+                # motion intensity, or a timer. Invalidate old classic work.
+                self._async_epoch += 1
+                self._async_domain = None
+                self._variant_frame = paint_backdrop_variant(raster_size, colors, weights, variant)
+                self._variant_key = key
+            # The music surface observes this shared frame to avoid even a
+            # cached render call on unrelated whole-surface paints.
+            self._frame = self._variant_frame
+            self._frame_key = self._frame_at = None
+            return QImage(self._variant_frame)
         now = float(now)
         intensity = min(1.0, max(0.0, float(intensity)))
         # Normalize colors and their support together. An invalid first

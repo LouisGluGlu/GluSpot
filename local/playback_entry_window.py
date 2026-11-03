@@ -23,6 +23,7 @@ from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_surface_background import AlbumFlowBackgroundRenderer
+from local.backdrop_variants import BACKDROP_VARIANTS, resolve_backdrop_variant
 from local.music_source_icons import paint_music_source_icon
 from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
 from local.control_hover import install_control_hover
@@ -450,6 +451,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         self._qr_image = QImage()
         self._account: AccountSnapshot | None = None
         self._account_image = QImage()
+        self._backdrop_variant = None
         self._flow = AlbumFlowBackgroundRenderer()
         self._background_frame = QImage()
         self._source_background_size = None
@@ -560,6 +562,22 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     @property
     def login_variant(self) -> str:
         return self._login_variant
+
+    @property
+    def backdrop_variant(self) -> str:
+        return resolve_backdrop_variant(self._backdrop_variant)
+
+    def set_backdrop_variant(self, name: str | None):
+        """Replace the static backdrop while preserving the login session."""
+        if name is not None:
+            name = str(name).strip().lower()
+            if name not in BACKDROP_VARIANTS:
+                raise ValueError(f"Unknown backdrop variant: {name!r}")
+        self._backdrop_variant = name
+        self._source_background_size = None
+        if self.page == "sources":
+            self._source_backdrop()
+        self.update()
 
     def set_login_variant(self, name: str):
         """Switch presentation without restarting or replacing the login session."""
@@ -1026,15 +1044,17 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     def _source_backdrop(self):
         """Freeze the existing onboarding pigment scene; no login timer/capture."""
         key = (self.width(), self.height(), self.login_variant,
-               (self.selected_source, self._account_image.cacheKey()) if self.login_variant == "hero" else None)
+               (self.selected_source, self._account_image.cacheKey()) if self.login_variant == "hero" else None,
+               self.backdrop_variant)
         if self._source_background_size == key and not self._background_frame.isNull():
             return
-        renderer = AlbumFlowBackgroundRenderer()
+        renderer = AlbumFlowBackgroundRenderer(self._backdrop_variant)
         self._background_frame = renderer.render(self.size(), tuple(QColor(value) for value in self.PALETTES[1]),
                                                  0.0, intensity=0.0).copy()
         with QPainter(self._background_frame) as painter:
-            painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, 152 if self.login_variant == "sidebar" else 188))
-            if self.login_variant == "hero":
+            veil = (152 if self.login_variant == "sidebar" else 188) if self.backdrop_variant == "classic" else 28
+            painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, veil))
+            if self.login_variant == "hero" and self.backdrop_variant == "classic":
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                 frame = QRectF(self._background_frame.rect())
                 if not self._account_image.isNull():

@@ -29,6 +29,7 @@ from local.music_source_icons import music_source_icon_image, paint_music_source
 from local.liquid_glass import (GlassCaptureMixin, GlassPushButton, glass_owner_is_live,
                                 paint_liquid_glass, widget_glass_backdrop, widget_glass_level)
 from local.music_surface_background import AlbumFlowBackgroundRenderer
+from local.backdrop_variants import BACKDROP_VARIANTS, resolve_backdrop_variant
 from local.music_surface_palette import artwork_surface_palette, cached_artwork_surface_palette
 from local.music_lyric_motion import MotionSimulationClock
 from local.control_hover import HOVER_SECONDS, install_control_hover
@@ -550,6 +551,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._background_frame = QImage()
         self._background_key = None
         self._background_source_key = None
+        self._backdrop_variant = None
         self._background_renderer = AlbumFlowBackgroundRenderer()
         self._background_seconds = 0.0
         self._background_clock = MotionSimulationClock()
@@ -1514,6 +1516,22 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._background_runner = run_background
         self.on_background_setting_changed()
 
+    @property
+    def backdrop_variant(self) -> str:
+        return resolve_backdrop_variant(self._backdrop_variant)
+
+    def set_backdrop_variant(self, name: str | None):
+        """Refresh scenery without replacing the catalog or playback state."""
+        if name is not None:
+            name = str(name).strip().lower()
+            if name not in BACKDROP_VARIANTS:
+                raise ValueError(f"Unknown backdrop variant: {name!r}")
+        self._backdrop_variant = name
+        self._background_renderer.set_backdrop_variant(name)
+        self._background_key = self._background_source_key = None
+        self.on_background_setting_changed()
+        self.update()
+
     def _background_setting(self, key, default):
         getter = self._background_settings_getter
         return getter(key, default) if callable(getter) else default
@@ -1533,7 +1551,8 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self.update()
 
     def _background_should_animate(self):
-        return (not self._background_closing and not self._navigation_cover_frozen
+        return (self.backdrop_variant == "classic"
+                and not self._background_closing and not self._navigation_cover_frozen
                 and self.isVisible() and not self.isMinimized()
                 and self._now_playing is not None and self._now_playing.is_playing
                 and self._background_intensity() > 0.)
@@ -1651,7 +1670,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         intensity = self._background_intensity() if palette else 0.
         seconds = self._background_seconds if palette else 0.
         key = (self.width(), self.height(), source.source_id if palette is None else None,
-               tuple(color.rgba() for color in colors), weights, intensity, seconds)
+               tuple(color.rgba() for color in colors), weights, intensity, seconds, self.backdrop_variant)
         if key == self._background_key:
             return False
         if (palette is None or (not self._navigation_cover_frozen
@@ -1659,7 +1678,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
                 and self._background_key is not None and key[3:5] != self._background_key[3:5])):
             # A deliberate paused song/artwork change still gets its own
             # static colors; it must not need a running timer to settle them.
-            self._background_renderer = AlbumFlowBackgroundRenderer()
+            self._background_renderer = AlbumFlowBackgroundRenderer(self._backdrop_variant)
         live_owner = self if self._background_should_animate() and glass_owner_is_live(self) else None
         frame = self._background_renderer.render(
             self.size(), colors, seconds, intensity=intensity, weights=weights,
@@ -1672,7 +1691,8 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             return False
         self._background_frame = frame.copy()
         with QPainter(self._background_frame) as painter:
-            painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, 142))
+            veil = 142 if self.backdrop_variant == "classic" else 28
+            painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, veil))
         self._background_source_key = source_key
         return True
 
@@ -1747,7 +1767,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._sync_background_animation()
         self._sync_album_rotation()
         if self._now_playing is not None and not self._background_should_animate():
-            self._background_renderer = AlbumFlowBackgroundRenderer()
+            self._background_renderer = AlbumFlowBackgroundRenderer(self._backdrop_variant)
             self._background_key = None
         self._update_background()
         self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
