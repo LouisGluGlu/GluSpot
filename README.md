@@ -106,6 +106,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-03: `grok/login-variants` adds three opt-in source/login compositions in the real `PlaybackEntryWindow`: A `sidebar`, B `focus`, C `hero`. `classic` remains the default. The environment flag, runtime setter, isolated renderer and comparison paths are documented under [登录页布局对比](#登录页布局对比); no version or provider change.
+
 - 2026-11-03: t168/t169/t170 B accepts independently observed CEF seeks within 250 ms, permits a later explicit retry after completed unverified readback, and preserves uncertain-write blocking. Narrow wheel browsing clears only lyric-row blur for 350 ms; routine capture/library/DJ/output status no longer takes over content. Owned unit setup injects both decoders, and login shares dark glass with centered responsive QR/platform cards. Focused results, the native initialization cause, inherited fixture failures and pending PC acceptance are recorded in [B evidence](docs/music-surface-t168-t170-b.md). No version, build, player restart or live playback-mode change.
 
 - 2026-11-03: t173/t168/t171 removes the narrow background veil's repeated Python row/LUT work, bounds its source raster and uses one 33 ms live presentation clock. Resolved lyricless songs temporarily animate to cover while preserving the saved lyric layout; pending lyrics retain their loader. Narrow transport has a 24 px bottom margin, lyrics clear the header, inactive countdown dots disappear and repeat annotations stay below the primary line. Box callback/CPU evidence, focused verification and pending PC acceptance are recorded in [commit A evidence](docs/music-surface-t173-t168-t171.md). No version, provider or capture/seek change.
@@ -236,6 +238,35 @@ Double-click `setup-env.bat` or `repair-env.bat` to prepare this checkout's Wind
 For the optional online account adapters, install Node.js 20 or later with npm and run `native/online_music/prepare-runtime.ps1`. It installs the pinned lockfile with package scripts disabled into ignored `build/online-music`, verifies adapter versions and retains dependency notices. `launch.bat` prepares Python only; each new checkout/worktree needs this optional runtime prepared independently. Without this runtime the login surface reports unavailable services; system capture remains usable. See [online entry setup](docs/owned-playback-entry.md).
 
 The combined directory has its own Python environment and native HomePod helper under `build/native-airplay/`. Run its own `launch.bat`; the two original part directories are preserved. GluSpot's single-instance lock and user settings retain the normal product namespace, so exit an already running GluSpot before launching another source copy. Rebuilding the helper requires the toolchain documented in [native helper instructions](native/airplay_sender/README.md).
+
+### 登录页布局对比
+
+`PlaybackEntryWindow` 的音乐来源页提供三种可选布局，默认 `classic` 保留原有布局与交互。选择只影响登录页，无需写入设置。
+
+| 方案 | 标记 | 布局 |
+| --- | --- | --- |
+| A | `sidebar` | 宽屏左侧平台栏、右侧详情；窄屏顶部平台芯片、下方详情 |
+| B | `focus` | 紧凑图标切换胶囊，居中突出账号或扫码卡片 |
+| C | `hero` | 本地头像柔化色彩背景、平台状态列表与内嵌详情卡片 |
+
+启动前设置 `GLUSPOT_LOGIN_VARIANT=sidebar`、`focus`、`hero` 或 `classic`；空值或未知环境值回退为 `classic`。运行中调用 `window.set_login_variant("focus")`，读取 `window.login_variant`；无效的 setter 参数抛出 `ValueError`。切换保留当前二维码、账号与信号接口；未适配平台仍不可选择，显示“即将支持”。
+
+离屏对比使用真实窗口与本地测试头像、测试二维码图案，覆盖 960×540 / 433×550 的已连接、等待扫码、错误状态。重现命令：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_login_variants.py
+```
+
+提交的脚本为 `tools/render_login_variants.py`，默认从 `/workspace/gluspot/wt-login-variants` 导入，使用私有临时 APPDATA/XDG 目录；支持 `--repo` 与 `--output`。交付副本为 `/workspace/gluspot/handoff/login-variants/render_variants.py`。截图不纳入 Git：
+
+- A：`/workspace/gluspot/handoff/login-variants/variant-A.png`
+- B：`/workspace/gluspot/handoff/login-variants/variant-B.png`
+- C：`/workspace/gluspot/handoff/login-variants/variant-C.png`
+- 单图：`/workspace/gluspot/handoff/login-variants/shots/{sidebar|focus|hero}-{960x540|433x550}-{connected|waiting|error}.png`
+
+112 项来源窗口、控制器、平台与布局测试通过。经典布局在两种尺寸、三种状态下与 `1246878` 基线逐像素一致（6/6）。离屏证据仅验证布局与交互，不代表真实账号登录或原生桌面显示验收。
+
+完整发现运行 5,955 项（181.900 秒），54 失败、48 错误、31 跳过，来源／布局测试无失败；18 个受影响模块在 `1246878` 临时源码副本中分组复验（658＋540 项），复现全部 54 失败／48 错误。完整日志为 `/workspace/gluspot/handoff/login-variants/full-suite.log`，后一组基线日志为 `baseline-remaining.log`。完整运行期间新测试的屏幕替身缺少 `geometry()`，曾触发其他遗留窗口的计时回调异常；已补全替身接口并重跑最终 112 项通过，产品代码未因该测试夹具修改。
 
 ## Windows Test Build
 

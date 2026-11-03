@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from local.runtime_platform import normalize_playback_selection, owned_playback_only, system_media_unavailable_reason
 
+import os
 import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QPainter, QPainterPath, QPen, QTransform
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QTransform
 from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton, QWidget
 
 from api.online_music import AccountSnapshot
@@ -25,6 +26,7 @@ from local.music_source_icons import paint_music_source_icon
 from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
 from local.control_hover import install_control_hover
 from local.music_page_resize import MusicPageResizeMixin
+from local.login_layout_variants import login_variant_layout
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,7 @@ ENTRY_SOURCES = (
     EntrySource("apple_music", "Apple Music", "#fa5268", False),
 )
 LOGIN_SOURCE_IDS = frozenset(source.source_id for source in ENTRY_SOURCES if source.login_supported)
+LOGIN_VARIANTS = ("classic", "sidebar", "focus", "hero")
 
 
 def _entry_font(pixels: int, *, heavy: bool = False) -> QFont:
@@ -236,6 +239,8 @@ class MusicSourceButton(QAbstractButton):
         super().__init__(parent)
         self.source = source
         self.show_caption = True
+        self.login_style = "classic"
+        self.connection_status = ""
         self._availability_status = ""
         self._availability_reason = ""
         self.setText(source.name)
@@ -274,6 +279,9 @@ class MusicSourceButton(QAbstractButton):
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            if self.login_style != "classic":
+                self._paint_login_variant(painter)
+                return
             upcoming = not self.source.login_supported
             face = QRectF(self.rect()).adjusted(1, 1, -1, -1)
             backdrop, source = widget_glass_backdrop(self, face)
@@ -316,6 +324,53 @@ class MusicSourceButton(QAbstractButton):
                     caption = painter.fontMetrics().elidedText(self._availability_status, Qt.TextElideMode.ElideRight, round(status.width()))
                     painter.drawText(status, align, caption)
 
+    def _paint_login_variant(self, painter: QPainter):
+        face = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        upcoming = not self.source.login_supported
+        row = self.login_style in {"sidebar", "hero"}
+        radius = 14 if row else face.height() / 2
+        backdrop, source = widget_glass_backdrop(self, face)
+        painter.setOpacity(.48 if upcoming else 1.)
+        border = QColor(self.source.color) if self.isChecked() else QColor(255, 255, 255, 26)
+        paint_liquid_glass(painter, face, radius=radius, backdrop=backdrop, backdrop_rect=source,
+                           refractive=True, cache_token=id(self), material_level=widget_glass_level(self),
+                           border_color=border, active=self.isChecked(), hovered=self.underMouse(), pressed=self.isDown())
+        if self.isChecked() or self.hasFocus():
+            painter.setPen(QPen(QColor("#b6bac5") if self.hasFocus() else border, 1.3))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(face.adjusted(1, 1, -1, -1), radius - 1, radius - 1)
+        side = 26 if self.height() > 48 else 22
+        icon = QRectF((self.width() - side) / 2 if self.login_style == "focus" else 14 if row else 12,
+                      (self.height() - side) / 2, side, side)
+        paint_music_source_icon(painter, icon, self.source.source_id)
+        if self.login_style == "focus":
+            return
+        painter.setPen(QColor("#f0f1f5"))
+        painter.setFont(_entry_font(12 if row else 11))
+        text_x = icon.right() + (12 if row else 8)
+        status = self._availability_status or self.connection_status
+        has_chip = self.login_style == "hero" and bool(status)
+        title = QRectF(text_x, 0, self.width() - text_x - (90 if has_chip else 10), self.height())
+        if status and not has_chip:
+            title.setHeight(self.height() / 2 + 2)
+            title.moveTop(3)
+        painter.drawText(title, Qt.AlignmentFlag.AlignVCenter,
+                         painter.fontMetrics().elidedText(self.source.name, Qt.TextElideMode.ElideRight, round(title.width())))
+        if has_chip:
+            chip = QRectF(self.width() - 78, (self.height() - 24) / 2, 64, 24)
+            connected = status == "已连接"
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(94, 202, 163, 30) if connected else QColor(255, 255, 255, 13))
+            painter.drawRoundedRect(chip, 12, 12)
+            painter.setPen(QColor("#a3ddc7") if connected else QColor("#adb2bf"))
+            painter.setFont(_entry_font(10))
+            painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, status)
+        elif status:
+            painter.setPen(QColor("#a5aab7"))
+            painter.setFont(_entry_font(9))
+            painter.drawText(QRectF(text_x, self.height() / 2 + 1, title.width(), self.height() / 2 - 3),
+                             Qt.AlignmentFlag.AlignVCenter, status)
+
 
 class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     selectionAccepted = Signal(bool, bool)
@@ -342,6 +397,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         self.setMouseTracking(True)
         self._resize_page(370, 176)
         self.page = "modes"
+        requested_variant = os.environ.get("GLUSPOT_LOGIN_VARIANT", "classic").strip().lower()
+        self._login_variant = requested_variant if requested_variant in LOGIN_VARIANTS else "classic"
         self.selected_source = ""
         self.login_state = "unavailable"
         self._accept_snapshots = True
@@ -451,6 +508,30 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     @property
     def selection(self) -> tuple[bool, bool]:
         return self.owned_button.isChecked(), self.system_button.isChecked()
+
+    @property
+    def login_variant(self) -> str:
+        return self._login_variant
+
+    def set_login_variant(self, name: str):
+        """Switch presentation without restarting or replacing the login session."""
+        name = str(name).strip().lower()
+        if name not in LOGIN_VARIANTS:
+            raise ValueError(f"Unknown login variant: {name!r}")
+        if name == self._login_variant:
+            return
+        self._login_variant = name
+        self._source_background_size = None
+        if self.page == "sources" and name != "classic" and self.height() < 400:
+            # A classic picker is only 264 px high. Use the same screen/shared
+            # geometry boundary as show_sources before exposing a detail pane.
+            self._resize_page(self.width(), 560)
+        self._layout_children()
+        self.update()
+
+    def _variant_layout(self):
+        return login_variant_layout(self.login_variant, self.width(), self.height(),
+                                    tuple(source.login_supported for source in ENTRY_SOURCES))
 
     def _resize_page(self, width: int, height: int):
         # QWidget.screen() reparents shared wrappers to this transient widget.
@@ -616,7 +697,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         for button in self.source_buttons.values():
             button.setChecked(False)
         self._expanded = 0.0
-        self._resize_page(560, 264)
+        self._resize_page(560, 264 if self.login_variant == "classic" else 560)
         self.message_label.setText("选择音乐来源")
         self._layout_children()
         if was_visible:
@@ -739,7 +820,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
 
     def _set_expanded(self, value):
         self._expanded = float(value)
-        self._resize_page(560, round(264 + (224 if self._account is not None else 296) * self._expanded))
+        if self.login_variant == "classic":
+            self._resize_page(560, round(264 + (224 if self._account is not None else 296) * self._expanded))
         self._layout_children()
         self.update()
 
@@ -811,6 +893,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             return
         self._account_image = image.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio,
                                            Qt.TransformationMode.SmoothTransformation) if not image.isNull() else QImage()
+        if self.login_variant == "hero":
+            self._source_backdrop()
         self.update()
 
     def _refresh_login(self):
@@ -845,7 +929,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
 
     def _source_backdrop(self):
         """Freeze the existing onboarding pigment scene; no login timer/capture."""
-        key = (self.width(), self.height())
+        key = (self.width(), self.height(), self.login_variant,
+               (self.selected_source, self._account_image.cacheKey()) if self.login_variant == "hero" else None)
         if self._source_background_size == key and not self._background_frame.isNull():
             return
         renderer = AlbumFlowBackgroundRenderer()
@@ -853,6 +938,28 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                                                  0.0, intensity=0.0).copy()
         with QPainter(self._background_frame) as painter:
             painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, 188))
+            if self.login_variant == "hero":
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                frame = QRectF(self._background_frame.rect())
+                if not self._account_image.isNull():
+                    # A tiny local raster stretches into a soft avatar wash;
+                    # neither a network fetch nor a moving background is needed.
+                    soft = self._account_image.scaled(8, 8, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation)
+                    painter.setOpacity(.25)
+                    painter.drawImage(frame.adjusted(-frame.width() * .25, -frame.height() * .5,
+                                                      frame.width() * .25, frame.height() * .3), soft)
+                    painter.setOpacity(1.)
+                    shade = QLinearGradient(frame.topLeft(), frame.topRight())
+                    shade.setColorAt(0, QColor(12, 14, 20, 0))
+                    shade.setColorAt(1, QColor(12, 14, 20, 100))
+                    painter.fillRect(frame, shade)
+                tint = QColor(self.source_buttons.get(self.selected_source, self.source_buttons["netease"]).source.color)
+                tint.setAlpha(55)
+                glow = QRadialGradient(QPointF(frame.width() * .28, frame.height() * .18), frame.width() * .70)
+                glow.setColorAt(0, tint)
+                glow.setColorAt(1, QColor(0, 0, 0, 0))
+                painter.fillRect(frame, glow)
         self._source_background_size = key
 
     def _compact_login_layout(self) -> bool:
@@ -863,11 +970,15 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                                                (self._expanded > .85 and self.height() < 480))
 
     def _source_pane_rect(self) -> QRectF:
+        if self.login_variant != "classic":
+            return self._variant_layout().pane
         top = max(rect.bottom() for rect in self._source_tile_rects()) + (16 if self._compact_login_layout() else 24)
         return QRectF(32, top, self.width() - 64, max(1, self.height() - top - 24))
 
     def _source_tile_rects(self) -> tuple[QRectF, ...]:
         """Keep every platform visible without compressing its label or target."""
+        if self.login_variant != "classic":
+            return self._variant_layout().tiles
         columns = 6 if self.width() >= 720 else 3
         compact = self._compact_login_layout()
         top = 64 if compact else 112 if columns == 6 else 72
@@ -879,10 +990,14 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                      for index in range(len(self.source_buttons)))
 
     def _stacked_login_layout(self) -> bool:
+        if self.login_variant != "classic":
+            return self._variant_layout().centered
         return self.width() < 480 and self._source_pane_rect().height() >= 288
 
     def _login_content_rects(self) -> tuple[QRectF, QRectF]:
         """Center the QR composition; short displays keep two compact lanes."""
+        if self.login_variant != "classic":
+            return self._variant_layout().login_content()
         pane = self._source_pane_rect()
         if self._stacked_login_layout():
             side = min(176., max(96., pane.height() - 192.))
@@ -902,6 +1017,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                          detail_width, max(1, pane.height() - 40))
 
     def _login_detail_geometry(self) -> tuple[QRectF, QRectF, QRectF, QRectF]:
+        if self.login_variant != "classic":
+            return self._variant_layout().login_detail()
         _qr, detail = self._login_content_rects()
         compact = self._compact_login_layout()
         stacked = self._stacked_login_layout()
@@ -921,6 +1038,8 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         return title, helper, message, action
 
     def _account_content_rects(self) -> tuple[QRectF, QRectF, QRectF]:
+        if self.login_variant != "classic":
+            return self._variant_layout().account_content()
         pane = self._source_pane_rect()
         compact = self._compact_login_layout()
         side = 96 if compact else 128
@@ -973,8 +1092,13 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             self.mode_hint.setFont(_entry_font(13))
             self.mode_hint.setGeometry(hint_x, body.bottom() + 1 - 62, body.right() + 1 - hint_x - inset, 38)
         for button, rect in zip(self.source_buttons.values(), self._source_tile_rects()):
-            button.setVisible(not modes)
+            button.login_style = ("sidebar" if self.width() >= 720 and self.height() >= 520 else "pill") if self.login_variant == "sidebar" else self.login_variant
+            if self.login_variant == "hero" and self.height() < 500:
+                button.login_style = "pill"
+            button.connection_status = "已连接" if self._account is not None and self._account.source_id == button.source.source_id else "未登录"
+            button.setVisible(not modes and not rect.isEmpty())
             button.setGeometry(rect.toAlignedRect())
+            button.update()
         expanded = not modes and self._expanded > .85
         account_card = expanded and self._account is not None
         self.message_label.setVisible(not modes and not account_card)
@@ -988,7 +1112,9 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.message_label.setFont(_entry_font(14))
             message_top = round(max(rect.bottom() for rect in self._source_tile_rects()) + 16)
-            self.message_label.setGeometry(32, message_top, self.width() - 64, 24)
+            self.message_label.setGeometry((self._source_pane_rect().adjusted(20, 16, -20, -16)).toAlignedRect()
+                                           if not modes and self.login_variant != "classic"
+                                           else QRect(32, message_top, self.width() - 64, 24))
         self.refresh_button.setVisible(expanded and self.login_state != "confirmed")
         self.refresh_button.setEnabled(self.login_state not in {"starting", "loading", "unavailable", "unsupported"})
         self.refresh_button.setText(self._login_action_text())
@@ -1151,6 +1277,111 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             return
         super().keyPressEvent(event)
 
+    def _paint_variant_glass(self, painter: QPainter, rect: QRectF, token: str, radius: float = 22):
+        sx = self._background_frame.width() / max(1, self.width())
+        sy = self._background_frame.height() / max(1, self.height())
+        paint_liquid_glass(painter, rect, radius=radius, backdrop=self._background_frame,
+                           backdrop_rect=QRectF(rect.x() * sx, rect.y() * sy, rect.width() * sx, rect.height() * sy),
+                           refractive=True, cache_token=(id(self), token))
+
+    def _paint_variant_avatar(self, painter: QPainter, rect: QRectF, source: EntrySource):
+        painter.setPen(QPen(QColor(255, 255, 255, 65), 1.5))
+        painter.setBrush(QColor("#343740"))
+        painter.drawEllipse(rect)
+        if self._account_image.isNull():
+            paint_music_source_icon(painter, rect.adjusted(rect.width() * .2, rect.height() * .2,
+                                                          -rect.width() * .2, -rect.height() * .2), source.source_id)
+            return
+        painter.save()
+        clip = QPainterPath()
+        clip.addEllipse(rect.adjusted(2, 2, -2, -2))
+        painter.setClipPath(clip, Qt.ClipOperation.IntersectClip)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        side = min(self._account_image.width(), self._account_image.height())
+        crop = QRectF((self._account_image.width() - side) / 2, (self._account_image.height() - side) / 2, side, side)
+        painter.drawImage(rect, self._account_image, crop)
+        painter.restore()
+
+    def _paint_login_variant(self, painter: QPainter):
+        layout = self._variant_layout()
+        wide = self.width() >= 720 and self.height() >= 520
+        source = next((item for item in ENTRY_SOURCES if item.source_id == self.selected_source), ENTRY_SOURCES[0])
+        painter.setFont(_entry_font(23))
+        painter.setPen(QColor("#f1f2f5"))
+        painter.drawText(QRectF(84 if self.back_button.isVisible() else 24, 20, self.width() - 168, 36),
+                         Qt.AlignmentFlag.AlignVCenter, "音乐来源")
+        if self.login_variant == "sidebar" and wide:
+            self._paint_variant_glass(painter, QRectF(24, 104, 208, self.height() - 128), "sidebar")
+            painter.setFont(_entry_font(12))
+            painter.setPen(QColor("#aeb3c0"))
+            painter.drawText(QRectF(36, 76, self.width() - 72, 20), Qt.AlignmentFlag.AlignVCenter,
+                             "连接你的音乐账号，继续收听收藏与歌单")
+            painter.setPen(QPen(QColor(255, 255, 255, 25), 1))
+            painter.drawLine(QPointF(48, 320), QPointF(208, 320))
+        elif self.login_variant == "focus":
+            switch = layout.tiles[0].united(layout.tiles[2]).adjusted(-5, -5, 5, 5)
+            self._paint_variant_glass(painter, switch, "segmented-switch", switch.height() / 2)
+        elif self.login_variant == "hero" and self.height() >= 500:
+            self._paint_variant_avatar(painter, QRectF(32 if wide else 24, 80, 52, 52), source)
+            painter.setFont(_entry_font(24 if wide else 21))
+            painter.setPen(QColor("#f3f2f6"))
+            painter.drawText(QRectF(100 if wide else 90, 78, self.width() - 124, 32),
+                             Qt.AlignmentFlag.AlignVCenter, "你的音乐账号")
+            painter.setFont(_entry_font(12))
+            painter.setPen(QColor("#b4b6c4"))
+            painter.drawText(QRectF(100 if wide else 90, 111, self.width() - 124, 22),
+                             Qt.AlignmentFlag.AlignVCenter, "继续收听收藏与歌单")
+        painter.setFont(_entry_font(10 if wide and self.login_variant != "focus" else 11))
+        painter.setPen(QColor("#8d93a3"))
+        painter.drawText(layout.upcoming,
+                         Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignLeft if wide and self.login_variant != "focus"
+                                                        else Qt.AlignmentFlag.AlignHCenter),
+                         "即将支持" if wide and self.login_variant in {"sidebar", "hero"} else "更多平台即将支持")
+        self._paint_variant_glass(painter, layout.pane, "variant-detail")
+        if self._expanded <= .85:
+            return
+        if self._account is not None:
+            avatar, name_rect, _action = self._account_content_rects()
+            self._paint_variant_avatar(painter, avatar, source)
+            alignment = Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignHCenter if layout.centered else Qt.AlignmentFlag.AlignLeft)
+            painter.setFont(_entry_font(24 if layout.centered else 22))
+            painter.setPen(QColor("#f5f5f8"))
+            painter.drawText(name_rect, alignment, painter.fontMetrics().elidedText(
+                self._account.nickname or "已登录账号", Qt.TextElideMode.ElideRight, round(name_rect.width())))
+            painter.setFont(_entry_font(12))
+            painter.setPen(QColor("#aeb9c5"))
+            painter.drawText(QRectF(name_rect.x(), name_rect.bottom() + 4, name_rect.width(), 24),
+                             alignment, f"{source.name} · 已连接")
+            return
+        qr, _detail = self._login_content_rects()
+        painter.setPen(QPen(QColor(255, 255, 255, 55), 1))
+        painter.setBrush(QColor("#ffffff") if not self._qr_image.isNull() else QColor(255, 255, 255, 8))
+        painter.drawRoundedRect(qr, 16, 16)
+        if not self._qr_image.isNull():
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+            painter.drawImage(qr.adjusted(10, 10, -10, -10), self._qr_image)
+        else:
+            icon_side = min(40., qr.width() * .28)
+            paint_music_source_icon(painter, QRectF(qr.center().x() - icon_side / 2,
+                                                    qr.center().y() - icon_side, icon_side, icon_side), source.source_id)
+            painter.setFont(_entry_font(12))
+            painter.setPen(QColor("#c0c5d0"))
+            painter.drawText(QRectF(qr.x() + 6, qr.center().y() + 10, qr.width() - 12, 32),
+                             Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self._login_placeholder_text())
+        title, helper, _message, _action = self._login_detail_geometry()
+        alignment = Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignHCenter if layout.centered else Qt.AlignmentFlag.AlignLeft)
+        painter.setFont(_entry_font(19 if helper.width() > 180 else 17))
+        painter.setPen(QColor("#f0f2f6"))
+        painter.drawText(title, alignment, painter.fontMetrics().elidedText(
+            f"连接{source.name}", Qt.TextElideMode.ElideRight, round(title.width())))
+        painter.setFont(_entry_font(12))
+        painter.setPen(QColor("#aeb5c4"))
+        guide = ("正在确认账号与登录服务" if self.login_state in {"starting", "loading"}
+                 else "已扫码，请在手机上确认登录" if self.login_state == "scanned"
+                 else "请重试连接，或选择其他音乐来源" if self._qr_image.isNull()
+                 else f"打开{source.name} App，扫描二维码登录")
+        painter.drawText(helper, alignment | Qt.TextFlag.TextWordWrap, guide)
+
     def paintEvent(self, event):
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1192,6 +1423,9 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                 if not self._background_frame.isNull():
                     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                     painter.drawImage(panel, self._background_frame)
+                if self.login_variant != "classic":
+                    self._paint_login_variant(painter)
+                    return
                 painter.setFont(_entry_font(23))
                 painter.setPen(QColor("#f1f2f5"))
                 painter.drawText(QRectF(84 if self.back_button.isVisible() else 24, 20, self.width() - 168, 36),
