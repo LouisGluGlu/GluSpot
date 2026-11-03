@@ -464,12 +464,12 @@ class BackgroundEdgeVeil:
         amount = max(0., min(1., float(progress)))
         return (.04 + .14 * amount, MAX_BLUR)
 
-    def prepare(self, source, width, height):
+    def prepare(self, source, width, height, *, force=False):
         """Eight blur samples interpolate continuously into one masked raster."""
         if source.isNull() or width <= 0 or height <= 0:
             return False
         key = (source.cacheKey(), float(width), float(height))
-        if key == self._key:
+        if not force and key == self._key:
             return False
         scale = min(1., self.MAX_SAMPLE_SIDE / max(float(width), float(height)))
         sample_width, sample_height = max(1, round(width * scale)), max(1, round(height * scale))

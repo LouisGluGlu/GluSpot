@@ -93,6 +93,7 @@ from local.ui_theme import app_dark_mode
 from local.control_hover import HoverMotion
 from local.music_control_glass import ControlFeedback, GlassControlRenderer, paint_control_overlay
 from local.music_surface_layout import MusicContentLayoutMixin
+from local.music_lyric_resize import MusicLyricResizeMixin, LyricResizeProbeReady
 from local.music_song_collection import MusicSongCollectionMixin
 from local.music_window_compact import MusicWindowCompactMixin
 
@@ -119,7 +120,7 @@ def constrained_window_size(
     return QSize(bounded_width, max(1, int(round(bounded_width / ratio))))
 
 
-class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, MusicContentLayoutMixin, GlassCaptureMixin, QWidget):
+class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSongCollectionMixin, MusicContentLayoutMixin, GlassCaptureMixin, QWidget):
     """Frameless full-screen/windowed music surface owned by the V2 island."""
 
     seekFinished = Signal(bool, float, str)
@@ -351,6 +352,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         self._display_raw_source_texts: tuple[str, ...] = ()
         self._display_units_source = None
         self._display_kinds_source = None
+        self._init_lyric_resize()
         self._song_layout_key = None
         self._song_layouts: tuple[tuple[QTextLayout, float], ...] = ()
         self._song_secondary_layouts: tuple[tuple[QTextLayout, float, float] | None, ...] = ()
@@ -900,6 +902,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             self._capturing_transition_snapshot = False
 
     def _cancel_mode_transition(self):
+        self._cancel_lyric_resize()
         self._reset_window_compact()
         self._mode_animation.stop()
         self._mode_transition_started_at = 0.0
@@ -1081,6 +1084,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def hideEvent(self, event):
         self._set_resize_chrome_hold(False)
+        self._cancel_lyric_resize()
         self._finish_width_layout()
         self._glass_feedback.reset()
         self._reset_window_compact()
@@ -1109,6 +1113,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         super().hideEvent(event)
 
     def resizeEvent(self, event):
+        self._note_lyric_width_event(event)
         # The popup is anchored in the surface's current coordinate space.
         # Close it before resizing rather than leave hit areas off-screen.
         self._dismiss_audio_output_panel(immediate=True)
@@ -1959,87 +1964,89 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             return
         tick_started = time.perf_counter()
         now = time.monotonic()
+        self._sync_lyric_resize_motion()
         did_heavy_prewarm = False
-        if self._song_layout_build is not None:
-            # A fresh song's lyric ink is delayed by the existing track fade.
-            # Shape a bounded part of its exact row geometry each tick rather
-            # than all 180+ rows in the first visible transition frame.
-            self._advance_song_layout_build(
-                max_rows=24, max_seconds=self.LYRIC_LAYOUT_BATCH_SECONDS,
-            )
-            did_heavy_prewarm = True
-        if (
-            not did_heavy_prewarm and self._lyric_blur_prewarm_queue
-            and now >= self._lyric_blur_next_prewarm_at
-        ):
-            self._advance_lyric_blur_prewarm(now)
-            did_heavy_prewarm = True
-        pending = self._pending_glow_prewarm if not did_heavy_prewarm else None
-        if pending is not None:
-            self._pending_glow_prewarm = None
-        if pending is not None and pending[0][0] == self._song_layout_key:
-            did_heavy_prewarm = True
-            token, text, font, width, layout, mode, unread_color, line_index, unit_index = pending
-            if 0 <= line_index < layout.lineCount():
-                line = layout.lineAt(line_index)
-                segment = self._utf16_slice(text, line.textStart(), line.textLength())
-                units, complete = self._advance_isolated_glyph_units(
-                    segment, font, "character", max_units=1,
+        if not self._lyric_resize_frozen:
+            if self._song_layout_build is not None:
+                # A fresh song's lyric ink is delayed by the existing track fade.
+                # Shape a bounded part of its exact row geometry each tick rather
+                # than all 180+ rows in the first visible transition frame.
+                self._advance_song_layout_build(
+                    max_rows=24, max_seconds=self.LYRIC_LAYOUT_BATCH_SECONDS,
                 )
-                next_unit = min(len(units), unit_index + 1)
-                for source, _left in units[unit_index:next_unit]:
-                    self._tinted_glyph_image(source, unread_color)
-                    self._sparse_glyph_halo(source)
-                if not complete or next_unit < len(units):
-                    self._pending_glow_prewarm = (
-                        token, text, font, width, layout, mode,
-                        unread_color, line_index, next_unit,
-                    )
-                elif line_index + 1 < layout.lineCount():
-                    self._pending_glow_prewarm = (
-                        token, text, font, width, layout, mode,
-                        unread_color, line_index + 1, 0,
-                    )
-        reading_pending = self._pending_reading_prewarm if not did_heavy_prewarm else None
-        if reading_pending is not None:
-            self._pending_reading_prewarm = None
-        if (
-            reading_pending is not None
-            and reading_pending[0][0] == self._song_layout_key
-            and reading_pending[0][1] == self._visual_track_identity()
-        ):
-            token, text, font, layout, unread_color, line_index, unit_index = reading_pending
-            if 0 <= line_index < layout.lineCount():
-                    did_heavy_prewarm = True
+                did_heavy_prewarm = True
+            if (
+                not did_heavy_prewarm and self._lyric_blur_prewarm_queue
+                and now >= self._lyric_blur_next_prewarm_at
+            ):
+                self._advance_lyric_blur_prewarm(now)
+                did_heavy_prewarm = True
+            pending = self._pending_glow_prewarm if not did_heavy_prewarm else None
+            if pending is not None:
+                self._pending_glow_prewarm = None
+            if pending is not None and pending[0][0] == self._song_layout_key:
+                did_heavy_prewarm = True
+                token, text, font, width, layout, mode, unread_color, line_index, unit_index = pending
+                if 0 <= line_index < layout.lineCount():
                     line = layout.lineAt(line_index)
                     segment = self._utf16_slice(text, line.textStart(), line.textLength())
-                    self._glyph_run(segment, font, "reading")
                     units, complete = self._advance_isolated_glyph_units(
-                        segment, font, "reading", max_units=1,
+                        segment, font, "character", max_units=1,
                     )
                     next_unit = min(len(units), unit_index + 1)
                     for source, _left in units[unit_index:next_unit]:
                         self._tinted_glyph_image(source, unread_color)
+                        self._sparse_glyph_halo(source)
                     if not complete or next_unit < len(units):
-                        self._pending_reading_prewarm = (
-                            token, text, font, layout, unread_color, line_index, next_unit,
+                        self._pending_glow_prewarm = (
+                            token, text, font, width, layout, mode,
+                            unread_color, line_index, next_unit,
                         )
                     elif line_index + 1 < layout.lineCount():
-                        self._pending_reading_prewarm = (
-                            token, text, font, layout, unread_color, line_index + 1, 0,
+                        self._pending_glow_prewarm = (
+                            token, text, font, width, layout, mode,
+                            unread_color, line_index + 1, 0,
                         )
-        if not did_heavy_prewarm:
-            idle_before = (
-                self._metadata_idle_raster_token,
-                len(self._metadata_idle_raster_pending),
-                self._metadata_raster_cache_bytes,
-            )
-            self._prewarm_idle_metadata_raster()
-            did_heavy_prewarm = idle_before != (
-                self._metadata_idle_raster_token,
-                len(self._metadata_idle_raster_pending),
-                self._metadata_raster_cache_bytes,
-            )
+            reading_pending = self._pending_reading_prewarm if not did_heavy_prewarm else None
+            if reading_pending is not None:
+                self._pending_reading_prewarm = None
+            if (
+                reading_pending is not None
+                and reading_pending[0][0] == self._song_layout_key
+                and reading_pending[0][1] == self._visual_track_identity()
+            ):
+                token, text, font, layout, unread_color, line_index, unit_index = reading_pending
+                if 0 <= line_index < layout.lineCount():
+                        did_heavy_prewarm = True
+                        line = layout.lineAt(line_index)
+                        segment = self._utf16_slice(text, line.textStart(), line.textLength())
+                        self._glyph_run(segment, font, "reading")
+                        units, complete = self._advance_isolated_glyph_units(
+                            segment, font, "reading", max_units=1,
+                        )
+                        next_unit = min(len(units), unit_index + 1)
+                        for source, _left in units[unit_index:next_unit]:
+                            self._tinted_glyph_image(source, unread_color)
+                        if not complete or next_unit < len(units):
+                            self._pending_reading_prewarm = (
+                                token, text, font, layout, unread_color, line_index, next_unit,
+                            )
+                        elif line_index + 1 < layout.lineCount():
+                            self._pending_reading_prewarm = (
+                                token, text, font, layout, unread_color, line_index + 1, 0,
+                            )
+            if not did_heavy_prewarm:
+                idle_before = (
+                    self._metadata_idle_raster_token,
+                    len(self._metadata_idle_raster_pending),
+                    self._metadata_raster_cache_bytes,
+                )
+                self._prewarm_idle_metadata_raster()
+                did_heavy_prewarm = idle_before != (
+                    self._metadata_idle_raster_token,
+                    len(self._metadata_idle_raster_pending),
+                    self._metadata_raster_cache_bytes,
+                )
         now = time.monotonic()
         idle_elapsed = now - self._control_last_motion_at
         idle_seconds = (
@@ -2216,6 +2223,7 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     def shutdown(self):
         if self._closing_for_shutdown:
             return
+        self._cancel_lyric_resize()
         self._finish_width_layout()
         self._glass_feedback.reset()
         self._clear_control_renderer.clear()
@@ -5311,6 +5319,14 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         cached = self._lyric_layout_cache.get(key)
         if cached is not None:
             return cached
+        result = self._create_wrapped_lyric_layout(text, font, width, align_right=align_right)
+        self._lyric_layout_cache[key] = result
+        while len(self._lyric_layout_cache) > 96:
+            self._lyric_layout_cache.pop(next(iter(self._lyric_layout_cache)))
+        return result
+
+    def _create_wrapped_lyric_layout(self, text, font, width, *, align_right=False):
+        """Shape a probe without changing the live LRU or prewarm queues."""
         layout = QTextLayout(str(text), font)
         self._apply_cjk_letter_spacing(layout, str(text), font)
         option = QTextOption()
@@ -5333,9 +5349,6 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             y += round(line.height() * 0.86)
         layout.endLayout()
         result = (layout, max(self._font_height(font), last_line_bottom))
-        self._lyric_layout_cache[key] = result
-        while len(self._lyric_layout_cache) > 96:
-            self._lyric_layout_cache.pop(next(iter(self._lyric_layout_cache)))
         return result
 
     def _song_lyric_layouts(
@@ -5352,6 +5365,19 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # The short LRU above serves arbitrary individual rows.  A separate
         # one-song cache prevents a 100+ row track from evicting its first
         # layouts before the next animation frame even starts.
+        if self._lyric_resize_capturing:
+            return self._song_layouts, self._song_row_tops
+        if self._lyric_resize_probe:
+            self._lyric_resize_probe_inputs = (
+                (lines, font, width, row_gap), dict(
+                    secondary_lines=secondary_lines, secondary_font=secondary_font,
+                    parenthetical_lines=parenthetical_lines,
+                    parenthetical_translation_lines=parenthetical_translation_lines,
+                    parenthetical_font=parenthetical_font, row_widths=row_widths,
+                    row_right_aligned=row_right_aligned, pair_starts=pair_starts))
+            raise LyricResizeProbeReady()
+        if getattr(self, '_lyric_resize_committing', False):
+            defer = False
         secondary = tuple(secondary_lines) if secondary_font is not None else ()
         parenthetical = tuple(parenthetical_lines) if secondary_font is not None else ()
         parenthetical_translations = tuple(parenthetical_translation_lines) if secondary_font is not None else ()
@@ -5363,8 +5389,41 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             tuple(round(value, 3) for value in row_widths),
             row_right_aligned, pair_starts,
         )
+        if self._lyric_resize_reposition_pending:
+            # Same character breaks: update only horizontal alignment. Qt's
+            # QTextLine.setPosition preserves the actual shaped glyph objects.
+            for group in (self._song_layouts, self._song_secondary_layouts,
+                          self._song_parenthetical_layouts, self._song_parenthetical_translation_layouts):
+                for index, item in enumerate(group):
+                    if item is None:
+                        continue
+                    row_width = row_widths[index] if index < len(row_widths) else width
+                    right = row_right_aligned[index] if index < len(row_right_aligned) else False
+                    for ordinal in range(item[0].lineCount()):
+                        line = item[0].lineAt(ordinal)
+                        line.setPosition(QPointF(max(0., row_width - line.naturalTextWidth()) if right else 0., line.y()))
+            # A font-scale transform can change the logical row gap while
+            # preserving every glyph and break. Reposition the existing rows.
+            old_tops = self._song_row_tops
+            tops = list(old_tops)
+            visual_tops = list(self._song_visual_tops)
+            cursor, index = 0., 0
+            while index < len(tops):
+                group = (index, index + 1) if index in pair_starts else (index,)
+                for member in group:
+                    tops[member] = cursor
+                    start, end = self._song_visual_ranges[member]
+                    for visual in range(start, end):
+                        visual_tops[visual] += cursor - old_tops[member]
+                cursor += max(self._song_row_heights[member] for member in group) + row_gap
+                index += len(group)
+            self._song_row_tops = tuple(tops)
+            self._song_visual_tops = tuple(visual_tops)
+            self._song_layout_key = key
+            self._lyric_resize_reposition_pending = False
         if key != self._song_layout_key:
             if key != self._song_layout_build_key:
+                self._lyric_relayout_count += 1
                 self._song_layout_build_key = key
                 self._song_layout_build = {
                     "lines": tuple(lines), "font": QFont(font), "width": width,
@@ -5398,6 +5457,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
     def _advance_song_layout_build(
         self, *, max_rows: int | None, max_seconds: float | None = None,
     ) -> None:
+        if self._lyric_resize_frozen or self._lyric_resize_capturing:
+            return
         build = self._song_layout_build
         if build is None:
             return
@@ -7063,7 +7124,21 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         painter.end()
         self._record_paint_cost(paint_started, _event)
 
-    def _paint_lyric_column(
+    def _paint_lyric_cover_shade(self, painter, painted_cover):
+        painter.save()
+        path = QPainterPath()
+        radius = self._album_art_radius(painted_cover.width())
+        path.addRoundedRect(painted_cover, radius, radius)
+        painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        shade = QLinearGradient(painted_cover.left(), painted_cover.top(), painted_cover.left(), painted_cover.bottom())
+        shade.setColorAt(0., QColor(0, 0, 0, 0))
+        shade.setColorAt(.42, QColor(0, 0, 0, 12))
+        shade.setColorAt(.72, QColor(0, 0, 0, 135))
+        shade.setColorAt(1., QColor(0, 0, 0, 180))
+        painter.fillRect(painted_cover, shade)
+        painter.restore()
+
+    def _paint_live_lyric_column(
         self, painter: QPainter, rect: QRectF, *, paint_region=None,
         painted_cover: QRectF | None = None, center_plan=None,
         cover_fraction: float = 0.0, normal_opacity: float = 0.0,
@@ -7071,50 +7146,90 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         previous=None, transition: float = 1.0, navigation_capture: bool = False,
     ):
         """Paint shared side/cover lyrics with the surface's timing and ink."""
-        surface_scale = self._surface_scale(rect)
-        content, column_cover, side_column = self._content_column_geometry(rect)
-        if painted_cover is None:
-            painted_cover = column_cover
-        text_left = side_column.left()
-        text_width = max(1.0, side_column.width())
-        cover_lyrics_layout = self._effective_content_layout() == "cover_lyrics"
-        lyrics_hidden_by_layout = (self._effective_content_layout() in {"cover", "playlist"}
-                                   or navigation_capture and cover_lyrics_layout)
-        lyric_transform = QTransform()
-        lyric_cover = painted_cover
-        pose = None
-        if not cover_lyrics_layout:
-            pose = self._width_lyric_render_pose(rect, side_column, surface_scale)
-            if pose is not None:
-                content, side_column, surface_scale, lyric_transform = pose
-                text_left = side_column.left()
-                text_width = max(1., side_column.width())
-        if cover_lyrics_layout:
-            # Reuse the real lyric timing/translation/duet rendering inside
-            # one stable logical cover. Controls and pause animate the art
-            # size; scaling its lyric canvas avoids restarting a long song's
-            # deferred layout (and losing its translations) on every frame.
-            lyric_cover = QRectF(center_plan["shown_cover"])
-            lyric_transform.translate(painted_cover.left(), painted_cover.top())
-            lyric_transform.scale(painted_cover.width() / max(1., lyric_cover.width()),
-                                  painted_cover.height() / max(1., lyric_cover.height()))
-            lyric_transform.translate(-lyric_cover.left(), -lyric_cover.top())
-            text_left = lyric_cover.left() + 25. * surface_scale
-            text_width = max(1., lyric_cover.width() - 50. * surface_scale)
-            if not navigation_capture:
-                painter.save()
-                path = QPainterPath()
-                radius = self._album_art_radius(painted_cover.width())
-                path.addRoundedRect(painted_cover, radius, radius)
-                painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
-                shade = QLinearGradient(painted_cover.left(), painted_cover.top(), painted_cover.left(), painted_cover.bottom())
-                shade.setColorAt(0., QColor(0, 0, 0, 0))
-                shade.setColorAt(.42, QColor(0, 0, 0, 12))
-                shade.setColorAt(.72, QColor(0, 0, 0, 135))
-                shade.setColorAt(1., QColor(0, 0, 0, 180))
-                painter.fillRect(painted_cover, shade)
-                painter.restore()
-        lines, timed = self._display_lyrics()
+        if self._lyric_resize_capturing:
+            rect = self._lyric_resize_last_geometry['rect']
+            content = self._lyric_resize_last_geometry['content']
+            column_cover = self._lyric_resize_last_geometry['column_cover']
+            side_column = self._lyric_resize_last_geometry['side_column']
+            surface_scale = self._lyric_resize_last_geometry['surface_scale']
+            text_left = self._lyric_resize_last_geometry['text_left']
+            text_width = self._lyric_resize_last_geometry['text_width']
+            cover_lyrics_layout = self._lyric_resize_last_geometry['cover_lyrics_layout']
+            lyrics_hidden_by_layout = self._lyric_resize_last_geometry['lyrics_hidden_by_layout']
+            lyric_transform = self._lyric_resize_last_geometry['lyric_transform']
+            lyric_cover = self._lyric_resize_last_geometry['lyric_cover']
+            pose = self._lyric_resize_last_geometry['pose']
+        else:
+            surface_scale = self._surface_scale(rect)
+            content, column_cover, side_column = self._content_column_geometry(rect)
+            if painted_cover is None:
+                painted_cover = column_cover
+            text_left = side_column.left()
+            text_width = max(1.0, side_column.width())
+            cover_lyrics_layout = self._effective_content_layout() == "cover_lyrics"
+            lyrics_hidden_by_layout = (self._effective_content_layout() in {"cover", "playlist"}
+                                       or navigation_capture and cover_lyrics_layout)
+            lyric_transform = QTransform()
+            lyric_cover = painted_cover
+            pose = None
+            if not cover_lyrics_layout:
+                pose = self._width_lyric_render_pose(rect, side_column, surface_scale)
+                if pose is not None:
+                    content, side_column, surface_scale, lyric_transform = pose
+                    text_left = side_column.left()
+                    text_width = max(1., side_column.width())
+            if cover_lyrics_layout:
+                # Reuse the real lyric timing/translation/duet rendering inside
+                # one stable logical cover. Controls and pause animate the art
+                # size; scaling its lyric canvas avoids restarting a long song's
+                # deferred layout (and losing its translations) on every frame.
+                lyric_cover = QRectF(center_plan["shown_cover"])
+                lyric_transform.translate(painted_cover.left(), painted_cover.top())
+                lyric_transform.scale(painted_cover.width() / max(1., lyric_cover.width()),
+                                      painted_cover.height() / max(1., lyric_cover.height()))
+                lyric_transform.translate(-lyric_cover.left(), -lyric_cover.top())
+                text_left = lyric_cover.left() + 25. * surface_scale
+                text_width = max(1., lyric_cover.width() - 50. * surface_scale)
+            if self._lyric_resize_reuse_scale is not None and not self._lyric_resize_probe:
+                # A font-changing but wrap-equivalent resize keeps the shaped
+                # rows. Paint their old font at the final uniform font scale.
+                source_scale = self._lyric_resize_reuse_scale
+                source_font = self._surface_font(self.LYRIC_PIXEL_SIZE * source_scale * (.74 if cover_lyrics_layout else 1.), QFont.Weight.Bold)
+                target_font = self._surface_font(self.LYRIC_PIXEL_SIZE * surface_scale * (.74 if cover_lyrics_layout else 1.), QFont.Weight.Bold)
+                ratio = target_font.pixelSize() / max(1, source_font.pixelSize())
+                reuse = QTransform()
+                reuse.translate(side_column.left(), side_column.top())
+                reuse.scale(ratio, ratio)
+                reuse.translate(-side_column.left(), -side_column.top())
+                inverse, _ok = reuse.inverted()
+                rect, content, side_column = (inverse.mapRect(value) for value in (rect, content, side_column))
+                lyric_cover = inverse.mapRect(lyric_cover)
+                text_left = inverse.map(QPointF(text_left, 0.)).x()
+                text_width = max(1., text_width / ratio)
+                surface_scale = source_scale
+                lyric_transform = reuse * lyric_transform
+            if not self._lyric_resize_probe:
+                self._lyric_resize_last_geometry = dict(
+                    rect=rect,
+                    content=content,
+                    column_cover=column_cover,
+                    side_column=side_column,
+                    surface_scale=surface_scale,
+                    text_left=text_left,
+                    text_width=text_width,
+                    cover_lyrics_layout=cover_lyrics_layout,
+                    lyrics_hidden_by_layout=lyrics_hidden_by_layout,
+                    lyric_transform=lyric_transform,
+                    lyric_cover=lyric_cover,
+                    pose=pose,
+                    column=lyric_transform.mapRect(lyric_cover if cover_lyrics_layout else side_column),
+                    scale=surface_scale)
+        if self._lyric_resize_capturing:
+            lines, timed = self._lyric_resize_last_display
+        else:
+            lines, timed = self._display_lyrics()
+            if not self._lyric_resize_probe:
+                self._lyric_resize_last_display = (lines, timed)
         loading_now = time.monotonic()
         self._update_lyric_loading_state(loading_now, lines, timed)
         lookup_pending = self._lyrics_lookup_pending(lines, timed)
@@ -7146,9 +7261,14 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
                 lines, timed = [], []
             else:
                 lines, timed = outgoing_lyrics[:2]
-        visual_layers = self._visual_lyric_layers_for_rows(
-            lines, timed, outgoing=outgoing_lyrics is not None,
-        )
+        if self._lyric_resize_capturing:
+            visual_layers = self._lyric_resize_last_layers
+        else:
+            visual_layers = self._visual_lyric_layers_for_rows(
+                lines, timed, outgoing=outgoing_lyrics is not None,
+            )
+            if not self._lyric_resize_probe:
+                self._lyric_resize_last_layers = visual_layers
         # An all-parenthetical row has no persistent main text. Keep a space
         # for layout/seek geometry, but never paint its hidden source ink.
         paint_lines = [layer.primary_text or " " for layer in visual_layers]
@@ -7157,8 +7277,13 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         parenthetical_translation_lines = tuple(
             layer.parenthetical_translation_text or "" for layer in visual_layers
         )
-        duet = self._display_duet_presentation
-        cached_display = self._display_lyrics_cache
+        if self._lyric_resize_capturing:
+            duet, cached_display = self._lyric_resize_last_duet
+        else:
+            duet = self._display_duet_presentation
+            cached_display = self._display_lyrics_cache
+            if not self._lyric_resize_probe:
+                self._lyric_resize_last_duet = (duet, cached_display)
         use_duet = (
             outgoing_lyrics is None and duet is not None and cached_display is not None
             and lines is cached_display[0] and timed is cached_display[1]
@@ -7456,17 +7581,22 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         # wrapping within a sentence retains its tighter visual-line rhythm.
         shaping_height = getattr(self, '_width_shaping_height', rect.height()) if pose is not None else rect.height()
         row_gap = max(18.0 * surface_scale, shaping_height * 0.035)
-        layouts, row_tops = self._song_lyric_layouts(
-            paint_lines, lyric_font, text_width, row_gap,
-            defer=holding_loaded_lyrics or bool(previous and transition < 0.35) or len(paint_lines) > 48,
-            secondary_lines=translation_lines, secondary_font=secondary_font,
-            parenthetical_lines=parenthetical_lines,
-            parenthetical_translation_lines=parenthetical_translation_lines,
-            parenthetical_font=parenthetical_font,
-            row_widths=row_widths,
-            row_right_aligned=tuple(duet_right_sides),
-            pair_starts=pair_starts,
-        )
+        if self._lyric_resize_capturing:
+            layouts, row_tops = self._lyric_resize_last_layouts
+        else:
+            layouts, row_tops = self._song_lyric_layouts(
+                paint_lines, lyric_font, text_width, row_gap,
+                defer=holding_loaded_lyrics or bool(previous and transition < 0.35) or len(paint_lines) > 48,
+                secondary_lines=translation_lines, secondary_font=secondary_font,
+                parenthetical_lines=parenthetical_lines,
+                parenthetical_translation_lines=parenthetical_translation_lines,
+                parenthetical_font=parenthetical_font,
+                row_widths=row_widths,
+                row_right_aligned=tuple(duet_right_sides),
+                pair_starts=pair_starts,
+            )
+        if not self._lyric_resize_capturing:
+            self._lyric_resize_last_layouts = (layouts, row_tops)
         parenthetical_factors = self._parenthetical_reserve_factors(
             visual_active, lyric_now, pair_starts=pair_starts,
         )
@@ -7547,145 +7677,146 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
             obo_reading_handoff * self._reading_lift_height()
             * max(0.5, float(max(1, parenthetical_font.pixelSize())) / self.LYRIC_PIXEL_SIZE)
         )
-        if timed and outgoing_lyrics is None:
-            focus_change_time = next_start
-            if active_kind == "unit" and song_has_real_units and active_pair_first is None:
-                ends = [
-                    float(unit.end_seconds) for unit in active_units
-                    if getattr(unit, "end_seconds", None) is not None
-                ]
-                finished_at = max(ends, default=0.0)
-                if real_unit_row_finished_before_next_start(
-                    active_primary, active_units, finished_at, next_start,
-                ):
-                    focus_change_time = finished_at
-            elif estimated_end is not None and estimated_end < next_start:
-                focus_change_time = estimated_end
-            self._queue_next_lyric_blurs(
-                paint_lines, layouts, row_tops, lyric_font, text_width,
-                lyric_clip, glow_bleed, emphasis_unread_color,
-                active, focus_change_time, current_position, lyric_now,
-                manual_view=manual_view, row_widths=row_widths,
-                secondary_lines=translation_lines, secondary_font=secondary_font,
-                pair_starts=pair_starts,
-            )
-        else:
-            self._lyric_blur_prewarm_queue.clear()
-            self._lyric_blur_prewarm_token = None
-        # Prepare an eligible glow and the next ordinary reading row between
-        # frames. Neither effect should shape a whole cold row at its boundary.
-        reading_candidate = None
-        glow_queued = False
-        for candidate in range(max(0, active), min(len(timed) - 1, active + 3) + 1) if layouts else ():
-            if candidate == active:
-                candidate_kind = active_kind
-                candidate_mode = active_priority_mode
+        if not self._lyric_resize_capturing:
+            if timed and outgoing_lyrics is None:
+                focus_change_time = next_start
+                if active_kind == "unit" and song_has_real_units and active_pair_first is None:
+                    ends = [
+                        float(unit.end_seconds) for unit in active_units
+                        if getattr(unit, "end_seconds", None) is not None
+                    ]
+                    finished_at = max(ends, default=0.0)
+                    if real_unit_row_finished_before_next_start(
+                        active_primary, active_units, finished_at, next_start,
+                    ):
+                        focus_change_time = finished_at
+                elif estimated_end is not None and estimated_end < next_start:
+                    focus_change_time = estimated_end
+                self._queue_next_lyric_blurs(
+                    paint_lines, layouts, row_tops, lyric_font, text_width,
+                    lyric_clip, glow_bleed, emphasis_unread_color,
+                    active, focus_change_time, current_position, lyric_now,
+                    manual_view=manual_view, row_widths=row_widths,
+                    secondary_lines=translation_lines, secondary_font=secondary_font,
+                    pair_starts=pair_starts,
+                )
             else:
-                candidate_kind = (
-                    self._display_timed_kinds[candidate]
-                    if candidate < len(self._display_timed_kinds) else "line"
-                )
-                candidate_units = (
-                    self._display_timed_units[candidate]
-                    if candidate < len(self._display_timed_units) else ()
-                )
-                unverified_candidate = candidate_kind == "unit" and not genuinely_timed_unit_row(candidate_units)
-                if unverified_candidate:
-                    candidate_kind = "line"
-                if candidate_kind == "unit":
-                    candidate_groups = explicit_slow_unit_groups(
-                        self._primary_timed_lyric_text(str(timed[candidate][1])), candidate_units,
-                    )
-                    candidate_mode = "scatter_glow" if candidate_groups else "none"
+                self._lyric_blur_prewarm_queue.clear()
+                self._lyric_blur_prewarm_token = None
+            # Prepare an eligible glow and the next ordinary reading row between
+            # frames. Neither effect should shape a whole cold row at its boundary.
+            reading_candidate = None
+            glow_queued = False
+            for candidate in range(max(0, active), min(len(timed) - 1, active + 3) + 1) if layouts else ():
+                if candidate == active:
+                    candidate_kind = active_kind
+                    candidate_mode = active_priority_mode
                 else:
-                    candidate_mode = "none"
-            if candidate_mode == "none":
-                if (
-                    reading_candidate is None
-                    and timed and outgoing_lyrics is None
-                    and candidate == active + 1
-                    and candidate_kind != "synthetic"
-                    and song_reads_internally
-                    and not self._has_reversed_lyric_unit_order(paint_lines[candidate])
-                ):
-                    candidate_layout = layouts[candidate][0]
-                    if not self._lyric_reading_assets_ready(
-                        paint_lines[candidate], lyric_font, candidate_layout, emphasis_unread_color,
-                    ):
-                        reading_candidate = (candidate, candidate_layout)
-                continue
-            if glow_queued:
-                continue
-            token = (self._song_layout_key, candidate)
-            candidate_layout = layouts[candidate][0]
-            if self._lyric_emphasis_assets_ready(
-                paint_lines[candidate], lyric_font, row_widths[candidate], candidate_layout,
-                candidate_mode, emphasis_unread_color,
-            ):
-                continue
-            if self._pending_glow_prewarm is None or self._pending_glow_prewarm[0] != token:
-                self._pending_glow_prewarm = (
-                    token, paint_lines[candidate], lyric_font, row_widths[candidate],
-                    candidate_layout, candidate_mode,
-                    emphasis_unread_color, 0, 0,
-                )
-            glow_queued = True
-        if not glow_queued:
-            # Asides have no sparse-duration gate. Prepare their character
-            # halos through the same one-unit-per-tick budget as main lyrics.
-            for candidate in range(max(0, active - 1), min(len(layouts), active + 3)):
-                for layer, layer_text, layer_font in (
-                    (self._song_parenthetical_layouts[candidate], parenthetical_lines[candidate], parenthetical_font),
-                    (self._song_parenthetical_translation_layouts[candidate], parenthetical_translation_lines[candidate], secondary_font),
-                ):
-                    if layer is None or not layer_text or (layer_font is secondary_font and not self._translation_setting):
-                        continue
-                    if self._lyric_emphasis_assets_ready(layer_text, layer_font, row_widths[candidate], layer[0], "scatter_glow", emphasis_unread_color):
-                        continue
-                    token = (self._song_layout_key, ("aside", candidate, layer_text, layer_font.toString()))
-                    if self._pending_glow_prewarm is None or self._pending_glow_prewarm[0] != token:
-                        self._pending_glow_prewarm = (
-                            token, layer_text, layer_font, row_widths[candidate], layer[0],
-                            "scatter_glow", emphasis_unread_color, 0, 0,
+                    candidate_kind = (
+                        self._display_timed_kinds[candidate]
+                        if candidate < len(self._display_timed_kinds) else "line"
+                    )
+                    candidate_units = (
+                        self._display_timed_units[candidate]
+                        if candidate < len(self._display_timed_units) else ()
+                    )
+                    unverified_candidate = candidate_kind == "unit" and not genuinely_timed_unit_row(candidate_units)
+                    if unverified_candidate:
+                        candidate_kind = "line"
+                    if candidate_kind == "unit":
+                        candidate_groups = explicit_slow_unit_groups(
+                            self._primary_timed_lyric_text(str(timed[candidate][1])), candidate_units,
                         )
-                    glow_queued = True
-                    break
-                if glow_queued:
-                    break
-        if reading_candidate is None:
-            candidate = active + 1
-            if (
-                timed and outgoing_lyrics is None and 0 <= candidate < len(layouts)
-                and song_reads_internally
-            ):
-                # These layers appear at the same boundary as the main row.
-                # Prepare their existing unit/tint assets incrementally too.
-                for layer, layer_text, layer_font in (
-                    (self._song_secondary_layouts[candidate], translation_lines[candidate], secondary_font),
-                    (self._song_parenthetical_layouts[candidate], parenthetical_lines[candidate], parenthetical_font),
-                    (self._song_parenthetical_translation_layouts[candidate], parenthetical_translation_lines[candidate], secondary_font),
-                ):
-                    if layer is not None and not self._lyric_reading_assets_ready(
-                        layer_text, layer_font, layer[0], emphasis_unread_color,
+                        candidate_mode = "scatter_glow" if candidate_groups else "none"
+                    else:
+                        candidate_mode = "none"
+                if candidate_mode == "none":
+                    if (
+                        reading_candidate is None
+                        and timed and outgoing_lyrics is None
+                        and candidate == active + 1
+                        and candidate_kind != "synthetic"
+                        and song_reads_internally
+                        and not self._has_reversed_lyric_unit_order(paint_lines[candidate])
                     ):
-                        reading_candidate = (candidate, layer_text, layer_font, layer[0])
+                        candidate_layout = layouts[candidate][0]
+                        if not self._lyric_reading_assets_ready(
+                            paint_lines[candidate], lyric_font, candidate_layout, emphasis_unread_color,
+                        ):
+                            reading_candidate = (candidate, candidate_layout)
+                    continue
+                if glow_queued:
+                    continue
+                token = (self._song_layout_key, candidate)
+                candidate_layout = layouts[candidate][0]
+                if self._lyric_emphasis_assets_ready(
+                    paint_lines[candidate], lyric_font, row_widths[candidate], candidate_layout,
+                    candidate_mode, emphasis_unread_color,
+                ):
+                    continue
+                if self._pending_glow_prewarm is None or self._pending_glow_prewarm[0] != token:
+                    self._pending_glow_prewarm = (
+                        token, paint_lines[candidate], lyric_font, row_widths[candidate],
+                        candidate_layout, candidate_mode,
+                        emphasis_unread_color, 0, 0,
+                    )
+                glow_queued = True
+            if not glow_queued:
+                # Asides have no sparse-duration gate. Prepare their character
+                # halos through the same one-unit-per-tick budget as main lyrics.
+                for candidate in range(max(0, active - 1), min(len(layouts), active + 3)):
+                    for layer, layer_text, layer_font in (
+                        (self._song_parenthetical_layouts[candidate], parenthetical_lines[candidate], parenthetical_font),
+                        (self._song_parenthetical_translation_layouts[candidate], parenthetical_translation_lines[candidate], secondary_font),
+                    ):
+                        if layer is None or not layer_text or (layer_font is secondary_font and not self._translation_setting):
+                            continue
+                        if self._lyric_emphasis_assets_ready(layer_text, layer_font, row_widths[candidate], layer[0], "scatter_glow", emphasis_unread_color):
+                            continue
+                        token = (self._song_layout_key, ("aside", candidate, layer_text, layer_font.toString()))
+                        if self._pending_glow_prewarm is None or self._pending_glow_prewarm[0] != token:
+                            self._pending_glow_prewarm = (
+                                token, layer_text, layer_font, row_widths[candidate], layer[0],
+                                "scatter_glow", emphasis_unread_color, 0, 0,
+                            )
+                        glow_queued = True
                         break
-        elif len(reading_candidate) == 2:
-            candidate, candidate_layout = reading_candidate
-            reading_candidate = (candidate, paint_lines[candidate], lyric_font, candidate_layout)
-        if reading_candidate is None:
-            self._pending_reading_prewarm = None
-        else:
-            candidate, reading_text, reading_font, candidate_layout = reading_candidate
-            token = (
-                self._song_layout_key, self._visual_track_identity(),
-                candidate, int(emphasis_unread_color.rgba()), reading_text, reading_font.toString(),
-            )
-            if self._pending_reading_prewarm is None or self._pending_reading_prewarm[0] != token:
-                self._pending_reading_prewarm = (
-                    token, reading_text, reading_font, candidate_layout,
-                    emphasis_unread_color, 0, 0,
+                    if glow_queued:
+                        break
+            if reading_candidate is None:
+                candidate = active + 1
+                if (
+                    timed and outgoing_lyrics is None and 0 <= candidate < len(layouts)
+                    and song_reads_internally
+                ):
+                    # These layers appear at the same boundary as the main row.
+                    # Prepare their existing unit/tint assets incrementally too.
+                    for layer, layer_text, layer_font in (
+                        (self._song_secondary_layouts[candidate], translation_lines[candidate], secondary_font),
+                        (self._song_parenthetical_layouts[candidate], parenthetical_lines[candidate], parenthetical_font),
+                        (self._song_parenthetical_translation_layouts[candidate], parenthetical_translation_lines[candidate], secondary_font),
+                    ):
+                        if layer is not None and not self._lyric_reading_assets_ready(
+                            layer_text, layer_font, layer[0], emphasis_unread_color,
+                        ):
+                            reading_candidate = (candidate, layer_text, layer_font, layer[0])
+                            break
+            elif len(reading_candidate) == 2:
+                candidate, candidate_layout = reading_candidate
+                reading_candidate = (candidate, paint_lines[candidate], lyric_font, candidate_layout)
+            if reading_candidate is None:
+                self._pending_reading_prewarm = None
+            else:
+                candidate, reading_text, reading_font, candidate_layout = reading_candidate
+                token = (
+                    self._song_layout_key, self._visual_track_identity(),
+                    candidate, int(emphasis_unread_color.rgba()), reading_text, reading_font.toString(),
                 )
+                if self._pending_reading_prewarm is None or self._pending_reading_prewarm[0] != token:
+                    self._pending_reading_prewarm = (
+                        token, reading_text, reading_font, candidate_layout,
+                        emphasis_unread_color, 0, 0,
+                    )
         if layouts:
             lower = max(0, min(len(layouts) - 1, int(math.floor(anchor))))
             upper = min(len(layouts) - 1, lower + 1)
@@ -8645,7 +8776,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
         actual scene raster and the shared theme veil/strength. Active states
         never choose their own ink, so all controls still agree.
         """
-        image = self._background_cache
+        scene = getattr(self, '_lyric_resize_backdrop_scene', None)
+        image = scene() if callable(scene) else self._background_cache
         if image.isNull():
             return self._interpolated_control_color("scene", QColor("black" if self._surface_glass_light() else "white"))
         veil = glass_material_tint(light=self._surface_glass_light(), material_level=self._surface_glass_level())
@@ -10247,6 +10379,8 @@ class MusicSurfaceWindow(MusicWindowCompactMixin, MusicSongCollectionMixin, Musi
 
     def _lyric_word_target_at(self, point: QPointF):
         """Return ``(row, unit, seconds)`` for a measured word under point."""
+        if self._lyric_resize_frozen:
+            return None
         current_key = (
             self._visual_track_identity(),
             str(getattr(self.owner, "media_source_app", "") or ""),

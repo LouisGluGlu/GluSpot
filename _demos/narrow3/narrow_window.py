@@ -227,6 +227,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.veil = VeilOverlay()
         self.background_veil = BackgroundEdgeVeil()
         self._background_veil_key = None
+        self._lyric_resize_background = None
         self.veil_key = None
         self._lyric_static_key = None
         self._lyric_static_image = None
@@ -317,6 +318,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         result['veil_seam_max_step'] = self.background_veil.veil_seam_max_step
         result['veil_seam_metric'] = 'profile-only; physical centerline measured separately'
         result['resize_chrome_hold'] = self._resize_chrome_hold
+        result['lyric_relayout_count'] = self.lyric_relayout_count
+        result['lyric_resize_frozen'] = self._lyric_resize_frozen
+        result['lyric_resize_source_width'] = getattr(self, '_lyric_resize_w0', None)
+        result['lyric_resize_playback_anchor'] = getattr(self, '_lyric_resize_playback_anchor', None)
         result['veil_cache_hit_ratio'] = self.veil.hits / max(1, self.veil.hits + self.veil.misses)
         result['controls_translate'] = -VeilOverlay.TOP_END * (1. - self.visibility.progress)
         result['controls_scale'] = 1.
@@ -723,11 +728,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 for key, rect in group.items()}
 
     def _refresh_chrome_backdrop(self, now):
-        self._clear_control_renderer.live_tint_scene = self._background_cache
+        self._clear_control_renderer.live_tint_scene = self._lyric_resize_backdrop_scene()
         # Rasterize shared content into a cached, unfiltered backdrop without
         # grabbing the widget or scheduling another visible paint. Width
         # merges freeze this endpoint; blur remains owned by the renderer.
         if (not self.isVisible() or self._width_chrome_active
+                or getattr(self, '_lyric_resize_frozen', False)
                 or self._capturing_content_snapshot or self._capturing_transition_snapshot
                 or getattr(self, "_capturing_chrome", False)
                 or not hasattr(self, "visibility")):
@@ -773,13 +779,35 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._chrome_backdrop_key, self._chrome_backdrop_at = key, now
 
     def _surface_glass_backdrop(self):
+        scene = self._lyric_resize_backdrop_scene()
+        self._clear_control_renderer.live_tint_scene = scene
         frozen = getattr(self, "_width_glass_backdrop", None)
         if frozen is not None:
             return frozen
         backdrop = getattr(self, "_chrome_backdrop", None)
         if backdrop is not None and not self._capturing_content_snapshot:
             return backdrop
+        if getattr(self, '_lyric_resize_frozen', False):
+            return scene
         return super()._surface_glass_backdrop()
+
+    def _lyric_resize_backdrop_scene(self):
+        """Keep sharp pixels and chrome probes on the same frozen source."""
+        if getattr(self, '_lyric_resize_frozen', False):
+            scene = getattr(self, '_lyric_resize_background', None)
+            if scene is None and not self._background_cache.isNull():
+                scene = self._lyric_resize_background = QImage(self._background_cache)
+            if scene is not None:
+                return scene
+        return self._background_cache
+
+    def _refresh_lyric_resize_backdrop(self):
+        """Refresh the veil once in the shared lyric-settle callback."""
+        self._lyric_resize_background = None
+        self.refresh_background_veil(time.monotonic(), force=True)
+        self.refresh_veil()
+        self._chrome_backdrop_key = None
+        self._chrome_backdrop_at = -math.inf
 
     def _advance_width_chrome(self, value):
         # Animation frames only repaint the posed geometry. Material/controls
@@ -795,6 +823,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._content_layout_fit_key = None
             self._record_width_transition()
         self._sync_narrow_mode()
+        if hasattr(self, '_sync_lyric_resize_motion'):
+            self._sync_lyric_resize_motion()
 
     def _clear_width_chrome(self):
         self._width_chrome_active = False
@@ -878,6 +908,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self._finish_width_chrome()
 
     def resizeEvent(self, event):
+        if hasattr(self, '_note_lyric_width_event'):
+            self._note_lyric_width_event(event)
         self._sync_narrow_mode()
         super().resizeEvent(event)
         if self.narrow and hasattr(self, "veil"):
@@ -989,7 +1021,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def _paint_surface_frame(self, event):
         super()._paint_surface_frame(event, paint_chrome=not (self.narrow or self._width_chrome_active))
 
-    def refresh_background_veil(self, now):
+    def refresh_background_veil(self, now, *, force=False):
         if self._background_cache.isNull():
             return
         # Pin both endpoints for the whole reveal/hide generation. The source
@@ -998,14 +1030,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
                self.owner.secondary_color.rgba(), self.visibility.opacity.generation,
                self._background_cache.cacheKey())
-        if (getattr(self, '_resize_chrome_hold', False) or self._width_chrome_active) and self.background_veil.ready:
+        if (not force and (getattr(self, '_lyric_resize_frozen', False)
+                or ((getattr(self, '_resize_chrome_hold', False) or self._width_chrome_active)
+                    and self.background_veil.ready))):
+            self._lyric_resize_backdrop_scene()
             if key != self._background_veil_key:
                 self._diagnostics['veil_stale_frames'] = self._diagnostics.get('veil_stale_frames', 0) + 1
             return
-        if self.background_veil.ready and now - getattr(self, '_background_veil_at', -math.inf) < .1:
+        if not force and self.background_veil.ready and now - getattr(self, '_background_veil_at', -math.inf) < .1:
             return
-        if key != self._background_veil_key or not self.background_veil.ready:
-            self.background_veil.prepare(self._background_cache, self.width(), self.height())
+        if force or key != self._background_veil_key or not self.background_veil.ready:
+            self.background_veil.prepare(self._background_cache, self.width(), self.height(), force=force)
             self._background_veil_key = key
             self._background_veil_at = now
             self._diagnostics['veil_prepares'] = self.background_veil.prepare_count
@@ -1015,7 +1050,16 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if narrow and (not self.visibility.settled(now) or self._width_chrome_active
                        or getattr(self, '_resize_chrome_hold', False)):
             kwargs['advance_frame'] = False
-        super()._paint_background(painter, rect, primary, secondary, now, **kwargs)
+        scene = self._lyric_resize_backdrop_scene()
+        if getattr(self, '_lyric_resize_frozen', False) and not scene.isNull():
+            self._background_rebuilt_this_paint = False
+            if not getattr(self, '_navigation_cover_capture', False):
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                painter.drawImage(rect, scene)
+                painter.restore()
+        else:
+            super()._paint_background(painter, rect, primary, secondary, now, **kwargs)
         if narrow:
             self.background_veil.paint(painter, rect, self.visibility.progress)
 
@@ -1545,10 +1589,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         Reading ink advances in the sharp lyric layer. The blurred overlay is
         prepared only for a changed row/scroll bucket, never for word progress.
         """
-        if ((getattr(self, '_resize_chrome_hold', False) or self._width_chrome_active)
-                and self.veil_key is not None):
+        if (getattr(self, '_lyric_resize_frozen', False)
+                or ((getattr(self, '_resize_chrome_hold', False) or self._width_chrome_active)
+                    and self.veil_key is not None)):
             return
-        if self._narrow_lyrics_mount or self.mode != "lyrics":
+        # Wide and mounted narrow lyrics use the shared column renderer.
+        # Preparing the unused stanza atlas here delays width settlement.
+        if not self.narrow or self._narrow_lyrics_mount or self.mode != "lyrics":
             return
         layout = NarrowLayout(self.width(), self.height())
         if self.mode == "playlist":

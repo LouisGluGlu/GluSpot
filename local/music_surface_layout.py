@@ -188,6 +188,7 @@ class MusicContentLayoutMixin:
             self._content_layout_measured_narrow = self._width_transition.want_narrow
         self._width_resize_marks = None
         self._content_layout_fit_key = None
+        self._sync_lyric_resize_motion()
 
     def _record_width_transition(self):
         transition = self._width_transition
@@ -280,6 +281,7 @@ class MusicContentLayoutMixin:
         self._record_width_transition()
         if again:
             self._retarget_width_layout(transition.want_narrow)
+        self._sync_lyric_resize_motion()
         self.update()
 
     def _finish_width_layout(self):
@@ -421,6 +423,8 @@ class MusicContentLayoutMixin:
         self._content_layout_cross_pair_next = False
         if layout == self._content_layout:
             return False
+        # An explicit content choice supersedes a pending width bitmap.
+        self._cancel_lyric_resize()
         cover_from = self._content_layout_cover_pose()
         snapshot = self._capture_content_layout() if animate and self.isVisible() else QImage()
         transport_from = QRectF(self._media_control_panel_rect)
