@@ -176,6 +176,7 @@ from local.music_surface_palette import (
     MusicSurfacePalette,
     artwork_surface_palette,
     cached_artwork_surface_palette,
+    idle_surface_colors,
     future_lyric_color,
     relative_luminance,
     solid_album_background_color,
@@ -2405,8 +2406,7 @@ class IslandStackVisual(QWidget):
 
     def _no_audio_surface_colors(self) -> tuple[QColor, QColor]:
         self._refresh_music_system_theme()
-        tones = (44, 14) if bool(getattr(self, "_music_system_dark", False)) else (242, 214)
-        return tuple(QColor(tone, tone, tone) for tone in tones)
+        return idle_surface_colors(light=not bool(getattr(self, "_music_system_dark", False)))
 
     def _active_lyric_color_fill_paints_background(self, ambience_style: str | None = None) -> bool:
         if not self._active_lyric_color_fill_enabled():

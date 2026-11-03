@@ -17,6 +17,7 @@ class MusicLibrarySearchTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Expanding icon/progress geometry.
         self.window.show()
         self.app.processEvents()
         self.search = self.window.search

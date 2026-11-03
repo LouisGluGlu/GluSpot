@@ -56,6 +56,7 @@ class MusicNativeDisplayCacheTests(unittest.TestCase):
                     self.assertEqual(shaped.call_count - before, 1)
 
     def test_direct_background_matches_field_at_dpr_one_and_two_and_marks_actual_rebuilds(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         for dpr in (1., 2.):
             with self.subTest(dpr=dpr):
                 actual = self.target(dpr)
@@ -93,6 +94,7 @@ class MusicNativeDisplayCacheTests(unittest.TestCase):
                 self.assertEqual(self.window._background_cache.cacheKey(), cached)
 
     def test_ready_background_waits_for_full_damage_then_bypasses_old_request_interval(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         rect = QRectF(0, 0, 640, 480)
         colors = (QColor('#a83c71'), QColor('#237bac'))
         target = self.target()

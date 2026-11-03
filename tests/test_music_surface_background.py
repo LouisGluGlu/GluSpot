@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -34,6 +35,12 @@ def _advance(renderer: AlbumFlowBackgroundRenderer, colors: tuple[QColor, ...], 
 
 class AlbumFlowBackgroundTests(unittest.TestCase):
     COLORS = (QColor(222, 53, 44), QColor(35, 120, 216), QColor(199, 170, 52))
+
+    def setUp(self):
+        # These motion/reference checks exercise the optional classic field.
+        variant = patch.dict(os.environ, {"GLUSPOT_BACKDROP_VARIANT": "classic"})
+        variant.start()
+        self.addCleanup(variant.stop)
 
     @staticmethod
     def _previous_ambient_color(source):

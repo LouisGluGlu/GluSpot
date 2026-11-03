@@ -19,6 +19,7 @@ class GroupedLibraryFlowTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Folded groups and shelf transitions.
         self.window.set_account(AccountSnapshot('netease', True, 'fixture', '测试账号'))
         self.catalog = (
             LibraryCollection('fm', 'fm', '私人漫游', '', group='for_you'),

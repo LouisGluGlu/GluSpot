@@ -204,6 +204,7 @@ class MusicLibraryControllerTests(unittest.TestCase):
         self.service, self.player = Service(), Player()
         self.tasks, self.art_tasks = FakeTasks(), FakeTasks()
         self.window, self.island, self.entry = MusicLibraryWindow(), Island(), Entry()
+        self.window.set_library_variant("classic")  # Aggregate paging and folded shelves.
         self.controller = MusicLibraryController(self.settings, self.service, self.player, self.island, self.entry,
             window=self.window, tasks=self.tasks, art_tasks=self.art_tasks)
         self.song = OnlineSong("netease", "song-1", "synthetic song")
@@ -541,6 +542,54 @@ class MusicLibraryControllerTests(unittest.TestCase):
             entry_window.close()
             entry_window.deleteLater()
             window.deleteLater()
+
+    def test_entry_receives_current_and_late_cover_palette_without_opening_library(self):
+        from local.music_surface_palette import idle_surface_palette
+        entry = Entry()
+        entry.window = PlaybackEntryWindow()
+        window, island = MusicLibraryWindow(), Island()
+        self.player.track = TrackData("Trippin", "Kara Marni", (), ColorToken(180, 40, 70),
+            ColorToken(40, 20, 30), (), album_art_bytes=_png(QColor("#ac182d")))
+        work = []
+        island._run_background = lambda name, prepare: work.append(prepare)
+        controller = MusicLibraryController(self.settings, self.service, self.player, island, entry,
+            window=window, tasks=FakeTasks(), art_tasks=FakeTasks())
+        try:
+            self.assertFalse(window.isVisible())
+            self.assertFalse(work)
+            entry.window.show_sources()
+            entry.window.show()
+            self.app.processEvents()
+            self.assertEqual(len(work), 1)
+            work.pop()()
+            self.assertIs(entry.window._background_palette, window._background_palette)
+            self.assertTrue(window._background_palette.ambient_colors)
+            self.player.track = None
+            self.player.changed.emit()
+            self.assertEqual(entry.window._background_palette, idle_surface_palette())
+        finally:
+            controller.close()
+            entry.window.close()
+            entry.window.deleteLater()
+            window.deleteLater()
+
+    def test_sidebar_more_fetches_selected_catalog_group(self):
+        self.open()
+        self.window.set_library_variant("sidebar")
+        self.controller._catalog_has_more = True
+        self.controller._recommended_has_more = True
+        self.controller._set_catalog_more()
+        self.window._variant_view.select_section("for_you")
+        self.assertFalse(self.window.more_button.isVisible())
+        self.window._variant_view.select_section("recommended")
+        self.window.more_button.click()
+        token = self.tasks.latest("recommended_catalog")[0]
+        self.assertEqual(token[0], "recommended_catalog")
+        self.tasks.run(self.tasks.latest("recommended_catalog"))
+        self.window._variant_view.select_section("personal")
+        self.assertTrue(self.window.more_button.isVisible())
+        self.window.more_button.click()
+        self.assertEqual(self.tasks.latest("catalog")[0][0], "catalog")
 
     def test_open_failure_does_not_invent_account_and_signed_out_returns_to_source_login(self):
         self.service.accounts["qq"] = AccountSnapshot("qq")
@@ -1218,6 +1267,7 @@ class OwnedControllerHandoffTests(unittest.TestCase):
             player=SignalingMediaPlayer(), audio=object(), tasks=self.play_tasks, artwork_tasks=self.play_art_tasks,
             prefetch_tasks=self.play_prefetch_tasks, stream_cache=None)
         self.window, self.island, self.entry = MusicLibraryWindow(), Island(), Entry()
+        self.window.set_library_variant("classic")  # Existing owned shelf handoffs.
         self.controller = MusicLibraryController(self.settings, self.service, self.player, self.island, self.entry,
             window=self.window, tasks=self.tasks, art_tasks=self.art_tasks)
         self.controller.open_source("netease")

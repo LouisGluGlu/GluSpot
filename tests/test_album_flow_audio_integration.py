@@ -104,6 +104,7 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
             cast_latency_seconds=1.51, status_message="正在连接同步播放设备" if pending else "正在同步播放到 3 个设备")
 
     def test_chooser_capture_holds_displayed_flow_until_a_complete_page_paint(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         for fullscreen in (False, True):
             with self.subTest(fullscreen=fullscreen):
                 self.window._fullscreen = fullscreen
@@ -156,18 +157,19 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                   for x in range(0, material.width(), 8)]
         self.assertTrue(all(color.alpha() == 255 for color in pixels))
         self.assertGreater(max(max(color.getRgb()[:3]) - min(color.getRgb()[:3]) for color in pixels), 3)
-        # The user's whole-scene decision supersedes independent local
-        # inversion, including this panel's average crop. Check the shared
-        # authority at the same instant rather than demanding a new local ink.
+        # The panel and unselected rows share the whole-scene ink. Confirmed
+        # active rows retain their existing pale face and black content.
         with patch("local.music_surface_window.time.monotonic", return_value=102.0):
             panel._sync_surface_style()
             decided = self.window._scene_control_ink()
         self.assertEqual(panel._ink, decided)
         self.assertEqual(panel._muted, decided)
-        self.assertTrue(all(row.ink == decided for row in panel._rows.values()))
+        for row in panel._rows.values():
+            self.assertEqual(row.ink, QColor("black") if row.state == "active" else decided)
         marker.hide()
 
     def test_displayed_backdrop_refreshes_material_without_repainting_lyrics(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         panel = self._open_with_pointer()
         # The helper settles the opening slide at its final crop location.
         with patch("local.audio_output_panel.time.monotonic", return_value=108.0):
@@ -305,6 +307,7 @@ class AlbumFlowAudioIntegrationTests(unittest.TestCase):
                 self.assertFalse(panel._poll_timer.isActive())
 
     def test_mixed_pending_and_confirmed_members_keep_one_displayed_background_frame(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         for fullscreen in (False, True):
             with self.subTest(fullscreen=fullscreen):
                 self.provider.snapshot = self._mixed_snapshot(pending=True)

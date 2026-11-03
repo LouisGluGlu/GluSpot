@@ -3508,6 +3508,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertTrue(self.window._isolated_glyph_cache)
 
     def test_album_flow_reuses_small_frame_between_ambient_updates(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         self.window.resize(960, 540)
         frame = QImage(self.window.size(), QImage.Format.Format_RGB32)
         rect = QRectF(self.window.rect())
@@ -4085,6 +4086,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.assertEqual(self.window._cover_cache.cacheKey(), cache.cacheKey())
 
     def test_ambient_background_reuses_slow_frame_while_lyrics_continue_at_full_rate(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         self.owner.media_track_id = "song"
         self.owner.timed_lyrics = [(0.0, "A lyric reading across the surface"), (4.0, "Next line")]
         self.owner.media_position_seconds = 0.3
@@ -4127,6 +4129,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertNotEqual(self.window._background_cache.cacheKey(), background_key)
 
     def test_art_upgrade_and_rapid_track_change_retarget_displayed_background(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         self.owner.media_track_id = "song-a"
         self.owner.album_art_source = "thumbnail"
         self.owner.album_art = QImage(80, 80, QImage.Format.Format_RGB32)
@@ -4289,6 +4292,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 self.assertGreaterEqual(self.window._contrast_ratio(composite, background), 2.0)
 
     def test_multicolor_art_flows_across_surface_with_neutral_unread_ink(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         art = QImage(100, 100, QImage.Format.Format_RGB32)
         art.fill(QColor(8, 9, 12))
         with QPainter(art) as painter:
@@ -4334,6 +4338,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             )
 
     def test_returning_album_ink_accounts_for_inherited_bright_palette(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         blue = QImage(100, 100, QImage.Format.Format_RGB32)
         blue.fill(QColor("#1023ff"))
         yellow = QImage(100, 100, QImage.Format.Format_RGB32)

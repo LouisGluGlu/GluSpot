@@ -1,0 +1,61 @@
+# Library sidebar A-refined
+
+The selectable `sidebar` library now displays the selected real catalog group (`for_you`, `recommended`, `personal`) or the existing platform search. Following the t200 decision, `sidebar` is the library default and shared variant 2 `frosted` is the backdrop default. Environment overrides retain the other layouts/backgrounds, including `classic`; missing, empty or unknown selectors use the shipping defaults.
+
+The content area has no extra glass pane or per-row glass card. Wide windows show a sparse cover grid, narrow windows show collection rows. Titles are `LibraryCollection.title`; secondary text is `song.artist` or a short kind label, with duplicate title/kind text omitted. Slogans, generic marketing subtitles and decorative cover generators are removed. Missing covers use the existing platform fallback; only URL-backed covers enter the artwork skeleton/request path.
+
+The rail reuses `login_variant_layout("sidebar", ...)`: a 208 px labeled rail at 960×540, and a 64 px vertical icon rail at 433×550 / 391×508. Platform controls use A2's existing source icons and connection states. A 90 ms clock invalidates only connected status dots; signed-out/error/unsupported states stop it. Top-right platform/logout/close share one glass capsule with 44 px targets. Both the mini bar and its cover emit the existing `nowPlayingRequested` action.
+
+Section filtering also applies to catalog loading and pagination. `moreRequested` remains the signal; `load_more()` uses the selected sidebar group to call the existing recommended/personal fetch method. `set_has_more(..., groups=...)` carries those existing controller flags to the view. Search and classic retain aggregate paging behavior. No independent liked/recent/local navigation or unconnected browse action is exposed.
+
+## Shared artwork background
+
+Library and `MusicSurfaceWindow._art_palette()` use `artwork_surface_palette` / its shared cache, with `ambient_colors` and `ambient_weights` passed to `AlbumFlowBackgroundRenderer`. Library now publishes prepared roles through `backgroundPaletteChanged`; `MusicLibraryController` connects that to login's `set_background_palette()` before applying the current track. Login freezes the same extracted scene at t=0 / intensity=0 and retains its readability veil.
+
+When library is hidden or closed and login is visible, the existing single palette worker can still finish the current artwork. Opening login starts a pending extraction; when both consumers are hidden, extraction stays deferred. Existing generation/key checks reject stale results. No duplicate login extractor, network call, pixel timer or private login palette is added.
+
+Without a track, library and login call `idle_surface_palette()`. Its dark source tones `(44,44,44)` and `(14,14,14)` come from `idle_surface_colors()`, also used by the main surface owner's `_no_audio_surface_colors()`. The main surface's existing light-system-theme tones `(242,242,242)` / `(214,214,214)` remain available through that helper. The first-run mode-choice animation retains its separate onboarding palette. Classic's underlying AlbumFlow painter is unchanged; refined chrome and the shared no-track palette intentionally change complete page pixels from 767eecc.
+
+## Evidence
+
+- `/workspace/gluspot/handoff/library-variants/variant-A-refined.png`: labeled 960×540 / 433×550 / 391×508, each loaded/loading/empty; loaded cells show the three real groups. All cells use LouisHerm and the Trippin / Kara Marni now-playing snapshot.
+- `/workspace/gluspot/handoff/backdrop-variants/backdrop-{baseline,1,2,3}.png`: refreshed classic/flow/frosted/noir sheets, A-refined library and connected login A2, two sizes and warm/red extracted palette fixtures.
+- `/workspace/gluspot/handoff/library-variants/FEATURE_INVENTORY.md`: current control-to-signal/controller mapping with source lines.
+- `tools/render_library_variants.py --refined` and `tools/render_backdrop_variants.py`: actual Qt windows, offscreen, private temporary settings/cache directories, no provider/controller/network construction.
+
+Review covers reuse tracked `_demos/narrow3/covers/{sunset_city,night_sea,pink_forest,clip}.jpg`. They are offline fixtures, not claimed to be official artwork for the displayed tracks/playlists. Backdrop comparison retains photographic detail under controlled warm/red duotones before running the real extractor. No new image asset or redistribution claim is added.
+
+Focused verification uses `/workspace/gluspot/qtvenv/bin/python`, separate processes per module, and private temporary settings. All 257 discovered checks complete successfully, with two existing skips: library variants (16), backdrop variants (11), library background (9), login variants (11), library controller (83), surface palette (43), idle palette (6), library window (45), header (8), search (12), horizontal catalog (9), navigation (4). The two skips require local reference screenshots that are unavailable. Log: `/workspace/gluspot/handoff/library-variants/verification-A-refined.log`. Compilation and `git diff --check` pass.
+
+A preliminary combined process completed assertions with an obsolete platform-tint expectation, then crashed during Qt teardown. That expectation was corrected for the requested shared neutral fallback. Final module-isolated runs exit normally; ordinary whole-suite/native teardown stability is not claimed. Full discovery was not run, as requested. Offscreen evidence does not establish Windows compositor/live-account acceptance.
+
+Process score: 100/100. Product edits were written by the primary agent; delegated work was read-only inspection. No version/build/push, credential access, live account call or player action was performed.
+
+## t200 integration
+
+The t200 decision selects A-refined `sidebar` and variant 2 `frosted` as the shipping defaults. Integration starts after Item 8 at `1e26cb8de31240bd84eba2b04c05eb8791d8fba5` and merges `27f238a3ced4ad6c2de02b3b85d10b36b07fcf63` into `grok/capture-narrow-v4`. No environment flag is required. `GLUSPOT_LIBRARY_VARIANT` and `GLUSPOT_BACKDROP_VARIANT` retain the alternate presentations, including explicit `classic`; missing, empty or unknown values select `sidebar` / `frosted`. Login keeps the t195 A2 `sidebar` default.
+
+The incoming library/backdrop chrome and prepared-palette connection are retained. The source-button merge keeps the target's disabled/unavailable `checked`, hover, press and focus-ring guards while adding the library's shared glass-cluster behavior. The island change only extracts its existing no-audio tones into the shared helper; the music surface adds backdrop style to its background cache identity. The t194 sea/audio glow implementation, t195 runtime preparation and QR begin/poll/cancel paths, and t196 provider/URL-cover/unblur implementation are preserved.
+
+Six final-source Qt frames are under `/workspace/gluspot/handoff/t200/`, with all three layout/backdrop environment selectors absent:
+
+| Surface | 960×540 | 433×550 | 391×508 |
+| --- | --- | --- | --- |
+| Loaded library A-refined | `t200-library-frosted-960x540.png` | `t200-library-frosted-433x550.png` | `t200-library-frosted-391x508.png` |
+| Login A2, connected fixture | `t200-login-frosted-960x540.png` | `t200-login-frosted-433x550.png` | `t200-login-frosted-391x508.png` |
+
+The isolated proof script `render_t200.py` uses tracked local photographs and synthetic model snapshots without providers/controllers or network calls. `render-manifest.json` records dimensions, source/PNG hashes, colors and coverage weights. Assertions verify that library extraction equals `artwork_surface_palette`, login receives the same prepared palette object, and their frosted rasters match the shared AlbumFlow output. The playing library's default 0.74 intensity still leaves its background timer stopped. These are offline connected fixtures; no real login was completed.
+
+The verified post-Item-8 baseline is 6,026 tests, 54 failures, 48 errors and 32 skips in 194.336 seconds. Its existing completed log is `/workspace/gluspot/handoff/t196/item8-final-full.log`; all ten recorded Python source/test hashes match the delivered Item-8 commit. `post-item8-baseline.json` records that binding and normalized test IDs. Classic-specific tests explicitly select their original rotating/folding/animated presentation, retaining those contracts while the default/palette tests exercise frosted with no flag.
+
+All 249 focused checks pass in 11 separate module processes with exit 0; `module-isolation-summary.json` records commands, reports and logs. Another 61 preservation checks cover sea waves, login/runtime preparation and cancellation, URL-cover priority, startup and classic motion handoffs; all 14 processes exit 0, with one existing PowerShell-required skip and no failures/errors (`preserve-isolation-summary.json`).
+
+The remaining classic worker/navigation clock fixtures explicitly select `classic` too; both modules pass all 18 checks with exit 0 (`module-supplemental-summary.json`). Total isolated coverage is 328 checks across 27 successful processes, with one existing skip and no failures/errors. No assertions were removed to accommodate the default change.
+
+Completed provisional discovery ran 6,055 tests in 198.630 seconds and identified five more classic-motion/cache assumptions plus an overbroad output-row ink assertion. Those motion fixtures now explicitly select `classic`; the generic output-material test keeps frosted and checks the existing active-row rule (black ink on the pale selected face), with other rows following scene ink. Its previous all-rows-equal assumption only passed when classic chose black scene ink. The corrected test passes under both styles; no output-panel product code changes. All 12 adjustment checks pass with exit 0 (`focused-final-adjustments.json`). A provisional narrow-scroll setup error was absent in paired isolated baseline/current runs (4/4 each, `narrow-scroll-comparison.json`); no shared fixture or product change was made for it.
+
+The earlier combined process passed the same 249 assertions and wrote its report, then exited 139 during Qt teardown. The first full attempt stalled in `test_music_palette.AlbumPaletteTests.test_black_white_gray_and_mixed_monochrome_covers_use_neutral_dark_gray` and was terminated without a summary. A second full attempt crashed in `test_library_layout_variants.LibraryLayoutVariantTests.test_pagination_and_catalog_loading_remain_explicit_and_independent`; its isolated module passes. After the completed provisional run and final fixture corrections, two ordinary canonical runs crashed constructing a settings sidebar icon in `test_liquid_glass_widgets` (unchanged `settings_window.py:1005`), with stable source hashes. These incomplete attempts do not establish ordinary full-process stability. Complete baseline/final module-isolated discovery comparison, canonical crash evidence and the delivered merge SHA are recorded in `/workspace/gluspot/handoff/t200/FINAL.md`.
+
+Final paired coverage uses all 322 baseline / 324 merged test modules in ordinary separate subprocesses, with private temporary profiles/caches, normal garbage collection and all variant selectors unset. The same owned-audio handoff module crashes at real `QAudioOutput()` on both revisions; its 18 unchanged tests all pass individually on each revision, without bootstrap or bypass. Combining those individual summaries with the remaining complete module summaries covers **6,026 baseline / 6,055 merged tests**: **54 failures / 48 errors / 32 skips** on both, with identical failure/error/skip IDs and reasons. There are **zero added failures, errors or skips**, and source hashes remain stable. Raw module evidence is `isolated-full-comparison.json`; the complete-coverage supplement is `isolated-handoff-individual.json`. This establishes the requested Box comparison, while ordinary all-in-one Qt process stability remains an explicit limitation.
+
+Native Windows display/live-account acceptance remains with the parent’s single bak-t200 restart covering wave, login, cover and library/frosted. This task does not launch a PC app or player, restart NetEase, build, change version or push.

@@ -47,7 +47,7 @@ class MusicBackgroundTaskTests(unittest.TestCase):
     def setUp(self):
         self.owner = SceneOwner()
         self.owner.resize(960, 540)
-        self.renderer = AlbumFlowBackgroundRenderer()
+        self.renderer = AlbumFlowBackgroundRenderer("classic")
         self.tasks = CapturedPixelRequests()
         self.factory = patch("local.liquid_glass_tasks.glass_pixel_tasks", return_value=self.tasks)
         self.factory.start()
@@ -83,7 +83,7 @@ class MusicBackgroundTaskTests(unittest.TestCase):
         self.assertTrue(immutable_numeric(request["payload"]))
         self.assertGreater(request["bytes"], 0)
         actual = self.tasks.finish()
-        reference = AlbumFlowBackgroundRenderer()
+        reference = AlbumFlowBackgroundRenderer("classic")
         reference.render(self.owner.size(), self.COLORS, 0.)
         expected = reference.render(self.owner.size(), self.COLORS, .04)
         self.assertEqual(self.pixels(actual), self.pixels(expected))
@@ -137,7 +137,7 @@ class MusicBackgroundTaskTests(unittest.TestCase):
                 deliveries.append(threading.get_ident())
                 super()._accept_background_frame(image, domain, stamp)
 
-        self.renderer = ObservedRenderer()
+        self.renderer = ObservedRenderer("classic")
         service = GlassPixelTasks(self.owner)
         original = _render_background_snapshot
 

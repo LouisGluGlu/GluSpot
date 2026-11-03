@@ -20,6 +20,7 @@ class MusicLibraryWindowTests(unittest.TestCase):
 
     def setUp(self):
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Original folded catalog contract.
         self.account = AccountSnapshot("netease", True, "fixture-id", "布局测试账号", state="verified")
         self.window.set_account(self.account)
         self.catalog = (
@@ -216,7 +217,8 @@ class MusicLibraryWindowTests(unittest.TestCase):
         self.window.set_collections(self.catalog + (LibraryCollection("extra", "playlist", "新歌单", "", "3"),))
         self.assertEqual(self.window._background_frame.cacheKey(), key)
         self.window.set_account(AccountSnapshot("qq", True, "qq-account", "另一个账号", state="verified"))
-        self.assertNotEqual(self.window._background_frame.cacheKey(), key)
+        # No track uses the shared neutral surface scene, independent of platform.
+        self.assertEqual(self.window._background_frame.cacheKey(), key)
 
     def test_clear_search_returns_catalog_once_and_preserves_account(self):
         self.window.search.setText("海")

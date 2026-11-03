@@ -8739,7 +8739,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         intensity_value = getattr(self.owner, "music_flow_intensity", 0.74)
         intensity = max(0.0, min(1.0, float(0.74 if intensity_value is None else intensity_value)))
         identity = self._track_visual[0] if self._track_visual else None
-        key = (width, height, tuple(color.rgba() for color in colors), ambient_weights, intensity, identity)
+        key = (width, height, tuple(color.rgba() for color in colors), ambient_weights, intensity, identity,
+               self._album_flow_background.backdrop_variant)
         # Advancing during a lyric-only dirty paint would leave a newer
         # background patch surrounded by old pixels. Hold the displayed
         # frame and its contrast samples until a whole-surface paint.

@@ -36,6 +36,7 @@ class MusicLibraryHeaderTests(unittest.TestCase):
         self.clock = patch("local.music_library_window.time.monotonic", side_effect=lambda: self.now)
         self.clock.start()
         self.window = MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Rotating/folding header contract.
         self.window.resize(760, 720)
         self.window.set_account(AccountSnapshot("netease", True, "header-account", "保留账号昵称"))
         self.window.set_background_context({"v2_music_flow_intensity": 0.}.get, lambda *args: None)

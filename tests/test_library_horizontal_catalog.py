@@ -18,6 +18,7 @@ class LibraryHorizontalCatalogTests(unittest.TestCase):
 
     def setUp(self):
         self.window=MusicLibraryWindow()
+        self.window.set_library_variant("classic")  # Horizontal shelves belong to classic.
         self.window.set_account(AccountSnapshot('netease',True,'horizontal-account','横向歌单'))
         self.catalog=(LibraryCollection('fm','fm','私人漫游',''),
             LibraryCollection('daily','daily','每日推荐',''),

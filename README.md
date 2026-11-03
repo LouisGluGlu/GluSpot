@@ -106,6 +106,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-04: t200 merges library variants `27f238a3` after Item 8 (`1e26cb8`). Library A-refined `sidebar` and shared backdrop variant 2 `frosted` are the defaults without environment flags. Library, A2 login and the main music surface retain the shared `artwork_surface_palette` / AlbumFlow path. Environment selectors retain alternate layouts/backgrounds and `classic` fallback. The t194 palette sea/audio glow, t195 runtime/QR availability and t196 URL-cover/unblur fixes are preserved. Box comparison and six requested proof frames are recorded in [t200 integration evidence](docs/library-sidebar-a-refined.md#t200-integration). No version/build, PC launch, completed login or player restart.
+
 - 2026-11-04: t196 item 8 gives system-capture NetEase artwork a matching queue URL before cloudsearch/CAA fallback, independently of the progress adapter. Downloaded covers of at least 320 px retain original provenance even when the CDN caps their size. Failed/missed previews display sharp; pending previews of at least 96 px stop blurring after 2.5 seconds. Stable title/artist artwork identity, per-track retries and flushed sanitized artwork logs replace the global NetEase cooldown. Source verification and remaining parent PC hi-res count/time-to-hi-res acceptance are recorded in [artwork recovery](docs/artwork-resilience.md#system-capture-url-priority--t196-item-8). No version/build, PC launch, completed login or player restart.
 
 - 2026-11-04: t195 merges `080741d` (`grok/login-variants`) after the t194 sea correction. A2 `sidebar` is the default source/login page, with a labeled wide sidebar, vertical narrow icon rail, green breathing account status dots and shared `GlassPushButton` capsules. The existing `e0ee9ca` runtime preparation, availability and QR begin/poll/cancel paths remain; unavailable sources stay dim and cannot paint armed rings in any layout. `classic`, B `focus` and C `hero` remain selectable as documented under [登录页布局对比](#登录页布局对比). No version/provider change, PC launch, completed login or player restart.
@@ -117,6 +119,12 @@ This README is the canonical product, implementation, release-readiness, and pen
 - 2026-11-03: t179 item 1 redo restores the wide lyric column to its ordinary margins and original active-row anchor. The ink-only alpha mask now fades over one lyric row to the earliest transport/collection/expanded-DJ top, using a stable control envelope through hide/reveal and resize capture. Narrow keeps its existing reservation and veil. Three-panel offscreen comparisons and focused verification are recorded in [t179 evidence](docs/capture-narrow-t179.md#lyric-bottom-clearance-item-1); parent PC interim acceptance is pending.
 
 - 2026-11-03: t179 dims unavailable login tiles and suppresses armed rings, lets runtime preparation retain an explicit missing-Node-license notice after a download failure, synchronizes hidden chrome with artwork/palette changes and checks drift every ten seconds. Owned covers remain pending through bounded retries, with one extra attempt for network/timeout/incomplete transfers. Existing parent PC QR proof, Box checks and remaining limits are recorded in [t179 evidence](docs/capture-narrow-t179.md). No version, build or player restart.
+- 2026-11-04: Library A `sidebar` is refined around the three real catalog groups, section-aware pagination, an A2-sized vertical rail, plain collection content and a fully clickable mini bar. Login receives the library's asynchronously prepared `artwork_surface_palette`; no-track library/login use the music surface's shared neutral fallback. `sidebar` is now the library default following the t200 decision. The nine-frame review sheet, refreshed four backdrop sheets, feature map and 257 focused checks (two existing skips) are recorded in [A-refined evidence](docs/library-sidebar-a-refined.md).
+
+- 2026-11-04: `grok/library-variants` adds shared `GLUSPOT_BACKDROP_VARIANT=classic|flow|frosted|noir`. At that commit, classic remained the pixel-identical default; the three new static fields use saturated HSL palette mixing, a dark luminance envelope and deterministic dither/grain. Library, source/login/account and AlbumFlow music surfaces share the selector. Switching, four warm/red comparison sheets and focused verification are documented under [背景风格对比](#背景风格对比).
+
+- 2026-11-04: `grok/library-variants` adds selectable library A `sidebar`, B `listen`, and C `compact`, with `classic` retained as a fallback. The three layouts share login A2 glass/status icons and the existing catalog/search/playback contracts. Isolated 27-frame contact sheets, switching instructions and focused verification are documented under [音乐库布局对比](#音乐库布局对比); no version, provider, build or player restart.
+
 
 - 2026-11-03: t168/t169/t170 B accepts independently observed CEF seeks within 250 ms, permits a later explicit retry after completed unverified readback, and preserves uncertain-write blocking. Narrow wheel browsing clears only lyric-row blur for 350 ms; routine capture/library/DJ/output status no longer takes over content. Owned unit setup injects both decoders, and login shares dark glass with centered responsive QR/platform cards. Focused results, the native initialization cause, inherited fixture failures and pending PC acceptance are recorded in [B evidence](docs/music-surface-t168-t170-b.md). No version, build, player restart or live playback-mode change.
 
@@ -248,6 +256,65 @@ Double-click `setup-env.bat` or `repair-env.bat` to prepare this checkout's Wind
 For the optional online account adapters, install Node.js 20 or later with npm and run `native/online_music/prepare-runtime.ps1`. It installs the pinned lockfile with package scripts disabled into ignored `build/online-music`, verifies adapter versions and retains dependency notices. `launch.bat` prepares Python only; each new checkout/worktree needs this optional runtime prepared independently. Without this runtime the login surface reports unavailable services; system capture remains usable. See [online entry setup](docs/owned-playback-entry.md).
 
 The combined directory has its own Python environment and native HomePod helper under `build/native-airplay/`. Run its own `launch.bat`; the two original part directories are preserved. GluSpot's single-instance lock and user settings retain the normal product namespace, so exit an already running GluSpot before launching another source copy. Rebuilding the helper requires the toolchain documented in [native helper instructions](native/airplay_sender/README.md).
+
+### 背景风格对比
+
+启动前设置 `GLUSPOT_BACKDROP_VARIANT=classic|flow|frosted|noir`。未设置、空值或未知环境值均使用默认 `frosted`，与布局选择互相独立。
+
+| 风格 | 效果 | 对比图 |
+| --- | --- | --- |
+| `classic` | 原 AlbumFlow 与原有深色遮罩，保持既有像素与动画 | `backdrop-baseline.png` |
+| `flow` | 专辑取色的柔软多团流体渐变，明亮色团之间保留深色空间 | `backdrop-1.png` |
+| `frosted`（默认） | 近黑磨砂场，左上方一团柔和取色光晕与细微颗粒 | `backdrop-2.png` |
+| `noir` | 近乎纯黑，仅保留极淡取色暗角，优先文字对比 | `backdrop-3.png` |
+
+音乐库与登录窗口支持 `window.set_backdrop_variant("flow")`，`window.backdrop_variant` 可读取当前风格；renderer 也支持相同 setter，或 `AlbumFlowBackgroundRenderer("flow")`。setter 规范化空白与大小写，无效名称抛出 `ValueError`，`None` 恢复环境变量选择。共享解析函数为 `local.backdrop_variants.resolve_backdrop_variant()`。切换不替换账号、二维码、歌单或播放状态。
+
+三个新风格均为静态：以尺寸、取色／覆盖权重和风格缓存不超过 256×256 的栅格，不使用时间桶、后台像素任务或新时钟；音乐库在这些风格下停止背景动画计时器。登录仍固定 `t=0` / intensity=0，通过 `backgroundPaletteChanged` 接收音乐库已准备的 `artwork_surface_palette`（含 ambient weights）；播放器已有的歌词／界面时钟照常运行并复用静态背景。色团沿最短 HSL 色相弧混合，彩色颜料的饱和度限制为 0.72–0.88，灰度封面保持中性；线性光亮度限制与稳定有序抖动／细微颗粒避免脏灰混色和色带。新风格的库／登录遮罩减轻到 alpha 28，classic 的原遮罩及 `_paint_field_pixels` 保持原样。无歌曲时，登录和音乐库使用共享 `idle_surface_palette()`：与主播放页深色无音频状态相同的 `(44,44,44)` / `(14,14,14)` 来源色；主播放页浅色系统主题仍使用同一 helper 的浅色分支。登录不再另用 onboarding 色板，也不从头像取音乐背景色。
+
+同一 `AlbumFlowBackgroundRenderer` 覆盖全部音乐库布局、来源／登录／账号页，以及 `MusicSurfaceWindow._paint_background` 的窗口、全屏和经过该共享路径的窄屏播放页。首次使用的播放方式二选一页仍单独绘制黑色；岛态 `local/music_background_renderer.py` 的 Solid/Native 背景走另一条路径。演示若调用 AlbumFlow 也会读取环境变量；旧版安装资产导出脚本 `packaging/windows/prepare-installer-assets.py` 同样如此，已有安装资产与安装程序没有重新生成。
+
+`767eecc` 的历史验证：从起始提交 `b15f831652758a7f72f7716549ae6c3f44e7302a` 隔离加载原始 painter／窗口，与当时源码比较：两套取色、两种尺寸共 **4/4 原始栅格及 8/8 完整库／登录截图逐像素一致**。当时 **84 项聚焦测试通过**，涵盖选择解析、classic 冻结参考、静态缓存、颜色／亮度、旧任务拒绝、窗口 setter／生命周期、音乐播放页与已有库／登录布局。按本任务要求不运行全量测试。
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_backdrop_variants.py
+```
+
+交付目录 `/workspace/gluspot/handoff/backdrop-variants/` 包含上表四张 2866×1204 对比图，每张两行（暖棕／琥珀与鲜红封面），四列（音乐库 A 已加载 960×540 / 433×550，登录 A2 已连接 960×540 / 433×550）。只创建本地 `Trippin / Kara Marni` 与 `LouisHerm` 模型夹具；最新 A-refined 对比使用仓库本地 sunset_city 照片的暖／红双色调测试图；库和登录通过产品的 prepared-palette 接口使用同一组提取色与覆盖权重，不再改写登录的 `PALETTES`。这不是 Trippin 的真实发行封面，账号／歌单／曲名均为离线夹具。所有 Qt 设置／缓存目录均为私有临时目录，不创建 provider 或访问网络。
+
+该目录另有 `shots/`、`pixels.json`、`classic-parity.json`、`verification.log`、可重现脚本 `render_backdrop_variants.py` 以及记录最终提交哈希的 `README.md` / `FINAL.md`。源码脚本为 `tools/render_backdrop_variants.py`，支持 `--repo`、`--output` 与 `--variants`。离屏证据不代表原生 Windows 合成器或真实账号验收；本任务不改版本、不构建、不重启播放器、不推送。
+
+### 音乐库布局对比
+
+音乐库默认使用 A-refined `sidebar`；A / B / C 仅替换布局与绘制，继续使用同一账号、歌单、搜索、封面、分页与播放控制器。
+
+| 方案 | 标记 | 布局 |
+| --- | --- | --- |
+| A-refined | `sidebar` | 与登录 A2 共用轨道尺寸；三个真实分区过滤、宽屏稀疏封面／窄屏列表、整条迷你播放条可点；无内容玻璃套层与填充口号 |
+| B | `listen` | 大封面正在播放头图、胶囊搜索、带时间的细进度与分区横向歌单架 |
+| C | `compact` | 分段玻璃标签、紧凑歌单行与标题下细进度；窄屏标签收为图标 |
+
+启动前设置 `GLUSPOT_LIBRARY_VARIANT=sidebar`、`listen`、`compact` 或 `classic`。未设置、空值或未知环境值均回退到 `sidebar`。运行中调用 `window.set_library_variant("sidebar")`，读取 `window.library_variant`；setter 会规范化空白／大小写，无效名称抛出 `ValueError`。切换保留当前账号、歌曲、搜索编辑器、查询、结果与封面缓存。搜索清除／返回仍由控制器取消未完成的播放。
+
+三种方案共用 A2 平台玻璃按钮、22 px 品牌图标与已连接／未登录／错误状态灯；未适配平台无灯。搜索分别融入侧栏、头部胶囊与标签页，进度分别融入迷你播放条、头图与标题下细线。未更改版本、设置文件、provider 或播放器生命周期。
+
+初版离屏对比覆盖每种方案的 960×540 / 433×550 / 391×508，以及已加载／加载中／空音乐库，共 27 张真实 Qt 窗口截图。初版图使用本地渐变测试封面、`AccountSnapshot` / `LibraryCollection` / `TrackData`，临时 APPDATA/XDG，不创建 provider 或访问网络：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_library_variants.py
+```
+
+证据目录为 `/workspace/gluspot/handoff/library-variants/`：`variant-A.png`、`variant-B.png`、`variant-C.png`（每张三列尺寸、三行状态），单图位于 `shots/`，可独立运行的脚本副本为 `render_variants.py`。离屏证据不代表 Windows 合成器与真实账号验收；本任务未构建发行包。
+
+A-refined 的当前交付为 `variant-A-refined.png`（三列尺寸 × 已加载／加载中／空音乐库），已加载行依次展示 `for_you` / `recommended` / `personal`，各帧保留 `LouisHerm` 与 `Trippin` 迷你条。脚本改用仓库已跟踪的本地照片／音乐图片，未声称它们是 Trippin 的官方封面；产品仍只通过 `artworkNeeded` 接收封面，缺图为平台图标。重现：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_library_variants.py --refined
+```
+
+当前功能证据、共享色板生命周期、聚焦验证结果及离屏限制见 [A-refined evidence](docs/library-sidebar-a-refined.md)。以下 99 项是初版布局的历史验证。
+
+针对性验证：`tests.test_library_layout_variants` 的 12 项与现有 `test_music_library_window`、`test_music_library_header`、`test_music_library_search`、`test_library_horizontal_catalog`、`test_library_navigation`、`test_music_library_background` 的 87 项合计 **99 项通过 / 7.670 秒**，包含 27 组离屏状态与 classic 往返、搜索返回取消、封面、播放信号和分页检查。编译与 `git diff --check` 通过，完整命令与输出位于证据目录的 `verification.log`。按本任务要求使用针对性测试，不要求全量测试通过。
 
 ### 登录页布局对比
 
@@ -622,7 +689,7 @@ Legacy data classes, independent provider modules, assets and unit fixtures rema
 - The library keeps account identity beside a separate current album rotating once per 20 seconds during playback; pausing stops rotation, and clicking the album opens window mode without restarting music. Playlist selection keeps the last playback surface. Library/player navigation moves a separate cover and enlarges the background over 560 ms, reversing into the library album on return; bounded transparent UI snapshots avoid repeated scenery and per-frame capture. A playlist starts preparing its first valid catalog page immediately and fills remaining pages only after authorized audio is ready, preserving paused playback and listener queue insertions.
 - Search starts as the rightmost icon beside an independent playback progress bar. Its original editor expands left, reserving one 44-pixel progress ring; placeholder, input, selection and caret fade in after geometry settles. Clicking the ring reverses the same animation and preserves query, cursor, selection and undo. Hover does not replace search/progress content; Ctrl+F, Enter and existing clear-search cancellation remain. See [current behavior and evidence](docs/lyric-continuity-and-queue-artwork-2026-10-15.md).
 
-- Source selection, login/account and the signed-in library use blurred, refractive Liquid Glass, retaining their existing dark appearance. Source/login uses a frozen in-app backdrop. The library follows the current song's actual cover pigments with the shared bounded AlbumFlow renderer, smooth palette changes and existing animation settings; pause, hide, minimize, close and zero intensity stop its background timer. Without a song it returns to the static platform canvas. Clicking the selected source preserves the current login; Back cancels that login before returning to source selection. QR/state/actions remain contained on short displays. Current-platform library search supports Ctrl+F and a clear/return action that retires pending playback through the existing controller. DJ loading/readiness/failure messages share one rounded glass prompt with the existing right-side ring icon, following the song page's theme policy; clicking its text opens voice choices. Previous/play/next remain bare glyphs. See [home flow and DJ prompt](docs/home-liquid-glass-2026-10-15.md) and [current library, layouts and verification](docs/library-playlist-and-window-boundaries-2026-10-15.md).
+- Source selection, login/account and the signed-in library use blurred, refractive Liquid Glass, retaining their existing dark appearance. Source/login uses a frozen in-app backdrop. The library follows the current song's actual cover pigments with the shared bounded AlbumFlow renderer. The optional `classic` preserves smooth palette changes and existing animation settings; pause, hide, minimize, close and zero intensity stop its background timer. Default `frosted` (variant 2) and optional `flow` / `noir` fields are static and fully cached; see [背景风格对比](#背景风格对比). Without a song, library/login use the music surface’s shared static neutral palette. Clicking the selected source preserves the current login; Back cancels that login before returning to source selection. QR/state/actions remain contained on short displays. Current-platform library search supports Ctrl+F and a clear/return action that retires pending playback through the existing controller. DJ loading/readiness/failure messages share one rounded glass prompt with the existing right-side ring icon, following the song page's theme policy; clicking its text opens voice choices. Previous/play/next remain bare glyphs. See [home flow and DJ prompt](docs/home-liquid-glass-2026-10-15.md) and [current library, layouts and verification](docs/library-playlist-and-window-boundaries-2026-10-15.md).
 - The library starts with nonplayable folded cover groups for daily/FM picks, recommended playlists and personal playlists. Expanding a group reveals horizontal playlist covers; clicking a playlist starts its first song using the last exited island/window/fullscreen surface. The saved expand-all switch opens all groups without fetching their song lists. A selected group stays above smaller side-by-side folded peers; switching first collapses its row, then moves the new group upward and rearranges its peers. Wheel input moves playlist covers under a fixed group title. Search songs can still be inserted as the immediate next song while preserving current playback and the original queue. The three old library presentation selectors and duplicate source-switch/back icons are removed visibly. NetEase personalized and QQ hot recommended playlists use the pinned provider/bridge interfaces, with independent pagination, retry and stale-source fencing. Source/library handoffs use cancellable native snapshots and exclusive island visibility ownership.
 - Real media state comes from `WindowsMediaProvider`.
 - Program-owned playback publishes a GluSpot Windows SMTC session with title/artist/album/artwork, play state and the real song timeline. Windows media-panel/headset Previous, Next, Play and Pause commands reuse the existing owned transport; supported position requests use guarded seek. The session closes on stop, source disable and exit, and is excluded from external-player capture. The source-less muted WinRT session publishes controls only; Qt remains the audio/output authority. See [native interface evidence and verification](docs/windows-smtc-owned-playback.md).

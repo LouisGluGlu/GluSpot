@@ -304,6 +304,7 @@ class NarrowContentLayoutTests(unittest.TestCase):
         self.assertIs(self.window._controls_bands, bands)
 
     def test_hidden_moving_background_keeps_existing_veil_preparation_cadence(self):
+        self.window._album_flow_background.set_backdrop_variant("classic")
         self.hide_chrome()
         self.owner.media_is_playing = True
         palette = self.window._art_palette()
