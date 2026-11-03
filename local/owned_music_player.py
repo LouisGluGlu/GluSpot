@@ -141,12 +141,14 @@ class OwnedMusicPlayer(QObject):
             self.audio.volumeChanged.connect(self._dj_music_volume_changed)
         self.tasks = tasks or MusicTasks(self)
         self.tasks.completed.connect(self._completed)
+        self.tasks.completed.connect(self._retry_cover_lyrics)
         self._control_requested.connect(self._apply_control_request, Qt.ConnectionType.QueuedConnection)
         # Image downloads/decoding cannot occupy the stream/lyric workers.
         self.artwork_tasks = artwork_tasks or MusicTasks(self)
         self.artwork_tasks.completed.connect(self._completed)
         self.prefetch_tasks = prefetch_tasks or MusicTasks(self)
         self.prefetch_tasks.completed.connect(self._completed)
+        self.prefetch_tasks.completed.connect(self._retry_cover_lyrics)
         self.stream_cache = OwnedStreamCache() if stream_cache is _DEFAULT_STREAM_CACHE else stream_cache
         self.download_tasks = (download_tasks or MusicTasks(self)) if self.stream_cache is not None else None
         if self.download_tasks is not None:
@@ -209,6 +211,7 @@ class OwnedMusicPlayer(QObject):
         self._lyrics_enrichment_pending = None
         self._lyrics_enrichment_attempted = False
         self._lyrics_enrichment_source = None
+        self._cover_lyrics_retry = None
         self.playback_mode = "sequential"
         self._normal_playback_mode = "sequential"
         self._mode_epoch = 0
@@ -2513,6 +2516,7 @@ class OwnedMusicPlayer(QObject):
         self._lyrics_enrichment_pending = None
         self._lyrics_enrichment_attempted = False
         self._lyrics_enrichment_source = None
+        self._cover_lyrics_retry = None
 
     def _lyrics_enrichment_context_is_current(self, song, epoch):
         return (not self._closed and epoch == self._epoch and self.track is not None
@@ -2835,6 +2839,7 @@ class OwnedMusicPlayer(QObject):
         self._pump_artwork()
 
     def _apply_cached_artwork(self):
+        previous = self.track
         visual_song = (next((song for song in self.queue
             if self.track.track_id == f"owned:{song.source_id}:{song.song_id}"), None)
             if self._is_voice_segment() else self.queue[self.index])
@@ -2854,7 +2859,38 @@ class OwnedMusicPlayer(QObject):
             changes["album_art_lookup_state"] = ("pending" if pending else "failed" if key in self._art_failed
                                                  else "pending" if visual_song.artwork_url else "miss")
         self.track = replace(self.track, **changes)
+        if (cached and not preview and cached[0] != previous.album_art_bytes
+                and (not previous.album_art_bytes or "original" not in previous.album_art_source)
+                and not previous.timed_lyrics and previous.lyrics == ("暂无歌词",)
+                and not self._closed and not self._is_voice_segment()
+                and visual_song is not None and visual_song.media_kind == "song"
+                and previous.track_id == f"owned:{visual_song.source_id}:{visual_song.song_id}"
+                and self._lyrics_parse_context_is_current(self._epoch)):
+            self._cover_lyrics_retry = (self._epoch, visual_song)
+            self._retry_cover_lyrics()
         self.changed.emit()
+
+    def _retry_cover_lyrics(self, *_completed):
+        pending = self._cover_lyrics_retry
+        if pending is None:
+            return
+        epoch, song = pending
+        if (self._closed or epoch != self._epoch or self.track is None
+                or not 0 <= self.index < len(self.queue) or self.queue[self.index] != song
+                or self.track.track_id != f"owned:{song.source_id}:{song.song_id}"
+                or self.track.timed_lyrics or self.track.lyrics != ("暂无歌词",)):
+            self._cover_lyrics_retry = None
+            return
+        if (self._lyrics_parse_pending is not None or self._lyrics_enrichment_pending is not None
+                or not self._lyrics_parse_context_is_current(epoch)):
+            return
+        # Keep one song-scoped intent if the bounded foreground queue is full.
+        # Its next completion supplies capacity; no new timer or network loop.
+        preferences = self._lyrics_preferences_snapshot()
+        if self.tasks.submit(("lyrics", epoch, self._lyrics_generation),
+                lambda: self._fetch_lyrics(song, preferences)
+                if not self._closed and epoch == self._epoch else None):
+            self._cover_lyrics_retry = None
 
     def _fetch_artwork(self, key, epoch, target_side=2560):
         if self._closed or epoch != self._queue_epoch or key not in self._art_window:

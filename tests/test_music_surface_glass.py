@@ -190,13 +190,13 @@ class MusicSurfaceGlassTests(unittest.TestCase):
             with self.subTest(background=background):
                 self.window._control_color_transitions.clear()
                 self.window._background_cache.fill(QColor(background))
-                with patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
+                with patch.object(self.window, "_album_accent_color", return_value=QColor("#248ace")):
                     stops = self.window._personal_fm_stops(target)
                 self.assertEqual(stops, ((0., QColor("#248ace")), (.5, QColor(expected)), (1., QColor("#248ace"))))
-                with patch.object(self.window, "_future_lyric_color", return_value=QColor("#be4c2b")), \
+                with patch.object(self.window, "_album_accent_color", return_value=QColor("#be4c2b")), \
                         patch("local.music_surface_window.time.monotonic", return_value=200.):
                     self.assertEqual(self.window._personal_fm_stops(target)[0][1], QColor("#248ace"))
-                with patch.object(self.window, "_future_lyric_color", return_value=QColor("#be4c2b")), \
+                with patch.object(self.window, "_album_accent_color", return_value=QColor("#be4c2b")), \
                         patch("local.music_surface_window.time.monotonic", return_value=200.36):
                     self.assertEqual(self.window._personal_fm_stops(target)[0][1], QColor("#be4c2b"))
 
@@ -228,7 +228,7 @@ class MusicSurfaceGlassTests(unittest.TestCase):
                         patch("local.music_surface_window.time.monotonic", return_value=100.), \
                         patch.object(self.window, "_audio_output_available", return_value=True), \
                         patch.object(self.window, "_library_back_available", return_value=True), \
-                        patch.object(self.window, "_future_lyric_color", return_value=QColor("magenta")), \
+                        patch.object(self.window, "_album_accent_color", return_value=QColor("magenta")), \
                         patch.object(self.window, "_personal_dj_reveal_at", return_value=1.), \
                         patch.object(self.window, "_personal_dj_activity_at", return_value=0.), \
                         patch("local.music_surface_window.paint_music_source_icon", wraps=paint_music_source_icon) as source, \

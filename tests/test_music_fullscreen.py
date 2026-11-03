@@ -1583,8 +1583,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 patch.object(self.window, "devicePixelRatioF", return_value=dpr),
                 patch("local.music_surface_window.time.monotonic", return_value=100.1),
             ):
-                self.window._prewarm_idle_metadata_raster()
-                self.window._prewarm_idle_metadata_raster()
+                self.window._metadata_slot_widths["title"] = 800.
+                for _ in range(4):
+                    self.window._prewarm_idle_metadata_raster()
                 font = self.window._surface_font(
                     self.window.TITLE_PIXEL_SIZE * self.window._surface_scale(), QFont.Weight.Bold,
                 )
@@ -4270,7 +4271,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         layout, height = self.window._wrapped_lyric_layout("像素字号不会裁掉歌词", lyric, 360.0)
         self.assertGreaterEqual(height, layout.lineAt(0).height())
 
-    def test_future_lyric_color_is_subdued_album_tinted_and_contrasts_with_background(self):
+    def test_future_lyric_color_is_neutral_and_contrasts_with_background(self):
         self.window.resize(320, 180)
         self.owner.album_color = QColor(204, 50, 54)
         region = QRectF(150.0, 12.0, 150.0, 150.0)
@@ -4282,13 +4283,12 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 future = self.window._future_lyric_color(region)
                 channels = future.getRgb()[:3]
                 self.assertLess(min(channels), 200)
-                self.assertGreater(future.red() - future.green(), 35)
-                self.assertGreater(future.red() - future.blue(), 35)
-                self.assertGreaterEqual(future.saturation(), 110)
+                self.assertEqual(len(set(channels)), 1)
+                self.assertEqual(future.saturation(), 0)
                 composite = self.window._composited_color(future, background)
                 self.assertGreaterEqual(self.window._contrast_ratio(composite, background), 2.0)
 
-    def test_multicolor_art_flows_across_surface_and_retains_gold_unread_ink(self):
+    def test_multicolor_art_flows_across_surface_with_neutral_unread_ink(self):
         art = QImage(100, 100, QImage.Format.Format_RGB32)
         art.fill(QColor(8, 9, 12))
         with QPainter(art) as painter:
@@ -4323,10 +4323,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertGreater(horizontal_range, 8)
         self.assertTrue(any(color.red() > color.blue() + 15 for color in samples))
         unread = self.window._future_lyric_color(QRectF(520, 100, 350, 240))
-        # Brighter moving fields need a paler gold than the old dark field,
-        # while retaining the album hue and separation from white read ink.
-        self.assertAlmostEqual(unread.hsvHue(), ambient_color(palette.characteristic).hsvHue(), delta=2)
-        self.assertGreater(unread.red(), unread.blue() + 30)
+        # Album color stays in the backdrop; reading ink uses neutral contrast.
+        self.assertEqual(unread.red(), unread.green())
+        self.assertEqual(unread.green(), unread.blue())
         self.assertLess(unread.blue(), 225)
         for backdrop in self.window._background_sample_colors(QRectF(520, 100, 350, 240)):
             self.assertGreaterEqual(
@@ -4519,9 +4518,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(len(set(tones)), 1)
 
         self.owner.album_color = QColor(48, 84, 210)
-        blue = self.window._future_lyric_color(region)
-        self.assertNotEqual(blue.rgba(), tones[0])
-        self.assertGreater(blue.blue(), blue.red() + 35)
+        neutral = self.window._future_lyric_color(region)
+        self.assertNotEqual(neutral.rgba(), tones[0])
+        self.assertEqual(neutral.saturation(), 0)
 
     def test_wrapped_future_lyric_keeps_one_tone_across_visual_lines(self):
         self.window.resize(320, 180)
@@ -4538,7 +4537,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         origin = QPointF(150.0, 12.0)
         colors = self.window._future_visual_line_colors(layout, origin)
         self.assertTrue(all(color.lightness() < 205 for color in colors))
-        self.assertTrue(all(color.red() > color.green() for color in colors))
+        self.assertTrue(all(color.saturation() == 0 for color in colors))
         self.assertEqual(colors[0].rgba(), colors[-1].rgba())
 
         output = QImage(320, 180, QImage.Format.Format_RGB32)

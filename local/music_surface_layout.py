@@ -377,9 +377,9 @@ class MusicContentLayoutMixin:
         self._no_lyrics_layout_track = track
         pending = self._lyrics_lookup_pending(lines, timed)
         if pending or self._lyric_loading_holds_result(now):
-            # An override belongs only to the resolved song. A new lookup
-            # starts with the listener's saved layout and its loading state.
-            if (pending or changed_track) and self._temporary_content_layout is not None:
+            # Same-song recovery keeps its cover while searching quietly.
+            # A new song starts with the saved layout and ordinary loader.
+            if changed_track and self._temporary_content_layout is not None:
                 self._change_content_layout(self._content_layout, temporary=True)
             return
         placeholder = str(getattr(self.owner, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip()

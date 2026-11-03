@@ -584,15 +584,17 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if now - self._palette_resync_at < 10.:
             return
         self._palette_resync_at = now
-        if not (self.narrow or self._width_chrome_active):
-            return
         # Compare identities only: a healthy hidden scene does no raster work.
         # Invalidating on drift still obeys the normal veil throttle and resize
         # freeze; never force a veil preparation on each presentation tick.
-        veil_drift = (not self._background_cache.isNull()
+        veil_drift = ((self.narrow or self._width_chrome_active)
+                      and not self._background_cache.isNull()
                       and self._background_veil_key != self._background_veil_identity())
-        controls_drift = self.variant != "A" and self._controls_palette_key != identity
-        if veil_drift or controls_drift:
+        controls_drift = ((self.narrow or self._width_chrome_active)
+                          and self.variant != "A" and self._controls_palette_key != identity)
+        chrome_drift = (self._chrome_backdrop_key is not None
+                        and self._chrome_backdrop_key[5] != self._background_cache.cacheKey())
+        if veil_drift or controls_drift or chrome_drift:
             self._chrome_backdrop = self._chrome_backdrop_key = None
             self._controls_key = self._commit_key = None
             self._scene_control_ink_key = None
@@ -1135,11 +1137,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 painter.restore()
         else:
             super()._paint_background(painter, rect, primary, secondary, now, **kwargs)
+        if self._background_cache_key != previous_basis:
+            self._background_veil_key = self._controls_key = None
+            self._chrome_backdrop = self._chrome_backdrop_key = None
+            self._scene_control_ink_key = None
+            self._wide_lyrics_dirty = True
         if narrow:
-            if self._background_cache_key != previous_basis:
-                self._background_veil_key = self._controls_key = None
-                self._chrome_backdrop = self._chrome_backdrop_key = None
-                self._wide_lyrics_dirty = True
             # Sample after the shared painter publishes its new raw raster.
             # A palette change may bypass the cadence once; moving frames keep
             # the existing 100ms preparation limit and frozen resize endpoint.

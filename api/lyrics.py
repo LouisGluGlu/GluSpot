@@ -297,7 +297,8 @@ class LocalLyricsStore:
                 return inherited
         return LyricsMatch((), (), "")
 
-    def resolve_in_background(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0) -> bool:
+    def resolve_in_background(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0,
+                              *, retry_missed: bool = False) -> bool:
         cache_key = self._cache_key(title, artist, album_title, duration_seconds)
         with self._cache_lock:
             if cache_key in self._resolved_cache or cache_key in self._pending_keys:
@@ -305,8 +306,10 @@ class LocalLyricsStore:
             missed_at, retry_seconds = self._miss_record(cache_key)
             if missed_at > 0.0:
                 self._missed_at.move_to_end(cache_key)
-            if missed_at and time.monotonic() - missed_at < retry_seconds:
+            if not retry_missed and missed_at and time.monotonic() - missed_at < retry_seconds:
                 return False
+            if retry_missed:
+                self._missed_at.pop(cache_key, None)
             self._pending_keys.add(cache_key)
             generation = self._cache_generation
         thread = threading.Thread(

@@ -314,7 +314,7 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
             palette = artwork_surface_palette(QImage(), source, source)
             ink = QColor("white" if source.lightness() < 128 else "black")
             with patch.object(self.window, "_art_palette", return_value=palette), \
-                    patch.object(self.window, "_future_lyric_color", return_value=accent), \
+                    patch.object(self.window, "_album_accent_color", return_value=accent), \
                     patch.object(self.window, "_scene_control_ink", return_value=ink):
                 stops = self.window._personal_fm_stops(rect)
             self.assertEqual(stops, ((0., accent), (.5, ink), (1., accent)))
@@ -327,7 +327,7 @@ class OwnedPlaybackSurfaceTests(unittest.TestCase):
         rasters = []
         before = _rendered_icon.cache_info().misses
         layers_before = len(self.window._control_layer_cache)
-        with patch.object(self.window, "_future_lyric_color", return_value=QColor("#248ace")):
+        with patch.object(self.window, "_album_accent_color", return_value=QColor("#248ace")):
             for instant in (0, .5, 1, 1.5, 2):
                 with patch("local.music_surface_window.time.monotonic", return_value=instant):
                     dpr = self.window.devicePixelRatioF()

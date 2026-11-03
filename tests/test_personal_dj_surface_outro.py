@@ -125,7 +125,7 @@ class PersonalDjSurfaceOutroTests(unittest.TestCase):
             image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
             image.fill(0)
             with patch("local.music_surface_window.time.monotonic", return_value=120), \
-                    patch.object(self.window, "_future_lyric_color", return_value=QColor("magenta")), \
+                    patch.object(self.window, "_album_accent_color", return_value=QColor("magenta")), \
                     patch.object(self.window, "_paint_surface_glass"), QPainter(image) as painter:
                 region = QRectF(self.window.rect())
                 self.window._paint_personal_dj_control(painter, region)

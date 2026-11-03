@@ -1,7 +1,101 @@
-# t179: lyric clearance, login availability, hidden palette and artwork recovery
+# t179: lyric clearance, cover/lyric recovery, palette and music chrome
 
 Source follow-through from `1246878` on `grok/capture-narrow-v4`, November 3,
 2026. Product implementation: sol. No version change or executable build.
+
+## t184 follow-up (items 2 and 6)
+
+One follow-up from `b0301cc` on `grok/capture-narrow-v4`. Earlier work is cited:
+`e0ee9ca` implements items 3/4/5, `1faf68a` is the rejected hard reservation,
+and `b0301cc` implements the accepted soft-fade replacement for item 1. Root
+wrote all product and test changes in this follow-up; parallel work was review,
+baseline verification and external offscreen evidence only. Model: sol.
+
+### Item 2: recovered cover, quiet lyric retry
+
+The shared Windows provider (also used by CEF capture) detects a same-song edge
+from missing/preview artwork to changed original bytes while lyrics have
+resolved absent. It reuses `LocalLyricsStore.resolve_in_background` with an
+explicit, keyword-only `retry_missed` option. Under the existing cache lock this
+reopens only that key's miss; resolved/manual results, pending-job guards,
+recording identity and cache-generation fences remain authoritative. Unchanged
+bytes, a source-only relabel, an already original cover, a new song or existing
+lyrics cannot reopen that miss through this edge.
+
+Owned playback uses the same cover edge to request its existing exact-ID lyric
+task. One song/epoch intent survives a full bounded foreground queue and is
+submitted on a subsequent foreground/prefetch completion. Pending parsing or
+enrichment coalesces with it; a useful result, navigation or close discards the
+intent. Failed retry results leave the resolved absence visible.
+
+The existing temporary cover override now survives a same-track pending search.
+The loader recognizes that override before cover travel settles, so retrying
+does not paint a skeleton. Found lyrics use the existing content snapshots and
+animation back to the saved lyric layout; another miss keeps the cover. A new
+pending track still resets to its ordinary saved layout/loading behavior. No
+automatic path calls the settings setter.
+
+### Item 6: wide glass, title, lyric ink and tooltip
+
+- **6a:** The responsive release window used to invalidate its composed chrome
+  after publishing a changed backdrop only when narrow. The wide path could
+  therefore paint gray pixels from its previous background. Both widths now
+  invalidate that stale snapshot after publication; wide chrome also joins the
+  existing ten-second drift comparison. The narrow veil, 100 ms material
+  schedule and frozen resize endpoints keep their existing boundaries. All
+  ordinary glass faces keep sampling the current cover-derived backdrop.
+- **6b:** Resting overflowing title/artist text is left anchored and right
+  elided. Its full text and original width remain the input to the existing
+  15-second/hover marquee. Elision text is bounded in cache, and the existing
+  idle prewarmer prepares its exact-size raster alongside the full text. Moving
+  marquee frames can naturally crop at both edges while travelling; there is
+  no centered, permanently clipped resting title.
+- **6c:** The shared surface lyric selector converts its established contrast
+  tone to neutral ink with the same luminance and alpha. Wide, narrow, cover,
+  translation, parenthetical and countdown consumers share that decision;
+  existing island reading already uses neutral ink. Genuine unit timestamps,
+  lift/blur/reading plans and word-click targets are preserved. DJ/FM accents
+  continue using the separate cover accent decision.
+- **6d:** A music-page-scoped Qt tooltip stylesheet gives existing chrome and
+  child-panel help text a dark face (`#24262b`), pale text and a quiet rim. This
+  also styles the existing seek-failure tooltip. Login styling is untouched.
+
+### Follow-up evidence and limits
+
+All files below are outside Git in `/workspace/gluspot/handoff/t179/`.
+
+| Evidence | Result |
+| --- | --- |
+| `t184-focused.log/json` | 359 tests passed, no failures/errors/skips |
+| `t184-targeted.log/json` | 29 changed metadata/contrast/regression checks passed |
+| `t184-dpr2-focused.log/json` | 128 tests passed, no failures/errors/skips |
+| `t184-accents.log/json` | 58 DJ/FM/voice accent checks passed |
+| `t184-dpr2-baseline-limits.log/json` | Two unchanged screen-size-dependent layout failures reproduced on clean `b0301cc` at DPR 2; excluded from the green DPR 2 scope |
+| `t184-full-baseline.log/json` | Clean `b0301cc`: 5,970 tests, 55 failures, 48 errors, 32 skips |
+| `t184-full-final.log/json`, `t184-full-comparison.json` | Final: 5,982 tests, 54 failures, 48 errors, 32 skips; no new failure/error identities |
+| `t184-6a-wide-red.png`, `t184-6b-title-start.png` | Current responsive wide render; six red glass roles and a title beginning `Human Sacrifice` with a trailing ellipsis |
+| `t184-6c-neutral-lyrics.png`, `t184-6c-neutral-column.png` | Partial reading has zero RGB-channel differences; 28 source-time word targets retained |
+| `t184-6d-tooltip.png` | Actual Qt tooltip has dominant opaque RGB `(36, 38, 43)` |
+| `t184-6-render-proof.json`, `t184_render_proof.py` | Material/ink/title/tooltip measurements, source hashes and reproducible fixture |
+| `t184-item2-{wide,narrow}-sequence.png`, `t184-item2-proof.json`, `t184_item2_proof.py` | Pending over three seconds: zero skeleton paints, zero settings callbacks; failed retry retains cover; found lyrics have real transition snapshots and a 50% animation midpoint |
+
+The latest **parent-supplied PC login proof**, cited without repeating the
+operation, is `E:\grok-gluspot\_logs\release-t179-item1\login-pc-verify.json`
+and sibling `login-qr-*.png`: with the runtime present at the live tip,
+NetEase/Kugou/QQ each completed QR begin, three `waiting` polls and cancel.
+This supersedes the older t178 single-attempt QQ network limit documented below.
+No login was completed; this follow-up did not launch a PC or access credentials.
+
+Screenshots use controlled provider data, a synthetic red cover and private
+temporary settings/cache roots. They establish renderer behavior, not physical
+Windows appearance, live CDN reliability, actual network lyric recovery or
+display smoothness. The complete fresh discovery comparison against `b0301cc`
+and its inherited failures is recorded in `t184-full-comparison.json` and the
+final handoff. The baseline-only priority-glow timing failure did not recur;
+this run difference is not claimed as a product fix. A green whole-branch
+suite is not claimed. Item 1's parent PC
+visual acceptance and live items 2/3/4/6 acceptance remain open. No version,
+build, push, player restart or login redesign is part of this follow-up.
 
 ## Lyric bottom clearance (item 1)
 
@@ -177,5 +271,5 @@ over 22 seconds, preparations and control bands remain unchanged. A separate
 at most 21 veil preparations, preserving the existing 10 Hz budget. These are
 controlled offscreen checks, not physical-display or long-session PC acceptance.
 
-Item 1 is handled by the separately scoped follow-up above. Item 2 remains
-deferred; its behavior is not specified by this task.
+Item 1 is handled by the separately scoped redo above. Item 2 and the later
+item 6 request are handled by the t184 follow-up at the top of this document.

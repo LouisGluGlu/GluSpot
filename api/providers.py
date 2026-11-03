@@ -3069,6 +3069,21 @@ class WindowsMediaProvider:
             eligible=bool(getattr(self, "_online_current_art_lookup_enabled", False) and track_key and title and artist),
             online_art=online_album_art, source=album_art_source,
         )
+        # A newly recovered original is fresh evidence after both lookups
+        # missed. Reopen only this song's terminal miss, once at this edge.
+        if (same_track_as_previous and previous_track is not None
+                and not previous_track.timed_lyrics and previous_track.lyrics == ("暂无歌词",)
+                and not lyrics_match.timed_lyrics and not lyrics_match.lyrics and not lyrics_lookup_pending
+                and album_art and album_art != previous_track.album_art_bytes
+                and "original" in album_art_source
+                and (not previous_track.album_art_bytes or "original" not in previous_track.album_art_source)):
+            with cache_lock:
+                if epoch != int(getattr(self, "_music_cache_epoch", 0)):
+                    return None
+                _lyrics_lookup_started = self.lyrics_store.resolve_in_background(
+                    title, artist, album_title, duration_seconds, retry_missed=True,
+                )
+                lyrics_lookup_pending = _lyrics_lookup_started
         album_color, secondary_color = self._colors_from_art(album_art, fallback_track.album_color, fallback_track.secondary_color)
         timed_lyrics = lyrics_match.timed_lyrics
         lyrics_source = lyrics_match.source

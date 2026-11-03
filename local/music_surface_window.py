@@ -194,6 +194,9 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
     def __init__(self, owner):
         super().__init__(None)
         self.owner = owner
+        # Scope Qt's tooltip material to the music page and its popup chrome.
+        self.setStyleSheet("QToolTip { color: #f4f4f5; background-color: #24262b; "
+                           "border: 1px solid #55575e; border-radius: 7px; padding: 6px 9px; }")
         # The song page and its child panels use stationary click controls.
         # The painted top-left library return keeps its explicit hover reveal.
         self.setProperty("controlHoverDisabled", True)
@@ -2493,7 +2496,9 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             self._lyric_loading_waiting = pending
         elif pending and not self._lyric_loading_waiting:
             self._lyric_loading_started_at = float(now)
-            self._lyric_loading_hold_centered = self._cover_layout_to >= 0.5
+            self._lyric_loading_hold_centered = (
+                self._temporary_content_layout == "cover" or self._cover_layout_to >= 0.5
+            )
             self._lyric_loading_has_shown = False
             self._lyric_loading_release_at = 0.0
             self._lyric_loading_exit_started_at = 0.0
@@ -3030,7 +3035,17 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         return tuple(samples)
 
     def _future_lyric_color(self, region: QRectF) -> QColor:
-        """Choose one album-hued unread tone for the whole song."""
+        """Reading changes opacity/lift only; word ink stays neutral everywhere."""
+        tone = self._album_accent_color(region)
+        # Preserve the established light/dark contrast decision, including
+        # pale covers, while removing the cover hue from the reading wipe.
+        luminance = self._relative_luminance(tone)
+        value = round(255. * (12.92 * luminance if luminance <= .0031308
+                             else 1.055 * luminance ** (1. / 2.4) - .055))
+        return QColor(value, value, value, tone.alpha())
+
+    def _album_accent_color(self, region: QRectF) -> QColor:
+        """Choose a stable album accent with the established contrast policy."""
         palette = self._art_palette()
         album_source = QColor(palette.characteristic)
         flow_backdrop = self._album_flow_background.contrast_backdrop(self._background_cache)
@@ -6617,6 +6632,13 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             return self._surface_font((self.TITLE_PIXEL_SIZE + 12.0 * 1.04) * scale, QFont.Weight.Bold)
         return self._surface_font((self.ARTIST_PIXEL_SIZE + 8.0 * 1.04) * scale, QFont.Weight.Medium)
 
+    @staticmethod
+    @lru_cache(maxsize=96)
+    def _elided_metadata_text(text: str, font_key: str, width: float) -> str:
+        font = QFont()
+        font.fromString(font_key)
+        return QFontMetricsF(font).elidedText(text, Qt.TextElideMode.ElideRight, width)
+
     def _prewarm_metadata_text(self) -> None:
         """Prepare one raster per field during the quiet lead-in, not one per frame."""
         raw_title = str(getattr(self.owner, "track_title", "") or "")
@@ -6655,7 +6677,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         identity = str(getattr(self.owner, "media_track_id", "") or "") or (raw_title, raw_artist)
         scale = self._surface_scale()
         dpr = max(1.0, float(self.devicePixelRatioF()))
-        token = (identity, raw_title, raw_artist, round(scale, 4), round(dpr, 3))
+        token = (identity, raw_title, raw_artist, round(scale, 4), round(dpr, 3),
+                 tuple(self._metadata_slot_widths.get(field) for field in ("title", "artist")))
         if token != self._metadata_idle_raster_token:
             self._metadata_idle_raster_token = token
             self._metadata_idle_raster_pending.clear()
@@ -6669,6 +6692,11 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 base_size = self.TITLE_PIXEL_SIZE if field == "title" else self.ARTIST_PIXEL_SIZE
                 weight = QFont.Weight.Bold if field == "title" else QFont.Weight.Medium
                 font = self._surface_font(base_size * scale, weight)
+                width = self._metadata_slot_widths.get(field)
+                if width is not None:
+                    elided = self._elided_metadata_text(display_text, font.toString(), width)
+                    if elided != display_text:
+                        self._metadata_idle_raster_pending.append((elided, font, color, dpr, identity))
                 self._metadata_idle_raster_pending.append((display_text, font, color, dpr, identity))
         if self._metadata_idle_raster_pending:
             self._metadata_text_raster(*self._metadata_idle_raster_pending.popleft(), create=True)
@@ -6706,15 +6734,6 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             ink_left, text_width, text_height, ascent = self._metadata_text_metrics(
                 display_text, font, dpr,
             )
-        raster = None
-        if use_raster:
-            raster = self._metadata_text_raster(
-                display_text, reference_font, painter.pen().color(), dpr, identity,
-            )
-        elif self._metadata_idle_raster_token is not None:
-            raster = self._metadata_text_raster(
-                display_text, font, painter.pen().color(), dpr, identity,
-            )
         overflow = max(0.0, text_width - rect.width())
         offset = 0.0
         if animate:
@@ -6742,6 +6761,20 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                         self._metadata_next_motion_at,
                         now + next_delay,
                     )
+        if not use_raster and overflow > 0.0 and offset <= 0.0:
+            # Rest at the beginning with an explicit trailing ellipsis. The
+            # existing marquee alone may translate text away from that edge.
+            display_text = self._elided_metadata_text(display_text, font.toString(), rect.width())
+            ink_left, _width, text_height, ascent = self._metadata_text_metrics(display_text, font, dpr)
+        raster = None
+        if use_raster:
+            raster = self._metadata_text_raster(
+                display_text, reference_font, painter.pen().color(), dpr, identity,
+            )
+        elif self._metadata_idle_raster_token is not None:
+            raster = self._metadata_text_raster(
+                display_text, font, painter.pen().color(), dpr, identity,
+            )
         painter.save()
         painter.setClipRect(rect, Qt.ClipOperation.IntersectClip)
         if raster is None:
@@ -9026,7 +9059,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         return changed
 
     def _personal_fm_stops(self, region: QRectF) -> tuple[tuple[float, QColor], ...]:
-        accent = self._interpolated_control_color("fm-accent", self._future_lyric_color(region))
+        accent = self._interpolated_control_color("fm-accent", self._album_accent_color(region))
         ink = self._scene_control_ink()
         # Keep the original moving infinity bands and their seamless sweep,
         # using the extracted accent plus the shared decided black/white tone.
@@ -9480,7 +9513,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 painter.drawEllipse(icon.adjusted(-1.2 * scale, -1.2 * scale, 1.2 * scale, 1.2 * scale))
             painter.restore()
         control_ink = self._surface_glass_ink(status_rect if status_reveal > .001 else button, live=True)
-        color = (self._interpolated_control_color("dj-accent", self._future_lyric_color(button)) if self._owned_dj_speaking
+        color = (self._interpolated_control_color("dj-accent", self._album_accent_color(button)) if self._owned_dj_speaking
                  and self._owned_personal_dj_enabled and status_reveal < .999 else control_ink)
         inner = icon.adjusted(icon.width() * .18, icon.height() * .14, -icon.width() * .18, -icon.height() * .14)
         neutral = control_ink

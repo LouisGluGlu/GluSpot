@@ -101,7 +101,7 @@ class FakeLyricsStore:
     def is_lookup_pending(self, *_args):
         return False
 
-    def resolve_in_background(self, *_args):
+    def resolve_in_background(self, *_args, **_kwargs):
         return False
 
     def enrich_in_background(self, *_args):
