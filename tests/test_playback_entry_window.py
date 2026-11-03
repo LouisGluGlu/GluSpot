@@ -43,6 +43,9 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.screen_patch.start()
         self.addCleanup(self.screen_patch.stop)
         self.window = PlaybackEntryWindow()
+        # Keep the original layout's geometry regressions explicitly scoped.
+        # Shipping-default sidebar coverage lives in test_login_layout_variants.
+        self.window.set_login_variant("classic")
 
     def tearDown(self):
         self.window.close()
@@ -160,22 +163,32 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         with patch("local.playback_entry_window.paint_liquid_glass", side_effect=face), \
                 patch("local.playback_entry_window.paint_music_source_icon", side_effect=icon), \
                 patch("local.playback_entry_window.widget_glass_backdrop", return_value=(QImage(), QRectF())), \
-                patch.object(MusicSourceButton, "hasFocus", return_value=True):
-            button.setChecked(True)
-            checked = button.grab().toImage()
-            button.setChecked(False)
-            self.assertEqual(button.grab().toImage(), checked)
-            self.assertTrue(faces)
-            self.assertTrue(icons)
-            self.assertTrue(all(.40 <= opacity <= .55 for opacity, _ in faces))
-            self.assertTrue(all(.40 <= opacity <= .55 for opacity in icons))
-            self.assertTrue(all(not data["active"] and not data["hovered"] and not data["pressed"]
-                                for _, data in faces))
-            self.window.set_sources((_source("netease"),))
-            button.setChecked(True)
-            button.grab()
-            self.assertEqual(faces[-1][0], 1.)
-            self.assertTrue(faces[-1][1]["active"])
+                patch.object(MusicSourceButton, "hasFocus", return_value=True), \
+                patch.object(MusicSourceButton, "underMouse", return_value=True):
+            for style in ("classic", "sidebar", "sidebar-icons", "focus", "hero"):
+                with self.subTest(style=style):
+                    button.login_style = style
+                    self.window.set_sources((SimpleNamespace(source_id="netease", available=False, reason=reason),))
+                    faces.clear()
+                    icons.clear()
+                    button.setDown(True)
+                    button.setChecked(True)
+                    checked = button.grab().toImage()
+                    button.setChecked(False)
+                    self.assertEqual(button.grab().toImage(), checked)
+                    self.assertTrue(faces)
+                    self.assertTrue(icons)
+                    self.assertTrue(all(.40 <= opacity <= .55 for opacity, _ in faces))
+                    self.assertTrue(all(.40 <= opacity <= .55 for opacity in icons))
+                    self.assertTrue(all(not data["active"] and not data["hovered"] and not data["pressed"]
+                                        for _, data in faces))
+                    self.window.set_sources((_source("netease"),))
+                    button.setChecked(True)
+                    button.grab()
+                    self.assertEqual(faces[-1][0], 1.)
+                    self.assertTrue(faces[-1][1]["active"])
+                    self.assertTrue(faces[-1][1]["hovered"])
+                    button.setDown(False)
         self.window.set_sources((SimpleNamespace(source_id="netease", available=False, reason=reason),))
         self.assertIn(reason, button.toolTip())
         self.assertIn(reason, button.accessibleDescription())
@@ -189,9 +202,9 @@ class PlaybackEntryWindowTests(unittest.TestCase):
         self.window.set_sources((_source("netease"),))
         self.assertTrue(button.isEnabled())
         self.assertEqual(button.availability_status, "")
-        self.assertEqual(button.accessibleName(), "网易云音乐")
-        self.assertEqual(button.accessibleDescription(), "")
-        self.assertEqual(button.toolTip(), "网易云音乐")
+        self.assertEqual(button.accessibleName(), "网易云音乐（未登录）")
+        self.assertEqual(button.accessibleDescription(), "网易云音乐（未登录）")
+        self.assertEqual(button.toolTip(), "网易云音乐（未登录）")
         self.assertEqual(self.window.message_label.text(), "选择音乐来源")
         spy = QSignalSpy(self.window.sourceSelected)
         button.click()

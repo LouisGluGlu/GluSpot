@@ -106,6 +106,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-04: t195 merges `080741d` (`grok/login-variants`) after the t194 sea correction. A2 `sidebar` is the default source/login page, with a labeled wide sidebar, vertical narrow icon rail, green breathing account status dots and shared `GlassPushButton` capsules. The existing `e0ee9ca` runtime preparation, availability and QR begin/poll/cancel paths remain; unavailable sources stay dim and cannot paint armed rings in any layout. `classic`, B `focus` and C `hero` remain selectable as documented under [登录页布局对比](#登录页布局对比). No version/provider change, PC launch, completed login or player restart.
+
 - 2026-11-03: t194 corrects t179 item 7: the expanded island sea again uses the cover-extracted sea/Xiaomi primary, with an audio-thickened soft palette glow and a crisp lighter tinted specular crest. Dark colors receive a documented lightness/chroma lift. Three slowly drifting ripple components, 60/250 ms attack/release, wave-only damage and bounded high-DPI rendering remain. Owned PCM and the read-only output meter retain their provider boundary; resolved lyricless islands retain the cover presentation. Box proofs, paired CPU proxy and native limits are recorded in [Item 7 correction evidence](docs/capture-narrow-t179.md#t194-correction--palette-water-glow-thickness-and-tinted-specular-light). No version/build or PC launch.
 
 - 2026-11-03: t184 completes t179 items 2/6: a recovered original cover can reopen the same song's lyric miss while keeping temporary cover-only presentation without a skeleton or settings write. Wide chrome now releases stale glass after the current backdrop is published and participates in the ten-second drift check. Resting long metadata uses start-aligned right elision with cached rasters; shared lyric ink is neutral while word seeking and DJ accents retain their existing paths. Music-page tooltips use a scoped dark material. Focused checks and offscreen proofs, the parent-supplied all-three-platform QR proof and remaining native/full-suite limits are recorded in [t179 evidence](docs/capture-narrow-t179.md#t184-follow-up-items-2-and-6). No version/build or PC launch.
@@ -244,6 +246,64 @@ Double-click `setup-env.bat` or `repair-env.bat` to prepare this checkout's Wind
 For the optional online account adapters, install Node.js 20 or later with npm and run `native/online_music/prepare-runtime.ps1`. It installs the pinned lockfile with package scripts disabled into ignored `build/online-music`, verifies adapter versions and retains dependency notices. `launch.bat` prepares Python only; each new checkout/worktree needs this optional runtime prepared independently. Without this runtime the login surface reports unavailable services; system capture remains usable. See [online entry setup](docs/owned-playback-entry.md).
 
 The combined directory has its own Python environment and native HomePod helper under `build/native-airplay/`. Run its own `launch.bat`; the two original part directories are preserved. GluSpot's single-instance lock and user settings retain the normal product namespace, so exit an already running GluSpot before launching another source copy. Rebuilding the helper requires the toolchain documented in [native helper instructions](native/airplay_sender/README.md).
+
+### 登录页布局对比
+
+`PlaybackEntryWindow` 的音乐来源页默认使用 A2 `sidebar`，并保留 `classic`、`focus`、`hero` 可选。选择只影响登录页，无需写入设置。
+
+| 方案 | 标记 | 布局 |
+| --- | --- | --- |
+| A2（默认） | `sidebar` | 宽屏左侧带名称的平台栏；窄屏左侧垂直图标栏；账号／扫码／错误详情始终在右侧 |
+| B | `focus` | 紧凑图标切换胶囊，居中突出账号或扫码卡片 |
+| C | `hero` | 本地头像柔化色彩背景、平台状态列表与内嵌详情卡片 |
+
+启动前设置 `GLUSPOT_LOGIN_VARIANT=sidebar`、`focus`、`hero` 或 `classic`；未设置、空值或未知环境值均回退为 `sidebar`。运行中调用 `window.set_login_variant("classic")`，读取 `window.login_variant`；无效的 setter 参数抛出 `ValueError`。切换保留当前二维码、账号与信号接口；未适配平台仍不可选择，宽屏显示“即将支持”，窄屏保持垂直暗化图标与完整提示。
+
+支持的平台使用 7 px 状态灯：已登录为柔绿，未登录为暗灰，账号或登录错误／过期为静态柔红；未适配平台没有灯。状态按平台记忆，切换不清除其他账号的已知状态；未知账号默认未登录。绿灯以 2 秒周期在 0.55–1.0 不透明度之间呼吸，独立 90 ms 时钟仅请求按钮内约 11×11 px 的脏区。来源页隐藏、退出或无可见绿灯时停止；背景仍是原有静态有界栅格。侧栏、详情与胶囊操作复用 `paint_liquid_glass` / `GlassPushButton`，账号按钮不再添加品牌色描边样式表。
+
+A2 离屏对比使用真实窗口与本地测试头像、测试二维码图案，覆盖 960×540 / 433×550 / 391×508 的已连接、等待扫码、错误状态。重现命令：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_login_variants.py --a2
+```
+
+提交的脚本为 `tools/render_login_variants.py`，默认从 `/workspace/gluspot/wt-login-variants` 导入，强制离屏并使用私有临时 APPDATA/XDG 目录；支持 `--repo` 与 `--output`。交付副本为 `/workspace/gluspot/handoff/login-variants/render_variants.py`；不加 `--a2` 仍可重现 A/B/C。截图不纳入 Git：
+
+- A2 三列三行：`/workspace/gluspot/handoff/login-variants/variant-A2.png`
+- A2 绿灯最低／最高相位裁图：`/workspace/gluspot/handoff/login-variants/variant-A2-pulse.png`（直接推进实际绿灯时钟，3 倍最近邻放大）
+- A2 单图：`/workspace/gluspot/handoff/login-variants/shots-a2/sidebar-{960x540|433x550|391x508}-{connected|waiting|error}.png`
+- A2 验证日志：`/workspace/gluspot/handoff/login-variants/focused-a2.log`
+
+A2 的 179 项聚焦测试通过（2 项因固定版本 QQ SDK 不可用而跳过），覆盖来源窗口／控制器、登录恢复与取消、布局和共享玻璃控件。状态灯测试验证两秒相位、仅绿灯变化、其他来源账号记忆、错误优先、脏区更新、静态背景和隐藏生命周期。
+
+- A：`/workspace/gluspot/handoff/login-variants/variant-A.png`
+- B：`/workspace/gluspot/handoff/login-variants/variant-B.png`
+- C：`/workspace/gluspot/handoff/login-variants/variant-C.png`
+- 单图：`/workspace/gluspot/handoff/login-variants/shots/{sidebar|focus|hero}-{960x540|433x550}-{connected|waiting|error}.png`
+
+A/B/C 初版曾通过 112 项来源窗口、控制器、平台与布局测试；当时经典布局在两种尺寸、三种状态下与 `1246878` 基线逐像素一致（6/6）。A2 修改了所有方案的操作按钮材质与状态可访问名称，该历史像素比较不适用于 A2。离屏证据仅验证布局与交互，不代表真实账号登录或原生桌面显示验收。
+
+A/B/C 初版完整发现运行 5,955 项（181.900 秒），54 失败、48 错误、31 跳过，来源／布局测试无失败；18 个受影响模块在 `1246878` 临时源码副本中分组复验（658＋540 项），复现全部 54 失败／48 错误。完整日志为 `/workspace/gluspot/handoff/login-variants/full-suite.log`，后一组基线日志为 `baseline-remaining.log`。完整运行期间新测试的屏幕替身缺少 `geometry()`，曾触发其他遗留窗口的计时回调异常；已补全替身接口并重跑最终 112 项通过，产品代码未因该测试夹具修改。A2 按本次要求运行聚焦验证，不重跑完整发现。
+
+t195 integration onto `f2e1188` merges exact `080741d`, preserving the existing
+runtime preparation, availability and QR controller/bridge files. Unavailable
+source dimming and ring suppression now cover all five paint styles. Python
+compilation and 274 focused login/bridge/runtime/navigation checks complete
+with zero failures/errors and four environment skips (PowerShell, prepared QQ
+runtime and two pinned SDK checks). Evidence is under
+`/workspace/gluspot/handoff/t179/t195-login-focused.json/log`.
+
+Merged full discovery completes 6,013 tests with 55 failures, 48 errors and 32
+skips. Relative to Job A's 54 failures, the extra priority-glow budget case
+reproduces 3/3 on exact `f2e1188` and 3/3 on the merged tree with identical test
+and renderer bytes: real cold tick costs exceed its 3.2 ms budget. All other
+failure/error and skip identities match. This is a known timing-sensitive
+fixture limit; no whole-branch green suite is claimed. See
+`t195-full-final.json/log`, `t195-full-comparison.json` and `t195-glow-reproduction-summary.json`
+under the same handoff directory. Current synthetic UI proofs are in
+`t195-login/`; reproduce with `tools/render_login_variants.py --repo
+/workspace/gluspot/grok-integrate4 --output /workspace/gluspot/handoff/t179/t195-login --a2`.
+No live login, credential operation, NetEase restart or PC launch was performed.
 
 ## Windows Test Build
 
