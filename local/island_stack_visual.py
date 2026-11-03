@@ -1642,7 +1642,12 @@ class IslandStackVisual(QWidget):
 
     def _timer_interval_ms(self, active_animation: bool = True, now: float | None = None) -> int:
         fps = self._effective_animation_fps(active_animation, now=now)
-        return max(1, int(round(1000 / fps)))
+        interval = max(1, int(round(1000 / fps)))
+        if self._navigation_window_visible(getattr(self, "music_fullscreen_overlay", None)):
+            # Keep provider/owner clocks live while its island is hidden;
+            # the music surface owns presentation, including lyric motion.
+            interval = max(33, interval)
+        return interval
 
     def _stable_render_interval_ms(self) -> int:
         return self._timer_interval_ms(active_animation=False)
@@ -3732,6 +3737,7 @@ class IslandStackVisual(QWidget):
                 notice_changed = notice_motion.advance(now)
         music_surface = getattr(self, "music_fullscreen_overlay", None)
         if self._navigation_window_visible(music_surface):
+            self._retune_frame_timer(False, now=now)
             self._refresh_media_data(now)
             self._update_scene_state(now)
             self._handle_music_lyric_tick(now, speed)

@@ -49,6 +49,55 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         self.window._cover_layout_from = self.window._cover_layout_to = float(self.window._no_lyrics_cover_target())
         self.render()
 
+    def test_resolved_no_lyrics_temporarily_animates_cover_and_restores_saved_layout(self):
+        self.window.show()
+        for saved in ("lyrics", "cover_lyrics"):
+            with self.subTest(saved=saved):
+                self.window.set_content_layout(saved, animate=False)
+                original_settings = dict(self.saved)
+                with patch.object(self.window, "_display_lyrics", return_value=(["暂无歌词"], [])), \
+                     patch.object(self.window, "_lyrics_lookup_pending", return_value=False), \
+                     patch.object(self.window, "_lyric_loading_holds_result", return_value=False):
+                    self.window._sync_no_lyrics_content_layout(100.)
+                self.assertEqual(self.window._effective_content_layout(), "cover")
+                self.assertEqual(self.window._content_layout, saved)
+                self.assertFalse(self.window._layout_snapshot.isNull())
+                self.assertEqual(self.saved, original_settings)
+                self.owner.media_track_id = "next-" + saved
+                with patch.object(self.window, "_display_lyrics", return_value=(["Sung line"], [(0., "Sung line")])), \
+                     patch.object(self.window, "_lyrics_lookup_pending", return_value=False), \
+                     patch.object(self.window, "_lyric_loading_holds_result", return_value=False):
+                    self.window._sync_no_lyrics_content_layout(101.)
+                self.assertEqual(self.window._effective_content_layout(), saved)
+                self.assertEqual(self.saved, original_settings)
+
+    def test_loading_skeleton_does_not_trigger_temporary_cover(self):
+        for pending, held in ((True, False), (False, True)):
+            with self.subTest(pending=pending, skeleton=held), \
+                 patch.object(self.window, "_display_lyrics", return_value=(["暂无歌词"], [])), \
+                 patch.object(self.window, "_lyrics_lookup_pending", return_value=pending), \
+                 patch.object(self.window, "_lyric_loading_holds_result", return_value=held):
+                self.window._sync_no_lyrics_content_layout(100.)
+                self.assertEqual(self.window._effective_content_layout(), "lyrics")
+                self.assertIsNone(self.window._temporary_content_layout)
+        self.assertEqual(self.saved, {})
+
+    def test_one_sung_row_is_not_resolved_absence_and_other_saved_modes_stay_selected(self):
+        with patch.object(self.window, "_display_lyrics", return_value=(["Sung"], [(0., "Sung")])), \
+             patch.object(self.window, "_lyrics_lookup_pending", return_value=False), \
+             patch.object(self.window, "_lyric_loading_holds_result", return_value=False):
+            self.window._sync_no_lyrics_content_layout(100.)
+            self.assertIsNone(self.window._temporary_content_layout)
+        for saved in ("cover", "playlist"):
+            self.window.set_content_layout(saved, animate=False)
+            original_settings = dict(self.saved)
+            with patch.object(self.window, "_display_lyrics", return_value=([], [])), \
+                 patch.object(self.window, "_lyrics_lookup_pending", return_value=False), \
+                 patch.object(self.window, "_lyric_loading_holds_result", return_value=False):
+                self.window._sync_no_lyrics_content_layout(100.)
+            self.assertEqual(self.window._effective_content_layout(), saved)
+            self.assertEqual(self.saved, original_settings)
+
     def drag_resize(self, width, height):
         start = QPointF(self.window.width() - 1, self.window.height() - 1)
         global_start = QPointF(self.window.mapToGlobal(start.toPoint()))

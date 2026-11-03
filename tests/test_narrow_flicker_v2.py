@@ -98,8 +98,11 @@ class NarrowFlickerTests(unittest.TestCase):
         layout = NarrowLayout(360, 640)
         source = QImage(360, 640, QImage.Format.Format_ARGB32_Premultiplied)
         source.fill(Qt.GlobalColor.transparent)
+        # The final row stays inside the responsive lyric viewport. The old
+        # fixed y=600 now belongs to the transport safe area.
+        row_top = int(layout.viewport.bottom()) - 20
         with QPainter(source) as painter:
-            painter.fillRect(QRectF(100, 600, 3, 20), Qt.GlobalColor.white)
+            painter.fillRect(QRectF(100, row_top, 3, 20), Qt.GlobalColor.white)
         veil = VeilOverlay()
         veil.prepare('bottom-row', source)
         target = QImage(source.size(), source.format())
@@ -107,7 +110,7 @@ class NarrowFlickerTests(unittest.TestCase):
         with QPainter(target) as painter:
             veil.paint(painter, source, 'bottom-row', 1,
                        bottom_start=layout.viewport.bottom() + 6)
-        self.assertEqual(target.copy(0, 590, 360, 30), source.copy(0, 590, 360, 30))
+        self.assertEqual(target.copy(0, row_top - 10, 360, 30), source.copy(0, row_top - 10, 360, 30))
 
 
 if __name__ == '__main__':

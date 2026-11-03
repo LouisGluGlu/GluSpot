@@ -87,6 +87,14 @@ class MusicLyricInterludeRenderTests(unittest.TestCase):
             second = [call.args[3] for call in dots.call_args_list][len(first):]
             self.assertEqual(first, second)
 
+    def test_past_and_future_countdowns_leave_no_inactive_dots(self):
+        for position in (8., 10., 20., 22., 30.):
+            self.owner.media_position_seconds = position
+            self.owner.media_position_sampled_at = position
+            with self.subTest(position=position), patch.object(self.window, '_paint_intro_countdown') as dots:
+                self.render()
+                dots.assert_not_called()
+
     def test_reload_is_idempotent_and_track_change_clears_old_intervals(self):
         for _ in range(3):
             self.window._display_lyrics_cache_key = None

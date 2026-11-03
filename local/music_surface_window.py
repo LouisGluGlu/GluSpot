@@ -2098,6 +2098,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             self.update(self._metadata_animation_rect)
         self._expire_lyric_browse(now)
         self._update_lyric_loading_state(now)
+        self._sync_no_lyrics_content_layout(now)
         self._advance_lyric_animation(now)
         if self._lyric_loading_visible(now) and self._lyric_animation_rect.isValid():
             cycle, phase = self._lyric_loading_phase(now)
@@ -6783,8 +6784,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             self._record_paint_cost(paint_started, _event)
             return
         navigation_capture = getattr(self, "_navigation_cover_capture", False)
-        if (paint_chrome and not navigation_capture and getattr(self, "_library_loading", None) is None
-                and self._paint_cached_content_layout()):
+        if (not navigation_capture and getattr(self, "_library_loading", None) is None
+                and self._paint_cached_content_layout(paint_chrome=paint_chrome)):
             self._record_paint_cost(paint_started, _event)
             return
         if (not navigation_capture and (self._pending_fullscreen is not None or self._island_returning)
@@ -7079,10 +7080,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed and not content_snapshot)
         controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
         normal_controls_bottom = rect.bottom() - self._personal_dj_footer_height(rect) - 18.0 * surface_scale
-        controls_top = min(
-            normal_controls_bottom - controls_height,
-            artist_rect.bottom() + 12.0 * surface_scale,
-        )
+        controls_top = normal_controls_bottom - controls_height
         if cover_fraction > 0.0:
             # Keep transport below the central artwork while information
             # remains in its established lower-left home.
@@ -7563,6 +7561,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         # naturally instead of ending at a visible vertical cut. The existing
         # cover mask and real window edge still bound the composed surface.
         lyric_ink_clip = QRectF(rect)
+        # Width remains uncut for blur/halos. Vertical content bounds keep
+        # lyric ink out of the album/title and transport chrome at any width.
+        lyric_ink_clip.setTop(content.top())
+        lyric_ink_clip.setBottom(content.bottom())
         self._lyric_animation_rect = QRectF(
             lyric_clip.left() - glow_bleed, rect.top(),
             lyric_clip.width() + 2.0 * glow_bleed, rect.height(),
@@ -7925,6 +7927,11 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             first_row = last_row = 0
         for index in range(first_row, min(len(lines), last_row)):
             if not 0 <= index < len(lines):
+                continue
+            if lines[index] == INTRO_COUNTDOWN_TEXT and not (
+                timed and index + 1 < len(timed)
+                and float(timed[index][0]) <= current_position < float(timed[index + 1][0])
+            ):
                 continue
             layout, layout_height = layouts[index]
             row_height = (
@@ -8446,6 +8453,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                             annotation_height * 0.75,
                             annotation_top - layout_height,
                         )
+                        # A source repeat count is a label, with no sung
+                        # entrance through the primary lyric's ink.
+                        if re.fullmatch(r"[xX×]\s*\d+", parenthetical_lines[index].strip()):
+                            slide = max(slide, layout_height - annotation_top)
                     else:
                         opacity, slide = 1.0, 0.0
                     if opacity > 0.001:

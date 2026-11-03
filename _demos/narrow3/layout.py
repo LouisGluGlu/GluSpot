@@ -29,8 +29,11 @@ class NarrowLayout:
 
     @property
     def viewport(self):
-        # Chrome overlays this full-height content; visibility never changes it.
-        return QRectF(20, 20, self.width - 40, max(1, self.height - 40))
+        # Reserve header and transport space even while chrome is hidden;
+        # a reveal must not shift wrapping or let old rows cross the title.
+        top = self.cover.bottom() + 24.
+        bottom = self.transport_panel.top() - 20.
+        return QRectF(20, top, self.width - 40, max(1., bottom - top))
 
     @property
     def lyric_font(self):
@@ -136,7 +139,7 @@ class NarrowLayout:
     @property
     def transport_panel(self):
         width = min(300.0, self.width - 32.0)
-        return QRectF((self.width - width) / 2, self.height - 116, width, 44)
+        return QRectF((self.width - width) / 2, self.height - 24. - 44., width, 44)
 
     def transport_slot(self, index):
         panel = self.transport_panel

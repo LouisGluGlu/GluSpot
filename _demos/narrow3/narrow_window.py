@@ -105,7 +105,7 @@ class ChromeFocusButton(QAbstractButton):
 class NarrowStudyWindow(MusicSurfaceWindow):
     @property
     def mode(self):
-        return self._content_layout
+        return self._effective_content_layout()
 
     @mode.setter
     def mode(self, value):
@@ -165,6 +165,13 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def _paint_wide_lyrics_mounted(self, painter):
         self._paint_lyric_column(painter, QRectF(self.rect()))
 
+    def _content_layout_cover_pose(self):
+        if (self._narrow_lyrics_mount and not self._width_chrome_active
+                and self._layout_snapshot.isNull()):
+            cover = NarrowLayout(self.width(), self.height()).cover
+            return cover.translated(0., -VeilOverlay.TOP_END * (1. - self.visibility.progress))
+        return super()._content_layout_cover_pose()
+
     def __init__(self, owner, variant, lyrics_alignment, *, live=False):
         self._width_chrome_active = False
         self._width_chrome_progress = 1.
@@ -207,6 +214,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self._diagnostics.update(settle_commits=0, first_sample_settle_outlier=0)
         self._diagnostics.update(stale_frames=0)
         self._painted_track = None
+        if live:
+            # This compositor presents whole ambient frames. One 30 Hz
+            # surface clock drives preparation and presentation together.
+            self.ANIMATION_FRAME_MS = self.EMPHASIS_FRAME_MS = 33
         super().__init__(owner)
         self.variant = variant
         self.lyrics_alignment = lyrics_alignment
@@ -405,8 +416,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def showEvent(self, event):
         super().showEvent(event)
         if self.live:
-            if hasattr(self, "study_timer") and not self.isMinimized():
-                self.study_timer.start(40)
+            self._timer.setInterval(self.ANIMATION_FRAME_MS)
 
     def hideEvent(self, event):
         if hasattr(self, "_width_chrome_animation"):
@@ -419,9 +429,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if getattr(self, "live", False) and hasattr(self, "study_timer"):
-            if self.isVisible() and not self.isMinimized():
-                self.study_timer.start(40)
-            else:
+            if not self.isVisible() or self.isMinimized():
                 self.study_timer.stop()
 
     def closeEvent(self, event):
@@ -435,10 +443,15 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         # whole background, so those paints must share the study's full-frame
         # cadence rather than interleave patches from different frames.
         timer = getattr(self, "study_timer", None)
-        if self.live and timer is not None and timer.isActive():
+        if self.live and timer is not None and (timer.isActive() or self._timer.isActive()):
             self._wide_lyrics_dirty = True
             return
         return super().update(*args)
+
+    def _on_animation_tick(self):
+        super()._on_animation_tick()
+        if self.live and self.isVisible() and not self._closing_for_shutdown:
+            self.tick()
 
     def set_cover(self, index):
         if self.live:
@@ -470,6 +483,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def tick(self):
         now = time.monotonic()
         self._diagnostics['samples'] += 1
+        self._update_lyric_loading_state(now)
+        self._sync_no_lyrics_content_layout(now)
         if self._pointer_exit_at is not None and now - self._pointer_exit_at >= .2:
             self._pointer_hover = False
             self._pointer_exit_at = None
@@ -743,7 +758,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 or getattr(self, '_lyric_resize_frozen', False)
                 or self._capturing_content_snapshot or self._capturing_transition_snapshot
                 or getattr(self, "_capturing_chrome", False)
-                or not hasattr(self, "visibility")):
+                or not hasattr(self, "visibility")
+                or (self.visibility.progress <= .001 and self.visibility.opacity.target <= 0.)):
             return
         raw = super()._surface_glass_backdrop()
         key = (self.width(), self.height(), self.devicePixelRatioF(), self.mode,
@@ -776,7 +792,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                         painter.setClipPath(path)
                         painter.drawImage(painted_cover, self.owner.album_art)
                         painter.restore()
-                    self._paint_lyric_column(painter, QRectF(self.rect()))
+                    center_plan = self._centered_album_plan(cover) if self.mode == "cover_lyrics" else None
+                    self._paint_lyric_column(painter, QRectF(self.rect()), center_plan=center_plan)
                     if self.mode == "playlist":
                         scale = self._surface_scale()
                         self._paint_playback_queue(painter, column.adjusted(0., 8. * scale, 0., -4. * scale))
@@ -928,6 +945,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             # The shared surface owns island/fullscreen morphs and compact
             # previews. Their bitmap must also win over mounted narrow ink.
             super().paintEvent(event)
+        elif self.narrow and not self._layout_snapshot.isNull():
+            self._paint_shared_narrow_content()
         elif self._width_chrome_active:
             self._paint_shared_narrow_content()
         elif not self.narrow:
@@ -1011,6 +1030,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 veil_key = self._fade_veil_key if fading and self._fade_veil_key is not None else self.veil_key
                 self.veil.paint(painter, content, veil_key, visibility,
                                 scroll_delta=self.veil_scroll_delta)
+        if self._capturing_content_snapshot:
+            # Album/title ink belongs to the content transition. Utility and
+            # transport chrome continue to use their independent live groups.
+            self.paint_header(painter, layout)
         if visibility > .001 and self._controls_bands is not None and not self._capturing_content_snapshot:
             self._paint_chrome_bands(painter)
         if self.live and self.owner.media_position_source == "capture-unavailable":
@@ -1336,6 +1359,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                self.owner.album_art.cacheKey(), self.owner.track_title, self.owner.artist,
                self._song_collection_state() if self.live else self.song_index in self.liked_songs,
                self.owner.media_is_playing, bool(self.owner.enable_dual_line_lyrics),
+               not self._layout_snapshot.isNull(),
                self._scene_control_ink().rgba())
         hidden = (self.visibility.opacity.target <= 0
                   and self.visibility.progress <= .001)
@@ -1359,7 +1383,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                   dj_available=self.dj_available)
             self._capturing_chrome = True
             try:
-                if self.mode == "lyrics":
+                if self.mode == "lyrics" and self._layout_snapshot.isNull():
                     self.paint_header(layer, layout)
                 self.paint_controls(layer, layout, 1.0)
             finally:
@@ -1710,6 +1734,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if y + row < viewport.top() - 16 - overscan or y > viewport.bottom() + 16 + overscan:
                 continue
             if line.text == INTRO_COUNTDOWN_TEXT:
+                end = (lines[index + 1].time_seconds if index + 1 < len(lines)
+                       else line.time_seconds)
+                if not line.time_seconds <= position < end:
+                    continue
                 self.paint_intro_dots(painter, QPointF(
                     viewport.left() + intro_dot_radius(font.pixelSize()) * (1.2 + 3.35),
                     layout.lyric_anchor + (index - visual_focus) * step), font)
@@ -1844,6 +1872,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                    else max(line.time_seconds + 1.0, self.owner.media_duration_seconds))
             progress = max(0.0, min(1.0, (position - line.time_seconds) / max(.001, end - line.time_seconds)))
             if line.text == INTRO_COUNTDOWN_TEXT:
+                if not line.time_seconds <= position < end:
+                    continue
                 font = self._surface_font(layout.lyric_font, QFont.Weight.Bold)
                 metrics = QFontMetricsF(font)
                 baseline_offset = metrics.ascent() - metrics.capHeight() / 2

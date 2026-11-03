@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient,
 from local.liquid_glass import paint_liquid_glass
 from local.glass_style import GLASS_SELECTED_INK
 from local.music_lyric_motion import LogicalLineSpringChain
+from local.music_lyric_presentation import INTRO_COUNTDOWN_TEXT
 from local.music_lyric_fit import fits as lyric_column_fits
 from local.artwork_skeleton import paint_artwork_skeleton
 from local.music_width_transition import WidthMarks, WidthTransition
@@ -62,6 +63,8 @@ class MusicContentLayoutMixin:
     def _init_content_layout(self):
         getter = getattr(self.owner, "settings_getter", None)
         self._content_layout = normalize_content_layout(getter("v2_music_content_layout", "lyrics") if callable(getter) else "lyrics")
+        self._temporary_content_layout = None
+        self._no_lyrics_layout_track = None
         self._content_layout_cross_pair_next = False
         self._layout_snapshot = QImage()
         self._layout_target_snapshot = QImage()
@@ -362,7 +365,29 @@ class MusicContentLayoutMixin:
         return content, cover, column
 
     def _effective_content_layout(self):
-        return self._content_layout
+        return self._temporary_content_layout or self._content_layout
+
+    def _sync_no_lyrics_content_layout(self, now):
+        """Present resolved lyricless songs as cover without saving a choice."""
+        lines, timed = self._display_lyrics()
+        track = self._visual_track_identity()
+        changed_track = track != self._no_lyrics_layout_track
+        self._no_lyrics_layout_track = track
+        pending = self._lyrics_lookup_pending(lines, timed)
+        if pending or self._lyric_loading_holds_result(now):
+            # An override belongs only to the resolved song. A new lookup
+            # starts with the listener's saved layout and its loading state.
+            if (pending or changed_track) and self._temporary_content_layout is not None:
+                self._change_content_layout(self._content_layout, temporary=True)
+            return
+        placeholder = str(getattr(self.owner, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip()
+        absent = {"", "暂无歌词", placeholder, INTRO_COUNTDOWN_TEXT}
+        has_lyrics = any(str(text).strip() not in absent for text in
+                         ([text for _start, text in timed] if timed else lines))
+        title = str(getattr(self.owner, "track_title", "") or "").strip()
+        lyricless = (not has_lyrics and title not in {"", "暂无媒体", "暂无播放", "媒体初始化中"})
+        target = "cover" if lyricless and self._content_layout in {"lyrics", "cover_lyrics"} else self._content_layout
+        self._change_content_layout(target, temporary=True)
 
     def _cycle_content_layout(self):
         effective = self._effective_content_layout()
@@ -419,10 +444,16 @@ class MusicContentLayoutMixin:
             self.update()
 
     def set_content_layout(self, layout, *, animate=True):
+        return self._change_content_layout(layout, animate=animate)
+
+    def _change_content_layout(self, layout, *, animate=True, temporary=False):
         layout = normalize_content_layout(layout)
-        self._content_layout_cross_pair_next = False
-        if layout == self._content_layout:
+        if temporary:
+            if layout == self._effective_content_layout():
+                return False
+        elif layout == self._content_layout:
             return False
+        self._content_layout_cross_pair_next = False
         # An explicit content choice supersedes a pending width bitmap.
         self._cancel_lyric_resize()
         cover_from = self._content_layout_cover_pose()
@@ -433,7 +464,12 @@ class MusicContentLayoutMixin:
         self._layout_target_snapshot = QImage()
         self._layout_composite = QImage()
         self._layout_snapshot = QImage()
-        self._layout_old, self._content_layout = self._content_layout, layout
+        self._layout_old = self._effective_content_layout()
+        if temporary:
+            self._temporary_content_layout = layout if layout != self._content_layout else None
+        else:
+            self._content_layout = layout
+            self._temporary_content_layout = None
         if self._effective_content_layout() != "playlist":
             self._clear_playback_queue_artwork_hint()
         self._last_effective_content_layout = self._effective_content_layout()
@@ -455,7 +491,7 @@ class MusicContentLayoutMixin:
         self._control_layer_cache.clear()
         self._control_layer_cache_bytes = 0
         setter = getattr(self.owner, "settings_setter", None)
-        if callable(setter):
+        if not temporary and callable(setter):
             setter("v2_music_content_layout", layout)
         self._reset_control_idle()
         if not snapshot.isNull():
@@ -546,7 +582,7 @@ class MusicContentLayoutMixin:
             painter.setOpacity(opacity);painter.drawImage(cover,image,pixels)
         painter.restore()
 
-    def _paint_cached_content_layout(self):
+    def _paint_cached_content_layout(self, *, paint_chrome=True):
         if self._layout_snapshot.isNull() or self._layout_target_snapshot.isNull():
             return False
         if (self._layout_transition_track != self._visual_track_identity()
@@ -580,7 +616,7 @@ class MusicContentLayoutMixin:
                 painter.drawImage(rect, self._layout_composite)
             else:
                 self._paint_content_layout_images(painter)
-            if not self._capturing_content_snapshot:
+            if paint_chrome and not self._capturing_content_snapshot:
                 self._paint_library_back(painter, rect)
                 self._paint_window_controls(painter, rect)
                 self._paint_personal_dj_control(painter, rect)

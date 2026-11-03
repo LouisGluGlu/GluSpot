@@ -153,6 +153,71 @@ class NarrowContentLayoutTests(unittest.TestCase):
                 self.assertEqual(self.window.diagnostic_snapshot()["commits"], before + 1)
                 self.window.study_timer.stop()
 
+    def test_narrow_temporary_cover_uses_effective_mode_and_new_pending_track_restores(self):
+        self.window.set_content_layout("cover_lyrics", animate=False)
+        original_settings = dict(self.saved)
+        empty = lyric_track(timed_lyrics=(), lyrics=("暂无歌词",))
+        self.owner._apply_visual_data(IslandVisualData(empty, (), ()))
+        for _ in range(100):
+            if self.window._display_lyrics() == (["暂无歌词"], []):
+                break
+            QTest.qWait(10)
+        self.assertEqual(self.window._display_lyrics(), (["暂无歌词"], []))
+        with patch.object(self.window, "_lyric_loading_holds_result", return_value=False):
+            self.window._sync_no_lyrics_content_layout(100.)
+        self.assertEqual(self.window.mode, "cover")
+        self.assertEqual(self.window._content_layout, "cover_lyrics")
+        with patch.object(self.window, "_paint_content_layout_images", wraps=self.window._paint_content_layout_images) as transition:
+            self.render()
+            transition.assert_called()
+        self.assertEqual(self.window._lyric_hit_rects, {})
+        self.owner.media_track_id = "next-pending"
+        with patch.object(self.window, "_lyrics_lookup_pending", return_value=True):
+            self.window._sync_no_lyrics_content_layout(101.)
+        self.assertEqual(self.window.mode, "cover_lyrics")
+        self.assertEqual(self.saved, original_settings)
+
+    def test_narrow_lyric_header_is_the_cover_transition_source(self):
+        from _demos.narrow3.layout import NarrowLayout
+        self.window.set_content_layout("lyrics", animate=False)
+        self.reveal()
+        self.assertEqual(self.window._content_layout_cover_pose(), NarrowLayout(self.window.width(), self.window.height()).cover)
+        with patch.object(self.window, "paint_header", wraps=self.window.paint_header) as header:
+            snapshot = self.window._capture_content_layout()
+        self.assertFalse(snapshot.isNull())
+        header.assert_called()
+
+    def test_wide_layout_transition_keeps_wide_chrome(self):
+        self.window.toggle_wide(True)
+        self.window._finish_width_chrome()
+        self.assertFalse(self.window.narrow)
+        self.window.set_content_layout("cover", animate=True)
+        self.assertFalse(self.window._layout_snapshot.isNull())
+        with patch.object(self.window, "_paint_shared_narrow_content", side_effect=AssertionError("narrow chrome in wide transition")):
+            self.render()
+
+    def test_visible_live_view_uses_one_clock_and_preserves_island_fps_setting(self):
+        self.owner.music_fullscreen_overlay = self.window
+        self.owner.animation_fps = self.owner.lyric_animation_fps = 165
+        with patch.object(self.owner, "_display_refresh_rate_fps_cap", return_value=165):
+            self.assertEqual(self.owner._timer_interval_ms(), 33)
+            self.window.hide()
+            self.window.show()
+            self.assertTrue(self.window._timer.isActive())
+            self.assertFalse(self.window.study_timer.isActive())
+            with patch.object(self.window, "tick") as tick:
+                self.window._on_animation_tick()
+                tick.assert_called_once_with()
+            self.window.hide()
+            self.assertEqual(self.owner._timer_interval_ms(), 6)
+        self.assertEqual(self.owner.animation_fps, 165)
+
+    def test_hidden_chrome_does_not_rasterize_a_backdrop(self):
+        self.window.visibility.progress = 0.
+        self.window.visibility.opacity.target = 0.
+        with patch.object(self.window, "_surface_glass_backdrop", side_effect=AssertionError("hidden backdrop")):
+            self.window._refresh_chrome_backdrop(100.)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,20 @@ class NarrowBackgroundVeilTests(unittest.TestCase):
         self.veil = BackgroundEdgeVeil()
         self.assertTrue(self.veil.prepare(self.raw, width, height))
 
+    def test_moving_small_backdrop_reuses_profile_without_upscaling(self):
+        source = self.raw.scaled(128, 160)
+        self.veil.prepare(source, 433, 550)
+        profile = self.veil._alpha_profile
+        mask = self.veil._alpha_lut
+        self.assertLessEqual(self.veil._source.width(), source.width())
+        self.assertLessEqual(self.veil._source.height(), source.height())
+        moved = source.copy()
+        moved.fill(QColor('#c98b72'))
+        self.veil.prepare(moved, 433, 550)
+        self.assertIs(self.veil._alpha_profile, profile)
+        self.assertIs(self.veil._alpha_lut, mask)
+        self.assertLessEqual(self.veil.cache_bytes, 256 * 256 * 4)
+
     def render(self, progress):
         image = self.raw.copy()
         with QPainter(image) as painter:

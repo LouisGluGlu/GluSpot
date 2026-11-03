@@ -178,7 +178,7 @@ def _run(args, *, settings_path):
 
     trace = Trace()
     window.installEventFilter(trace)
-    window.study_timer.timeout.connect(trace.sample)
+    window._timer.timeout.connect(trace.sample)
     window.show()
 
     def save_frame(name):

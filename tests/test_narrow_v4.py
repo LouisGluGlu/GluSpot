@@ -501,7 +501,7 @@ class NarrowCommitTests(unittest.TestCase):
         self.assertEqual(after['noop_paints'] - before['noop_paints'], 30)
         self.assertLessEqual(after['commits'], after['samples'])
 
-    def test_advancing_sample_paints_share_the_25hz_visual_cadence(self):
+    def test_advancing_sample_paints_share_the_single_30hz_visual_cadence(self):
         class PaintCounter(QObject):
             paints = 0
 
@@ -516,7 +516,8 @@ class NarrowCommitTests(unittest.TestCase):
         QTest.qWait(120)
         self.owner.timer.stop()
         counter.paints = 0
-        self.assertEqual(self.window.study_timer.interval(), 40)
+        self.assertFalse(self.window.study_timer.isActive())
+        self.assertEqual(self.window._timer.interval(), 33)
         started = time.monotonic()
         for _ in range(70):
             # Fast source snapshots exercise coalescing without creating a
@@ -526,7 +527,7 @@ class NarrowCommitTests(unittest.TestCase):
             QTest.qWait(10)
         elapsed = time.monotonic() - started
         self.assertGreaterEqual(counter.paints, elapsed * 15)
-        self.assertLessEqual(counter.paints, elapsed * 25 + 2)
+        self.assertLessEqual(counter.paints, elapsed * (1000 / 33) + 2)
 
     def test_visible_surface_is_single_and_owner_has_zero_paints(self):
         self.window.show()

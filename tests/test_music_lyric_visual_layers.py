@@ -251,6 +251,22 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         # unread until the primary lyric reaches its final fifth.
         self.assertTrue(all(progress == 0.0 for _y, _weight, progress in captured))
 
+    def test_repeat_count_never_enters_above_its_clear_annotation_lane(self):
+        self._four_rows("Don't do it to me (x3)")
+        self.owner.media_position_seconds = 4.0
+        captured = []
+
+        def capture(_painter, row, text, _font, _layout, _progress, **_kwargs):
+            if text == "x3":
+                captured.append(row.top())
+
+        with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
+            for instant in (100., 100.02, 100.10, 100.30, 100.60):
+                with patch("local.music_surface_window.time.monotonic", return_value=instant):
+                    self._render()
+        self.assertGreaterEqual(len(captured), 3)
+        self.assertGreaterEqual(min(captured), captured[-1] - .1)
+
     def test_bracket_translation_sits_below_bracket_and_reads_together(self):
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")
         self.owner.media_position_seconds = 4.0

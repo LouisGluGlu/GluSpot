@@ -77,6 +77,15 @@ class NarrowChromeTests(unittest.TestCase):
         self.window.visibility.progress = 0.0
         self.assertTrue(all(not group for group in self.window.glass_groups()))
 
+    def test_short_narrow_header_lyrics_and_transport_have_separate_vertical_space(self):
+        for width, height in ((433, 550), (391, 508), (360, 640)):
+            with self.subTest(size=(width, height)):
+                layout = NarrowLayout(width, height)
+                self.assertEqual(height - layout.transport_panel.bottom(), 24.)
+                self.assertGreaterEqual(layout.viewport.top() - layout.text.bottom(), 24.)
+                self.assertGreaterEqual(layout.transport_panel.top() - layout.viewport.bottom(), 20.)
+                self.assertTrue(layout.viewport.contains(QPointF(width / 2, layout.lyric_anchor)))
+
     def test_no_library_slot_when_shared_back_gate_is_unavailable(self):
         self.owner._music_library_back_callback = None
         self.assertFalse(self.window._library_back_available())

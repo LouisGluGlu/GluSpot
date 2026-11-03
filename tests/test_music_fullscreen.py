@@ -1534,6 +1534,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
                 )
 
     def test_metadata_idle_prewarm_builds_two_exact_and_two_expansion_rasters(self):
+        # Keep this metadata-cache fixture in its lyric layout; resolved empty
+        # lyrics now legitimately start the temporary cover transition.
+        self.owner.timed_lyrics = [(float(i * 10), f"Line {i}") for i in range(6)]
         self.owner.track_title = "A long song title to prewarm"
         self.owner.artist = "A long list of artists to prewarm"
         self.window.resize(1190, 666)
@@ -3925,7 +3928,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(near, image_at(1))
         self.assertGreater(_intro_raster.cache_info().hits, before)
 
-    def test_finished_intro_countdown_uses_dots_instead_of_small_text_glyphs(self):
+    def test_finished_intro_countdown_leaves_no_dots_or_text_residue(self):
         self.owner.music_intro_cleanup_enabled = True
         self.owner.timed_lyrics = [
             (0.0, "· · ·"), (5.0, "first lyric"), (9.0, "second lyric"),
@@ -3936,13 +3939,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         output = QImage(self.window.size(), QImage.Format.Format_RGB32)
         with patch.object(self.window, "_paint_intro_countdown", wraps=self.window._paint_intro_countdown) as dots:
             self.window.render(output)
-        self.assertTrue(dots.called)
-        self.assertEqual(dots.call_args.args[3], 1.0)
-        self.assertEqual(dots.call_args.args[4], 1)
-        self.assertEqual(
-            dots.call_args.kwargs["unread_color"].rgba(),
-            self.window._future_lyric_color(QRectF(self.window.rect())).rgba(),
-        )
+        dots.assert_not_called()
 
     def test_credit_only_timed_source_shows_no_lyrics_placeholder(self):
         self.owner.music_intro_cleanup_enabled = True

@@ -13,6 +13,7 @@ from functools import lru_cache
 import math
 from typing import Callable, Hashable
 
+import numpy as np
 from PIL import Image, ImageFilter
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter
@@ -435,7 +436,7 @@ class BackgroundEdgeVeil:
     REVEAL_RADIUS = MAX_BLUR
     IDLE_DIM = .04
     REVEAL_DIM = .18
-    MAX_SAMPLE_SIDE = 512
+    MAX_SAMPLE_SIDE = 256
 
     def __init__(self):
         self._key = None
@@ -446,6 +447,7 @@ class BackgroundEdgeVeil:
         self.veil_prepares = 0
         self.veil_stale_frames = 0
         self.veil_seam_max_step = 0.
+        self._profile_key = None
 
     @property
     def prepare_count(self):
@@ -471,7 +473,10 @@ class BackgroundEdgeVeil:
         key = (source.cacheKey(), float(width), float(height))
         if not force and key == self._key:
             return False
-        scale = min(1., self.MAX_SAMPLE_SIDE / max(float(width), float(height)))
+        # AlbumFlow already supplies a bounded raster. Enlarging it before
+        # eight blurs invents no detail and used to monopolize the GUI thread.
+        scale = min(1., self.MAX_SAMPLE_SIDE / max(float(width), float(height)),
+                    source.width() / float(width), source.height() / float(height))
         sample_width, sample_height = max(1, round(width * scale)), max(1, round(height * scale))
         sampled = source.scaled(sample_width, sample_height,
                                 Qt.AspectRatioMode.IgnoreAspectRatio,
@@ -479,27 +484,36 @@ class BackgroundEdgeVeil:
         sampled = sampled.convertToFormat(QImage.Format.Format_RGBA8888_Premultiplied)
         pixels = Image.frombytes("RGBA", (sample_width, sample_height),
                                  bytes(sampled.constBits()), "raw", "RGBA", sampled.bytesPerLine())
-        profile = tuple(VeilOverlay.band_strength((y + .5) * height / sample_height, height)
-                        for y in range(sample_height))
+        profile_key = (sample_width, sample_height, float(height), self.REVEAL_DIM)
+        if profile_key != self._profile_key:
+            profile = tuple(VeilOverlay.band_strength((y + .5) * height / sample_height, height)
+                            for y in range(sample_height))
+            strengths = np.asarray(profile, dtype=np.float64)
+            degrees = strengths * BLUR_LEVELS
+            self._lower = np.minimum(BLUR_LEVELS, degrees.astype(np.intp))
+            self._upper = np.minimum(BLUR_LEVELS, self._lower + 1)
+            self._blend = (degrees - self._lower)[:, None, None]
+            values = np.arange(256)[None, :]
+            self._rgb_lut = np.rint(values * (strengths * (1. - self.REVEAL_DIM * strengths))[:, None]).astype(np.uint8)
+            self._alpha_lut = np.rint(values * strengths[:, None]).astype(np.uint8)
+            self._alpha_profile = profile
+            self._profile_key = profile_key
+        profile = self._alpha_profile
         sample_scale = sample_width / float(width)
         levels = (pixels,) + tuple(
             pixels.filter(ImageFilter.GaussianBlur(MAX_BLUR * level / BLUR_LEVELS * sample_scale))
             for level in range(1, BLUR_LEVELS + 1))
-        endpoint = Image.new("RGBA", pixels.size)
-        for y, strength in enumerate(profile):
-            if strength <= 0.:
-                continue
-            degree = strength * BLUR_LEVELS
-            lower = min(BLUR_LEVELS, int(degree))
-            upper = min(BLUR_LEVELS, lower + 1)
-            box = (0, y, sample_width, y + 1)
-            row = Image.blend(levels[lower].crop(box), levels[upper].crop(box), degree - lower)
-            # Premultiplied RGB and alpha use the same continuous mask. The
-            # clear-core alpha is zero; native sharp pixels stay untouched.
-            rgb = [round(value * strength * (1. - self.REVEAL_DIM * strength))
-                   for value in range(256)]
-            alpha = [round(value * strength) for value in range(256)]
-            endpoint.paste(row.point(rgb * 3 + alpha), (0, y))
+        # Blend the same eight continuous blur levels in bulk. Geometry-only
+        # lookup tables survive moving backgrounds; no per-row PIL crops or
+        # thousands of Python LUT/round operations on each ambient frame.
+        samples = np.stack([np.asarray(level) for level in levels])
+        rows = np.arange(sample_height)
+        lower = samples[self._lower, rows].astype(np.float64)
+        upper = samples[self._upper, rows]
+        blended = (lower + (upper - lower) * self._blend).astype(np.uint8)
+        endpoint = np.empty_like(blended)
+        endpoint[:, :, :3] = self._rgb_lut[rows[:, None, None], blended[:, :, :3]]
+        endpoint[:, :, 3] = self._alpha_lut[rows[:, None], blended[:, :, 3]]
         data = endpoint.tobytes()
         image = QImage(data, sample_width, sample_height, sample_width * 4,
                        QImage.Format.Format_RGBA8888_Premultiplied).copy()

@@ -101,7 +101,7 @@ class ReleaseChromeTests(unittest.TestCase):
                 self.assertEqual(set(transport), {"media:previous", "media:toggle_play_pause", "media:next"})
                 pause = transport["media:toggle_play_pause"]
                 self.assertAlmostEqual(pause.center().x(), 433 / 2)
-                self.assertEqual({rect.center().y() for rect in transport.values()}, {456.})
+                self.assertEqual({rect.center().y() for rect in transport.values()}, {504.})
                 for first, second in itertools.combinations(transport.values(), 2):
                     self.assertFalse(first.intersects(second))
                 for rect in transport.values():
@@ -160,7 +160,8 @@ class ReleaseChromeTests(unittest.TestCase):
         self.assertIs(self.owner.music_fullscreen_overlay, self.window)
         self.assertTrue(self.owner._music_surface_active)
         self.assertTrue(self.window.isVisible())
-        self.assertTrue(self.window.study_timer.isActive())
+        self.assertFalse(self.window.study_timer.isActive())
+        self.assertTrue(self.window._timer.isActive())
         self.stop_timers()
         with patch.object(self.window, "return_to_island") as restore:
             self.window.close()

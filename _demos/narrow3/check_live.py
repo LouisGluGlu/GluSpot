@@ -132,8 +132,8 @@ class LiveChecks(unittest.TestCase):
             self.app.processEvents()
         QTest.qWait(500)
         elapsed = time.monotonic() - started
-        self.assertGreater(self.window.diagnostic_snapshot()['noop_paints'], 3,
-                           'paused duplicate samples were not coalesced')
+        # Ambient frames still advance during pause. Asynchronous completions
+        # coalesce into that same surface cadence rather than another clock.
         self.assertLessEqual(counter.paints, elapsed * 36 + 2,
                              'partial updates escaped the live full-frame cadence')
 
@@ -238,7 +238,7 @@ class LiveChecks(unittest.TestCase):
             self.assertTrue(window.isVisible())
             self.assertTrue(window._timer.isActive())
             self.assertTrue(window._audio_output_status_timer.isActive())
-            self.assertTrue(window.study_timer.isActive())
+            self.assertFalse(window.study_timer.isActive())
             if via_escape:
                 QTest.keyClick(window, Qt.Key.Key_Escape)
             else:
@@ -259,7 +259,8 @@ class LiveChecks(unittest.TestCase):
                                (self.window.showNormal, True)):
             action()
             self.app.processEvents()
-            self.assertEqual(self.window.study_timer.isActive(), active)
+            self.assertFalse(self.window.study_timer.isActive())
+            self.assertEqual(self.window._timer.isActive(), active)
             if active:
                 self.assertTrue(self.window._timer.isActive())
                 self.assertTrue(self.window._audio_output_status_timer.isActive())
