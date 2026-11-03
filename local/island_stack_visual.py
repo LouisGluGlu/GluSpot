@@ -607,6 +607,8 @@ class IslandStackVisual(QWidget):
         self.album_island_transition_started_at = 0.0
         self.album_island_transition_reason = ""
         self.album_island_transition_direction = 1
+        self._island_track_transition_started_at = 0.0
+        self._island_track_previous_cover = QImage()
         self.music_surface_transition_started_at = 0.0
         self.music_surface_transition_duration = 0.62
         self.music_surface_transition_mode = ""
@@ -894,7 +896,9 @@ class IslandStackVisual(QWidget):
             same_media_generation=same_media_generation,
         )
         flow_direction = 1
+        outgoing_cover = QImage()
         if track_changed and not initial:
+            outgoing_cover = self._island_track_cover_snapshot(now)
             flow_direction = self._prepare_album_flow_for_track_change(incoming_track_id)
         self.track_title = track.title
         self.artist = track.artist
@@ -1039,6 +1043,15 @@ class IslandStackVisual(QWidget):
             self.album_art_source = ""
             self._scaled_album_art_cache.clear()
         self.album_art_lookup_state = str(getattr(track, "album_art_lookup_state", "") or "")
+        if track_changed or self.media_no_audio:
+            self._clear_island_track_transition()
+        if (track_changed and not initial and not self.media_no_audio and not outgoing_cover.isNull()
+              and not bool(getattr(self, "scene_suppressed", False))
+              and not bool(getattr(self, "_tray_hidden", False))
+              and not bool(getattr(self, "_application_quitting", False))
+              and not self._navigation_surface_blocks_island()):
+            self._island_track_previous_cover = outgoing_cover
+            self._island_track_transition_started_at = now
         if track_changed:
             self.lyric_index = 0 if self.timed_lyrics else min(1, len(self.lyrics) - 1)
             self.prev_lyric_index = self.lyric_index
@@ -1706,6 +1719,9 @@ class IslandStackVisual(QWidget):
         if cover_motion is not None and cover_motion.active:
             from local.island_presentation import ActiveVisualAnimationPlan
             return ActiveVisualAnimationPlan(True, "album_cover_hover")
+        if IslandStackVisual._island_track_transition_progress(self, now) < 1.0:
+            from local.island_presentation import ActiveVisualAnimationPlan
+            return ActiveVisualAnimationPlan(True, "island_track_flip")
         motion = getattr(self, "_audio_device_motion", None)
         if motion is not None and motion.active:
             # Reuse the island's precise frame timer, including paused lyrics.
@@ -3705,6 +3721,7 @@ class IslandStackVisual(QWidget):
         return 1.6
 
     def showEvent(self, event):
+        self._clear_island_track_transition()
         super().showEvent(event)
         self._resume_solid_album_palette_worker()
         if (bool(getattr(self, "_tray_hidden", False)) or bool(getattr(self, "_application_quitting", False))
@@ -3716,6 +3733,7 @@ class IslandStackVisual(QWidget):
         self._force_super_topmost()
 
     def hideEvent(self, event):
+        self._clear_island_track_transition()
         self._island_music_control_hover_motions = {}
         self._island_music_control_neighbor_offsets = {}
         self._island_music_control_neighbor_velocities = {}
@@ -3760,6 +3778,10 @@ class IslandStackVisual(QWidget):
 
     def _tick(self):
         now = time.monotonic()
+        if (self._island_track_transition_progress(now) >= 1.0
+                or bool(getattr(self, "scene_suppressed", False))
+                or self._navigation_surface_blocks_island()):
+            self._clear_island_track_transition()
         anim_dt = self._animation_tick_delta_seconds(now)
         self.last_tick_at = now
         speed = self._animation_speed_factor()
@@ -3821,7 +3843,8 @@ class IslandStackVisual(QWidget):
             if state is None:
                 state = self._sea_wave_state = SeaWaveState()
             state.update_ripple(getattr(self, "_sea_peak_sample", None), now,
-                                is_playing=bool(getattr(self, "media_is_playing", False)))
+                                is_playing=bool(getattr(self, "media_is_playing", False)),
+                                vocal=getattr(self, "_sea_vocal_sample", 0.0))
             state.update(
                 self.current_audio_bands,
                 now,
@@ -8548,6 +8571,7 @@ class IslandStackVisual(QWidget):
             event.ignore()
             self.ensure_minimum_surface()
             return
+        self._clear_island_track_transition()
         self._close_solid_album_palette_worker()
         preparation = getattr(self, "_lyric_presentation_store", None)
         if preparation is not None:
@@ -12466,6 +12490,10 @@ class IslandStackVisual(QWidget):
     def _paint_music_surface_transition_wash(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
         if self._solid_album_music_active():
             return
+        if self._effective_music_ambience_style() == "sea_level":
+            # Track changes use crest/cover reflections, painted with their
+            # surfaces. A whole-shell wash would obscure that soft light.
+            return
         mode = str(getattr(self, "music_surface_transition_mode", "") or "")
         started_at = float(getattr(self, "music_surface_transition_started_at", 0.0) or 0.0)
         if not mode or started_at <= 0.0:
@@ -12797,7 +12825,8 @@ class IslandStackVisual(QWidget):
     def _retarget_white_bridge_to_current_album(self):
         target_primary = QColor(getattr(self, "album_color", QColor(58, 68, 88)))
         target_secondary = QColor(getattr(self, "secondary_color", QColor(34, 44, 62)))
-        self.music_surface_transition_from = (QColor(245, 247, 250), QColor(228, 233, 241))
+        if self._effective_music_ambience_style() != "sea_level":
+            self.music_surface_transition_from = (QColor(245, 247, 250), QColor(228, 233, 241))
         self.music_surface_transition_to = (target_primary, target_secondary)
         self.music_surface_transition_started_at = time.monotonic()
         self.music_surface_transition_duration = max(0.42, min(0.72, float(getattr(self, "album_island_transition_duration", 0.62) or 0.62)))
@@ -13225,6 +13254,9 @@ class IslandStackVisual(QWidget):
 
     def _paint_interactive_music_cover(self, painter: QPainter, rect: QRectF, radius: float,
                                        image: QImage | None = None, cache_key: str | None = None):
+        progress = IslandStackVisual._island_track_transition_progress(self, getattr(self, "_island_glow_paint_now", None))
+        if progress < 1.0:
+            self._native_music_background_renderer().paint_sea_level_cover_light(painter, rect, progress)
         motion = getattr(self, "_music_cover_hover_motion", None)
         reveal = max(0.0, min(1.0, motion.value)) if motion is not None else 0.0
         painter.save()
@@ -13232,7 +13264,10 @@ class IslandStackVisual(QWidget):
             painter.translate(rect.center())
             painter.scale(motion.scale, motion.scale)
             painter.translate(-rect.center())
-        self._paint_cover(painter, rect, radius, image, cache_key)
+        if progress < 1.0:
+            self._paint_island_track_cover(painter, rect, radius, image, cache_key, progress)
+        else:
+            self._paint_cover(painter, rect, radius, image, cache_key)
         if reveal > 0.001:
             path = self._rounded_path(rect, radius)
             painter.fillPath(path, QColor(0, 0, 0, round(112*reveal)))
@@ -13244,6 +13279,57 @@ class IslandStackVisual(QWidget):
             mode = "windowed" if bool(getattr(self, "_music_windowed_preference", False)) else "fullscreen"
             paint_presentation_glyph(painter, glyph, mode, QColor(255, 255, 255, 242))
             painter.restore()
+        painter.restore()
+
+    def _clear_island_track_transition(self):
+        self._island_track_transition_started_at = 0.0
+        self._island_track_previous_cover = QImage()
+
+    def _island_track_transition_progress(self, now: float | None = None) -> float:
+        started = float(getattr(self, "_island_track_transition_started_at", 0.0))
+        if started <= 0.0:
+            return 1.0
+        now = time.monotonic() if now is None else float(now)
+        return max(0.0, min(1.0, (now - started) / .64))
+
+    def _island_track_cover_snapshot(self, now: float) -> QImage:
+        """Bound outgoing art; interrupted switches inherit the visible pose."""
+        image = getattr(self, "album_art", QImage())
+        progress = self._island_track_transition_progress(now)
+        if progress >= 1.0:
+            return self._bounded_album_image(image, 192, smooth=True)
+        snapshot = QImage(192, 192, QImage.Format.Format_ARGB32_Premultiplied)
+        snapshot.fill(Qt.GlobalColor.transparent)
+        with QPainter(snapshot) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            self._paint_island_track_cover(painter, QRectF(0, 0, 192, 192), 16, progress=progress)
+        return snapshot
+
+    def _paint_island_track_cover(self, painter, rect, radius, image=None, cache_key=None, progress=1.0):
+        if progress >= 1.0:
+            self._paint_cover(painter, rect, radius, image, cache_key)
+            return
+        eased = progress * progress * (3.0 - 2.0 * progress)
+        angle = math.pi * (eased if eased < .5 else eased - 1.0)
+        width = abs(math.cos(angle))
+        if width < .012:
+            return  # Edge-on: switch faces here, never mirror the new artwork.
+        if eased < .5:
+            image = self._island_track_previous_cover
+            cache_key = None
+        taper = .32 * abs(math.sin(angle))
+        perspective = {"left_height": 1.0 - (taper if angle < 0 else 0.0),
+                       "right_height": 1.0 - (taper if angle >= 0 else 0.0)}
+        painter.save()
+        painter.translate(rect.center())
+        painter.scale(width, 1.0)
+        painter.translate(-rect.center())
+        painter.setWorldTransform(album_cover_projection(rect, perspective), combine=True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        self._paint_cover(painter, rect, radius, image, cache_key)
+        shade = self._rounded_path(rect, radius)
+        painter.fillPath(shade, QColor(0, 0, 0, round(65 * (1.0 - width))))
         painter.restore()
 
     def _paint_cover(self, painter: QPainter, rect: QRectF, radius: float, image: QImage | None = None, cache_key: str | None = None):

@@ -8612,6 +8612,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_white_bridge_retargets_to_loaded_album_colors_on_track_apply(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "system"
         visual.media_track_id = "old"
         visual.track_title = "Old"
         visual.artist = "Artist"
@@ -9028,6 +9029,7 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_music_surface_transition_paints_visible_wash_over_dark_body(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        visual.music_ambience_style = "system"
         visual.album_color = QColor(12, 24, 44)
         visual.secondary_color = QColor(30, 40, 58)
         visual.music_surface_transition_started_at = 100.0

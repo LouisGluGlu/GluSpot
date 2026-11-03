@@ -1066,7 +1066,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
     def sea_level_wave_strip(self, rect: QRectF) -> QRectF:
         """Fixed damage envelope: all ripple, reflection and glow pixels."""
         center = rect.top() + rect.height() * .495
-        return QRectF(rect.left(), center - self._u(18), rect.width(), self._u(52)).intersected(rect)
+        return QRectF(rect.left(), center - self._u(18), rect.width(), self._u(58)).intersected(rect)
 
     def _sea_level_surface(self, context: MusicBackgroundRenderContext, rect: QRectF, expanded: bool) -> list[QPointF]:
         """The moving water line shared by the sea body and its highlight.
@@ -1142,17 +1142,14 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
     def _sea_level_colors(context: MusicBackgroundRenderContext, expanded: bool = True) -> tuple[QColor, QColor]:
         """Keep the sea primary's hue readable on black, then tint its light.
 
-        Expanded water uses the existing Xiaomi/sea palette's primary (solid
+        Both island sizes use the live Xiaomi/sea palette's primary (solid
         album is the fallback). Lift HSL lightness to at least .28 and chromatic
         saturation to .58 so dark/muted covers retain visible pigment. The
         specular tint has lightness >= .84 and softened saturation; neutral
         sources stay neutral and only near-white sources can approach white.
-        Compact/preview colors retain their established rendering.
         """
         sea = QColor(context.palette.solid_album_background)
         sea.setAlpha(255)
-        if not expanded:
-            return sea, QColor(255, 255, 255, 175)
         palette = context.palette.sea_level_palette()
         if palette:
             sea = QColor(palette[0])
@@ -1204,7 +1201,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         water.closeSubpath()
         # Moving the gradient with the crest also changes deep-water pixels
         # outside the wave damage strip. Expanded depth must stay anchored.
-        top = rect.top() + rect.height() * .495 - self._u(9) if expanded else min(point.y() for point in points)
+        top = rect.top() + rect.height() * .495 - self._u(13) if expanded else min(point.y() for point in points)
         depth = QLinearGradient(0, top, 0, paint_rect.bottom())
         depth.setColorAt(0.00, sea)
         depth.setColorAt(0.16, self._mix_color(sea, self.SEA_DEEP, 0.72))
@@ -1266,6 +1263,8 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         """Tinted specular crest over a palette glow whose depth follows audio."""
         context = self.render_context("sea_level", expanded=expanded)
         sea, line = self._sea_level_colors(context, expanded=expanded)
+        transition = getattr(self.host, "_island_track_transition_progress", None)
+        progress = transition(getattr(self.host, "_island_glow_paint_now", None)) if callable(transition) else 1.0
         painter.save()
         inset = self._u(1.4)
         painter.setClipPath(self._music_shell_path(rect.adjusted(inset, inset, -inset, -inset), max(1.0, radius - inset), expanded))
@@ -1280,7 +1279,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
                 preview_mode = getattr(self.host, "sea_shape_mode", None)
                 key = (id(state), getattr(state, "ripple_updated_at", None), getattr(state, "updated_at", None),
                        preview_mode, float(getattr(self.host, "ambient_phase", 0.)) if preview_mode else None,
-                       rect.getRect(), radius, self._u(1.0), sea.rgba(), line.rgba())
+                       rect.getRect(), radius, self._u(1.0), sea.rgba(), line.rgba(), progress)
                 cached = getattr(self, "_sea_ripple_raster", None)
                 if state is None or cached is None or cached[0] != key:
                     raster = QImage(strip.width(), strip.height(), QImage.Format.Format_ARGB32_Premultiplied)
@@ -1304,7 +1303,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
             level = max(0., min(1., level))
             # Quiet input leaves almost no band; loud input grows a soft light
             # below the crest. All changing light stays inside the strip.
-            depth_units = .3 + 20.7 * level
+            depth_units = .3 + 24.7 * level
             under = QPainterPath(path)
             for point in reversed(points):
                 under.lineTo(QPointF(point.x(), point.y() + self._u(depth_units)))
@@ -1320,14 +1319,17 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
             # Wide antialiased strokes tessellate every segment at high DPR.
             # The filled falloff supplies the glow with just one thin crest.
             line.setAlpha(round(185 + 70 * level))
-            painter.setPen(QPen(line, self._u(1. + .65 * level),
+            painter.setPen(QPen(line, self._u(1. + .95 * level),
                                 Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.drawPath(path)
+            self._paint_sea_track_light(painter, rect, points, sea, line, progress, expanded)
+            painter.save()
             painter.translate(0, self._u(3.2 + 1.2 * level))
             line.setAlpha(round(30 * level))
             painter.setPen(QPen(line, self._u(.6 + .35 * level),
                                 Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.drawPath(path)
+            painter.restore()
             painter.restore()
             return
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1339,7 +1341,51 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         painter.drawPath(path)
         # A faint upper edge gives the highlight the same restrained light falloff as glass.
         painter.translate(0, -self._u(0.25))
-        upper = QColor(255, 255, 255, 65)
+        upper = QColor(line)
+        upper.setAlpha(65)
         painter.setPen(QPen(upper, self._u(0.4), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.drawPath(path)
+        painter.translate(0, self._u(0.25))
+        self._paint_sea_track_light(painter, rect, points, sea, line, progress, expanded)
         painter.restore()
+
+    def _paint_sea_track_light(self, painter, rect, points, sea, line, progress, expanded):
+        """A feathered moving reflection attached to the actual water crest."""
+        if not 0.0 < progress < 1.0:
+            return
+        envelope = math.sin(math.pi * progress) ** 2
+        position = .04 + .92 * progress
+        index = position * (len(points) - 1)
+        left = int(index)
+        fraction = index - left
+        y = points[left].y() * (1.0 - fraction) + points[min(left + 1, len(points) - 1)].y() * fraction
+        x = rect.left() + rect.width() * position
+        width = min(rect.width() * .22, self._u(100))
+        tint = self._mix_color(sea, line, .55)
+        self._paint_background_blob(painter, QPointF(x, y + self._u(2)), width,
+                                    self._u(12 if expanded else 5), tint, round(150 * envelope))
+        gradient = QLinearGradient(x - width, 0, x + width, 0)
+        edge = QColor(line)
+        edge.setAlpha(0)
+        middle = QColor(line)
+        middle.setAlpha(round(125 * envelope))
+        gradient.setColorAt(0, edge)
+        gradient.setColorAt(.5, middle)
+        gradient.setColorAt(1, edge)
+        # Restrict the streak to its local crest segment; gradients pad their
+        # transparent endpoints, so the remaining path contributes no light.
+        path = QPainterPath(points[0])
+        for point in points[1:]:
+            path.lineTo(point)
+        painter.setPen(QPen(QBrush(gradient), self._u(3.5 if expanded else 1.8)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+    def paint_sea_level_cover_light(self, painter, rect, progress):
+        if not 0.0 < progress < 1.0:
+            return
+        context = self.render_context("sea_level")
+        sea, line = self._sea_level_colors(context)
+        center = QPointF(rect.left() + rect.width() * (.25 + .5 * progress), rect.bottom())
+        self._paint_background_blob(painter, center, rect.width() * .95, rect.height() * .38,
+                                    self._mix_color(sea, line, .38), round(165 * math.sin(math.pi * progress) ** 2))

@@ -221,8 +221,8 @@ class MusicBackgroundRendererTests(unittest.TestCase):
             self.assertGreater(line.hslSaturationF(), .2)
             self.assertNotEqual(sea, context.palette.solid_album_background)
             compact, compact_line = renderer._sea_level_colors(context, expanded=False)
-            self.assertEqual(compact, context.palette.solid_album_background)
-            self.assertEqual(compact_line.getRgb(), (255, 255, 255, 175))
+            self.assertEqual(compact, sea)
+            self.assertEqual(compact_line, line)
 
     def _paint_image(self, paint_func, *, now: float = 42.0) -> QImage:
         image = QImage(260, 96, QImage.Format.Format_ARGB32_Premultiplied)
