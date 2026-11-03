@@ -106,6 +106,8 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-04: `grok/library-variants` adds selectable library A `sidebar`, B `listen`, and C `compact`, preserving `classic` as the default. The three layouts share login A2 glass/status icons and the existing catalog/search/playback contracts. Isolated 27-frame contact sheets, switching instructions and focused verification are documented under [音乐库布局对比](#音乐库布局对比); no version, provider, build or player restart.
+
 - 2026-11-03: `grok/login-variants` ships A2 `sidebar` as the default source/login page: labeled wide sidebar, vertical narrow icon rail, per-platform status lights with a dot-only breathing clock, and shared frosted Liquid Glass panes/actions. `classic`, B `focus` and C `hero` remain selectable. The environment flag, runtime setter, isolated A2 renderer and evidence paths are documented under [登录页布局对比](#登录页布局对比); no version or provider change.
 
 - 2026-11-03: t168/t169/t170 B accepts independently observed CEF seeks within 250 ms, permits a later explicit retry after completed unverified readback, and preserves uncertain-write blocking. Narrow wheel browsing clears only lyric-row blur for 350 ms; routine capture/library/DJ/output status no longer takes over content. Owned unit setup injects both decoders, and login shares dark glass with centered responsive QR/platform cards. Focused results, the native initialization cause, inherited fixture failures and pending PC acceptance are recorded in [B evidence](docs/music-surface-t168-t170-b.md). No version, build, player restart or live playback-mode change.
@@ -238,6 +240,30 @@ Double-click `setup-env.bat` or `repair-env.bat` to prepare this checkout's Wind
 For the optional online account adapters, install Node.js 20 or later with npm and run `native/online_music/prepare-runtime.ps1`. It installs the pinned lockfile with package scripts disabled into ignored `build/online-music`, verifies adapter versions and retains dependency notices. `launch.bat` prepares Python only; each new checkout/worktree needs this optional runtime prepared independently. Without this runtime the login surface reports unavailable services; system capture remains usable. See [online entry setup](docs/owned-playback-entry.md).
 
 The combined directory has its own Python environment and native HomePod helper under `build/native-airplay/`. Run its own `launch.bat`; the two original part directories are preserved. GluSpot's single-instance lock and user settings retain the normal product namespace, so exit an already running GluSpot before launching another source copy. Rebuilding the helper requires the toolchain documented in [native helper instructions](native/airplay_sender/README.md).
+
+### 音乐库布局对比
+
+音乐库默认仍为 `classic`；A / B / C 仅替换布局与绘制，继续使用同一账号、歌单、搜索、封面、分页与播放控制器。
+
+| 方案 | 标记 | 布局 |
+| --- | --- | --- |
+| A | `sidebar` | 与登录 A2 一致的磨砂侧栏、分区封面网格、底部迷你播放条；窄屏为图标栏 |
+| B | `listen` | 大封面正在播放头图、胶囊搜索、带时间的细进度与分区横向歌单架 |
+| C | `compact` | 分段玻璃标签、紧凑歌单行与标题下细进度；窄屏标签收为图标 |
+
+启动前设置 `GLUSPOT_LIBRARY_VARIANT=sidebar`、`listen`、`compact` 或 `classic`。未设置、空值或未知环境值均回退到 `classic`。运行中调用 `window.set_library_variant("sidebar")`，读取 `window.library_variant`；setter 会规范化空白／大小写，无效名称抛出 `ValueError`。切换保留当前账号、歌曲、搜索编辑器、查询、结果与封面缓存。搜索清除／返回仍由控制器取消未完成的播放。
+
+三种方案共用 A2 平台玻璃按钮、22 px 品牌图标与已连接／未登录／错误状态灯；未适配平台无灯。搜索分别融入侧栏、头部胶囊与标签页，进度分别融入迷你播放条、头图与标题下细线。未更改版本、设置文件、provider 或播放器生命周期。
+
+离屏对比覆盖每种方案的 960×540 / 433×550 / 391×508，以及已加载／加载中／空音乐库，共 27 张真实 Qt 窗口截图。只使用本地渐变测试封面、`AccountSnapshot` / `LibraryCollection` / `TrackData`，临时 APPDATA/XDG，不创建 provider 或访问网络：
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_library_variants.py
+```
+
+证据目录为 `/workspace/gluspot/handoff/library-variants/`：`variant-A.png`、`variant-B.png`、`variant-C.png`（每张三列尺寸、三行状态），单图位于 `shots/`，可独立运行的脚本副本为 `render_variants.py`。离屏证据不代表 Windows 合成器与真实账号验收；本任务未构建发行包。
+
+针对性验证：`tests.test_library_layout_variants` 的 12 项与现有 `test_music_library_window`、`test_music_library_header`、`test_music_library_search`、`test_library_horizontal_catalog`、`test_library_navigation`、`test_music_library_background` 的 87 项合计 **99 项通过 / 7.670 秒**，包含 27 组离屏状态与 classic 往返、搜索返回取消、封面、播放信号和分页检查。编译与 `git diff --check` 通过，完整命令与输出位于证据目录的 `verification.log`。按本任务要求使用针对性测试，不要求全量测试通过。
 
 ### 登录页布局对比
 
