@@ -44,6 +44,16 @@ class MusicSurfacePalette:
         return _same_color_family(self.primary, self.characteristic)
 
 
+def idle_surface_colors(*, light: bool = False) -> tuple[QColor, QColor]:
+    """Shared no-track source tones; login/library use the dark surface theme."""
+    return tuple(QColor(tone, tone, tone) for tone in ((242, 214) if light else (44, 14)))
+
+
+def idle_surface_palette() -> MusicSurfacePalette:
+    """Static dark AlbumFlow fallback, without platform or onboarding pigments."""
+    return artwork_surface_palette(QImage(), *idle_surface_colors())
+
+
 def solid_album_background_color(palette: MusicSurfacePalette) -> QColor:
     """Use the occupied cover tone unchanged for the flat music island."""
     source = palette.source_primary

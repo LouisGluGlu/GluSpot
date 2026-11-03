@@ -22,7 +22,13 @@ class MusicLibraryController(QObject):
         self.settings, self.service, self.player = settings, service, player
         self.island, self.entry = island, entry
         self.window = window or MusicLibraryWindow()
-        self.window.set_background_context(settings.get, getattr(island, "_run_background", None))
+        entry_window = getattr(entry, "window", None)
+        self.window.set_background_context(settings.get, getattr(island, "_run_background", None),
+            palette_visible=lambda: entry_window is not None and entry_window.isVisible()
+                                   and getattr(entry_window, "page", "") == "sources")
+        entry_palette = getattr(entry_window, "set_background_palette", None)
+        if callable(entry_palette):
+            self.window.backgroundPaletteChanged.connect(entry_palette)
         settings_changed = getattr(settings, "setting_changed", None)
         if settings_changed is not None:
             settings_changed.connect(self.window.on_background_setting_changed)
@@ -123,6 +129,8 @@ class MusicLibraryController(QObject):
             window.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self.entry, "window", None) and event.type() == QEvent.Type.Show:
+            self.window._prepare_background_palette()
         if (watched in getattr(self, "_navigation_windows", ())
                 and event.type() in (QEvent.Type.Move, QEvent.Type.Resize)
                 and watched.isVisible() and not self._music_geometry_applying
@@ -544,7 +552,7 @@ class MusicLibraryController(QObject):
             self._pending = False
             self.window.set_loading(False)
             self.window.set_collections(self._collections)
-            self.window.set_has_more(getattr(self, "_catalog_has_more", False) or self._recommended_has_more or self._recommended_retry)
+            self._set_catalog_more()
             return
         self.window.set_search_results(())
         self._fetch_search()
@@ -588,6 +596,13 @@ class MusicLibraryController(QObject):
             return
         if self._catalog_pending:
             return
+        if self.window.library_variant == "sidebar":
+            section = self.window._variant_view.section
+            if section == "recommended" and (self._recommended_has_more or self._recommended_retry):
+                self._fetch_recommended()
+            elif section == "personal" and getattr(self, "_catalog_has_more", False):
+                self._fetch_catalog_page()
+            return
         if self._recommended_retry:
             self._fetch_recommended()
             return
@@ -596,6 +611,12 @@ class MusicLibraryController(QObject):
                 self._fetch_recommended()
             return
         self._fetch_catalog_page()
+
+    def _set_catalog_more(self):
+        personal = getattr(self, "_catalog_has_more", False)
+        recommended = self._recommended_has_more or self._recommended_retry
+        self.window.set_has_more(personal or recommended,
+                                 groups={"personal": personal, "recommended": recommended})
 
     def _fetch_catalog_page(self, *, initial=False):
         self._catalog_pending = True
@@ -611,7 +632,7 @@ class MusicLibraryController(QObject):
             if not self._query:
                 self._pending = False
             self._schedule_catalog_retry(kind)
-            self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+            self._set_catalog_more()
 
     @staticmethod
     def _catalog_loading_kind(kind):
@@ -735,7 +756,7 @@ class MusicLibraryController(QObject):
             self._recommended_retry = True
             self._schedule_catalog_retry("recommended")
             if not self._query:
-                self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                self._set_catalog_more()
 
     @staticmethod
     def _append_unique(previous, incoming):
@@ -786,7 +807,7 @@ class MusicLibraryController(QObject):
                 self._recommended_retry = True
                 self._schedule_catalog_retry("recommended")
                 if not self._query:
-                    self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                    self._set_catalog_more()
                 return
             self._recommended_retry = False
             self._finish_catalog_retry("recommended")
@@ -796,7 +817,7 @@ class MusicLibraryController(QObject):
             self._recommended_has_more = bool(result.has_more and result.next_offset > request)
             if not self._query:
                 self.window.set_collections(self._collections)
-                self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                self._set_catalog_more()
             self._prefetch_catalog_artwork()
             return
         if kind in {"initial_catalog", "catalog"}:
@@ -813,7 +834,7 @@ class MusicLibraryController(QObject):
                     or result.has_more and (not result.items or result.next_offset <= self._catalog_offset)):
                 self._schedule_catalog_retry(kind)
                 if not self._query:
-                    self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+                    self._set_catalog_more()
             else:
                 self._finish_catalog_retry(kind)
                 self._append_catalog(result)
@@ -974,7 +995,7 @@ class MusicLibraryController(QObject):
         self._catalog_has_more = bool(page.has_more and page.next_offset > old_offset)
         if not self._query:
             self.window.set_collections(self._collections)
-            self.window.set_has_more(self._catalog_has_more or self._recommended_has_more or self._recommended_retry)
+            self._set_catalog_more()
         self._prefetch_catalog_artwork()
 
     def _queue_art(self, key, url):

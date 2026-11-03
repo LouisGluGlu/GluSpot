@@ -23,6 +23,7 @@ from local.branding import APP_NAME
 from local.island_stack_visual import IslandStackVisual
 from local.music_lyric_reading import LyricReadingRenderer
 from local.music_surface_background import AlbumFlowBackgroundRenderer
+from local.music_surface_palette import idle_surface_palette
 from local.backdrop_variants import BACKDROP_VARIANTS, resolve_backdrop_variant
 from local.music_source_icons import paint_music_source_icon
 from local.liquid_glass import GlassPushButton, paint_liquid_glass, widget_glass_backdrop, widget_glass_level
@@ -83,10 +84,11 @@ class EntryNavigationButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
             backdrop, source = widget_glass_backdrop(self, rect)
-            paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              backdrop=backdrop, backdrop_rect=source, refractive=True, cache_token=id(self),
-                              material_level=widget_glass_level(self),
-                              border_color=QColor("#494b51") if self.hasFocus() else None)
+            if not self.property("glassClusterMember") or self.underMouse() or self.hasFocus():
+                paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
+                                  backdrop=backdrop, backdrop_rect=source, refractive=True, cache_token=id(self),
+                                  material_level=widget_glass_level(self),
+                                  border_color=QColor("#494b51") if self.hasFocus() else None)
             painter.setPen(QPen(QColor("#e8e9ec"), 2, Qt.PenStyle.SolidLine,
                                 Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             center = rect.center()
@@ -372,10 +374,11 @@ class MusicSourceButton(QAbstractButton):
         border = QColor(self.source.color) if self.isChecked() else QColor(255, 255, 255, 26)
         if sidebar and self.isChecked():
             border.setAlpha(115)
-        paint_liquid_glass(painter, face, radius=radius, backdrop=backdrop, backdrop_rect=source,
-                           refractive=True, cache_token=id(self), material_level=widget_glass_level(self),
-                           light=sidebar, opacity=.75 if sidebar else 1.,
-                           border_color=border, active=self.isChecked(), hovered=self.underMouse(), pressed=self.isDown())
+        if not self.property("glassClusterMember") or self.underMouse() or self.hasFocus():
+            paint_liquid_glass(painter, face, radius=radius, backdrop=backdrop, backdrop_rect=source,
+                               refractive=True, cache_token=id(self), material_level=widget_glass_level(self),
+                               light=sidebar, opacity=.75 if sidebar else 1.,
+                               border_color=border, active=self.isChecked(), hovered=self.underMouse(), pressed=self.isDown())
         if self.hasFocus() or (self.isChecked() and not sidebar):
             painter.setPen(QPen(QColor("#b6bac5") if self.hasFocus() else border, 1.3))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -455,6 +458,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         self._flow = AlbumFlowBackgroundRenderer()
         self._background_frame = QImage()
         self._source_background_size = None
+        self._background_palette = idle_surface_palette()
         self._palette_index = 0
         self._palette_started_at = time.monotonic()
         self._expanded = 0.0
@@ -1041,16 +1045,26 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
             self.enter_button.setText("继续")
             self.enter_button.setFont(_entry_font(15))
 
+    def set_background_palette(self, palette):
+        """Accept the library's prepared artwork roles; never extract in login paint."""
+        self._background_palette = palette if palette is not None else idle_surface_palette()
+        self._source_background_size = None
+        if self.page == "sources":
+            self._source_backdrop()
+            self.update()
+
     def _source_backdrop(self):
-        """Freeze the existing onboarding pigment scene; no login timer/capture."""
+        """Freeze the shared artwork scene; no login timer/capture."""
+        palette = self._background_palette
+        colors = palette.ambient_colors or (palette.primary, palette.secondary)
         key = (self.width(), self.height(), self.login_variant,
                (self.selected_source, self._account_image.cacheKey()) if self.login_variant == "hero" else None,
-               self.backdrop_variant)
+               self.backdrop_variant, tuple(color.rgba() for color in colors), palette.ambient_weights)
         if self._source_background_size == key and not self._background_frame.isNull():
             return
         renderer = AlbumFlowBackgroundRenderer(self._backdrop_variant)
-        self._background_frame = renderer.render(self.size(), tuple(QColor(value) for value in self.PALETTES[1]),
-                                                 0.0, intensity=0.0).copy()
+        self._background_frame = renderer.render(self.size(), colors, 0.0, intensity=0.0,
+                                                 weights=palette.ambient_weights).copy()
         with QPainter(self._background_frame) as painter:
             veil = (152 if self.login_variant == "sidebar" else 188) if self.backdrop_variant == "classic" else 28
             painter.fillRect(self._background_frame.rect(), QColor(12, 14, 20, veil))

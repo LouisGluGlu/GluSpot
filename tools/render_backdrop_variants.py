@@ -34,7 +34,7 @@ def main():
             folder.mkdir(mode=0o700)
             os.environ[key] = str(folder)
         from PySide6.QtCore import QByteArray, QBuffer, QCoreApplication, QEvent, QIODevice, QRect, QRectF, QSize, Qt
-        from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QLinearGradient, QPainter
+        from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter
         from PySide6.QtWidgets import QApplication
         from api.models import ColorToken, TrackData
         from api.online_music import AccountSnapshot
@@ -61,25 +61,24 @@ def main():
                                  geometry=lambda: QRect(0, 0, 1920, 1080))
 
         def artwork(title, colors):
-            image = QImage(320, 320, QImage.Format.Format_RGB32)
-            with QPainter(image) as p:
-                p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                gradient = QLinearGradient(0, 0, 320, 320)
-                for stop, color in zip((0., .55, 1.), colors):
-                    gradient.setColorAt(stop, QColor(color))
-                p.fillRect(image.rect(), gradient)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(colors[2]))
-                p.drawEllipse(QRectF(160, -65, 230, 230))
-                p.setBrush(QColor(colors[0]))
-                p.drawEllipse(QRectF(-60, 180, 420, 250))
-                font = QFont("Noto Sans CJK SC")
-                font.setPixelSize(25)
-                font.setBold(True)
-                p.setFont(font)
-                p.setPen(QColor("#fff7ec"))
-                p.drawText(QRectF(24, 236, 280, 54), Qt.AlignmentFlag.AlignVCenter, title)
-            return image
+            # A tracked photo retains image detail under controlled warm/red
+            # duotones, so the sheets compare extracted pigments, not fake cards.
+            import numpy as np
+            image = QImage(str(args.repo / "_demos/narrow3/covers/sunset_city.jpg"))
+            if image.isNull():
+                raise RuntimeError("Missing local sunset photo fixture")
+            image = image.scaled(320, 320).convertToFormat(QImage.Format.Format_RGBA8888)
+            rgb = np.frombuffer(image.constBits(), np.uint8).reshape(320, 320, 4)[..., :3]
+            light = (rgb.astype(float) @ np.array((.2126, .7152, .0722))) / 255.
+            stops = np.array([QColor(color).getRgb()[:3] for color in colors], float)
+            fraction = np.minimum(light * 2, 1.)[..., None]
+            low = stops[0] * (1 - fraction) + stops[1] * fraction
+            fraction = np.maximum(light * 2 - 1, 0.)[..., None]
+            tinted = low * (1 - fraction) + stops[2] * fraction
+            output = np.empty((320, 320, 4), np.uint8)
+            output[..., :3] = tinted.astype(np.uint8)
+            output[..., 3] = 255
+            return QImage(output.data, 320, 320, 1280, QImage.Format.Format_RGBA8888).copy()
 
         def dispose(window):
             window.close()
@@ -125,9 +124,8 @@ def main():
                                 window.set_now_playing(track)
                             else:
                                 window = PlaybackEntryWindow()
-                                # Login normally keeps its onboarding palette. Inject the
-                                # same cover pigments locally to compare both painters.
-                                window.PALETTES = ((), tuple(color.name() for color in pigments))
+                                # Exercise the same prepared-palette input wired by the controller.
+                                window.set_background_palette(palette)
                                 window.show_sources()
                                 window.set_sources(tuple(SimpleNamespace(source_id=s.source_id, available=s.login_supported)
                                                          for s in ENTRY_SOURCES))
@@ -137,7 +135,7 @@ def main():
                                 window.setMinimumSize(0, 0)
                                 window.resize(width, height)
                                 window.set_account(account)
-                                window.set_account_artwork(artwork("LH", colors))
+                                # Leave the account avatar on its platform fallback.
                             window.show()
                             app.processEvents()
                             if page == "library":
@@ -146,6 +144,8 @@ def main():
                                 window._artwork_skeleton_timer.stop()
                                 window._background_timer.stop()
                                 window._header_motion.stop()
+                                window._variant_view.status_timer.stop()
+                                window._variant_view.advance_status_pulse(window._variant_view.status_started_at + 1.)
                             else:
                                 window._layout_children()
                                 window._status_timer.stop()
@@ -171,7 +171,7 @@ def main():
                     for row_index, ((palette_name, _colors), row) in enumerate(zip(palettes, frames)):
                         x, y = 16, 16 + row_index * 594
                         for index, frame in enumerate(row):
-                            page = "Library A · loaded" if index < 2 else "Login A2 · connected"
+                            page = "Library A-refined · loaded" if index < 2 else "Login A2 · connected"
                             p.drawText(QRectF(x, y, frame.width(), 28), Qt.AlignmentFlag.AlignVCenter,
                                        f"{variant} / {palette_name} · {page} · {frame.width()} × {frame.height()}")
                             p.drawImage(x, y + 28, frame)

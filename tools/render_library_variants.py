@@ -17,10 +17,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path("/workspace/gluspot/wt-library-variants"))
     parser.add_argument("--output", type=Path, default=Path("/workspace/gluspot/handoff/library-variants"))
+    parser.add_argument("--refined", action="store_true", help="Render only the A-refined review sheet")
     args = parser.parse_args()
     sys.path.insert(0, str(args.repo.resolve()))
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     os.environ["QT_SCALE_FACTOR"] = "1"
+    if args.refined:
+        os.environ["GLUSPOT_BACKDROP_VARIANT"] = "classic"
     with tempfile.TemporaryDirectory(prefix="gluspot-library-renders-") as private:
         for key in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
                     "XDG_RUNTIME_DIR", "GLUSPOT_LYRICS_CACHE_DIR", "GLUSPOT_ALBUM_ART_CACHE_DIR"):
@@ -28,7 +31,7 @@ def main():
             folder.mkdir(mode=0o700)
             os.environ[key] = str(folder)
         from PySide6.QtCore import QByteArray, QBuffer, QCoreApplication, QEvent, QIODevice, QRect, QRectF, Qt
-        from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath
+        from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QPainter
         from PySide6.QtWidgets import QApplication
         from api.models import ColorToken, TrackData
         from api.online_music import AccountSnapshot
@@ -38,40 +41,14 @@ def main():
         app.setFont(QFont("Noto Sans CJK SC", 10))
         shots = args.output / "shots"
         shots.mkdir(parents=True, exist_ok=True)
-        palettes = (("#e7ad79", "#6d4654"), ("#bac5e7", "#4f5f83"), ("#8acbb8", "#335569"),
-                    ("#e69c9b", "#6f425f"), ("#d1c89e", "#5d725e"), ("#a29dc5", "#3c4b78"),
-                    ("#c4b497", "#5c585b"), ("#95b9c9", "#3f5267"))
+        # Existing tracked photo/music demo assets; no fabricated cover painter.
+        cover_paths = tuple(args.repo / "_demos/narrow3/covers" / name for name in
+                            ("sunset_city.jpg", "night_sea.jpg", "pink_forest.jpg", "clip.jpg"))
 
         def artwork(index, title):
-            image = QImage(320, 320, QImage.Format.Format_RGB32)
-            a, b = palettes[index % len(palettes)]
-            with QPainter(image) as p:
-                p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                gradient = QLinearGradient(0, 0, 320, 320)
-                gradient.setColorAt(0, QColor(a))
-                gradient.setColorAt(1, QColor(b))
-                p.fillRect(image.rect(), gradient)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(255, 244, 225, 58))
-                p.drawEllipse(QRectF(155, -70, 230, 230))
-                p.setBrush(QColor(16, 28, 46, 44))
-                p.drawEllipse(QRectF(-60, 180, 420, 250))
-                p.setPen(QColor(255, 255, 255, 80))
-                for y in range(56, 260, 16):
-                    path = QPainterPath()
-                    path.moveTo(30, y)
-                    path.cubicTo(92, y - 70, 178, y + 70, 290, y - 10)
-                    p.drawPath(path)
-                font = QFont("Noto Sans CJK SC")
-                font.setPixelSize(27)
-                font.setBold(True)
-                p.setFont(font)
-                p.setPen(QColor("#fff7ec"))
-                p.drawText(QRectF(25, 235, 270, 50), Qt.AlignmentFlag.AlignVCenter, title)
-                font.setPixelSize(11)
-                font.setBold(False)
-                p.setFont(font)
-                p.drawText(QRectF(27, 282, 260, 20), "G L U S P O T   /   M U S I C")
+            image = QImage(str(cover_paths[index % len(cover_paths)]))
+            if image.isNull():
+                raise RuntimeError(f"Missing local fixture cover: {cover_paths[index % len(cover_paths)]}")
             return image
 
         names = (("daily", "daily", "每日推荐", "for_you"), ("fm", "fm", "私人漫游", "for_you"),
@@ -81,7 +58,7 @@ def main():
         catalog = tuple(LibraryCollection(key, kind, title, f"fixture://{key}", key if kind == "playlist" else "", group=group)
                         for key, kind, title, group in names)
         art = {item.key: artwork(index, item.title) for index, item in enumerate(catalog)}
-        cover = artwork(3, "TRIPPIN")
+        cover = artwork(1, "TRIPPIN")
         buffer_data = QByteArray()
         buffer = QBuffer(buffer_data)
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -95,25 +72,27 @@ def main():
         sizes = ((960, 540), (433, 550), (391, 508))
         states = (("loaded", "已加载"), ("loading", "加载中"), ("empty", "空音乐库"))
         with patch.object(QGuiApplication, "screenAt", return_value=screen):
-            for letter, variant in zip("ABC", ("sidebar", "listen", "compact")):
+            variants = (("A", "sidebar"),) if args.refined else zip("ABC", ("sidebar", "listen", "compact"))
+            for letter, variant in variants:
                 images = {}
                 for width, height in sizes:
                     for state, _label in states:
                         with patch.dict(os.environ, {"GLUSPOT_LIBRARY_VARIANT": variant}):
                             window = MusicLibraryWindow()
-                        window.set_background_context({"v2_music_flow_intensity": 0.}.get, lambda *args: None)
+                        window.set_background_context({"v2_music_flow_intensity": 0.}.get, lambda name, prepare: prepare())
                         window.resize(width, height)
                         window.set_account(AccountSnapshot("netease", True, "fixture", "LouisHerm", state="verified"))
+                        window.set_now_playing(track)
                         if state == "loaded":
                             window.set_collections(catalog)
                             for key, image in art.items():
                                 window.set_artwork(key, image)
-                            window.set_now_playing(track)
+                            if args.refined:
+                                window._variant_view.select_section({960: "for_you", 433: "recommended", 391: "personal"}[width])
                         elif state == "loading":
-                            window.set_loading(True, "正在整理你的音乐…")
-                            window.set_catalog_loading("recommended", True)
+                            window.set_loading(True)
+                            window.set_catalog_loading("for_you" if args.refined else "recommended", True)
                         else:
-                            window.set_account(AccountSnapshot("netease", False))
                             window.set_collections(())
                         window.show()
                         app.processEvents()
@@ -122,9 +101,11 @@ def main():
                         window._artwork_skeleton_timer.stop()
                         window._background_timer.stop()
                         window._header_motion.stop()
+                        window._variant_view.status_timer.stop()
+                        window._variant_view.advance_status_pulse(window._variant_view.status_started_at + 1.)
                         image = window.grab().toImage()
                         assert image.size() == window.size() and image.size().toTuple() == (width, height)
-                        path = shots / f"{variant}-{width}x{height}-{state}.png"
+                        path = shots / f"{variant}{'-refined' if args.refined else ''}-{width}x{height}-{state}.png"
                         if not image.save(str(path)):
                             raise RuntimeError(f"Cannot save {path}")
                         images[width, state] = image
@@ -146,9 +127,9 @@ def main():
                             x = 16 + sum(w + 16 for w, _h in sizes[:column])
                             y = 16 + row * row_height
                             p.drawText(QRectF(x, y, width, 24), Qt.AlignmentFlag.AlignVCenter,
-                                       f"{letter} · {variant} · {width} × {height} · {label}")
+                                       f"{letter}{'-refined' if args.refined else ''} · {width} × {height} · {label}")
                             p.drawImage(x, y + 28, images[width, state])
-                path = args.output / f"variant-{letter}.png"
+                path = args.output / f"variant-{letter}{'-refined' if args.refined else ''}.png"
                 if not sheet.save(str(path)) or path.stat().st_size < 50_000:
                     raise RuntimeError(f"Missing or unexpectedly small contact sheet: {path}")
                 print(f"{path} ({path.stat().st_size:,} bytes)")

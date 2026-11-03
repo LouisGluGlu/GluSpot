@@ -30,7 +30,7 @@ from local.liquid_glass import (GlassCaptureMixin, GlassPushButton, glass_owner_
                                 paint_liquid_glass, widget_glass_backdrop, widget_glass_level)
 from local.music_surface_background import AlbumFlowBackgroundRenderer
 from local.backdrop_variants import BACKDROP_VARIANTS, resolve_backdrop_variant
-from local.music_surface_palette import artwork_surface_palette, cached_artwork_surface_palette
+from local.music_surface_palette import artwork_surface_palette, cached_artwork_surface_palette, idle_surface_palette
 from local.music_lyric_motion import MotionSimulationClock
 from local.control_hover import HOVER_SECONDS, install_control_hover
 from local.playback_entry_window import ENTRY_SOURCES, EntryNavigationButton, MusicSourceButton, _entry_font
@@ -74,10 +74,11 @@ class _LibraryActionButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             rect = QRectF(self.rect()).adjusted(2, 2, -2, -2)
             backdrop, source = widget_glass_backdrop(self, rect)
-            paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
-                              refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self),
-                              light=getattr(self.window(), "library_variant", "classic") != "classic",
-                              material_level=widget_glass_level(self))
+            if not self.property("glassClusterMember") or self.underMouse() or self.hasFocus():
+                paint_liquid_glass(painter, rect, radius=12, hovered=self.underMouse(), pressed=self.isDown(),
+                                  refractive=True, backdrop=backdrop, backdrop_rect=source, cache_token=id(self),
+                                  light=getattr(self.window(), "library_variant", "classic") != "classic",
+                                  material_level=widget_glass_level(self))
             paint_music_source_icon(painter, rect.adjusted(10, 10, -10, -10), self.kind,
                                      tint=QColor("white") if self.kind == "switch" else None)
             if self.hasFocus() and self.window().testAttribute(Qt.WidgetAttribute.WA_KeyboardFocusChange):
@@ -524,6 +525,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     libraryExpandChanged = Signal(bool)
     closed = Signal()
     backgroundPaletteReady = Signal(int, object, object)
+    backgroundPaletteChanged = Signal(object)
 
     # 256 downsampled 256px covers are bounded to roughly 64 MiB, allowing all
     # ordinary library pages to retain their covers before a user expands them.
@@ -557,6 +559,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._background_clock = MotionSimulationClock()
         self._background_settings_getter = None
         self._background_runner = None
+        self._background_palette_visible = None
         self._background_palette = None
         self._background_palette_key = None
         self._background_palette_current_key = None
@@ -618,6 +621,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._opening = False
         self._opening_cover = None
         self._has_more = False
+        self._catalog_more = None
         self._more_requested = False
         self._drag_origin: QPoint | None = None
         self._section_starts = {}
@@ -1168,21 +1172,30 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._section_overlay.fraction=float(value);self._section_overlay.update()
 
     def _load_more_clicked(self):
-        if self._has_more and not self._more_requested and not self._loading:
+        if self._visible_has_more() and not self._more_requested and not self._loading:
             self._more_requested=True
             self.moreRequested.emit()
 
-    def set_has_more(self, has_more: bool):
+    def set_has_more(self, has_more: bool, *, groups=None):
         self._has_more = bool(has_more)
+        self._catalog_more = dict(groups) if groups is not None else None
         self._more_requested = False
         self._layout()
+
+    def _visible_has_more(self):
+        if self.library_variant != "sidebar" or self.search.text().strip():
+            return self._has_more
+        section = self._variant_view.section
+        if section not in {"recommended", "personal"}:
+            return False
+        return bool(self._catalog_more.get(section)) if self._catalog_more is not None else self._has_more
 
     def _scroll_changed(self, value):
         self._request_visible_artwork()
         if self.library_variant != "classic":
             self.update(self.scroll.geometry())
         bar = self.scroll.verticalScrollBar()
-        if (self._has_more and not self._more_requested and not self._loading and not self._catalog_loading and
+        if (self._visible_has_more() and not self._more_requested and not self._loading and not self._catalog_loading and
                 bar.maximum() > 0 and value >= bar.maximum() - 160):
             self._more_requested = True
             self.moreRequested.emit()
@@ -1510,10 +1523,11 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.clear_search_button.setGeometry(self.search.width()-88, 0, 44, 44)
         self.progress_button.layout_strip(QRect(24, 104, self.width()-48, 44))
 
-    def set_background_context(self, settings_getter, run_background=None):
+    def set_background_context(self, settings_getter, run_background=None, *, palette_visible=None):
         """Share the app's existing animation settings and cold-work runner."""
         self._background_settings_getter = settings_getter
         self._background_runner = run_background
+        self._background_palette_visible = palette_visible
         self.on_background_setting_changed()
 
     @property
@@ -1586,7 +1600,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         """Use provider colors now; prepare each new cover away from paint."""
         track = self._now_playing
         if track is None:
-            self._background_palette = None
+            self._set_background_palette(None)
             self._background_palette_current_key = None
             self._background_palette_pending = None
             return
@@ -1595,13 +1609,13 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         key = (image.cacheKey(), primary.rgba(), secondary.rgba())
         if key != self._background_palette_current_key:
             self._background_palette_current_key = key
-            self._background_palette = artwork_surface_palette(QImage(), primary, secondary)
+            self._set_background_palette(artwork_surface_palette(QImage(), primary, secondary))
             self._background_palette_key = None
         if key == self._background_palette_key:
             return
         cached = cached_artwork_surface_palette(image, primary, secondary)
         if cached is not None or image.isNull():
-            self._background_palette = cached or self._background_palette
+            self._set_background_palette(cached or self._background_palette)
             self._background_palette_key = key
             return
         if key == self._background_palette_failed_key or key == self._background_palette_worker_key:
@@ -1609,8 +1623,19 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._background_palette_pending = (key, QImage(image), primary, secondary)
         self._start_background_palette_worker()
 
+    def _set_background_palette(self, palette):
+        if self._background_palette is palette:
+            return
+        self._background_palette = palette
+        self.backgroundPaletteChanged.emit(palette)
+
+    def _palette_consumer_visible(self):
+        return callable(self._background_palette_visible) and self._background_palette_visible()
+
     def _start_background_palette_worker(self):
-        if (self._background_closing or not self.isVisible() or self._background_palette_worker_key is not None
+        external = self._palette_consumer_visible()
+        if ((self._background_closing or not self.isVisible()) and not external
+                or self._background_palette_worker_key is not None
                 or self._background_palette_pending is None):
             return
         key, image, primary, secondary = self._background_palette_pending
@@ -1641,9 +1666,10 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         if token != self._background_palette_worker_token or key != self._background_palette_worker_key:
             return
         self._background_palette_worker_key = None
-        if not self._background_closing and key == self._background_palette_current_key:
+        if (not self._background_closing or self._palette_consumer_visible()) and key == self._background_palette_current_key:
             if palette is not None:
-                self._background_palette, self._background_palette_key = palette, key
+                self._background_palette_key = key
+                self._set_background_palette(palette)
                 if self._update_background():
                     self.update()
             else:
@@ -1660,20 +1686,17 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def _update_background(self):
         """One bounded scene raster, frozen whenever playback is not visible."""
-        source = self.source_button.source
-        palette = self._background_palette if self._now_playing is not None else None
-        if palette is not None:
-            colors = palette.ambient_colors or (palette.primary, palette.secondary)
-        else:
-            colors = (QColor("#303a43"), QColor(source.color), QColor("#d1d7dd"))
-        weights = palette.ambient_weights if palette else ()
-        intensity = self._background_intensity() if palette else 0.
-        seconds = self._background_seconds if palette else 0.
-        key = (self.width(), self.height(), source.source_id if palette is None else None,
+        active = self._background_palette if self._now_playing is not None else None
+        palette = active or idle_surface_palette()
+        colors = palette.ambient_colors or (palette.primary, palette.secondary)
+        weights = palette.ambient_weights
+        intensity = self._background_intensity() if active else 0.
+        seconds = self._background_seconds if active else 0.
+        key = (self.width(), self.height(), None,
                tuple(color.rgba() for color in colors), weights, intensity, seconds, self.backdrop_variant)
         if key == self._background_key:
             return False
-        if (palette is None or (not self._navigation_cover_frozen
+        if (active is None or (not self._navigation_cover_frozen
                 and not self._background_should_animate() and self.isVisible()
                 and self._background_key is not None and key[3:5] != self._background_key[3:5])):
             # A deliberate paused song/artwork change still gets its own
@@ -1748,6 +1771,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self._finish_section_motion()
         self._artwork_skeleton_timer.stop()
         self._background_timer.stop()
+        self._variant_view.status_timer.stop()
         self._background_clock.reset(time.monotonic())
         self._album_rotation_timer.stop()
         self._album_rotation_sample = None
@@ -1762,6 +1786,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._variant_view.sync_status_pulse()
         self._background_closing = False
         self._prepare_background_palette()
         self._sync_background_animation()
@@ -1776,6 +1801,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._search_timer.start()
 
     def closeEvent(self, event):
+        self._variant_view.status_timer.stop()
         self._finish_section_motion()
         self._artwork_skeleton_timer.stop()
         self._background_closing = True
@@ -1794,6 +1820,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "_background_timer"):
+            self._variant_view.sync_status_pulse()
             self._sync_background_animation()
             self._sync_album_rotation()
             self._sync_artwork_skeleton()

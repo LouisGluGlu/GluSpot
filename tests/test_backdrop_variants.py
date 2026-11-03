@@ -14,7 +14,7 @@ from api.models import ColorToken, TrackData
 from api.online_music import AccountSnapshot
 from local.backdrop_variants import BACKDROP_VARIANTS, resolve_backdrop_variant
 from local.music_surface_background import AlbumFlowBackgroundRenderer
-from local.music_surface_palette import relative_luminance
+from local.music_surface_palette import artwork_surface_palette, idle_surface_colors, idle_surface_palette, relative_luminance
 from tests.glass_background_reference import reference_field_pixels
 
 
@@ -191,6 +191,59 @@ class BackdropWindowTests(unittest.TestCase):
             previous = window._background_frame.copy()
         with self.assertRaises(ValueError):
             window.set_backdrop_variant("invalid")
+
+    def test_shared_palette_reaches_login_while_library_hidden_and_resets_to_surface_idle(self):
+        from local.music_library_window import MusicLibraryWindow
+        from local.playback_entry_window import PlaybackEntryWindow
+        from local.music_surface_window import MusicSurfaceWindow
+        from tests.test_music_fullscreen import _Owner
+        from tests.test_music_palette import _png
+        library, login = MusicLibraryWindow(), PlaybackEntryWindow()
+        self.addCleanup(self.dispose, library)
+        self.addCleanup(self.dispose, login)
+        work = []
+        library.set_background_context({"v2_music_flow_intensity": 0.}.get,
+            lambda name, prepare: work.append(prepare), palette_visible=login.isVisible)
+        library.backgroundPaletteChanged.connect(login.set_background_palette)
+        library.close()
+        login.show_sources()
+        login.show()
+        library.set_now_playing(TrackData("Trippin", "Kara Marni", (), ColorToken(174, 116, 62),
+            ColorToken(59, 36, 25), (), album_art_bytes=_png(QColor("#c61446"))))
+        self.assertEqual(len(work), 1)
+        work.pop()()
+        self.assertIs(login._background_palette, library._background_palette)
+        palette = artwork_surface_palette(library._now_playing_image, QColor(174, 116, 62), QColor(59, 36, 25))
+        self.assertEqual(login._background_palette.ambient_colors, palette.ambient_colors)
+        self.assertEqual(login._background_palette.ambient_weights, palette.ambient_weights)
+        # Both pages feed the same painter, including occupied color weights.
+        login.resize(960, 540)
+        login._source_backdrop()
+        raw = AlbumFlowBackgroundRenderer().render(login.size(), palette.ambient_colors,
+            0., intensity=0., weights=palette.ambient_weights).copy()
+        with QPainter(raw) as p:
+            p.fillRect(raw.rect(), QColor(12, 14, 20, 152))
+        self.assertEqual(login._background_frame, raw)
+        owner = _Owner()
+        self.addCleanup(owner.close)
+        owner.album_art = QImage(library._now_playing_image)
+        owner.album_color, owner.secondary_color = QColor(174, 116, 62), QColor(59, 36, 25)
+        surface = MusicSurfaceWindow(owner)
+        self.addCleanup(surface.shutdown)
+        self.assertEqual(surface._art_palette(), login._background_palette)
+        library.set_now_playing(None)
+        self.assertEqual(login._background_palette, idle_surface_palette())
+        owner._no_audio_visual_active = lambda: True
+        owner._no_audio_surface_colors = idle_surface_colors
+        self.assertEqual(surface._art_palette(), login._background_palette)
+        library._update_background()
+        expected = idle_surface_palette()
+        self.assertEqual(library._background_renderer._palette_input_key,
+                         (expected.ambient_colors or (expected.primary, expected.secondary), expected.ambient_weights))
+        login.hide()
+        library.set_now_playing(TrackData("other", "artist", (), ColorToken(20, 40, 80),
+            ColorToken(10, 20, 30), (), album_art_bytes=_png(QColor("#147bc6"))))
+        self.assertFalse(work)
 
     def test_library_setter_stops_timer_and_survives_palette_change_and_reopen(self):
         from local.music_library_window import MusicLibraryWindow

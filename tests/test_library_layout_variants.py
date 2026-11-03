@@ -196,8 +196,7 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                     QTest.mouseClick(view.buttons[section], Qt.MouseButton.LeftButton)
                     self.assertEqual(view.section, section)
                     self.assertTrue(view.buttons[section].isChecked())
-                    if variant == "compact":
-                        self.assertEqual([row.collection for row in w._rows], list(w._catalog_groups()[section]))
+                    self.assertEqual([row.collection for row in w._rows], list(w._catalog_groups()[section]))
                 requested = QSignalSpy(w.searchRequested)
                 QTest.mouseClick(view.buttons["search"], Qt.MouseButton.LeftButton)
                 self.assertTrue(w.search.isVisible())
@@ -287,7 +286,7 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                 else:
                     self.assertTrue(w.search.isVisible())
                     self.assertEqual([shelf.group_key for shelf in w._shelves], ["for_you", "recommended", "personal"])
-                if variant == "compact":
+                if variant in {"sidebar", "compact"}:
                     self.assertEqual([row.collection for row in w._rows], [self.catalog[-1]])
                     self.assertTrue(w._rows[0].isVisible())
 
@@ -346,13 +345,55 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                 self.assertEqual(requested.at(0), ["Kara"])
                 self.assertFalse(w._search_timer.isActive())
 
+    def test_sidebar_uses_login_rail_and_entire_mini_bar_opens_playback(self):
+        from local.login_layout_variants import login_variant_layout
+        for size in SIZES:
+            w = self.prepare("sidebar", size)
+            view = w._variant_view
+            expected = login_variant_layout("sidebar", *size, (True,) * 4)
+            self.assertEqual(view.rail, expected.rail)
+            buttons = tuple(view.buttons.values())
+            self.assertEqual(len({b.x() for b in buttons}), 1)
+            self.assertTrue(all(a.geometry().bottom() < b.y() for a, b in zip(buttons, buttons[1:])))
+            opened = QSignalSpy(w.nowPlayingRequested)
+            QTest.mouseClick(view.player_button, Qt.MouseButton.LeftButton)
+            self.assertEqual(opened.count(), 1)
+            w.set_now_playing(None)
+            self.assertTrue(view.player_button.isHidden())
+
+    def test_sidebar_status_pulse_updates_only_dots_and_stops_when_hidden(self):
+        w = self.prepare("sidebar")
+        view = w._variant_view
+        self.assertTrue(view.status_timer.isActive())
+        with patch.object(w.source_button, "update") as update:
+            view.advance_status_pulse(view.status_started_at + 1.)
+            update.assert_called_once_with(w.source_button.status_rect())
+        self.assertEqual(w.source_button.status_opacity, 1.)
+        w.set_account(AccountSnapshot("netease", state="expired"))
+        self.assertFalse(view.status_timer.isActive())
+        w.set_account(self.account)
+        self.assertTrue(view.status_timer.isActive())
+        w.hide()
+        self.assertFalse(view.status_timer.isActive())
+
+    def test_sidebar_no_artwork_url_uses_platform_fallback_without_endless_skeleton(self):
+        w = self.prepare("sidebar")
+        w.set_collections((LibraryCollection("daily-no-cover", "daily", "每日推荐", "", group="for_you"),))
+        cover = w._rows[0].cover
+        self.assertTrue(cover.image.isNull())
+        self.assertFalse(cover.loading)
+        self.assertFalse(w._artwork_skeleton_timer.isActive())
+
     def test_pagination_and_catalog_loading_remain_explicit_and_independent(self):
         for variant in VARIANTS:
             with self.subTest(variant=variant):
                 w = self.prepare(variant)
+                if variant == "sidebar":
+                    w._variant_view.select_section("recommended")
                 requested = QSignalSpy(w.moreRequested)
                 w.set_has_more(True)
                 self.assertTrue(w.more_button.isVisible())
+
                 w.more_button.click()
                 w.more_button.click()
                 self.assertEqual(requested.count(), 1)
@@ -366,6 +407,23 @@ class LibraryLayoutVariantTests(unittest.TestCase):
                 w.set_catalog_loading("recommended", False)
                 self.assertFalse(w._catalog_skeleton.isVisible())
                 self.assertTrue(w.more_button.isVisible())
+
+    def test_sidebar_loading_and_pagination_belong_to_visible_section(self):
+        w = self.prepare("sidebar")
+        w.set_has_more(True, groups={"personal": True, "recommended": False})
+        w.set_catalog_loading("personal", True)
+        self.assertFalse(w._catalog_skeleton.isVisible())
+        self.assertFalse(w.more_button.isVisible())
+        w._variant_view.select_section("personal")
+        self.assertTrue(w._catalog_skeleton.isVisible())
+        w.set_catalog_loading("personal", False)
+        self.assertTrue(w.more_button.isVisible())
+        w._variant_view.select_section("recommended")
+        self.assertFalse(w.more_button.isVisible())
+        requested = QSignalSpy(w.moreRequested)
+        w.scroll.verticalScrollBar().setRange(0, 500)
+        w._scroll_changed(500)
+        self.assertEqual(requested.count(), 0)
 
 
 if __name__ == "__main__":
