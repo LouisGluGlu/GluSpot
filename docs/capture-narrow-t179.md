@@ -273,3 +273,99 @@ controlled offscreen checks, not physical-display or long-session PC acceptance.
 
 Item 1 is handled by the separately scoped redo above. Item 2 and the later
 item 6 request are handled by the t184 follow-up at the top of this document.
+
+## Item 7 — expanded sea-level ripple (t191/t192)
+
+This is a focused follow-up from `79c0f90` for the expanded V2 island. The bad
+red/magenta path won because `_sea_level_colors()` returned an opaque
+`solid_album_background`, and `_paint_xiaomi_duotone_ambience()` filled the
+water polygon with that cover pigment before fading it toward gray. The neutral
+crest was only 0.9 units at alpha 175 with a 2.4-unit alpha-24 glow. It could not
+produce the supplied good screenshot's bright silver edge over black. Existing
+renderer tests even required that cover-colored water. Item 7 supersedes that
+expanded-water requirement; compact/preview spectrum behavior is retained.
+
+Expanded ambience is now static black. Its moving light stays inside a fixed
+52-unit strip, with a white/silver crest, shallow downward glow and a faint
+reflection below it. Three sine components drift independently and stay pure
+between audio ticks. An absolute peak envelope controls amplitude, brightness
+and thickness, using exponential time constants of 60 ms attack / 250 ms
+release. This avoids the old per-band automatic gain turning quiet and loud
+input into equally large waves. A valid zero settles near flat; only unavailable
+input gets gentle idle breathing, and paused playback releases toward zero.
+
+`AudioFrame.peak` extends the existing provider contract. Owned playback uses
+its presentation-clock/token-fenced decoded PCM; peaks are measured before mono
+downmix, preserving antiphase stereo energy. Requested loopback capture supplies
+real PCM peaks and releases its cached visual peak on silence without renewing
+the established last-audible timestamp. Default system playback can instead read
+Windows' `IAudioMeterInformation` through the existing Core Audio helpers. The
+SDK IID and vtable were checked against Microsoft's `endpointvolume.h` and
+`mmdeviceapi.h`; the small local binding needs no new dependency or vendor
+payload. Its worker owns all COM objects, polls at at most 30 Hz, refreshes the
+default multimedia output every two seconds, rejects samples older than 200 ms,
+releases COM after one second without demand and parks. Suspend/shutdown detaches
+it. Metadata auto-hide does not start it or treat zero peaks as detected sound.
+No stream, microphone, default-output, mute or volume write is involved.
+
+The existing 30 Hz `music_wave_update_due` budget remains in force. Settled
+cover-only islands request just the strip on wave ticks; lyrics, marquee,
+interactions, shell travel and pending transition cleanup retain their ordinary
+frames. High-DPI light uses a cached logical-pixel strip raster, bounding both
+allocation and stroke work. The `8caf672` hidden-owner early return and responsive
+surface's 33 ms presentation clocks are retained.
+
+Resolved lyricless expanded islands use the existing album/cover painter without
+writing a setting. This includes metadata-only cleaned misses; a song containing
+real lyrics retains its genuine intro/gap presentation. Same-song recovery keeps
+its temporary cover while pending, new-song pending keeps the established loader,
+and returned lyrics restore the saved island flow. The no-lyrics proof records
+zero lyric-viewport paints, zero gap/dot paints and zero settings callbacks.
+
+Evidence is outside Git in `/workspace/gluspot/handoff/t179/`:
+`t192_wave_proof.py`, `t192-wave-{low,high}.png`, the corresponding `-strip.png` and `-dpr2.png`
+frames, `t192-wave-no-lyrics.png` and `t192-wave-proof.json/log`. Synthetic magenta
+artwork produces zero RGB channel differences in the sea; low/high crest ranges
+are 0.40/8.45 logical pixels, with maximum luminance 173/252. These are offscreen
+Qt fixtures, not native player/audio or physical display acceptance.
+
+The paired 600-frame Box sea-state/render proxy against exact `79c0f90` (60
+warmup frames; 30 Hz equivalent; includes state updates) measured:
+
+| DPR | Parent P95 | Item 7 P95 | Parent one-core CPU | Item 7 one-core CPU |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 1.690 ms | 1.246 ms | 4.414% | 3.021% |
+| 2 | 1.987 ms | 1.803 ms | 4.965% | 4.563% |
+
+This is a bounded raster proxy, not a PC CPU promise. Parent PC expectation:
+expanded wave-only activity remains at most 30 Hz, quiet input stays calm, and
+narrow/windowed playback retains the `8caf672` callback limits. Compare the same
+PC track, size, DPR and observation interval before/after; physical compositor
+smoothness, actual Windows meter response/output switching and exclusive-mode
+meter support remain parent acceptance work. Endpoint peaks precede master gain
+and may be zero when an exclusive-mode driver lacks hardware metering.
+
+Verification uses the same private offscreen wrapper as Items 1–6:
+
+| Scope | Result | Evidence under the handoff directory |
+| --- | --- | --- |
+| Final focused render/audio/provider contracts | 229 passed | `t192-render-focused.json/log` |
+| Final DPR 2 render/state/lyric contracts | 150 passed | `t192-dpr2-focused.json/log` |
+| Clean `79c0f90` ordinary full discovery | 5,982 run; 54 failures, 48 errors, 32 skips | `t192-full-baseline.json/log` |
+| Item 7 ordinary full discovery | 6,000 run; 54 failures, 48 errors, 32 skips | `t192-full-final.json/log` |
+
+All eighteen added cases pass. Failure/error identities and skips match the
+baseline; no green whole-branch suite is claimed. Changed Python compilation and
+`git diff --check` pass. Native Windows meter/audio and physical PC visuals remain
+unverified. Scope/process review has no uncorrected interface, verification or
+architecture deduction: **100/100 for source handoff**, not release acceptance.
+
+
+The existing default 433 × 550 DPR 1 narrow Box callback probe also completed
+against both trees (`t192-{baseline-,}narrow-perf.json/log`): one-core process CPU
+44.652% → 38.862%, paint P95 18.221 → 16.816 ms, tick P95 9.116 → 10.848 ms.
+These five-second samples retain about 30 Hz presentation, zero lyric builds,
+38/39 veil preparations and the same 33 ms timers. The tick tail is higher in
+this short sample; uniform callback improvement is not claimed. No narrow veil,
+layout or presentation-clock implementation changed. `t192-full-comparison.json`
+records the exact unchanged failure/error and skip identities/reasons.

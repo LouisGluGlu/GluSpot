@@ -22,6 +22,8 @@ class AudioFrame:
     vocal: float = 0.0
     spectrum: tuple[float, ...] = ()
     vocal_spectrum: tuple[float, ...] = ()
+    # Absolute PCM/render peak; None means this source only supplied bands.
+    peak: float | None = None
 
 
 @dataclass(frozen=True)

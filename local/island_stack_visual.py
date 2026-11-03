@@ -1684,7 +1684,7 @@ class IslandStackVisual(QWidget):
             speed=getattr(self, "animation_speed", 1.0),
         )
 
-    def _active_visual_animation_plan(self, now: float):
+    def _active_visual_animation_plan(self, now: float, *, include_media: bool = True):
         if bool(getattr(self, "_bar_scene_transition", False)):
             self._bar_visibility_opacity(now)
             if abs(float(getattr(self, "_bar_visibility_value", 1.)) - float(getattr(self, "_bar_visibility_target", 1.))) > .001:
@@ -1711,7 +1711,7 @@ class IslandStackVisual(QWidget):
             from local.island_presentation import ActiveVisualAnimationPlan
             return ActiveVisualAnimationPlan(True, "audio_device")
         plan = presentation_active_visual_animation_plan(
-            media_is_playing=getattr(self, "media_is_playing", False),
+            media_is_playing=include_media and getattr(self, "media_is_playing", False),
             finder_mode=getattr(self, "finder_mode", False),
             drag_candidate=getattr(self, "drag_candidate", False),
             dragging=getattr(self, "dragging", False),
@@ -2154,13 +2154,50 @@ class IslandStackVisual(QWidget):
             self._update_wave_values()
         if not frame_plan.should_render:
             return False
+        wave_damage = self._sea_wave_only_damage(now) if not visual_data_changed else None
+        if wave_damage is not None and not frame_plan.update_music_wave:
+            return False
         self.scroll_phase += frame_plan.scroll_phase_delta
         self.ambient_phase += frame_plan.ambient_phase_delta
         if frame_plan.mark_render_frame:
             self._mark_render_frame(now)
         if frame_plan.update_widget:
-            self.update()
+            if wave_damage is None:
+                self.update()
+            else:
+                self.update(wave_damage)
         return True
+
+    def _sea_wave_only_damage(self, now: float):
+        """A settled cover-only island needs damage only around its ripple.
+
+        Lyric ink, marquee, interactions and shell/cover travel continue to
+        request their existing frames. Never narrow damage during a handoff.
+        """
+        if (not bool(getattr(self, "expanded", False))
+                or self._effective_music_ambience_style() != "sea_level"
+                or str(getattr(self, "music_expanded_layout_style", "standard")) != "standard"
+                or not bool(getattr(self, "_expanded_cover_only", False))
+                or bool(getattr(self, "_music_metadata_scrolls", False))
+                or bool(getattr(self, "show_debug_overlay", False))
+                or not getattr(self, "surface_transition_pixmap", QPixmap()).isNull()
+                or bool(getattr(self, "scene_transition_mode", ""))
+                or bool(getattr(self, "music_surface_transition_mode", ""))
+                or self._active_visual_animation_plan(now, include_media=False).active
+                or self._album_island_transition_progress(now) < 1.):
+            return None
+        visuals = self._build_visuals()
+        if len(visuals) != 1 or visuals[0].kind != IslandKind.MUSIC:
+            return None
+        motion = self.motions.get(visuals[0].key)
+        if motion is None or motion.opacity < .999:
+            return None
+        rect, target = motion.rect, visuals[0].rect
+        if (max(abs(a - b) for a, b in zip((rect.x(), rect.y(), rect.width(), rect.height()),
+                                          (target.x(), target.y(), target.width(), target.height()))) > .05
+                or max(abs(motion.vx), abs(motion.vy), abs(motion.vw), abs(motion.vh)) > .05):
+            return None
+        return self._native_music_background_renderer().sea_level_wave_strip(rect).toAlignedRect()
 
     def set_animation_fps(self, fps: int, notify: bool = True):
         self.animation_fps = self._normalize_animation_fps(fps)
@@ -3783,6 +3820,8 @@ class IslandStackVisual(QWidget):
             state = getattr(self, "_sea_wave_state", None)
             if state is None:
                 state = self._sea_wave_state = SeaWaveState()
+            state.update_ripple(getattr(self, "_sea_peak_sample", None), now,
+                                is_playing=bool(getattr(self, "media_is_playing", False)))
             state.update(
                 self.current_audio_bands,
                 now,
@@ -3820,12 +3859,24 @@ class IslandStackVisual(QWidget):
         if callable(input_snapshot):
             provider = getattr(self, "data_provider", None)
             def read_live_frame():
+                self._sea_peak_sample = None
                 self._sea_vocal_sample = 0.0
                 self._sea_spectrum = self._sea_vocal_spectrum = ()
                 frame = getattr(provider, "get_audio_frame", lambda: None)()
+                if frame is not None:
+                    # Older/fixture providers may only supply real bands.
+                    self._sea_peak_sample = getattr(frame, "peak", None)
+                    if self._sea_peak_sample is None:
+                        self._sea_peak_sample = max(getattr(frame, "low", 0.), getattr(frame, "mid", 0.), getattr(frame, "high", 0.))
                 self._sea_vocal_sample = getattr(frame, "vocal", 0.0) or 0.0
                 self._sea_spectrum = getattr(frame, "spectrum", ()) or ()
                 self._sea_vocal_spectrum = getattr(frame, "vocal_spectrum", ()) or ()
+                if (getattr(frame, "peak", None) is not None
+                        and not any((frame.low, frame.mid, frame.high, self._sea_vocal_sample))
+                        and not self._sea_spectrum and not self._sea_vocal_spectrum):
+                    # Peak-only visual metering must not authorize the shared
+                    # band's live-audio/auto-hide path, including real silence.
+                    return None
                 return frame
             return input_snapshot(
                 now=now,
@@ -9682,6 +9733,30 @@ class IslandStackVisual(QWidget):
         no_text = str(getattr(self, "no_lyrics_text", "暂无歌词")).strip()
         return len(lyrics) == 1 and lyrics[0] == no_text
 
+    def _expanded_no_lyrics_cover_active(self) -> bool:
+        """Temporary cover for resolved misses, retaining it during recovery.
+
+        Reuse the shared cleaned rows and pending state; never save a layout
+        or replace a genuine intro/instrumental gap in a song with lyrics.
+        """
+        track = (str(getattr(self, "media_track_id", "") or ""),
+                 str(getattr(self, "track_title", "") or ""), str(getattr(self, "artist", "") or ""))
+        retained = (track == getattr(self, "_expanded_cover_only_track", None)
+                    and bool(getattr(self, "_expanded_cover_only", False)))
+        rows = self._island_cleaned_lyric_rows()
+        loading = {"查找歌词中", "寻找歌词中", "加载歌词中"}
+        pending = self._music_surface_waiting_for_loaded_lyrics() or any(str(row).strip() in loading for row in rows)
+        if pending:
+            active = retained
+        else:
+            absent = {"", "暂无歌词", str(getattr(self, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip(),
+                      INTRO_COUNTDOWN_TEXT}
+            active = (track[1] not in {"", "暂无媒体", "暂无播放", "媒体初始化中"}
+                      and not any(str(row).strip() not in absent for row in rows))
+        self._expanded_cover_only_track = track
+        self._expanded_cover_only = active
+        return active
+
     def _album_island_slots(self, rect: QRectF, reserve_text: bool = False) -> list[dict[str, object]]:
         count = int(getattr(self, "album_island_cover_count", 5))
         if count not in (3, 5, 7):
@@ -11636,6 +11711,7 @@ class IslandStackVisual(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
 
     def _paint_music(self, painter: QPainter, rect: QRectF, expanded: bool):
+        self._music_metadata_scrolls = False
         if self._immersive_bar_compact_active() and not expanded:
             self._paint_finder_bar_music(painter, rect)
             return
@@ -13997,7 +14073,7 @@ class IslandStackVisual(QWidget):
             row = QRectF(rect.left() + self._u(22.0), rect.center().y() - self._u(18.0), rect.width() - self._u(44.0), self._u(36.0))
             self._paint_scrolling_text(painter, row, text, 18, self._music_lyric_text_color(226), True, centered=True, centered_scroll=True)
             return
-        if self._should_paint_album_island():
+        if self._expanded_no_lyrics_cover_active() or self._should_paint_album_island():
             self.music_cover_rect = QRectF()
             self._paint_album_island_expanded(painter, rect)
             return
@@ -15413,6 +15489,7 @@ class IslandStackVisual(QWidget):
             flags = Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignHCenter if centered else Qt.AlignmentFlag.AlignLeft)
             painter.drawText(rect, flags, text)
         else:
+            self._music_metadata_scrolls = True
             x = self._scrolling_text_x(rect, text_w, centered, centered_scroll)
             painter.drawText(QRectF(x, rect.top(), text_w + self._u(20), rect.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
         painter.restore()

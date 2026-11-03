@@ -50,6 +50,36 @@ class SeaWaveState:
         self.vibration_velocity = 0.0
         self.onset_strength = 0.0
         self._vibration_at = -10.0
+        self.ripple_level = 0.0
+        self.ripple_updated_at = None
+        self.ripple_time = 0.0
+
+    def update_ripple(self, peak, now, *, is_playing=True):
+        """Absolute level, independent of the experimental spectrum's AGC.
+
+        A real zero is silence. Only an unavailable meter gets idle breathing.
+        Attack/release are exponential time constants of 60/250 ms.
+        """
+        dt = 1 / 30 if self.ripple_updated_at is None else max(0.0, min(.25, now - self.ripple_updated_at))
+        self.ripple_updated_at = now
+        self.ripple_time += dt
+        if not is_playing:
+            target = 0.0
+        elif peak is None:
+            target = .045 + .018 * math.sin(self.ripple_time * .65)
+        else:
+            target = math.sqrt(max(0.0, min(1.0, float(peak)))) if math.isfinite(float(peak)) else 0.0
+        tau = .060 if target > self.ripple_level else .250
+        self.ripple_level += (target - self.ripple_level) * -math.expm1(-dt / tau)
+
+    def ripple_displacement(self, pos):
+        """Three long ripples with independent, slowly drifting phases."""
+        t = self.ripple_time
+        drift = .22 * math.sin(t * .17)
+        shape = (.58 * math.sin(pos * math.tau * 1.10 - t * .72 + drift)
+                 + .29 * math.sin(pos * math.tau * 2.25 + t * .49 - drift)
+                 + .13 * math.sin(pos * math.tau * 3.65 - t * .31 + .8))
+        return (.20 + 8.5 * self.ripple_level) * shape
 
     def update(self, bands, now, vocal=0.0, intensity=None, spectrum=(), vocal_spectrum=()):
         dt = 1 / 60 if self.updated_at is None else max(0.0, min(0.25, now - self.updated_at))

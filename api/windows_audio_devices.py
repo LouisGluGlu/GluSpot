@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 
@@ -309,6 +310,7 @@ _IID_ENUMERATOR = "a95664d2-9614-4f35-a746-de8db63617e6"
 _POLICY_CONFIG = "870af99c-171d-4f9e-af0d-e63df40c2bc9"
 _IID_POLICY_CONFIG = "f8679f50-850a-41cf-9c72-430f290290c8"
 _IID_ENDPOINT_VOLUME = "5cdf2c82-841e-4546-9722-0cf74078229a"
+_IID_AUDIO_METER = "c02216f6-8c67-4b5b-9d00-d008e73e0064"
 
 
 def _check(hr, operation):
@@ -388,6 +390,34 @@ class _WindowsCoreAudioAdapter:
             return ctypes.wstring_at(text)
         finally:
             self._ole32.CoTaskMemFree(text)
+
+    @contextmanager
+    def default_peak_reader(self):
+        """Worker-local SDK IAudioMeterInformation, before endpoint gain.
+
+        ABI: Microsoft's endpointvolume.h / mmdeviceapi.h. This activates a
+        read-only meter, without IAudioClient, capture, or output mutation.
+        """
+        with _ComScope(self._ole32) as scope:
+            enumerator = scope.create(_MM_ENUMERATOR, _IID_ENUMERATOR)
+            device = ctypes.c_void_p()
+            _check(_call(enumerator, 4, (ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)),
+                         0, 1, ctypes.byref(device)), "IMMDeviceEnumerator.GetDefaultAudioEndpoint")
+            scope.own(device)
+            meter = ctypes.c_void_p()
+            _check(_call(device, 3, (ctypes.POINTER(_GUID), _DWORD, ctypes.c_void_p,
+                                    ctypes.POINTER(ctypes.c_void_p)),
+                         ctypes.byref(_GUID.from_string(_IID_AUDIO_METER)), 23, None,
+                         ctypes.byref(meter)), "IMMDevice.Activate(IAudioMeterInformation)")
+            scope.own(meter)
+
+            def read_peak():
+                value = ctypes.c_float()
+                _check(_call(meter, 3, (ctypes.POINTER(ctypes.c_float),), ctypes.byref(value)),
+                       "IAudioMeterInformation.GetPeakValue")
+                return float(value.value)
+
+            yield read_peak
 
     def _endpoint_volume(self, scope, device_id):
         """Activate SDK IAudioEndpointVolume for an explicit render ID."""

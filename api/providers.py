@@ -29,7 +29,7 @@ from PySide6.QtGui import QColor, QImage
 
 from api.capture import capture_enabled
 from api.capture.seek import record_seek_decision
-from api.audio_analyzer import LiveAudioAnalyzer
+from api.audio_analyzer import LiveAudioAnalyzer, RenderPeakMeter
 from api.audio_routes import AudioRouteSnapshot
 from api.artwork_sources import (
     ARTWORK_USER_AGENT, MusicBrainzArtworkResolver,
@@ -635,6 +635,7 @@ class WindowsMediaProvider:
         runtime = getattr(self, "_capture_runtime", None)
         loop = getattr(self, "_loop", None)
         self._capture_closed = True
+        self.suspend_live_audio()
         worker = getattr(self, "_capture_uia_worker", None)
         if worker is not None:
             worker.close()
@@ -1491,7 +1492,7 @@ class WindowsMediaProvider:
     def get_audio_frame(self) -> AudioFrame | None:
         audio_analyzer = self._ensure_audio_analyzer_if_requested()
         if audio_analyzer is None:
-            return None
+            return self._render_peak_frame()
         track = self._last_data.track if self._last_data is not None else None
         try:
             live_audio = audio_analyzer.has_recent_real_frame()
@@ -1499,7 +1500,7 @@ class WindowsMediaProvider:
             self._release_audio_analyzer(f"audio-frame-check-failed: {self._brief_error(exc)}", cooldown=True)
             return None
         if not live_audio:
-            return None
+            return self._render_peak_frame()
         try:
             return audio_analyzer.get_frame(
                 is_playing=True if track is None else track.is_playing,
@@ -1509,9 +1510,21 @@ class WindowsMediaProvider:
             self._release_audio_analyzer(f"audio-frame-read-failed: {self._brief_error(exc)}", cooldown=True)
             return None
 
+    def _render_peak_frame(self) -> AudioFrame | None:
+        # Reading a render meter does not open the optional loopback stream.
+        # Demand comes from the existing wave tick, never metadata auto-hide.
+        if sys.platform != "win32" or bool(getattr(self, "_capture_closed", False)):
+            return None
+        meter = getattr(self, "_render_peak_meter", None)
+        if meter is None:
+            meter = self._render_peak_meter = RenderPeakMeter()
+        return meter.get_frame()
+
     def has_live_audio(self) -> bool:
         audio_analyzer = self._ensure_audio_analyzer_if_requested()
         if audio_analyzer is None:
+            # The visual-only endpoint meter must not change metadata-driven
+            # auto-hide or classify quiet output as active playback.
             return False
         try:
             return audio_analyzer.has_recent_real_frame()
@@ -1582,6 +1595,9 @@ class WindowsMediaProvider:
 
     def suspend_live_audio(self):
         """Detach an optional meter immediately, release its stream off Qt."""
+        meter, self._render_peak_meter = getattr(self, "_render_peak_meter", None), None
+        if meter is not None:
+            meter.stop()
         analyzer, self.audio_analyzer = getattr(self, "audio_analyzer", None), None
         if analyzer is not None:
             def stop():

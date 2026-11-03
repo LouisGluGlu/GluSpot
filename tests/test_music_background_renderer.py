@@ -215,7 +215,7 @@ class MusicBackgroundRendererTests(unittest.TestCase):
             host._solid_album_background_color = lambda color=color: color
             context = renderer.render_context("sea_level", expanded=True)
             sea, line = renderer._sea_level_colors(context)
-            self.assertEqual(sea.getRgb()[:3], color.getRgb()[:3])
+            self.assertEqual(sea.getRgb()[:3], (34, 34, 34))
             self.assertEqual(line.getRgb(), (255, 255, 255, 175))
 
     def _paint_image(self, paint_func, *, now: float = 42.0) -> QImage:

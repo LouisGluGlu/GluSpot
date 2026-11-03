@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import sys
 import threading
 import time
 import warnings
@@ -21,7 +22,11 @@ DISCONTINUITY_LIMIT = 3
 def analyze_frequency_block(block, sample_rate: int, np, smooth) -> AudioFrame | None:
     """Analyze real PCM using the shared bands; never invent a fallback frame."""
     data = np.asarray(block, dtype=np.float32)
-    if data.size == 0:
+    if data.size == 0 or not np.isfinite(data).all():
+        return None
+    peak = min(1.0, float(np.max(np.abs(data))))
+    if peak < .00008:
+        smooth[:] = [0.0, 0.0, 0.0]
         return None
     side = None
     if len(data.shape) > 1:
@@ -29,8 +34,9 @@ def analyze_frequency_block(block, sample_rate: int, np, smooth) -> AudioFrame |
             side = (data[:, 0] - data[:, 1]) * 0.5
         data = data.mean(axis=1)
     data = data - float(np.mean(data))
-    if not np.isfinite(data).all() or float(np.max(np.abs(data))) < 0.00008:
-        return None
+    if float(np.max(np.abs(data))) < 0.00008:
+        smooth[:] = [0.0, 0.0, 0.0]
+        return AudioFrame(0.0, 0.0, 0.0, peak=peak)
     spectrum = np.abs(np.fft.rfft(data * np.hanning(len(data))))
     freqs = np.fft.rfftfreq(len(data), 1.0 / sample_rate)
     normalized = []
@@ -59,7 +65,81 @@ def analyze_frequency_block(block, sample_rate: int, np, smooth) -> AudioFrame |
         return tuple(result)
     return AudioFrame(*normalized, vocal=vocal,
                       spectrum=log_bands(spectrum, 50, 10000),
-                      vocal_spectrum=log_bands(center_spectrum, 200, 4000))
+                      vocal_spectrum=log_bands(center_spectrum, 200, 4000), peak=peak)
+
+
+class RenderPeakMeter:
+    """Demand-driven, read-only Core Audio meter; never opens a PCM stream.
+
+    Qt only reads a fresh immutable frame. The worker owns every COM pointer,
+    releases them after one second without demand, and then parks.
+    """
+
+    def __init__(self, reader_factory=None):
+        self._reader_factory = reader_factory
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = None
+        self._requested_at = -math.inf
+        self._sample = (None, -math.inf)
+        self._retry_not_before = 0.0
+
+    def get_frame(self):
+        if self._stop.is_set() or (sys.platform != "win32" and self._reader_factory is None):
+            return None
+        now = time.monotonic()
+        with self._lock:
+            self._requested_at = now
+            if self._thread is None and now >= self._retry_not_before:
+                self._thread = threading.Thread(target=self._run, name="GluSpotRenderPeak", daemon=True)
+                self._thread.start()
+        self._wake.set()
+        return self.recent_frame(now)
+
+    def recent_frame(self, now=None):
+        frame, sampled_at = self._sample
+        now = time.monotonic() if now is None else now
+        return frame if not self._stop.is_set() and 0 <= now - sampled_at <= 0.20 else None
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+        self._sample = (None, -math.inf)
+
+    def _run(self):
+        try:
+            factory = self._reader_factory
+            if factory is None:
+                from api.windows_audio_devices import _WindowsCoreAudioAdapter
+                factory = _WindowsCoreAudioAdapter().default_peak_reader
+            while not self._stop.is_set():
+                if time.monotonic() - self._requested_at > 1.0:
+                    self._sample = (None, -math.inf)
+                    self._wake.clear()
+                    # Recheck after clearing to avoid losing a new request.
+                    if not self._stop.is_set() and time.monotonic() - self._requested_at > 1.0:
+                        self._wake.wait()
+                    continue
+                try:
+                    with factory() as read_peak:
+                        renew_at = time.monotonic() + OUTPUT_CHECK_INTERVAL_SECONDS
+                        while not self._stop.is_set() and time.monotonic() - self._requested_at <= 1.0:
+                            peak = float(read_peak())
+                            if not math.isfinite(peak) or not 0.0 <= peak <= 1.0:
+                                raise ValueError("Invalid render peak")
+                            self._sample = (AudioFrame(0.0, 0.0, 0.0, peak=peak), time.monotonic())
+                            if self._stop.wait(1.0 / 30.0) or time.monotonic() >= renew_at:
+                                break
+                except Exception:
+                    self._sample = (None, -math.inf)
+                    self._stop.wait(OUTPUT_CHECK_INTERVAL_SECONDS)
+        except Exception:
+            self._sample = (None, -math.inf)
+            self._retry_not_before = time.monotonic() + OUTPUT_CHECK_INTERVAL_SECONDS
+        finally:
+            with self._lock:
+                self._thread = None
 
 
 class LiveAudioAnalyzer:
@@ -204,6 +284,10 @@ class LiveAudioAnalyzer:
                 if frame is not None:
                     self._frame = frame
                     self._last_real_frame_at = now
+                elif isinstance(block, np.ndarray) and block.size and np.isfinite(block).all() and float(np.max(np.abs(block))) < .00008:
+                    # Release the visual immediately, preserving the existing
+                    # last-*audible* timestamp used by metadata auto-hide.
+                    self._frame = AudioFrame(0.0, 0.0, 0.0, peak=0.0)
                 if now >= next_output_check:
                     next_output_check = now + OUTPUT_CHECK_INTERVAL_SECONDS
                     if sc.default_speaker().id != endpoint_id:
@@ -248,7 +332,7 @@ class LiveAudioAnalyzer:
         return self._last_real_frame_at > 0 and time.monotonic() - self._last_real_frame_at < 1.2
 
     def _dampen(self, frame: AudioFrame) -> AudioFrame:
-        return AudioFrame(frame.low * 0.18, frame.mid * 0.14, frame.high * 0.10, frame.vocal * 0.14, tuple(x * .14 for x in frame.spectrum), tuple(x * .14 for x in frame.vocal_spectrum))
+        return AudioFrame(frame.low * 0.18, frame.mid * 0.14, frame.high * 0.10, frame.vocal * 0.14, tuple(x * .14 for x in frame.spectrum), tuple(x * .14 for x in frame.vocal_spectrum), None if frame.peak is None else frame.peak * .18)
 
     def _estimated_frame(self, is_playing: bool, position_seconds: float) -> AudioFrame:
         if not is_playing:

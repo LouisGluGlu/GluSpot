@@ -7,7 +7,7 @@ import math
 import time
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
+from PySide6.QtGui import QBrush, QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
 
 from local.music_reactive_plans import (
     background_motion_plan,
@@ -1063,6 +1063,11 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
     SEA_SKY = QColor(12, 12, 12)
     SEA_DEEP = QColor(34, 34, 34)
 
+    def sea_level_wave_strip(self, rect: QRectF) -> QRectF:
+        """Fixed damage envelope: all ripple, reflection and glow pixels."""
+        center = rect.top() + rect.height() * .495
+        return QRectF(rect.left(), center - self._u(18), rect.width(), self._u(52)).intersected(rect)
+
     def _sea_level_surface(self, context: MusicBackgroundRenderContext, rect: QRectF, expanded: bool) -> list[QPointF]:
         """The moving water line shared by the sea body and its highlight.
 
@@ -1071,6 +1076,18 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         """
         from local.sea_wave import sea_intensity
         state = getattr(self.host, "_sea_wave_state", None)
+        if expanded and state is not None and getattr(self.host, "sea_shape_mode", None) not in {"spectrum", "wave"}:
+            # The island ripple is a smooth water surface, independent of the
+            # optional spectrum preview. No repeated spring-chain filtering.
+            cache_key = (state.ripple_updated_at, rect.x(), rect.y(), rect.width(), rect.height(), self._u(1))
+            cached = getattr(state, "_ripple_surface_cache", None)
+            if cached is None or cached[0] != cache_key:
+                points = tuple(QPointF(rect.left() + rect.width() * index / 48,
+                                      rect.top() + rect.height() * .495
+                                      - self._u(state.ripple_displacement(index / 48)))
+                               for index in range(49))
+                state._ripple_surface_cache = (cache_key, points)
+            return list(state._ripple_surface_cache[1])
         if state is None:
             plan = sea_level_wave_paint_plan(
                 context.response("sea_level"),
@@ -1122,9 +1139,9 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         return smoothed
 
     @staticmethod
-    def _sea_level_colors(context: MusicBackgroundRenderContext) -> tuple[QColor, QColor]:
-        """The cover tone and a neutral glass-like water-line highlight."""
-        sea = QColor(context.palette.solid_album_background)
+    def _sea_level_colors(context: MusicBackgroundRenderContext, expanded: bool = True) -> tuple[QColor, QColor]:
+        """Expanded sea is silver on black; cover pigment belongs elsewhere."""
+        sea = QColor(34, 34, 34) if expanded else QColor(context.palette.solid_album_background)
         sea.setAlpha(255)
         line = QColor(255, 255, 255, 175)
         return sea, line
@@ -1147,7 +1164,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         painter.restore()
 
     def _paint_xiaomi_duotone_ambience(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
-        """Sea level: a dark sky, the cover tone just under the water line, deepening to black."""
+        """Black expanded sea; its moving light is confined to the wave strip."""
         painter.save()
         inset = self._u(1.4)
         bleed = self._u(1.0)
@@ -1157,8 +1174,17 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.fillRect(paint_rect, self.SEA_SKY)
 
+        if expanded:
+            depth = QLinearGradient(0, rect.top(), 0, rect.bottom())
+            depth.setColorAt(0, self.SEA_SKY)
+            depth.setColorAt(.5, self.SEA_SKY)
+            depth.setColorAt(1, QColor(0, 0, 0))
+            painter.fillRect(paint_rect, depth)
+            painter.restore()
+            return
+
         context = self.render_context("sea_level", expanded=expanded)
-        sea, _line = self._sea_level_colors(context)
+        sea, _line = self._sea_level_colors(context, expanded=False)
         points = self._sea_level_surface(context, rect, expanded)
         water = QPainterPath(QPointF(paint_rect.left(), points[0].y()))
         for point in points:
@@ -1226,16 +1252,70 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         return path
 
     def _paint_xiaomi_duotone_wave(self, painter: QPainter, rect: QRectF, radius: float, expanded: bool):
-        """The thin light water line on top of the sea body."""
+        """White specular crest, soft downward glow and a second reflection."""
         painter.save()
         inset = self._u(1.4)
         painter.setClipPath(self._music_shell_path(rect.adjusted(inset, inset, -inset, -inset), max(1.0, radius - inset), expanded))
+        if expanded:
+            painter.setClipRect(self.sea_level_wave_strip(rect), Qt.ClipOperation.IntersectClip)
+            if painter.device().devicePixelRatioF() > 1.0:
+                # This soft light needs only a logical-pixel raster. Bound
+                # high-DPI tessellation and allocation to the wave strip,
+                # then let Qt scale its silver falloff with the shell clip.
+                strip = self.sea_level_wave_strip(rect).toAlignedRect()
+                state = getattr(self.host, "_sea_wave_state", None)
+                preview_mode = getattr(self.host, "sea_shape_mode", None)
+                key = (id(state), getattr(state, "ripple_updated_at", None), getattr(state, "updated_at", None),
+                       preview_mode, float(getattr(self.host, "ambient_phase", 0.)) if preview_mode else None,
+                       rect.getRect(), radius, self._u(1.0))
+                cached = getattr(self, "_sea_ripple_raster", None)
+                if state is None or cached is None or cached[0] != key:
+                    raster = QImage(strip.width(), strip.height(), QImage.Format.Format_ARGB32_Premultiplied)
+                    raster.fill(Qt.GlobalColor.transparent)
+                    with QPainter(raster) as layer:
+                        layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+                        layer.translate(-strip.left(), -strip.top())
+                        self._paint_xiaomi_duotone_wave(layer, rect, radius, expanded)
+                    self._sea_ripple_raster = (key, raster)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                painter.drawImage(QPointF(strip.topLeft()), self._sea_ripple_raster[1])
+                painter.restore()
+                return
         context = self.render_context("sea_level", expanded=expanded)
         _sea, line = self._sea_level_colors(context)
         points = self._sea_level_surface(context, rect, expanded)
         path = QPainterPath(points[0])
         for point in points[1:]:
             path.lineTo(point)
+        if expanded:
+            state = getattr(self.host, "_sea_wave_state", None)
+            level = state.ripple_level if state is not None else max(context.bands)
+            level = max(0., min(1., level))
+            # A shallow silver falloff follows the crest instead of filling
+            # the lower island with album pigment. All work stays in the strip.
+            depth_units = 14. + 8. * level
+            under = QPainterPath(path)
+            for point in reversed(points):
+                under.lineTo(QPointF(point.x(), point.y() + self._u(depth_units)))
+            under.closeSubpath()
+            top = min(point.y() for point in points)
+            glow = QLinearGradient(0, top, 0, top + self._u(depth_units + 8))
+            glow.setColorAt(0, QColor(255, 255, 255, round(52 + 74 * level)))
+            glow.setColorAt(.25, QColor(255, 255, 255, round(25 + 40 * level)))
+            glow.setColorAt(1, QColor(255, 255, 255, 0))
+            painter.fillPath(under, glow)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            # Wide antialiased strokes tessellate every segment at high DPR.
+            # The filled falloff supplies the glow with just one thin crest.
+            painter.setPen(QPen(QColor(255, 255, 255, round(210 + 45 * level)), self._u(1. + .65 * level),
+                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawPath(path)
+            painter.translate(0, self._u(3.2 + 1.2 * level))
+            painter.setPen(QPen(QColor(255, 255, 255, round(12 + 18 * level)), self._u(.6 + .35 * level),
+                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter.drawPath(path)
+            painter.restore()
+            return
         painter.setBrush(Qt.BrushStyle.NoBrush)
         glow = QColor(line)
         glow.setAlpha(24)
