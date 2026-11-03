@@ -74,60 +74,66 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
             paint(painter, QRectF(self.window.rect()))
         return ink
 
-    def test_wide_lyric_viewport_and_ink_clear_transport_and_collection(self):
+    def test_wide_full_height_column_keeps_active_anchor_and_softly_clears_controls(self):
         self.prepare_bottom_clearance_song()
         for size in ((640, 360), (960, 540), (1040, 600), (1280, 720)):
             self.window.resize(*size)
             self.assertFalse(self.window._content_layout_is_narrow())
             surface = QRectF(self.window.rect())
-            column = self.window._content_column_geometry()[2]
-            region_top = surface.bottom() - self.window.CONTROL_BOTTOM_REGION_HEIGHT * self.window._surface_scale()
-            self.assertAlmostEqual(column.bottom(), region_top)
+            content, _cover, column = self.window._content_column_geometry()
+            self.assertEqual(column.bottom(), content.bottom())
+            self.assertAlmostEqual(column.bottom(), surface.bottom() - 60. * self.window._surface_scale())
+            self.assertGreater(column.bottom(), surface.height() * .90)
             for active in (0, 5, 11):
                 with self.subTest(size=size, active=active):
                     self.owner.media_position_seconds = active * 10. + 1.
                     with patch.object(self.window, "_lyric_view_anchor", return_value=(float(active), active, True)):
                         self.render()
-                        ink = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
-                        ink.fill(Qt.GlobalColor.transparent)
-                        clips = []
-                        original = self.window._draw_future_wrapped_layout
-                        def observe(painter, *args, **kwargs):
-                            clips.append(painter.clipBoundingRect())
-                            return original(painter, *args, **kwargs)
-                        with QPainter(ink) as painter, \
-                                patch.object(self.window, "_draw_future_wrapped_layout", side_effect=observe):
-                            self.window._paint_live_lyric_column(painter, surface)
+                        ink = self.render_lyric_ink()
                     controls = self.window._media_control_panel_rect
                     collection = self.window._song_collection_geometry(surface, shifted=False)
                     self.assertTrue(collection.isValid())
-                    for boundary in (controls.top(), collection.top()):
-                        self.assertLess(self.window._lyric_clip_rect.bottom(), boundary)
-                        self.assertLess(self.window._lyric_hit_rects[active].bottom(), boundary)
-                        self.assertTrue(all(row.bottom() < boundary for row in self.window._lyric_hit_rects.values() if row.isValid()))
-                    self.assertTrue(clips)
-                    self.assertTrue(all(clip.bottom() <= column.bottom() for clip in clips))
-                    self.assertTrue(all(not clip.intersects(controls) for clip in clips))
-                    # Check actual premultiplied ink, independently of hit geometry.
-                    bottom = ink.copy(0, int(column.bottom()) + 1, ink.width(), ink.height() - int(column.bottom()) - 1)
-                    rgba = bottom.convertToFormat(QImage.Format.Format_RGBA8888)
-                    self.assertFalse(any(bytes(rgba.constBits())[3::4]))
+                    boundary = min(controls.top(), collection.top())
+                    # Layout/hit geometry can reach into chrome; only ink fades.
+                    clip = self.window._lyric_clip_rect
+                    self.assertGreater(clip.bottom(), boundary)
+                    self.assertGreater(column.bottom(), boundary)
+                    expected_center = (column.top() + max(8., surface.height() * .018)
+                                       + (column.height() - max(12., surface.height() * .035)) * .43)
+                    self.assertAlmostEqual(self.window._lyric_hit_rects[active].center().y(), expected_center)
+                    self.assertGreater(expected_center, surface.height() * .43)
+                    rgba = ink.convertToFormat(QImage.Format.Format_RGBA8888)
+                    alpha = np.frombuffer(rgba.constBits(), np.uint8).reshape(rgba.height(), rgba.width(), 4)[:, :, 3]
+                    self.assertFalse(np.any(alpha[int(np.ceil(boundary * ink.devicePixelRatioF())):]))
 
-    def test_wide_bottom_rows_fade_before_their_glyphs_or_blur_are_clipped(self):
+    def test_wide_bottom_feather_reaches_control_top_without_a_vacant_band(self):
         self.prepare_bottom_clearance_song()
         self.owner.media_position_seconds = 51.
-        with patch.object(self.window, "_lyric_view_anchor", return_value=(5., 5, True)), \
-                patch.object(self.window, "_lyric_blur_follow_levels", return_value=((0.,) * 12, False)):
-            plain = self.render_lyric_ink(faded=False).convertToFormat(QImage.Format.Format_RGBA8888)
-            faded = self.render_lyric_ink().convertToFormat(QImage.Format.Format_RGBA8888)
-        alpha_plain = np.frombuffer(plain.constBits(), np.uint8).reshape(plain.height(), plain.width(), 4)[:, :, 3]
-        alpha_faded = np.frombuffer(faded.constBits(), np.uint8).reshape(faded.height(), faded.width(), 4)[:, :, 3]
-        self.assertTrue(np.any((alpha_faded > 0) & (alpha_faded < alpha_plain)))
-        self.assertTrue(np.all(alpha_faded <= alpha_plain))
-        column = self.window._content_column_geometry()[2]
-        fade_top = column.bottom() - min(88. * self.window._surface_scale(), column.height() * .16)
-        unchanged_bottom = int(fade_top * self.window.devicePixelRatioF())
-        self.assertTrue(np.array_equal(alpha_plain[:unchanged_bottom], alpha_faded[:unchanged_bottom]))
+        for size in ((960, 540), (640, 360)):
+            with self.subTest(size=size), \
+                    patch.object(self.window, "_lyric_view_anchor", return_value=(5., 5, True)), \
+                    patch.object(self.window, "_lyric_blur_follow_levels", return_value=((0.,) * 12, False)):
+                self.window.resize(*size)
+                self.render()
+                plain = self.render_lyric_ink(faded=False).convertToFormat(QImage.Format.Format_RGBA8888)
+                faded = self.render_lyric_ink().convertToFormat(QImage.Format.Format_RGBA8888)
+                alpha_plain = np.frombuffer(plain.constBits(), np.uint8).reshape(plain.height(), plain.width(), 4)[:, :, 3]
+                alpha_faded = np.frombuffer(faded.constBits(), np.uint8).reshape(faded.height(), faded.width(), 4)[:, :, 3]
+                fade_top, fade_bottom = self.window._lyric_bottom_fade_band(QRectF(self.window.rect()))
+                controls = self.window._media_control_panel_rect
+                collection = self.window._song_collection_geometry(QRectF(self.window.rect()), shifted=False)
+                self.assertAlmostEqual(fade_bottom, min(controls.top(), collection.top()))
+                ratio = self.window.devicePixelRatioF()
+                start, end = int(fade_top * ratio), int(np.ceil(fade_bottom * ratio))
+                self.assertTrue(np.any((alpha_faded[start:end] > 0) & (alpha_faded[start:end] < alpha_plain[start:end])))
+                self.assertTrue(np.all(alpha_faded <= alpha_plain))
+                self.assertTrue(np.array_equal(alpha_plain[:start], alpha_faded[:start]))
+                self.assertFalse(np.any(alpha_faded[end:]))
+                # Ink remains near the control top, rather than ending at the
+                # rejected 195*scale reserve with an empty band below it.
+                ink_bottom = np.nonzero(alpha_faded)[0].max() / ratio
+                self.assertLess(fade_bottom - ink_bottom, fade_bottom - fade_top)
+                self.assertGreater(ink_bottom, fade_top)
 
     def test_bottom_fade_preserves_readable_lines_of_a_tall_active_row(self):
         self.prepare_bottom_clearance_song()
@@ -164,27 +170,41 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
             self.assertAlmostEqual(clip.top(), column.top())
             self.assertAlmostEqual(clip.bottom(), column.bottom())
 
-    def test_wide_bottom_reserve_is_stable_through_dj_and_control_reveals(self):
+    def test_full_column_and_control_fade_envelope_stay_stable_through_reveals(self):
         self.prepare_bottom_clearance_song()
+        self.owner.media_position_seconds = 51.
         for size in ((640, 360), (960, 540), (1280, 720)):
             self.window.resize(*size)
             surface = QRectF(self.window.rect())
-            expected = None
+            expected_column = self.window._content_column_geometry()[2]
+            expected_band = None
+            expected_active = None
             for enabled in (False, True):
                 self.window._owned_personal_dj_enabled = enabled
-                if expected is None:
-                    expected = self.window._content_column_geometry()[2]
                 for reveal in (0., .5, 1.):
-                    with self.subTest(size=size, enabled=enabled, reveal=reveal):
-                        self.window._control_reveal_from = self.window._control_reveal_target = reveal
-                        self.window._footer_lane_from = self.window._footer_lane_target = 400.
-                        self.window._footer_lane_started = 100.
-                        self.window._dj_activity_from = self.window._dj_activity_to = 1.
-                        self.assertEqual(self.window._content_column_geometry()[2], expected)
-                        self.assertEqual(self.window._personal_dj_footer_height(surface), 0.)
-                        for expansion in (0., .5, 1.):
-                            icon, caption = self.window._personal_dj_geometry(surface, 100., expansion=expansion, posed=False)
-                            self.assertLessEqual(expected.bottom(), min(icon.top(), caption.top()))
+                    for activity in (0., .5, 1.):
+                        with self.subTest(size=size, enabled=enabled, reveal=reveal, activity=activity), \
+                                patch.object(self.window, "_lyric_view_anchor", return_value=(5., 5, True)):
+                            self.window._control_reveal_from = self.window._control_reveal_target = reveal
+                            self.window._footer_lane_from = self.window._footer_lane_target = 400.
+                            self.window._footer_lane_started = 100.
+                            self.window._dj_activity_from = self.window._dj_activity_to = activity
+                            band = self.window._lyric_bottom_fade_band(surface)
+                            if expected_band is None:
+                                expected_band = band
+                            self.assertEqual(band, expected_band)
+                            self.assertEqual(self.window._content_column_geometry()[2], expected_column)
+                            self.assertEqual(self.window._personal_dj_footer_height(surface), 0.)
+                            icon, caption = self.window._personal_dj_geometry(surface, 100., expansion=activity, posed=False)
+                            self.assertLessEqual(band[1], min(icon.top(), caption.top()) + 1e-6)
+                            self.assertGreater(expected_column.bottom(), caption.top())
+                            ink = self.render_lyric_ink().convertToFormat(QImage.Format.Format_RGBA8888)
+                            alpha = np.frombuffer(ink.constBits(), np.uint8).reshape(ink.height(), ink.width(), 4)[:, :, 3]
+                            self.assertFalse(np.any(alpha[int(np.ceil(band[1] * ink.devicePixelRatioF())):]))
+                            active = self.window._lyric_hit_rects[5]
+                            if expected_active is None:
+                                expected_active = active
+                            self.assertEqual(active, expected_active)
 
     def test_stacked_lyric_viewport_keeps_existing_bottom_reservation(self):
         self.prepare_bottom_clearance_song()

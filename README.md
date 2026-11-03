@@ -106,7 +106,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
-- 2026-11-03: t179 item 1 reserves the wide lyric viewport above transport, collection and the fully expanded DJ envelope. Follow/hit/ink bounds now use the actual lyric column; a reusable ink-only alpha mask feathers the bottom without dimming complete wrapped rows. Narrow's existing reservation and veil remain in place. Offscreen geometry, paired images and resize checks are recorded in [t179 evidence](docs/capture-narrow-t179.md#lyric-bottom-clearance-item-1); parent PC restart/acceptance is pending.
+- 2026-11-03: t179 item 1 redo restores the wide lyric column to its ordinary margins and original active-row anchor. The ink-only alpha mask now fades over one lyric row to the earliest transport/collection/expanded-DJ top, using a stable control envelope through hide/reveal and resize capture. Narrow keeps its existing reservation and veil. Three-panel offscreen comparisons and focused verification are recorded in [t179 evidence](docs/capture-narrow-t179.md#lyric-bottom-clearance-item-1); parent PC interim acceptance is pending.
 
 - 2026-11-03: t179 dims unavailable login tiles and suppresses armed rings, lets runtime preparation retain an explicit missing-Node-license notice after a download failure, synchronizes hidden chrome with artwork/palette changes and checks drift every ten seconds. Owned covers remain pending through bounded retries, with one extra attempt for network/timeout/incomplete transfers. Existing parent PC QR proof, Box checks and remaining limits are recorded in [t179 evidence](docs/capture-narrow-t179.md). No version, build or player restart.
 

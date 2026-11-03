@@ -177,11 +177,12 @@ class CoverLyricContinuityTests(unittest.TestCase):
             return sum(normal.pixel(x, y) != absent.pixel(x, y)
                        for y in range(max(0, int(region.top() * dpr)), min(normal.height(), int(region.bottom() * dpr)))
                        for x in range(max(0, int(region.left() * dpr)), min(normal.width(), int(region.right() * dpr))))
-        column = self.window._content_column_geometry()[2]
         self.assertGreater(different(clip), 0)
-        self.assertLess(clip.bottom(), self.window._media_control_panel_rect.top())
-        self.assertEqual(different(QRectF(clip.left(), column.bottom() + 1., clip.width(),
-                                        self.window.height() - column.bottom() - 1.)), 0)
+        fade_top, fade_bottom = self.window._lyric_bottom_fade_band(QRectF(self.window.rect()))
+        self.assertGreater(clip.bottom(), fade_bottom)
+        self.assertGreater(different(QRectF(clip.left(), fade_top, clip.width(), fade_bottom - fade_top)), 0)
+        self.assertEqual(different(QRectF(clip.left(), fade_bottom + 1., clip.width(),
+                                        self.window.height() - fade_bottom - 1.)), 0)
         # Real cached blur spreads into the left inset instead of stopping at
         # the text column. It remains naturally bounded by its finite kernel.
         self.assertGreater(different(QRectF(clip.left() - 24., 0., 24., self.window.height())), 0)

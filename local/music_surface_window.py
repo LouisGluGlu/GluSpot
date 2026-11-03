@@ -7146,16 +7146,40 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         painter.fillRect(painted_cover, shade)
         painter.restore()
 
+    def _lyric_bottom_fade_band(self, rect: QRectF):
+        """One row of soft ink fade into the wide chrome's stable envelope."""
+        scale = self._surface_scale(rect)
+        # External wide transport has no footer. Resolve its top from this
+        # surface, not _media_control_panel_rect (painted after the lyrics and
+        # potentially still holding the previous size). Use unshifted faces:
+        # auto-hide and DJ activity must not move the band or lyric anchor.
+        bottom = rect.bottom() - (18. + self.TRANSPORT_PANEL_HEIGHT) * scale
+        collection = self._song_collection_geometry(rect, shifted=False)
+        if collection.isValid():
+            bottom = min(bottom, collection.top())
+        if self._owned_personal_dj_enabled is not None:
+            side = self._personal_dj_measured_widths(rect)[0]
+            # _personal_dj_geometry's expanded icon is at most two sides tall
+            # above its bottom caption, with a 44*scale gap. Its live lane can
+            # contract; use the full envelope even during that contraction.
+            bottom = min(bottom, rect.bottom() - max(10., 18. * scale) - 3. * side - 44. * scale)
+        font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
+        row_height = self._font_height(font) + max(18. * scale, rect.height() * .035)
+        return bottom - row_height, bottom
+
     def _paint_live_lyric_column(self, painter: QPainter, rect: QRectF, **kwargs):
         """Feather only external wide ink, preserving readable wrapped rows."""
         wide = (getattr(self, "_lyric_bottom_fade_active", False) if self._lyric_resize_capturing else
                 self._effective_content_layout() == "lyrics" and not self._content_layout_is_narrow())
         if not self._lyric_resize_capturing and not self._lyric_resize_probe:
             self._lyric_bottom_fade_active = wide
+            if wide:
+                self._lyric_bottom_fade_last_band = self._lyric_bottom_fade_band(rect)
         if not wide or self._lyric_resize_probe or getattr(self, "_lyric_resize_committing", False):
             return self._paint_lyric_column_ink(painter, rect, **kwargs)
         column = (self._lyric_resize_last_geometry['column'] if self._lyric_resize_capturing
                   else self._content_column_geometry(rect)[2])
+        fade_top, fade_bottom = self._lyric_bottom_fade_last_band
         bounds = QRectF(rect.left(), column.top(), rect.width(), column.height()).intersected(rect)
         if bounds.isEmpty():
             return self._paint_lyric_column_ink(painter, rect, **kwargs)
@@ -7178,8 +7202,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             layer.setRenderHints(painter.renderHints())
             layer.translate(-bounds.left(), -bounds.top())
             self._paint_lyric_column_ink(layer, rect, **kwargs)
-            fade = min(88. * self._surface_scale(rect), column.height() * .16)
-            gradient = QLinearGradient(0., column.bottom() - fade, 0., column.bottom())
+            gradient = QLinearGradient(0., fade_top, 0., fade_bottom)
             gradient.setColorAt(0., QColor(255, 255, 255, 255))
             gradient.setColorAt(.55, QColor(255, 255, 255, 150))
             gradient.setColorAt(1., QColor(255, 255, 255, 0))
@@ -7605,8 +7628,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         # naturally instead of ending at a visible vertical cut. The existing
         # cover mask and real window edge still bound the composed surface.
         lyric_ink_clip = lyric_transform.mapRect(rect)
-        # Width remains uncut for blur/halos. Vertical content bounds keep
-        # lyric ink out of the album/title and transport chrome at any width.
+        # Width remains uncut for blur/halos. Keep the full column vertically;
+        # the wide ink mask handles bottom chrome without shortening follow.
         ink_column = lyric_transform.mapRect(side_column)
         lyric_ink_clip.setTop(ink_column.top())
         lyric_ink_clip.setBottom(ink_column.bottom())

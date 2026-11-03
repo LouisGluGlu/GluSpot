@@ -5,62 +5,70 @@ Source follow-through from `1246878` on `grok/capture-narrow-v4`, November 3,
 
 ## Lyric bottom clearance (item 1)
 
-The item-1 follow-up starts from `e0ee9ca`. Wide lyrics previously used the
-outer content height (only a `60 * scale` bottom margin), so bottom ink reached
-the transport/collection painted afterward. Shortening the column alone was
-insufficient: follow/hit/ink bounds also used that outer content rectangle.
+The redo is one follow-up commit on `1faf68a`. The user rejected that
+revision's hard `195 * scale` bottom reservation: it moved the active lyric
+upward and left a large empty band. Wide columns now restore `e0ee9ca`'s full
+content height with only ordinary `60 * scale` margins. Follow, wrapping and
+hit geometry use that height; no control reserve shortens the column.
 
-Wide reading columns now reserve `CONTROL_BOTTOM_REGION_HEIGHT * scale` and,
-when DJ is available, its stable fully expanded envelope including its minimum
-36 px targets. Control reveal, DJ enable/status/hover animation do not change
-the reserve. Stacked columns retain their existing `156 * scale` reservation.
-The renderer uses column vertical bounds and maps its ink clip through the
-existing width/reuse transform. Cover lyrics retain their own cover viewport.
+The existing reusable, pixel-aligned ink-only QImage still applies
+DestinationIn alpha. Its fade starts one lyric row (font height plus sentence
+gap) above the earliest bottom control top and reaches zero there. Transport
+top resolves from the current surface and shared panel constants, avoiding the
+previous-size panel rectangle that is painted later. Collection uses its
+unshifted geometry. Available DJ uses its measured side and maximum expanded
+icon envelope, independent of its animated lane width, enabled/activity state
+or hide/reveal. Only ink changes; layout and the active anchor remain stable.
+Resize capture reuses the source fade band, including the narrow-first to wide
+wrap-reuse handoff. Narrow keeps the existing `156 * scale` reserve and veil.
 
-A reusable ink-only QImage applies a bottom alpha gradient, preserving readable
-parts of tall wrapped rows and the existing narrow veil. Its origin aligns to
-physical pixels; frozen resize snapshots capture the same masked endpoint,
-including a direct wide-to-narrow crossover. It adds no shaping or blur filter.
+All values below come from the same shared-renderer fixture with active row 5.
+The two baseline panels render actual Git archives of `e0ee9ca` and `1faf68a`.
 
-At 960 x 540 without DJ, the reading column bottom moves from y=491.351 to
-y=381.892, above transport y=476.757 and collection y=489.405. With expanded DJ,
-the column ends at y=375.243 above its icon y=381.730. Paired fixture renders
-reduce lyric pixels below the earliest chrome boundary from 4,516 to zero
-(960 x 540), 3,165 to zero (640 x 360), and 28,216 to zero (960 x 540 with DJ).
+| Size / revision | Column bottom | Active row top | Ink bottom | Ink pixels below earliest control top |
+| --- | ---: | ---: | ---: | ---: |
+| 960 x 540 / `e0ee9ca` | 491.351 | 219.604 | 490 | 4,516 |
+| 960 x 540 / `1faf68a` | 381.892 | 172.536 | 381 | 0 |
+| 960 x 540 / redo | 491.351 | 219.604 | 476 | 0 |
+| 640 x 360 / `e0ee9ca` | 327.568 | 147.923 | 327 | 3,165 |
+| 640 x 360 / `1faf68a` | 254.595 | 116.544 | 253 | 0 |
+| 640 x 360 / redo | 327.568 | 147.923 | 312 | 0 |
 
-Evidence is outside Git in `/workspace/gluspot/handoff/t179/`:
+Without DJ, fade bands are y=416.654–476.757 and y=273.478–314.000,
+respectively. Ink remains immediately above the controls. Expanded-DJ
+comparisons also preserve the original column/anchor and have zero ink pixels
+below their earliest control tops (381.730 and 218.216).
 
-- `item1-{before,after}-{960x540,640x360}.png` and corresponding
-  `-annotated.png`; `item1-{before,after}-960x540-dj-annotated.png`.
-- `item1-{before,after}-geometry.json` and `item1_render_proof.py` reproduce
-  paired shared-renderer fixtures against the clean baseline archive.
-- Six new `MusicSurfaceLayoutTests` cover wide viewport/ink clearance,
-  feathered pixels, tall active rows, transformed clip bounds, stable expanded
-  DJ clearance and the stacked reservation. Five fail on unchanged `e0ee9ca`;
-  the tall-row test also passes baseline and guards the new alpha mask.
-- The existing continuity regression now asserts bottom chrome clearance
-  while retaining horizontal blur/inset checks. The resize snapshot fixture
-  enables the same painter hints as production before exact image comparison.
+Evidence outside Git in `/workspace/gluspot/handoff/t179/`:
 
-Final focused verification passes 131 tests at DPR 1 and 40 at DPR 2 (six new
-cases plus chrome/resize/width motion). The broader DPR-2 layout/continuity run
-passes 62 of 64; both wide-display fixture failures reproduce on unchanged
-`e0ee9ca` with offscreen screen-size clamping. Reports are
-`item1-final-focus.json`, `item1-review-item1-motion-final-dpr2.json` and
-`item1-review-wide-fixture-baseline-dpr2.json`. Compilation and whitespace
-checks pass. Forty warmed fixture paints per scene reuse the same ink buffer
-with zero additional lyric relayouts; synthetic P95 is 6.038 ms at 960 x 540
-without DJ (baseline 5.760 ms). These are offscreen raster samples.
+- `item1-redo-960x540-triple.png`, `item1-redo-640x360-triple.png`:
+  BEFORE / rejected hard reserve / NEW, each panel at its stated size.
+- `item1-redo-{960x540,640x360}-dj-triple.png`: expanded-DJ variants.
+- `item1-redo-geometry.json`: column and ink bottoms, all control tops,
+  fade bands, active-row y/center, below-control and rectangle-overlap counts.
+- `item1_redo_proof.py` and `item1_redo_assemble.py`: isolated shared-renderer
+  fixture and triple/JSON assembly; source roots recorded separately.
+- `ITEM1_INTERIM.md`: exact redo SHA, validation and parent PC handoff.
 
-Ordinary full discovery completes **5,970 tests / 187.082 s**, versus **5,964 /
-187.025 s** on clean `e0ee9ca`. Both report **54 failures, 48 errors and 32
-skips**, with identical identities and ordering; zero added or removed.
-All six new regressions and the updated continuity case pass. The inherited
-whole-branch failures remain; `item1-full-{final,baseline}.{log,json}` and
-`item1-full-comparison.json` preserve the comparison.
+The six existing item-1 tests now cover the full-height anchor, soft pixels
+near control tops without a large vacant band, unchanged readable ink in tall
+wrapped rows, transformed physical clip edges, stable DJ/control reveals and
+the preserved stacked reservation. The continuity regression checks faded ink
+at the full-height endpoint while retaining horizontal blur/inset coverage.
 
-Parent PC restart and physical acceptance remain pending. This session does
-not resume other numbered items.
+Final focused verification: **131 passed at DPR 1** (layout, continuity,
+companions, visual layers, width transition/breakpoint, chrome and resize),
+and **27 passed at DPR 2** (all six item-1 policies plus the resize suite).
+Reports are `item1-redo-final-focus.{json,log}` and
+`item1-redo-review-final-dpr2.{json,log}`. Python compilation and
+`git diff --check` pass. Full discovery was not rerun, following the requested
+focused scope; the earlier branch-wide inherited failures are not claimed
+fixed. Process audit: 100/100 after interface lookup, independent review and
+focused verification.
+
+Parent PC interim acceptance remains pending. No PC launch, player restart,
+completed login, version/build or push occurred. This session stops after
+item 1; other numbered items were not resumed.
 
 ## Platform login (item 5)
 

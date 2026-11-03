@@ -361,21 +361,9 @@ class MusicContentLayoutMixin:
                            content.width()))
         cover = QRectF(content.left(), content.top(), side, side)
         left = cover.right() + 100. * scale
-        # Keep the reading lane above the full bottom chrome region, including
-        # the expanded DJ pose. Never key this reserve to control visibility:
-        # revealing/hiding chrome must not move the lyric anchor or reflow it.
-        # This also supplies font-fit measurements, so do not ask a footer
-        # helper that itself resolves the narrow/wide breakpoint here.
-        bottom_reserve = self.CONTROL_BOTTOM_REGION_HEIGHT * scale
-        if getattr(self, "_owned_personal_dj_enabled", None) is not None:
-            # The minimum 36 px DJ target can exceed the scaled bottom region
-            # in short wide windows. Reserve its fully expanded envelope,
-            # independent of the live caption/status/hover animation.
-            side_dj = max(36., 44. * scale)
-            bottom_reserve = max(bottom_reserve,
-                max(10., 18. * scale) + 3. * side_dj + 44. * scale + 8. * scale)
-        bottom = max(content.top() + 1., surface.bottom() - bottom_reserve)
-        column = QRectF(left, content.top(), max(0., content.right() - left), bottom - content.top())
+        # Follow/wrapping use the full reading lane. Bottom chrome feathers
+        # lyric ink separately; its visibility must never move the anchor.
+        column = QRectF(left, content.top(), max(0., content.right() - left), content.height())
         return content, cover, column
 
     def _effective_content_layout(self):
