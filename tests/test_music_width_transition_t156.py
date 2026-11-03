@@ -20,26 +20,49 @@ class WidthTransitionStateTests(unittest.TestCase):
         transition = WidthTransition(True)
         transition.request(False)
         self.assertEqual(transition.state, 'SPLITTING')
-        self.assertEqual(transition.duration, .5)
+        self.assertEqual(transition.duration, 1.)
         transition.request(True)
         self.assertEqual(transition.state, 'SPLITTING')
-        self.assertEqual(transition.duration, .5)
+        self.assertEqual(transition.duration, 1.)
         transition.complete()
         self.assertEqual(transition.state, 'MERGING')
-        self.assertEqual(transition.duration, .5)
+        self.assertEqual(transition.duration, 1.)
         transition.complete()
         self.assertEqual(transition.state, 'NARROW')
 
-    def test_fast_jump_has_200ms_floor_and_duration_does_not_change(self):
+    def test_fast_jump_has_400ms_floor_and_duration_does_not_change(self):
         transition = WidthTransition(True)
         transition.request_mark(10., 0.)
         transition.request_mark(50., .01)
-        self.assertEqual(transition.duration, .2)
+        self.assertEqual(transition.duration, .4)
         transition.request_mark(18., .02)
         self.assertEqual(transition.state, 'SPLITTING')
-        self.assertEqual(transition.duration, .2)
+        self.assertEqual(transition.duration, .4)
         transition.complete()
-        self.assertGreaterEqual(transition.duration, .2)
+        self.assertEqual(transition.duration, .4)
+
+    def test_duration_follows_speed_formula_and_clamps_to_400ms(self):
+        for speed in (0., 15., 60., 112.5, 300., 1000.):
+            with self.subTest(speed=speed):
+                transition = WidthTransition(True)
+                self.assertEqual(transition.duration, 1.)
+                transition.drag_speed = speed
+                transition.request(False)
+                expected = max(.4, min(1., 1. / (1. + .8 * speed / 60.)))
+                self.assertAlmostEqual(transition.duration, expected)
+
+    def test_queued_reverse_uses_new_speed_only_after_current_handoff(self):
+        transition = WidthTransition(True)
+        transition.request(False)
+        transition.drag_speed = 60.
+        transition.request(True)
+        self.assertEqual(transition.state, 'SPLITTING')
+        self.assertEqual(transition.duration, 1.)
+        transition.complete()
+        self.assertEqual(transition.state, 'MERGING')
+        self.assertAlmostEqual(transition.duration, 1. / 1.8)
+        transition.complete()
+        self.assertEqual(transition.state, 'NARROW')
 
     def test_deadband_keeps_intent(self):
         transition = WidthTransition(True)
@@ -85,13 +108,13 @@ class WidthTransitionWindowTests(unittest.TestCase):
         self.window.LYRIC_PIXEL_SIZE += 6
         self.assertGreater(self.window._width_breakpoint_width(), old)
 
-    def test_below25_does_not_animate_and_fast_crossing_is200ms(self):
+    def test_below25_does_not_animate_and_fast_crossing_is400ms(self):
         marks = self.begin()
         self.window.resize(round(marks.minimum), round(marks.height))
         self.assertFalse(self.window._width_chrome_active)
         self.window.resize(round(marks.maximum), round(marks.height))
         self.assertEqual(self.window._width_transition.state, 'SPLITTING')
-        self.assertEqual(self.window._width_chrome_animation.duration(), 200)
+        self.assertEqual(self.window._width_chrome_animation.duration(), 400)
         self.assertEqual(self.window._width_chrome_animation.easingCurve().type(), QEasingCurve.Type.InOutCubic)
 
     def test_release_exactly_at25_preserves_split_intent(self):
@@ -126,7 +149,7 @@ class WidthTransitionWindowTests(unittest.TestCase):
 
     def test_column_travels_with_cover_and_four_font_shaping_keys(self):
         self.window.resize(1100, 640)
-        self.window._width_chrome_animation.setCurrentTime(500)
+        self.window._width_chrome_animation.setCurrentTime(self.window._width_chrome_animation.duration())
         self.window.resize(700, 640)
         self.window._width_chrome_animation.stop()
         keys = set()

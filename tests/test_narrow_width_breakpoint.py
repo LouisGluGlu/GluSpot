@@ -90,7 +90,7 @@ class NarrowWidthBreakpointTests(unittest.TestCase):
         entry, exit_width = self.crossover()
         self.window.resize(entry, 640)
         self.window._width_chrome_animation.stop()
-        self.assertEqual(self.window._width_chrome_animation.duration(), 500)
+        self.assertEqual(self.window._width_chrome_animation.duration(), 1000)
 
         def at(progress):
             self.window._advance_width_chrome(progress)
@@ -174,12 +174,18 @@ class NarrowWidthBreakpointTests(unittest.TestCase):
             self.window._sync_narrow_mode()
         self.assertEqual(self.window._width_chrome_animation.currentTime(), 160)
 
-    def test_album_modes_do_not_trigger_width_chrome(self):
+    def test_album_modes_share_responsive_chrome_without_content_handoff(self):
         for mode in ('cover', 'cover_lyrics'):
             self.window.set_content_layout(mode, animate=False)
             for width in (1300, 360, 1000):
                 self.window.resize(width, 640)
-                self.assertFalse(self.window.narrow)
+                self.assertEqual(self.window.narrow, self.window._width_breakpoint_narrow())
+                if width == 360:
+                    self.assertTrue(self.window.narrow)
+                    self.assertEqual(set(self.window.glass_groups()[2]),
+                                     {'media:previous', 'media:toggle_play_pause', 'media:next'})
+                elif width == 1300:
+                    self.assertFalse(self.window.narrow)
                 self.assertFalse(self.window._width_chrome_active)
                 self.assertEqual(self.window.mode, mode)
 

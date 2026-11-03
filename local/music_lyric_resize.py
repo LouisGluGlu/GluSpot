@@ -1,10 +1,10 @@
-"""Width-motion bitmap handoff for the shared music lyric column (t160)."""
+"""Cheap skeleton handoff for shared lyric/list width motion (t165)."""
 from __future__ import annotations
 
 import time
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QTransform
+from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter
 
 
 class LyricResizeProbeReady(Exception):
@@ -13,7 +13,7 @@ class LyricResizeProbeReady(Exception):
 
 class MusicLyricResizeMixin:
     LYRIC_RESIZE_SETTLE_MS = 150
-    LYRIC_RESIZE_CROSSFADE_MS = 140
+    LYRIC_RESIZE_CROSSFADE_MS = 180
 
     def _init_lyric_resize(self):
         self._lyric_relayout_count = 0
@@ -32,6 +32,8 @@ class MusicLyricResizeMixin:
         self._lyric_resize_reuse_scale = None
         self._lyric_resize_reposition_pending = False
         self._lyric_resize_crossfade_at = None
+        self._lyric_resize_started_at = None
+        self._lyric_resize_last_queue_rect = QRectF()
         self._lyric_resize_last_width = None
         self._lyric_resize_was_moving = False
         self._lyric_resize_settle_timer = QTimer(self)
@@ -40,7 +42,7 @@ class MusicLyricResizeMixin:
         self._lyric_resize_settle_timer.timeout.connect(self._settle_lyric_resize)
         self._lyric_resize_motion_timer = QTimer(self)
         self._lyric_resize_motion_timer.setInterval(16)
-        self._lyric_resize_motion_timer.timeout.connect(self._sync_lyric_resize_motion)
+        self._lyric_resize_motion_timer.timeout.connect(self._advance_lyric_resize_motion)
         self._lyric_resize_fade_timer = QTimer(self)
         self._lyric_resize_fade_timer.setInterval(16)
         self._lyric_resize_fade_timer.timeout.connect(self._advance_lyric_resize_fade)
@@ -79,12 +81,13 @@ class MusicLyricResizeMixin:
                 or self._pending_fullscreen is not None or self._island_returning):
             return
         self._lyric_resize_fade_timer.stop()
-        self._lyric_resize_crossfade_at = None
-        # Render only the previous column, using its last resolved pose and
-        # existing layouts. This avoids QWidget.grab()'s recursive resize paint
-        # and excludes chrome/background/cover from the snapshot.
+        # Keep old ink only for the short fade out, at its original pixel size.
+        # Steady drag frames draw current-width bars, never stretched glyphs.
         geometry = self._lyric_resize_last_geometry
-        source = QRectF(geometry['column']).intersected(self._lyric_resize_last_request[0])
+        source = (QRectF(self._lyric_resize_last_queue_rect)
+                  if self._effective_content_layout() == 'playlist'
+                  else QRectF(geometry['column']))
+        source = source.intersected(self._lyric_resize_last_request[0])
         if source.isEmpty():
             return
         ratio = self.devicePixelRatioF()
@@ -99,11 +102,22 @@ class MusicLyricResizeMixin:
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                 painter.translate(-source.left(), -source.top())
-                rect, kwargs = self._lyric_resize_last_request
-                self._paint_live_lyric_column(painter, rect, **kwargs)
+                def live(ink):
+                    if self._effective_content_layout() == 'playlist':
+                        super(MusicLyricResizeMixin, self)._paint_playback_queue(ink, source)
+                    else:
+                        rect, kwargs = self._lyric_resize_last_request
+                        self._paint_live_lyric_column(ink, rect, **kwargs)
+                if self._lyric_resize_crossfade_at is not None:
+                    # Reversing during reveal starts with the ink currently on
+                    # screen, including its skeleton, without a full-ink flash.
+                    self._paint_resize_ink(painter, source, live)
+                else:
+                    live(painter)
         finally:
             self._lyric_resize_capturing = False
         self._lyric_resize_snapshot = image
+        self._lyric_resize_crossfade_at = None
         self._lyric_resize_source_rect = source
         self._lyric_resize_w0 = source.width()
         playback_position = getattr(self, 'playback_position', None)
@@ -114,6 +128,7 @@ class MusicLyricResizeMixin:
         self._lyric_resize_wrap_signature = self._current_lyric_wrap_signature()
         self._lyric_resize_song_key = self._song_layout_key
         self._lyric_resize_frozen = True
+        self._lyric_resize_started_at = time.monotonic()
         pin = getattr(self, '_lyric_resize_backdrop_scene', None)
         if callable(pin):
             pin()
@@ -135,6 +150,13 @@ class MusicLyricResizeMixin:
         elif self._lyric_resize_was_moving:
             self._lyric_resize_settle_timer.start(self.LYRIC_RESIZE_SETTLE_MS)
         self._lyric_resize_was_moving = moving
+        if (time.monotonic() - self._lyric_resize_started_at) * 1000 >= self.LYRIC_RESIZE_CROSSFADE_MS:
+            self._lyric_resize_snapshot = QImage()
+
+    def _advance_lyric_resize_motion(self):
+        self._sync_lyric_resize_motion()
+        if self._lyric_resize_frozen:
+            self.update()
 
     def _cancel_lyric_resize(self):
         self._lyric_resize_settle_timer.stop()
@@ -143,6 +165,7 @@ class MusicLyricResizeMixin:
         self._lyric_resize_frozen = False
         self._lyric_resize_was_moving = False
         self._lyric_resize_crossfade_at = None
+        self._lyric_resize_started_at = None
         self._lyric_resize_snapshot = QImage()
         self._lyric_resize_reuse_scale = None
         self._lyric_resize_reposition_pending = False
@@ -178,6 +201,9 @@ class MusicLyricResizeMixin:
         self._lyric_word_hit_rects.clear()
         self._pressed_lyric_index = self._pressed_lyric_word = None
         self._pressed_lyric_track_key = None
+        self._queue_hit_rects.clear()
+        self._queue_pressed = None
+        self._queue_scrollbar_rect = QRectF()
 
     @staticmethod
     def _lyric_layout_signature(layout):
@@ -218,6 +244,12 @@ class MusicLyricResizeMixin:
             return
         if self._lyric_width_in_motion():
             self._lyric_resize_was_moving = True
+            return
+        remaining = self.LYRIC_RESIZE_CROSSFADE_MS - (time.monotonic() - self._lyric_resize_started_at) * 1000
+        if remaining > 0:
+            # A single short width step still reaches a full skeleton before
+            # committing new geometry, so the live relayout cannot flash.
+            self._lyric_resize_settle_timer.start(max(1, round(remaining)))
             return
         request = self._lyric_resize_request or self._lyric_resize_last_request
         rect, kwargs = request
@@ -272,11 +304,10 @@ class MusicLyricResizeMixin:
                     self._paint_live_lyric_column(painter, rect, **kwargs)
         finally:
             self._lyric_resize_committing = False
-        if not same:
-            self._lyric_resize_crossfade_at = time.monotonic()
-            self._lyric_resize_fade_timer.start()
-        else:
-            self._lyric_resize_snapshot = QImage()
+        # Wrap reuse skips shaping, but follows the same visual handoff.
+        self._lyric_resize_snapshot = QImage()
+        self._lyric_resize_crossfade_at = time.monotonic()
+        self._lyric_resize_fade_timer.start()
         self.update()
 
     def _lyric_resize_target_rect(self, rect, kwargs):
@@ -287,27 +318,112 @@ class MusicLyricResizeMixin:
         return self._content_column_geometry(rect)[2]
 
     def _draw_lyric_resize_snapshot(self, painter, target, opacity=1.):
+        """Fade old ink in place; width motion never scales its glyphs."""
         if self._lyric_resize_snapshot.isNull() or target.isEmpty():
             return
-        source = self._lyric_resize_source_rect
-        transform = QTransform()
-        transform.translate(target.left(), target.top())
-        transform.scale(target.width() / source.width(), target.height() / source.height())
         painter.save()
         painter.setClipRect(target, Qt.ClipOperation.IntersectClip)
-        painter.setWorldTransform(transform, True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.setOpacity(painter.opacity() * opacity)
-        painter.drawImage(QPointF(), self._lyric_resize_snapshot)
+        painter.drawImage(self._lyric_resize_source_rect.topLeft(), self._lyric_resize_snapshot)
         painter.restore()
+
+    @staticmethod
+    def _lyric_resize_skeleton_rects(target):
+        """Only arithmetic: bars always fit the current lyric/list column."""
+        if target.width() < 8. or target.height() < 8.:
+            return ()
+        margin = min(24., target.width() * .08)
+        width = target.width() - 2. * margin
+        height = min(18., max(8., target.width() * .045))
+        gap = height * 2.8
+        ratios = (.82, .96, .66, .88, .72)
+        return tuple(QRectF(target.left() + margin, y, width * ratios[index % len(ratios)], height)
+                     for index in range(max(0, int((target.height() - margin - height) / gap) + 1))
+                     if (y := target.top() + margin + index * gap) + height <= target.bottom())
+
+    def _paint_lyric_resize_skeleton(self, painter, target):
+        phase = (time.monotonic() % 1.8) / 1.8
+        shimmer = QLinearGradient(target.left() - target.width() + 3. * target.width() * phase,
+                                  0., target.left() + 3. * target.width() * phase, 0.)
+        shimmer.setColorAt(0., QColor(174, 178, 184, 38))
+        shimmer.setColorAt(.5, QColor(202, 206, 212, 66))
+        shimmer.setColorAt(1., QColor(174, 178, 184, 38))
+        painter.save()
+        painter.setClipRect(target, Qt.ClipOperation.IntersectClip)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(shimmer)
+        for bar in self._lyric_resize_skeleton_rects(target):
+            painter.drawRoundedRect(bar, bar.height() * .5, bar.height() * .5)
+        painter.restore()
+
+    def _lyric_resize_ink_weights(self, now=None):
+        now = time.monotonic() if now is None else now
+        started = self._lyric_resize_started_at if self._lyric_resize_frozen else self._lyric_resize_crossfade_at
+        if started is None:
+            return 0., 0., 1.
+        progress = max(0., min(1., (now - started) * 1000 / self.LYRIC_RESIZE_CROSSFADE_MS))
+        progress = QEasingCurve(QEasingCurve.Type.InOutCubic).valueForProgress(progress)
+        return ((1. - progress, progress, 0.) if self._lyric_resize_frozen
+                else (0., 1. - progress, progress))
 
     def _advance_lyric_resize_fade(self):
         if (self._lyric_resize_crossfade_at is None or
                 (time.monotonic() - self._lyric_resize_crossfade_at) * 1000 >= self.LYRIC_RESIZE_CROSSFADE_MS):
             self._lyric_resize_crossfade_at = None
-            self._lyric_resize_snapshot = QImage()
             self._lyric_resize_fade_timer.stop()
         self.update()
+
+    def _paint_resize_ink(self, painter, target, live):
+        old_weight, skeleton_weight, live_weight = self._lyric_resize_ink_weights()
+        if target.isEmpty():
+            return
+        if skeleton_weight >= 1.:
+            self._paint_lyric_resize_skeleton(painter, target)
+            return
+        # Crossfade premultiplied endpoints once over the background. Only the
+        # 180 ms handoffs allocate ink images; steady drag is rounded bars only.
+        ratio = self.devicePixelRatioF()
+        blend = QImage(max(1, round(target.width() * ratio)), max(1, round(target.height() * ratio)),
+                       QImage.Format.Format_ARGB32_Premultiplied)
+        blend.setDevicePixelRatio(ratio)
+        blend.fill(Qt.GlobalColor.transparent)
+        with QPainter(blend) as mix:
+            mix.setRenderHint(QPainter.RenderHint.Antialiasing)
+            mix.translate(-target.left(), -target.top())
+            self._draw_lyric_resize_snapshot(mix, target, old_weight)
+            mix.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+            mix.setOpacity(skeleton_weight)
+            self._paint_lyric_resize_skeleton(mix, target)
+        if live_weight > 0.:
+            ink = QImage(blend.size(), blend.format())
+            ink.setDevicePixelRatio(ratio)
+            ink.fill(Qt.GlobalColor.transparent)
+            with QPainter(ink) as layer:
+                layer.setRenderHint(QPainter.RenderHint.Antialiasing)
+                layer.translate(-target.left(), -target.top())
+                live(layer)
+            with QPainter(ink) as weight:
+                weight.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                weight.fillRect(QRectF(0., 0., target.width(), target.height()),
+                                QColor(255, 255, 255, round(255 * live_weight)))
+            with QPainter(blend) as mix:
+                mix.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+                mix.drawImage(QPointF(), ink)
+        painter.save()
+        painter.setClipRect(target, Qt.ClipOperation.IntersectClip)
+        painter.drawImage(target.topLeft(), blend)
+        painter.restore()
+
+    def _paint_playback_queue(self, painter, rect):
+        self._lyric_resize_last_queue_rect = QRectF(rect)
+        if self._lyric_resize_frozen or self._lyric_resize_crossfade_at is not None:
+            self._queue_view_rect = QRectF(rect)
+            self._queue_hit_rects.clear()
+            self._queue_pressed = None
+            self._queue_scrollbar_rect = QRectF()
+            self._paint_resize_ink(painter, rect, lambda ink: super(MusicLyricResizeMixin, self)._paint_playback_queue(ink, rect))
+        else:
+            super()._paint_playback_queue(painter, rect)
 
     def _paint_lyric_column(self, painter, rect, **kwargs):
         self._lyric_resize_request = (QRectF(rect), dict(kwargs))
@@ -315,42 +431,11 @@ class MusicLyricResizeMixin:
         target = self._lyric_resize_target_rect(rect, kwargs)
         if self._effective_content_layout() == 'cover_lyrics' and not kwargs.get('navigation_capture', False):
             self._paint_lyric_cover_shade(painter, target)
-        if self._lyric_resize_frozen:
+        if self._lyric_resize_frozen or self._lyric_resize_crossfade_at is not None:
             self._disable_resize_lyric_hits()
-            self._draw_lyric_resize_snapshot(painter, target)
-            return
-        if self._lyric_resize_crossfade_at is not None:
-            fraction = min(1., (time.monotonic() - self._lyric_resize_crossfade_at) * 1000 / self.LYRIC_RESIZE_CROSSFADE_MS)
-            fraction = QEasingCurve(QEasingCurve.Type.InOutCubic).valueForProgress(fraction)
-            if not target.isEmpty():
-                # Weight premultiplied endpoints before a single SourceOver.
-                # Two SourceOver draws would dim coincident ink at midpoint.
-                ratio = self.devicePixelRatioF()
-                live = QImage(max(1, round(target.width() * ratio)), max(1, round(target.height() * ratio)),
-                              QImage.Format.Format_ARGB32_Premultiplied)
-                live.setDevicePixelRatio(ratio)
-                live.fill(Qt.GlobalColor.transparent)
-                with QPainter(live) as ink:
-                    ink.setRenderHint(QPainter.RenderHint.Antialiasing)
-                    ink.translate(-target.left(), -target.top())
-                    self._paint_live_lyric_column(ink, rect, **kwargs)
-                with QPainter(live) as weight:
-                    weight.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-                    weight.fillRect(QRectF(0., 0., target.width(), target.height()),
-                                    QColor(255, 255, 255, round(255 * fraction)))
-                blend = QImage(live.size(), live.format())
-                blend.setDevicePixelRatio(ratio)
-                blend.fill(Qt.GlobalColor.transparent)
-                with QPainter(blend) as mix:
-                    mix.translate(-target.left(), -target.top())
-                    self._draw_lyric_resize_snapshot(mix, target, 1. - fraction)
-                    mix.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-                    mix.setOpacity(1.)
-                    mix.drawImage(target.topLeft(), live)
-                painter.save()
-                painter.setClipRect(target, Qt.ClipOperation.IntersectClip)
-                painter.drawImage(target.topLeft(), blend)
-                painter.restore()
+            self._paint_resize_ink(painter, target,
+                                   lambda ink: self._paint_live_lyric_column(ink, rect, **kwargs))
         else:
             self._paint_live_lyric_column(painter, rect, **kwargs)
-        self._lyric_resize_last_request = (QRectF(rect), dict(kwargs))
+        if not self._lyric_resize_frozen:
+            self._lyric_resize_last_request = (QRectF(rect), dict(kwargs))

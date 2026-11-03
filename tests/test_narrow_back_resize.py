@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.providers import EmptyIslandDataProvider
 from local.island_stack_visual import IslandStackVisual
-from local.music_surface_window import MUSIC_WINDOW_ASPECT_RATIO, constrained_window_size
+from local.music_surface_window import MusicSurfaceWindow, MUSIC_WINDOW_ASPECT_RATIO, constrained_window_size
 from _demos.narrow3.narrow_window import NarrowStudyWindow
 
 
@@ -109,7 +109,7 @@ class NarrowBackResizeTests(unittest.TestCase):
         self.window.resize(960, 900)
         self.assertTrue(self.window.narrow)
 
-    def test_return_uses_toggle_and_wide_button_returns_to_narrow_without_seek(self):
+    def test_narrow_size_toggles_and_live_wide_return_preserves_island_lifecycle(self):
         self.show()
         with patch.object(self.window, '_seek_to_lyric') as seek:
             for live in (True, False):
@@ -125,12 +125,19 @@ class NarrowBackResizeTests(unittest.TestCase):
                     self.window._sync_window_control_rects()
                     point = self.window._button_rects['return'].center().toPoint()
                     with patch.object(self.window, '_control_reveal_at', return_value=1.0), \
-                         patch.object(self.window, 'toggle_wide', wraps=self.window.toggle_wide) as toggle:
+                         patch.object(self.window, 'toggle_wide', wraps=self.window.toggle_wide) as toggle, \
+                         patch.object(MusicSurfaceWindow, 'return_to_island') as restore:
                         QTest.mouseClick(self.window, Qt.MouseButton.LeftButton,
                                          Qt.KeyboardModifier.NoModifier, point)
-                        toggle.assert_called_once_with()
-                    self.assertEqual((self.window.width(), self.window.height()), (360, 640))
-                    self.assertTrue(self.window.narrow)
+                        if live:
+                            restore.assert_called_once_with()
+                            toggle.assert_not_called()
+                        else:
+                            restore.assert_not_called()
+                            toggle.assert_called_once_with()
+                    self.assertEqual((self.window.width(), self.window.height()),
+                                     (960, 540) if live else (360, 640))
+                    self.assertEqual(self.window.narrow, not live)
             seek.assert_not_called()
 
     def drag(self, point, delta):

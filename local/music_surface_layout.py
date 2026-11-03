@@ -80,7 +80,7 @@ class MusicContentLayoutMixin:
         self._layout_animation.finished.connect(self._finish_content_layout)
         self._width_layout_fraction = None
         self._width_layout_animation = QVariantAnimation(self)
-        self._width_layout_animation.setDuration(500)
+        self._width_layout_animation.setDuration(1000)
         self._width_layout_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._width_layout_animation.valueChanged.connect(self._advance_width_layout)
         self._width_layout_animation.finished.connect(self._width_layout_completed)

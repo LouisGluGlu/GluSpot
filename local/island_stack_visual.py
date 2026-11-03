@@ -6977,7 +6977,10 @@ class IslandStackVisual(QWidget):
             self._focus_active_music_surface()
             return
         if overlay is None:
-            overlay = MusicSurfaceWindow(self)
+            # Release and --narrow-live share the responsive Liquid Glass
+            # chrome, including the narrow bottom transport lane.
+            from _demos.narrow3.narrow_window import NarrowStudyWindow
+            overlay = NarrowStudyWindow(self, "B", "left", live=True)
             self.music_fullscreen_overlay = overlay
         if loading_selection is not None:
             overlay.set_library_loading(*loading_selection)

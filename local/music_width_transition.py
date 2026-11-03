@@ -27,7 +27,7 @@ class WidthTransition:
     def __init__(self, narrow=True):
         self.state = "NARROW" if narrow else "WIDE"
         self.want_narrow = bool(narrow)
-        self.duration = .5
+        self.duration = 1.
         self.drag_speed = 0.
         self._sample = None
         self._fast_jump = False
@@ -65,7 +65,7 @@ class WidthTransition:
         if self.active or self.narrow == self.want_narrow:
             return False
         self.state = "MERGING" if narrow else "SPLITTING"
-        self.duration = .2 if self._fast_jump else max(.2, min(.5, .5 / (1. + .8 * self.drag_speed / 60.)))
+        self.duration = .4 if self._fast_jump else max(.4, min(1., 1. / (1. + .8 * self.drag_speed / 60.)))
         self._fast_jump = False
         return True
 

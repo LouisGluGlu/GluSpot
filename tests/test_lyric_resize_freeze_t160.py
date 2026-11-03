@@ -1,4 +1,4 @@
-"""t160: shared lyric pixels and prepared veil survive live width changes."""
+"""t165: width skeletons preserve t160 layout and prepared-veil gates."""
 from __future__ import annotations
 
 import time
@@ -125,23 +125,45 @@ class LyricResizeFreezeTests(unittest.TestCase):
         self.assertEqual(self.window.width(), 1099)
         self.assertEqual(self.window._song_layout_key[2], round(self.window._content_column_geometry()[2].width()))
 
-    def test_a4_snapshot_is_column_only_dpr_aware_and_stable_across_widths(self):
+    def test_a4_skeleton_follows_current_width_without_song_shaping(self):
         window = self.window
         window.resize(1096, 640)
         self.render()
-        snapshot = window._lyric_resize_snapshot
-        source = window._lyric_resize_source_rect
-        self.assertFalse(snapshot.isNull())
-        self.assertTrue(QRectF(window.rect()).contains(source))
-        self.assertLess(source.width(), 1100)
-        self.assertEqual(snapshot.devicePixelRatio(), window.devicePixelRatioF())
-        self.assertAlmostEqual(snapshot.width() / snapshot.devicePixelRatio(), source.width(), delta=1)
-        self.assertAlmostEqual(snapshot.height() / snapshot.devicePixelRatio(), source.height(), delta=1)
-        key = snapshot.cacheKey()
+        started = window._lyric_resize_started_at
         for width in (1080, 1040, 1000, 1080):
             window.resize(width, 640)
-            self.render()
-            self.assertEqual(window._lyric_resize_snapshot.cacheKey(), key)
+            with patch('local.music_lyric_resize.time.monotonic', return_value=started + .2), \
+                    patch.object(window, '_paint_live_lyric_column', side_effect=AssertionError('live ink during motion')), \
+                    patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton:
+                self.render()
+                skeleton.assert_called()
+                target = skeleton.call_args.args[1]
+                bars = window._lyric_resize_skeleton_rects(target)
+                self.assertTrue(bars)
+                self.assertTrue(all(target.contains(bar) for bar in bars))
+                self.assertAlmostEqual(bars[0].width(), (target.width() - 2 * min(24., target.width() * .08)) * .82)
+                self.assertTrue(window._lyric_resize_snapshot.isNull())
+                self.assertEqual(window._lyric_resize_ink_weights(), (0., 1., 0.))
+
+    def test_skeleton_raster_has_grey_rows_subtle_shimmer_and_clear_gaps(self):
+        target = QRectF(10, 10, 180, 120)
+        images = []
+        for now in (100., 100.6):
+            image = QImage(200, 140, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with patch('local.music_lyric_resize.time.monotonic', return_value=now):
+                with QPainter(image) as painter:
+                    window = self.window
+                    window._paint_lyric_resize_skeleton(painter, target)
+            bar = window._lyric_resize_skeleton_rects(target)[0]
+            color = image.pixelColor(bar.center().toPoint())
+            self.assertGreater(color.alpha(), 30)
+            self.assertLessEqual(color.alpha(), 66)
+            self.assertLess(abs(color.red() - color.blue()), 15)
+            self.assertEqual(image.pixelColor(2, 2).alpha(), 0)
+            self.assertEqual(image.pixelColor(round(bar.center().x()), round(bar.bottom() + 4)).alpha(), 0)
+            images.append(image)
+        self.assertNotEqual(images[0], images[1])
 
     def test_a3_font_change_and_return_reuse_wrap_equivalent_shapes(self):
         self.owner.timed_lyrics = [(float(index * 10), f'Line {index}') for index in range(8)]
@@ -238,7 +260,7 @@ class LyricResizeFreezeTests(unittest.TestCase):
             self.render()
             self.assertEqual(self.window.lyric_relayout_count, before)
 
-    def test_duet_snapshot_keeps_the_cached_two_column_geometry(self):
+    def test_duet_fade_keeps_cached_geometry_then_uses_only_skeleton(self):
         self.owner.timed_lyrics = [
             (0., '(男)Hello'), (.5, '(女)World'), (8., '(男)Sing'), (8.5, '(女)Along'),
             (16., '(合)Together'), (24., 'Next'), (32., 'Later'), (40., 'Last'),
@@ -282,29 +304,91 @@ class LyricResizeFreezeTests(unittest.TestCase):
     def test_crossfade_preserves_coincident_ink_and_leaves_outside_column_clear(self):
         ratio = self.window.devicePixelRatioF()
         column = QRectF(20, 20, 40, 40)
-        snapshot = QImage(round(40 * ratio), round(40 * ratio),
-                          QImage.Format.Format_ARGB32_Premultiplied)
-        snapshot.setDevicePixelRatio(ratio)
-        snapshot.fill(Qt.GlobalColor.white)
-        output = QImage(round(100 * ratio), round(100 * ratio), snapshot.format())
+        output = QImage(round(100 * ratio), round(100 * ratio), QImage.Format.Format_ARGB32_Premultiplied)
         output.setDevicePixelRatio(ratio)
         output.fill(Qt.GlobalColor.transparent)
-        def live(painter, _rect, **_kwargs):
+        def white(painter, _rect, **_kwargs):
             painter.fillRect(column, Qt.GlobalColor.white)
-        with patch.object(self.window, '_lyric_resize_snapshot', snapshot), \
-                patch.object(self.window, '_lyric_resize_source_rect', column), \
-                patch.object(self.window, '_lyric_resize_crossfade_at', 100.), \
+        with patch.object(self.window, '_lyric_resize_crossfade_at', 100.), \
                 patch.object(self.window, '_lyric_resize_target_rect', return_value=column), \
-                patch.object(self.window, '_paint_live_lyric_column', side_effect=live), \
-                patch('local.music_lyric_resize.time.monotonic', return_value=100.07):
+                patch.object(self.window, '_paint_live_lyric_column', side_effect=white), \
+                patch.object(self.window, '_paint_lyric_resize_skeleton', side_effect=white), \
+                patch('local.music_lyric_resize.time.monotonic', return_value=100.09):
             with QPainter(output) as painter:
                 self.window._paint_lyric_column(painter, QRectF(self.window.rect()))
-        # Premultiplied endpoint addition allows one raster rounding unit;
-        # sequential SourceOver at half opacity would drop alpha to about191.
         center = output.pixelColor(round(40 * ratio), round(40 * ratio))
         self.assertGreaterEqual(center.alpha(), 254)
         self.assertGreaterEqual(center.red(), 254)
         self.assertEqual(output.pixelColor(round(10 * ratio), round(10 * ratio)).alpha(), 0)
+
+    def test_both_fades_are_bounded_180ms_and_equal_wrap_still_fades_in(self):
+        window = self.window
+        window.resize(1099, 640)
+        self.render()
+        started = window._lyric_resize_started_at
+        for elapsed, expected in ((0., (1., 0., 0.)), (.09, (.5, .5, 0.)), (.18, (0., 1., 0.))):
+            for actual, wanted in zip(window._lyric_resize_ink_weights(started + elapsed), expected):
+                self.assertAlmostEqual(actual, wanted)
+        self.wait_settle()
+        started = window._lyric_resize_crossfade_at
+        self.assertIsNotNone(started)
+        for elapsed, expected in ((0., (0., 1., 0.)), (.09, (0., .5, .5)), (.18, (0., 0., 1.))):
+            weights = window._lyric_resize_ink_weights(started + elapsed)
+            self.assertAlmostEqual(sum(weights), 1.)
+            for actual, wanted in zip(weights, expected):
+                self.assertAlmostEqual(actual, wanted)
+        with patch('local.music_lyric_resize.time.monotonic', return_value=started + .2):
+            window._advance_lyric_resize_fade()
+        self.assertIsNone(window._lyric_resize_crossfade_at)
+        self.assertFalse(window._lyric_resize_fade_timer.isActive())
+
+    def test_playlist_motion_uses_current_width_bars_and_skips_live_list(self):
+        window = self.window
+        window.set_content_layout('playlist', animate=False)
+        self.render()
+        window.resize(1090, 640)
+        self.render()
+        started = window._lyric_resize_started_at
+        from local.music_surface_layout import MusicContentLayoutMixin
+        with patch('local.music_lyric_resize.time.monotonic', return_value=started + .2), \
+                patch.object(MusicContentLayoutMixin, '_paint_playback_queue', side_effect=AssertionError('list rebuilt during drag')), \
+                patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton:
+            window.resize(1080, 640)
+            self.render()
+            skeleton.assert_called()
+            self.assertFalse(window._queue_hit_rects)
+            self.assertTrue(all(window._queue_view_rect.contains(bar)
+                                for bar in window._lyric_resize_skeleton_rects(window._queue_view_rect)))
+        self.wait_settle()
+        self.assertIsNotNone(window._lyric_resize_crossfade_at)
+
+    def test_new_width_during_reveal_starts_from_visible_composite(self):
+        window = self.window
+        column = QRectF(window._lyric_resize_last_geometry['column'])
+        ratio = window.devicePixelRatioF()
+        before = window.lyric_relayout_count
+        def live(painter, _rect, **_kwargs):
+            painter.fillRect(column, QColor('white'))
+        def skeleton(painter, _rect):
+            painter.fillRect(column, QColor(80, 80, 80))
+        for elapsed in (.045, .09, .135):
+            window._cancel_lyric_resize()
+            with patch.object(window, '_lyric_resize_crossfade_at', 100.), \
+                    patch.object(window, '_lyric_resize_target_rect', return_value=column), \
+                    patch.object(window, '_paint_live_lyric_column', side_effect=live), \
+                    patch.object(window, '_paint_lyric_resize_skeleton', side_effect=skeleton), \
+                    patch('local.music_lyric_resize.time.monotonic', return_value=100. + elapsed):
+                expected = QImage(round(column.width() * ratio), round(column.height() * ratio),
+                                  QImage.Format.Format_ARGB32_Premultiplied)
+                expected.setDevicePixelRatio(ratio)
+                expected.fill(Qt.GlobalColor.transparent)
+                with QPainter(expected) as painter:
+                    painter.translate(-column.left(), -column.top())
+                    window._paint_lyric_column(painter, QRectF(window.rect()))
+                window._enter_lyric_resize()
+                self.assertTrue(window._lyric_resize_frozen)
+                self.assertEqual(window._lyric_resize_snapshot, expected)
+                self.assertEqual(window.lyric_relayout_count, before)
 
     def test_pointer_resize_marks_without_width_motion_take_no_snapshot(self):
         before = self.window.lyric_relayout_count
