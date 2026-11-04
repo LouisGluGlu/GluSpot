@@ -14037,7 +14037,7 @@ class IslandStackVisual(QWidget):
         painter.restore()
 
     def _paint_sea_level_compact(self, painter: QPainter, rect: QRectF):
-        """One white line between artwork and four live spectral columns."""
+        """Shared timed reading between artwork and four live spectral columns."""
         painter.save()
         painter.setClipPath(self._music_shell_path(rect, self._music_shell_radius(rect, False), False),
                             Qt.ClipOperation.IntersectClip)
@@ -14053,17 +14053,31 @@ class IslandStackVisual(QWidget):
         bars = self._sea_level_bars_rect(rect)
         text_rect = QRectF(left, rect.top(), max(0.0, bars.left() - 12.0 * scale - left), rect.height())
         text = self._compact_music_text()
-        if self._should_paint_album_island() or self._empty_music_text_active():
+        title_only = self._should_paint_album_island() or self._empty_music_text_active()
+        if title_only:
             text = self.track_title or self.artist or text
         lines = self._lyric_display_lines(text) or [text]
-        lines, _phase, alpha = self._compact_lyric_paint_snapshot(lines[:1], self._island_display_phase())
+        phase = self._island_display_phase()
+        if phase.get("visual_focus_index", phase.get("active_index")) != phase.get("active_index"):
+            # An unread following row cannot inherit the previous row's front.
+            phase = dict(phase, progress=0.0, whole_row=False)
+            for key in ("timed_primary_text", "timed_units", "timed_position",
+                        "timed_line_end", "timed_character_front", "whole_block_progress"):
+                phase.pop(key, None)
+        lines, phase, alpha = self._compact_lyric_paint_snapshot(lines[:1], phase)
         text = lines[0] if lines else ""
         if not text_rect.isEmpty():
             painter.save()
             painter.setClipRect(text_rect, Qt.ClipOperation.IntersectClip)
             painter.setOpacity(painter.opacity() * alpha)
-            self._paint_scrolling_text(painter, text_rect, text, self._compact_primary_lyric_font_size(),
-                                       QColor(255, 255, 255), True, centered=True, centered_scroll=True)
+            size = self._fit_island_lyric_row_size(text, self._compact_primary_lyric_font_size(), True, text_rect.height())
+            if title_only:
+                self._paint_scrolling_text(painter, text_rect, text, size,
+                                           QColor(255, 255, 255), True, centered=True, centered_scroll=True)
+            else:
+                self._paint_live_lyric_text(painter, text_rect, text, size,
+                                           QColor(255, 255, 255, 132), QColor(255, 255, 255, 246),
+                                           True, phase, centered=True, centered_scroll=True)
             painter.restore()
         self._paint_sea_level_bars(painter, bars)
         painter.restore()

@@ -165,14 +165,14 @@ class IslandAudioBarPaintTests(unittest.TestCase):
         self.assertEqual(image.pixelColor(200, 6), QColor("black"))
         self.assertEqual(image.pixelColor(200, 49), QColor("black"))
 
-    def test_single_white_line_preserves_width_hold_and_cover_visibility_setting(self):
+    def test_single_reading_line_preserves_width_hold_and_cover_visibility_setting(self):
         self.visual.enable_dual_line_lyrics = True
         self.visual.compact_lyric_show_cover = False
         self.visual._compact_held_lyric = (("Previous line",), {})
         self.visual._compact_shell_waiting = True
         image = QImage(500, 60, QImage.Format.Format_ARGB32_Premultiplied)
         with patch.object(self.visual, "_compact_music_text", return_value="Primary line\nTranslation line"), \
-                patch.object(self.visual, "_paint_scrolling_text") as text, \
+                patch.object(self.visual, "_paint_live_lyric_text") as text, \
                 patch.object(self.visual, "_island_display_phase", return_value={}), \
                 patch.object(self.visual, "_paint_sea_level_bars") as bars:
             with QPainter(image) as painter:
@@ -182,8 +182,9 @@ class IslandAudioBarPaintTests(unittest.TestCase):
                 self.visual._paint_music(painter, QRectF(4., 4., 486., 48.), False)
             self.assertEqual(text.call_count, 2)
             self.assertEqual(text.call_args.args[2], "Primary line")
-            self.assertEqual(text.call_args.args[4], QColor("white"))
-            self.assertTrue(text.call_args.args[5])
+            self.assertEqual(text.call_args.args[4], QColor(255, 255, 255, 132))
+            self.assertEqual(text.call_args.args[5], QColor(255, 255, 255, 246))
+            self.assertTrue(text.call_args.args[6])
             self.assertTrue(text.call_args.kwargs["centered"])
             self.assertTrue(self.visual.music_cover_rect.isEmpty())
             self.assertEqual(bars.call_count, 2)
