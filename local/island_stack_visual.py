@@ -61,6 +61,7 @@ try:
 except Exception:
     QSvgRenderer = None
 from PySide6.QtWidgets import QApplication, QWidget
+from shiboken6 import isValid
 
 from api.lyric_timeline import (
     active_index_for_position,
@@ -1081,7 +1082,7 @@ class IslandStackVisual(QWidget):
         self._sync_timed_lyrics(now, allow_backward=timed_lyrics_appeared or timing_changed)
         previous_visual_data = getattr(self, "current_visual_data", None)
         self.current_visual_data = visual_data
-        if visual_data != previous_visual_data:
+        if visual_data != previous_visual_data and isValid(self):
             self.visualDataChanged.emit(visual_data)
         return bool(
             track_changed

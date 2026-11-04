@@ -686,6 +686,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._mode_animation.finished.connect(self._finish_mode_transition)
             self.seekFinished.connect(self._on_seek_finished)
         self._closing_for_shutdown = False
+        # Refresh before capturing this entry's destination. showEvent must
+        # not mistake its fresh bitmap for a retained page of the old song.
+        self._on_owner_visual_data_changed()
         self._sync_queue_artwork_connection()
         # Hidden surfaces stop polling. Refresh before rendering the morph's
         # destination bitmap so it cannot carry an old device/count on entry.
@@ -3131,7 +3134,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             QImage(getattr(self.owner, "album_art", QImage())),
             QColor(primary), QColor(secondary),
         )
-        if self._track_visual is not None and visual[:3] != self._track_visual[:3]:
+        if self._track_visual is not None and visual[0] != self._track_visual[0]:
             self._track_cover_previous = self._track_cover_snapshot(now)
             self._track_cover_started_at = now if not self._track_cover_previous.isNull() else 0.
             self._cover_upgrade_previous = QImage()
