@@ -1933,8 +1933,16 @@ class OwnedMusicPlayer(QObject):
         if self.personal_dj_enabled and self._fm_source == "netease" and self._fm_kind == "dj":
             self._prefetch_fm()
             self._prefetch_audio()
+        key = self._art_key(song)
+        if not cached and key not in self._art_failed:
+            self._art_attempted.discard(key)
         if prefetched is not None:
             self._audio_completed(("audio", epoch, catalog_epoch), prefetched, None)
+            # A local audio hit still advances the cover window. Otherwise
+            # cached list thumbnails never acquire their current-song original
+            # once continuous audio prefetch bypasses the stream task path.
+            if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch:
+                self._pump_artwork()
             return True
         accepted = self.tasks.submit(("stream", epoch, catalog_epoch), lambda: self._resolve_stream(song)
             if not self._closed and epoch == self._epoch and catalog_epoch == self._catalog_epoch else None)
@@ -1947,9 +1955,6 @@ class OwnedMusicPlayer(QObject):
             self._lyrics_unavailable()
         else:
             self.changed.emit()
-        key = self._art_key(song)
-        if not cached and key not in self._art_failed:
-            self._art_attempted.discard(key)
         self._pump_artwork()
         return accepted
 

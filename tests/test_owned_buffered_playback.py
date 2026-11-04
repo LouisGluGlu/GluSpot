@@ -10,6 +10,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication
 
 from api.lyrics import LocalLyricsStore
+from api.models import ColorToken
 from api.online_music import LyricPayload, OnlineSong, StreamInfo
 from api.owned_stream_cache import PreparedAudio, StreamDownloadError
 from local.owned_music_player import OwnedMusicPlayer
@@ -105,6 +106,38 @@ class OwnedBufferedPlaybackTests(unittest.TestCase):
         self.assertEqual(len(self.cache.preparations), downloads)
         self.assertIn(active.lease, self.cache.released)
         self.assertIn(upcoming.lease, self.cache.leases)
+
+    def test_prefetched_selected_song_upgrades_cached_list_thumbnail(self):
+        songs = tuple(replace(self.songs[0], song_id=str(i), title=f"Song {i}",
+            artwork_url=f"https://fixture.invalid/{i}.png") for i in range(8))
+        self.start(songs)
+        artwork = self.owned.artwork_tasks
+        # Finish the original neighbor jobs before selecting a distant,
+        # previously browsed list row with both audio and a thumbnail cached.
+        seen = set()
+        while self.owned._art_running:
+            token = next(token for token, _ in artwork.jobs
+                if token[3] in self.owned._art_running and token not in seen)
+            seen.add(token)
+            artwork.completed.emit(token, (b"original", ColorToken(80, 40, 20),
+                ColorToken(40, 20, 10), 640), None)
+        selected = songs[5]
+        key = self.owned._art_key(selected)
+        self.owned._art_cache[key] = (b"list thumbnail", ColorToken(80, 40, 20), ColorToken(40, 20, 10))
+        self.owned._art_sizes[key] = 320
+        self.owned._art_cache_targets[key] = self.owned.ARTWORK_THUMBNAIL_SIDE
+        self.owned._art_targets[key] = self.owned.ARTWORK_THUMBNAIL_SIDE
+        self.owned._prefetched_audio = self.cache.prepare(self.service.stream_url("netease", "5"))
+        self.assertTrue(self.owned.select_queue_index(5, self.owned._queue_view_serial))
+        self.assertEqual(self.owned.track.album_art_bytes, b"list thumbnail")
+        self.assertEqual(self.owned.track.album_art_lookup_state, "pending")
+        self.assertIn((self.owned._queue_epoch, key), self.owned._art_running.values())
+        token = next(token for token, _ in reversed(artwork.jobs)
+            if token[2] == key and token[3] in self.owned._art_running)
+        artwork.completed.emit(token, (b"selected original", ColorToken(80, 40, 20),
+            ColorToken(40, 20, 10), 1280), None)
+        self.assertEqual(self.owned.track.album_art_bytes, b"selected original")
+        self.assertEqual(self.owned.track.album_art_lookup_state, "original")
 
     def test_music_prefetches_real_intro_then_both_complete_files_play_independently(self):
         songs = (segments(1)[1],) + segments(2)
