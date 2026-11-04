@@ -427,7 +427,12 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._translation_entered_at: dict[tuple, float] = {}
         self._translation_known_tokens: set[tuple] = set()
         self._translation_entry_from: dict[tuple, tuple[float, float, float]] = {}
-        self._translation_exit_poses: dict[tuple, tuple[float, float, float]] = {}
+        self._translation_toggle_at: float | None = None
+        self._translation_toggle_poses: dict[tuple, tuple[float, float, float]] = {}
+        self._translation_toggle_curve = QEasingCurve(QEasingCurve.Type.BezierSpline)
+        self._translation_toggle_curve.addCubicBezierSegment(
+            QPointF(0.28, 0.0), QPointF(0.72, 1.0), QPointF(1.0, 1.0),
+        )
         self._obo_advanced_focus_index: int | None = None
         self._obo_advanced_focus_pose: tuple[float, float, float, float, bool, float] | None = None
         self._obo_advanced_handoff_last_at: float | None = None
@@ -2236,7 +2241,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         )
         companion_animating = (
             self._translation_exit_at is not None
-            or any(0.0 <= now - began < self._translation_style.entry_duration_s
+            or (self._translation_toggle_at is not None
+                and 0.0 <= now - self._translation_toggle_at < 0.32)
+            or any(0.0 <= now - began < 0.32
                    for began in self._translation_entered_at.values())
             or (self._translation_focus_entry is not None
                 and 0.0 <= now - self._translation_focus_entry[1] < self._translation_style.entry_duration_s)
@@ -3409,7 +3416,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         return frame["lyrics"]
 
     def _resolve_display_lyrics(self) -> tuple[list[str], list[tuple[float, str]]]:
-        translated = self._translation_render_enabled(time.monotonic())
+        self._translation_render_enabled(time.monotonic())
+        # Visibility is a paint pose, not a different song. Keep companions
+        # shaped while hidden so a toggle cannot discard the primary layouts.
+        translated = True
         raw_timed = tuple((start, str(text)) for start, text in (getattr(self.owner, "timed_lyrics", ()) or ()))
         owner_units = getattr(self.owner, "timed_lyric_units", ()) or ()
         owner_kinds = getattr(self.owner, "timed_lyric_timing_kinds", ()) or ()
@@ -3481,7 +3491,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             and lines is cached_display[0] and timed is cached_display[1]
             and len(duet.rows) == len(lines)
         )
-        show_translation = self._translation_render_enabled(time.monotonic())
+        show_translation = True
         key = (
             self._visual_track_identity(), id(lines), id(timed),
             id(duet) if use_duet else None, show_translation,
@@ -3693,15 +3703,18 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         }
         self._translation_track_key = self._visual_track_identity()
         self._translation_setting = enabled
+        self._translation_toggle_at = now
+        self._translation_toggle_poses = poses
+        if getattr(self, '_translation_cover_anchor_key', None) is None:
+            self._translation_cover_anchor_key = getattr(self, '_translation_cover_last_key', None)
+            self._translation_cover_anchor_heights = getattr(self, '_translation_cover_last_heights', ())
         if enabled:
             self._translation_exit_at = None
             self._translation_exit_source = None
             self._translation_animate_entries = True
             self._translation_entered_at.clear()
             self._translation_entry_from = poses
-            self._translation_exit_poses.clear()
         else:
-            self._translation_exit_poses = poses
             source = self._translation_last_source
             self._translation_exit_at = now if source is not None else None
             self._translation_exit_source = (
@@ -3721,48 +3734,50 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._translation_entered_at = {}
             self._translation_known_tokens = set()
             self._translation_entry_from = {}
-            self._translation_exit_poses = {}
+            self._translation_toggle_at = None
+            self._translation_toggle_poses = {}
             self._translation_animate_entries = False
             self._translation_focus_entry = None
             self._translation_setting = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
         enabled = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
         if enabled != self._translation_setting:
             self.on_translation_visibility_changed(enabled)
-        if self._translation_exit_at is not None and now - self._translation_exit_at >= 0.34:
+        if self._translation_exit_at is not None and now - self._translation_exit_at >= 0.32:
             self._translation_exit_at = None
             self._translation_exit_source = None
         return enabled or self._translation_exit_at is not None
 
     def _translation_layer_pose(self, index: int, text: str, now: float) -> tuple[float, float, float]:
-        """Return reserved height, opacity and one positional spring reveal."""
+        """Return companion height, opacity and positional reveal."""
         if not text:
             return 0.0, 0.0, 0.0
         token = (index, text)
         self._translation_known_tokens.add(token)
+        if self._translation_toggle_at is not None and token in self._translation_toggle_poses:
+            self._translation_entered_at.setdefault(token, self._translation_toggle_at)
+            phase = max(0.0, min(1.0, (now - self._translation_toggle_at) / 0.32))
+            eased = self._translation_toggle_curve.valueForProgress(phase)
+            target = 1.0 if self._translation_setting else 0.0
+            return tuple(value + (target - value) * eased
+                         for value in self._translation_toggle_poses[token])
         if self._translation_exit_at is not None:
-            phase = max(0.0, min(1.0, (now - self._translation_exit_at) / 0.34))
-            reveal = 1.0 - phase * phase * (3.0 - 2.0 * phase)
-            start = self._translation_exit_poses.get(token, (1.0, 1.0, 1.0))
-            # Keep the entrance lane until the outgoing ink has disappeared;
-            # its following row then closes the space with the same spring.
-            return start[0], start[1] * reveal, start[2] * reveal
+            # A companion that was never displayed cannot appear on exit.
+            return 0.0, 0.0, 0.0
         if not self._translation_setting:
             return 0.0, 0.0, 0.0
-        focus_entry = self._translation_focus_entry
-        focus_reveal = (
-            not self._translation_animate_entries
-            and focus_entry is not None and focus_entry[0] == token
-        )
-        if not self._translation_animate_entries and not focus_reveal:
-            return 1.0, 1.0, 1.0
-        start = (1.0, 0.0, 0.0) if focus_reveal else self._translation_entry_from.get(token, (1.0, 0.0, 0.0))
-        began = focus_entry[1] if focus_reveal else self._translation_entered_at.get(token)
-        if began is None and start[1] > 0.001:
+        if self._translation_animate_entries:
+            # Providers may deliver bilingual rows only after their settings
+            # refresh. Start the same height/alpha curve when ink is ready.
             began = self._translation_entered_at.setdefault(token, now)
-        if began is None:
-            # Reserve the full destination before showing ink. The actual
-            # following spring grants clearance and starts the reveal below.
-            return 1.0, start[1], start[2]
+            phase = max(0.0, min(1.0, (now - began) / 0.32))
+            eased = self._translation_toggle_curve.valueForProgress(phase)
+            start = self._translation_entry_from.get(token, (0.0, 0.0, 0.0))
+            return tuple(value + (1.0 - value) * eased for value in start)
+        focus_entry = self._translation_focus_entry
+        if focus_entry is None or focus_entry[0] != token:
+            return 1.0, 1.0, 1.0
+        start = (1.0, 0.0, 0.0)
+        began = focus_entry[1]
         style = self._translation_style
         phase = max(0.0, min(1.0, (now - began) / style.entry_duration_s))
         smooth = phase * phase * (3.0 - 2.0 * phase)
@@ -3773,48 +3788,6 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         )
         opacity = opacity_phase * opacity_phase * (3.0 - 2.0 * opacity_phase)
         return tuple(value + (1.0 - value) * eased for value, eased in zip(start, (smooth, opacity, back)))
-
-    def _start_translation_entries_with_clearance(
-        self, texts: tuple[str, ...], layouts: tuple, positions: tuple[float, ...],
-        ranges: tuple, factors: tuple[float, ...], pair_first_by_row: dict, now: float,
-        visible_range: tuple[int, int],
-    ) -> None:
-        """Let following primary springs open the lane before elastic ink enters."""
-        if not self._translation_setting or not self._translation_animate_entries:
-            return
-        for index, text in enumerate(texts[:len(layouts)]):
-            token = (index, text)
-            if not text or token in self._translation_entered_at:
-                continue
-            first, end = ranges[index]
-            if end <= visible_range[0] or first >= visible_range[1]:
-                # Offscreen springs intentionally do not integrate. They
-                # acquire settled geometry when entering the viewport and
-                # must not keep a paused page repainting for an unseen reveal.
-                self._translation_entered_at[token] = now - self._translation_style.entry_duration_s
-                continue
-            next_row = pair_first_by_row[index] + 2 if index in pair_first_by_row else index + 1
-            if next_row >= len(layouts):
-                self._translation_entered_at[token] = now
-                continue
-            next_first = ranges[next_row][0]
-            if end <= first or next_first >= len(positions):
-                continue
-            layout, height = layouts[index]
-            bottom = (
-                positions[first] + height if index in pair_first_by_row else
-                positions[end - 1] + layout.lineAt(layout.lineCount() - 1).height()
-            )
-            bottom += (
-                self._song_parenthetical_extra_heights[index] * factors[index]
-                + self._song_translation_extra_heights[index]
-            )
-            # The small overshoot remains inside the normal sentence gap.
-            secondary = self._song_secondary_layouts[index]
-            small_height = secondary[1] if secondary is not None else 0.0
-            margin = min(max(3.0, small_height * 0.06), max(3.0, self.height() * 0.012))
-            if positions[next_first] >= bottom + margin:
-                self._translation_entered_at[token] = now
 
     def _timing_quality_badge(self, lines: list[str], timed: list[tuple[float, str]]) -> str:
         """Describe the source timing, independent of the chosen paint style."""
@@ -5813,6 +5786,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                 max_seconds=self.LYRIC_LAYOUT_BATCH_SECONDS if defer else None,
             )
             if self._song_layout_key != key:
+                old = self._song_layout_key
+                if (old is not None and self._song_layouts
+                        and old[:4] + old[5:7] + old[8:] == key[:4] + key[5:7] + key[8:]):
+                    # Provider refreshes can remove/add companions after the
+                    # click. Identical primary text/geometry stays paintable
+                    # while the bounded companion build finishes. The caller
+                    # uses these committed companion strings until promotion.
+                    return self._song_layouts, self._song_row_tops
                 return (), ()
         return self._song_layouts, self._song_row_tops
 
@@ -8018,6 +7999,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             )
         if not self._lyric_resize_capturing:
             self._lyric_resize_last_layouts = (layouts, row_tops)
+        if layouts and self._song_layout_build is not None:
+            translation_lines = self._song_layout_key[4]
+            parenthetical_translation_lines = self._song_layout_key[7]
         parenthetical_factors = self._parenthetical_reserve_factors(
             visual_active, lyric_now, pair_starts=pair_starts,
         )
@@ -8061,23 +8045,39 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             * (1.0 - translation_poses[index][0])
             for index in range(len(layouts))
         )
+        translation_before = [0.0] * len(layouts)
+        translation_visual_offsets = [0.0] * len(self._song_visual_tops) if layouts else []
         if layouts and (any(parenthetical_factors) or any(self._song_translation_extra_heights)):
             adjusted_tops = []
             adjusted_visual_tops = list(self._song_visual_tops)
             reserve_before = 0.0
+            translated_before = 0.0
             row_index = 0
             while row_index < len(row_tops):
                 group = (row_index, row_index + 1) if row_index in pair_starts else (row_index,)
                 for member in group:
+                    translation_before[member] = translated_before
                     adjusted_tops.append(row_tops[member] + reserve_before)
                     start, end = self._song_visual_ranges[member]
                     for visual_index in range(start, end):
                         adjusted_visual_tops[visual_index] += reserve_before
-                reserve_before += max(
+                        translation_visual_offsets[visual_index] = translated_before
+                extras = tuple(
                     annotation_extras[member]
                     * parenthetical_factors[member]
                     + self._song_translation_extra_heights[member] * translation_poses[member][0]
                     for member in group
+                )
+                translated_extras = tuple(
+                    (self._song_parenthetical_translation_layouts[member][1]
+                     if self._song_parenthetical_translation_layouts[member] is not None else 0.0)
+                    * translation_poses[member][0] * parenthetical_factors[member]
+                    + self._song_translation_extra_heights[member] * translation_poses[member][0]
+                    for member in group
+                )
+                reserve_before += max(extras)
+                translated_before += max(extras) - max(
+                    total - translated for total, translated in zip(extras, translated_extras)
                 )
                 row_index += len(group)
             row_tops = tuple(adjusted_tops)
@@ -8250,21 +8250,34 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             lower = max(0, min(len(layouts) - 1, int(math.floor(anchor))))
             upper = min(len(layouts) - 1, lower + 1)
             fraction = max(0.0, min(1.0, anchor - lower))
+            cover_anchor_key = (self._visual_track_identity(), focus_index)
+            if cover_anchor_key != getattr(self, '_translation_cover_anchor_key', None):
+                self._translation_cover_anchor_key = None
+            block_heights = tuple(
+                layout[1] + (annotation_extras[index] * parenthetical_factors[index]
+                + self._song_translation_extra_heights[index] * translation_poses[index][0]
+                if cover_lyrics_layout else 0.0)
+                for index, layout in enumerate(layouts)
+            )
+            if cover_lyrics_layout:
+                if (self._translation_cover_anchor_key == cover_anchor_key
+                        and len(self._translation_cover_anchor_heights) == len(layouts)):
+                    block_heights = self._translation_cover_anchor_heights
+                self._translation_cover_last_key = cover_anchor_key
+                self._translation_cover_last_heights = block_heights
             def row_center(index: int) -> float:
                 first = pair_first_by_row.get(index)
                 def block_height(row: int) -> float:
-                    height = layouts[row][1]
-                    if cover_lyrics_layout:
-                        height += annotation_extras[row] * parenthetical_factors[row]
-                        height += self._song_translation_extra_heights[row] * translation_poses[row][0]
-                    return height
+                    return block_heights[row]
                 height = max(block_height(first), block_height(first + 1)) if first is not None else block_height(index)
                 return row_tops[index] + height * 0.5
             lower_center = row_center(lower)
             upper_center = row_center(upper)
             anchor_center = lower_center * (1.0 - fraction) + upper_center * fraction
+            translation_anchor_offset = translation_before[lower] * (1.0 - fraction) + translation_before[upper] * fraction
         else:
             anchor_center = 0.0
+            translation_anchor_offset = 0.0
         origin_y = lyric_clip.top() + lyric_clip.height() * 0.43 - anchor_center
         visual_targets = tuple(origin_y + top for top in visual_tops) if layouts else ()
         visual_ranges = self._song_visual_ranges if layouts else ()
@@ -8278,6 +8291,21 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._song_visual_counts,
         )
         visual_row_ids = self._visual_row_identities(paint_lines) if layouts else ()
+        translation_offsets = tuple(value - translation_anchor_offset for value in translation_visual_offsets)
+        # The 320 ms height curve already moves neighbors. Rebase only that
+        # component of their physical springs, retaining normal lyric-scroll
+        # position/velocity without adding a second lagging expansion spring.
+        spring = self._logical_line_spring
+        offset_key = (logical_spring_key, visual_row_ids)
+        previous_offsets = getattr(self, '_translation_spring_offsets', ())
+        if (getattr(self, '_translation_spring_offset_key', None) == offset_key
+                and spring.key == logical_spring_key
+                and len(previous_offsets) == len(translation_offsets) == len(spring.positions)):
+            for index, (old, new) in enumerate(zip(previous_offsets, translation_offsets)):
+                spring.positions[index] += new - old
+                spring.targets[index] += new - old
+        self._translation_spring_offset_key = offset_key
+        self._translation_spring_offsets = translation_offsets
         spring_visible_range = self._visible_visual_spring_range(
             visual_targets, rect, glow_bleed, logical_spring_key, visual_row_ids,
         )
@@ -8290,15 +8318,6 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             sequence_index=visual_focus_row - sum(first < visual_focus_row for first in pair_starts),
             visible_range=spring_visible_range,
             row_ids=visual_row_ids,
-        )
-        self._start_translation_entries_with_clearance(
-            translation_texts, layouts, logical_spring.positions,
-            visual_ranges, parenthetical_factors, pair_first_by_row, lyric_now,
-            spring_visible_range,
-        )
-        translation_poses = tuple(
-            self._translation_layer_pose(index, text, lyric_now)
-            for index, text in enumerate(translation_texts)
         )
         focus_target_shift = anchor_center - row_center(focus_index) if layouts else 0.0
         blur_levels, blur_focus_moving = self._lyric_blur_follow_levels(
@@ -8725,6 +8744,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                         secondary_top -= self._song_parenthetical_extra_heights[index] * (
                             1.0 - parenthetical_open_poses[index]
                         )
+                        translated_aside = self._song_parenthetical_translation_layouts[index]
+                        if translated_aside is not None:
+                            secondary_top -= translated_aside[1] * (1.0 - translation_poses[index][0])
                         block_layers.append((
                             secondary_layout,
                             QPointF(row.left(), row.top() + secondary_top),
@@ -8775,12 +8797,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             if secondary is not None and translation_poses[index][1] > 0.001:
                 secondary_layout, secondary_height, secondary_top = secondary
                 secondary_text = translation_lines[index]
-                # Keep the translated aside and the sentence translation in
-                # one ordered stack while both pop out. Collapsing their
-                # internal distance with the outer reservation overlaps ink.
+                # The sentence follows the animated translated-aside height
+                # so the companion stack stays inside its reserved lane.
                 secondary_top -= self._song_parenthetical_extra_heights[index] * (
                     1.0 - parenthetical_open_poses[index]
                 )
+                translated_aside = self._song_parenthetical_translation_layouts[index]
+                if translated_aside is not None:
+                    secondary_top -= translated_aside[1] * (1.0 - translation_poses[index][0])
                 companion_slide = -(1.0 - translation_poses[index][2]) * secondary_height * translation_style.slide_factor
                 secondary_origin = QPointF(row.left(), row.top() + secondary_top + companion_slide)
                 secondary_offsets = (combined_offsets[-1] if combined_offsets else 0.0,) * secondary_layout.lineCount()
