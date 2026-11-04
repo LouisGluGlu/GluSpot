@@ -302,6 +302,7 @@ class SmtcInterruptionObserver:
         latest = binding.observation if binding else None
         return bool(latest is not None and binding.session is observation.session
                     and latest.playing is True and observation.playing is True
+                    and latest.kind is MediaKind.MUSIC and observation.kind is MediaKind.MUSIC
                     and latest.interval == observation.interval
                     and latest.media_generation == observation.media_generation
                     and latest.media_key == observation.media_key)

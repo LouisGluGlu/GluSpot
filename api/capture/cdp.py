@@ -124,6 +124,9 @@ class CdpSession:
         self._page_loaded = asyncio.Event()
         self._early_script_id = None
         self._target_endpoint = None
+        self._pause_observation_generation = None
+        self._pause_observation_requested_generation = None
+        self._pause_requests = set()
 
     @property
     def ready(self):
@@ -186,6 +189,72 @@ class CdpSession:
             return False
         # The adapter never copies the seek target into readback state.
         return await self._evaluate(self.adapter.seek_expression(track_id, request_id, seconds)) is True
+
+    async def set_pause_observation_enabled(self, enabled, *, guard=lambda: True):
+        """Observe a real page Pause contract on this already-ready connection.
+
+        No connection, adapter installation, reload or launch is attempted.
+        Older attached adapter revisions fail closed through optional methods.
+        """
+        if not isinstance(enabled, bool) or not self.ready or not guard():
+            return False
+        generation = self.generation
+        if enabled and self._pause_observation_generation == generation:
+            return True
+        if (not enabled and self._pause_observation_generation is None
+                and self._pause_observation_requested_generation is None):
+            return True
+        # Record dispatch before awaiting: OFF must remove a native observer
+        # even if cancellation/timeout prevents the enable acknowledgement.
+        self._pause_observation_requested_generation = generation if enabled else None
+        observed = await self._evaluate(self.adapter.pause_observation_expression(enabled))
+        if generation != self.generation:
+            return False
+        if observed is True:
+            self._pause_observation_generation = generation if enabled else None
+            if not enabled:
+                self._pause_requests.clear()
+            # OFF/new intent can race the response after observation was armed.
+            if enabled and not guard() and self.ready:
+                await self._evaluate(self.adapter.pause_observation_expression(False))
+                self._pause_observation_generation = None
+                self._pause_observation_requested_generation = None
+                return False
+            return True
+        return False
+
+    async def pause(self, track_id, request_id, *, expected_generation=None, guard=lambda: True):
+        """Explicit, one-attempt Pause using only an observed native contract.
+
+        Success requires independent raw Paused readback. An uncertain write is
+        never retried, and this method never creates or prepares a channel.
+        """
+        generation = self.generation
+        request_key = (generation, str(request_id))
+        latest = self.latest
+        if (not self.ready or not guard() or self._pause_observation_generation != generation
+                or expected_generation not in (None, generation) or not request_id
+                or request_key in self._pause_requests or not latest
+                or latest.get('trackId') != str(track_id) or latest.get('playing') is not True):
+            return False
+        capability = await self._evaluate(self.adapter.pause_capability_expression())
+        if (not isinstance(capability, dict) or capability.get('available') is not True
+                or capability.get('trackId') != str(track_id) or not self.ready
+                or self.generation != generation or not guard() or not self.latest
+                or self.latest.get('trackId') != str(track_id)
+                or self.latest.get('playing') is not True):
+            return False
+        self._pause_requests.add(request_key)
+        if len(self._pause_requests) > 256:
+            self._pause_requests = {request_key}
+        sent_at = self.clock()
+        accepted = await self._evaluate(self.adapter.pause_expression(track_id, request_id))
+        if accepted is not True or not self.ready or self.generation != generation or not guard():
+            return False
+        sample = await self.readback()
+        return bool(self.ready and self.generation == generation and guard() and sample
+                    and sample.get('trackId') == str(track_id) and sample.get('playing') is False
+                    and max(sample.get('received_at', 0), sample.get('state_received_at', 0)) >= sent_at)
 
     async def readback(self):
         if not self.ready:
@@ -415,6 +484,9 @@ class CdpSession:
 
     async def _disconnect(self):
         self._ready.clear()
+        self._pause_observation_generation = None
+        self._pause_observation_requested_generation = None
+        self._pause_requests.clear()
         self.latest = None
         self._notify(None)
         # Restore while the response reader is still available (e.g. heartbeat

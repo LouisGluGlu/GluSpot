@@ -36,6 +36,18 @@ class JsAdapter:
         arguments = ','.join(json.dumps(value, allow_nan=False) for value in (str(track_id), str(request_id), float(seconds)))
         return f'globalThis.{ADAPTER_GLOBAL}.seek({arguments})'
 
+    def pause_observation_expression(self, enabled) -> str:
+        # Optional chaining keeps old, already-attached adapters unsupported.
+        return f'globalThis.{ADAPTER_GLOBAL}?.observePause?.({str(enabled is True).lower()})'
+
+    def pause_capability_expression(self) -> str:
+        return f'globalThis.{ADAPTER_GLOBAL}?.pauseCapability?.()'
+
+    def pause_expression(self, track_id, request_id) -> str:
+        import json
+        arguments = ','.join(json.dumps(str(value)) for value in (track_id, request_id))
+        return f'globalThis.{ADAPTER_GLOBAL}?.pause?.({arguments})'
+
     def close_expression(self) -> str:
         return f'globalThis.{ADAPTER_GLOBAL} && globalThis.{ADAPTER_GLOBAL}.close()'
 
@@ -325,6 +337,60 @@ _INSTALL = r"""(() => {
     const descriptor = data(owner, key);
     return descriptor && descriptor.value;
   };
+  // Dormant until t260 is explicitly enabled. Learn an actual page-originated
+  // Pause contract, then require independent PlayState=false confirmation.
+  // A channel with a call method alone never proves pause support.
+  let pauseHook = null, pauseCandidate = null, pauseContract = null, replayingPause = false;
+  const pauseRequests = new Set();
+  const stopPauseObservation = () => {
+    if (pauseHook) {
+      try {
+        if (value(seekChannel, 'call') === pauseHook.wrapper)
+          Object.defineProperty(seekChannel, 'call', pauseHook.descriptor);
+      } catch (_) {}
+    }
+    pauseHook = pauseCandidate = pauseContract = null;
+    pauseRequests.clear();
+  };
+  const pauseAvailable = () => !!(active && intact() && latest && pauseContract && pauseHook &&
+    value(seekChannel, 'call') === pauseHook.wrapper &&
+    pauseContract.trackId === latest.trackId && pauseContract.nativeTrackId === latest.nativeTrackId);
+  const observePause = enabled => {
+    if (!enabled) { stopPauseObservation(); return true; }
+    if (!active || !intact()) return false;
+    if (pauseHook && value(seekChannel, 'call') === pauseHook.wrapper) return true;
+    stopPauseObservation();
+    const descriptor = data(seekChannel, 'call');
+    if (!descriptor || !descriptor.writable || typeof descriptor.value !== 'function') return false;
+    const original = descriptor.value;
+    const wrapper = new Proxy(original, {apply(target, receiver, args) {
+      let candidate = null;
+      try {
+        // An unrelated command cannot later confirm an older pending Pause.
+        if (!replayingPause) pauseCandidate = null;
+        // These are observed argument shapes, not synthesized native commands.
+        // Opaque/request-token/multi-argument shapes remain unsupported.
+        if (!replayingPause && active && latest && playing === true && receiver === seekChannel &&
+            args.length === 3 && args[0] === 'audioplayer.pause' && typeof args[1] === 'function' &&
+            Array.isArray(args[2]) && (args[2].length === 0 ||
+              (args[2].length === 1 && value(args[2], '0') === latest.nativeTrackId))) {
+          candidate = {trackId:latest.trackId,nativeTrackId:latest.nativeTrackId,
+            method:args[0],args:args[2].length ? [latest.nativeTrackId] : [],at:performance.now()};
+          pauseCandidate = candidate;
+        }
+      } catch (_) { pauseCandidate = null; }
+      try { return Reflect.apply(target, receiver, args); }
+      catch (error) {
+        if (pauseCandidate === candidate) pauseCandidate = null;
+        if (pauseContract === candidate) pauseContract = null;
+        throw error;
+      }
+    }});
+    try { Object.defineProperty(seekChannel, 'call', {...descriptor,value:wrapper}); }
+    catch (_) { return false; }
+    pauseHook = {descriptor,wrapper,original};
+    return true;
+  };
   const prepare = () => {
     const map = value(native, 'registerCallMap'), stubs = value(native, 'registerCallStubs');
     if (!map || !stubs) return null;
@@ -420,6 +486,11 @@ _INSTALL = r"""(() => {
       if (event === 'PlayState') {
         const value = state(args);
         if (value !== null) playing = value;
+        if (value === false && latest && pauseCandidate &&
+            pauseCandidate.trackId === latest.trackId &&
+            pauseCandidate.nativeTrackId === latest.nativeTrackId &&
+            performance.now() - pauseCandidate.at <= 2000) pauseContract = pauseCandidate;
+        pauseCandidate = null;
       } else if (event === 'End') playing = false;
       if (event === 'Load') {
         latest = null; playing = null; loadDuration = 0;
@@ -494,6 +565,20 @@ _INSTALL = r"""(() => {
               chainIntact:intact(),originalCalls:{...originalCalls},discovery};
     },
     read() { return latest; },
+    observePause,
+    pauseCapability() { return {available:pauseAvailable(),trackId:latest ? latest.trackId : null}; },
+    pause(trackId, requestId) {
+      if (!pauseAvailable() || latest.trackId !== String(trackId) || playing !== true ||
+          typeof requestId !== 'string' || !requestId || pauseRequests.has(requestId)) return false;
+      pauseRequests.add(requestId);
+      if (pauseRequests.size > 256) { pauseRequests.clear(); pauseRequests.add(requestId); }
+      replayingPause = true;
+      try {
+        Reflect.apply(pauseHook.original, seekChannel,
+          [pauseContract.method,()=>{},pauseContract.args.slice()]);
+        return true;
+      } finally { replayingPause = false; }
+    },
     seek(trackId, requestId, seconds) {
       if (!active || !canSeek || !latest || latest.trackId !== String(trackId) ||
           !Number.isFinite(seconds) || seconds < 0) return false;
@@ -502,6 +587,7 @@ _INSTALL = r"""(() => {
       return true;
     },
     close() {
+      stopPauseObservation();
       active = false; clearInterval(heartbeat); heartbeat = null;
       restore(); latest = null; playing = null; loadDuration = 0;
     }

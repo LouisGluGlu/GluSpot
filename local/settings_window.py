@@ -705,6 +705,9 @@ class SettingsWindow(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._normalize_finder_bar_setting()
         self._build_ui()
+        setting_changed = getattr(self.settings, "setting_changed", None)
+        if setting_changed is not None:
+            setting_changed.connect(self._playback_interruption_setting_changed)
         self._update_theme_schedule_controls()
         self._update_music_background_follow_dependency_controls()
         self._apply_settings_font()
@@ -2000,12 +2003,24 @@ class SettingsWindow(QDialog):
         )
         c.addWidget(self.owned_playback_switch)
         c.addWidget(self.system_capture_switch)
+        self.playback_interruption_switch = self._check(
+            "内外播放打断", self._setting_value("v2_playback_interruption_enabled", False) is True,
+            lambda enabled: self._save("v2_playback_interruption_enabled", enabled),
+        )
+        c.addWidget(self.playback_interruption_switch)
+        interruption_hint = QLabel("开启后，后开始的音乐优先播放；库内播放开始时暂停已确认的外部音乐（包括网页音乐）。视频、游戏和未识别音频暂不干预。")
+        interruption_hint.setWordWrap(True)
+        interruption_hint.setMaximumWidth(600)
+        interruption_hint.setStyleSheet(self._hint_style(2, 12))
+        c.addWidget(interruption_hint)
         if owned_playback_only():
             self._set_switch_checked(self.owned_playback_switch, True)
             self._set_switch_checked(self.system_capture_switch, False)
             self.owned_playback_switch.setEnabled(False)
             self.system_capture_switch.setEnabled(False)
             self.system_capture_switch.setToolTip(system_media_unavailable_reason())
+            self.playback_interruption_switch.setEnabled(False)
+            self.playback_interruption_switch.setToolTip(system_media_unavailable_reason())
         player_hint = QLabel("外部播放通过 Windows 系统媒体会话（SMTC）读取，无需填写播放器路径。若播放时没有会话，请在播放器中开启系统媒体控制；无法据此判断播放器内部开关。")
         if owned_playback_only():
             player_hint.setText(system_media_unavailable_reason())
@@ -2432,6 +2447,7 @@ class SettingsWindow(QDialog):
         for control, key, default in (
             (self.owned_playback_switch, "v2_owned_playback_enabled", True),
             (self.system_capture_switch, "v2_system_capture_enabled", False),
+            (self.playback_interruption_switch, "v2_playback_interruption_enabled", False),
             (self.mydockfinder_monitor_switch, "v2_mydockfinder_monitor_enabled", True),
             (self.bar_hide_follow_switch, "v2_bar_hide_follow_enabled", True),
             (self.music_background_follow_theme_checkbox, "v2_music_background_follow_theme", False),
@@ -2751,6 +2767,10 @@ class SettingsWindow(QDialog):
         # without making the panel depend on the surrounding window type.
         if key == "v2_system_capture_enabled" and hasattr(self, "system_capture_switch"):
             self._set_switch_checked(self.system_capture_switch, bool(value))
+
+    def _playback_interruption_setting_changed(self, key, value):
+        if key == "v2_playback_interruption_enabled":
+            self._set_switch_checked(self.playback_interruption_switch, value is True)
 
     def _set_music_glass_level(self, value: int):
         self._save("v2_music_glass_level", normalize_music_glass_level(value))

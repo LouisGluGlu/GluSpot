@@ -194,6 +194,7 @@ DEFAULT_SETTINGS = {
     "v2_personal_dj_enabled": False,
     "v2_personal_dj_voice_key": "",
     "v2_system_capture_enabled": True,
+    "v2_playback_interruption_enabled": False,
     "v2_startup_mode": "none",
     "v2_custom_icon_path": "",
     "v2_music_playing": True,
@@ -486,6 +487,7 @@ class SettingsManager(QObject):
                 migrated = True
             for key, default in (("v2_owned_playback_enabled", True), ("v2_system_capture_enabled", True),
                                  ("v2_playback_onboarding_completed", False), ("v2_personal_dj_enabled", False),
+                                 ("v2_playback_interruption_enabled", False),
                                  ("v2_library_expanded", False), ("v2_bar_hide_follow_enabled", True)):
                 if not isinstance(self._settings.get(key), bool):
                     self._settings[key] = default
@@ -620,6 +622,8 @@ class SettingsManager(QObject):
             if not isinstance(value, str) or not value.strip() or len(value.strip()) > 64:
                 return
             value = value.strip().casefold()
+        if key == "v2_playback_interruption_enabled" and not isinstance(value, bool):
+            return
         if key == "v2_personal_dj_enabled" and not isinstance(value, bool):
             return
         if key == "v2_library_expanded" and not isinstance(value, bool):

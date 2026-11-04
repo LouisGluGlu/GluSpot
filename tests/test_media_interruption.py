@@ -204,6 +204,16 @@ class ObserverTests(CaptureAsyncTestCase):
         self.assertIsNone(await self.observer.revalidate(snapshot))
         self.assertEqual(self.session.pauses, 0)
 
+    async def test_same_title_type_change_revokes_queued_music_permission(self):
+        self.session.playing = True
+        snapshot = await self.collect()
+        self.assertTrue(self.observer.is_current(snapshot))
+        self.session.media_type = 2
+        await self.collect()
+        self.assertFalse(self.observer.is_current(snapshot))
+        self.assertIs(await self.observer.pause(snapshot), PauseResult.STALE)
+        self.assertEqual(self.session.pauses, 0)
+
     async def test_session_replacement_during_metadata_wait_blocks_dispatch(self):
         self.session.playing = True
         snapshot = await self.collect()

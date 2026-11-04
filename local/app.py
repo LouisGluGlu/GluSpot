@@ -325,7 +325,10 @@ class LocalIslandApp:
         self.owned_player.restore_personal_dj_voice(self.settings.get("v2_personal_dj_voice_key", ""))
         self.data_provider = PlaybackSourceProvider(self.system_provider, self.owned_player, self._runtime_setting)
         self.data_provider.settings_setter = self.settings.set
+        self.data_provider.set_playback_interruption_enabled(
+            self.settings.get("v2_playback_interruption_enabled", False))
         self.system_media_controls = WindowsSmtcBridge(self.owned_player, self.data_provider._owned_active, self.app)
+        self.data_provider.sourceChanged.connect(self.system_media_controls.refresh)
         self.app.aboutToQuit.connect(self.system_media_controls.close)
         self.app.aboutToQuit.connect(self.data_provider.close_audio_outputs)
         if self.settings.get("v2_owned_playback_enabled", True) or self.settings.get("v2_system_capture_enabled", False):
@@ -464,6 +467,10 @@ class LocalIslandApp:
             self.window.update()
 
     def _playback_mode_changed(self, key, value):
+        if key == "v2_playback_interruption_enabled":
+            self.data_provider.set_playback_interruption_enabled(value)
+        if key in {"v2_owned_playback_enabled", "v2_system_capture_enabled"}:
+            self.data_provider.playback_source_changed()
         if key == "v2_music_glass_level":
             surface = getattr(self.window, "music_fullscreen_overlay", None)
             if surface is not None:
