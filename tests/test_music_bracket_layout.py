@@ -8,6 +8,7 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
 from local.music_surface_window import MusicSurfaceWindow
+from local.translation_style_variants import CLASSIC
 
 
 class _BracketOwner(QWidget):
@@ -71,12 +72,16 @@ class MusicBracketLayoutTests(unittest.TestCase):
                 _translated, translated_height, translated_top = (
                     self.window._song_parenthetical_translation_layouts[0]
                 )
+                scale = self.window._surface_scale()
+                gap = self.window._translation_style.gap_px_fn(
+                    self.window.LYRIC_PIXEL_SIZE * scale, scale,
+                )
                 self.assertAlmostEqual(bracket_top, self.window._song_layouts[0][1])
-                self.assertAlmostEqual(translated_top, bracket_top + bracket_height)
+                self.assertAlmostEqual(translated_top, bracket_top + bracket_height + gap)
                 self.assertGreater(secondary_top, translated_top + translated_height)
                 self.assertAlmostEqual(
                     self.window._song_parenthetical_extra_heights[0],
-                    bracket_height + translated_height,
+                    bracket_height + gap + translated_height,
                 )
                 sentence_gap = self.window._song_row_tops[1] - self.window._song_row_heights[0]
                 self.assertGreaterEqual(sentence_gap, height * 0.035)
@@ -128,7 +133,7 @@ class MusicBracketLayoutTests(unittest.TestCase):
 
         def record_static(painter, layout, origin, text, font, width, height, color, offsets=(), **kwargs):
             captured[text] = (origin.y() + (offsets[0] if offsets else 0.0),
-                              origin.y() + height + (offsets[-1] if offsets else 0.0), 1.0)
+                              origin.y() + height + (offsets[-1] if offsets else 0.0), None)
             return static(painter, layout, origin, text, font, width, height, color, offsets, **kwargs)
 
         with (
@@ -138,9 +143,12 @@ class MusicBracketLayoutTests(unittest.TestCase):
         ):
             self.render(960, 540, 100.6)
         self.assertEqual(captured["long"][2], 0.0)
-        self.assertEqual(captured["岁月里"][2], 0.0)
+        # Default A paints the translated aside as solid, dimmed ink.
+        self.assertIsNone(captured["岁月里"][2])
         self.assertAlmostEqual(captured["long"][0], captured["For so long"][1])
-        self.assertAlmostEqual(captured["岁月里"][0], captured["long"][1])
+        scale = self.window._surface_scale()
+        gap = self.window._translation_style.gap_px_fn(self.window.LYRIC_PIXEL_SIZE * scale, scale)
+        self.assertAlmostEqual(captured["岁月里"][0], captured["long"][1] + gap)
         self.assertGreater(captured["漫长岁月里"][0], captured["岁月里"][1])
 
     @staticmethod
@@ -156,6 +164,8 @@ class MusicBracketLayoutTests(unittest.TestCase):
         owner.enable_dual_line_lyrics = True
 
     def test_short_parenthetical_reads_across_main_to_next_quarter_then_blurs(self):
+        # This regression checks retained classic translation karaoke timing.
+        self.window._translation_style = CLASSIC
         self._short_parenthetical_fixture(self.owner)
         self.window.resize(960, 540)
         highlighted = []
@@ -278,6 +288,8 @@ class MusicBracketLayoutTests(unittest.TestCase):
         self.assertTrue(any(at == 4.0 and text == "echo" and top == c_start_top for at, text, _p, top in highlighted))
 
     def test_parenthetical_clock_is_shared_by_cover_modes_fullscreen_and_translation_toggle(self):
+        # Shared translated-aside karaoke clocks belong to the classic option.
+        self.window._translation_style = CLASSIC
         self._short_parenthetical_fixture(self.owner)
         progress_by_mode = {}
         now = 110.0

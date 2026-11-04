@@ -12,6 +12,7 @@ from local.lyric_unit_timing import display_row_reading_front, timed_unit_readin
 from local.music_lyric_presentation import INTRO_COUNTDOWN_TEXT, split_display_layers
 from local.music_lyric_motion import LyricEmphasisPlan
 from local.music_surface_window import MusicSurfaceWindow
+from local.translation_style_variants import CLASSIC
 
 
 class _LayerOwner(QWidget):
@@ -69,6 +70,10 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.owner.timed_lyric_units = [(), (), (), ()]
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
 
+    def _classic_translation_karaoke(self):
+        """Select the retained option for tests of translated reading fronts."""
+        self.window._translation_style = CLASSIC
+
     def _reading_lane_lyrics(self):
         self.owner.media_position_seconds = 25.0
         self.owner.timed_lyrics = [
@@ -81,6 +86,9 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.owner.timed_lyric_timing_kinds = ["line"] * 4
         self.owner.album_art = QImage(32, 32, QImage.Format.Format_RGB32)
         self.owner.album_art.fill(QColor("#d87954"))
+        # Opacity comparisons sample a resting scene after A's entry delay.
+        with patch("local.music_surface_window.time.monotonic", return_value=99.0):
+            self._render()
 
     def _reading_lane_ink(self):
         opacities = {}
@@ -127,12 +135,14 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
                 self.owner.track_title = "Visual layers"
                 with_title = self._reading_lane_ink()
                 for text in ("Past line", "过去", "Future line", "未来"):
-                    self.assertAlmostEqual(without_title[text], 1.0)
+                    alpha = self.window._translation_style.alpha_inactive if text in {"过去", "未来"} else 1.0
+                    self.assertAlmostEqual(without_title[text], alpha)
                     self.assertGreater(with_title[text], 0.0)
                     self.assertLess(with_title[text], without_title[text])
                 for text in ("Current line", "当前"):
                     self.assertAlmostEqual(with_title[text], without_title[text])
-                    self.assertAlmostEqual(with_title[text], 1.0)
+                    alpha = self.window._translation_style.alpha_active if text == "当前" else 1.0
+                    self.assertAlmostEqual(with_title[text], alpha)
                 self.assertEqual(self.window._background_cache, ambience)
                 self.assertEqual(self.window._lyric_hit_rects, hit_rows)
 
@@ -144,7 +154,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
                 ink = self._reading_lane_ink()
             ratios.append(ink["Future line"] / ink["Current line"])
             self.assertAlmostEqual(ink["Current line"], 1.0 - fraction)
-            self.assertAlmostEqual(ink["当前"], ink["Current line"])
+            self.assertAlmostEqual(ink["当前"], ink["Current line"] * self.window._translation_style.alpha_active)
         # Both title layouts are absent halfway through the travel. Their
         # gradual return subdues surrounding ink without changing lyric fade.
         self.assertLess(ratios[0], ratios[2])
@@ -176,7 +186,9 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.window._browse_until = 110.0
         browsing = self._reading_lane_ink()
         for text in ("Past line", "过去", "Future line", "未来", "Current line", "当前"):
-            self.assertAlmostEqual(browsing[text], 1.0)
+            alpha = (self.window._translation_style.alpha_active if text == "当前" else
+                     self.window._translation_style.alpha_inactive if text in {"过去", "未来"} else 1.0)
+            self.assertAlmostEqual(browsing[text], alpha)
 
     def test_render_builds_independent_small_regular_translation_and_parenthesis_layouts(self):
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")
@@ -198,11 +210,13 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertEqual(bracket_translation.font().weight(), QFont.Weight.Normal)
         self.assertLess(secondary_layout.font().pixelSize(), primary_layout.font().pixelSize())
         scale = self.window._surface_scale()
-        self.assertEqual(secondary_layout.font().pixelSize(), round((self.window.LYRIC_PIXEL_SIZE - 6) * scale * 0.5))
+        self.assertEqual(secondary_layout.font().pixelSize(), round(
+            self.window.LYRIC_PIXEL_SIZE * scale * self.window._translation_style.size_ratio))
         self.assertEqual(parenthetical_layout.font().pixelSize(), round((self.window.LYRIC_PIXEL_SIZE - 6) * scale))
         self.assertGreater(secondary_top, self.window._song_layouts[0][1])
         self.assertAlmostEqual(parenthetical_top, self.window._song_layouts[0][1])
-        self.assertAlmostEqual(bracket_translation_top, parenthetical_top + parenthetical_height)
+        gap = self.window._translation_style.gap_px_fn(self.window.LYRIC_PIXEL_SIZE * scale, scale)
+        self.assertAlmostEqual(bracket_translation_top, parenthetical_top + parenthetical_height + gap)
         self.assertGreater(secondary_top, bracket_translation_top + bracket_translation_height)
         self.assertGreaterEqual(
             self.window._song_parenthetical_extra_heights[0],
@@ -268,6 +282,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertGreaterEqual(min(captured), captured[-1] - .1)
 
     def test_bracket_translation_sits_below_bracket_and_reads_together(self):
+        self._classic_translation_karaoke()
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")
         self.owner.media_position_seconds = 4.0
         captured = {}
@@ -288,6 +303,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertAlmostEqual(captured["echo"][2], captured["回声"][2])
 
     def test_line_timed_bracket_and_translation_continue_through_next_first_quarter(self):
+        self._classic_translation_karaoke()
         self._four_rows("Shine (echo) on me\n翻译：照耀（回声）我")
         self.owner.media_position_source = "local-seek"
         self.owner.media_position_seconds = 1.0
@@ -329,6 +345,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertEqual(self.owner.timed_lyrics[1][0], 20.0)
 
     def test_real_unit_bracket_continuation_preserves_source_units(self):
+        self._classic_translation_karaoke()
         source = "Shine (echo) on me"
         self._four_rows(source + "\n翻译：照耀（回声）我")
         self.owner.timed_lyric_units[0] = tuple(
@@ -408,6 +425,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertEqual(prefixed[6], 15)
 
     def test_rendered_translation_uses_primary_unit_read_percentage(self):
+        self._classic_translation_karaoke()
         source = "Shine (echo) on me"
         self._four_rows(source + "\n照耀我")
         self.owner.media_position_seconds = 13.5
@@ -443,6 +461,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertAlmostEqual(painted["照耀我"][1], expected, places=4)
 
     def test_low_perception_line_timing_reads_estimated_primary_and_translation(self):
+        self._classic_translation_karaoke()
         self._four_rows("One line to sing\n一句歌词")
         self.owner.media_position_seconds = 1.0
         lifted = {}
@@ -469,6 +488,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertLess(lifted["一句歌词"][0], 1.0)
 
     def test_low_perception_real_unit_timing_reads_primary_and_translation(self):
+        self._classic_translation_karaoke()
         self._four_rows("Hello world\n你好世界")
         self.owner.timed_lyric_units[0] = (
             SimpleNamespace(start_seconds=0.0, end_seconds=0.8, text="Hello "),
@@ -640,6 +660,7 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
             self.assertEqual(row.end_seconds, 16.0)
 
     def test_estimated_duet_translations_keep_their_own_visible_reading_fronts(self):
+        self._classic_translation_karaoke()
         self.owner.artist = "薛之谦、刘惜君"
         self.owner.timed_lyrics = [
             (10.0, "薛：我先开始唱\n翻译：First voice"),

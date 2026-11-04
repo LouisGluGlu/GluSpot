@@ -106,7 +106,11 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-04: t214–t222 embeds the real expanded island across the sidebar library footer, sharing live provider state, glass transport, selected ambience and cover flip; adds shared DPR-aware native/Qt resize edges to player/library/login; migrates immersive `fade` to `capsule` and paints cached settings thumbnails with current artwork and production background painters. Translation A is the default (including unset/unknown selectors), composed with t205 full-height lyrics and cover compression. Collapsed pill growth reserves its native mask before paint, holds text until ready and shrinks the mask after the shell; exact-base frame proofs reproduce and remove the clipped background/rim/cover. [F–J evidence and limits](docs/music-surface-t214-t222.md) include library CPU overhead and inherited suite failures. PC 未验证; no version/build, push or PC operation.
+
 - 2026-11-04: t205–t211 removes the external lyric viewport's interior top/bottom cuts in both responsive window widths and fullscreen, with full-window ink and DestinationIn edge feathers through the existing glass/transport. Chrome retreats vertically along its own edge; wide cover, metadata and transport share the shrinking width budget with lyrics while retaining the previous breakpoint. Island sea adds low-band onset punches and larger absolute vocal swells, with a bounded one-second history drawing a saturated palette crest only on rising water. Window, fullscreen and island reuse the 640 ms cover projection/reflection; same-track artwork upgrades quietly crossfade. BOX renders, measurements, paired CPU proxies and baseline failure comparison are recorded in [t205–t211 evidence](docs/music-surface-t205-t211.md). PC verification 未验证; parent owns the single Desktop-launcher restart after commit. No version/build, provider, button style or glass grouping change.
+
+- 2026-11-04: `grok/translation-variants` adds `GLUSPOT_TRANSLATION_VARIANT=a|b|c|classic` for song-page bilingual typography and float. A is now the default for unset, empty and unknown values; `classic` explicitly selects the original rendering. A/B/C share existing translation layout, spring and cached paint components with distinct size, alpha, gap, blur and reveal timing; translation karaoke is disabled only in the variants. See [译文风格对比](#译文风格对比) for the offline comparison harness. No version/build or provider change.
 
 - 2026-11-04: t202 strengthens the island ripple with absolute centered 300–3400 Hz energy in every intensity mode, retaining 60/250 ms attack/release and near-calm quiet input. Compact and expanded sea now share the live Xiaomi primary, contrast lift and tinted crest. Track changes flip the visible cover in 640 ms using the existing perspective painter and island timer, with soft traveling crest/under-cover light. Same-track artwork upgrades retain the ongoing pose; hide/show clears it. Box amplitude, palette, transition, CPU and baseline test comparisons are recorded in [t202 evidence](docs/island-t202.md). PC verification 未验证; no version/build or PC operation.
 
@@ -260,6 +264,26 @@ Double-click `setup-env.bat` or `repair-env.bat` to prepare this checkout's Wind
 For the optional online account adapters, install Node.js 20 or later with npm and run `native/online_music/prepare-runtime.ps1`. It installs the pinned lockfile with package scripts disabled into ignored `build/online-music`, verifies adapter versions and retains dependency notices. `launch.bat` prepares Python only; each new checkout/worktree needs this optional runtime prepared independently. Without this runtime the login surface reports unavailable services; system capture remains usable. See [online entry setup](docs/owned-playback-entry.md).
 
 The combined directory has its own Python environment and native HomePod helper under `build/native-airplay/`. Run its own `launch.bat`; the two original part directories are preserved. GluSpot's single-instance lock and user settings retain the normal product namespace, so exit an already running GluSpot before launching another source copy. Rebuilding the helper requires the toolchain documented in [native helper instructions](native/airplay_sender/README.md).
+
+### 译文风格对比
+
+启动前设置 `GLUSPOT_TRANSLATION_VARIANT=a`、`b` 或 `c`（不区分大小写）。未设置、空值或未知值使用 A；`classic` 显式使用原有样式；每个音乐窗口创建时读取一次，不写入设置。主歌词仍使用现有布局与弹簧；非焦点双语行按方案轻微缩小。
+
+| 方案 | 译文字号 / 主字号基准 | 焦点 / 非焦点透明度 | 主行下方间距 | 译文模糊倍率 | 入场 / 透明度延迟 |
+| --- | --- | --- | --- | --- | --- |
+| A（默认）· Apple-Music-like | 0.50 | 0.30 / 0.18 | 0.30 × 主字号基准 | 1.00 | 0.40 s / 0.25 s |
+| B · NetEase-readable | 0.62 | 0.78 / 0.42 | 8 × 窗口缩放 | 0.50 | 0.32 s / 0 s |
+| C · Synthesis | 0.55 | 0.55 / 0.28 | max(4, 0.22 × 主字号基准) | 0.70 | 0.42 s / 0.08 s |
+
+三种方案均使用 Normal 字重、整行译文，不逐词读亮。字号基准为 `38 × surface_scale`；封面内歌词的主行 0.74 倍缩放不缩小译文字号。Classic 保留 `(38 - 6) × surface_scale × 0.5` 与原有逐词、间距及入场路径。
+
+```bash
+/workspace/gluspot/qtvenv/bin/python tools/render_translation_variants.py
+```
+
+工具通过正式解析器与 Qt 绘制路径生成自写中英双语样本，隔离 APPDATA/XDG，使用 offscreen，不启动播放器。默认输出在 `/workspace/gluspot/handoff/translation-variants/`：`baseline.png`、`variant-A.png`、`variant-B.png`、`variant-C.png`、`shots/` 与绘制报告。每张含 433×550 / 960×540 的焦点与非焦点场景，以及 0/80/160/280/480 ms 浮动序列。用户已选择 A 为默认；这些是离屏方案比较，实际桌面动画验收另行进行。
+
+当前整合保留 `classic` 参考，同时默认使用 A。与精确 `ec89693` 的窄／宽双语图、A 参数／入场／关闭译文卡拉 OK 检查、旧默认测试的修正与完整 discovery 基线比较，见 [t214–t222 证据](docs/music-surface-t214-t222.md)。整个项目仍有继承的测试失败；PC 未验证。
 
 ### 背景风格对比
 

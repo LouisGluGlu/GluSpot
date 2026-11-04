@@ -1285,7 +1285,7 @@ class MacPreferencesShellTests(unittest.TestCase):
             self.assertTrue(media.isAncestorOf(window.finder_bar_style))
             self.assertEqual(window.finder_bar_style.currentData(), "transparent")
             self.assertEqual({window.finder_bar_style.itemData(i) for i in range(window.finder_bar_style.count())},
-                             {"transparent", "capsule", "fade"})
+                             {"transparent", "capsule"})
             self.assertFalse(hasattr(window, "location_mode"))
             self.assertFalse(hasattr(window, "position_preset"))
             indexed = " ".join(" ".join(entry["terms"]) for entry in window._settings_search_entries)
@@ -1294,7 +1294,7 @@ class MacPreferencesShellTests(unittest.TestCase):
             self.assertEqual(window.finder_bar_preview.accessibleName(), "沉浸栏样式预览")
             self.assertIn("Finder Bar 与 Tasker Bar 共用沉浸栏样式", window.finder_bar_hint.text())
             self.assertEqual([window.finder_bar_style.itemText(i) for i in range(window.finder_bar_style.count())],
-                             ["专辑与无背景", "专辑与渐变色背景", "专辑与背景"])
+                             ["专辑与无背景", "专辑与背景"])
             self.assertIn("音乐岛模式", indexed)
             self.assertIn("沉浸栏位置", indexed)
         finally:
@@ -1313,14 +1313,14 @@ class MacPreferencesShellTests(unittest.TestCase):
         island.set_finder_bar_style = set_style
         window = SettingsWindow(island, settings)
         try:
-            for mode, style in (("finder", "capsule"), ("tasker", "fade"), ("finder", "transparent")):
+            for mode, style in (("finder", "capsule"), ("tasker", "transparent"), ("finder", "capsule")):
                 island.location_mode = mode
                 window.finder_bar_style.setCurrentIndex(window.finder_bar_style.findData(style))
                 self.assertEqual(island.finder_bar_style, style)
                 self.assertEqual(settings.get("v2_finder_bar_style"), style)
                 self.assertEqual(window.finder_bar_preview.style, style)
                 self.assertFalse(hasattr(island, "tasker_bar_style"))
-            self.assertEqual(calls, [(style, False) for style in ("capsule", "fade", "transparent")])
+            self.assertEqual(calls, [(style, False) for style in ("capsule", "transparent", "capsule")])
             self.assertEqual(settings.get("v2_location_mode"), "top")
             self.assertEqual(settings.get("v2_music_island_style"), "standard")
         finally:
@@ -1334,21 +1334,21 @@ class MacPreferencesShellTests(unittest.TestCase):
         island = FakeIslandWidget()
         window = SettingsWindow(island, settings)
         try:
-            self.assertEqual(window.finder_bar_style.currentData(), "fade")
+            self.assertEqual(window.finder_bar_style.currentData(), "capsule")
             for mode in ("tasker", "top", "free", "tasker"):
                 family = "immersive" if mode == "tasker" else mode
                 window.placement_mode.setCurrentIndex(window.placement_mode.findData(family))
                 self.assertEqual(island.location_mode, mode)
-                self.assertEqual(window.finder_bar_style.currentData(), "fade")
-                self.assertEqual(window.finder_bar_preview.style, "fade")
-                self.assertEqual(settings.get("v2_finder_bar_style"), "fade")
+                self.assertEqual(window.finder_bar_style.currentData(), "capsule")
+                self.assertEqual(window.finder_bar_preview.style, "capsule")
+                self.assertEqual(settings.get("v2_finder_bar_style"), "capsule")
             self.assertNotIn("v2_tasker_bar_style", settings.values)
         finally:
             window.close()
         reopened = SettingsWindow(FakeIslandWidget(), settings)
         try:
-            self.assertEqual(reopened.finder_bar_style.currentData(), "fade")
-            self.assertEqual(reopened.finder_bar_preview.style, "fade")
+            self.assertEqual(reopened.finder_bar_style.currentData(), "capsule")
+            self.assertEqual(reopened.finder_bar_preview.style, "capsule")
         finally:
             reopened.close()
 
@@ -1504,8 +1504,8 @@ class MacPreferencesShellTests(unittest.TestCase):
                     self.assertEqual(window.finder_bar_preview.mode, expected)
                     self.assertIn("Finder Bar" if expected == "finder" else "Tasker Bar",
                                   window.finder_bar_hint.text())
-                self.assertEqual(window.finder_bar_style.currentData(), "fade")
-                self.assertEqual(settings.get("v2_finder_bar_style"), "fade")
+                self.assertEqual(window.finder_bar_style.currentData(), "capsule")
+                self.assertEqual(settings.get("v2_finder_bar_style"), "capsule")
             # Disabling monitoring immediately stops presenting a stale Dock hit.
             island.mydockfinder_running = True
             island.finder_bar_enabled = False

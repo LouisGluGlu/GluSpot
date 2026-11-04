@@ -366,7 +366,7 @@ class IslandVisualStackTests(unittest.TestCase):
             scene_suppressed=True,
             interaction_mask_active=True,
             finder_hover_rect=QRectF(),
-            last_mask_rect=QRectF(92.4, 44.2, 35.8, 21.7),
+            last_mask_rect=QRectF(91.6, 43.8, 36.8, 22.4),
             now=10.0,
             mask_deferred_until=0.0,
             last_pointer_move_at=0.0,

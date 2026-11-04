@@ -26,6 +26,12 @@ class MusicLibraryController(QObject):
         self.window.set_background_context(settings.get, getattr(island, "_run_background", None),
             palette_visible=lambda: entry_window is not None and entry_window.isVisible()
                                    and getattr(entry_window, "page", "") == "sources")
+        embedded = getattr(self.window, "now_playing_island", None)
+        if embedded is not None:
+            embedded.set_context(settings.get, island)
+            send_command = getattr(self.player, "send_playback_command", None)
+            if callable(send_command):
+                embedded.commandRequested.connect(send_command)
         entry_palette = getattr(entry_window, "set_background_palette", None)
         if callable(entry_palette):
             self.window.backgroundPaletteChanged.connect(entry_palette)

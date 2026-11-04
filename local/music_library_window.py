@@ -35,6 +35,7 @@ from local.music_lyric_motion import MotionSimulationClock
 from local.control_hover import HOVER_SECONDS, install_control_hover
 from local.playback_entry_window import ENTRY_SOURCES, EntryNavigationButton, MusicSourceButton, _entry_font
 from local.library_layout_variants import LIBRARY_VARIANTS, LibraryVariantPresentation
+from local.library_now_playing import LibraryNowPlayingIsland
 
 
 @dataclass(frozen=True)
@@ -674,6 +675,8 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         self.now_playing_button = _NowPlayingCover(self)
         self.now_playing_button.clicked.connect(self.nowPlayingRequested)
         self.now_playing_button.hide()
+        self.now_playing_island = LibraryNowPlayingIsland(self)
+        self.now_playing_island.openRequested.connect(self.nowPlayingRequested)
         self.search = LibrarySearch(self)
         self.search.setAccessibleName("搜索当前平台的歌曲与歌单")
         self.search.setPlaceholderText("搜索歌曲与歌单")
@@ -767,6 +770,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         previous = self._now_playing
         self._accumulate_album_rotation()
         self._now_playing = track
+        self.now_playing_island.set_track(track)
         art = getattr(track,'album_art_bytes',b'')
         if art != self._now_playing_art:
             self._now_playing_art = art
@@ -912,6 +916,12 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def navigation_cover_state(self):
         """Global album bounds, unrotated image and clockwise angle in degrees."""
+        if self.library_variant == "sidebar" and self._now_playing is not None:
+            island = self.now_playing_island
+            rect = island.music_cover_rect.toAlignedRect()
+            if island.isVisible() and not rect.isEmpty():
+                return (QRect(island.mapToGlobal(rect.topLeft()), rect.size()),
+                        QImage(self._header_album_image), 0.)
         if self.now_playing_button.isHidden():
             return QRect(), QImage(), 0.
         button = self.now_playing_button
@@ -922,6 +932,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def freeze_navigation_cover(self):
         self._accumulate_album_rotation()
         self._navigation_cover_frozen = True
+        self.now_playing_island._sync_clock()
         self._sync_album_rotation()
         # The navigation layer owns a frozen copy of this page. Do not keep
         # repainting scenery or missing covers behind its invisible target.
@@ -931,6 +942,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def resume_navigation_cover(self):
         self._navigation_cover_frozen = False
+        self.now_playing_island._sync_clock()
         self._sync_album_rotation()
         self._sync_background_animation()
         self._sync_artwork_skeleton()
@@ -1424,6 +1436,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
 
     def _layout(self):
         if hasattr(self, "_variant_view"):
+            self.now_playing_island.setVisible(self.library_variant == "sidebar")
             self._variant_view.set_visible(self.library_variant != "classic")
         if self.library_variant != "classic":
             self._update_background()
@@ -1526,6 +1539,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def set_background_context(self, settings_getter, run_background=None, *, palette_visible=None):
         """Share the app's existing animation settings and cold-work runner."""
         self._background_settings_getter = settings_getter
+        self.now_playing_island.set_context(settings_getter)
         self._background_runner = run_background
         self._background_palette_visible = palette_visible
         self.on_background_setting_changed()
@@ -1558,6 +1572,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
         return max(0., min(1., value)) if math.isfinite(value) else .74
 
     def on_background_setting_changed(self, key="", value=None):
+        self.now_playing_island.sync_settings()
         if key and key not in {"v2_music_flow_intensity", "v2_animation_fps"}:
             return
         self._sync_background_animation()
@@ -1801,6 +1816,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
             self._search_timer.start()
 
     def closeEvent(self, event):
+        self.now_playing_island.suspend()
         self._variant_view.status_timer.stop()
         self._finish_section_motion()
         self._artwork_skeleton_timer.stop()
@@ -1820,6 +1836,7 @@ class MusicLibraryWindow(GlassCaptureMixin, MusicPageResizeMixin, QWidget):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange and hasattr(self, "_background_timer"):
+            self.now_playing_island._sync_clock()
             self._variant_view.sync_status_pulse()
             self._sync_background_animation()
             self._sync_album_rotation()

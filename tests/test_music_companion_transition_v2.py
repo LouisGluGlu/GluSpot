@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 from api.models import TimedLyricUnit
 from local.music_surface_window import MusicSurfaceWindow
 from local.music_lyric_motion import LyricEmphasisPlan
+from local.translation_style_variants import CLASSIC
 from tests.test_music_lyric_visual_layers import _LayerOwner
 
 
@@ -227,21 +228,26 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         gap_before = future_translation.top - future_primary.bottom
         self.assertLess(gap_before, future_primary.pixel_size * 0.5)
 
-        focus = self._render(101.0, 20.0)
-        main_at_focus = self._paint(focus, main)
-        translated_at_focus = self._paint(focus, translated)
-        self.assertAlmostEqual(
-            translated_at_focus.top - main_at_focus.bottom, gap_before, delta=1.0,
-        )
-        entering = self._animate_for(101.0, 20.0, 0.08)
+        self._render(101.0, 20.0)
+        focus = self._animate_for(101.0, 20.0, 0.04)
+        self._paint(focus, main)
+        # A reserves and moves the companion before its delayed ink appears.
+        self.assertFalse(any(p.text == translated for p in focus))
+        token = self.window._translation_focus_entry[0]
+        self.assertEqual(token[0], 1)
+        self.assertEqual(self.window._translation_layer_pose(*token, 101.04)[:2], (1.0, 0.0))
+        entering = self._animate_for(101.04, 20.04, 0.08)
         aside = self._paint(entering, "echo")
         self.assertGreater(aside.opacity, 0.0)
         self.assertEqual(aside.progress, 0.0)
+        self.assertFalse(any(p.text == translated for p in entering))
+        began, position, entering = self._wait_for_companion(101.12, 20.12, translated)
         early_gap = self._paint(entering, translated).top - self._paint(entering, main).bottom
-        settled = self._animate_for(101.08, 20.08, 0.52)
+        settled = self._animate_for(began, position, 0.52)
         settled_gap = self._paint(settled, translated).top - self._paint(settled, main).bottom
         self.assertGreater(early_gap, gap_before)
-        self.assertGreater(settled_gap, early_gap)
+        self.assertGreater(settled_gap, gap_before)
+        self.assertNotAlmostEqual(settled_gap, early_gap, delta=0.1)
         self.assertAlmostEqual(self._paint(settled, "echo").top, self._paint(settled, main).bottom, delta=1.0)
         self.assertGreaterEqual(self._paint(settled, translated).top, self._paint(settled, "回声").bottom)
 
@@ -256,7 +262,9 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         # C's first quarter at 24.75 (C's own estimate is 20..39).
         self.assertAlmostEqual(before.progress, (18.6 - 15.2) / (24.75 - 15.2))
         self.assertIsNone(before.color)
-        self.assertAlmostEqual(before.pixel_size / 2, regular_translation.pixel_size, delta=0.5)
+        self.assertEqual(regular_translation.pixel_size, round(
+            self.window.LYRIC_PIXEL_SIZE * self.window._surface_scale()
+            * self.window._translation_style.size_ratio))
         self.assertEqual(before.pixel_size, round((self.window.LYRIC_PIXEL_SIZE - 6) * self.window._surface_scale()))
         self.assertEqual(before.weight, int(QFont.Weight.Bold))
         self.assertEqual(regular_translation.weight, int(QFont.Weight.Normal))
@@ -265,7 +273,8 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self.assertAlmostEqual(self._paint(held, "echo").progress,
                                (20.8 - 15.2) / (24.75 - 15.2))
         self.assertEqual(self._paint(held, "echo").blur, 0.0)
-        self.assertEqual(self._paint(held, "回声").blur, 0.0)
+        self.assertAlmostEqual(self._paint(held, "回声").blur,
+                               self._paint(held, main).blur * self.window._translation_style.blur_factor)
         # It stays attached and clear over C's opening, then joins A's blur.
         self._render(105.25, 24.75)
         completed = self._render(105.6, 25.1)
@@ -289,14 +298,13 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self.assertFalse(any(p.text == "夜色依然温柔" for p in self._render(100.0, 4.0)))
         self._toggle(100.01)
         self._render(100.01, 4.0)
-        began, position, _ = self._wait_for_companion(100.01, 4.01, "夜色依然温柔")
-        early = self._paint(self._animate_for(began, position, 0.08), "夜色依然温柔")
-        peak = self._paint(self._animate_for(began + 0.08, position + 0.08, 0.20), "夜色依然温柔")
-        settled = self._paint(self._animate_for(began + 0.28, position + 0.28, 0.32), "夜色依然温柔")
+        began, position, first_visible = self._wait_for_companion(100.01, 4.01, "夜色依然温柔")
+        early = self._paint(first_visible, "夜色依然温柔")
+        settled = self._paint(self._animate_for(began, position, 0.60), "夜色依然温柔")
         self.assertGreater(early.opacity, 0.0)
         self.assertLess(early.opacity, settled.opacity)
-        self.assertLess(early.top, settled.top)
-        self.assertGreater(peak.top, settled.top)
+        # A's delayed first visible ink is already in the elastic overshoot.
+        self.assertGreater(early.top, settled.top)
 
     def test_delayed_translation_starts_its_entrance_when_content_arrives(self):
         self.owner.enable_dual_line_lyrics = False
@@ -309,11 +317,11 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self.owner.timed_lyrics[0] = (0.0, main + "\n翻译：夜色依然温柔")
         arrival = self._render(100.9, 4.9)
         self.assertFalse(any(p.text == "夜色依然温柔" and p.opacity > 0.001 for p in arrival))
-        began, position, _ = self._wait_for_companion(100.9, 4.9, "夜色依然温柔")
-        entering = self._paint(self._animate_for(began, position, 0.08), "夜色依然温柔")
-        settled = self._paint(self._animate_for(began + 0.08, position + 0.08, 0.52), "夜色依然温柔")
+        began, position, first_visible = self._wait_for_companion(100.9, 4.9, "夜色依然温柔")
+        entering = self._paint(first_visible, "夜色依然温柔")
+        settled = self._paint(self._animate_for(began, position, 0.60), "夜色依然温柔")
         self.assertLess(entering.opacity, settled.opacity)
-        self.assertLess(entering.top, settled.top)
+        self.assertGreater(entering.top, settled.top)
 
     def test_close_keeps_provider_removed_translation_until_collapse_finishes(self):
         main = "月光照耀着我今晚仍会继续轻轻歌唱"
@@ -358,14 +366,15 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         main = "月光照耀着我今晚仍会继续轻轻歌唱"
         self._rows(main + "\n翻译：夜色依然温柔")
         self._render(100.0, 4.0)
-        self._toggle(100.01)
-        before = self._render(100.18, 4.18)
+        self._render(100.6, 4.6)  # Settle A's initial focus entrance before exiting.
+        self._toggle(100.61)
+        before = self._render(100.78, 4.78)
         before_translation = self._paint(before, "夜色依然温柔")
         before_main = self._paint(before, main)
-        self.assertGreater(before_translation.opacity, 0.25)
-        self.assertLess(before_translation.opacity, 0.75)
-        self._toggle(100.18)
-        after = self._render(100.18, 4.18)
+        self.assertGreater(before_translation.opacity, self.window._translation_style.alpha_active * 0.25)
+        self.assertLess(before_translation.opacity, self.window._translation_style.alpha_active * 0.75)
+        self._toggle(100.78)
+        after = self._render(100.78, 4.78)
         after_translation = self._paint(after, "夜色依然温柔")
         after_main = self._paint(after, main)
         self.assertAlmostEqual(after_translation.opacity, before_translation.opacity, delta=0.03)
@@ -375,6 +384,8 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         )
 
     def test_low_perception_translation_toggle_keeps_shared_half_second_read_front(self):
+        # This regression specifically measures retained classic karaoke fronts.
+        self.window._translation_style = CLASSIC
         self.owner.enable_dual_line_lyrics = False
         self.window._translation_setting = False
         main = "月光照耀着我今晚仍会继续轻轻歌唱"
@@ -426,9 +437,14 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         next_before = self._paint(before, next_main).top
         self._toggle(100.61)
         frames = []
+        hidden_motion = []
         for step in range(61):
             now = 100.61 + step * 0.02
             frames.append(self._render(now, 4.61 + step * 0.02))
+            token = next(token for token in self.window._translation_known_tokens if token[0] == 0)
+            height, opacity, position = self.window._translation_layer_pose(*token, now)
+            if opacity == 0.0 and position > 0.0:
+                hidden_motion.append((height, position))
         visible_frames = [frame for frame in frames if any(
             p.text == "月光继续歌唱" and p.opacity > 0.01 for p in frame
         )]
@@ -446,14 +462,18 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
             self._paint(frame, "月光继续歌唱").top - self._paint(frame, main).bottom
             for frame in visible_frames
         ]
-        self.assertLess(min(relative_tops), settled_offset - 1.0)
+        self.assertTrue(hidden_motion, "A's position reveal must advance during its opacity delay")
+        self.assertTrue(all(height == 1.0 for height, _position in hidden_motion))
         self.assertGreater(max(relative_tops), settled_offset + 0.4,
                            "Reserving space must preserve the visible spring overshoot")
 
     def test_initial_enabled_translation_is_visible_without_an_unrequested_toggle(self):
         self._rows("月光照耀着我今晚仍会继续轻轻歌唱\n翻译：夜色依然温柔")
-        translated = self._paint(self._render(100.0, 4.0), "夜色依然温柔")
-        self.assertEqual(translated.opacity, 1.0)
+        initial = self._render(100.0, 4.0)
+        self.assertFalse(any(p.text == "夜色依然温柔" for p in initial))
+        translated = self._paint(self._render(100.5, 4.5), "夜色依然温柔")
+        self.assertEqual(translated.opacity, self.window._translation_style.alpha_active)
+        self.assertTrue(self.owner.enable_dual_line_lyrics)
 
     def test_external_settings_flag_uses_same_entrance_and_exit(self):
         self.owner.enable_dual_line_lyrics = False
@@ -481,16 +501,17 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
             for index, char in enumerate(main)
         )
         self.owner.timed_lyric_timing_kinds[0] = "unit"
-        before = self._paint(self._render(100.0, 4.2), main)
+        self._render(100.0, 4.2)
+        before = self._paint(self._render(100.6, 4.8), main)
         self.assertIsNotNone(before.real_progresses)
-        self._toggle(100.0)
+        self._toggle(100.6)
         self.owner.timed_lyrics[0] = (0.0, main)
         self.owner.timed_lyric_units[0] = ()
         self.owner.timed_lyric_timing_kinds[0] = "line"
-        after = self._paint(self._render(100.0, 4.2), main)
+        after = self._paint(self._render(100.6, 4.8), main)
         self.assertEqual(after.real_progresses, before.real_progresses)
         self.assertIsNotNone(after.real_progresses)
-        self.assertTrue(any(p.text == "夜色依然温柔" for p in self._render(100.1, 4.3)))
+        self.assertTrue(any(p.text == "夜色依然温柔" for p in self._render(100.7, 4.9)))
 
     def test_track_change_during_exit_cannot_leak_old_companion_or_reuse_entry_pose(self):
         main = "月光照耀着我今晚仍会继续轻轻歌唱"
@@ -544,7 +565,9 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         aside_translation = self._paint(painted, "回声")
         normal_translation = self._paint(painted, "月光继续歌唱")
         self.assertAlmostEqual(aside.top, main_paint.bottom, delta=1.0)
-        self.assertAlmostEqual(aside_translation.top, aside.bottom, delta=1.0)
+        scale = self.window._surface_scale()
+        gap = self.window._translation_style.gap_px_fn(self.window.LYRIC_PIXEL_SIZE * scale, scale)
+        self.assertAlmostEqual(aside_translation.top, aside.bottom + gap, delta=1.0)
         self.assertGreater(normal_translation.top, aside_translation.bottom)
         self.assertLess(normal_translation.top - aside_translation.bottom, 12.0)
 

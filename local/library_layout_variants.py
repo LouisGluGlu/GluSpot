@@ -250,6 +250,14 @@ class LibraryVariantPresentation:
         o.now_playing_button.setVisible(o._now_playing is not None)
         self.player_button.setGeometry(self.player.toAlignedRect())
         self.player_button.setVisible(o.library_variant == "sidebar" and o._now_playing is not None)
+        if o.library_variant == "sidebar":
+            self.player_button.hide()
+            o.now_playing_button.hide()
+            island = o.now_playing_island
+            island.setFixedSize(self.player.size().toSize())
+            island.move(self.player.topLeft().toPoint())
+            island.raise_()
+            return
         if self.player.isEmpty():
             return
         if o.library_variant == "listen":
@@ -330,17 +338,22 @@ class LibraryVariantPresentation:
             button.icons_only = not wide
         if variant == "sidebar":
             login = login_variant_layout("sidebar", w, h, (True,) * 4)
-            self.rail = login.rail
+            bar_top = h - o.now_playing_island.HEIGHT - 16
+            self.rail = QRectF(login.rail)
+            self.rail.setBottom(bar_top - 12)
             left = round(login.pane.x())
             rail_w = round(self.rail.width())
-            self.pane = QRectF(left, self.rail.y(), w - left - 24, h - self.rail.y() - 112)
-            self.player = QRectF(left, h - 88, w - left - 16, 72)
+            self.pane = QRectF(left, self.rail.y(), w - left - 24, bar_top - self.rail.y() - 12)
+            self.player = QRectF(16, bar_top, w - 32, o.now_playing_island.HEIGHT)
+            rail_height = min(44, max(24, int((self.rail.height() - 16) / 5)))
+            rail_gap = min(8, max(0, int((self.rail.height() - 16 - rail_height * 5) / 4)))
             for index, button in enumerate(self.buttons.values()):
                 button.setGeometry(round(self.rail.x()) + (12 if wide else 8),
-                                   round(self.rail.y()) + (14 if wide else 8) + index * (68 if wide else 56),
-                                   rail_w - (24 if wide else 16), 58 if wide else 44)
-            self.rail_source.setGeometry(round(self.rail.x()) + (12 if wide else 8), h - 76,
-                                         rail_w - (24 if wide else 16), 44)
+                                   round(self.rail.y()) + 8 + index * (rail_height + rail_gap),
+                                   rail_w - (24 if wide else 16), rail_height)
+            self.rail_source.setGeometry(round(self.rail.x()) + (12 if wide else 8),
+                                         round(self.rail.bottom()) - rail_height - 8,
+                                         rail_w - (24 if wide else 16), rail_height)
             searching = query or self.section == "search"
             self.search_rect = QRect(left, round(self.pane.y()) + 44, round(self.pane.width()), 44)
             top = round(self.pane.y()) + (100 if searching else 48)
@@ -482,7 +495,8 @@ class LibraryVariantPresentation:
         elif variant == "compact":
             title = "搜索结果" if o.search.text().strip() else SECTIONS[self.section]
             _text(p, QRectF(36, self.pane.y() + 8, self.pane.width() - 40, 26), title, 15, bold=True)
-        _glass(p, o, self.player, "now-playing", 20, opacity=.72)
+        if variant != "sidebar":
+            _glass(p, o, self.player, "now-playing", 20, opacity=.72)
         track = o._now_playing
         title = track.title if track else "未在播放"
         artist = track.artist if track else ""
@@ -496,7 +510,7 @@ class LibraryVariantPresentation:
             _text(p, QRectF(x, self.player.y() + 39, self.player.right() - x - 18, 33), title, 27 if wide else 21, bold=True)
             _text(p, QRectF(x, self.player.y() + (76 if wide else 65), self.player.right() - x - 18, 23), artist, 13, "#c0c9d7")
             self._progress(p, QRectF(self.player.x() + 22, self.player.bottom() - 32, self.player.width() - 44, 3))
-        else:
+        elif variant != "sidebar":
             x = self.player.x() + (72 if variant == "sidebar" and track else 54 if track else 16)
             _text(p, QRectF(x, self.player.y() + 8, self.player.right() - x - 16, 22), title, 13, bold=True)
             if variant == "sidebar":

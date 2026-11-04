@@ -101,6 +101,8 @@ from local.music_surface_layout import MusicContentLayoutMixin
 from local.music_lyric_resize import MusicLyricResizeMixin, LyricResizeProbeReady
 from local.music_song_collection import MusicSongCollectionMixin
 from local.music_window_compact import MusicWindowCompactMixin
+from local.music_resize_hit_test import NativeMusicResizeMixin, resize_cursor, resize_edges
+from local.translation_style_variants import resolve_translation_style
 
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
@@ -125,12 +127,13 @@ def constrained_window_size(
     return QSize(bounded_width, max(1, int(round(bounded_width / ratio))))
 
 
-class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSongCollectionMixin, MusicContentLayoutMixin, GlassCaptureMixin, QWidget):
+class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSongCollectionMixin, MusicContentLayoutMixin, GlassCaptureMixin, QWidget):
     """Frameless full-screen/windowed music surface owned by the V2 island."""
 
     seekFinished = Signal(bool, float, str)
     artworkPaletteReady = Signal(int, object, object)
-    RESIZE_MARGIN = 9
+    RESIZE_MARGIN = 7
+    _native_resize_aspect_ratio = MUSIC_WINDOW_ASPECT_RATIO
     TITLE_BAR_HEIGHT = 58
     MODE_TRANSITION_MS = 340
     AMBIENT_FRAME_SECONDS = AlbumFlowBackgroundRenderer.FRAME_SECONDS
@@ -199,6 +202,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
     def __init__(self, owner):
         super().__init__(None)
         self.owner = owner
+        self._translation_style = resolve_translation_style()
+        self._translation_focus_entry: tuple[tuple[int, str], float] | None = None
         # Scope Qt's tooltip material to the music page and its popup chrome.
         self.setStyleSheet("QToolTip { color: #f4f4f5; background-color: #24262b; "
                            "border: 1px solid #55575e; border-radius: 7px; padding: 6px 9px; }")
@@ -2160,7 +2165,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         )
         companion_animating = (
             self._translation_exit_at is not None
-            or any(0.0 <= now - began < 0.48 for began in self._translation_entered_at.values())
+            or any(0.0 <= now - began < self._translation_style.entry_duration_s
+                   for began in self._translation_entered_at.values())
+            or (self._translation_focus_entry is not None
+                and 0.0 <= now - self._translation_focus_entry[1] < self._translation_style.entry_duration_s)
             or (self._translation_animate_entries and self._translation_setting and bool(
                 self._translation_known_tokens - self._translation_entered_at.keys()
             ))
@@ -3530,6 +3538,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             self._translation_entry_from = {}
             self._translation_exit_poses = {}
             self._translation_animate_entries = False
+            self._translation_focus_entry = None
             self._translation_setting = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
         enabled = bool(getattr(self.owner, "enable_dual_line_lyrics", False))
         if enabled != self._translation_setting:
@@ -3554,20 +3563,29 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             return start[0], start[1] * reveal, start[2] * reveal
         if not self._translation_setting:
             return 0.0, 0.0, 0.0
-        if not self._translation_animate_entries:
+        focus_entry = self._translation_focus_entry
+        focus_reveal = (
+            not self._translation_animate_entries
+            and focus_entry is not None and focus_entry[0] == token
+        )
+        if not self._translation_animate_entries and not focus_reveal:
             return 1.0, 1.0, 1.0
-        start = self._translation_entry_from.get(token, (1.0, 0.0, 0.0))
-        began = self._translation_entered_at.get(token)
+        start = (1.0, 0.0, 0.0) if focus_reveal else self._translation_entry_from.get(token, (1.0, 0.0, 0.0))
+        began = focus_entry[1] if focus_reveal else self._translation_entered_at.get(token)
         if began is None and start[1] > 0.001:
             began = self._translation_entered_at.setdefault(token, now)
         if began is None:
             # Reserve the full destination before showing ink. The actual
             # following spring grants clearance and starts the reveal below.
             return 1.0, start[1], start[2]
-        phase = max(0.0, min(1.0, (now - began) / 0.48))
+        style = self._translation_style
+        phase = max(0.0, min(1.0, (now - began) / style.entry_duration_s))
         smooth = phase * phase * (3.0 - 2.0 * phase)
         back = 1.0 + 2.70158 * (phase - 1.0) ** 3 + 1.70158 * (phase - 1.0) ** 2
-        opacity_phase = min(1.0, phase * 3.0)
+        opacity_phase = (
+            max(0.0, min(1.0, (now - began - style.opacity_stagger_s) * 3.0 / style.entry_duration_s))
+            if style.opacity_stagger_s > 0.0 else min(1.0, phase * 3.0)
+        )
         opacity = opacity_phase * opacity_phase * (3.0 - 2.0 * opacity_phase)
         return tuple(value + (1.0 - value) * eased for value, eased in zip(start, (smooth, opacity, back)))
 
@@ -3588,7 +3606,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 # Offscreen springs intentionally do not integrate. They
                 # acquire settled geometry when entering the viewport and
                 # must not keep a paused page repainting for an unseen reveal.
-                self._translation_entered_at[token] = now - 0.48
+                self._translation_entered_at[token] = now - self._translation_style.entry_duration_s
                 continue
             next_row = pair_first_by_row[index] + 2 if index in pair_first_by_row else index + 1
             if next_row >= len(layouts):
@@ -5515,6 +5533,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         row_widths: tuple[float, ...] = (),
         row_right_aligned: tuple[bool, ...] = (),
         pair_starts: tuple[int, ...] = (),
+        translation_gap: float | None = None,
     ) -> tuple[tuple[tuple[QTextLayout, float], ...], tuple[float, ...]]:
         # The short LRU above serves arbitrary individual rows.  A separate
         # one-song cache prevents a 100+ row track from evicting its first
@@ -5528,7 +5547,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                     parenthetical_lines=parenthetical_lines,
                     parenthetical_translation_lines=parenthetical_translation_lines,
                     parenthetical_font=parenthetical_font, row_widths=row_widths,
-                    row_right_aligned=row_right_aligned, pair_starts=pair_starts))
+                    row_right_aligned=row_right_aligned, pair_starts=pair_starts,
+                    translation_gap=translation_gap))
             raise LyricResizeProbeReady()
         if getattr(self, '_lyric_resize_committing', False):
             defer = False
@@ -5543,6 +5563,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             tuple(round(value, 3) for value in row_widths),
             row_right_aligned, pair_starts,
         )
+        if translation_gap is not None:
+            key += (self._translation_style.name, translation_gap)
         if self._lyric_resize_reposition_pending:
             # Same character breaks: update only horizontal alignment. Qt's
             # QTextLine.setPosition preserves the actual shaped glyph objects.
@@ -5587,6 +5609,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                     "parenthetical_translation_lines": parenthetical_translations,
                     "parenthetical_font": QFont(parenthetical_font) if parenthetical_font is not None else None,
                     "secondary_font": QFont(secondary_font) if secondary_font is not None else None,
+                    "translation_gap": translation_gap,
                     "row_widths": row_widths, "row_right_aligned": row_right_aligned,
                     "pair_starts": frozenset(pair_starts),
                     "secondary_layouts": [], "row_heights": [],
@@ -5670,7 +5693,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             else:
                 build["parenthetical_layouts"].append(None)
             if translated_text and build["secondary_font"] is not None:
-                translation_top = annotation_bottom
+                translation_top = annotation_bottom + (build["translation_gap"] or 0.0)
                 translation_layout, translation_height = self._wrapped_lyric_layout(
                     translated_text, build["secondary_font"], width,
                     align_right=align_right,
@@ -5692,7 +5715,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 small_layout, small_height = self._wrapped_lyric_layout(
                     secondary_text, build["secondary_font"], width, align_right=align_right,
                 )
-                small_gap = max(4.0, build["font"].pixelSize() * 0.12)
+                small_gap = (
+                    max(4.0, build["font"].pixelSize() * 0.12)
+                    if build["translation_gap"] is None else build["translation_gap"]
+                )
                 small_top = max(total_height, annotation_bottom) + small_gap
                 build["secondary_layouts"].append((small_layout, small_height, small_top))
                 build["translation_extra_heights"].append(small_gap + small_height)
@@ -6190,13 +6216,16 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 if secondary is not None:
                     small_layout, small_height, _small_top = secondary
                     small_text = secondary_lines[index]
-                    if small_layout.lineCount() > 1:
-                        for visual_index in range(small_layout.lineCount()):
+                    for small_level, _weight in self._lyric_blur_layers(level * self._translation_style.blur_factor):
+                        if not small_level:
+                            continue
+                        if small_layout.lineCount() > 1:
+                            for visual_index in range(small_layout.lineCount()):
+                                jobs.append((small_text, secondary_font, raster_width, small_height,
+                                             small_layout, color, small_level, visual_index))
+                        if small_layout.lineCount() == 1 or index < next_active:
                             jobs.append((small_text, secondary_font, raster_width, small_height,
-                                         small_layout, color, level, visual_index))
-                    if small_layout.lineCount() == 1 or index < next_active:
-                        jobs.append((small_text, secondary_font, raster_width, small_height,
-                                     small_layout, color, level, None))
+                                         small_layout, color, small_level, None))
         self._lyric_blur_prewarm_token = token
         self._lyric_blur_prewarm_queue = jobs
         self._lyric_blur_next_prewarm_at = now
@@ -7735,8 +7764,12 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             lyric_top = lyric_cover.top() + lyric_cover.height() * .42
             lyric_height = max(1., lyric_cover.height() * .55)
         lyric_font = self._surface_font(self.LYRIC_PIXEL_SIZE * surface_scale * (.74 if cover_lyrics_layout else 1.), QFont.Weight.Bold)
+        translation_style = self._translation_style
+        translation_variant = translation_style.name != "classic"
         secondary_font = self._surface_font(
-            max(1.0, (self.LYRIC_PIXEL_SIZE - 6.0) * surface_scale * 0.5), QFont.Weight.Normal,
+            max(1.0, self.LYRIC_PIXEL_SIZE * surface_scale * translation_style.size_ratio)
+            if translation_variant else max(1.0, (self.LYRIC_PIXEL_SIZE - 6.0) * surface_scale * 0.5),
+            translation_style.weight,
         )
         parenthetical_font = self._surface_font(
             max(1.0, (self.LYRIC_PIXEL_SIZE - 6.0) * surface_scale), QFont.Weight.Bold,
@@ -7791,6 +7824,9 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 row_widths=row_widths,
                 row_right_aligned=tuple(duet_right_sides),
                 pair_starts=pair_starts,
+                translation_gap=(translation_style.gap_px_fn(
+                    self.LYRIC_PIXEL_SIZE * surface_scale, surface_scale,
+                ) if translation_variant else None),
             )
         if not self._lyric_resize_capturing:
             self._lyric_resize_last_layouts = (layouts, row_tops)
@@ -7808,6 +7844,14 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             "\n".join(filter(None, (translation_lines[index], parenthetical_translation_lines[index])))
             for index in range(len(layouts))
         )
+        if translation_variant:
+            focus_text = translation_texts[focus_index] if 0 <= focus_index < len(translation_texts) else ""
+            focus_token = (focus_index, focus_text)
+            if self._translation_focus_entry is None or self._translation_focus_entry[0] != focus_token:
+                self._translation_focus_entry = (focus_token, lyric_now)
+                if self._translation_animate_entries:
+                    self._translation_entered_at.pop(focus_token, None)
+                    self._translation_entry_from.pop(focus_token, None)
         self._translation_known_tokens = {
             (index, text) for index, text in enumerate(translation_texts) if text
         }
@@ -8267,6 +8311,12 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 painter.drawRoundedRect(row.adjusted(-4, 2, 4, -2), 12, 12)
             text = paint_lines[index]
             painter.save()
+            translation_focused = pair_first_by_row.get(index, index) == focus_index
+            if translation_variant and not translation_focused:
+                # Keep the whole bilingual block on the same line spring.
+                painter.translate(row.left(), painted_top)
+                painter.scale(translation_style.inactive_scale, translation_style.inactive_scale)
+                painter.translate(-row.left(), -painted_top)
             row_base_opacity = painter.opacity()
             if (not manual_view and blur_level > 0.0
                     and pair_first_by_row.get(index, index) != focus_index):
@@ -8482,7 +8532,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                     block_layers = [(layout, row.topLeft(), combined_offsets)]
                     block_poses = [(1.0, 0.0)]
                     block_secondary = self._song_secondary_layouts[index]
-                    if block_secondary is not None:
+                    if block_secondary is not None and translation_style.karaoke_on_translation:
                         secondary_layout, secondary_height, secondary_top = block_secondary
                         secondary_top -= self._song_parenthetical_extra_heights[index] * (
                             1.0 - parenthetical_open_poses[index]
@@ -8494,7 +8544,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                         ))
                         block_poses.append((
                             translation_poses[index][1],
-                            -(1.0 - translation_poses[index][2]) * secondary_height * 0.55,
+                            -(1.0 - translation_poses[index][2]) * secondary_height * translation_style.slide_factor,
                         ))
                     self._draw_low_perception_block_wipe(
                         painter, tuple(block_layers), block_progress,
@@ -8543,12 +8593,31 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 secondary_top -= self._song_parenthetical_extra_heights[index] * (
                     1.0 - parenthetical_open_poses[index]
                 )
-                companion_slide = -(1.0 - translation_poses[index][2]) * secondary_height * 0.55
+                companion_slide = -(1.0 - translation_poses[index][2]) * secondary_height * translation_style.slide_factor
                 secondary_origin = QPointF(row.left(), row.top() + secondary_top + companion_slide)
                 secondary_offsets = (combined_offsets[-1] if combined_offsets else 0.0,) * secondary_layout.lineCount()
                 painter.save()
                 painter.setOpacity(painter.opacity() * translation_poses[index][1])
-                if obo_waiting:
+                if translation_variant:
+                    painter.setOpacity(painter.opacity() * (
+                        translation_style.alpha_active if translation_focused else translation_style.alpha_inactive
+                    ))
+                if not translation_style.karaoke_on_translation:
+                    translation_blur = blur_level * translation_style.blur_factor
+                    if translation_focused or not timed or index < active:
+                        self._draw_sprung_cached_wrapped_layout(
+                            painter, secondary_layout, secondary_origin,
+                            secondary_text, secondary_font, row_width,
+                            secondary_height, QColor(255, 255, 255), secondary_offsets,
+                            blur_level=translation_blur,
+                        )
+                    else:
+                        self._draw_future_wrapped_layout(
+                            painter, secondary_layout, secondary_origin,
+                            secondary_text, secondary_font, row_width,
+                            secondary_height, secondary_offsets, blur_level=translation_blur,
+                        )
+                elif obo_waiting:
                     waiting_scale = max(0.5, float(max(1, secondary_font.pixelSize())) / self.LYRIC_PIXEL_SIZE)
                     painter.save()
                     painter.translate(0.0, -(1.0 - obo_unread_pose) * self._reading_lift_height() * waiting_scale)
@@ -8693,10 +8762,14 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                             painter.save()
                             if is_translation:
                                 painter.setOpacity(painter.opacity() * translation_poses[index][1])
-                                painter.translate(0.0, -(1.0 - translation_poses[index][2]) * layer_height * 0.55)
+                                if translation_variant:
+                                    painter.setOpacity(painter.opacity() * (
+                                        translation_style.alpha_active if translation_focused else translation_style.alpha_inactive
+                                    ))
+                                painter.translate(0.0, -(1.0 - translation_poses[index][2]) * layer_height * translation_style.slide_factor)
                             layer_lift = (
                                 obo_active_parenthetical_lift if layer_font is parenthetical_font
-                                else obo_active_translation_lift
+                                else obo_active_translation_lift if translation_style.karaoke_on_translation else 0.0
                             )
                             if layer_lift:
                                 painter.translate(0.0, obo_active_primary_lift - layer_lift)
@@ -8733,7 +8806,13 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                                             obo_active_primary_lift - layer_lift if layer_lift else 0.0
                                         ),
                                     )
-                            if completed and not aside_reading:
+                            if is_translation and not translation_style.karaoke_on_translation:
+                                self._draw_sprung_cached_wrapped_layout(
+                                    painter, annotation_layout, layer_origin, layer_text,
+                                    layer_font, row_width, layer_height, QColor(255, 255, 255),
+                                    layer_offsets, blur_level=blur_level * translation_style.blur_factor,
+                                )
+                            elif completed and not aside_reading:
                                 annotation_blur = blur_level
                                 if aside_window is not None:
                                     blur_phase = max(0., min(1., (current_position - aside_window.end_seconds) / .18))
@@ -10394,17 +10473,34 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
     def _edge_set(self, point: QPointF) -> set[str]:
         if self._fullscreen:
             return set()
-        margin = float(self.RESIZE_MARGIN)
-        edges: set[str] = set()
-        if point.x() <= margin:
-            edges.add("left")
-        elif point.x() >= self.width() - margin:
-            edges.add("right")
-        if point.y() <= margin:
-            edges.add("top")
-        elif point.y() >= self.height() - margin:
-            edges.add("bottom")
-        return edges
+        return resize_edges(point.x(), point.y(), self.width(), self.height(),
+                            dpr=self.devicePixelRatioF())
+
+    def _native_resize_enabled(self):
+        return (not getattr(self, "_fullscreen", False)
+                and getattr(self, "_pending_fullscreen", None) is None
+                and not getattr(self, "_island_returning", False)
+                and not getattr(self, "_island_entering", False)
+                and not getattr(self, "_compact_committing", False)
+                and super()._native_resize_enabled())
+
+    def _native_system_resize_enabled(self):
+        # Windows clamps system-size pointer motion at its minimum tracking
+        # size before WM_SIZING. The existing white-feather/Free-island gesture
+        # needs the raw inward client drag beyond that minimum, so retain its
+        # manual path. Library/login can use native HT edges and Aero sizing.
+        return False
+
+    def _update_resize_cursor(self, point):
+        """Edges own hover before the full-height lyric/control hit regions."""
+        edges = self._edge_set(point)
+        if not edges:
+            return False
+        self._hovered_lyric_index = None
+        self._hovered_window_button = self._hovered_media_command = ""
+        self._set_control_hover("", "", time.monotonic())
+        self.setCursor(resize_cursor(edges))
+        return True
 
     @staticmethod
     def _display_source_offsets(source: str, display: str) -> tuple[int, ...] | None:
@@ -10719,6 +10815,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             event.accept()
             return
         if not (event.buttons() & Qt.MouseButton.LeftButton):
+            if self._update_resize_cursor(event.position()):
+                return super().mouseMoveEvent(event)
             word_hover = self._lyric_word_target_at(event.position())
             hover = (
                 word_hover[0] if word_hover is not None else
@@ -10753,17 +10851,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             if window_button or media_button:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
                 return
-            edges = self._edge_set(event.position())
-            if edges in ({"left", "top"}, {"right", "bottom"}):
-                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-            elif edges in ({"right", "top"}, {"left", "bottom"}):
-                self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-            elif edges & {"left", "right"}:
-                self.setCursor(Qt.CursorShape.SizeHorCursor)
-            elif edges & {"top", "bottom"}:
-                self.setCursor(Qt.CursorShape.SizeVerCursor)
-            else:
-                self.unsetCursor()
+            self.unsetCursor()
             return super().mouseMoveEvent(event)
         delta = event.globalPosition().toPoint() - self._drag_origin
         if self._moving:

@@ -154,7 +154,10 @@ def placement_mode_label(mode) -> str:
 
 def normalize_finder_bar_style(value) -> str:
     style = str(value or "transparent").strip().lower()
-    return style if style in {"capsule", "fade", "transparent"} else "transparent"
+    # Retired gradient bars keep their album/background intent.
+    if style == "fade":
+        return "capsule"
+    return style if style in {"capsule", "transparent"} else "transparent"
 
 
 def normalize_finder_bar_center_ratio(value) -> float:

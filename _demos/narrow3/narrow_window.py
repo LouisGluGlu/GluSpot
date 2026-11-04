@@ -2289,6 +2289,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         self.pointer_activity(event.position(), time.monotonic())
         self._glass_feedback.move(event.position())
         self.hovered_glass = ""
+        if not event.buttons() and self._update_resize_cursor(event.position()):
+            self.update()
+            return
+        self.unsetCursor()
         for group in self.glass_groups():
             for key, rect in group.items():
                 if rect.contains(event.position()):
@@ -2378,7 +2382,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         if self.live:
             if event.button() == Qt.MouseButton.LeftButton:
-                action = self._live_action_at(event.position())
+                action = (None if self._edge_set(event.position())
+                          else self._live_action_at(event.position()))
                 if action is not None:
                     self._begin_live_press(event.position())
                 else:

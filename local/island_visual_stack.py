@@ -391,22 +391,12 @@ def interaction_mask_update_plan(
     last_pointer_move_at: float,
     last_mask_update_at: float,
     unit: float = 1.0,
+    defer_shrink: bool = False,
 ) -> InteractionMaskUpdatePlan:
     if not platform_win32:
         return InteractionMaskUpdatePlan()
     if not finder_mode and not scene_suppressed:
         return InteractionMaskUpdatePlan(action="clear") if interaction_mask_active else InteractionMaskUpdatePlan()
-    if float(now) < float(mask_deferred_until or 0.0):
-        return InteractionMaskUpdatePlan()
-
-    pointer_quiet_seconds = 0.06 if finder_mode else 0.12
-    if float(now) - float(last_pointer_move_at or 0.0) < pointer_quiet_seconds:
-        return InteractionMaskUpdatePlan()
-
-    mask_interval = 0.24 if finder_mode else 0.18
-    if float(now) - float(last_mask_update_at or 0.0) < mask_interval:
-        return InteractionMaskUpdatePlan()
-
     u = max(0.0, float(unit))
     mask_rect = QRectF()
     hover_rect = QRectF(finder_hover_rect)
@@ -419,6 +409,29 @@ def interaction_mask_update_plan(
         mask_rect = mask_rect.adjusted(-4.0 * u, -2.0 * u, 4.0 * u, 4.0 * u)
     if mask_rect.isNull() or mask_rect.width() <= 0 or mask_rect.height() <= 0:
         return InteractionMaskUpdatePlan(action="clear", record_update_at=True) if interaction_mask_active else InteractionMaskUpdatePlan(record_update_at=True)
+
+    previous = QRectF(last_mask_rect)
+    if interaction_mask_active and not previous.isNull():
+        # A native region clips painting, including the cover and rounded rim.
+        # Grow before a QPainter is opened, even while pointer/resize gates are
+        # busy. Keep the old extent until the painted spring has settled.
+        if not previous.contains(mask_rect):
+            return InteractionMaskUpdatePlan(
+                action="apply", mask_rect=previous.united(mask_rect), record_update_at=True,
+            )
+        if defer_shrink:
+            return InteractionMaskUpdatePlan()
+
+    if float(now) < float(mask_deferred_until or 0.0):
+        return InteractionMaskUpdatePlan()
+
+    pointer_quiet_seconds = 0.06 if finder_mode else 0.12
+    if float(now) - float(last_pointer_move_at or 0.0) < pointer_quiet_seconds:
+        return InteractionMaskUpdatePlan()
+
+    mask_interval = 0.24 if finder_mode else 0.18
+    if float(now) - float(last_mask_update_at or 0.0) < mask_interval:
+        return InteractionMaskUpdatePlan()
 
     previous = QRectF(last_mask_rect)
     if interaction_mask_active and not previous.isNull():

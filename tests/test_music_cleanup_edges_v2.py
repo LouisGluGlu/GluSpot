@@ -276,6 +276,10 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
         units = (TimedLyricUnit(0.0, 1.0, "春"), TimedLyricUnit(1.0, None, "風"))
         owner = self._boundary_owner(units)
         window = MusicSurfaceWindow(owner)
+        # This regression also verifies the retained translated karaoke clock.
+        # The product-default A intentionally paints translated ink as a still.
+        from local.translation_style_variants import CLASSIC
+        window._translation_style = CLASSIC
         window.resize(960, 540)
         try:
             self._sample_boundary(window, owner, 100.0, 1.0)
@@ -308,6 +312,10 @@ class MusicCleanupSurfaceMappingV2Tests(unittest.TestCase):
             with self.subTest(mixed=mixed):
                 owner = self._boundary_owner((), mixed=mixed)
                 window = MusicSurfaceWindow(owner)
+                # Keep coverage of the optional classic translated read front;
+                # A's no-karaoke path has independent variant paint coverage.
+                from local.translation_style_variants import CLASSIC
+                window._translation_style = CLASSIC
                 window.resize(960, 540)
                 try:
                     self._sample_boundary(window, owner, 100.0, 0.0)

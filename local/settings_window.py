@@ -181,6 +181,7 @@ class FinderBarPreview(QWidget):
         self.island = island
         self.style = "transparent"
         self.mode = "tasker"
+        self._track_key = None
         self.setMinimumHeight(90)
         self.setAccessibleName("沉浸栏样式预览")
 
@@ -192,8 +193,17 @@ class FinderBarPreview(QWidget):
         self.mode = "finder" if mode == "finder" else "tasker"
         self.update()
 
+    def refresh_track(self):
+        image = getattr(self.island, "album_art", QImage())
+        key = (image.cacheKey(), str(getattr(self.island, "track_title", "")),
+               str(getattr(self.island, "artist", "")),
+               QColor(getattr(self.island, "album_color", "#383838")).rgba())
+        if key != self._track_key:
+            self._track_key = key
+            self.update()
+
     def paintEvent(self, event):
-        from local.finder_bar_style import finder_fade_positions, paint_finder_background
+        from local.finder_bar_style import paint_finder_background
         with QPainter(self) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -222,12 +232,7 @@ class FinderBarPreview(QWidget):
                 row = QRectF(left_edge, top+inset, width, height-2*inset)
                 paint_finder_background(painter, row, self.style, pigment)
                 cover = QRectF(row.left()+8, row.top()+3, 22, 22)
-                gradient = QLinearGradient(cover.topLeft(), cover.bottomRight())
-                gradient.setColorAt(0, pigment.lighter(135))
-                gradient.setColorAt(1, QColor(getattr(self.island, "secondary_color", "#b96d9a")))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(gradient)
-                painter.drawRoundedRect(cover, 4, 4)
+                paint_preview_cover(painter, cover, getattr(self.island, "album_art", QImage()), pigment)
                 backdrop = QColor(bar)
                 if self.style != "transparent":
                     backdrop = QColor(round(bar.red()*.13+pigment.red()*.87),
@@ -236,15 +241,55 @@ class FinderBarPreview(QWidget):
                 painter.setPen(solid_album_ink_color(backdrop))
                 painter.setFont(QFont(self.font().family(), 10, QFont.Weight.DemiBold))
                 left = cover.right()+8
-                if self.style == "fade":
-                    left = max(left, row.left()+row.width()*finder_fade_positions(row)[1]+4)
-                text = painter.fontMetrics().elidedText("♪  音乐与歌词，随你而动", Qt.TextElideMode.ElideRight,
+                title = str(getattr(self.island, "track_title", "") or "GluSpot")
+                text = painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight,
                                                        max(0, int(row.right()-left-10)))
                 painter.drawText(QRectF(left, row.top(), row.right()-left-10, row.height()),
                                  Qt.AlignmentFlag.AlignVCenter, text)
 
 
+class _MusicPreviewHost:
+    """Keep thumbnail geometry local; obtain the real track's renderer inputs."""
+
+    def __init__(self, preview):
+        self.preview = preview
+        self.album_color = preview._album_color
+        self.secondary_color = preview._secondary_color
+        self.ambient_intensity = preview._values["ambient_intensity"]
+        self.music_flow = preview._values["music_flow_intensity"]
+        self.media_is_playing = preview._playing
+
+    def __getattr__(self, name):
+        return getattr(self.preview.island, name)
+
+    def _u(self, value):
+        return float(value) * .35
+
+    def _music_shell_path(self, rect, radius, expanded=False):
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        return path
+
+    def _audio_bands(self):
+        # A swatch is a still; drawing it must not poll the playback provider.
+        return (0., 0., 0.)
+
+    def _music_reactive_style_response(self, style):
+        from local.audio_reactive_engine import ReactiveFrame, audio_reactive_style_plan
+        return audio_reactive_style_plan(ReactiveFrame(), style).as_response()
+
+    def _solid_album_background_color(self):
+        read = getattr(self.preview.island, "_solid_album_background_color", None)
+        if callable(read):
+            return read()
+        from local.music_surface_palette import artwork_surface_palette, solid_album_background_color
+        palette = artwork_surface_palette(self.preview._cover, self.album_color, self.secondary_color)
+        return solid_album_background_color(palette)
+
+
 class MusicAmbiencePreview(QWidget):
+    """Cached thumbnail drawn by the same background renderers as the island."""
+
     DEFAULT_VALUES = {
         "ambient_intensity": 0.62,
         "music_flow_intensity": 0.74,
@@ -254,17 +299,20 @@ class MusicAmbiencePreview(QWidget):
     }
     VALID_STYLES = set(DEFAULT_MUSIC_AMBIENCE_VALUES)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, island=None):
         super().__init__(parent)
+        self.island = island
         self._style = "sea_level"
         self._values = dict(self.DEFAULT_VALUES)
-        self._album_color = QColor("#16BCFF")
-        self._secondary_color = QColor("#FF3A94")
-        self._yaoguang_outer_color = QColor("#6C35F2")
-        self._yaoguang_blur_strength = 58
-        self._yaoguang_color_source = "custom"
-        self._yaoguang_album_inverse_enabled = False
-        self._playing = True
+        self._album_color = QColor("#383838")
+        self._secondary_color = QColor("#484848")
+        self._playing = False
+        self._cover = QImage()
+        self._title = ""
+        self._artist = ""
+        self._state_key = None
+        self._raster_key = None
+        self._raster = QImage()
         self.setObjectName("MusicAmbiencePreview")
         self.setFixedHeight(58)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -273,351 +321,110 @@ class MusicAmbiencePreview(QWidget):
         return QSize(320, 58)
 
     def set_preview_state(
-        self,
-        style: str,
-        values: dict[str, object] | None = None,
+        self, style: str, values: dict[str, object] | None = None,
         album_color: QColor | str | None = None,
         secondary_color: QColor | str | None = None,
-        yaoguang_outer_color: QColor | str | None = None,
-        yaoguang_blur_strength: int | None = None,
-        yaoguang_color_source: str | None = None,
-        yaoguang_album_inverse_enabled: bool | None = None,
+        yaoguang_outer_color=None, yaoguang_blur_strength=None,
+        yaoguang_color_source=None, yaoguang_album_inverse_enabled=None,
         playing: bool = True,
     ):
-        self._style = normalize_music_ambience_style(style)
+        style = normalize_music_ambience_style(style)
         merged = dict(self.DEFAULT_VALUES)
         if isinstance(values, dict):
-            for key in merged:
-                if key in values:
-                    merged[key] = values[key]
-        self._values = merged
-        self._album_color = self._safe_color(album_color, "#16BCFF")
-        self._secondary_color = self._safe_color(secondary_color, "#FF3A94")
-        self._yaoguang_outer_color = self._safe_color(yaoguang_outer_color, "#6C35F2")
-        if yaoguang_blur_strength is not None:
-            self._yaoguang_blur_strength = max(0, min(200, int(yaoguang_blur_strength)))
-        if yaoguang_color_source is not None:
-            value = str(yaoguang_color_source or "custom").strip().lower()
-            self._yaoguang_color_source = "album" if value == "album" else "custom"
-        if yaoguang_album_inverse_enabled is not None:
-            self._yaoguang_album_inverse_enabled = bool(yaoguang_album_inverse_enabled)
+            merged.update({key: values[key] for key in merged if key in values})
+        primary = self._safe_color(album_color, "#383838")
+        secondary = self._safe_color(secondary_color, "#484848")
+        cover = QImage(getattr(self.island, "album_art", QImage()))
+        title = str(getattr(self.island, "track_title", "") or "")
+        artist = str(getattr(self.island, "artist", "") or "")
+        palette = getattr(self.island, "_solid_album_palette_cache", None)
+        palette_key = tuple(getattr(palette, name).rgba() for name in
+                            ("primary", "secondary", "characteristic")) if palette is not None else ()
+        key = (style, tuple(sorted(merged.items())), primary.rgba(), secondary.rgba(),
+               cover.cacheKey(), title, artist, palette_key, bool(playing))
+        if key == self._state_key:
+            return
+        self._state_key = key
+        self._style, self._values = style, merged
+        self._album_color, self._secondary_color = primary, secondary
+        self._cover, self._title, self._artist = cover, title, artist
         self._playing = bool(playing)
+        self._raster_key = None
         self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = QRectF(self.rect()).adjusted(7.0, 5.0, -7.0, -5.0)
-        radius = min(20.0, rect.height() * 0.42)
-        painter.setPen(Qt.PenStyle.NoPen)
-        shadow = QColor(0, 0, 0, 42)
-        painter.setBrush(shadow)
-        painter.drawRoundedRect(rect.adjusted(0.0, 2.0, 0.0, 3.0), radius, radius)
-
         style = self._style
         if style == "system":
             style = "pure_black" if system_dark_mode() else "pure_white"
-        if style == "pure_white":
-            self._paint_pure_white(painter, rect, radius)
-        elif style == "pure_black":
-            self._paint_pure_black(painter, rect, radius)
-        elif style == "solid_album":
-            self._paint_solid_album(painter, rect, radius)
-        elif style == "yaoguang":
-            self._paint_yaoguang(painter, rect, radius)
-        elif style == "bilateral_diffraction":
-            self._paint_bilateral_diffraction(painter, rect, radius)
-        elif style == "duotone_full":
-            self._paint_full_duotone(painter, rect, radius)
-        else:
-            self._paint_sea_level(painter, rect, radius)
-        self._paint_preview_content(painter, rect, radius, style)
-        self._paint_border(painter, rect, radius, style == "pure_white")
-        painter.end()
+        key = (self._state_key, self.width(), self.height(), self.devicePixelRatioF(), style)
+        if key != self._raster_key:
+            self._render_thumbnail(style)
+            self._raster_key = key
+        with QPainter(self) as painter:
+            painter.drawImage(QPointF(0, 0), self._raster)
 
-    def _paint_sea_level(self, painter: QPainter, rect: QRectF, radius: float):
-        path = self._rounded_path(rect, radius)
-        painter.fillPath(path, self._dark_body_gradient(rect))
-        painter.save()
-        painter.setClipPath(path)
-        album = self._album_color.lighter(120)
-        secondary = self._secondary_color.lighter(118)
-        bridge = self._mix_color(album, secondary, 0.45)
-        intensity = self._float_value("ambient_intensity", 0.62)
-        flow = self._float_value("music_flow_intensity", 0.74)
+    def _render_thumbnail(self, style):
+        from local.music_background_renderer import NativeMusicBackgroundRenderer, SolidMusicBackgroundRenderer
+        dpr = self.devicePixelRatioF()
+        self._raster = QImage(max(1, round(self.width()*dpr)), max(1, round(self.height()*dpr)),
+                              QImage.Format.Format_ARGB32_Premultiplied)
+        self._raster.setDevicePixelRatio(dpr)
+        self._raster.fill(Qt.GlobalColor.transparent)
+        host = _MusicPreviewHost(self)
+        solid = SolidMusicBackgroundRenderer(host)
+        rect = QRectF(self.rect()).adjusted(7., 5., -7., -5.)
+        radius = min(20., rect.height() * .42)
+        with QPainter(self._raster) as painter:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            if style == "sea_level":
+                native = NativeMusicBackgroundRenderer(host)
+                native.paint_sea_level_ambience(painter, rect, radius, expanded=True)
+                native.paint_sea_level_wave(painter, rect, radius, expanded=True)
+            elif style == "solid_album":
+                solid.paint_solid_album(painter, rect, radius)
+            elif style == "pure_white":
+                solid.paint_pure_white(painter, rect, radius)
+            else:
+                solid.paint_pure_black(painter, rect, radius)
+            background = host._solid_album_background_color() if style == "solid_album" else QColor(
+                "#ffffff" if style == "pure_white" else "#000000")
+            ink = solid_album_ink_color(background)
+            cover = QRectF(rect.left()+12., rect.center().y()-15., 30., 30.)
+            paint_preview_cover(painter, cover, self._cover, self._album_color)
+            painter.setFont(QFont(self.font().family(), 9, QFont.Weight.DemiBold))
+            painter.setPen(ink)
+            info = QRectF(cover.right()+11, rect.top()+6, max(0, rect.right()-cover.right()-25), 18)
+            painter.drawText(info, Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(self._title or "GluSpot", Qt.TextElideMode.ElideRight, int(info.width())))
+            ink.setAlpha(150)
+            painter.setPen(ink)
+            painter.setFont(QFont(self.font().family(), 8))
+            painter.drawText(info.translated(0, 17), Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(self._artist or "当前专辑", Qt.TextElideMode.ElideRight, int(info.width())))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(255, 255, 255, 46), 1.))
+            painter.drawRoundedRect(rect.adjusted(.5, .5, -.5, -.5), radius, radius)
 
-        horizon_y = rect.top() + rect.height() * 0.50
-        sea = QLinearGradient(0, rect.top(), 0, rect.bottom())
-        sea.setColorAt(0.00, QColor(album.red(), album.green(), album.blue(), 0))
-        sea.setColorAt(0.44, QColor(bridge.red(), bridge.green(), bridge.blue(), int(42 + 62 * intensity)))
-        sea.setColorAt(0.70, QColor(album.red(), album.green(), album.blue(), int(74 + 78 * intensity)))
-        sea.setColorAt(1.00, QColor(secondary.red(), secondary.green(), secondary.blue(), int(42 + 58 * intensity)))
-        painter.fillRect(rect, sea)
-
-        phase = 0.65 + flow * 1.8
-        wave = QPainterPath(QPointF(rect.left(), horizon_y))
-        count = 18
-        for index in range(count + 1):
-            progress = index / count
-            x = rect.left() + rect.width() * progress
-            y = horizon_y + math.sin(progress * math.tau * 1.4 + phase) * rect.height() * 0.045
-            wave.lineTo(QPointF(x, y))
-        wave.lineTo(QPointF(rect.right(), rect.bottom()))
-        wave.lineTo(QPointF(rect.left(), rect.bottom()))
-        wave.closeSubpath()
-        wave_color = QColor(album.red(), album.green(), album.blue(), int(92 + 66 * intensity))
-        painter.fillPath(wave, wave_color)
-        painter.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
-        painter.drawLine(QPointF(rect.left() + 18, horizon_y), QPointF(rect.right() - 18, horizon_y + 1.0))
-        painter.restore()
-
-    def _paint_full_duotone(self, painter: QPainter, rect: QRectF, radius: float):
-        path = self._rounded_path(rect, radius)
-        painter.save()
-        painter.setClipPath(path)
-        album = self._album_color.lighter(126)
-        secondary = self._secondary_color.lighter(116)
-        bridge = self._mix_color(album, secondary, 0.50)
-        balance = max(0.24, min(0.76, self._percent_value("compact_duotone_balance", 58.0) / 100.0))
-
-        base = QLinearGradient(0, rect.top(), 0, rect.bottom())
-        base.setColorAt(0.00, QColor(secondary.red(), secondary.green(), secondary.blue(), 230))
-        base.setColorAt(max(0.10, balance - 0.08), QColor(secondary.red(), secondary.green(), secondary.blue(), 218))
-        base.setColorAt(balance, QColor(bridge.red(), bridge.green(), bridge.blue(), 238))
-        base.setColorAt(min(0.92, balance + 0.10), QColor(album.red(), album.green(), album.blue(), 226))
-        base.setColorAt(1.00, QColor(album.red(), album.green(), album.blue(), 238))
-        painter.fillRect(rect, base)
-
-        flow = self._float_value("music_flow_intensity", 0.74)
-        self._paint_mist(painter, QPointF(rect.left() + rect.width() * 0.22, rect.top() + rect.height() * 0.36), rect.width() * (0.33 + flow * 0.10), rect.height() * 0.72, secondary, 82)
-        self._paint_mist(painter, QPointF(rect.left() + rect.width() * 0.80, rect.top() + rect.height() * 0.72), rect.width() * (0.34 + flow * 0.09), rect.height() * 0.70, album, 90)
-        self._paint_mist(painter, QPointF(rect.center().x(), rect.center().y()), rect.width() * 0.30, rect.height() * 0.52, bridge, 52)
-        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
-        sheen.setColorAt(0.00, QColor(255, 255, 255, 22))
-        sheen.setColorAt(0.44, QColor(255, 255, 255, 0))
-        sheen.setColorAt(1.00, QColor(255, 255, 255, 18))
-        painter.fillRect(rect, sheen)
-        painter.restore()
-
-    def _paint_bilateral_diffraction(self, painter: QPainter, rect: QRectF, radius: float):
-        path = self._rounded_path(rect, radius)
-        painter.fillPath(path, QColor(0, 0, 0, 255))
-        painter.save()
-        painter.setClipPath(path)
-        album = self._album_color.lighter(132)
-        secondary = self._secondary_color.lighter(125)
-        frequency = self._float_value("diffraction_frequency", 0.46)
-        intensity = self._float_value("ambient_intensity", 0.62)
-        ring_count = max(5, min(12, int(round(5 + frequency * 7))))
-
-        left_center = QPointF(rect.left() + rect.width() * 0.06, rect.center().y())
-        right_center = QPointF(rect.right() - rect.width() * 0.06, rect.center().y())
-        self._paint_mist(painter, left_center, rect.width() * 0.36, rect.height() * 1.18, album, int(72 + intensity * 80))
-        self._paint_mist(painter, right_center, rect.width() * 0.36, rect.height() * 1.18, secondary, int(72 + intensity * 80))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        for index in range(ring_count):
-            progress = index / max(1, ring_count - 1)
-            alpha = int((92 - progress * 58) * (0.68 + intensity * 0.32))
-            width = rect.width() * (0.18 + progress * 0.48)
-            height = rect.height() * (0.36 + progress * 1.05)
-            painter.setPen(QPen(QColor(album.red(), album.green(), album.blue(), alpha), 1.0))
-            painter.drawEllipse(QRectF(left_center.x() - width * 0.5, left_center.y() - height * 0.5, width, height))
-            painter.setPen(QPen(QColor(secondary.red(), secondary.green(), secondary.blue(), alpha), 1.0))
-            painter.drawEllipse(QRectF(right_center.x() - width * 0.5, right_center.y() - height * 0.5, width, height))
-        center = QLinearGradient(rect.left(), rect.center().y(), rect.right(), rect.center().y())
-        center.setColorAt(0.00, QColor(album.red(), album.green(), album.blue(), 64))
-        center.setColorAt(0.50, QColor(255, 255, 255, 18))
-        center.setColorAt(1.00, QColor(secondary.red(), secondary.green(), secondary.blue(), 64))
-        painter.fillRect(rect.adjusted(0, rect.height() * 0.40, 0, -rect.height() * 0.40), center)
-        painter.restore()
-
-    def _paint_pure_black(self, painter: QPainter, rect: QRectF, radius: float):
-        path = self._rounded_path(rect, radius)
-        painter.fillPath(path, QColor(0, 0, 0, 255))
-        painter.save()
-        painter.setClipPath(path)
-        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
-        sheen.setColorAt(0.00, QColor(255, 255, 255, 18))
-        sheen.setColorAt(0.38, QColor(255, 255, 255, 4))
-        sheen.setColorAt(1.00, QColor(255, 255, 255, 10))
-        painter.fillRect(rect, sheen)
-        painter.setPen(QPen(QColor(255, 255, 255, 26), 1.0))
-        painter.drawLine(QPointF(rect.left() + 18, rect.top() + 9), QPointF(rect.right() - 18, rect.top() + 9))
-        painter.restore()
-
-    def _paint_solid_album(self, painter: QPainter, rect: QRectF, radius: float):
-        path = self._rounded_path(rect, radius)
-        painter.fillPath(path, self._album_color)
-
-    def _yaoguang_effective_preview_color(self) -> QColor:
-        if str(getattr(self, "_yaoguang_color_source", "custom")) == "album":
-            color = QColor(self._album_color)
-            hue, saturation, value, _alpha = color.getHsvF()
-            if hue >= 0 and saturation >= 0.16 and 0.18 < value < 0.98:
-                if bool(getattr(self, "_yaoguang_album_inverse_enabled", False)):
-                    hue = (hue + 0.5) % 1.0
-                return self._yaoguang_preview_color(QColor.fromHsvF(hue, saturation, value, 1.0))
-        return self._yaoguang_preview_color(self._yaoguang_outer_color)
-
-    def _paint_yaoguang_soft_rect(self, painter: QPainter, rect: QRectF, radius: float, color: QColor, softness: float):
-        strength = max(0.0, min(2.0, float(softness)))
-        if strength > 0.0:
-            normalized = min(1.0, strength)
-            extra = max(0.0, strength - 1.0)
-            spread = min(rect.width(), rect.height()) * (0.10 + 0.28 * normalized + 0.20 * extra)
-            passes = max(4, min(26, int(round(4 + normalized * 14 + extra * 8))))
-            for step in range(passes, 0, -1):
-                t = step / passes
-                grow = spread * t
-                glow = QColor(color)
-                glow.setAlpha(max(2, int(color.alpha() * (0.08 + 0.13 * normalized + 0.05 * extra) * (1.0 - t * 0.68))))
-                glow_rect = rect.adjusted(-grow, -grow, grow, grow)
-                painter.fillPath(self._rounded_path(glow_rect, radius + grow), glow)
-        painter.fillPath(self._rounded_path(rect, radius), color)
-
-    def _paint_yaoguang(self, painter: QPainter, rect: QRectF, radius: float):
-        path = self._rounded_path(rect, radius)
-        outer = self._yaoguang_effective_preview_color()
-        hue, saturation, value, _alpha = outer.getHsvF()
-        if hue < 0:
-            hue = 0.72
-        mid = QColor.fromHsvF(hue, max(0.40, saturation * 0.62), min(0.98, max(0.74, value + 0.16)), 1.0)
-        pale = QColor.fromHsvF(hue, max(0.16, saturation * 0.28), 0.93, 1.0)
-
-        painter.save()
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.fillPath(path, QColor(2, 1, 5, 255))
-
-        frame = max(4.0, min(rect.width(), rect.height()) * 0.17)
-        inner = rect.adjusted(frame, frame, -frame, -frame)
-        inner_radius = min(inner.height() / 2.0, max(2.0, radius - frame))
-        local_mid = inner.adjusted(inner.width() * 0.085, 0.0, -inner.width() * 0.085, 0.0)
-        local_pale = inner.adjusted(inner.width() * 0.165, 0.0, -inner.width() * 0.165, 0.0)
-        local_radius = min(inner.height() / 2.0, inner_radius)
-        softness = max(0, min(200, int(self._yaoguang_blur_strength))) / 100.0
-        painter.setClipPath(self._rounded_path(inner, inner_radius))
-        self._paint_yaoguang_soft_rect(painter, inner, local_radius, outer, softness * 0.72)
-        self._paint_yaoguang_soft_rect(painter, local_mid, local_radius, mid, softness)
-        self._paint_yaoguang_soft_rect(painter, local_pale, local_radius, pale, min(1.0, softness * 1.12))
-        painter.restore()
-
-    def _paint_pure_white(self, painter: QPainter, rect: QRectF, radius: float):
-        path = self._rounded_path(rect, radius)
-        base = QLinearGradient(0, rect.top(), 0, rect.bottom())
-        base.setColorAt(0.0, QColor(255, 255, 255, 255))
-        base.setColorAt(0.62, QColor(247, 249, 252, 255))
-        base.setColorAt(1.0, QColor(231, 236, 244, 255))
-        painter.fillPath(path, base)
-        painter.save()
-        painter.setClipPath(path)
-        sheen = QLinearGradient(rect.left(), rect.top(), rect.right(), rect.bottom())
-        sheen.setColorAt(0.00, QColor(255, 255, 255, 92))
-        sheen.setColorAt(0.58, QColor(225, 229, 236, 18))
-        sheen.setColorAt(1.00, QColor(188, 196, 210, 34))
-        painter.fillRect(rect, sheen)
-        painter.restore()
-
-    def _paint_preview_content(self, painter: QPainter, rect: QRectF, radius: float, style: str):
-        light = style in {"pure_white", "yaoguang"}
-        text = QColor(28, 30, 34, 210) if light else QColor(255, 255, 255, 224)
-        muted = QColor(74, 82, 96, 160) if light else QColor(255, 255, 255, 112)
-        if style == "solid_album":
-            text = solid_album_ink_color(self._album_color, 246)
-            muted = solid_album_ink_color(self._album_color, 150)
-            light = text.red() == 0
-        cover = QRectF(rect.left() + 12.0, rect.center().y() - 15.0, 30.0, 30.0)
-        cover_gradient = QLinearGradient(cover.topLeft(), cover.bottomRight())
-        cover_gradient.setColorAt(0.0, self._album_color.lighter(132))
-        cover_gradient.setColorAt(1.0, self._secondary_color.lighter(116))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(cover_gradient)
-        painter.drawRoundedRect(cover, 8.0, 8.0)
-        painter.setPen(QPen(QColor(255, 255, 255, 62) if not light else QColor(0, 0, 0, 20), 1.0))
-        painter.drawRoundedRect(cover.adjusted(0.5, 0.5, -0.5, -0.5), 7.5, 7.5)
-
-        text_left = cover.right() + 11.0
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(text)
-        painter.drawRoundedRect(QRectF(text_left, rect.top() + 14.0, rect.width() * 0.30, 5.5), 2.7, 2.7)
-        painter.setBrush(muted)
-        painter.drawRoundedRect(QRectF(text_left, rect.top() + 26.0, rect.width() * 0.22, 4.5), 2.2, 2.2)
-
-        control_color = QColor(255, 255, 255, 194) if not light else QColor(32, 36, 44, 152)
-        painter.setBrush(control_color)
-        center_x = rect.right() - 51.0
-        for index, height in enumerate((8.0, 15.0, 11.0)):
-            bar = QRectF(center_x + index * 7.0, rect.center().y() - height / 2.0, 3.0, height)
-            painter.drawRoundedRect(bar, 1.5, 1.5)
-        painter.setBrush(QColor(255, 255, 255, 68) if not light else QColor(0, 0, 0, 34))
-        painter.drawRoundedRect(QRectF(rect.right() - 22.0, rect.center().y() - 9.0, 8.0, 18.0), 4.0, 4.0)
-
-    def _paint_border(self, painter: QPainter, rect: QRectF, radius: float, light: bool):
-        stroke = QColor(255, 255, 255, 46) if not light else QColor(170, 176, 188, 82)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(stroke, 1.0))
-        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-
-    def _paint_mist(self, painter: QPainter, center: QPointF, radius_x: float, radius_y: float, color: QColor, alpha: int):
-        painter.save()
-        painter.translate(center)
-        painter.scale(max(1.0, radius_x), max(1.0, radius_y))
-        glow = QRadialGradient(QPointF(0.0, 0.0), 1.0)
-        glow.setColorAt(0.00, QColor(color.red(), color.green(), color.blue(), int(alpha * 0.58)))
-        glow.setColorAt(0.28, QColor(color.red(), color.green(), color.blue(), int(alpha * 0.38)))
-        glow.setColorAt(0.64, QColor(color.red(), color.green(), color.blue(), int(alpha * 0.14)))
-        glow.setColorAt(1.00, QColor(color.red(), color.green(), color.blue(), 0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(glow)
-        painter.drawEllipse(QRectF(-1.0, -1.0, 2.0, 2.0))
-        painter.restore()
-
-    def _dark_body_gradient(self, rect: QRectF) -> QLinearGradient:
-        body = QLinearGradient(0, rect.top(), 0, rect.bottom())
-        body.setColorAt(0.00, QColor(4, 8, 18, 255))
-        body.setColorAt(0.46, QColor(7, 13, 26, 255))
-        body.setColorAt(1.00, QColor(13, 24, 44, 255))
-        return body
-
-    def _rounded_path(self, rect: QRectF, radius: float) -> QPainterPath:
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        return path
-
-    def _float_value(self, key: str, fallback: float) -> float:
-        try:
-            return max(0.0, min(1.0, float(self._values.get(key, fallback))))
-        except (TypeError, ValueError):
-            return fallback
-
-    def _percent_value(self, key: str, fallback: float) -> float:
-        try:
-            value = float(self._values.get(key, fallback))
-        except (TypeError, ValueError):
-            value = fallback
-        if value <= 1.0:
-            value *= 100.0
-        return max(0.0, min(100.0, value))
-
-    def _safe_color(self, value: QColor | str | None, fallback: str) -> QColor:
+    @staticmethod
+    def _safe_color(value, fallback):
         color = QColor(value) if value is not None else QColor(fallback)
         return color if color.isValid() else QColor(fallback)
 
-    def _yaoguang_preview_color(self, value: QColor) -> QColor:
-        color = QColor(value)
-        if not color.isValid():
-            color = QColor("#6C35F2")
-        hue, saturation, value, _alpha = color.getHsvF()
-        if hue < 0 or saturation < 0.16 or value <= 0.18 or value >= 0.98:
-            hue, saturation, value, _alpha = QColor("#6C35F2").getHsvF()
-        return QColor.fromHsvF(hue, max(0.68, min(0.96, saturation)), max(0.54, min(0.96, value)), 1.0)
 
-    def _mix_color(self, first: QColor, second: QColor, amount: float) -> QColor:
-        amount = max(0.0, min(1.0, amount))
-        return QColor(
-            int(first.red() + (second.red() - first.red()) * amount),
-            int(first.green() + (second.green() - first.green()) * amount),
-            int(first.blue() + (second.blue() - first.blue()) * amount),
-        )
+def paint_preview_cover(painter, rect, image, fallback):
+    """Use current artwork; missing artwork keeps a quiet, honest empty tile."""
+    path = QPainterPath()
+    path.addRoundedRect(rect, min(5., rect.height()/5), min(5., rect.height()/5))
+    painter.save()
+    painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+    if not image.isNull():
+        side = min(image.width(), image.height())
+        source = QRectF((image.width()-side)/2, (image.height()-side)/2, side, side)
+        painter.drawImage(rect, image, source)
+    else:
+        painter.fillPath(path, QColor(fallback))
+    painter.restore()
 
 
 class SmoothScrollArea(QScrollArea):
@@ -825,7 +632,6 @@ class SettingsWindow(QDialog):
 
     FINDER_BAR_STYLES = (
         ("专辑与无背景", "transparent"),
-        ("专辑与渐变色背景", "fade"),
         ("专辑与背景", "capsule"),
     )
 
@@ -897,10 +703,14 @@ class SettingsWindow(QDialog):
             & ~Qt.WindowType.WindowContextHelpButtonHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._normalize_finder_bar_setting()
         self._build_ui()
         self._update_theme_schedule_controls()
         self._update_music_background_follow_dependency_controls()
         self._apply_settings_font()
+        self._preview_poll = QTimer(self)
+        self._preview_poll.setInterval(500)
+        self._preview_poll.timeout.connect(self._update_previews)
 
     def _theme(self) -> dict[str, str]:
         # Settings keeps the player's dark glass surface. The saved interface
@@ -2334,7 +2144,7 @@ class SettingsWindow(QDialog):
             self._set_music_ambience_style,
         )
         self._row(c, "背景样式", self.music_ambience_style)
-        self.music_preview = MusicAmbiencePreview(self)
+        self.music_preview = MusicAmbiencePreview(self, island=self.island_widget)
         c.addWidget(self.music_preview)
         self.lyric_flow_style = self._combo(
             list(self.LYRIC_FLOW_STYLES),
@@ -2902,6 +2712,9 @@ class SettingsWindow(QDialog):
         combo.blockSignals(False)
 
     def _update_previews(self):
+        finder = getattr(self, "finder_bar_preview", None)
+        if finder is not None:
+            finder.refresh_track()
         preview = getattr(self, "music_preview", None)
         if isinstance(preview, MusicAmbiencePreview):
             style = self._current_music_ambience_style()
@@ -2918,6 +2731,17 @@ class SettingsWindow(QDialog):
                 secondary_color=secondary_color,
                 playing=bool(getattr(self.island_widget, "media_is_playing", True)),
             )
+
+    def _normalize_finder_bar_setting(self):
+        raw = getattr(self.island_widget, "finder_bar_style", self._setting_value("v2_finder_bar_style", "transparent"))
+        style = normalize_finder_bar_style(raw)
+        if raw != style:
+            setter = getattr(self.island_widget, "set_finder_bar_style", None)
+            if callable(setter):
+                setter(style, notify=False)
+            else:
+                self.island_widget.finder_bar_style = style
+            self._save("v2_finder_bar_style", style)
 
     def _save(self, key: str, value):
         if self.settings:
@@ -3087,8 +2911,11 @@ class SettingsWindow(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._apply_rounded_window_mask()
+        self._update_previews()
+        self._preview_poll.start()
 
     def hideEvent(self, event):
+        self._preview_poll.stop()
         if hasattr(self.island_widget, "set_settings_window_active"):
             self.island_widget.set_settings_window_active(False)
         super().hideEvent(event)

@@ -2188,6 +2188,7 @@ class IslandStackVisual(QWidget):
         if frame_plan.mark_render_frame:
             self._mark_render_frame(now)
         if frame_plan.update_widget:
+            self._reserve_interaction_mask_bounds()
             if wave_damage is None:
                 self.update()
             else:
@@ -11061,6 +11062,54 @@ class IslandStackVisual(QWidget):
             motion.y = visual.rect.top()
             motion.vy = 0.0
 
+    def _reserve_interaction_mask_bounds(self):
+        # Qt may restrict a dispatched paint region to the native mask it had
+        # when update() was queued. Reserve growth before queuing that paint;
+        # the paint path checks the same bounds again for unsolicited exposes.
+        if (sys.platform != "win32"
+                or not (getattr(self, "finder_mode", False) or getattr(self, "scene_suppressed", False))):
+            return
+        visuals = self._build_visuals()
+        rects = [QRectF(v.rect) for v in visuals]
+        rects += [QRectF(m.rect) for m in self.motions.values() if m.opacity > .06]
+        self._update_interaction_mask(rects, defer_shrink=True)
+
+    def _prepare_compact_width_transition(self, visuals, now):
+        music = next((v for v in visuals if v.kind == IslandKind.MUSIC), None)
+        if self.expanded or music is None:
+            self._compact_width_token = None
+            self._compact_held_lyric = None
+            self._compact_shrink_after = 0.0
+            return
+        token = (getattr(self, "media_track_id", ""), self._compact_music_text())
+        previous = getattr(self, "_compact_width_token", None)
+        old_width = getattr(self, "_compact_target_width", music.rect.width())
+        if token != previous:
+            self._compact_width_token = token
+            self._compact_shrink_after = 0.0
+            self._compact_held_lyric = None
+            self._compact_text_reveal_at = now if previous is not None else now - .10
+            if previous is not None and music.rect.width() > old_width + .5:
+                self._compact_held_lyric = getattr(self, "_compact_lyric_presented", (("",), {}))
+            elif previous is not None and music.rect.width() < old_width - .5:
+                # Reveal the new, shorter line before starting shell shrink.
+                self._compact_shrink_after = now + .10
+        self._compact_target_width = music.rect.width()
+
+    def _compact_lyric_paint_snapshot(self, display_lines, phase):
+        now = getattr(self, "_island_lyric_frame_at", None)
+        now = time.monotonic() if now is None else now
+        held = getattr(self, "_compact_held_lyric", None)
+        if held is not None and getattr(self, "_compact_shell_waiting", False):
+            return held[0], held[1], 1.0
+        if held is not None:
+            self._compact_held_lyric = None
+            self._compact_text_reveal_at = now
+        self._compact_lyric_presented = (tuple(display_lines), dict(phase))
+        started = getattr(self, "_compact_text_reveal_at", now - 1.)
+        alpha = max(0., min(1., (now - started) / .10))
+        return display_lines, phase, alpha
+
     def paintEvent(self, event):
         # Layout and ink must consume one verified source snapshot. A queued
         # timer can still hold the old row when this first visible frame is
@@ -11075,18 +11124,10 @@ class IslandStackVisual(QWidget):
             self._island_lyric_frame_phase = None
 
     def _paint_island_frame(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        if getattr(self, "high_quality_font_rendering", False):
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-
         now = self._island_lyric_frame_at
         dt = (now - self.last_frame_at) * self._animation_speed_factor()
         self.last_frame_at = now
 
-        self._paint_stage(painter)
-        self._paint_taskbar_drop_hint(painter)
         visuals = self._build_visuals()
         transition_scale, transition_opacity, scene_hidden, transition_edge_progress = self._scene_transition_params(now)
         if scene_hidden:
@@ -11094,24 +11135,10 @@ class IslandStackVisual(QWidget):
             self.clearMask()
             self.interaction_mask_active = False
             self.last_mask_rect = QRectF()
-            if self.show_debug_overlay:
-                self._paint_help(painter)
-            painter.end()
             return
 
         targets = {visual.key for visual in visuals}
-        painter_transform_applied = False
-        if transition_scale != 1.0 or transition_opacity != 1.0:
-            painter.save()
-            anchor = self._scene_transition_anchor(visuals)
-            offset = self._scene_transition_offset(visuals, transition_edge_progress)
-            painter.translate(offset)
-            painter.translate(anchor.x(), anchor.y())
-            painter.scale(transition_scale, transition_scale)
-            painter.translate(-anchor.x(), -anchor.y())
-            painter.setOpacity(transition_opacity)
-            painter_transform_applied = True
-
+        self._prepare_compact_width_transition(visuals, now)
         drag_hides_auxiliary_visuals = self._drag_hides_auxiliary_visuals()
         taskbar_compact_active = self._taskbar_compact_active()
         stack_bounce_active = now < float(getattr(self, "stack_bounce_until", 0.0) or 0.0)
@@ -11129,6 +11156,9 @@ class IslandStackVisual(QWidget):
                 self.motions[visual.key] = SpringRect(start)
             if motion_plan.snap_to_target:
                 self._apply_motion_snap_to_target(visual.key, motion_plan.target_rect, motion_plan.target_opacity)
+                continue
+            if (visual.kind == IslandKind.MUSIC and not self.expanded
+                    and now < getattr(self, "_compact_shrink_after", 0.0)):
                 continue
             self.motions[visual.key].step(
                 motion_plan.target_rect,
@@ -11169,6 +11199,45 @@ class IslandStackVisual(QWidget):
 
         paint_plan = stack_frame_paint_plan(visuals, self.motions, minimum_opacity=0.06)
         items = list(paint_plan.visible_items)
+        # Publish one frame's native bounds before constructing its painter.
+        # Targets reserve growth immediately; current springs keep shrinkage
+        # inside the previous region until all visible geometry has settled.
+        mask_rects = list(paint_plan.mask_rects) + [v.rect for v in visuals]
+        moving = any(
+            max(abs(a - b) for a, b in zip(
+                (m.rect.x(), m.rect.y(), m.rect.width(), m.rect.height()),
+                (v.rect.x(), v.rect.y(), v.rect.width(), v.rect.height()),
+            )) > .1
+            for v in visuals if (m := self.motions.get(v.key)) is not None
+        )
+        mask_rects += [self._hover_rect(m.rect, now) for v, m in items
+                       if v.key == self.hovered_key and now < self.hover_bounce_until]
+        self._compact_shell_waiting = any(
+            v.kind == IslandKind.MUSIC and not self.expanded
+            and m.rect.width() < v.rect.width() - .5
+            for v, m in items
+        )
+        self._update_interaction_mask(mask_rects, defer_shrink=moving)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        if getattr(self, "high_quality_font_rendering", False):
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        self._paint_stage(painter)
+        self._paint_taskbar_drop_hint(painter)
+        painter_transform_applied = False
+        if transition_scale != 1.0 or transition_opacity != 1.0:
+            painter.save()
+            anchor = self._scene_transition_anchor(visuals)
+            offset = self._scene_transition_offset(visuals, transition_edge_progress)
+            painter.translate(offset)
+            painter.translate(anchor.x(), anchor.y())
+            painter.scale(transition_scale, transition_scale)
+            painter.translate(-anchor.x(), -anchor.y())
+            painter.setOpacity(transition_opacity)
+            painter_transform_applied = True
+
         self._paint_myfinder_group_frame(painter, items, dt)
 
         self._paint_dot_group_backing(painter, items)
@@ -11218,7 +11287,6 @@ class IslandStackVisual(QWidget):
                     painter.restore()
                 self._island_glow_current_visual_key = ""
 
-        self._update_interaction_mask(list(paint_plan.mask_rects))
         if painter_transform_applied:
             painter.restore()
         self._paint_surface_transition(painter, now)
@@ -11263,7 +11331,7 @@ class IslandStackVisual(QWidget):
     def _paint_taskbar_drop_hint(self, painter: QPainter):
         self._sync_taskbar_drop_overlay()
 
-    def _update_interaction_mask(self, rects: list[QRectF]):
+    def _update_interaction_mask(self, rects: list[QRectF], *, defer_shrink: bool = False):
         now = time.monotonic()
         plan = stack_interaction_mask_update_plan(
             rects,
@@ -11278,6 +11346,7 @@ class IslandStackVisual(QWidget):
             last_pointer_move_at=float(getattr(self, "last_pointer_move_at", 0.0) or 0.0),
             last_mask_update_at=float(getattr(self, "last_mask_update_at", 0.0) or 0.0),
             unit=self._u(1.0),
+            defer_shrink=defer_shrink,
         )
         if plan.record_update_at:
             self.last_mask_update_at = now
@@ -13819,6 +13888,8 @@ class IslandStackVisual(QWidget):
                 phase.pop(key, None)
         compact_size = self._compact_primary_lyric_font_size()
         display_lines = self._lyric_display_lines(lines[index])
+        display_lines, phase, text_alpha = self._compact_lyric_paint_snapshot(display_lines, phase)
+        painter.setOpacity(painter.opacity() * text_alpha)
         base_text = self._music_lyric_base_text_color(132)
         live_text = self._music_lyric_text_color(246)
         if len(display_lines) > 1 and rect.height() >= self._u(48.0):

@@ -81,7 +81,7 @@ class SimplifiedSettingsDefaultsTests(unittest.TestCase):
         self.assertEqual(settings_store.DEFAULT_SETTINGS, original)
 
     def test_finder_styles_and_drag_ratio_normalize_without_reopening_global_position_settings(self):
-        for raw, expected in (("capsule", "capsule"), (" FADE ", "fade"), ("transparent", "transparent"),
+        for raw, expected in (("capsule", "capsule"), (" FADE ", "capsule"), ("transparent", "transparent"),
                               ("unknown", "transparent"), (None, "transparent")):
             with self.subTest(style=raw):
                 self.assertEqual(settings_store.normalize_finder_bar_style(raw), expected)
@@ -97,7 +97,7 @@ class SimplifiedSettingsDefaultsTests(unittest.TestCase):
             manager.set("v2_stack_center_ratio", .8)
             manager.save_now()
             loaded = settings_store.SettingsManager()
-            self.assertEqual(loaded.get("v2_finder_bar_style"), "fade")
+            self.assertEqual(loaded.get("v2_finder_bar_style"), "capsule")
             self.assertEqual(loaded.get("v2_finder_bar_center_ratio"), .8)
             self.assertEqual(loaded.get("v2_location_mode"), "top")
             self.assertEqual(loaded.get("v2_stack_center_ratio"), settings_store.DEFAULT_SETTINGS["v2_stack_center_ratio"])

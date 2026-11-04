@@ -43,12 +43,12 @@ class ImmersiveBarStyleTests(unittest.TestCase):
             self.visual._paint_music(painter, rect if paint_rect is None else paint_rect, False)
         return image
 
-    def test_tasker_three_materials_preserve_cover_timed_lyrics_and_real_taskbar_bounds(self):
+    def test_tasker_materials_preserve_cover_timed_lyrics_and_real_taskbar_bounds(self):
         visual = self.tasker()
         selected = QRectF(200, 1040, 500, 40)
         before_size = visual._taskbar_compact_music_size(420., 40., selected_zone=selected)
         for dpr in (1., 2.):
-            for style in ("transparent", "fade", "capsule"):
+            for style in ("transparent", "capsule"):
                 with self.subTest(dpr=dpr, style=style):
                     visual.set_finder_bar_style(style, notify=False)
                     lyrics = []
@@ -67,9 +67,6 @@ class ImmersiveBarStyleTests(unittest.TestCase):
                     x, y = round(rect.center().x() * dpr), round((content.top() + 2.) * dpr)
                     self.assertEqual(image.pixelColor(x, y).alpha(), 0 if style == "transparent" else 222)
                     self.assertEqual(image.pixelColor(x, round(2 * dpr)).alpha(), 0)
-                    if style == "fade":
-                        self.assertEqual(image.pixelColor(round(3 * dpr), round(rect.center().y() * dpr)).alpha(), 0)
-                        self.assertGreaterEqual(lyrics[0].left() - visual.music_cover_rect.right(), 24. - 1.e-6)
 
     def test_same_content_dimensions_and_native_tone_produce_same_finder_tasker_material(self):
         visual = self.tasker()
@@ -78,7 +75,7 @@ class ImmersiveBarStyleTests(unittest.TestCase):
         visual.finder_material.mid_color = QColor(visual.taskbar_material_color)
         # Isolate background+cover from the two placements' reading policies.
         with patch.object(visual, "_paint_compact_lyric_viewport"):
-            for style in ("transparent", "fade", "capsule"):
+            for style in ("transparent", "capsule"):
                 for dpr in (1., 2.):
                     with self.subTest(style=style, dpr=dpr):
                         visual.set_finder_bar_style(style, notify=False)
@@ -125,7 +122,7 @@ class ImmersiveBarStyleTests(unittest.TestCase):
 
     def test_tasker_styles_keep_hover_transport_and_narrow_zone_play_hit_targets(self):
         visual = self.tasker()
-        for style in ("transparent", "fade", "capsule"):
+        for style in ("transparent", "capsule"):
             with self.subTest(style=style):
                 visual.set_finder_bar_style(style, notify=False)
                 visual.hovered_key = "music"
@@ -166,7 +163,7 @@ class ImmersiveBarStyleTests(unittest.TestCase):
         visual.taskbar_selected_drop_zone = QRectF()
         visual.music_ambience_style = "system"
         visual._music_system_dark = False
-        for style in ("transparent", "fade", "capsule"):
+        for style in ("transparent", "capsule"):
             with self.subTest(style=style):
                 visual.set_finder_bar_style(style, notify=False)
                 self.assertFalse(visual._immersive_bar_compact_active())
@@ -188,7 +185,7 @@ class ImmersiveBarStyleTests(unittest.TestCase):
         visual._island_dj_title, visual._island_dj_artist = "Next song", "GluSpot singer"
         visual._finder_dj_reveal_from = visual._finder_dj_reveal_target = 0.
         visual._finder_dj_reveal_at = 100.
-        for style in ("transparent", "fade", "capsule"):
+        for style in ("transparent", "capsule"):
             visual.set_finder_bar_style(style, notify=False)
             with patch.object(visual, "_paint_personal_dj_island", wraps=visual._paint_personal_dj_island) as dj, \
                     patch.object(visual, "_paint_compact_lyric_viewport") as lyrics:
@@ -209,7 +206,7 @@ class ImmersiveBarStyleTests(unittest.TestCase):
         visual.expanded = True
         visual.music_ambience_style = "pure_black"
         before_ink = visual._music_lyric_text_color()
-        for style in ("transparent", "fade", "capsule"):
+        for style in ("transparent", "capsule"):
             visual.set_finder_bar_style(style, notify=False)
             with patch.object(visual, "_paint_finder_bar_music", side_effect=AssertionError("compact bars only")), \
                     patch.object(visual, "_execute_music_surface_paint_step") as steps:
