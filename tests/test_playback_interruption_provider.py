@@ -88,6 +88,38 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
     def owned_pauses(self):
         return sum(name == 'pause' for name, _ in self.decoder.calls)
 
+    async def test_fresh_wrappers_do_not_drop_the_external_pause(self):
+        native = Session('cloudmusic.exe')
+
+        class Wrap:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        class Refreshing:
+            def get_sessions(self):
+                return [Wrap(native)]
+
+            def add_sessions_changed(self, callback):
+                return callback
+
+            def remove_sessions_changed(self, token):
+                return None
+
+        self.system._manager = Refreshing()
+        with _capture_interruption_log() as lines:
+            self.assertTrue(self.provider.set_playback_interruption_enabled(True))
+            await self.flush()
+            for _ in range(3):
+                await self.provider._interruption_observer.collect_once()
+            await self.start_owned()
+        self.assertEqual(native.pauses, 1)
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertFalse(any('revalidate-stale' in line or 'reason=removed' in line for line in lines))
+        self.assertEqual(sum('reason=baseline' in line for line in lines), 1)
+
     async def test_library_start_pauses_browser_music_but_never_video_or_unknown(self):
         music = Session('chrome.exe')
         video = Session('edge.exe', media_type=2)
