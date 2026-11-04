@@ -86,67 +86,64 @@ class MusicLoadingHandoffTests(unittest.TestCase):
                 self.assertFalse(self.window._art_loading_waiting)
                 self.assertFalse(self.window._should_blur_preview(self.owner.album_art))
 
-    def test_loaded_lyrics_wait_for_current_cycle_and_keep_current_media_time(self):
+    def test_loaded_lyrics_end_skeleton_immediately_and_keep_current_media_time(self):
         self.begin()
         self.render(102.2)
         self.assertTrue(self.window._lyric_loading_visible(102.2))
-        self.resolve(102.6)
-        self.assertAlmostEqual(self.window._lyric_loading_release_at, 105.0)
-        self.assertFalse(self.window._has_timed_lyrics)
-        self.assertEqual(self.window._lyric_hit_rects, {})
         self.owner.media_position_seconds = 8.5
+        self.resolve(102.6)
+        self.assertEqual(self.window._lyric_loading_release_at, 0.0)
+        self.assertFalse(self.window._lyric_loading_visible(102.6))
+        self.assertTrue(self.window._has_timed_lyrics)
+        self.assertTrue(self.window._lyric_hit_rects)
         self.render(105.01)
         self.assertTrue(self.window._has_timed_lyrics)
         self.assertEqual(self.window._lyric_motion.active_index, 2)
 
-    def test_instrumental_centers_only_after_visible_cycle_disappears(self):
+    def test_instrumental_centers_immediately_without_finishing_loading_cycle(self):
         self.begin()
         self.render(102.2)
         self.resolve(102.7, instrumental=True)
-        self.assertEqual(self.window._cover_layout_to, 0.0)
-        self.assertTrue(self.window._lyric_loading_visible(104.9))
+        self.assertEqual(self.window._cover_layout_to, 1.0)
+        self.assertFalse(self.window._lyric_loading_visible(102.7))
         self.render(105.01)
         self.assertEqual(self.window._cover_layout_to, 1.0)
         self.assertFalse(self.window._has_timed_lyrics)
 
-    def test_resolved_long_song_prewarms_during_cycle_without_painting_or_seek_targets(self):
+    def test_resolved_long_song_builds_rows_without_retaining_a_loading_cycle(self):
         self.begin()
         self.render(102.2)
         self.owner.timed_lyrics = [(float(i * 4), f"Loaded verse {i} continues softly") for i in range(120)]
         self.owner.lyrics = [text for _at, text in self.owner.timed_lyrics]
-        with patch.object(self.window, "_paint_wrapped_lifted_lyric") as word_paint:
+        with patch.object(self.window, "_paint_lyric_loading") as loading:
             self.render(102.6)
             for tick in range(24):
                 now = 102.7 + tick * 0.01
                 with patch("local.music_surface_window.time.monotonic", return_value=now):
                     self.window._on_animation_tick()
                 self.render(now)
-        word_paint.assert_not_called()
+        loading.assert_not_called()
         self.assertIsNone(self.window._song_layout_build)
         self.assertEqual(len(self.window._song_layouts), 120)
         prepared_key = self.window._song_layout_key
-        self.assertFalse(self.window._has_timed_lyrics)
-        self.assertEqual(self.window._lyric_hit_rects, {})
-        self.assertIsNone(self.window._last_visible_lyric_snapshot)
+        self.assertTrue(self.window._has_timed_lyrics)
+        self.assertTrue(self.window._lyric_hit_rects)
+        self.assertFalse(self.window._lyric_loading_visible(103.))
         self.render(105.01)
         self.assertEqual(self.window._song_layout_key, prepared_key)
         self.assertTrue(self.window._has_timed_lyrics)
         self.assertTrue(self.window._lyric_hit_rects)
 
-    def test_result_at_cycle_end_retains_full_fade_without_starting_another_cycle(self):
+    def test_result_at_cycle_end_exits_loading_without_an_extra_fade_cycle(self):
         for result_at in (104.95, 105.0):
             with self.subTest(result_at=result_at):
                 self.begin(101.0, f"late-{result_at}")
                 self.render(102.2)
                 self.resolve(result_at)
-                self.assertAlmostEqual(self.window._lyric_loading_exit_started_at, result_at)
-                self.assertAlmostEqual(self.window._lyric_loading_release_at, result_at + 0.5)
-                with patch("local.music_surface_window.time.monotonic", return_value=105.1):
-                    cycle, phase = self.window._lyric_loading_phase(105.1)
-                self.assertEqual(cycle, 0)
-                self.assertAlmostEqual(phase, 1.0, places=4)
-                self.assertTrue(self.window._lyric_loading_visible(result_at + 0.25))
-                self.assertAlmostEqual(self.window._lyric_loading_reveal(result_at + 0.25)[1], 0.5)
+                self.assertEqual(self.window._lyric_loading_exit_started_at, 0.)
+                self.assertEqual(self.window._lyric_loading_release_at, 0.)
+                self.assertFalse(self.window._lyric_loading_visible(result_at))
+                self.assertTrue(self.window._has_timed_lyrics)
                 self.render(result_at + 0.51)
                 self.assertFalse(self.window._lyric_loading_visible(result_at + 0.51))
                 self.assertTrue(self.window._has_timed_lyrics)
@@ -187,7 +184,7 @@ class MusicLoadingHandoffTests(unittest.TestCase):
         self.render(105.02)
         self.assertTrue(self.window._has_timed_lyrics)
 
-    def test_loading_diagonal_reveal_and_exit_start_from_bottom_right(self):
+    def test_loading_diagonal_reveal_ends_as_soon_as_result_arrives(self):
         self.begin()
         initial, entering, full = (self.skeleton(at) for at in (101.9, 102.25, 102.6))
         scale = self.window._surface_scale()
@@ -201,13 +198,8 @@ class MusicLoadingHandoffTests(unittest.TestCase):
         self.assertGreater(full.pixelColor(*first).alpha(), 0)
         self.resolve(102.7)
         exiting = self.skeleton(104.7)
-        _cycle, phase = self.window._lyric_loading_phase(104.7)
-        exit_first = (first[0], round(top + (1 - phase) * step + height * 0.5))
-        exit_last = (last[0], round(top + (6 - phase) * step + height * 0.5))
-        # Compare each position with its own tint, since rows have different
-        # base opacity and the last row moves in the final half-second.
-        self.assertGreater(exiting.pixelColor(*exit_first).alpha(), 0)
-        self.assertEqual(exiting.pixelColor(*exit_last).alpha(), 0)
+        self.assertEqual(exiting.pixelColor(*first).alpha(), 0)
+        self.assertEqual(exiting.pixelColor(*last).alpha(), 0)
 
     def test_ripple_cannot_paint_inside_transparent_cover_slot(self):
         self.owner.album_art = QImage()

@@ -190,21 +190,24 @@ class WideChromeRecoveryTests(unittest.TestCase):
                     window._sync_narrow_mode()
                     window.set_content_layout(layout, animate=False)
                     baseline = dict(saved)
+                    owner.lyrics, owner.timed_lyrics = ["暂无歌词"], []
                     with patch.object(window, "_display_lyrics", return_value=(["暂无歌词"], [])):
                         window._update_lyric_loading_state(100.)
                         window._sync_no_lyrics_content_layout(100.)
                     self.assertEqual(window._effective_content_layout(), "cover")
                     window._cover_layout_to = 0.0  # The cover travel has not settled yet.
+                    owner.lyrics = ["查找歌词中"]
                     with patch.object(window, "_display_lyrics", return_value=(["查找歌词中"], [])):
                         for now in (100.1, 101.5, 104.):
                             window._update_lyric_loading_state(now)
                             window._sync_no_lyrics_content_layout(now)
                             self.assertEqual(window._effective_content_layout(), "cover")
                             self.assertFalse(window._lyric_loading_visible(now))
+                    owner.lyrics, owner.timed_lyrics = ["Found"], [(0., "Found")]
                     with patch.object(window, "_display_lyrics", return_value=(["Found"], [(0., "Found")])):
                         window._update_lyric_loading_state(105.)
                         window._sync_no_lyrics_content_layout(105.)
-                    self.assertEqual(window._effective_content_layout(), layout)
+                    self.assertEqual(window._effective_content_layout(), "lyrics")
                     self.assertEqual(window._content_layout, layout)
                     self.assertEqual(saved, baseline)
 

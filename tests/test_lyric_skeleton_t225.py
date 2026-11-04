@@ -92,7 +92,7 @@ class LyricSkeletonFailureTests(unittest.TestCase):
             self.fail_next_preparation()
             rows = self.window._resolve_display_lyrics()
             self.window._update_lyric_loading_state(106.2, *rows)
-            self.assertEqual(log.call_args.args[2], "result_cycle_exit")
+            self.assertEqual(log.call_args.args[2], "preparation_failed_exit")
             self.window._update_lyric_loading_state(111., *rows)
             self.assertEqual(log.call_args.args[2], "preparation_failed_exit")
             self.assertTrue(log.call_args.kwargs["store_failed"])

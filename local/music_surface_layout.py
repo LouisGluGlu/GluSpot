@@ -65,6 +65,8 @@ class MusicContentLayoutMixin:
         self._content_layout = normalize_content_layout(getter("v2_music_content_layout", "lyrics") if callable(getter) else "lyrics")
         self._temporary_content_layout = None
         self._no_lyrics_layout_track = None
+        self._no_lyrics_layout_active = False
+        self._no_lyrics_manual_layout = None
         self._content_layout_cross_pair_next = False
         self._layout_snapshot = QImage()
         self._layout_target_snapshot = QImage()
@@ -321,7 +323,8 @@ class MusicContentLayoutMixin:
     def _content_column_geometry(self, rect=None):
         """Width changes the external column arrangement, never its mode."""
         content, cover, column = self._wide_content_column_geometry(rect)
-        if self._content_layout in {"lyrics", "playlist"}:
+        layout = self._effective_content_layout()
+        if layout in {"lyrics", "playlist"}:
             narrow = self._content_layout_is_narrow()
             surface = QRectF(self.rect()) if rect is None else QRectF(rect)
             scale = self._surface_scale(surface)
@@ -330,15 +333,15 @@ class MusicContentLayoutMixin:
             stacked_content = surface.adjusted(margin, top, -margin, -margin)
             side = max(1., min(96., surface.width() * .267, stacked_content.height() * .28))
             stacked_cover = QRectF(stacked_content.left(), stacked_content.top(), side, side)
-            column_top = surface.top() if self._content_layout == "lyrics" else stacked_cover.bottom() + 24. * scale
-            bottom = surface.bottom() if self._content_layout == "lyrics" else max(column_top + 1., surface.bottom() - 156. * scale)
+            column_top = surface.top() if layout == "lyrics" else stacked_cover.bottom() + 24. * scale
+            bottom = surface.bottom() if layout == "lyrics" else max(column_top + 1., surface.bottom() - 156. * scale)
             stacked_column = QRectF(stacked_content.left(), column_top, stacked_content.width(), bottom - column_top)
             # Content, artwork and the reading viewport share one pose.
             fraction = self._width_layout_fraction
             content = self._interpolate_rect(content, stacked_content, fraction)
             cover = self._interpolate_rect(cover, stacked_cover, fraction)
             column = self._interpolate_rect(column, stacked_column, fraction)
-            if self._content_layout != "lyrics":
+            if layout != "lyrics":
                 column = self._separate_width_column(cover, column)
         return content, cover, column
 
@@ -380,29 +383,49 @@ class MusicContentLayoutMixin:
         return self._temporary_content_layout or self._content_layout
 
     def _sync_no_lyrics_content_layout(self, now):
-        """Present resolved lyricless songs as cover without saving a choice."""
+        """Use the existing cover mode for a contiguous run without lyrics.
+
+        The override is presentation state, separate from the saved choice.
+        A button click within this run is remembered until usable lyrics
+        arrive, including across instrumental track changes and quiet retries.
+        """
         lines, timed = self._display_lyrics()
         track = self._visual_track_identity()
-        changed_track = track != self._no_lyrics_layout_track
         self._no_lyrics_layout_track = track
-        pending = self._lyrics_lookup_pending(lines, timed)
-        if pending or self._lyric_loading_holds_result(now):
-            # Same-song recovery keeps its cover while searching quietly.
-            # A new song starts with the saved layout and ordinary loader.
-            if changed_track and self._temporary_content_layout is not None:
-                self._change_content_layout(self._content_layout, temporary=True)
+        state = self._lyric_content_state(now, lines, timed)
+        if state == "loading":
+            # Once degraded, keep the cover while the next lookup or a
+            # same-track recovery is pending. No lyric column is reserved.
             return
-        placeholder = str(getattr(self.owner, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip()
-        absent = {"", "暂无歌词", placeholder, INTRO_COUNTDOWN_TEXT}
-        has_lyrics = any(str(text).strip() not in absent for text in
-                         ([text for _start, text in timed] if timed else lines))
-        title = str(getattr(self.owner, "track_title", "") or "").strip()
-        lyricless = (not has_lyrics and title not in {"", "暂无媒体", "暂无播放", "媒体初始化中"})
-        target = "cover" if lyricless and self._content_layout in {"lyrics", "cover_lyrics"} else self._content_layout
-        self._change_content_layout(target, temporary=True)
+        if state == "no_lyrics":
+            self._no_lyrics_layout_active = True
+            target = self._no_lyrics_manual_layout or "cover"
+            if (self._layout_old in {"lyrics", "cover_lyrics"}
+                    and not self._layout_snapshot.isNull()):
+                self._layout_animation.stop()
+                self._finish_content_layout()
+            # Discard the old lyric bitmap at this boundary. A terminal
+            # instrumental result must not crossfade stale ink over artwork.
+            self._change_content_layout(target, temporary=True, animate=False)
+            return
+        if self._no_lyrics_layout_active:
+            if state == "loaded":
+                target = "playlist" if self._no_lyrics_manual_layout == "playlist" else "lyrics"
+            else:
+                target = self._content_layout
+            self._no_lyrics_layout_active = False
+            self._no_lyrics_manual_layout = None
+            self._change_content_layout(target, temporary=True)
 
     def _cycle_content_layout(self):
+        self._sync_no_lyrics_content_layout(time.monotonic())
         effective = self._effective_content_layout()
+        if self._no_lyrics_layout_active:
+            following = "cover" if effective == "playlist" else "playlist"
+            self._no_lyrics_manual_layout = following
+            # A deliberate no-lyrics choice is a user preference; unlike
+            # automatic degradation it may use the existing settings path.
+            return self.set_content_layout(following)
         # Preserve the established click order at every width: first the
         # current pair, then its corresponding external/cover form.
         same_pair = {"lyrics": "playlist", "playlist": "lyrics",
@@ -417,6 +440,8 @@ class MusicContentLayoutMixin:
         return changed
 
     def _content_layout_tooltip(self):
+        if self._no_lyrics_layout_active:
+            return "无歌词：单击切换仅专辑 / 播放列表"
         return "单击切换：先切换同组布局，再切换另一组"
 
     def _pulse_content_layout_edges(self):
@@ -463,7 +488,7 @@ class MusicContentLayoutMixin:
         if temporary:
             if layout == self._effective_content_layout():
                 return False
-        elif layout == self._content_layout:
+        elif layout == self._content_layout and self._temporary_content_layout is None:
             return False
         self._content_layout_cross_pair_next = False
         # An explicit content choice supersedes a pending width bitmap.

@@ -108,6 +108,7 @@ from local.translation_style_variants import resolve_translation_style
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
 _LYRIC_LOADING_MARKERS = frozenset({"查找歌词中", "寻找歌词中", "加载歌词中"})
+_LYRIC_LOADING_TIMEOUT_SECONDS = 30.0
 
 
 def constrained_window_size(
@@ -356,6 +357,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._visual_lyric_cache_key = None
         self._visual_lyric_layers = ()
         self._lyric_loading_track_key = None
+        self._lyric_loading_timed_out = False
         self._lyric_loading_started_at = 0.0
         self._lyric_loading_last_stage = None
         self._lyric_loading_waiting = False
@@ -2479,9 +2481,12 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         lines, timed = self._display_lyrics()
         now = time.monotonic()
         self._update_lyric_loading_state(now, lines, timed)
-        # Preserve the preceding layout until this song is resolved and the
-        # visible loading cycle has finished. A centered song has no skeleton.
-        if self._lyrics_lookup_pending(lines, timed) or self._lyric_loading_holds_result(now):
+        state = self._lyric_content_state(now, lines, timed)
+        if state == "no_lyrics":
+            return True
+        # Preserve the preceding pose only while this lookup is unresolved.
+        # A centered song has no lyric skeleton.
+        if state == "loading":
             return self._lyric_loading_hold_centered
         placeholder = str(getattr(self.owner, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip()
         # Count semantic lyric rows only after display filtering. Translations
@@ -2502,12 +2507,64 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._resolved_centered_track_key = track_key
         return centered
 
+    def _lyric_content_state(self, now=None, lines=None, timed=None) -> str:
+        """Classify the provider/display boundary without treating a miss as ink.
+
+        Providers publish a loading sentinel while their bounded fetch/retry
+        work is pending, and ``暂无歌词`` after a miss/failure. Pure-music
+        sentinels use the island's existing instrumental classification. The
+        visual deadline only ends the loader; a late result is still accepted.
+        """
+        title = str(getattr(self.owner, "track_title", "") or "").strip()
+        idle = title in {"", "暂无媒体", "暂无播放", "媒体初始化中"}
+        if lines is None or timed is None:
+            lines, timed = self._display_lyrics()
+        placeholder = str(getattr(self.owner, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip()
+        absent = {"", "暂无歌词", placeholder, INTRO_COUNTDOWN_TEXT}
+        def semantic(rows):
+            return any(str(text).strip() not in absent
+                       and str(text).strip() not in _LYRIC_LOADING_MARKERS for text in rows)
+        raw_timed = getattr(self.owner, "timed_lyrics", ()) or ()
+        raw_lines = getattr(self.owner, "lyrics", ()) or ()
+        raw_rows = [text for _start, text in raw_timed] if raw_timed else raw_lines
+        instrumental = getattr(self.owner, "_is_instrumental_track", None)
+        pure_music = bool(instrumental()) if callable(instrumental) else False
+        # Standalone music surfaces lack the island classifier; use precisely
+        # the same single-row marker contract, never a title/artist guess.
+        if not pure_music and len(raw_rows) == 1:
+            marker = str(raw_rows[0]).lower()
+            pure_music = any(word in marker for word in ("纯音乐", "instrumental", "伴奏", "无人声"))
+        raw_terminal = bool(raw_rows) and not semantic(raw_rows) and not any(
+            str(row).strip() in _LYRIC_LOADING_MARKERS for row in raw_rows)
+        if pure_music or raw_terminal:
+            return "idle" if idle else "no_lyrics"
+        raw_pending = self._lyrics_lookup_pending(raw_lines, raw_timed)
+        displayed = semantic([text for _start, text in timed] if timed else lines)
+        if displayed and not raw_pending:
+            return "loaded"
+        if idle:
+            return "idle"
+        store = getattr(self.owner, "_lyric_presentation_store", None)
+        if store is not None and store.failed is not None:
+            return "no_lyrics"
+        if raw_pending or self._lyrics_lookup_pending(lines, timed):
+            instant = time.monotonic() if now is None else float(now)
+            if (self._visual_track_identity() == self._lyric_loading_track_key
+                    and instant - self._lyric_loading_started_at >= _LYRIC_LOADING_TIMEOUT_SECONDS):
+                self._lyric_loading_timed_out = True
+                return "no_lyrics"
+            return "loading"
+        return "no_lyrics"
+
     def _lyrics_lookup_pending(
         self, lines: list[str] | None = None,
         timed: list[tuple[float, str]] | None = None,
     ) -> bool:
         title = str(getattr(self.owner, "track_title", "") or "").strip()
         if title in {"", "暂无媒体", "暂无播放", "媒体初始化中"}:
+            return False
+        if (getattr(self, "_lyric_loading_timed_out", False)
+                and self._visual_track_identity() == self._lyric_loading_track_key):
             return False
         if lines is None or timed is None:
             lines, timed = self._display_lyrics()
@@ -2524,7 +2581,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     ) -> None:
         """Keep visual loading local to a track; never hold its provider clock."""
         key = self._visual_track_identity()
-        pending = self._lyrics_lookup_pending(lines, timed)
+        if key != getattr(self, "_lyric_loading_track_key", None):
+            self._lyric_loading_timed_out = False
+        state = self._lyric_content_state(now, lines, timed)
+        pending = state == "loading"
         if key != getattr(self, "_lyric_loading_track_key", None):
             self._lyric_loading_track_key = key
             self._lyric_loading_started_at = float(now)
@@ -2547,16 +2607,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._lyric_loading_waiting = True
         elif not pending and self._lyric_loading_waiting:
             self._lyric_loading_waiting = False
-            if self._lyric_loading_has_shown:
-                visible_at = self._lyric_loading_started_at + 1.0
-                cycle = max(1, math.ceil((float(now) - visible_at) / 3.0))
-                self._lyric_loading_cycle_end_at = visible_at + cycle * 3.0
-                self._lyric_loading_exit_started_at = max(
-                    float(now), self._lyric_loading_cycle_end_at - 0.5,
-                )
-                # A result arriving at the cycle boundary still deserves the
-                # full fade, instead of reducing it to one paint or 50 ms.
-                self._lyric_loading_release_at = self._lyric_loading_exit_started_at + 0.5
+            self._lyric_loading_has_shown = False
+            self._lyric_loading_release_at = 0.0
+            self._lyric_loading_exit_started_at = 0.0
+            self._lyric_loading_cycle_end_at = 0.0
         if (
             pending and not self._lyric_loading_hold_centered
             and float(now) >= self._lyric_loading_started_at + 1.0
@@ -2613,9 +2667,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
 
     def _lyric_loading_visible(self, now: float) -> bool:
         return bool(
-            not self._lyric_loading_hold_centered
+            self._lyric_content_state(now) == "loading"
+            and self._effective_content_layout() not in {"cover", "playlist"}
+            and not self._lyric_loading_hold_centered
             and self._lyric_loading_has_shown
-            and (self._lyric_loading_waiting or self._lyric_loading_holds_result(now))
+            and self._lyric_loading_waiting
         )
 
     def _lyric_loading_reveal(self, now: float) -> tuple[float, float]:
@@ -2646,18 +2702,16 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     def _paint_lyric_loading(self, painter: QPainter, column: QRectF, now: float, opacity: float, *, force: bool = False) -> None:
         """Seven album-tinted rows move up once every three seconds.
 
-        force=True paints the same loader outside the lyric-lookup gate so
-        width-resize handoffs reuse this exact skeleton and its transitions.
+        The legacy force argument cannot turn resizing into a lyric lookup.
         """
-        if opacity <= 0.001 or column.isEmpty():
+        if (opacity <= 0.001 or column.isEmpty()
+                or self._effective_content_layout() != 'lyrics'
+                or self._lyric_content_state(now) != 'loading'):
             return
         cycle, phase = self._lyric_loading_phase(now)
-        if not force and not self._lyric_loading_visible(now):
+        if not self._lyric_loading_visible(now):
             return
-        if force:
-            entrance, exit_phase = 1.0, 0.0
-        else:
-            entrance, exit_phase = self._lyric_loading_reveal(now)
+        entrance, exit_phase = self._lyric_loading_reveal(now)
         scale = self._surface_scale()
         height = min(42.0 * scale, max(17.0 * scale, column.height() * 0.067))
         step = min(height * 1.75, column.height() / 7.45)
@@ -2665,7 +2719,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         tone = self._future_lyric_color(column)
         widths = (0.96, 0.89, 0.84, 0.93, 0.78, 0.91, 0.86, 0.95, 0.81, 0.90, 0.87)
         painter.save()
-        painter.setOpacity(opacity)
+        painter.setOpacity(painter.opacity() * opacity)
         band = QRectF(column.left(), top - (step - height) * 0.5, column.width(), step * 7.0)
         painter.setClipRect(column.intersected(band), Qt.ClipOperation.IntersectClip)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -7366,6 +7420,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
 
     def _paint_live_lyric_column(self, painter: QPainter, rect: QRectF, **kwargs):
         """Feather external lyric ink at both window edges, behind chrome."""
+        if (self._effective_content_layout() in {'cover', 'playlist'}
+                or self._lyric_content_state() in {'idle', 'no_lyrics'}):
+            return
         wide = (getattr(self, "_lyric_bottom_fade_active", False) if self._lyric_resize_capturing else
                 self._effective_content_layout() == "lyrics")
         if not self._lyric_resize_capturing and not self._lyric_resize_probe:
@@ -10300,12 +10357,12 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
              translation_hovered, translation_pressed, playback_mode, playback_asset, playback_ink.rgba(), playback_hovered, playback_pressed,
              hovered, pressed, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot,
              gradient_key, fm_phase if fm_continuous else None, hover_pose_key,
-             self._content_layout, round(self._layout_transition_fraction, 3), layout_hovered, layout_pressed, False), draw,
+             self._effective_content_layout(), round(self._layout_transition_fraction, 3), layout_hovered, layout_pressed, False), draw,
             prewarm_default=(("window", key, round(scale, 3), translated,
                                translation_hovered, translation_pressed, playback_mode, playback_asset, default_playback_ink.rgba(), playback_hovered, playback_pressed,
                                False, False, audio_available, audio_hovered, audio_pressed, audio_active, audio_kinds, audio_pose is not None, self._capturing_transition_snapshot,
                                gradient_key, default_fm_phase if fm_continuous else None, (),
-                               self._content_layout, 1., False, False, False), draw_default),
+                               self._effective_content_layout(), round(self._layout_transition_fraction, 3), False, False, False), draw_default),
             # The live FM gradient changes every frame. Caching the entire
             # group here would only churn native rasters and evict its idle
             # blur levels; its existing direct vector path stays continuous.
