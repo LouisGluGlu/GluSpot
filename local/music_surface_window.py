@@ -1224,9 +1224,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
 
     def _window_corner_radius(self, size: QSize | None = None) -> float:
         size = self.size() if size is None else size
-        scale = max(0.01, size.height()/self.REFERENCE_SURFACE_HEIGHT)
-        artwork_side = max(1.0, min(404.0*scale, size.height()-238.0*scale))
-        return self._album_art_radius(artwork_side)
+        unit = min(max(1.0, float(size.width())) / 100.0, max(1.0, float(size.height())) / 75.8)
+        return self._album_art_radius(37.8 * unit)
 
     def _island_corner_radius(self, geometry: QRect) -> float:
         edge_notch = getattr(self.owner, "_edge_notch_active", None)
@@ -2956,7 +2955,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             )
             if available >= original.width() * 0.53 or step == 14:
                 break
-        maximum_side = min(original.width() * 1.3, rect.width() - 2.0 * margin)
+        # The live cover is smaller than the old 404*scale plate. Keep the
+        # centered cap on that older plate so hiding controls can still grow it.
+        legacy_side = max(1.0, min(404.0 * scale, rect.height() - 238.0 * scale))
+        maximum_side = min(max(original.width(), legacy_side) * 1.3, rect.width() - 2.0 * margin)
         if self._content_layout_is_narrow():
             maximum_side = min(rect.width() - 2.0 * margin, max(1., rect.height() - 142. * scale))
         idle_side = max(1.0, min(maximum_side, rect.height() - footer_height - 2.0 * margin -
@@ -5577,6 +5579,25 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     def _surface_font(self, size: float, weight: QFont.Weight = QFont.Weight.Bold) -> QFont:
         return surface_font(size, weight)
 
+    def _control_unit(self, rect: QRectF | None = None) -> float:
+        """Shared wide-window unit: min(width/100, height/75.8)."""
+        width, height = (self.width(), self.height()) if rect is None else (rect.width(), rect.height())
+        width, height = max(1.0, float(width)), max(1.0, float(height))
+        cache = getattr(self, "_frame_geometry_cache", None)
+        key = ("control_unit", width, height)
+        if cache is not None and key in cache:
+            return cache[key]
+        unit = min(width / 100.0, height / 75.8)
+        if cache is not None:
+            cache[key] = unit
+        return unit
+
+    def _wide_transport_rect(self, rect: QRectF) -> QRectF:
+        unit = self._control_unit(rect)
+        # Hit row keeps the existing panel height. The glyphs inside are 5.2u.
+        height = max(32.0, self.TRANSPORT_PANEL_HEIGHT * self._surface_scale(rect))
+        return QRectF(10.6 * unit, 56.0 * unit, 30.2 * unit, height)
+
     def _surface_scale(self, rect: QRectF | None = None) -> float:
         width, height = (self.width(), self.height()) if rect is None else (rect.width(), rect.height())
         cache = getattr(self, "_frame_geometry_cache", None)
@@ -5619,21 +5640,45 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self, cover: QRectF, content: QRectF, surface_scale: float, control_reveal: float,
     ) -> tuple[QFont, QRectF, QFont, QRectF]:
         """Let title lead and artist follow into space freed by the controls."""
+        self._metadata_artist_visible = self.width() >= 500.0
         if (self._content_layout in {"lyrics", "playlist"}
                 and self._content_layout_is_narrow()):
             # The stacked column keeps names beside its small header cover.
+            # Below about 500px the artist row is dropped, same as the wide pose.
             left = cover.right() + 16. * surface_scale
             width = max(1., content.right() - left)
             title_size, artist_size = 18. * surface_scale, 14. * surface_scale
             self._metadata_draw_pixel_sizes = {"title": title_size, "artist": artist_size}
+            artist_height = 0.0 if not self._metadata_artist_visible else 22. * surface_scale
             return (self._surface_font(title_size, QFont.Weight.Bold),
                     QRectF(left, cover.center().y() - 30. * surface_scale, width, 30. * surface_scale),
                     self._surface_font(artist_size, QFont.Weight.Medium),
-                    QRectF(left, cover.center().y() + 5. * surface_scale, width, 22. * surface_scale))
+                    QRectF(left, cover.center().y() + 5. * surface_scale, width, artist_height))
         surface_scale = self._cover_column_scale(cover, content, surface_scale)
         expansion = 1.0 - max(0.0, min(1.0, float(control_reveal)))
         title_gain = self._metadata_spring_fraction(expansion, delay=0.05, overshoot=0.5)
         artist_gain = self._metadata_spring_fraction(expansion, delay=0.16, overshoot=0.38)
+        window_unit = self._control_unit()
+        # Probes still pass the legacy 404*scale cover. Only the live wide
+        # cover (37.8u) uses the window unit; expansion distance stays on scale.
+        if abs(cover.width() - 37.8 * window_unit) <= max(1.5, cover.width() * 0.02):
+            unit = window_unit
+            width = cover.width()
+            metadata_top = cover.bottom() + 1.6 * unit + 8.0 * surface_scale * title_gain
+            title_size = 3.1 * unit * (1.0 + 0.18 * title_gain)
+            title_font = self._surface_font(title_size, QFont.Weight.Bold)
+            title_base_font = self._surface_font(self.TITLE_PIXEL_SIZE * surface_scale, QFont.Weight.Bold)
+            title_height = self._font_height(title_base_font) * title_size / title_base_font.pixelSize()
+            title_rect = QRectF(cover.left(), metadata_top, width, max(3.4 * unit, title_height + 2.0 * unit))
+            gap = -2.0 + 14.0 * artist_gain - 4.0 * math.sin(math.pi * min(1.0, max(0.0, artist_gain)))
+            artist_size = 1.95 * unit * (1.0 + 0.16 * artist_gain)
+            artist_font = self._surface_font(artist_size, QFont.Weight.Medium)
+            artist_base_font = self._surface_font(self.ARTIST_PIXEL_SIZE * surface_scale, QFont.Weight.Medium)
+            artist_height = self._font_height(artist_base_font) * artist_size / artist_base_font.pixelSize()
+            artist_height_px = 0.0 if not self._metadata_artist_visible else max(2.2 * unit, artist_height + unit)
+            artist_rect = QRectF(cover.left(), title_rect.bottom() + gap * surface_scale, width, artist_height_px)
+            self._metadata_draw_pixel_sizes = {"title": title_size, "artist": artist_size}
+            return title_font, title_rect, artist_font, artist_rect
         width = cover.width() - 14.0
         metadata_top = cover.bottom() + max(14.0, 60.0 * surface_scale * 0.38)
         metadata_top += 8.0 * surface_scale * title_gain
@@ -7366,13 +7411,14 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                         metadata_now, previous[0], field="title", animate=False,
                     )
                     painter.restore()
-                painter.setPen(QColor(255, 255, 255, 142))
-                painter.setFont(artist_font)
-                self._paint_scrolling_metadata(
-                    painter, artist_rect, str(getattr(self.owner, "artist", "") or ""),
-                    artist_font, metadata_now, metadata_identity,
-                    field="artist",
-                )
+                if self._metadata_artist_visible:
+                    painter.setPen(QColor(255, 255, 255, 142))
+                    painter.setFont(artist_font)
+                    self._paint_scrolling_metadata(
+                        painter, artist_rect, str(getattr(self.owner, "artist", "") or ""),
+                        artist_font, metadata_now, metadata_identity,
+                        field="artist",
+                    )
                 if previous and cover_fraction < 0.1:
                     painter.save()
                     painter.setOpacity(normal_opacity * (1.0 - transition))
@@ -7416,23 +7462,24 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._paint_library_back(painter, rect)
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed and not content_snapshot)
         cover_column_scale = self._cover_column_scale(original_cover, content, surface_scale)
-        controls_height = self.TRANSPORT_PANEL_HEIGHT * cover_column_scale
-        normal_controls_bottom = rect.bottom() - self._personal_dj_footer_height(rect) - 18.0 * surface_scale
-        controls_top = normal_controls_bottom - controls_height
-        if cover_fraction > 0.0:
-            # Keep transport below the central artwork while information
-            # remains in its established lower-left home.
-            controls_top = min(
-                normal_controls_bottom - controls_height,
-                max(controls_top, cover.bottom() + 6.0 * surface_scale * cover_fraction),
-            )
-        panel_width = max(1., metadata_width - 50.0 * cover_column_scale / surface_scale)
-        if cover.bottom() > controls_top:
-            panel_width = min(
-                panel_width,
-                max(145.0 * surface_scale, cover.left() - (content.left() + 7.0) - 8.0 * surface_scale),
-            )
-        normal_controls_rect = QRectF(content.left() + 7.0, controls_top, panel_width, controls_height)
+        if self._content_layout_is_narrow():
+            controls_height = self.TRANSPORT_PANEL_HEIGHT * cover_column_scale
+            normal_controls_bottom = rect.bottom() - self._personal_dj_footer_height(rect) - 18.0 * surface_scale
+            controls_top = normal_controls_bottom - controls_height
+            if cover_fraction > 0.0:
+                controls_top = min(
+                    normal_controls_bottom - controls_height,
+                    max(controls_top, cover.bottom() + 6.0 * surface_scale * cover_fraction),
+                )
+            panel_width = max(1., metadata_width - 50.0 * cover_column_scale / max(surface_scale, .001))
+            if cover.bottom() > controls_top:
+                panel_width = min(
+                    panel_width,
+                    max(145.0 * surface_scale, cover.left() - (content.left() + 7.0) - 8.0 * surface_scale),
+                )
+            normal_controls_rect = QRectF(content.left() + 7.0, controls_top, panel_width, controls_height)
+        else:
+            normal_controls_rect = self._wide_transport_rect(rect)
         transport_rect = self._interpolate_rect(normal_controls_rect, centered_controls_rect, cover_fraction)
         # DJ avoidance must see this frame's transport geometry, including
         # the first compact paint after a resize or content-mode switch.
@@ -9143,10 +9190,44 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             painter.drawImage(rect, self._background_cache)
             painter.restore()
 
+    def _top_chrome_side(self, rect: QRectF) -> float:
+        """5.6u top buttons, at least 34px, unless that row would leave the window."""
+        unit = self._control_unit(rect)
+        preferred = max(34.0, 5.6 * unit)
+        margin = 2.4 * unit
+        count = 3  # return/mode, translation, content layout
+        if getattr(self, "_owned_playback_mode", None) is not None:
+            count += 1
+        if self._audio_output_available():
+            count += 1
+        right = float(rect.x()) + float(rect.width())
+        # Stay strictly inside the 1px window inset used by layout tests.
+        room = right - margin - 1.05
+        # Keep the existing 12px-at-scale gap while the row fits. Only the
+        # compressed row drops that floor, or a 100px window cannot hold it.
+        gap = 12.0 * self._surface_scale(rect)
+        gaps = max(0, count - 1)
+        if room > 1.0 and count * preferred + gaps * gap <= room:
+            return preferred
+        factor = count + gaps * 12.0 / 44.0
+        if room <= 1.0 or factor <= 0.0:
+            return max(1.0, min(preferred, room / max(1.0, count)))
+        return max(1.0, min(preferred, room / factor))
+
+    def _top_chrome_box(self, rect: QRectF) -> tuple[float, float]:
+        """Side and margin for the top circles. Whole pixels while the row fits."""
+        side = self._top_chrome_side(rect)
+        margin = 2.4 * self._control_unit(rect)
+        if side >= 34.0:
+            side = float(round(side))
+            margin = float(round(margin))
+        return side, margin
+
     def _window_control_base_rect(self, rect: QRectF) -> QRectF:
-        scale = self._surface_scale(rect)
-        width, height, top = 44.0 * scale, 44.0 * scale, 18.0 * scale
-        return QRectF(rect.right() - 22.0 * scale - width, top, width, height)
+        side, margin = self._top_chrome_box(rect)
+        right = float(rect.x()) + float(rect.width())
+        top = float(rect.y()) + margin
+        return QRectF(right - margin - side, top, side, side)
 
     def _reset_library_expansion(self, now: float):
         self._library_expansion_from = self._library_expansion_target = 0.0
@@ -9187,13 +9268,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self.update(self._library_damage_rect(QRectF(self.rect())))
 
     def _library_button_rect(self, rect: QRectF, expansion: float | None = None) -> QRectF:
-        scale = self._surface_scale(rect)
         expansion = self._library_expansion_at(time.monotonic()) if expansion is None else expansion
-        diameter = min(max(44.0, 44.0 * scale), max(1., rect.width() * .14))
-        expanded = min(max(104.0, 118.0 * scale), max(diameter, rect.width()-36.*scale))
+        diameter, margin = self._top_chrome_box(rect)
+        expanded = min(max(diameter * 2.4, diameter * 2.7), max(diameter, rect.width() - margin * 2.0))
         width = diameter + (expanded - diameter) * expansion
-        return QRectF(18.0 * scale, max(4.0, 6.0 * scale),
-                      width, diameter)
+        return QRectF(margin, margin, width, diameter)
 
     def _library_button_face(self, rect: QRectF, expansion: float | None = None) -> QRectF:
         inset = max(3.0, 4.0 * self._surface_scale(rect))
@@ -9402,7 +9481,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
 
     @staticmethod
     def _preceding_control_rect(button: QRectF, scale: float) -> QRectF:
-        return QRectF(button.left() - button.width() - 12.0 * scale,
+        # The group keeps its 12px-at-scale gap. Below 34px the row was
+        # compressed to stay inside the window, so the gap shrinks with it.
+        gap = button.width() * 12.0 / 44.0 if button.width() < 34.0 else 12.0 * scale
+        return QRectF(button.left() - button.width() - gap,
                       button.top(), button.width(), button.height())
 
     def _translation_button_rect(self, button: QRectF, scale: float) -> QRectF:
@@ -9489,13 +9571,17 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     def _personal_dj_measured_widths(self, rect: QRectF):
         """Measure each real prompt once; geometry and footer share these widths."""
         scale = self._surface_scale(rect)
+        unit = self._control_unit(rect)
         has_collection = bool(self._song_collection_state().track_id)
-        side = max(36. if has_collection else 32., 44. * scale)
+        # Idle wave button follows the window unit. Caption text keeps the
+        # surface-scale font; its floor grows with the button so the doubled
+        # speech glyph still fits inside the title.
+        side = max(35. if has_collection else 32., 6.2 * unit)
         font = self._surface_font(max(10., 14. * scale), QFont.Weight.DemiBold)
-        key = (self._dj_next_title, font.toString(), round(scale, 3))
+        key = (self._dj_next_title, font.toString(), round(scale, 3), round(side, 2))
         if getattr(self, "_dj_caption_width_key", None) != key:
             self._dj_caption_width_key = key
-            self._dj_caption_width = min(250. * scale, max(side * 4.4,
+            self._dj_caption_width = min(max(250. * scale, side * 4.4), max(side * 4.4,
                 QFontMetricsF(font).horizontalAdvance(self._dj_next_title) + 28. * scale))
         status_font = self._surface_font(max(14., 16. * scale), QFont.Weight.DemiBold)
         status_key = status_font.toString()
@@ -9513,10 +9599,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._footer_lane_started = now
             return 0.
         side, caption_width, status_width = self._personal_dj_measured_widths(rect)
-        scale = self._surface_scale(rect)
+        unit = self._control_unit(rect)
         has_collection = bool(self._song_collection_state().track_id)
-        margin = max(10., 18. * scale)
-        reserve = (max(36., 44. * scale) * 2.5 + max(8., 10. * scale)) if has_collection else 0.
+        margin = 2.4 * unit
+        columns = 1. if rect.width() < 440. else 2.
+        reserve = (max(34., 5.4 * unit) * columns + max(8., 1.2 * unit)) if has_collection else 0.
         maximum = max(side, rect.width() - 2. * margin - reserve)
         expanded = self._dj_activity_to > .001 or self._dj_voice_selector_active
         target = caption_width if expanded else side
@@ -9555,15 +9642,18 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     def _personal_dj_geometry_uncached(self, rect: QRectF, now: float, *, expansion: float | None = None, posed=True):
         if self._owned_personal_dj_enabled is None and self._song_collection_state().track_id:
             return QRectF(), QRectF()
+        unit = self._control_unit(rect)
         scale = self._surface_scale(rect)
         side, width, _status_width = self._personal_dj_measured_widths(rect)
-        margin = max(10.0, 18.0 * scale)
+        margin = 2.4 * unit
+        has_collection = bool(self._song_collection_state().track_id)
         expansion = max(self._personal_dj_activity_at(now), self._dj_voice_selector_motion.value(now)) if expansion is None else max(0.0, min(1.0, expansion))
-        base = QRectF(rect.right() - margin - side, rect.bottom() - margin - side, side, side)
-        lane = self._footer_dj_lane_width(rect, now) if self._song_collection_state().track_id else width
+        right = float(rect.x()) + float(rect.width())
+        bottom = float(rect.y()) + float(rect.height())
+        base = QRectF(right - margin - side, bottom - margin - side, side, side)
+        lane = self._footer_dj_lane_width(rect, now) if has_collection else width
         width = min(width, lane)
-        pill_height = side
-        pill = QRectF(rect.right() - margin - width, rect.bottom() - margin - pill_height, width, pill_height)
+        pill = QRectF(right - margin - width, bottom - margin - side, width, side)
         large_side = min(side * 2, lane)
         large = QRectF(pill.center().x() - large_side / 2, pill.top() - 44.0 * scale - large_side, large_side, large_side)
         if self._content_layout_is_narrow():
@@ -10673,7 +10763,12 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     ):
         # The panel remains a layout/hit-test region, but has no visible plate.
         panel = QRectF(rect)
-        scale = self._surface_scale() if content_scale is None else content_scale
+        # Wide transport keeps the surface-scale hit height. The cover-column
+        # scale is only for the stacked layout's smaller row.
+        if content_scale is None or not self._content_layout_is_narrow():
+            scale = self._surface_scale()
+        else:
+            scale = content_scale
         panel.setHeight(min(self.TRANSPORT_PANEL_HEIGHT * scale, panel.height()))
         panel.setWidth(min(350.0 * scale, panel.width()))
         self._media_control_panel_rect = QRectF(panel)
@@ -10696,9 +10791,24 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                 button = QRectF(panel.left() + index * slot, panel.top(), slot, panel.height())
                 if use_pose:
                     button = self._hover_control_rect("media:" + command, button, hover_group, now)
-                icon_side = min(44.0 * scale, panel.height() - 12.0 * scale)
-                icon_rect = QRectF(button.center().x() - icon_side / 2.0,
-                                   button.center().y() - icon_side / 2.0, icon_side, icon_side)
+                wide_group = (
+                    not self._content_layout_is_narrow()
+                    and abs(panel.width() - 30.2 * self._control_unit()) <= max(1.5, panel.width() * 0.04)
+                )
+                if not wide_group:
+                    icon_side = min(44.0 * scale, panel.height() - 12.0 * scale)
+                    icon_x = button.center().x() - icon_side / 2.0
+                else:
+                    # Equal icons. Previous sits on the group's left edge and
+                    # next on its right edge (about 3.8u inside the cover).
+                    icon_side = min(panel.height(), max(24.0, panel.width() * 5.2 / 30.2))
+                    if command == "previous":
+                        icon_x = button.left()
+                    elif command == "next":
+                        icon_x = button.right() - icon_side
+                    else:
+                        icon_x = button.center().x() - icon_side / 2.0
+                icon_rect = QRectF(icon_x, button.center().y() - icon_side / 2.0, icon_side, icon_side)
                 self._paint_transport_icon(layer, icon_rect, command, QColor(accent),
                     hovered=self._hovered_media_command == command,
                     pressed=self._pressed_media_command == command, scene_ink=accent)
