@@ -22,7 +22,11 @@ remain. `GLUSPOT_MASK_DEBUG=1` prints timestamp, expanded state, window,
 mask and painted bounds on every rendered frame.
 
 57 focused checks passed. Persistent-buffer regression covers 330 frames at
-DPR 1/2, including expansion, collapse, lyric growth/shrink and track change.
+DPR 1/2 with Finder available and unavailable (1,320 frames total), including
+expansion, collapse, lyric growth/shrink and track change. A final independent
+review reproduced the legacy cradle in the unavailable-bar fallback; that
+current-runtime branch is also suppressed, retaining only dormant legacy
+multi-item fixture behavior.
 The original t217 normal and overflow harnesses each pass 240 frames with
 zero shell/window/mask/cover/text clipping counters. Before/after native-region
 emulation shows oversized mask frames 330→0 and outside-current-shell ink

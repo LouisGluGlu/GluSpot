@@ -11669,9 +11669,12 @@ class IslandStackVisual(QWidget):
         self._paint_taskbar_material_frame(painter, frame)
 
     def _paint_myfinder_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
-        if self._finder_bar_active():
-            # The live music pill owns its rounded ambience in both states.
-            # The legacy multi-item cradle leaves a gray halo around it.
+        runtime_music = (self.finder_mode and getattr(self, "_runtime_extras_retired", False)
+                         and any(visual.kind == IslandKind.MUSIC for visual, _ in items))
+        if self._finder_bar_active() or runtime_music:
+            # The live music pill owns its rounded ambience in both states,
+            # including a transiently unavailable Finder bar. The legacy
+            # multi-item cradle leaves a gray halo outside the native region.
             self.group_frame_motion = None
             self.group_frame_mode_key = ""
             self.group_frame_target_rect = QRectF()

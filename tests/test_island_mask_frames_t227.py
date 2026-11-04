@@ -53,9 +53,10 @@ class IslandMaskFrameTests(unittest.TestCase):
         return w
 
     def test_every_frame_uses_current_shell_and_clears_old_transparent_pixels(self):
-        for dpr in (1, 2):
-            with self.subTest(dpr=dpr):
+        for dpr, available in ((1, True), (2, True), (1, False), (2, False)):
+            with self.subTest(dpr=dpr, finder_available=available):
                 w = self.make_island()
+                w._finder_bar_available = lambda: available
                 buffer = QImage(w.width()*dpr, w.height()*dpr, QImage.Format.Format_ARGB32_Premultiplied)
                 buffer.setDevicePixelRatio(dpr)
                 buffer.fill(Qt.GlobalColor.transparent)
