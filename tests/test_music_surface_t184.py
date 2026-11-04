@@ -180,7 +180,7 @@ class WideChromeRecoveryTests(unittest.TestCase):
             self.assertIsNone(window._chrome_backdrop)
             prepare.assert_not_called()
 
-    def test_same_song_retry_keeps_cover_without_skeleton_then_restores_saved_layout(self):
+    def test_same_song_explicit_retry_restores_lyrics_but_terminal_marker_stays_cover_only(self):
         window, owner = self.window, self.owner
         owner.track_title = "Recovered song"
         owner.media_track_id = "recovered-song"
@@ -198,14 +198,27 @@ class WideChromeRecoveryTests(unittest.TestCase):
                         window._update_lyric_loading_state(100.)
                         window._sync_no_lyrics_content_layout(100.)
                     self.assertEqual(window._effective_content_layout(), "cover")
+                    # A quiet retry retaining the provider's confirmed miss
+                    # keeps the terminal presentation until data changes.
+                    with patch.object(window, "_display_lyrics", return_value=(["暂无歌词"], [])):
+                        window._update_lyric_loading_state(100.05)
+                        window._sync_no_lyrics_content_layout(100.05)
+                        self.assertEqual(window._effective_content_layout(), "cover")
+                        self.assertFalse(window._lyric_loading_visible(100.05))
                     window._cover_layout_to = 0.0  # The cover travel has not settled yet.
                     owner.lyrics = ["查找歌词中"]
                     with patch.object(window, "_display_lyrics", return_value=(["查找歌词中"], [])):
                         for now in (100.1, 101.5, 104.):
                             window._update_lyric_loading_state(now)
                             window._sync_no_lyrics_content_layout(now)
-                            self.assertEqual(window._effective_content_layout(), "cover")
-                            self.assertFalse(window._lyric_loading_visible(now))
+                            self.assertEqual(window._lyric_content_state(now), "loading")
+                            self.assertEqual(window._effective_content_layout(), "lyrics")
+                            self.assertFalse(window._no_lyrics_layout_active)
+                            self.assertEqual(window._lyric_loading_visible(now), now >= 101.1)
+                            # Pending cover-lyrics reopens an external column;
+                            # it never places its skeleton over the artwork.
+                            self.assertEqual(window._content_layout, layout)
+                            self.assertEqual(saved, baseline)
                     owner.lyrics, owner.timed_lyrics = ["Found"], [(0., "Found")]
                     with patch.object(window, "_display_lyrics", return_value=(["Found"], [(0., "Found")])):
                         window._update_lyric_loading_state(105.)

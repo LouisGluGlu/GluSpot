@@ -397,7 +397,7 @@ class MusicContentLayoutMixin:
             if self._no_lyrics_layout_active:
                 # A terminal miss says nothing about an explicitly reopened
                 # lookup, even on this song. Restore without saving a choice.
-                target = "playlist" if self._no_lyrics_manual_layout == "playlist" else self._content_layout
+                target = "playlist" if self._no_lyrics_manual_layout == "playlist" else "lyrics"
                 self._no_lyrics_layout_active = False
                 self._no_lyrics_manual_layout = None
                 self._change_content_layout(target, temporary=True)

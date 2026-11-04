@@ -176,8 +176,8 @@ class NarrowContentLayoutTests(unittest.TestCase):
         with patch.object(self.window, "_lyrics_lookup_pending", return_value=True):
             self.window._sync_no_lyrics_content_layout(101.)
         self.assertEqual(self.window._lyric_content_state(101.), "loading")
-        self.assertEqual(self.window.mode, "cover_lyrics")
-        self.assertEqual(self.window._effective_content_layout(), "cover_lyrics")
+        self.assertEqual(self.window.mode, "lyrics")
+        self.assertEqual(self.window._effective_content_layout(), "lyrics")
         self.assertFalse(self.window._no_lyrics_layout_active)
         self.assertEqual(self.window._content_layout, "cover_lyrics")
         self.assertEqual(self.saved, original_settings)
