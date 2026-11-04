@@ -416,10 +416,8 @@ class MusicLibraryController(QObject):
         """Expose the final surface once, then animate only frozen layers."""
         if self.window.isVisible():
             self._publish_shared_music_geometry(self.window.geometry())
-        if getattr(self.island, "_music_surface_active", False):
-            self.island._restore_island_from_music_surface()
+        # Opening the expanded page must not restore the mini island on top of it.
         self.island._music_library_active = False
-        self.island.show()
         # An explicit empty origin bypasses the island's entire-window morph.
         # The separate cover handoff already owns this navigation animation.
         kwargs = {}
@@ -429,6 +427,7 @@ class MusicLibraryController(QObject):
         self.island._show_music_fullscreen(fullscreen=mode == "fullscreen",
             origin_geometry=QRect(), origin_snapshot=QImage(), **kwargs)
         if getattr(self.island, "_music_surface_active", False):
+            self.island.hide()
             self._navigation.request_start(frame, getattr(self.island, "music_fullscreen_overlay", None))
             self.window.hide()
             return True

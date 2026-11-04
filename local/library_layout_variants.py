@@ -305,10 +305,39 @@ class LibraryVariantPresentation:
         o._clear_search_opacity.setOpacity(1.)
         o.progress_button.hide()
 
+    def _cards_are_wide(self):
+        """Keep the card/list choice until the width clears a small dead band."""
+        width, height = self.owner.width(), self.owner.height()
+        wide = width >= 720 and height >= 520
+        previous = getattr(self, "_wide_cards", None)
+        if previous is True and height >= 520 and 688 <= width < 720:
+            wide = True
+        elif previous is False and height >= 520 and 720 <= width < 752:
+            wide = False
+        self._wide_cards = wide
+        return wide
+
+    def _stable_grid(self, width):
+        """Fit as many cards as the width allows, and don't flip at the boundary."""
+        width = max(1, int(width))
+        gap, min_side, max_side, slack = 24, 132, 176, 24
+        def side_for(columns):
+            return (width - gap * max(0, columns - 1)) / max(1, columns)
+        columns = 1
+        while side_for(columns + 1) >= min_side:
+            columns += 1
+        previous = getattr(self, "_grid_columns", None)
+        if previous and previous != columns:
+            stayed = side_for(int(previous))
+            if min_side - slack <= stayed <= max_side + slack:
+                columns = int(previous)
+        self._grid_columns = columns
+        return columns, max(1, int(min(max_side, side_for(columns))))
+
     def layout(self):
         o, variant = self.owner, self.owner.library_variant
         w, h = o.width(), o.height()
-        wide = w >= 720 and h >= 520
+        wide = self._cards_are_wide()
         query = bool(o.search.text().strip())
         self.cluster = QRectF(w - 164, 16, 148, 48)
         for button, x in ((o.source_button, w - 162), (o.logout_button, w - 114), (o.close_button, w - 66)):
@@ -396,8 +425,7 @@ class LibraryVariantPresentation:
                 shelf.setGeometry(0, top, cw, 224)
                 top += 228
         elif variant == "sidebar" and not query:
-            columns = max(1, min(3, cw // 192)) if wide else 1
-            side = min(176, (cw - 24 * (columns - 1)) // columns)
+            columns, side = (1, cw) if not wide else self._stable_grid(cw)
             for index, row in enumerate(o._rows):
                 row.card = wide
                 if wide:
@@ -456,7 +484,7 @@ class LibraryVariantPresentation:
 
     def paint_skeleton(self, p, widget):
         seconds, ink = time.monotonic(), QColor("white")
-        if self.owner.library_variant == "compact" or (self.owner.library_variant == "sidebar" and self.owner.width() < 720):
+        if self.owner.library_variant == "compact" or (self.owner.library_variant == "sidebar" and not self._cards_are_wide()):
             for y in range(8, widget.height() - 40, 66):
                 for rect, radius in ((QRectF(8, y, 44, 44), 10),
                                      (QRectF(68, y + 5, min(160, widget.width() - 88), 12), 6),
@@ -469,8 +497,7 @@ class LibraryVariantPresentation:
                 paint_artwork_skeleton(p, QRectF(x, 40, 132, 132), ink, seconds, radius=14)
                 paint_artwork_skeleton(p, QRectF(x + 4, 183, 100, 10), ink, seconds, radius=5)
             return
-        columns = max(1, min(3, widget.width() // 192))
-        side = min(176, (widget.width() - 24 * (columns - 1)) // columns)
+        columns, side = self._stable_grid(widget.width())
         for index in range(columns):
             x = index * (side + 24)
             paint_artwork_skeleton(p, QRectF(x, 4, side, side), ink, seconds, radius=14)

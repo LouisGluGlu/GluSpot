@@ -7177,6 +7177,7 @@ class IslandStackVisual(QWidget):
     def _show_music_fullscreen(self, *, fullscreen=None, origin_geometry=None, origin_snapshot=None, loading_selection=None):
         overlay = getattr(self, "music_fullscreen_overlay", None)
         if bool(getattr(self, "_music_surface_active", False)):
+            self.hide()
             self._focus_active_music_surface()
             return
         if overlay is None:

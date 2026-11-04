@@ -9993,22 +9993,21 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                 painter.restore()
             painter.restore()
         status_state = self._personal_dj_ring_status()
-        status_color = personal_dj_status_color(status_state)
-        if status_color is None and self._owned_personal_dj_enabled is True and not self._owned_dj_speaking:
-            # Enabled remains visible when no brief status text is open. This
-            # is an outline only: glass keeps the same neutral scene material
-            # as its neighboring controls, and ordinary idle hiding is shared.
-            status_color = QColor(52, 196, 112)
-        if status_color is not None and status_reveal < .999:
+        if status_state == "failed" or self._dj_introduction_failed:
+            status_color = QColor("#ec373f")
+        elif status_state == "ready" or (
+                self._owned_personal_dj_enabled is True and status_state not in {"failed", "loading"}):
+            status_color = QColor("#16c777")
+        else:
+            status_color = QColor("#8b919c")
+        if status_reveal < .999 and not icon.isEmpty():
             painter.save()
             painter.setOpacity(reveal * (1.0 - status_reveal))
-            opacity = personal_dj_status_opacity(status_state, elapsed)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            for spread, alpha in ((3.5, 23), (2.0, 45), (1.0, 230)):
-                color = QColor(status_color)
-                color.setAlpha(round(170 + 60 * opacity if spread == 1.0 else alpha * opacity))
-                painter.setPen(QPen(color, max(1.2, 1.8 * scale) * spread))
-                painter.drawEllipse(icon.adjusted(-1.2 * scale, -1.2 * scale, 1.2 * scale, 1.2 * scale))
+            dot = max(6.0, min(10.0, icon.width() * 0.22))
+            badge = QRectF(icon.right() - dot * 0.82, icon.bottom() - dot * 0.82, dot, dot)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(status_color)
+            painter.drawEllipse(badge)
             painter.restore()
         control_ink = self._surface_glass_ink(status_rect if status_reveal > .001 else button, live=True)
         color = (self._interpolated_control_color("dj-accent", self._album_accent_color(button)) if self._owned_dj_speaking

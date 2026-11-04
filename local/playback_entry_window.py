@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QByteArray, QBuffer, QEasingCurve, QIODevice, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QImage, QImageReader, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QTransform
-from PySide6.QtWidgets import QAbstractButton, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QAbstractButton, QLabel, QMessageBox, QPushButton, QWidget
 
 from api.online_music import AccountSnapshot
 from local.branding import APP_NAME
@@ -292,11 +292,13 @@ class MusicSourceButton(QAbstractButton):
         self.setToolTip(description)
 
     def _status_dot_rect(self) -> QRectF:
-        if not self.source.login_supported or self.login_style not in {"sidebar", "sidebar-icons"}:
+        if not self.source.login_supported:
             return QRectF()
         if self.login_style == "sidebar-icons":
             return QRectF(self.width() - 14, self.height() - 14, 7, 7)
-        return QRectF(self.width() - 23, (self.height() - 7) / 2, 7, 7)
+        if self.login_style == "sidebar":
+            return QRectF(self.width() - 23, (self.height() - 7) / 2, 7, 7)
+        return QRectF(self.width() - 16, 8, 7, 7)
 
     def status_rect(self) -> QRect:
         """Only this small area is invalidated by the source pulse clock."""
@@ -351,6 +353,7 @@ class MusicSourceButton(QAbstractButton):
                 title = QRectF(4, icon.bottom() + (1 if short else 4), self.width() - 8, 14 if short else 18)
                 status = QRectF(4, self.height() - (12 if short else 17), self.width() - 8, 12)
             paint_music_source_icon(painter, icon, self.source.source_id)
+            self._paint_status_dot(painter)
             if self.show_caption:
                 painter.setOpacity(.50 if upcoming else .82 if not self.isEnabled() else 1.)
                 painter.setFont(_entry_font(10 if short or horizontal and self.width() < 140 else 11 if self.width() < 116 else 12))
@@ -428,6 +431,7 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
     sourceSelected = Signal(str)
     refreshRequested = Signal()
     loginAccepted = Signal(str)
+    sourceLogoutRequested = Signal(str)
     backRequested = Signal()
     closed = Signal()
 
@@ -553,6 +557,17 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                 button.setToolTip(f"{button.source.name}：即将支持，暂未提供登录适配器")
                 button.set_availability_status("即将支持", "暂未提供登录适配器")
             button.clicked.connect(lambda checked=False, sid=source_id: self.select_source(sid))
+        self._logout_buttons = {}
+        self._logout_confirmation = None
+        for source_id, button in self.source_buttons.items():
+            if not button.source.login_supported:
+                continue
+            logout = QPushButton("退出", self)
+            logout.setAccessibleName(f"退出{button.source.name}")
+            logout.setCursor(Qt.CursorShape.PointingHandCursor)
+            logout.hide()
+            logout.clicked.connect(lambda checked=False, sid=source_id: self._confirm_source_logout(sid))
+            self._logout_buttons[source_id] = logout
         for button in (self.refresh_button, self.enter_button):
             button.setGlassLight(True)
             button.setProperty("glassRadius", 22.0)
@@ -857,6 +872,39 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
         self._source_status[source_id] = status
         button.set_connection_status(status)
         self._sync_status_pulse()
+        if self.isVisible():
+            self._layout_children()
+
+    def _confirm_source_logout(self, source_id: str):
+        if self._source_status.get(source_id) != "connected":
+            return
+        if self._logout_confirmation is not None:
+            self._logout_confirmation.raise_()
+            self._logout_confirmation.activateWindow()
+            return
+        button = self.source_buttons.get(source_id)
+        name = button.source.name if button is not None else source_id
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("退出登录")
+        dialog.setText(f"确认退出{name}？")
+        dialog.setInformativeText("只清除这个平台的登录记录，其他平台不受影响。")
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        dialog.button(QMessageBox.StandardButton.Ok).setText("退出")
+        dialog.button(QMessageBox.StandardButton.Cancel).setText("取消")
+        dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        dialog.setEscapeButton(QMessageBox.StandardButton.Cancel)
+        self._logout_confirmation = dialog
+
+        def finished(result):
+            if self._logout_confirmation is not dialog:
+                return
+            self._logout_confirmation = None
+            if result == int(QMessageBox.StandardButton.Ok) and self._source_status.get(source_id) == "connected":
+                self.sourceLogoutRequested.emit(source_id)
+            dialog.deleteLater()
+
+        dialog.finished.connect(finished)
+        dialog.open()
 
     @staticmethod
     def _account_status(account: AccountSnapshot) -> str:
@@ -1233,6 +1281,15 @@ class PlaybackEntryWindow(MusicPageResizeMixin, QWidget):
                 button.login_style = "pill"
             button.setVisible(not modes and not rect.isEmpty())
             button.setGeometry(rect.toAlignedRect())
+            logout = self._logout_buttons.get(button.source.source_id)
+            if logout is not None:
+                show_logout = (not modes and button.isVisible()
+                               and self._source_status.get(button.source.source_id) == "connected")
+                logout.setVisible(show_logout)
+                if show_logout:
+                    tile = button.geometry()
+                    logout.setGeometry(tile.right() - 52, tile.top() + max(4, (tile.height() - 28) // 2), 46, 28)
+                    logout.raise_()
             button.update()
         expanded = not modes and self._expanded > .85
         account_card = expanded and self._account is not None

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.lyrics import LocalLyricsStore
 from api.online_music import OnlineSong, StreamInfo
-from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider
+from api.providers import EmptyIslandDataProvider, PlaybackSourceProvider, WindowsMediaProvider, empty_visual_data
 from local.owned_music_player import OwnedMusicPlayer
 from tests.capture_async import CaptureAsyncTestCase
 from tests.test_media_interruption import Manager, Session
@@ -68,6 +68,17 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         # Explicit loop turns, no wall-clock sleeps or real player/network.
         for _ in range(24):
             await asyncio.sleep(0)
+
+    async def test_pinned_external_title_shows_when_capture_is_still_empty(self):
+        self.system.get_visual_data = lambda: empty_visual_data()
+        self.provider._interruption_pin = SimpleNamespace(
+            media_key=("外部歌曲", "外部歌手", ""), app_id="cloudmusic.exe")
+        data = self.provider.get_visual_data()
+        self.assertEqual(data.track.title, "外部歌曲")
+        self.assertEqual(data.track.artist, "外部歌手")
+        self.assertTrue(data.track.is_playing)
+        self.provider._interruption_pin = None
+        self.assertNotEqual(self.provider.get_visual_data().track.title, "外部歌曲")
 
     async def enable(self, sessions):
         self.system._manager.sessions = sessions

@@ -382,6 +382,11 @@ class MusicContentLayoutMixin:
         if not measure_fit and self._content_layout == "lyrics":
             column.setTop(surface.top())
             column.setBottom(surface.bottom())
+        elif not measure_fit and self._content_layout == "playlist":
+            # Fill down to the bottom-right controls instead of the old content margin.
+            unit = self._control_unit(surface)
+            footer = max(40., 6.2 * unit + 2.4 * unit + 8.)
+            column.setBottom(max(column.top() + 1., surface.bottom() - footer))
         return content, cover, column
 
     def _effective_content_layout(self):
@@ -792,12 +797,16 @@ class MusicContentLayoutMixin:
         self._queue_scroll = max(0., min(max_scroll, self._queue_scroll))
         painter.setClipRect(viewport)
         if self._queue_selection_position >= 0.:
+            inset = 6. * scale
             selected = QRectF(rect.left(), top + self._queue_selection_position * row_height - self._queue_scroll,
-                              rect.width(), row_height - 5 * scale)
-            if selected.intersects(viewport):
+                              rect.width(), row_height).adjusted(inset, inset, -inset, -inset)
+            if selected.intersects(viewport) and selected.width() > 1. and selected.height() > 1.:
+                # Same corner as the row's cover thumbnail, with even padding.
+                highlight = QPainterPath()
+                highlight.addRoundedRect(selected, 6. * scale, 6. * scale)
                 backdrop = self._surface_glass_backdrop()
                 self._clear_control_renderer.paint(painter, selected, scene=backdrop, scene_bounds=QRectF(self.rect()),
-                    ink=ink, now=time.monotonic(), role="queue-selection", kind="capsule",
+                    ink=ink, now=time.monotonic(), role="queue-selection", kind="capsule", path=highlight,
                     level=self._surface_glass_level(), selected=True)
         first = max(0, int(self._queue_scroll // row_height))
         last = min(len(entries), first + int(viewport.height() / row_height) + 2)

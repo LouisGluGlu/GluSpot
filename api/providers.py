@@ -869,7 +869,22 @@ class PlaybackSourceProvider:
             data = self.owned.visual_data()
             return replace(data, messages=(), plugins=())
         if self._system_enabled():
-            return replace(self.system.get_visual_data(), messages=(), plugins=())
+            data = replace(self.system.get_visual_data(), messages=(), plugins=())
+            pin = self.__dict__.get("_interruption_pin")
+            title = str(getattr(getattr(data, "track", None), "title", "") or "")
+            if pin is not None and title in {"", "暂无媒体", "暂无播放", "媒体初始化中"}:
+                key = tuple(getattr(pin, "media_key", ()) or ())
+                external_title = str(key[0]).strip() if key else ""
+                if external_title:
+                    artist = str(key[1]).strip() if len(key) > 1 else ""
+                    data = replace(data, track=replace(
+                        data.track,
+                        title=external_title,
+                        artist=artist or data.track.artist,
+                        is_playing=True,
+                        source_app_id=str(getattr(pin, "app_id", "") or data.track.source_app_id),
+                    ))
+            return data
         return empty_visual_data("程序内播放", "登录后选择歌单", "GluSpot")
 
     def get_audio_frame(self):

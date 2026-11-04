@@ -64,6 +64,9 @@ class PlaybackEntryController(QObject):
         self.window.closed.connect(self._entry_closed)
         self.window.backRequested.connect(self._cancel_login)
         self.window.loginAccepted.connect(self.enter_account)
+        logout = getattr(self.window, "sourceLogoutRequested", None)
+        if logout is not None and hasattr(logout, "connect"):
+            logout.connect(self.logout_source)
         self._generation = 0
         self._route_generation = 0
         self._session = ""
@@ -285,6 +288,19 @@ class PlaybackEntryController(QObject):
         self.window.hide()
         self.login_callback(source_id)
 
+    def logout_source(self, source_id):
+        """Clear one platform's saved login. Other platforms stay as they are."""
+        if self._closed or source_id not in LOGIN_SOURCE_IDS:
+            return
+        generation = self._generation
+        def work():
+            if self._closed or generation != self._generation:
+                return None
+            self.service.logout(source_id)
+            return source_id
+        if not self.tasks.submit(("logout", generation, source_id), work):
+            self.window.message_label.setText("退出失败，请重试")
+
     def begin_login(self, source_id):
         if (self._closed or source_id not in LOGIN_SOURCE_IDS
                 or source_id not in {source.source_id for source in self._sources if source.available}):
@@ -367,6 +383,32 @@ class PlaybackEntryController(QObject):
                             break
                         self.service.prepare_login_runtime(source_id)
                 self.tasks.submit(("prepare", generation), prepare)
+                def statuses():
+                    found = []
+                    for source_id in available:
+                        if self._closed or generation != self._generation:
+                            break
+                        try:
+                            found.append((source_id, self.service.account_status(source_id, refresh=True)))
+                        except Exception:
+                            found.append((source_id, None))
+                    return found
+                self.tasks.submit(("source-statuses", generation), statuses)
+            return
+        if kind == "source-statuses":
+            for source_id, account in (result or ()):
+                if account is None:
+                    continue
+                self.window._set_source_status(source_id, self.window._account_status(account))
+            return
+        if kind == "logout":
+            source_id = extra[0]
+            if error:
+                self.window.message_label.setText("退出失败，请重试")
+                return
+            self.window._set_source_status(source_id, "signed_out")
+            if getattr(self.window, "_account", None) is not None and self.window._account.source_id == source_id:
+                self.window._account = None
             return
         if kind == "account":
             source = extra[0]
