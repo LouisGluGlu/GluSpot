@@ -80,6 +80,7 @@ from local.audio_reactive_engine import (
 )
 from local.album_art_pipeline import album_art_bytes_signature, album_art_update_plan
 from local.album_island_projection import album_cover_projection
+from local.island_audio_bars import IslandAudioBars
 from local.music_lyric_motion import GLYPH_FLOAT_LIFT, LogicalLineSpringChain, MusicLyricMotion
 from local.music_lyric_reading import (
     LyricReadingRenderer,
@@ -3937,6 +3938,13 @@ class IslandStackVisual(QWidget):
                 spectrum=getattr(self, "_sea_spectrum", ()),
                 vocal_spectrum=getattr(self, "_sea_vocal_spectrum", ()),
             )
+            bars = getattr(self, "_island_bar_state", None)
+            if bars is None:
+                bars = self._island_bar_state = IslandAudioBars()
+            bars.update(getattr(self, "_sea_spectrum", ()), now,
+                        bands=getattr(self, "_sea_frame_bands", ()),
+                        vocal=getattr(self, "_sea_vocal_sample", 0.0),
+                        is_playing=bool(getattr(self, "media_is_playing", False)))
         previous_at = getattr(self, "_wave_values_updated_at", None)
         advance = self._audio_reactive_runtime_for_current_settings().advance_wave_values(
             self.wave_values,
@@ -3970,8 +3978,10 @@ class IslandStackVisual(QWidget):
                 self._sea_low_sample = 0.0
                 self._sea_vocal_sample = 0.0
                 self._sea_spectrum = self._sea_vocal_spectrum = ()
+                self._sea_frame_bands = ()
                 frame = getattr(provider, "get_audio_frame", lambda: None)()
                 if frame is not None:
+                    self._sea_frame_bands = (frame.low, frame.mid, frame.high)
                     self._sea_low_sample = getattr(frame, "low", 0.0) or 0.0
                     # Older/fixture providers may only supply real bands.
                     self._sea_peak_sample = getattr(frame, "peak", None)
@@ -8869,7 +8879,12 @@ class IslandStackVisual(QWidget):
             self._music_lyric_measurement_width_cap(expanded=False),
         )
         current_dual_w = self._current_compact_dual_line_width(compact_lyric_size)
-        return self._compact_music_target_width_from_content(content_w, title_w, artist_w, lyric_w, current_dual_w, instrumental)
+        width = self._compact_music_target_width_from_content(content_w, title_w, artist_w, lyric_w, current_dual_w, instrumental)
+        if self._effective_music_ambience_style() == "sea_level":
+            # Reserve the four columns without changing the existing line
+            # measurement, grow-before-reveal or reveal-before-shrink logic.
+            width += 24.0
+        return width
 
     def _music_lyric_measurement_width_cap(self, expanded: bool) -> float:
         return self._u(680.0 if expanded else 640.0)
@@ -12207,11 +12222,15 @@ class IslandStackVisual(QWidget):
             )
             painter.save()
             painter.setClipPath(self._rounded_path(background_rect, radius), Qt.ClipOperation.IntersectClip)
-            for step in plan.steps:
+            steps = ("pure_black_background",) if plan.ambience_style == "sea_level" else plan.steps
+            for step in steps:
                 self._execute_music_surface_paint_step(
                     step, painter, background_rect, radius, False, plan.ambience_style,
                 )
             painter.restore()
+            # Artwork insets refer to the visible capsule, not the native
+            # attachment row that includes its one-pixel exterior margins.
+            rect = background_rect
         else:
             from local.finder_bar_style import paint_finder_background
             paint_finder_background(painter, rect, style, self._solid_album_surface_palette().primary, self._u(1.))
@@ -12249,13 +12268,14 @@ class IslandStackVisual(QWidget):
             painter.setOpacity(original_opacity * (1. - dj_progress))
             if self._taskbar_cover_only_music_active(rect):
                 self._paint_taskbar_cover_only_music(painter, rect)
+            elif style == "capsule" and self._effective_music_ambience_style() == "sea_level":
+                self._paint_sea_level_compact(painter, rect)
+                self._paint_taskbar_music_hover_overlay(painter, rect)
             else:
-                inset = min(2., rect.height() * .10)
-                side = max(1., rect.height() - inset * 2.)
-                cover = QRectF(rect.left() + self._u(8), rect.center().y() - side / 2., side, side)
+                cover, cover_radius = self._island_cover_geometry(rect)
                 if dj_progress < .5:
                     self.music_cover_rect = QRectF(cover)
-                self._paint_interactive_music_cover(painter, cover, min(self._u(4), side * .18))
+                self._paint_interactive_music_cover(painter, cover, cover_radius)
                 lyric_left = cover.right() + self._u(7)
                 if style == "fade":
                     lyric_left = max(lyric_left, rect.left() + rect.width() * self._finder_bar_fade_positions(rect)[1] + self._u(4))
@@ -12400,11 +12420,7 @@ class IslandStackVisual(QWidget):
                 self._effective_music_ambience_style())
             painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
         self.music_button_rects = {}
-        icon_area = rect
-        side = min(icon_area.height() * .90, self._u(100))
-        icon = QRectF(rect.left() + self._u(13), icon_area.center().y() - side / 2, side, side)
-        if expanded and not bar_compact:
-            icon = QRectF(rect.left() + self._u(16), rect.top() + self._u(14), self._u(58), self._u(58))
+        icon, cover_radius = self._island_cover_geometry(rect)
         # The rings occupy the normal interactive artwork slot. Its existing
         # hover glyph and hit target open the same window/fullscreen surface.
         self.music_cover_rect = QRectF(icon)
@@ -12417,7 +12433,7 @@ class IslandStackVisual(QWidget):
             max_lightening=float(getattr(self, "_island_dj_lightening", .60)),
             backdrop=lambda ring: self._personal_dj_island_backdrop(ring, surface_rect=rect),
             elapsed=max(0., time.monotonic() - started))
-        self._paint_music_cover_presentation_overlay(painter, icon, self._u(17))
+        self._paint_music_cover_presentation_overlay(painter, icon, cover_radius)
         if bar_compact:
             # Both bars use the fitted timed-lyric row. Reserve their bounded
             # height instead of the top/free title-and-artist stack.
@@ -12440,7 +12456,7 @@ class IslandStackVisual(QWidget):
             painter.restore()
             return
         if expanded:
-            info = QRectF(icon.right() + self._u(15), icon.top() + self._u(2),
+            info = QRectF(icon.right() + self._u(15), rect.top() + self._u(16),
                 max(0., rect.right() - icon.right() - self._u(132) - self._u(48)), self._u(68))
             title = getattr(self, "_island_dj_title", "") or getattr(self, "track_title", "")
             artist = str(getattr(self, "_island_dj_artist", "") or getattr(self, "artist", "") or "")
@@ -12448,7 +12464,7 @@ class IslandStackVisual(QWidget):
                 title, 13, self._music_meta_text_color(240), True)
             self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)),
                 artist, 9, self._music_meta_text_color(135), False)
-            self._paint_music_standard_transport(painter, rect, icon.center().y())
+            self._paint_music_standard_transport(painter, rect, rect.top() + self._u(43))
             painter.restore()
             return
         title_rect = QRectF(icon.right() + self._u(16), rect.top(),
@@ -12542,7 +12558,10 @@ class IslandStackVisual(QWidget):
         elif step == "yaoguang_compact_background":
             self._paint_yaoguang_compact_music_background(painter, rect, radius)
         elif step == "pure_black_background":
-            self._paint_pure_black_music_background(painter, rect, radius)
+            if ambience_style == "sea_level" and not expanded:
+                painter.fillPath(self._music_shell_path(rect, radius, False), QColor(0, 0, 0))
+            else:
+                self._paint_pure_black_music_background(painter, rect, radius)
         elif step == "bilateral_diffraction_ambience":
             self._paint_bilateral_diffraction_ambience(painter, rect, radius, expanded)
         elif step == "glass_body":
@@ -12915,24 +12934,25 @@ class IslandStackVisual(QWidget):
         return QRectF(left, top, max(1.0, right - left), max(1.0, bottom - top))
 
     def _compact_cover_rect(self, rect: QRectF) -> QRectF:
-        two_line = self._has_current_two_line_lyric()
-        if self._taskbar_edge_compact_active():
-            top_padding, bottom_padding = self._compact_lyric_vertical_padding(two_line, rect)
-            cover_size = min(rect.height() - top_padding - bottom_padding, self._u(38.0 if two_line else 30.0))
-            cover_size = max(self._u(20.0), cover_size)
-            return QRectF(rect.left() + self._u(9), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
-        if two_line:
-            cover_size = min(rect.height() - self._u(14.0), self._u(50.0))
-            y_offset = self._u(1.0)
-        else:
-            cover_size = self._u(30.0)
-            y_offset = 0.0
-        return QRectF(rect.left() + self._u(9), rect.center().y() - cover_size / 2.0 + y_offset, cover_size, cover_size)
+        return self._island_cover_geometry(rect)[0]
 
     def _compact_cover_radius(self, rect: QRectF, two_line: bool) -> float:
-        if self._taskbar_edge_compact_active():
-            return self._music_shell_radius(rect, expanded=False)
-        return self._u(10.0 if two_line else 8.0)
+        return self._island_cover_geometry(rect)[1]
+
+    def _island_cover_geometry(self, rect: QRectF) -> tuple[QRectF, float]:
+        """Artwork follows the painted shell, including every spring frame.
+
+        Eight logical pixels gives a 32 px cover in a 48 px pill. Short native
+        bars scale that inset with their real height, independently of the
+        free island's VISUAL_SCALE. All three exterior insets stay equal.
+        """
+        height = max(0.0, float(rect.height()))
+        inset = min(height / 2.0, max(min(8.0, height / 6.0), height - rect.width()))
+        side = max(0.0, height - 2.0 * inset)
+        cover = QRectF(rect.left() + inset, rect.top() + inset, side, side)
+        shell_radius = self._music_shell_radius(rect, bool(getattr(self, "expanded", False)))
+        radius = min(side / 4.0, max(0.0, shell_radius - inset))
+        return cover, radius
 
     def _paint_music_glass_body(self, painter: QPainter, rect: QRectF, radius: float):
         path = self._music_shell_path(rect, radius)
@@ -13577,7 +13597,8 @@ class IslandStackVisual(QWidget):
     def _paint_interactive_music_cover(self, painter: QPainter, rect: QRectF, radius: float,
                                        image: QImage | None = None, cache_key: str | None = None):
         progress = IslandStackVisual._island_track_transition_progress(self, getattr(self, "_island_glow_paint_now", None))
-        if progress < 1.0:
+        if progress < 1.0 and (bool(getattr(self, "expanded", False))
+                              or self._effective_music_ambience_style() != "sea_level"):
             self._native_music_background_renderer().paint_sea_level_cover_light(painter, rect, progress)
         motion = getattr(self, "_music_cover_hover_motion", None)
         painter.save()
@@ -13939,6 +13960,10 @@ class IslandStackVisual(QWidget):
         if self._taskbar_cover_only_music_active(rect):
             self._paint_taskbar_cover_only_music(painter, rect)
             return
+        if self._effective_music_ambience_style() == "sea_level":
+            self._paint_sea_level_compact(painter, rect)
+            self._paint_taskbar_music_hover_overlay(painter, rect)
+            return
         if self._empty_music_text_active():
             self.music_cover_rect = QRectF()
             top_padding, bottom_padding = self._compact_lyric_vertical_padding(False, rect)
@@ -13978,18 +14003,75 @@ class IslandStackVisual(QWidget):
                 delattr(self, "_compact_lyric_clip_path")
         self._paint_taskbar_music_hover_overlay(painter, rect)
 
+    def _sea_level_bars_rect(self, rect: QRectF) -> QRectF:
+        scale = min(1.0, max(0.0, rect.height()) / 48.0)
+        width, height = 20.0 * scale, 24.0 * scale
+        return QRectF(rect.right() - 12.0 * scale - width,
+                      rect.center().y() - height / 2.0, width, height)
+
+    def _sea_level_bar_color(self) -> QColor:
+        color = QColor(self._xiaomi_duotone_palette()[0])
+        hue, saturation, lightness, _alpha = color.getHslF()
+        # Keep the existing sea palette's hue; lift dark artwork enough for
+        # small strokes on black. Palette extraction retains its own fallback.
+        color = QColor.fromHslF(max(0.0, hue), saturation, max(.62, lightness), 1.0)
+        return color
+
+    def _paint_sea_level_bars(self, painter: QPainter, rect: QRectF):
+        levels = getattr(getattr(self, "_island_bar_state", None), "levels", (0.0,) * 4)
+        width = rect.width() / 6.0
+        step = (rect.width() - width) / 3.0
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._sea_level_bar_color())
+        for index, level in enumerate(levels):
+            height = width + (rect.height() - width) * level
+            bar = QRectF(rect.left() + index * step, rect.center().y() - height / 2.0,
+                         width, height)
+            painter.drawRoundedRect(bar, width / 2.0, width / 2.0)
+        painter.restore()
+
+    def _paint_sea_level_compact(self, painter: QPainter, rect: QRectF):
+        """One white line between artwork and four live spectral columns."""
+        painter.save()
+        painter.setClipPath(self._music_shell_path(rect, self._music_shell_radius(rect, False), False),
+                            Qt.ClipOperation.IntersectClip)
+        scale = min(1.0, rect.height() / 48.0)
+        if self._compact_lyric_cover_enabled():
+            cover, radius = self._island_cover_geometry(rect)
+            self.music_cover_rect = QRectF(cover)
+            self._paint_interactive_music_cover(painter, cover, radius)
+            left = cover.right() + 12.0 * scale
+        else:
+            self.music_cover_rect = QRectF()
+            left = rect.left() + 12.0 * scale
+        bars = self._sea_level_bars_rect(rect)
+        text_rect = QRectF(left, rect.top(), max(0.0, bars.left() - 12.0 * scale - left), rect.height())
+        text = self._compact_music_text()
+        if self._should_paint_album_island() or self._empty_music_text_active():
+            text = self.track_title or self.artist or text
+        lines = self._lyric_display_lines(text) or [text]
+        lines, _phase, alpha = self._compact_lyric_paint_snapshot(lines[:1], self._island_display_phase())
+        text = lines[0] if lines else ""
+        if not text_rect.isEmpty():
+            painter.save()
+            painter.setClipRect(text_rect, Qt.ClipOperation.IntersectClip)
+            painter.setOpacity(painter.opacity() * alpha)
+            self._paint_scrolling_text(painter, text_rect, text, self._compact_primary_lyric_font_size(),
+                                       QColor(255, 255, 255), True, centered=True, centered_scroll=True)
+            painter.restore()
+        self._paint_sea_level_bars(painter, bars)
+        painter.restore()
+
     def _paint_taskbar_cover_only_music(self, painter: QPainter, rect: QRectF):
         pad = max(self._u(2.0), rect.height() * 0.08)
         button_size = max(self._u(20.0), min(rect.height() - pad * 2.0, rect.width() * 0.40))
-        cover_size = max(self._u(22.0), min(rect.height() - pad * 2.0, rect.width() - button_size - pad * 3.0))
-        cover = QRectF(rect.left() + pad, rect.center().y() - cover_size / 2.0, cover_size, cover_size)
+        cover, cover_radius = self._island_cover_geometry(rect)
         button = QRectF(rect.right() - pad - button_size, rect.center().y() - button_size / 2.0, button_size, button_size)
-        if button.left() <= cover.right() + pad:
-            cover_size = max(self._u(18.0), button.left() - pad - cover.left())
-            cover = QRectF(cover.left(), rect.center().y() - cover_size / 2.0, cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
         self.music_button_rects = {"music:toggle_play_pause": QRectF(button)}
-        self._paint_interactive_music_cover(painter, cover, self._compact_cover_radius(rect, False))
+        self._paint_interactive_music_cover(painter, cover, cover_radius)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         radius = min(button.height() / 2.0, self._u(9.0))
@@ -14401,13 +14483,36 @@ class IslandStackVisual(QWidget):
             self._paint_album_island_listened_text(painter, rect, raw_slots)
         painter.restore()
 
-    def _paint_album_island_slots(self, painter: QPainter, raw_slots: list[dict[str, object]]):
+    def _paint_album_island_slots(self, painter: QPainter, raw_slots: list[dict[str, object]],
+                                  *, shell_rect: QRectF | None = None, stage_rect: QRectF | None = None):
+        if shell_rect is not None:
+            # Keep the current artwork in the common left-hand slot. Retain
+            # the existing history/queue sources and perspective painters in
+            # the available lane to its right, below expanded metadata.
+            cover, cover_radius = self._island_cover_geometry(shell_rect)
+            stage = QRectF(stage_rect if stage_rect is not None else shell_rect)
+            center = next((slot for slot in raw_slots if bool(slot.get("center"))), None)
+            if center is not None:
+                center["rect"], center["radius"] = cover, cover_radius
+            others = sorted((slot for slot in raw_slots if not bool(slot.get("center"))),
+                            key=lambda slot: (abs(int(slot["side"])), int(slot["side"])))
+            left = cover.right() + self._u(10.0)
+            right = stage.right() - self._u(4.0)
+            if others and not any(int(slot["side"]) > 0 for slot in others):
+                left += min(max(0.0, right - left) * .42, self._u(126.0))
+            available = max(0.0, right - left)
+            largest = min(available, max((QRectF(slot["rect"]).width() for slot in others), default=0.0))
+            desired = largest * max(48, min(170, int(getattr(self, "album_island_spacing", 112)))) / 100.0
+            step = min(desired, max(0.0, available - largest) / max(1, len(others) - 1))
+            for index, slot in enumerate(others):
+                side = min(QRectF(slot["rect"]).width(), available, stage.height())
+                slot["rect"] = QRectF(left + index * step, stage.center().y() - side / 2.0, side, side)
         slots = sorted(raw_slots, key=lambda slot: int(slot.get("z", 0)))
         for slot in slots:
             if bool(slot["center"]):
                 self.music_cover_rect = QRectF(slot["rect"])
             painter.setOpacity(float(slot["alpha"]) / 255.0)
-            radius = self._u(8.0 if bool(slot["center"]) else 6.0)
+            radius = float(slot.get("radius", self._u(8.0 if bool(slot["center"]) else 6.0)))
             self._paint_album_island_slot(painter, slot, radius)
 
     def _paint_album_island_compact(self, painter: QPainter, rect: QRectF):
@@ -14415,7 +14520,7 @@ class IslandStackVisual(QWidget):
         painter.setClipRect(rect)
         stage = rect.adjusted(self._u(8.0), self._u(4.0), -self._u(8.0), -self._u(4.0))
         raw_slots = self._album_island_slots(stage, reserve_text=True)
-        self._paint_album_island_slots(painter, raw_slots)
+        self._paint_album_island_slots(painter, raw_slots, shell_rect=rect, stage_rect=stage)
         painter.setOpacity(1.0)
         if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
             self._paint_album_island_listened_text(painter, rect, raw_slots)
@@ -14453,10 +14558,12 @@ class IslandStackVisual(QWidget):
         if center_slot is None:
             return
         cover_rect = QRectF(center_slot["rect"])
+        right = min((QRectF(slot["rect"]).left() - self._u(6.0)
+                     for slot in slots if not bool(slot.get("center"))), default=rect.right())
         text_rect = QRectF(
             cover_rect.right() + self._u(10.0),
             rect.top(),
-            max(0.0, rect.right() - cover_rect.right() - self._u(12.0)),
+            max(0.0, right - cover_rect.right() - self._u(12.0)),
             rect.height(),
         )
         if text_rect.width() < self._u(46.0):
@@ -14497,17 +14604,14 @@ class IslandStackVisual(QWidget):
         if self._normalize_music_expanded_layout_style(getattr(self, "music_expanded_layout_style", "standard")) == "dual_panel":
             self._paint_music_expanded_dual_panel(painter, rect)
             return
-        margin = self._u(16)
-        cover_size = self._u(58)
-        cover = QRectF(rect.left() + margin, rect.top() + self._u(14), cover_size, cover_size)
+        cover, cover_radius = self._island_cover_geometry(rect)
         controls_w = self._u(132)
-        info = QRectF(cover.right() + self._u(15), cover.top() + self._u(2), rect.right() - cover.right() - controls_w - self._u(48), self._u(68))
+        info = QRectF(cover.right() + self._u(15), rect.top() + self._u(16), rect.right() - cover.right() - controls_w - self._u(48), self._u(68))
         progress = self._personal_dj_island_outro_progress()
         if progress < 1.0:
             # Move the same rings/title into the established cover/title slots;
             # the shell and ambience keep their existing physical animation.
-            side = min(rect.height() * .90, self._u(100))
-            origin = QRectF(rect.left() + self._u(13), rect.center().y() - side / 2, side, side)
+            origin = QRectF(cover)
             moving_cover = QRectF(*(a + (b - a) * progress for a, b in zip(
                 (origin.x(), origin.y(), origin.width(), origin.height()),
                 (cover.x(), cover.y(), cover.width(), cover.height()))))
@@ -14515,7 +14619,7 @@ class IslandStackVisual(QWidget):
             painter.save()
             opacity = painter.opacity()
             painter.setOpacity(opacity * progress)
-            self._paint_interactive_music_cover(painter, moving_cover, self._u(17))
+            self._paint_interactive_music_cover(painter, moving_cover, cover_radius)
             painter.setOpacity(opacity * (1.0 - progress))
             paint_personal_dj_icon(painter, moving_cover, self._personal_dj_island_color(),
                 backdrop=lambda ring: self._personal_dj_island_backdrop(ring, surface_rect=rect),
@@ -14560,32 +14664,34 @@ class IslandStackVisual(QWidget):
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, artist)
         else:
             self.music_cover_rect = QRectF(cover)
-            self._paint_interactive_music_cover(painter, cover, self._u(17))
+            self._paint_interactive_music_cover(painter, cover, cover_radius)
             self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(34)), self.track_title, 13, self._music_meta_text_color(240), True)
             self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(35), info.width(), self._u(24)), self.artist, 9, self._music_meta_text_color(135), False)
         painter.save()
         painter.setOpacity(painter.opacity() * progress)
 
-        self._paint_music_standard_transport(painter, rect, cover.center().y())
+        self._paint_music_standard_transport(painter, rect, rect.top() + self._u(43))
 
-        viewport = QRectF(rect.left() + self._u(22), cover.bottom() + self._u(10), rect.width() - self._u(44), rect.bottom() - cover.bottom() - self._u(28))
+        lyric_left = cover.right() + self._u(15)
+        viewport = QRectF(lyric_left, rect.top() + self._u(82),
+            max(0.0, rect.right() - lyric_left - self._u(22)), max(0.0, rect.height() - self._u(110)))
         self._paint_lyric_viewport(painter, viewport)
         painter.restore()
 
     def _paint_music_expanded_dual_panel(self, painter: QPainter, rect: QRectF):
         lyric_panel, info_panel = self._dual_panel_music_rects(rect)
         self.music_button_rects = {}
+        cover, cover_radius = self._island_cover_geometry(rect)
         lyric_viewport = lyric_panel.adjusted(self._u(30.0), self._u(16.0), -self._u(30.0), -self._u(14.0))
+        lyric_viewport.setLeft(cover.right() + self._u(16.0))
         self._paint_lyric_viewport(painter, lyric_viewport)
 
         lower_light = self._music_lyric_text_color(255).lightness() < 128
         title_color = QColor(0, 0, 0, 242) if lower_light else QColor(255, 255, 255, 242)
         artist_color = QColor(0, 0, 0, 184) if lower_light else QColor(255, 255, 255, 172)
         margin = self._u(22.0)
-        cover_size = max(self._u(48.0), min(self._u(66.0), info_panel.height() - self._u(26.0)))
-        cover = QRectF(info_panel.left() + margin, info_panel.center().y() - cover_size / 2.0, cover_size, cover_size)
         self.music_cover_rect = QRectF(cover)
-        self._paint_interactive_music_cover(painter, cover, self._u(9.0))
+        self._paint_interactive_music_cover(painter, cover, cover_radius)
 
         button_size = self._u(42.0)
         gap = self._u(14.0 if rect.width() >= self._u(600.0) else 12.0)
@@ -14613,7 +14719,9 @@ class IslandStackVisual(QWidget):
         controls_w = self._u(132.0)
         self.music_button_rects = {}
 
-        info = QRectF(rect.left() + margin, rect.top() + self._u(13.0), rect.width() - controls_w - margin * 2.0 - self._u(18.0), self._u(42.0))
+        cover, _cover_radius = self._island_cover_geometry(rect)
+        info_left = cover.right() + self._u(15.0)
+        info = QRectF(info_left, rect.top() + self._u(13.0), max(0.0, rect.right() - controls_w - margin - self._u(18.0) - info_left), self._u(42.0))
         self._paint_scrolling_text(painter, QRectF(info.left(), info.top(), info.width(), self._u(24.0)), self.track_title, 12, self._music_meta_text_color(238), True)
         self._paint_scrolling_text(painter, QRectF(info.left(), info.top() + self._u(24.0), info.width(), self._u(18.0)), self.artist, 8, self._music_meta_text_color(132), False)
 
@@ -14625,9 +14733,9 @@ class IslandStackVisual(QWidget):
             self.music_button_rects[command] = QRectF(br)
             self._paint_music_control_button(painter, br, command, 34 if command == "music:toggle_play_pause" else 22, radius=self._u(12.0))
 
-        stage = QRectF(rect.left() + margin, rect.top() + self._u(58.0), rect.width() - margin * 2.0, rect.height() - self._u(76.0))
+        stage = QRectF(info_left, rect.top() + self._u(58.0), max(0.0, rect.right() - margin - info_left), rect.height() - self._u(76.0))
         raw_slots = self._album_island_slots(stage, reserve_text=True)
-        self._paint_album_island_slots(painter, raw_slots)
+        self._paint_album_island_slots(painter, raw_slots, shell_rect=rect, stage_rect=stage)
         painter.setOpacity(1.0)
         if not any(int(slot.get("side", 0)) > 0 for slot in raw_slots):
             self._paint_album_island_listened_text(painter, stage, raw_slots)

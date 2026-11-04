@@ -5978,8 +5978,8 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
         self.assertTrue(cover_rects)
         self.assertTrue(lyric_rects)
-        self.assertLess(lyric_rects[0].top(), cover_rects[0].top())
-        self.assertLess(lyric_rects[0].bottom(), cover_rects[0].top())
+        self.assertGreaterEqual(lyric_rects[0].left(), cover_rects[0].right())
+        self.assertLess(lyric_rects[0].bottom(), min(row.top() for row in text_rects))
         self.assertTrue(any(key in visual.music_button_rects for key in ("music:previous", "music:toggle_play_pause", "music:next")))
 
     def test_dual_panel_expanded_background_uses_neutral_lower_panel(self):
@@ -9579,10 +9579,13 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         normal_rect = QRectF(0.0, 0.0, 420.0, 46.0 * IslandStackVisual.VISUAL_SCALE)
         normal_cover = visual._compact_cover_rect(normal_rect)
 
-        self.assertAlmostEqual(dual_cover.width(), 50.0 * IslandStackVisual.VISUAL_SCALE)
+        self.assertAlmostEqual(dual_cover.width(), dual_rect.height() - 16.0)
         self.assertGreater(dual_cover.width(), normal_cover.width())
-        self.assertAlmostEqual(dual_cover.center().y(), dual_rect.center().y() + 1.0 * IslandStackVisual.VISUAL_SCALE)
+        self.assertAlmostEqual(dual_cover.center().y(), dual_rect.center().y())
         self.assertAlmostEqual(normal_cover.center().y(), normal_rect.center().y())
+        for shell, cover in ((dual_rect, dual_cover), (normal_rect, normal_cover)):
+            self.assertAlmostEqual(cover.left() - shell.left(), cover.top() - shell.top())
+            self.assertAlmostEqual(cover.left() - shell.left(), shell.bottom() - cover.bottom())
 
     def test_coalesced_timed_lyrics_merge_same_timestamp_as_two_lines(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)

@@ -137,7 +137,11 @@ class IslandPersonalRadioControlTests(unittest.TestCase):
                                    self.visual._u(112.))
                 self.assertEqual(set(self.visual.music_button_rects),
                                  {"music:toggle_play_pause", "music:next"})
-                self.assertEqual(self.visual.music_cover_rect.height(), self.visual._u(58.))
+                cover = self.visual.music_cover_rect
+                inset = cover.left() - rect.left()
+                self.assertAlmostEqual(cover.top() - rect.top(), inset)
+                self.assertAlmostEqual(rect.bottom() - cover.bottom(), inset)
+                self.assertAlmostEqual(cover.height(), rect.height() - 2.0 * inset)
                 for button in self.visual.music_button_rects.values():
                     self.assertTrue(rect.contains(button))
                     self.assertFalse(self.visual.music_cover_rect.intersects(button))

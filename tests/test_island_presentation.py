@@ -692,13 +692,8 @@ class IslandPresentationTests(unittest.TestCase):
         self.assertEqual(
             sea.steps,
             (
-                "glass_body",
-                "bottom_ambience",
-                "light_wave",
-                "reactive_overlay",
-                "surface_transition",
+                "pure_black_background",
                 "compact_content",
-                "border",
             ),
         )
         self.assertEqual(

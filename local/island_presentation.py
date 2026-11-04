@@ -653,6 +653,13 @@ def music_surface_paint_plan(
 ) -> MusicSurfacePaintPlan:
     style = _normalized_music_ambience_style(ambience_style)
     layout_style = str(expanded_layout_style or "standard").strip().lower()
+    if not bool(expanded) and style == "sea_level":
+        # The compact now-playing face is an opaque black pill. Expanded
+        # water retains its existing background layers.
+        return MusicSurfacePaintPlan(
+            ambience_style=style,
+            steps=("pure_black_background", "compact_content"),
+        )
     if bool(expanded) and layout_style == "dual_panel":
         return MusicSurfacePaintPlan(
             ambience_style=style,
