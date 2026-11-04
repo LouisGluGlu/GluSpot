@@ -91,7 +91,25 @@ Keep Me Warm incident itself remains unresolved without live diagnostic evidence
 
 After cherry-picking, 126 island/style/mask checks and 45 translation/loader/
 t229 lifecycle checks passed. Python compilation and diff whitespace checks pass.
-The requested final module-isolated suite is recorded in the external handoff.
+All eight test modules adapted for default A in 395d6ed were restored
+byte-for-byte to ec89693 CLASSIC expectations; explicit A/B/C tests remain.
+113 final focused checks passed in 9.560 seconds. The first complete run
+exposed 12 stale A assertions; its logs are retained separately.
+
+The final requested module-isolated run covers **337 modules / 6,145 tests
+in 153.337 seconds: 54 failures / 48 errors / 32 skips**, with **zero new or
+removed failure/error/skip identities vs exact 395d6ed**. This is inherited
+baseline equivalence, not a green whole suite. The same two native-incomplete
+modules are individually supplemented by the requested runner. Normal GC and
+private profiles remain enabled; tested source hashes stay unchanged.
+
+Command: `/workspace/gluspot/qtvenv/bin/python
+/workspace/gluspot/handoff/t202/run_full_isolated.py
+/workspace/gluspot/grok-integrate4
+/workspace/gluspot/handoff/t225/full-isolated-round2-final --workers 3`.
+Evidence: `full-isolated-round2-final/summary.json`,
+`full-identity-comparison-round2.json`, `source-bindings-round2.json` and
+`/workspace/gluspot/handoff/t225/FINAL2.md` (external final handoff).
 
 PC 未验证: native transparent-window/DWM behavior, actual Finder/Tasker settings
 interaction, the actual owned NetEase payload/stall, Windows CPU and desktop
