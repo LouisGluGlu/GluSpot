@@ -1,4 +1,4 @@
-"""t165: width skeletons preserve t160 layout and prepared-veil gates."""
+"""Width snapshots preserve layout/veil gates without inventing lyric loads."""
 from __future__ import annotations
 
 import time
@@ -125,40 +125,39 @@ class LyricResizeFreezeTests(unittest.TestCase):
         self.assertEqual(self.window.width(), 1099)
         self.assertEqual(self.window._song_layout_key[2], round(self.window._content_column_geometry()[2].width()))
 
-    def test_a4_skeleton_follows_current_width_without_song_shaping(self):
+    def test_a4_loaded_resize_retains_snapshot_without_loader_or_song_shaping(self):
         window = self.window
         window.resize(1096, 640)
         self.render()
         started = window._lyric_resize_started_at
+        snapshot = window._lyric_resize_snapshot.copy()
+        self.assertFalse(snapshot.isNull())
         for width in (1080, 1040, 1000, 1080):
             window.resize(width, 640)
             with patch('local.music_lyric_resize.time.monotonic', return_value=started + .2), \
                     patch.object(window, '_paint_live_lyric_column', side_effect=AssertionError('live ink during motion')), \
                     patch.object(window, '_paint_lyric_loading', wraps=window._paint_lyric_loading) as loading, \
-                    patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton:
+                    patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton, \
+                    patch.object(window, '_draw_lyric_resize_snapshot', wraps=window._draw_lyric_resize_snapshot) as draw:
                 self.render()
-                skeleton.assert_called()
-                loading.assert_called()
-                target = skeleton.call_args.args[1]
-                load_args = loading.call_args
-                self.assertEqual(load_args.kwargs.get('force'), True)
-                self.assertAlmostEqual(load_args.args[1].width(), target.width(), delta=1)
-                self.assertTrue(window._lyric_resize_snapshot.isNull())
-                self.assertEqual(window._lyric_resize_ink_weights(), (0., 1., 0.))
+                skeleton.assert_not_called()
+                loading.assert_not_called()
+                draw.assert_called()
+                self.assertEqual(window._lyric_resize_snapshot, snapshot)
+                self.assertEqual(window._lyric_resize_ink_weights(), (1., 0., 0.))
 
     def test_skeleton_raster_reuses_lyric_loading_rows_and_animates(self):
-        """Resize handoff must paint MusicSurfaceWindow._paint_lyric_loading."""
+        """A real pending lookup shares the delayed, animated loading rows."""
         target = QRectF(10, 10, 180, 220)
         images = []
         window = self.window
-        # Pin the loader clock so the 3s row-sweep actually advances between frames.
-        window._lyric_loading_started_at = 90.0
-        window._lyric_loading_cycle_end_at = 0.0
-        window._lyric_loading_release_at = 0.0
-        window._lyric_loading_waiting = False
-        window._lyric_loading_has_shown = True
-        window._lyric_loading_hold_centered = False
-        for now in (100.0, 102.9):
+        self.owner.media_track_id = 'pending-resize'
+        self.owner.timed_lyrics = []
+        self.owner.lyrics = ['加载歌词中']
+        window._update_lyric_loading_state(90.0)
+        self.assertEqual(window._lyric_content_state(90.0), 'loading')
+        # Pin the lookup clock; resizing must preserve its one-second delay.
+        for now in (90.5, 100.0, 102.9):
             image = QImage(200, 240, QImage.Format.Format_ARGB32_Premultiplied)
             image.fill(Qt.GlobalColor.transparent)
             with patch('local.music_lyric_resize.time.monotonic', return_value=now), \
@@ -166,9 +165,12 @@ class LyricResizeFreezeTests(unittest.TestCase):
                 with QPainter(image) as painter:
                     window._paint_lyric_resize_skeleton(painter, target)
                 loading.assert_called_once()
-                self.assertTrue(loading.call_args.kwargs.get('force'))
+                self.assertNotIn('force', loading.call_args.kwargs)
             opaque = sum(1 for y in range(image.height()) for x in range(image.width())
                          if image.pixelColor(x, y).alpha() > 20)
+            if now == 90.5:
+                self.assertEqual(opaque, 0)
+                continue
             self.assertGreater(opaque, 80)
             self.assertEqual(image.pixelColor(2, 2).alpha(), 0)
             images.append(image.copy())
@@ -269,7 +271,7 @@ class LyricResizeFreezeTests(unittest.TestCase):
             self.render()
             self.assertEqual(self.window.lyric_relayout_count, before)
 
-    def test_duet_fade_keeps_cached_geometry_then_uses_only_skeleton(self):
+    def test_duet_snapshot_keeps_cached_role_geometry_without_reshaping(self):
         self.owner.timed_lyrics = [
             (0., '(男)Hello'), (.5, '(女)World'), (8., '(男)Sing'), (8.5, '(女)Along'),
             (16., '(合)Together'), (24., 'Next'), (32., 'Later'), (40., 'Last'),
@@ -318,10 +320,16 @@ class LyricResizeFreezeTests(unittest.TestCase):
         output.fill(Qt.GlobalColor.transparent)
         def white(painter, _rect, **_kwargs):
             painter.fillRect(column, Qt.GlobalColor.white)
+        snapshot = QImage(round(column.width() * ratio), round(column.height() * ratio),
+                          QImage.Format.Format_ARGB32_Premultiplied)
+        snapshot.setDevicePixelRatio(ratio)
+        snapshot.fill(Qt.GlobalColor.white)
         with patch.object(self.window, '_lyric_resize_crossfade_at', 100.), \
+                patch.object(self.window, '_lyric_resize_snapshot', snapshot), \
+                patch.object(self.window, '_lyric_resize_source_rect', column), \
                 patch.object(self.window, '_lyric_resize_target_rect', return_value=column), \
                 patch.object(self.window, '_paint_live_lyric_column', side_effect=white), \
-                patch.object(self.window, '_paint_lyric_resize_skeleton', side_effect=white), \
+                patch.object(self.window, '_paint_lyric_resize_skeleton', side_effect=AssertionError('loaded skeleton')), \
                 patch('local.music_lyric_resize.time.monotonic', return_value=100.09):
             with QPainter(output) as painter:
                 self.window._paint_lyric_column(painter, QRectF(self.window.rect()))
@@ -330,18 +338,21 @@ class LyricResizeFreezeTests(unittest.TestCase):
         self.assertGreaterEqual(center.red(), 254)
         self.assertEqual(output.pixelColor(round(10 * ratio), round(10 * ratio)).alpha(), 0)
 
-    def test_both_fades_are_bounded_180ms_and_equal_wrap_still_fades_in(self):
+    def test_loaded_snapshot_holds_during_motion_then_fades_to_live_in_180ms(self):
         window = self.window
         window.resize(1099, 640)
         self.render()
         started = window._lyric_resize_started_at
-        for elapsed, expected in ((0., (1., 0., 0.)), (.09, (.5, .5, 0.)), (.18, (0., 1., 0.))):
+        snapshot = window._lyric_resize_snapshot.copy()
+        self.assertFalse(snapshot.isNull())
+        for elapsed, expected in ((0., (1., 0., 0.)), (.09, (1., 0., 0.)), (.18, (1., 0., 0.))):
             for actual, wanted in zip(window._lyric_resize_ink_weights(started + elapsed), expected):
                 self.assertAlmostEqual(actual, wanted)
         self.wait_settle()
         started = window._lyric_resize_crossfade_at
         self.assertIsNotNone(started)
-        for elapsed, expected in ((0., (0., 1., 0.)), (.09, (0., .5, .5)), (.18, (0., 0., 1.))):
+        self.assertEqual(window._lyric_resize_snapshot, snapshot)
+        for elapsed, expected in ((0., (1., 0., 0.)), (.09, (.5, 0., .5)), (.18, (0., 0., 1.))):
             weights = window._lyric_resize_ink_weights(started + elapsed)
             self.assertAlmostEqual(sum(weights), 1.)
             for actual, wanted in zip(weights, expected):
@@ -350,27 +361,33 @@ class LyricResizeFreezeTests(unittest.TestCase):
             window._advance_lyric_resize_fade()
         self.assertIsNone(window._lyric_resize_crossfade_at)
         self.assertFalse(window._lyric_resize_fade_timer.isActive())
+        self.assertTrue(window._lyric_resize_snapshot.isNull())
 
-    def test_playlist_motion_uses_current_width_bars_and_skips_live_list(self):
+    def test_playlist_motion_retains_snapshot_without_loader_or_live_list(self):
         window = self.window
         window.set_content_layout('playlist', animate=False)
         self.render()
         window.resize(1090, 640)
         self.render()
         started = window._lyric_resize_started_at
+        snapshot = window._lyric_resize_snapshot.copy()
+        self.assertFalse(snapshot.isNull())
         from local.music_surface_layout import MusicContentLayoutMixin
         with patch('local.music_lyric_resize.time.monotonic', return_value=started + .2), \
                 patch.object(MusicContentLayoutMixin, '_paint_playback_queue', side_effect=AssertionError('list rebuilt during drag')), \
                 patch.object(window, '_paint_lyric_loading', wraps=window._paint_lyric_loading) as loading, \
-                patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton:
+                patch.object(window, '_paint_lyric_resize_skeleton', wraps=window._paint_lyric_resize_skeleton) as skeleton, \
+                patch.object(window, '_draw_lyric_resize_snapshot', wraps=window._draw_lyric_resize_snapshot) as draw:
             window.resize(1080, 640)
             self.render()
-            skeleton.assert_called()
-            loading.assert_called()
+            skeleton.assert_not_called()
+            loading.assert_not_called()
+            draw.assert_called()
             self.assertFalse(window._queue_hit_rects)
-            target = skeleton.call_args.args[1]
+            target = draw.call_args.args[1]
             self.assertTrue(window._queue_view_rect.contains(target.center()))
-            self.assertTrue(loading.call_args.kwargs.get('force'))
+            self.assertEqual(window._lyric_resize_snapshot, snapshot)
+            self.assertEqual(window._lyric_resize_ink_weights(), (1., 0., 0.))
         self.wait_settle()
         self.assertIsNotNone(window._lyric_resize_crossfade_at)
 
@@ -385,7 +402,13 @@ class LyricResizeFreezeTests(unittest.TestCase):
             painter.fillRect(column, QColor(80, 80, 80))
         for elapsed in (.045, .09, .135):
             window._cancel_lyric_resize()
+            snapshot = QImage(round(column.width() * ratio), round(column.height() * ratio),
+                              QImage.Format.Format_ARGB32_Premultiplied)
+            snapshot.setDevicePixelRatio(ratio)
+            snapshot.fill(QColor(80, 80, 80))
             with patch.object(window, '_lyric_resize_crossfade_at', 100.), \
+                    patch.object(window, '_lyric_resize_snapshot', snapshot), \
+                    patch.object(window, '_lyric_resize_source_rect', column), \
                     patch.object(window, '_lyric_resize_target_rect', return_value=column), \
                     patch.object(window, '_paint_live_lyric_column', side_effect=live), \
                     patch.object(window, '_paint_lyric_resize_skeleton', side_effect=skeleton), \
