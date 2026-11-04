@@ -4705,6 +4705,12 @@ class IslandStackVisual(QWidget):
         }
 
     def _begin_surface_transition(self, reason: str = "layout"):
+        if reason in {"finder", "standalone"}:
+            # Finder hands off one live shell. A grab includes any previous
+            # fading snapshot, baking several old poses into the next frame;
+            # that extra ink also has no place in the live shell's native mask.
+            self._clear_surface_transition()
+            return False
         if not self.isVisible() or self.width() <= 2 or self.height() <= 2:
             return False
         try:
@@ -4788,6 +4794,9 @@ class IslandStackVisual(QWidget):
             self.drag_detach_global_rects = {}
 
     def _reset_location_runtime_state(self, clear_surface: bool = False, clear_drag_detach: bool = True):
+        # A queued t227 pose holds the old mode's layout even when its motion
+        # objects survive the handoff. Never let an old reservation paint later.
+        self._queued_island_frame = None
         self._stop_taskbar_position_animation()
         self._reset_group_frame_state(clear_mask=True)
         self._clear_mode_interaction_state(clear_drag_detach=clear_drag_detach)
@@ -4795,6 +4804,19 @@ class IslandStackVisual(QWidget):
         self.taskbar_follow_last_key = ""
         self.taskbar_follow_last_hidden = False
         self.taskbar_hidden_by_follow = False
+        if bool(getattr(self, "finder_mode", False)):
+            now = time.monotonic()
+            self._bar_scene_transition = False
+            self._bar_visibility_value = self._bar_visibility_target = 1.0
+            self._bar_visibility_velocity = 0.0
+            self._bar_visibility_at = now
+            self._finder_material_transition_started = self._finder_material_transition_until = 0.0
+            self._finder_dj_reveal_from = self._finder_dj_reveal_target = 0.0
+            self._finder_dj_reveal_at = now
+            self._finder_dj_retained_title = self._finder_dj_retained_artist = self._finder_dj_retained_status = ""
+            self._compact_width_token = self._compact_held_lyric = None
+            self._compact_shrink_after = 0.0
+            self.motions.clear()
         if clear_surface:
             self._clear_surface_transition()
 
@@ -5158,6 +5180,10 @@ class IslandStackVisual(QWidget):
             self._pulse_stack()
         except Exception:
             pass
+        if previous == "finder" and mode != "finder":
+            # The destination uses its own geometry on its very first frame,
+            # including an exit in the middle of expansion or bar auto-hide.
+            self._settle_island_return_motion(time.monotonic())
         if notify:
             self._notify_settings_changed()
         self.update()
