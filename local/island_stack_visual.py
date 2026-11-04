@@ -8828,6 +8828,27 @@ class IslandStackVisual(QWidget):
         return self._gelv_join_chunks(chunks[:limit])
 
     def _music_lyric_measurement_lines(self, lyrics: list[str], expanded: bool) -> list[str]:
+        # Resolve the worker's current output once, even on a cache hit: late
+        # preparation, failure and compatible translation results can change
+        # the display without replacing the owner's raw lyric list.
+        cleaned_rows = self._island_cleaned_lyric_rows()
+        key = (
+            tuple(str(lyric or "") for lyric in (lyrics or ())),
+            tuple(str(lyric or "") for lyric in (getattr(self, "lyrics", ()) or ())),
+            cleaned_rows,
+            str(getattr(self, "artist", "") or ""),
+            bool(getattr(self, "enable_dual_line_lyrics", False)),
+            self._dual_line_lyrics_allowed(),
+            bool(expanded),
+            self._music_lyric_measurement_chunk_limit(expanded),
+        )
+        cache = getattr(self, "_music_lyric_measurement_cache", None)
+        if cache is None:
+            cache = {}
+            self._music_lyric_measurement_cache = cache
+        cached = cache.get(key)
+        if cached is not None:
+            return list(cached)
         lines: list[str] = []
         for lyric in lyrics or []:
             cleaned = self._clean_lyric_for_width(str(lyric or ""))
@@ -8838,6 +8859,11 @@ class IslandStackVisual(QWidget):
                 measured = self._music_lyric_measurement_text(line, expanded)
                 if measured:
                     lines.append(measured)
+        # Text is independent of font/DPR. The existing representative-width
+        # cache below owns the actual font/metrics-dependent measurement.
+        cache[key] = tuple(lines)
+        while len(cache) > 4:
+            cache.pop(next(iter(cache)))
         return lines
 
     def _compact_music_measurement_text(self) -> str:
@@ -8920,8 +8946,17 @@ class IslandStackVisual(QWidget):
     def _representative_lyric_width(self, lines: list[str], size: float, bold: bool) -> float:
         if not lines:
             return 0.0
+        metrics_context = (self.devicePixelRatioF(), self.logicalDpiX(), self.logicalDpiY())
+        previous_context = getattr(self, "_representative_lyric_metrics_context", None)
+        if previous_context is not None and previous_context != metrics_context:
+            # A width miss must not reuse a layout shaped before a screen's
+            # font-metrics change. Both layers share the same live context.
+            self._clear_lyric_metrics_cache()
+        self._representative_lyric_metrics_context = metrics_context
         key = (
             tuple(lines),
+            self._wave_stream_font(size, QFont.Weight.Bold if bold else QFont.Weight.Normal).toString(),
+            metrics_context,
             self._font_size(size),
             bool(bold),
             tuple(self._wave_stream_font_families()),

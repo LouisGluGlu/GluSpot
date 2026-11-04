@@ -16,7 +16,7 @@ from api.models import AlbumQueueEntry, AudioFrame, ColorToken, IslandVisualData
 from api.providers import EmptyIslandDataProvider, empty_visual_data
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QPoint, QPointF, QRect, QRectF, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtTest import QTest
 
 from local.island_stack_visual import IslandKind, IslandStackVisual, LyricLayout, ReactiveFrame, SpringRect, StackVisual, TaskbarDropOverlay
@@ -9169,6 +9169,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_album_island_expanded_width_grows_to_fit_configured_cover_row(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Width caches read the real Qt font/DPI measurement context.
+        QWidget.__init__(visual)
+        self.addCleanup(visual.deleteLater)
         visual.expanded = True
         visual.lyric_flow_style = "album_island"
         visual.no_lyrics_display_mode = "text"
@@ -9428,6 +9431,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_expanded_dual_line_music_width_uses_measurement_ceiling(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Width caches read the real Qt font/DPI measurement context.
+        QWidget.__init__(visual)
+        self.addCleanup(visual.deleteLater)
         visual.expanded = True
         visual.location_mode = "free"
         visual.track_title = "LOSER"
@@ -9455,6 +9461,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_music_main_width_is_capped_to_screen_bounds_for_expanded_dual_line(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Width caches read the real Qt font/DPI measurement context.
+        QWidget.__init__(visual)
+        self.addCleanup(visual.deleteLater)
         visual.location_mode = "free"
         visual.finder_mode = False
         visual.expanded = True
@@ -9504,6 +9513,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_finder_music_main_width_is_capped_to_screen_bounds_for_expanded_dual_line(self):
         visual = IslandStackVisual.__new__(IslandStackVisual)
+        # Width caches read the real Qt font/DPI measurement context.
+        QWidget.__init__(visual)
+        self.addCleanup(visual.deleteLater)
         visual.location_mode = "finder"
         visual.finder_mode = True
         visual.finder_material = type("FakeFinderMaterial", (), {"bar_height": 34.0})()
