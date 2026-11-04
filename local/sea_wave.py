@@ -54,9 +54,10 @@ class SeaWaveState:
         self.ripple_level = 0.0
         self.ripple_updated_at = None
         self.ripple_time = 0.0
-        self.ripple_beat = 0.0
-        self._ripple_low_average = 0.0
         self._ripple_history = deque(maxlen=34)
+        self._ripple_edge_smoothed = (0.,) * 49
+        self._ripple_edge_rises = (0.,) * 49
+        self._ripple_edge_widths = (0.,) * 49
 
     def update_ripple(self, peak, now, *, is_playing=True, vocal=0.0, low=0.0):
         """Absolute level, independent of the experimental spectrum's AGC.
@@ -81,20 +82,17 @@ class SeaWaveState:
                 target = min(1.0, target + 1.4 * max(0.0, min(1.0, vocal) - .02))
         tau = .060 if target > self.ripple_level else .250
         self.ripple_level += (target - self.ripple_level) * -math.expm1(-dt / tau)
-        low = float(low)
-        low = max(0., min(1., low)) if is_playing and math.isfinite(low) else 0.
-        onset = max(0., low - self._ripple_low_average * 1.15 - .02)
-        self._ripple_low_average = _follow(self._ripple_low_average, low, dt, .45)
-        beat_target = min(1., onset * 2.5)
-        beat_tau = .020 if beat_target > self.ripple_beat else .110
-        self.ripple_beat += (beat_target - self.ripple_beat) * -math.expm1(-dt / beat_tau)
         sample = (float(now), tuple(self.ripple_displacement(i / 48) for i in range(49)))
         if self._ripple_history and now <= self._ripple_history[-1][0]:
             if now < self._ripple_history[-1][0]:
                 self._ripple_history.clear()
+                self._ripple_edge_smoothed = (0.,) * 49
+                self._ripple_edge_rises = (0.,) * 49
+                self._ripple_edge_widths = (0.,) * 49
             else:
                 self._ripple_history.pop()
         self._ripple_history.append(sample)
+        self._update_ripple_edge(dt)
 
     def ripple_displacement(self, pos):
         """Three long ripples with independent, slowly drifting phases."""
@@ -103,20 +101,15 @@ class SeaWaveState:
         shape = (.58 * math.sin(pos * math.tau * 1.10 - t * .72 + drift)
                  + .29 * math.sin(pos * math.tau * 2.25 + t * .49 - drift)
                  + .13 * math.sin(pos * math.tau * 3.65 - t * .31 + .8))
-        # Nonlinear absolute drive preserves silence while giving both full
-        # band/vocal swells and low-band onsets room to move visibly.
-        return (.20 + 83. * self.ripple_level ** 1.5 + 24. * self.ripple_beat) * shape
+        # Keep the restrained absolute peak/vocal response used by ebe525e.
+        # The accepted low-band input no longer adds a separate onset punch.
+        return (.20 + 12.5 * self.ripple_level) * shape
 
-    def ripple_edge_widths(self, *, minimum=None, maximum=None, include_rises=False):
-        """Palette crest thickness only where water rose over the last second.
-
-        The existing 33 ms audio clock supplies this bounded history. Linear
-        time interpolation and a zero-slope rise gate avoid sample/segment pops.
-        """
+    def _update_ripple_edge(self, dt):
+        """Smooth extra crest thickness on the audio clock, never in paint."""
         history = self._ripple_history
         if len(history) < 2 or history[-1][0] - history[0][0] < 1.:
-            empty = (0.,) * 49
-            return (empty, empty) if include_rises else empty
+            return
         target = history[-1][0] - 1.
         before, after = history[0], history[1]
         for first, second in zip(history, list(history)[1:]):
@@ -124,24 +117,48 @@ class SeaWaveState:
                 before, after = first, second
                 break
         phase = max(0., min(1., (target - before[0]) / max(1e-9, after[0] - before[0])))
-        result = []
         rises = []
-        def visible(value):
-            if minimum is not None:
-                value = max(minimum, value)
-            if maximum is not None:
-                value = min(maximum, value)
-            return value
+        widths = []
+        gated = []
+        alpha = -math.expm1(-dt / .160)
         for index, current in enumerate(history[-1][1]):
-            previous = visible(before[1][index]) + (visible(after[1][index]) - visible(before[1][index])) * phase
-            signed_rise = visible(current) - previous
+            previous = before[1][index] + (after[1][index] - before[1][index]) * phase
+            signed_rise = current - previous
             rises.append(signed_rise)
-            rise = max(0., signed_rise)
-            ramp = min(1., rise / 8.)
+            ramp = max(0., min(1., signed_rise / 4.))
             ramp = ramp * ramp * (3. - 2. * ramp)
-            noise = .78 + .22 * math.sin(index * .47 + self.ripple_time * .38)
-            result.append(8. * (1. - math.exp(-rise / 12.)) * ramp * noise)
-        return (tuple(result), tuple(rises)) if include_rises else tuple(result)
+            old = self._ripple_edge_smoothed[index]
+            width = old + (1.2 * ramp - old) * alpha
+            widths.append(width)
+            gated.append(width * ramp)
+        self._ripple_edge_smoothed = tuple(widths)
+        self._ripple_edge_rises = tuple(rises)
+        self._ripple_edge_widths = tuple(gated)
+
+    def ripple_edge_widths(self, *, minimum=None, maximum=None, include_rises=False):
+        """At most 1.2 extra units, feathered to zero at every rise boundary.
+
+        The 160 ms EMA lives on the existing audio clock. A smooth rise gate
+        tapers its residual at falling intervals; repeated paints are pure.
+        Optional visible limits retain the existing plateau-query contract.
+        """
+        rises = self._ripple_edge_rises
+        if minimum is None and maximum is None:
+            widths = self._ripple_edge_widths
+            return (widths, rises) if include_rises else widths
+        def visible(value):
+            return min(maximum if maximum is not None else math.inf,
+                       max(minimum if minimum is not None else -math.inf, value))
+        # Clipping can only shorten a rise; the displacement itself stays
+        # unclamped, as in the original small-amplitude sea.
+        if self._ripple_history:
+            rises = tuple(min(rise, visible(current) - visible(current - rise))
+                          for current, rise in zip(self._ripple_history[-1][1], rises))
+        result = []
+        for width, rise in zip(self._ripple_edge_smoothed, rises):
+            ramp = max(0., min(1., rise / 4.))
+            result.append(width * ramp * ramp * (3. - 2. * ramp))
+        return (tuple(result), rises) if include_rises else tuple(result)
 
     def update(self, bands, now, vocal=0.0, intensity=None, spectrum=(), vocal_spectrum=()):
         dt = 1 / 60 if self.updated_at is None else max(0.0, min(0.25, now - self.updated_at))
