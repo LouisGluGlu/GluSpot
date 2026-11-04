@@ -3305,6 +3305,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
         visual.mydockfinder_running = True
         visual.manual_finder_available = True
         visual._reset_location_runtime_state = lambda *args, **kwargs: None
+        # This state-only fixture has no QWidget/lyric geometry. The live
+        # destination settlement is covered by test_finder_exit_t244.
+        visual._settle_island_return_motion = lambda _now: None
         visual._notify_settings_changed = lambda: None
         visual._begin_surface_transition = lambda _reason: False
         visual._hide_taskbar_drop_overlay = lambda: None
