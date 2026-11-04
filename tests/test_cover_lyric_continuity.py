@@ -179,7 +179,8 @@ class CoverLyricContinuityTests(unittest.TestCase):
                        for x in range(max(0, int(region.left() * dpr)), min(normal.width(), int(region.right() * dpr))))
         self.assertGreater(different(clip), 0)
         fade_top, fade_bottom = self.window._lyric_bottom_fade_band(QRectF(self.window.rect()))
-        self.assertGreater(clip.bottom(), fade_bottom)
+        self.assertEqual(clip.bottom(), fade_bottom)
+        self.assertEqual(fade_bottom, self.window.height())
         self.assertGreater(different(QRectF(clip.left(), fade_top, clip.width(), fade_bottom - fade_top)), 0)
         self.assertEqual(different(QRectF(clip.left(), fade_bottom + 1., clip.width(),
                                         self.window.height() - fade_bottom - 1.)), 0)

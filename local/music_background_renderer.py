@@ -1066,7 +1066,8 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
     def sea_level_wave_strip(self, rect: QRectF) -> QRectF:
         """Fixed damage envelope: all ripple, reflection and glow pixels."""
         center = rect.top() + rect.height() * .495
-        return QRectF(rect.left(), center - self._u(18), rect.width(), self._u(58)).intersected(rect)
+        return QRectF(rect.left(), max(rect.top(), center - self._u(18)),
+                      rect.width(), rect.height()).intersected(rect)
 
     def _sea_level_surface(self, context: MusicBackgroundRenderContext, rect: QRectF, expanded: bool) -> list[QPointF]:
         """The moving water line shared by the sea body and its highlight.
@@ -1082,9 +1083,15 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
             cache_key = (state.ripple_updated_at, rect.x(), rect.y(), rect.width(), rect.height(), self._u(1))
             cached = getattr(state, "_ripple_surface_cache", None)
             if cached is None or cached[0] != cache_key:
+                # Protect both scaled header units and the actual shell's
+                # header fraction (the island can use a .75 unit scale).
+                # Strong troughs can use the lower island, but neither crest
+                # nor glow may cross that header or the real shell edge.
+                upper = min(rect.bottom() - self._u(3), rect.top() + max(self._u(56), rect.height() * .42))
+                lower = rect.bottom() - self._u(3)
                 points = tuple(QPointF(rect.left() + rect.width() * index / 48,
-                                      rect.top() + rect.height() * .495
-                                      - self._u(state.ripple_displacement(index / 48)))
+                                      max(upper, min(lower, rect.top() + rect.height() * .495
+                                      - self._u(state.ripple_displacement(index / 48)))))
                                for index in range(49))
                 state._ripple_surface_cache = (cache_key, points)
             return list(state._ripple_surface_cache[1])
@@ -1319,17 +1326,11 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
             # Wide antialiased strokes tessellate every segment at high DPR.
             # The filled falloff supplies the glow with just one thin crest.
             line.setAlpha(round(185 + 70 * level))
-            painter.setPen(QPen(line, self._u(1. + .95 * level),
-                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            painter.drawPath(path)
+            ribbon = self._sea_rising_ribbon(rect, points)
+            crest_tint = self._mix_color(sea, line, .16)
+            crest_tint.setAlpha(line.alpha())
+            painter.fillPath(ribbon, crest_tint)
             self._paint_sea_track_light(painter, rect, points, sea, line, progress, expanded)
-            painter.save()
-            painter.translate(0, self._u(3.2 + 1.2 * level))
-            line.setAlpha(round(30 * level))
-            painter.setPen(QPen(line, self._u(.6 + .35 * level),
-                                Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            painter.drawPath(path)
-            painter.restore()
             painter.restore()
             return
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1349,6 +1350,36 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         self._paint_sea_track_light(painter, rect, points, sea, line, progress, expanded)
         painter.restore()
 
+    def _sea_rising_ribbon(self, rect, points, *, max_width=8.):
+        """The same visible rise gate for the base crest and track reflection."""
+        state = getattr(self.host, "_sea_wave_state", None)
+        center = rect.top() + rect.height() * .495
+        upper = min(rect.bottom() - self._u(3), rect.top() + max(self._u(56), rect.height() * .42))
+        widths, rises = (state.ripple_edge_widths(minimum=(center - (rect.bottom() - self._u(3))) / self._u(1),
+                                                maximum=(center - upper) / self._u(1), include_rises=True)
+                         if state is not None else ((0.,) * len(points), (0.,) * len(points)))
+        ribbon = QPainterPath()
+        for index in range(len(points) - 1):
+            a, b = points[index:index + 2]
+            wa, wb = (self._u(min(max_width, widths[i])) for i in (index, index + 1))
+            if wa <= 0. and wb <= 0.:
+                continue
+            ra, rb = rises[index:index + 2]
+            # Surface segments interpolate linearly. Stop exactly at their
+            # zero-rise crossing, before ink could enter a falling interval.
+            if ra > 0. >= rb:
+                b = a + (b - a) * (ra / (ra - rb))
+                wb = 0.
+            elif rb > 0. >= ra:
+                a = a + (b - a) * (-ra / (rb - ra))
+                wa = 0.
+            ribbon.moveTo(a.x(), a.y())
+            ribbon.lineTo(b.x(), b.y())
+            ribbon.lineTo(b.x(), b.y() + wb)
+            ribbon.lineTo(a.x(), a.y() + wa)
+            ribbon.closeSubpath()
+        return ribbon
+
     def _paint_sea_track_light(self, painter, rect, points, sea, line, progress, expanded):
         """A feathered moving reflection attached to the actual water crest."""
         if not 0.0 < progress < 1.0:
@@ -1367,25 +1398,27 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         gradient = QLinearGradient(x - width, 0, x + width, 0)
         edge = QColor(line)
         edge.setAlpha(0)
-        middle = QColor(line)
+        middle = self._mix_color(sea, line, .16) if expanded else QColor(line)
         middle.setAlpha(round(125 * envelope))
         gradient.setColorAt(0, edge)
         gradient.setColorAt(.5, middle)
         gradient.setColorAt(1, edge)
-        # Restrict the streak to its local crest segment; gradients pad their
-        # transparent endpoints, so the remaining path contributes no light.
-        path = QPainterPath(points[0])
-        for point in points[1:]:
-            path.lineTo(point)
-        painter.setPen(QPen(QBrush(gradient), self._u(3.5 if expanded else 1.8)))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
+        # Track reflection obeys the same rising-only edge gate as the sea.
+        # Its soft under-crest glow remains independent of this sharp ribbon.
+        if expanded and getattr(self.host, "_sea_wave_state", None) is not None:
+            painter.fillPath(self._sea_rising_ribbon(rect, points, max_width=3.5), gradient)
+        else:
+            path = QPainterPath(points[0])
+            for point in points[1:]:
+                path.lineTo(point)
+            painter.setPen(QPen(QBrush(gradient), self._u(1.8)))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
 
     def paint_sea_level_cover_light(self, painter, rect, progress):
         if not 0.0 < progress < 1.0:
             return
         context = self.render_context("sea_level")
         sea, line = self._sea_level_colors(context)
-        center = QPointF(rect.left() + rect.width() * (.25 + .5 * progress), rect.bottom())
-        self._paint_background_blob(painter, center, rect.width() * .95, rect.height() * .38,
-                                    self._mix_color(sea, line, .38), round(165 * math.sin(math.pi * progress) ** 2))
+        from local.track_cover_transition import paint_cover_transition_light
+        paint_cover_transition_light(painter, rect, progress, sea, line)

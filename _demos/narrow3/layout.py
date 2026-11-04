@@ -29,11 +29,15 @@ class NarrowLayout:
 
     @property
     def viewport(self):
-        # Reserve header and transport space even while chrome is hidden;
-        # a reveal must not shift wrapping or let old rows cross the title.
         top = self.cover.bottom() + 24.
         bottom = self.transport_panel.top() - 20.
         return QRectF(20, top, self.width - 40, max(1., bottom - top))
+
+    @property
+    def lyric_viewport(self):
+        # Reading occupies the whole window. Chrome changes only the soft
+        # ink mask, never the viewport, wrapping or active-row anchor.
+        return QRectF(20, 0., self.width - 40, self.height)
 
     @property
     def lyric_font(self):

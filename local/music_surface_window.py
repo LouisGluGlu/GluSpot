@@ -15,6 +15,10 @@ import numpy as np
 
 from PIL import Image, ImageFilter
 from local.artwork_skeleton import paint_artwork_skeleton
+from local.track_cover_transition import (
+    ARTWORK_UPGRADE_SECONDS, cover_transition_progress,
+    paint_track_cover_flip, paint_cover_transition_light,
+)
 
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, QTextBoundaryFinder, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient, QRegion, QTextCharFormat, QTextLayout, QTextOption, QTransform
@@ -473,6 +477,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         self._seek_pending = False
         self._track_visual = None
         self._previous_track_visual = None
+        self._track_cover_previous = QImage()
+        self._track_cover_started_at = 0.
+        self._cover_upgrade_previous = QImage()
+        self._cover_upgrade_started_at = 0.
         self._track_transition_at = 0.0
         self._previous_cover_cache_key = None
         self._previous_cover_cache = QImage()
@@ -2137,7 +2145,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             self.update()
         cover_animating = self._cover_scale_animating(now)
         layout_animating = self._cover_layout_animating(now)
-        cover_animating = layout_animating or cover_animating
+        cover_animating = layout_animating or cover_animating or self._track_cover_animating(now)
         playing = self._display_playing_state(now)
         priority = (
             playing
@@ -2941,6 +2949,9 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             QColor(primary), QColor(secondary),
         )
         if self._track_visual is not None and visual[0] != self._track_visual[0]:
+            self._track_cover_previous = self._track_cover_snapshot(now)
+            self._track_cover_started_at = now if not self._track_cover_previous.isNull() else 0.
+            self._cover_upgrade_previous = QImage()
             self._previous_track_visual = self._track_visual
             self._track_transition_at = now
             # The center-layout exit may reuse lyric ink from an earlier
@@ -2976,9 +2987,86 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 # changes to geometry or device-pixel ratio do not.
                 self._art_loading_waiting = True
                 self._begin_art_loading_ring(now)
+        if (self._track_visual is not None and visual[0] == self._track_visual[0]
+                and visual[3].cacheKey() != self._track_visual[3].cacheKey()
+                and not self._track_visual[3].isNull() and not visual[3].isNull()):
+            self._cover_upgrade_previous = self._track_visual[3]
+            self._cover_upgrade_started_at = now
         self._last_art_loading_source = str(getattr(self.owner, "album_art_source", "") or "")
         self._track_visual = visual
         return max(0.0, min(1.0, (now - self._track_transition_at) / 0.36)) if self._previous_track_visual else 1.0
+
+    def _track_cover_progress(self, now):
+        return cover_transition_progress(self._track_cover_started_at, now)
+
+    def _track_cover_animating(self, now):
+        return (self._track_cover_progress(now) < 1.
+                or cover_transition_progress(self._cover_upgrade_started_at, now, ARTWORK_UPGRADE_SECONDS) < 1.)
+
+    def _track_cover_snapshot(self, now):
+        if self._track_visual is None or self._track_visual[3].isNull():
+            return QImage()
+        if not self._track_cover_animating(now):
+            return self._track_visual[3].scaled(192, 192, Qt.AspectRatioMode.KeepAspectRatio,
+                                               Qt.TransformationMode.SmoothTransformation)
+        image = QImage(192, 192, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        with QPainter(image) as layer:
+            self._paint_track_cover_image(layer, QRectF(0, 0, 192, 192), 12., now, light=False)
+        return image
+
+    def _paint_track_cover_image(self, painter, rect, radius, now, *, light=True, cache_side=None):
+        """The island's 640 ms flip, plus quiet same-track artwork enrichment."""
+        if self._track_visual is None:
+            palette = self._art_palette()
+            self._track_transition(now, QColor(palette.primary), QColor(palette.secondary))
+        progress = self._track_cover_progress(now)
+        upgrade = cover_transition_progress(self._cover_upgrade_started_at, now, ARTWORK_UPGRADE_SECONDS)
+        if light and progress < 1.:
+            palette = self._art_palette()
+            paint_cover_transition_light(painter, rect, progress, QColor(palette.primary), QColor(palette.secondary))
+
+        def draw_image(image, *, previous=False, preview=False):
+            path = QPainterPath()
+            path.addRoundedRect(rect, radius, radius)
+            painter.save()
+            painter.setClipPath(path, Qt.ClipOperation.IntersectClip)
+            if image.isNull():
+                painter.fillRect(rect, QColor(255, 255, 255, 22))
+            else:
+                dpr = max(1., float(self.devicePixelRatioF()))
+                pixels = max(1, round((rect.width() if cache_side is None else cache_side) * dpr))
+                if preview:
+                    pixels = min(pixels, 384)
+                key = (image.cacheKey(), pixels, pixels, round(dpr, 3), preview)
+                key_attr, image_attr = (("_previous_cover_cache_key", "_previous_cover_cache") if previous
+                                       else ("_cover_cache_key", "_cover_cache"))
+                if key != getattr(self, key_attr):
+                    scaled = self._scaled_artwork_image(image, pixels, dpr)
+                    if preview:
+                        scaled = self._blurred_preview_cover(scaled)
+                    setattr(self, image_attr, scaled)
+                    setattr(self, key_attr, key)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                painter.drawImage(rect, getattr(self, image_attr))
+            painter.restore()
+
+        def paint_face(outgoing):
+            if outgoing:
+                draw_image(self._track_cover_previous, previous=True)
+            else:
+                image = self._track_visual[3]
+                draw_image(image, preview=self._should_blur_preview(image))
+                if upgrade < 1. and not self._cover_upgrade_previous.isNull():
+                    painter.save()
+                    painter.setOpacity(painter.opacity() * (1. - upgrade))
+                    draw_image(self._cover_upgrade_previous, previous=True)
+                    painter.restore()
+        paint_track_cover_flip(painter, rect, radius, progress, paint_face)
+        if progress >= 1.:
+            self._track_cover_previous = QImage()
+        if upgrade >= 1.:
+            self._cover_upgrade_previous = QImage()
 
     def _blurred_preview_cover(self, source: QImage) -> QImage:
         if source.isNull():
@@ -5339,6 +5427,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                     QRectF(left, cover.center().y() - 30. * surface_scale, width, 30. * surface_scale),
                     self._surface_font(artist_size, QFont.Weight.Medium),
                     QRectF(left, cover.center().y() + 5. * surface_scale, width, 22. * surface_scale))
+        surface_scale = self._cover_column_scale(cover, content, surface_scale)
         expansion = 1.0 - max(0.0, min(1.0, float(control_reveal)))
         title_gain = self._metadata_spring_fraction(expansion, delay=0.05, overshoot=0.5)
         artist_gain = self._metadata_spring_fraction(expansion, delay=0.16, overshoot=0.38)
@@ -5370,6 +5459,12 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         )
         self._metadata_draw_pixel_sizes = {"title": title_size, "artist": artist_size}
         return title_font, title_rect, artist_font, artist_rect
+
+    def _cover_column_scale(self, cover, content, scale):
+        if self._effective_content_layout() == "lyrics" and not self._content_layout_is_narrow():
+            original = max(1., min(404. * scale, content.height() - 118. * scale, content.width()))
+            return scale * min(1., cover.width() / original)
+        return scale
 
     def _wrapped_lyric_layout(
         self, text: str, font: QFont, width: float, *, align_right: bool = False,
@@ -6958,7 +7053,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 max(0.0, rect.bottom() - original_cover.bottom()),
             ))
         self._cover_animation_rect = cover_dirty.adjusted(
-            -2.0, -2.0, 2.0, 2.0,
+            -cover_dirty.width() * .5, -2.0, cover_dirty.width() * .5, cover_dirty.height() * .20,
         ).intersected(rect).toAlignedRect()
         cover_scale = self._cover_scale_at(cover_now)
         painted_cover = self._scaled_cover_rect(cover, cover_scale)
@@ -6966,61 +7061,10 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             painted_cover.adjusted(-2.0, -2.0, 2.0, 2.0).toAlignedRect()
         )
         if cover_exposed and not navigation_capture:
-            painted_side = painted_cover.width()
-            image = QImage(getattr(self.owner, "album_art", QImage()))
-            path = QPainterPath()
-            path.addRoundedRect(painted_cover, self._album_art_radius(painted_side), self._album_art_radius(painted_side))
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.setClipPath(path)
-            if image.isNull():
-                painter.fillRect(painted_cover, QColor(255, 255, 255, 22))
-            else:
-                dpr = max(1.0, float(self.devicePixelRatioF()))
-                cache_side = max(original_cover.width(), center_plan["idle_cover"].width(),
-                                 center_plan["shown_cover"].width()) if center_plan else original_cover.width()
-                preview_cover = self._should_blur_preview(image)
-                cache_pixels = max(1, int(round(cache_side * dpr)))
-                if preview_cover:
-                    # The preview is intentionally soft. Upscaling a thumbnail
-                    # to a 4K cover and then blurring millions of pixels would
-                    # stall the first visible frame for no perceptual benefit.
-                    cache_pixels = min(cache_pixels, 384)
-                cover_key = (
-                    image.cacheKey(),
-                    cache_pixels,
-                    cache_pixels,
-                    round(dpr, 3),
-                    preview_cover,
-                )
-                if cover_key != self._cover_cache_key:
-                    self._cover_cache = self._scaled_artwork_image(image, cover_key[1], dpr)
-                    self._cover_cache_key = cover_key
-                cover_image = self._cover_cache
-                if preview_cover:
-                    cover_image = self._blurred_preview_cover(cover_image)
-                painter.drawImage(painted_cover, cover_image)
-            painter.restore()
-
-            if previous and not previous[3].isNull():
-                painter.save()
-                painter.setOpacity(1.0 - transition)
-                painter.setClipPath(path)
-                dpr = max(1.0, float(self.devicePixelRatioF()))
-                cache_side = max(original_cover.width(), center_plan["idle_cover"].width(),
-                                 center_plan["shown_cover"].width()) if center_plan else original_cover.width()
-                previous_key = (
-                    previous[3].cacheKey(),
-                    max(1, int(round(cache_side * dpr))),
-                    max(1, int(round(cache_side * dpr))),
-                    round(dpr, 3),
-                )
-                if previous_key != self._previous_cover_cache_key:
-                    self._previous_cover_cache = self._scaled_artwork_image(previous[3], previous_key[1], dpr)
-                    self._previous_cover_cache_key = previous_key
-                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-                painter.drawImage(painted_cover, self._previous_cover_cache)
-                painter.restore()
+            self._paint_track_cover_image(painter, painted_cover,
+                                         self._album_art_radius(painted_cover.width()), cover_now,
+                                         cache_side=max(original_cover.width(), center_plan["idle_cover"].width(),
+                                                        center_plan["shown_cover"].width()) if center_plan else original_cover.width())
 
         metadata_width = original_cover.width()
         available_metadata_width = max(
@@ -7147,7 +7191,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         if not content_snapshot and (paint_region is None or paint_region.intersects(self._library_damage_rect(rect))):
             self._paint_library_back(painter, rect)
         self._paint_window_controls(painter, rect, paint_ink=window_control_exposed and not content_snapshot)
-        controls_height = self.TRANSPORT_PANEL_HEIGHT * surface_scale
+        cover_column_scale = self._cover_column_scale(original_cover, content, surface_scale)
+        controls_height = self.TRANSPORT_PANEL_HEIGHT * cover_column_scale
         normal_controls_bottom = rect.bottom() - self._personal_dj_footer_height(rect) - 18.0 * surface_scale
         controls_top = normal_controls_bottom - controls_height
         if cover_fraction > 0.0:
@@ -7157,7 +7202,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
                 normal_controls_bottom - controls_height,
                 max(controls_top, cover.bottom() + 6.0 * surface_scale * cover_fraction),
             )
-        panel_width = max(1., metadata_width - 50.0)
+        panel_width = max(1., metadata_width - 50.0 * cover_column_scale / surface_scale)
         if cover.bottom() > controls_top:
             panel_width = min(
                 panel_width,
@@ -7188,6 +7233,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             primary,
             secondary,
             paint_ink=media_control_exposed and not content_snapshot,
+            content_scale=cover_column_scale,
         )
         if self._control_prewarm_requested and (window_control_exposed or media_control_exposed):
             self._control_prewarm_requested = False
@@ -7213,7 +7259,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         painter.restore()
 
     def _lyric_bottom_fade_band(self, rect: QRectF):
-        """One row of soft ink fade into the wide chrome's stable envelope."""
+        """Soft ink fade through the stable chrome envelope to the window edge."""
         scale = self._surface_scale(rect)
         # External wide transport has no footer. Resolve its top from this
         # surface, not _media_control_panel_rect (painted after the lyrics and
@@ -7231,22 +7277,20 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             bottom = min(bottom, rect.bottom() - max(10., 18. * scale) - 3. * side - 44. * scale)
         font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
         row_height = self._font_height(font) + max(18. * scale, rect.height() * .035)
-        return bottom - row_height, bottom
+        return bottom - row_height, rect.bottom()
 
     def _paint_live_lyric_column(self, painter: QPainter, rect: QRectF, **kwargs):
-        """Feather only external wide ink, preserving readable wrapped rows."""
+        """Feather external lyric ink at both window edges, behind chrome."""
         wide = (getattr(self, "_lyric_bottom_fade_active", False) if self._lyric_resize_capturing else
-                self._effective_content_layout() == "lyrics" and not self._content_layout_is_narrow())
+                self._effective_content_layout() == "lyrics")
         if not self._lyric_resize_capturing and not self._lyric_resize_probe:
             self._lyric_bottom_fade_active = wide
             if wide:
                 self._lyric_bottom_fade_last_band = self._lyric_bottom_fade_band(rect)
         if not wide or self._lyric_resize_probe or getattr(self, "_lyric_resize_committing", False):
             return self._paint_lyric_column_ink(painter, rect, **kwargs)
-        column = (self._lyric_resize_last_geometry['column'] if self._lyric_resize_capturing
-                  else self._content_column_geometry(rect)[2])
         fade_top, fade_bottom = self._lyric_bottom_fade_last_band
-        bounds = QRectF(rect.left(), column.top(), rect.width(), column.height()).intersected(rect)
+        bounds = QRectF(rect)
         if bounds.isEmpty():
             return self._paint_lyric_column_ink(painter, rect, **kwargs)
         # One reusable, viewport-sized ink buffer; no filtering or reshaping.
@@ -7268,6 +7312,18 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             layer.setRenderHints(painter.renderHints())
             layer.translate(-bounds.left(), -bounds.top())
             self._paint_lyric_column_ink(layer, rect, **kwargs)
+            scale = self._surface_scale(rect)
+            font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
+            row_height = self._font_height(font) + max(18. * scale, rect.height() * .035)
+            top_end = rect.top() + max(row_height, 70. * scale)
+            if self._content_layout_is_narrow():
+                top_end = rect.top() + min(70., rect.height() * .16) + min(96., rect.width() * .267) + row_height
+            top_gradient = QLinearGradient(0., rect.top(), 0., top_end)
+            top_gradient.setColorAt(0., QColor(255, 255, 255, 0))
+            top_gradient.setColorAt(.45, QColor(255, 255, 255, 105))
+            top_gradient.setColorAt(1., QColor(255, 255, 255, 255))
+            layer.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            layer.fillRect(bounds, top_gradient)
             gradient = QLinearGradient(0., fade_top, 0., fade_bottom)
             gradient.setColorAt(0., QColor(255, 255, 255, 255))
             gradient.setColorAt(.55, QColor(255, 255, 255, 150))
@@ -7673,8 +7729,8 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
             )
         else:
             self._active_glow_stage = "done"
-        lyric_top = side_column.top() + max(8.0, rect.height() * 0.018)
-        lyric_height = max(1.0, side_column.height() - max(12.0, rect.height() * 0.035))
+        lyric_top = rect.top()
+        lyric_height = max(1.0, rect.height())
         if cover_lyrics_layout:
             lyric_top = lyric_cover.top() + lyric_cover.height() * .42
             lyric_height = max(1., lyric_cover.height() * .55)
@@ -7694,11 +7750,9 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
         # naturally instead of ending at a visible vertical cut. The existing
         # cover mask and real window edge still bound the composed surface.
         lyric_ink_clip = lyric_transform.mapRect(rect)
-        # Width remains uncut for blur/halos. Keep the full column vertically;
-        # the wide ink mask handles bottom chrome without shortening follow.
-        ink_column = lyric_transform.mapRect(side_column)
-        lyric_ink_clip.setTop(ink_column.top())
-        lyric_ink_clip.setBottom(ink_column.bottom())
+        # Only the actual window edge clips external ink. Header/footer
+        # clearance belongs exclusively to the DestinationIn feather.
+        self._lyric_ink_clip_rect = QRectF(lyric_ink_clip)
         self._lyric_animation_rect = QRectF(
             lyric_clip.left() - glow_bleed, rect.top(),
             lyric_clip.width() + 2.0 * glow_bleed, rect.height(),
@@ -8827,7 +8881,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
 
     def _library_control_shift(self, rect: QRectF, reveal: float) -> QPointF:
         button = self._library_button_rect(rect, 0.0)
-        return QPointF(-(button.right()) * (1.0 - reveal),
+        return QPointF(0.,
                        -(button.bottom()) * (1.0 - reveal))
 
     def _library_damage_rect(self, rect: QRectF) -> QRect:
@@ -9245,7 +9299,7 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
 
     def _personal_dj_control_shift(self, rect: QRectF, reveal: float) -> QPointF:
         bounds = self._personal_dj_button_rect(rect)
-        return QPointF(14.0 * self._surface_scale(rect) * (1.0 - reveal),
+        return QPointF(0.,
                        (rect.bottom() - bounds.top() + 4.0) * (1.0 - reveal))
 
     def _personal_dj_hit_path(self, rect: QRectF, now: float, *, shifted: bool = True, posed=True):
@@ -9693,14 +9747,13 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
     def _window_control_shift(self, button: QRectF, reveal: float) -> QPointF:
         scale = self._surface_scale()
         hidden = 1.0 - reveal
-        return QPointF((button.width() + 22.0 * scale) * hidden,
+        return QPointF(0.,
                        -(button.height() + 18.0 * scale) * hidden)
 
     def _transport_control_shift(self, panel: QRectF, reveal: float) -> QPointF:
         scale = self._surface_scale()
         hidden = 1.0 - reveal
-        centered = self._cover_layout_fraction_at(time.monotonic())
-        return QPointF(-36.0 * scale * hidden * (1.0 - centered),
+        return QPointF(0.,
                        (panel.height() + 20.0 * scale) * hidden)
 
     def _remember_control_layer(self, key: tuple, image: QImage):
@@ -10296,11 +10349,11 @@ class MusicSurfaceWindow(MusicLyricResizeMixin, MusicWindowCompactMixin, MusicSo
 
     def _paint_media_controls(
         self, painter: QPainter, rect: QRectF, primary: QColor, secondary: QColor,
-        *, paint_ink: bool = True,
+        *, paint_ink: bool = True, content_scale=None,
     ):
         # The panel remains a layout/hit-test region, but has no visible plate.
         panel = QRectF(rect)
-        scale = self._surface_scale()
+        scale = self._surface_scale() if content_scale is None else content_scale
         panel.setHeight(min(self.TRANSPORT_PANEL_HEIGHT * scale, panel.height()))
         panel.setWidth(min(350.0 * scale, panel.width()))
         self._media_control_panel_rect = QRectF(panel)

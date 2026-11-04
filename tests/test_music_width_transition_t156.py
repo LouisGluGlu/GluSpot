@@ -162,7 +162,11 @@ class WidthTransitionWindowTests(unittest.TestCase):
             content, logical, font_scale, transform = self.window._width_lyric_render_pose(QRectF(self.window.rect()), column, self.window._surface_scale())
             keys.add((round(logical.width(), 5), round(font_scale, 5)))
             self.assertAlmostEqual(transform.mapRect(logical).width(), column.width(), places=4)
-            self.assertFalse(column.intersects(cover))
+            # Lyrics share the full window height while header artwork
+            # crosses their lane; alpha feathering supplies separation.
+            self.assertAlmostEqual(column.top(), 0., places=4)
+            self.assertAlmostEqual(column.bottom(), self.window.height(), places=4)
+            self.assertAlmostEqual(transform.mapRect(logical).height(), column.height(), places=4)
         self.assertEqual(len(keys), 4)
         self.assertNotEqual(columns[0], columns[15])
         self.assertNotEqual(covers[0], covers[15])

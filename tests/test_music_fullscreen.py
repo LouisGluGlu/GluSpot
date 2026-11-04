@@ -2249,7 +2249,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         bottom_indices = [
             index for index, (start, end) in enumerate(ranges)
             if any(
-                clip.bottom() < positions[visual] < self.window.height()
+                positions[visual] < clip.bottom()
+                < positions[visual] + self.window._song_visual_heights[visual]
                 for visual in range(start, end)
             )
         ]
@@ -2268,8 +2269,8 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertTrue(all(f"row {index}" in painted for index in edge_indices))
         self.assertGreaterEqual(self.window._logical_line_spring.visible_range[1],
                                 max(ranges[index][1] for index in edge_indices))
-        # Move the manual anchor enough for the bottom row to cross the
-        # former lyric inset boundary; it must remain in both frames.
+        # Move the manual anchor while the edge row crosses the real shell
+        # boundary; its spring and painter must retain it in both frames.
         self.window._browse_index = 10.08
         with (
             patch("local.music_surface_window.time.monotonic", return_value=100.116),
@@ -5002,15 +5003,26 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             patch.object(self.window, "_blurred_preview_cover", wraps=self.window._blurred_preview_cover) as blur,
         ):
             self.window.render(target)
+            # The first half of the shared cover flip still paints the
+            # outgoing original; the incoming preview is prepared on reveal.
+            blur.assert_not_called()
+        with (
+            patch("local.music_surface_window.time.monotonic", return_value=21.4),
+            patch.object(self.window, "_blurred_preview_cover", wraps=self.window._blurred_preview_cover) as blur,
+        ):
+            self.window.render(target)
             self.assertGreater(blur.call_count, 0)
             self.assertLessEqual(self.window._cover_cache.width(), 384)
+            prepared = blur.call_count
+            self.window.render(target)
+            self.assertEqual(blur.call_count, prepared)
         replacement = QImage(1200, 1200, QImage.Format.Format_RGB32)
         replacement.fill(QColor(21, 21, 21))
         self.owner.album_art = replacement
         self.owner.album_art_source = "original"
         self.owner.album_art_lookup_state = "ready"
         with (
-            patch("local.music_surface_window.time.monotonic", return_value=21.2),
+            patch("local.music_surface_window.time.monotonic", return_value=21.5),
             patch.object(self.window, "_blurred_preview_cover", wraps=self.window._blurred_preview_cover) as blur,
         ):
             self.window.render(target)

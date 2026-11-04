@@ -609,6 +609,8 @@ class IslandStackVisual(QWidget):
         self.album_island_transition_direction = 1
         self._island_track_transition_started_at = 0.0
         self._island_track_previous_cover = QImage()
+        self._island_cover_upgrade_previous = QImage()
+        self._island_cover_upgrade_started_at = 0.
         self.music_surface_transition_started_at = 0.0
         self.music_surface_transition_duration = 0.62
         self.music_surface_transition_mode = ""
@@ -1031,6 +1033,9 @@ class IslandStackVisual(QWidget):
             message_refresh=message_refresh,
         )
         if plan.should_set_loaded_cover and not cover_reused:
+            if not track_changed and not initial and not self.album_art.isNull():
+                self._island_cover_upgrade_previous = QImage(self.album_art)
+                self._island_cover_upgrade_started_at = now
             self.album_art = self._bounded_album_image(image, self.CURRENT_ALBUM_ART_MAX_SIDE, smooth=True)
             self.album_art_signature = plan.next_signature or art_signature
             self.album_art_source = str(getattr(track, "album_art_source", "") or "")
@@ -1722,6 +1727,10 @@ class IslandStackVisual(QWidget):
         if IslandStackVisual._island_track_transition_progress(self, now) < 1.0:
             from local.island_presentation import ActiveVisualAnimationPlan
             return ActiveVisualAnimationPlan(True, "island_track_flip")
+        from local.track_cover_transition import cover_transition_progress, ARTWORK_UPGRADE_SECONDS
+        if cover_transition_progress(getattr(self, "_island_cover_upgrade_started_at", 0.), now, ARTWORK_UPGRADE_SECONDS) < 1.:
+            from local.island_presentation import ActiveVisualAnimationPlan
+            return ActiveVisualAnimationPlan(True, "island_cover_upgrade")
         motion = getattr(self, "_audio_device_motion", None)
         if motion is not None and motion.active:
             # Reuse the island's precise frame timer, including paused lyrics.
@@ -3778,10 +3787,16 @@ class IslandStackVisual(QWidget):
 
     def _tick(self):
         now = time.monotonic()
-        if (self._island_track_transition_progress(now) >= 1.0
-                or bool(getattr(self, "scene_suppressed", False))
+        if (bool(getattr(self, "scene_suppressed", False))
                 or self._navigation_surface_blocks_island()):
             self._clear_island_track_transition()
+        elif self._island_track_transition_progress(now) >= 1.0:
+            self._island_track_transition_started_at = 0.
+            self._island_track_previous_cover = QImage()
+        from local.track_cover_transition import cover_transition_progress, ARTWORK_UPGRADE_SECONDS
+        if cover_transition_progress(getattr(self, "_island_cover_upgrade_started_at", 0.), now, ARTWORK_UPGRADE_SECONDS) >= 1.:
+            self._island_cover_upgrade_previous = QImage()
+            self._island_cover_upgrade_started_at = 0.
         anim_dt = self._animation_tick_delta_seconds(now)
         self.last_tick_at = now
         speed = self._animation_speed_factor()
@@ -3844,7 +3859,8 @@ class IslandStackVisual(QWidget):
                 state = self._sea_wave_state = SeaWaveState()
             state.update_ripple(getattr(self, "_sea_peak_sample", None), now,
                                 is_playing=bool(getattr(self, "media_is_playing", False)),
-                                vocal=getattr(self, "_sea_vocal_sample", 0.0))
+                                vocal=getattr(self, "_sea_vocal_sample", 0.0),
+                                low=getattr(self, "_sea_low_sample", 0.0))
             state.update(
                 self.current_audio_bands,
                 now,
@@ -3883,10 +3899,12 @@ class IslandStackVisual(QWidget):
             provider = getattr(self, "data_provider", None)
             def read_live_frame():
                 self._sea_peak_sample = None
+                self._sea_low_sample = 0.0
                 self._sea_vocal_sample = 0.0
                 self._sea_spectrum = self._sea_vocal_spectrum = ()
                 frame = getattr(provider, "get_audio_frame", lambda: None)()
                 if frame is not None:
+                    self._sea_low_sample = getattr(frame, "low", 0.0) or 0.0
                     # Older/fixture providers may only supply real bands.
                     self._sea_peak_sample = getattr(frame, "peak", None)
                     if self._sea_peak_sample is None:
@@ -13264,7 +13282,8 @@ class IslandStackVisual(QWidget):
             painter.translate(rect.center())
             painter.scale(motion.scale, motion.scale)
             painter.translate(-rect.center())
-        if progress < 1.0:
+        upgrade_started = getattr(self, "_island_cover_upgrade_started_at", 0.)
+        if progress < 1. or upgrade_started > 0.:
             self._paint_island_track_cover(painter, rect, radius, image, cache_key, progress)
         else:
             self._paint_cover(painter, rect, radius, image, cache_key)
@@ -13284,53 +13303,55 @@ class IslandStackVisual(QWidget):
     def _clear_island_track_transition(self):
         self._island_track_transition_started_at = 0.0
         self._island_track_previous_cover = QImage()
+        self._island_cover_upgrade_previous = QImage()
+        self._island_cover_upgrade_started_at = 0.
 
     def _island_track_transition_progress(self, now: float | None = None) -> float:
         started = float(getattr(self, "_island_track_transition_started_at", 0.0))
         if started <= 0.0:
             return 1.0
         now = time.monotonic() if now is None else float(now)
-        return max(0.0, min(1.0, (now - started) / .64))
+        from local.track_cover_transition import cover_transition_progress
+        return cover_transition_progress(started, now)
 
     def _island_track_cover_snapshot(self, now: float) -> QImage:
         """Bound outgoing art; interrupted switches inherit the visible pose."""
         image = getattr(self, "album_art", QImage())
         progress = self._island_track_transition_progress(now)
-        if progress >= 1.0:
+        from local.track_cover_transition import cover_transition_progress, ARTWORK_UPGRADE_SECONDS
+        upgrade = cover_transition_progress(getattr(self, "_island_cover_upgrade_started_at", 0.), now, ARTWORK_UPGRADE_SECONDS)
+        if progress >= 1.0 and upgrade >= 1.:
             return self._bounded_album_image(image, 192, smooth=True)
         snapshot = QImage(192, 192, QImage.Format.Format_ARGB32_Premultiplied)
         snapshot.fill(Qt.GlobalColor.transparent)
         with QPainter(snapshot) as painter:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            self._paint_island_track_cover(painter, QRectF(0, 0, 192, 192), 16, progress=progress)
+            self._paint_island_track_cover(painter, QRectF(0, 0, 192, 192), 16, progress=progress, paint_now=now)
         return snapshot
 
-    def _paint_island_track_cover(self, painter, rect, radius, image=None, cache_key=None, progress=1.0):
-        if progress >= 1.0:
+    def _paint_island_track_cover(self, painter, rect, radius, image=None, cache_key=None, progress=1.0, *, paint_now=None):
+        from local.track_cover_transition import ARTWORK_UPGRADE_SECONDS, cover_transition_progress, paint_track_cover_flip
+        now = getattr(self, "_island_glow_paint_now", None) if paint_now is None else paint_now
+        now = time.monotonic() if now is None else now
+        upgrade = cover_transition_progress(getattr(self, "_island_cover_upgrade_started_at", 0.), now, ARTWORK_UPGRADE_SECONDS)
+        def paint_current():
             self._paint_cover(painter, rect, radius, image, cache_key)
+            previous = getattr(self, "_island_cover_upgrade_previous", QImage())
+            if upgrade < 1. and not previous.isNull():
+                painter.save()
+                painter.setOpacity(painter.opacity() * (1. - upgrade))
+                self._paint_cover(painter, rect, radius, previous)
+                painter.restore()
+        if progress >= 1.0:
+            paint_current()
             return
-        eased = progress * progress * (3.0 - 2.0 * progress)
-        angle = math.pi * (eased if eased < .5 else eased - 1.0)
-        width = abs(math.cos(angle))
-        if width < .012:
-            return  # Edge-on: switch faces here, never mirror the new artwork.
-        if eased < .5:
-            image = self._island_track_previous_cover
-            cache_key = None
-        taper = .32 * abs(math.sin(angle))
-        perspective = {"left_height": 1.0 - (taper if angle < 0 else 0.0),
-                       "right_height": 1.0 - (taper if angle >= 0 else 0.0)}
-        painter.save()
-        painter.translate(rect.center())
-        painter.scale(width, 1.0)
-        painter.translate(-rect.center())
-        painter.setWorldTransform(album_cover_projection(rect, perspective), combine=True)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        self._paint_cover(painter, rect, radius, image, cache_key)
-        shade = self._rounded_path(rect, radius)
-        painter.fillPath(shade, QColor(0, 0, 0, round(65 * (1.0 - width))))
-        painter.restore()
+        def paint_face(outgoing):
+            if outgoing:
+                self._paint_cover(painter, rect, radius, self._island_track_previous_cover)
+            else:
+                paint_current()
+        paint_track_cover_flip(painter, rect, radius, progress, paint_face)
 
     def _paint_cover(self, painter: QPainter, rect: QRectF, radius: float, image: QImage | None = None, cache_key: str | None = None):
         path = self._rounded_path(rect, radius)

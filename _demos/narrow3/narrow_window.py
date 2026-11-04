@@ -145,7 +145,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                      for first, last in zip(self._width_content_from, target))
             compact = phase if self.narrow else 1. - phase
             cover.translate(0., -VeilOverlay.TOP_END * (1. - self.visibility.progress) * compact)
-            return content, cover, self._separate_width_column(cover, column)
+            return content, cover, column
         if not self._narrow_lyrics_mount:
             content, cover, column = super()._content_column_geometry(rect)
             if (getattr(self, "narrow", False) and self.mode == "playlist"
@@ -153,7 +153,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 cover.translate(0., -VeilOverlay.TOP_END * (1. - self.visibility.progress))
             return content, cover, column
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
-        viewport = NarrowLayout(surface.width(), surface.height()).viewport
+        viewport = NarrowLayout(surface.width(), surface.height()).lyric_viewport
         viewport.translate(surface.topLeft())
         return QRectF(viewport), QRectF(-10000., 0., 0., 0.), viewport
 
@@ -162,7 +162,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return self._wide_content_column_geometry(rect)
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
         layout = NarrowLayout(surface.width(), surface.height())
-        return surface, layout.cover.translated(surface.topLeft()), layout.viewport.translated(surface.topLeft())
+        return surface, layout.cover.translated(surface.topLeft()), layout.lyric_viewport.translated(surface.topLeft())
 
     def _paint_wide_lyrics_mounted(self, painter):
         self._paint_lyric_column(painter, QRectF(self.rect()))
@@ -572,7 +572,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def _sync_artwork_palette(self, now):
         # Palette acquisition belongs to the presentation clock, including
         # fully hidden chrome. Extraction retains the shared single worker.
-        self._art_palette()
+        palette = self._art_palette()
+        self._track_transition(now, QColor(palette.primary), QColor(palette.secondary))
+        if self._track_cover_animating(now):
+            self._wide_lyrics_dirty = True
         identity = (self.owner.album_art.cacheKey(), self.owner.album_color.rgba(),
                     self.owner.secondary_color.rgba(), self._art_palette_cache_key)
         changed = identity != self._palette_sync_key
@@ -672,7 +675,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                         rect.bottom() - margin - side, side * 2.5, side)
         if shifted:
             reveal = self._control_reveal_at(time.monotonic() if now is None else now)
-            result.translate(14. * scale * (1. - reveal),
+            result.translate(0.,
                              (rect.bottom() - result.top() + 4.) * (1. - reveal))
         return result
 
@@ -771,7 +774,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         if not getattr(self, "_capturing_chrome", False):
             hidden = 1. - self.visibility.progress
             lower = key.startswith("media:") or (key in {"collection", "personal_dj"} and top <= 0.)
-            rect.translate(0. if key.startswith("media:") else (self.width() + 22.) * hidden,
+            rect.translate(0.,
                            (VeilOverlay.BOTTOM_HEIGHT if lower else -VeilOverlay.TOP_END) * hidden)
         return rect
 
@@ -1075,6 +1078,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             self.paint_header(painter, layout)
         if visibility > .001 and self._controls_bands is not None and not self._capturing_content_snapshot:
             self._paint_chrome_bands(painter)
+            painter.save()
+            painter.setOpacity(min(1., visibility / .2))
+            self.paint_header(painter, layout)
+            painter.restore()
         if self.hints and not self._capturing_content_snapshot:
             painter.setFont(self._surface_font(12, QFont.Weight.Medium))
             painter.setPen(QColor(255, 255, 255, 120))
@@ -1153,7 +1160,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         hidden = 1. - self.visibility.progress
         painter.save()
         painter.setOpacity(min(1., self.visibility.progress / .2))
-        painter.drawImage(QPointF((self.width() + 22.) * hidden, -VeilOverlay.TOP_END * hidden), self._controls_bands[0])
+        painter.drawImage(QPointF(0., -VeilOverlay.TOP_END * hidden), self._controls_bands[0])
         painter.drawImage(QPointF(0, self.height() - VeilOverlay.BOTTOM_HEIGHT
                                  + VeilOverlay.BOTTOM_HEIGHT * hidden), self._controls_bands[1])
         painter.restore()
@@ -1435,8 +1442,6 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                                   dj_available=self.dj_available)
             self._capturing_chrome = True
             try:
-                if self.mode == "lyrics" and self._layout_snapshot.isNull():
-                    self.paint_header(layer, layout)
                 self.paint_controls(layer, layout, 1.0)
             finally:
                 self._capturing_chrome = False
@@ -1731,12 +1736,10 @@ class NarrowStudyWindow(MusicSurfaceWindow):
     def paint_header(self, painter, layout):
         shift = 0. if getattr(self, "_capturing_chrome", False) else -VeilOverlay.TOP_END * (1. - self.visibility.progress)
         cover = layout.cover.translated(0., shift)
-        painter.save()
-        clip = QPainterPath()
-        clip.addRoundedRect(cover, 10, 10)
-        painter.setClipPath(clip)
-        painter.drawImage(cover, self.owner.album_art)
-        painter.restore()
+        palette = self._art_palette()
+        now = time.monotonic()
+        self._track_transition(now, QColor(palette.primary), QColor(palette.secondary))
+        self._paint_track_cover_image(painter, cover, 10., now)
         column = layout.text.translated(0., shift)
         painter.setFont(self._surface_font(20))
         painter.setPen(QColor(255, 255, 255, 242))

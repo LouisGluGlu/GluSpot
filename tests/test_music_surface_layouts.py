@@ -81,9 +81,8 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
             self.assertFalse(self.window._content_layout_is_narrow())
             surface = QRectF(self.window.rect())
             content, _cover, column = self.window._content_column_geometry()
-            self.assertEqual(column.bottom(), content.bottom())
-            self.assertAlmostEqual(column.bottom(), surface.bottom() - 60. * self.window._surface_scale())
-            self.assertGreater(column.bottom(), surface.height() * .90)
+            self.assertEqual(column.top(), surface.top())
+            self.assertEqual(column.bottom(), surface.bottom())
             for active in (0, 5, 11):
                 with self.subTest(size=size, active=active):
                     self.owner.media_position_seconds = active * 10. + 1.
@@ -98,15 +97,13 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                     clip = self.window._lyric_clip_rect
                     self.assertGreater(clip.bottom(), boundary)
                     self.assertGreater(column.bottom(), boundary)
-                    expected_center = (column.top() + max(8., surface.height() * .018)
-                                       + (column.height() - max(12., surface.height() * .035)) * .43)
+                    expected_center = surface.top() + surface.height() * .43
                     self.assertAlmostEqual(self.window._lyric_hit_rects[active].center().y(), expected_center)
-                    self.assertGreater(expected_center, surface.height() * .43)
-                    rgba = ink.convertToFormat(QImage.Format.Format_RGBA8888)
-                    alpha = np.frombuffer(rgba.constBits(), np.uint8).reshape(rgba.height(), rgba.width(), 4)[:, :, 3]
-                    self.assertFalse(np.any(alpha[int(np.ceil(boundary * ink.devicePixelRatioF())):]))
+                    self.assertEqual(self.window._lyric_ink_clip_rect.top(), surface.top())
+                    self.assertEqual(self.window._lyric_ink_clip_rect.bottom(), surface.bottom())
+                    self.assertEqual(ink.height(), round(surface.height() * ink.devicePixelRatioF()))
 
-    def test_wide_bottom_feather_reaches_control_top_without_a_vacant_band(self):
+    def test_wide_bottom_feather_continues_through_controls_to_the_window_edge(self):
         self.prepare_bottom_clearance_song()
         self.owner.media_position_seconds = 51.
         for size in ((960, 540), (640, 360)):
@@ -122,15 +119,16 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                 fade_top, fade_bottom = self.window._lyric_bottom_fade_band(QRectF(self.window.rect()))
                 controls = self.window._media_control_panel_rect
                 collection = self.window._song_collection_geometry(QRectF(self.window.rect()), shifted=False)
-                self.assertAlmostEqual(fade_bottom, min(controls.top(), collection.top()))
+                self.assertAlmostEqual(fade_bottom, self.window.height())
+                self.assertLess(fade_top, min(controls.top(), collection.top()))
                 ratio = self.window.devicePixelRatioF()
                 start, end = int(fade_top * ratio), int(np.ceil(fade_bottom * ratio))
                 self.assertTrue(np.any((alpha_faded[start:end] > 0) & (alpha_faded[start:end] < alpha_plain[start:end])))
                 self.assertTrue(np.all(alpha_faded <= alpha_plain))
-                self.assertTrue(np.array_equal(alpha_plain[:start], alpha_faded[:start]))
+                core_start = round(self.window.height() * .20 * ratio)
+                self.assertTrue(np.array_equal(alpha_plain[core_start:start], alpha_faded[core_start:start]))
                 self.assertFalse(np.any(alpha_faded[end:]))
-                # Ink remains near the control top, rather than ending at the
-                # rejected 195*scale reserve with an empty band below it.
+                # The soft mask retains ink through the chrome envelope.
                 ink_bottom = np.nonzero(alpha_faded)[0].max() / ratio
                 self.assertLess(fade_bottom - ink_bottom, fade_bottom - fade_top)
                 self.assertGreater(ink_bottom, fade_top)
@@ -147,8 +145,8 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         column = self.window._content_column_geometry()[2]
         self.assertGreater(self.window._song_layouts[5][0].lineCount(), 4)
         ratio = self.window.devicePixelRatioF()
-        core = QRect(round(column.left() * ratio), round((column.top() + 10.) * ratio),
-                     round(column.width() * ratio), round(column.height() * .55 * ratio))
+        core = QRect(round(column.left() * ratio), round(column.height() * .20 * ratio),
+                     round(column.width() * ratio), round(column.height() * .35 * ratio))
         self.assertTrue(any(bytes(faded.copy(core).constBits())))
         self.assertEqual(faded.copy(core), plain.copy(core))
 
@@ -196,7 +194,8 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                             self.assertEqual(self.window._content_column_geometry()[2], expected_column)
                             self.assertEqual(self.window._personal_dj_footer_height(surface), 0.)
                             icon, caption = self.window._personal_dj_geometry(surface, 100., expansion=activity, posed=False)
-                            self.assertLessEqual(band[1], min(icon.top(), caption.top()) + 1e-6)
+                            self.assertEqual(band[1], surface.bottom())
+                            self.assertLess(band[0], min(icon.top(), caption.top()))
                             self.assertGreater(expected_column.bottom(), caption.top())
                             ink = self.render_lyric_ink().convertToFormat(QImage.Format.Format_RGBA8888)
                             alpha = np.frombuffer(ink.constBits(), np.uint8).reshape(ink.height(), ink.width(), 4)[:, :, 3]
@@ -206,7 +205,7 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                                 expected_active = active
                             self.assertEqual(active, expected_active)
 
-    def test_stacked_lyric_viewport_keeps_existing_bottom_reservation(self):
+    def test_stacked_lyric_viewport_spans_the_window_height(self):
         self.prepare_bottom_clearance_song()
         for size in ((372, 432), (433, 550), (480, 640)):
             with self.subTest(size=size):
@@ -214,8 +213,10 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                 self.assertTrue(self.window._content_layout_is_narrow())
                 self.render()
                 column = self.window._content_column_geometry()[2]
-                self.assertAlmostEqual(column.bottom(), self.window.height() - 156. * self.window._surface_scale())
-                self.assertLessEqual(self.window._lyric_clip_rect.bottom(), column.bottom())
+                self.assertEqual(column.top(), 0.)
+                self.assertEqual(column.bottom(), self.window.height())
+                self.assertEqual(self.window._lyric_clip_rect.top(), 0.)
+                self.assertEqual(self.window._lyric_clip_rect.bottom(), self.window.height())
 
     def test_resolved_no_lyrics_temporarily_animates_cover_and_restores_saved_layout(self):
         self.window.show()
@@ -480,7 +481,8 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
         self.window.resize(665, 628)
         content, cover, column = self.window._content_column_geometry()
         self.assertTrue(self.window._content_layout_is_narrow())
-        self.assertGreater(column.top(), cover.bottom())
+        self.assertEqual(column.top(), 0.)
+        self.assertEqual(column.bottom(), self.window.height())
         self.assertGreaterEqual(column.width(), cover.width())
         self.window.set_content_layout("lyrics", animate=False)
         self.assertEqual(self.window._content_layout, "lyrics")
@@ -513,7 +515,8 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                     cover = self.window._scaled_cover_rect(self.window._current_cover_rect(),self.window._cover_scale_at(100.))
                     self.assertTrue(bounds.contains(cover), (bounds,cover))
                     if not self.window._lyric_clip_rect.isEmpty():
-                        self.assertTrue(bounds.contains(self.window._lyric_clip_rect),self.window._lyric_clip_rect)
+                        lyric_bounds = (QRectF(self.window.rect()) if layout == "lyrics" else bounds)
+                        self.assertTrue(lyric_bounds.contains(self.window._lyric_clip_rect), self.window._lyric_clip_rect)
                     if self.window._effective_content_layout() == "playlist":
                         self.assertTrue(bounds.contains(self.window._queue_view_rect))
                         self.assertTrue(all(self.window._queue_view_rect.contains(row)

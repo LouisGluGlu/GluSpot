@@ -390,7 +390,7 @@ class MusicSongCollectionMixin:
             if self._owned_personal_dj_enabled is not None:
                 shift = self._personal_dj_control_shift(rect, reveal)
             else:
-                shift = QPointF(14. * scale * (1. - reveal),
+                shift = QPointF(0.,
                                (rect.bottom() - face.top() + 4.) * (1. - reveal))
             face.translate(shift)
         return face

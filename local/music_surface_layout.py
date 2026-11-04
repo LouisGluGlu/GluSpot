@@ -148,7 +148,7 @@ class MusicContentLayoutMixin:
             return self._width_breakpoint_inverse
         def fits(width):
             rect = QRectF(0., 0., width, height)
-            column = self._wide_content_column_geometry(rect)[2]
+            column = self._wide_content_column_geometry(rect, measure_fit=True)[2]
             font = self._surface_font(self.LYRIC_PIXEL_SIZE * self._surface_scale(rect), QFont.Weight.Bold)
             return lyric_column_fits(column.width(), font, previous=None, dpr=self.devicePixelRatioF())
         low, high = 1., max(640., height * 2.)
@@ -220,7 +220,7 @@ class MusicContentLayoutMixin:
                self.logicalDpiX(), self.logicalDpiY(), self._width_resize_marks)
         if key == getattr(self, "_content_layout_fit_key", None):
             return self._content_layout_fit_narrow
-        _content, _cover, column = self._wide_content_column_geometry()
+        _content, _cover, column = self._wide_content_column_geometry(measure_fit=True)
         font = self._surface_font(self.LYRIC_PIXEL_SIZE * scale, QFont.Weight.Bold)
         previous = getattr(self, "_content_layout_measured_narrow", None)
         narrow = not lyric_column_fits(column.width(), font, previous=previous, dpr=self.devicePixelRatioF())
@@ -330,15 +330,16 @@ class MusicContentLayoutMixin:
             stacked_content = surface.adjusted(margin, top, -margin, -margin)
             side = max(1., min(96., surface.width() * .267, stacked_content.height() * .28))
             stacked_cover = QRectF(stacked_content.left(), stacked_content.top(), side, side)
-            column_top = stacked_cover.bottom() + 24. * scale
-            bottom = max(column_top + 1., surface.bottom() - 156. * scale)
+            column_top = surface.top() if self._content_layout == "lyrics" else stacked_cover.bottom() + 24. * scale
+            bottom = surface.bottom() if self._content_layout == "lyrics" else max(column_top + 1., surface.bottom() - 156. * scale)
             stacked_column = QRectF(stacked_content.left(), column_top, stacked_content.width(), bottom - column_top)
             # Content, artwork and the reading viewport share one pose.
             fraction = self._width_layout_fraction
             content = self._interpolate_rect(content, stacked_content, fraction)
             cover = self._interpolate_rect(cover, stacked_cover, fraction)
             column = self._interpolate_rect(column, stacked_column, fraction)
-            column = self._separate_width_column(cover, column)
+            if self._content_layout != "lyrics":
+                column = self._separate_width_column(cover, column)
         return content, cover, column
 
     @staticmethod
@@ -351,7 +352,7 @@ class MusicContentLayoutMixin:
                 column.setTop(max(column.top(), cover.bottom() + 1.))
         return column
 
-    def _wide_content_column_geometry(self, rect=None):
+    def _wide_content_column_geometry(self, rect=None, *, measure_fit=False):
         """Unadapted two-column geometry also supplies the fit measurement."""
         surface = QRectF(self.rect()) if rect is None else QRectF(rect)
         scale = self._surface_scale(surface)
@@ -359,11 +360,20 @@ class MusicContentLayoutMixin:
         content = surface.adjusted(margin, margin, -margin, -margin)
         side = max(1., min(404. * scale, content.height() - 118. * scale,
                            content.width()))
+        # Keep the existing shaped breakpoint measurement independent of the
+        # responsive composition. Both visible columns share the width budget.
+        gap = 100. * scale
+        if not measure_fit:
+            side = max(1., min(side, content.width() * .44))
+            gap = min(gap, content.width() * .10)
         cover = QRectF(content.left(), content.top(), side, side)
-        left = cover.right() + 100. * scale
+        left = cover.right() + gap
         # Follow/wrapping use the full reading lane. Bottom chrome feathers
         # lyric ink separately; its visibility must never move the anchor.
         column = QRectF(left, content.top(), max(0., content.right() - left), content.height())
+        if not measure_fit and self._content_layout == "lyrics":
+            column.setTop(surface.top())
+            column.setBottom(surface.bottom())
         return content, cover, column
 
     def _effective_content_layout(self):

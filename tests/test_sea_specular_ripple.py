@@ -63,7 +63,9 @@ class RippleLevelTests(unittest.TestCase):
         self.assertEqual(before, [state.ripple_displacement(i / 48) for i in range(49)])
         state.update_ripple(.64, 3.)
         after = [state.ripple_displacement(i / 48) for i in range(49)]
-        self.assertLess(max(abs(a-b) for a, b in zip(before, after)), .3)
+        # t207 increases displacement by at least 5x; retain a proportional
+        # per-tick continuity bound for the unchanged travelling-wave phases.
+        self.assertLess(max(abs(a-b) for a, b in zip(before, after)), 2.)
         self.assertGreater(np.ptp(before), 8)
 
 
@@ -205,6 +207,41 @@ class PeakInputTests(unittest.TestCase):
                 self.assertFalse(snapshot.live_audio_available)
                 self.assertEqual(host._sea_peak_sample, peak)
 
+    def test_sea_beat_uses_real_provider_low_and_ignores_playing_fallback_bands(self):
+        from local.audio_reactive_engine import AudioReactiveRuntime
+        runtime = AudioReactiveRuntime()
+        frame = [AudioFrame(0., 0., 0., peak=0.)]
+        read_frame = Mock(side_effect=lambda: frame[0])
+        host = SimpleNamespace(data_provider=SimpleNamespace(get_audio_frame=read_frame,
+                                   has_live_audio=lambda: False),
+                               media_is_playing=True, wave_values=[.1] * 36, ambient_phase=1.25,
+                               _audio_reactive_runtime_for_current_settings=lambda: runtime,
+                               _effective_music_ambience_style=lambda: "sea_level",
+                               _invalidate_music_reactive_snapshot=Mock())
+        host._music_wave_input_snapshot = lambda now: IslandStackVisual._music_wave_input_snapshot(host, now)
+        host._music_wave_update_plan = lambda now: IslandStackVisual._music_wave_update_plan(host, now)
+        for tick in range(90):
+            with patch("local.island_stack_visual.time.monotonic", return_value=tick / 30.):
+                IslandStackVisual._update_wave_values(host)
+        self.assertGreater(host.current_audio_bands[0], 0., "Exercise the real nonzero playing fallback")
+        self.assertEqual(host._sea_low_sample, 0.)
+        self.assertEqual(host._sea_wave_state.ripple_beat, 0.)
+        self.assertLess(max(abs(host._sea_wave_state.ripple_displacement(i / 48.)) for i in range(49)), .25)
+        self.assertEqual(read_frame.call_count, 90, "All absolute features share one provider read per tick")
+
+        frame[0] = AudioFrame(.64, .1, .1, peak=.64)
+        with patch("local.island_stack_visual.time.monotonic", return_value=3.):
+            IslandStackVisual._update_wave_values(host)
+        beat = host._sea_wave_state.ripple_beat
+        self.assertEqual(host._sea_low_sample, .64)
+        self.assertGreater(beat, .5)
+        frame[0] = None
+        with patch("local.island_stack_visual.time.monotonic", return_value=3.033):
+            IslandStackVisual._update_wave_values(host)
+        self.assertEqual(host._sea_low_sample, 0.)
+        self.assertIsNone(host._sea_peak_sample)
+        self.assertLess(host._sea_wave_state.ripple_beat, beat)
+
     def test_sdk_peak_binding_only_reads_and_releases(self):
         from api import windows_audio_devices as native
         calls = []
@@ -273,14 +310,22 @@ class ExpandedRippleRenderTests(unittest.TestCase):
                 images.append(self._rgb(image))
                 body_pixel = image.pixelColor(260, 77)
                 self.assertLess(abs(body_pixel.hslHueF() - color.hslHueF()), .025)
-                crest = images[-1][50:80, 20:500]
+                # The louder sea now traverses the lower island; inspect its
+                # actual damage strip instead of the former 30 px band.
+                strip = renderer.sea_level_wave_strip(rect).toAlignedRect()
+                crest = images[-1][strip.top():strip.bottom()+1, 20:500]
                 brightest = crest.reshape(-1, 3)[np.argmax(crest.sum(axis=2))].astype(int)
                 self.assertGreater(np.ptp(brightest), 15)
-                self.assertGreater(brightest.max(), 145)
+                if peak > .01:
+                    self.assertGreater(brightest.max(), 145)
+                else:
+                    # Quiet water has no unconditional bright crest stroke.
+                    self.assertLess(brightest.max(), 145)
             strip = renderer.sea_level_wave_strip(rect).toAlignedRect()
             self.assertTrue(np.array_equal(images[0][:strip.top()], images[1][:strip.top()]))
             self.assertTrue(np.array_equal(images[0][strip.bottom()+1:], images[1][strip.bottom()+1:]))
             self.assertFalse(np.array_equal(images[0], images[1]))
+            self.assertGreater(images[1].max(), images[0].max() + 50)
             renders.append(images[1])
         self.assertFalse(np.array_equal(renders[0], renders[1]))
         self.assertFalse(np.array_equal(renders[1], renders[2]))
@@ -320,8 +365,12 @@ class ExpandedRippleRenderTests(unittest.TestCase):
             else:
                 self.assertEqual(sea.red(), sea.green())
                 self.assertEqual(line.red(), line.green())
-            host._sea_wave_state = SeaWaveState()
-            self.assertGreater(self._rgb(self._render(renderer)).max(), 145)
+            state = host._sea_wave_state = SeaWaveState()
+            calm_peak = int(self._rgb(self._render(renderer)).max())
+            self.assertLess(calm_peak, 145)
+            for n in range(90):
+                state.update_ripple(.81, n / 30)
+            self.assertGreater(self._rgb(self._render(renderer)).max(), calm_peak + 40)
 
     def test_resolved_miss_uses_cover_and_recovery_holds_without_settings_write(self):
         visual = IslandStackVisual(EmptyIslandDataProvider())
@@ -370,7 +419,10 @@ class ExpandedRippleRenderTests(unittest.TestCase):
                                _build_visuals=lambda: [SimpleNamespace(kind=IslandKind.MUSIC, key="music", rect=rect)],
                                _native_music_background_renderer=lambda: NativeMusicBackgroundRenderer(PaintHost({})))
         damage = IslandStackVisual._sea_wave_only_damage(host, 10.)
-        self.assertLess(damage.height(), rect.height() * .5)
+        # The >=5x response uses more of the lower island while continuing
+        # to avoid a full-shell repaint and the header above the water.
+        self.assertLess(damage.height(), rect.height() * .7)
+        self.assertGreaterEqual(damage.top(), rect.top() + 40.)
         motion.vw = 1.
         self.assertIsNone(IslandStackVisual._sea_wave_only_damage(host, 10.))
         motion.vw = 0.
@@ -393,8 +445,10 @@ class ExpandedRippleRenderTests(unittest.TestCase):
         self.assertNotEqual(images[0], images[1])
         for image in images:
             pixels = self._rgb(image).astype(int)
-            self.assertGreater(pixels.max(), 180)
-            self.assertGreater(np.ptp(pixels, axis=2).max(), 15)
+            # The new crest is saturated palette ink; test visibility and
+            # color separation without demanding the former pale stroke.
+            self.assertGreater(pixels.max(), 100)
+            self.assertGreater(np.ptp(pixels, axis=2).max(), 50)
 
     def test_explicit_preview_spectrum_still_shapes_the_surface(self):
         host = PaintHost({})

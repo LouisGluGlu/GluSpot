@@ -19,7 +19,7 @@ class NarrowChromeSlideTests(unittest.TestCase):
         window.visibility.progress = .8
         layout = NarrowLayout(window.width(), window.height())
         groups = window.glass_groups()
-        self.assertAlmostEqual(groups[0]['content_layout'].left(), layout.top[0].left() + (window.width() + 22.) * .2)
+        self.assertAlmostEqual(groups[0]['content_layout'].left(), layout.top[0].left())
         self.assertAlmostEqual(groups[0]['content_layout'].top(), layout.top[0].top() - VeilOverlay.TOP_END * .2)
         self.assertAlmostEqual(groups[2]['media:next'].top(), layout.next.top() + VeilOverlay.BOTTOM_HEIGHT * .2)
         self.assertEqual(window._live_action_at(groups[0]['return'].center()), 'return')
@@ -62,6 +62,7 @@ class NarrowChromeSlideTests(unittest.TestCase):
             def drawImage(self, point, image): self.points.append(point)
         recorder = Recorder()
         window._paint_chrome_bands(recorder)
+        self.assertEqual(recorder.points[0].x(), 0.)
         self.assertEqual(recorder.points[0].y(), -VeilOverlay.TOP_END * .5)
         self.assertEqual(recorder.points[1].y(), window.height() - VeilOverlay.BOTTOM_HEIGHT * .5)
 
