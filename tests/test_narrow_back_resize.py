@@ -1,4 +1,4 @@
-"""Back navigation preserves geometry and window mode owns narrow/wide sizing."""
+"""Back navigation preserves geometry; explicit sizing owns narrow/wide changes."""
 import unittest
 from unittest.mock import Mock, patch
 
@@ -109,7 +109,7 @@ class NarrowBackResizeTests(unittest.TestCase):
         self.window.resize(960, 900)
         self.assertTrue(self.window.narrow)
 
-    def test_narrow_size_toggles_and_live_wide_return_preserves_island_lifecycle(self):
+    def test_live_return_uses_island_lifecycle_and_study_return_toggles_size(self):
         self.show()
         with patch.object(self.window, '_seek_to_lyric') as seek:
             for live in (True, False):
@@ -117,11 +117,19 @@ class NarrowBackResizeTests(unittest.TestCase):
                     self.window.live = live
                     self.window.toggle_wide(False)
                     self.window.resize(483, 560)
-                    with patch.object(self.window, 'toggle_wide', wraps=self.window.toggle_wide) as toggle:
+                    with patch.object(self.window, 'toggle_wide', wraps=self.window.toggle_wide) as toggle, \
+                         patch.object(MusicSurfaceWindow, 'return_to_island') as restore:
                         self.click_narrow('return')
-                        toggle.assert_called_once_with()
-                    self.assertEqual((self.window.width(), self.window.height()), (960, 540))
-                    self.assertFalse(self.window.narrow)
+                        if live:
+                            restore.assert_called_once_with()
+                            toggle.assert_not_called()
+                        else:
+                            restore.assert_not_called()
+                            toggle.assert_called_once_with()
+                    self.assertEqual((self.window.width(), self.window.height()),
+                                     (483, 560) if live else (960, 540))
+                    self.assertEqual(self.window.narrow, live)
+                    self.window.toggle_wide(True)
                     self.window._sync_window_control_rects()
                     point = self.window._button_rects['return'].center().toPoint()
                     with patch.object(self.window, '_control_reveal_at', return_value=1.0), \
@@ -153,15 +161,18 @@ class NarrowBackResizeTests(unittest.TestCase):
                                 Qt.KeyboardModifier.NoModifier)
             QCoreApplication.sendEvent(self.window, event)
 
-    def test_move_and_resize_still_work_after_library_and_window_mode_back(self):
+    def test_move_and_resize_still_work_after_library_back_and_explicit_size_toggle(self):
         self.show()
         with patch.object(self.window, '_available_geometry', return_value=QRect(0, 0, 1920, 1080)), \
              patch.object(self.window, '_seek_to_lyric') as seek:
-            for action in ('library', 'return'):
+            for action in ('library', 'size'):
                 with self.subTest(action=action):
                     self.window.toggle_wide(False)
                     self.window.resize(483, 560)
-                    self.click_narrow(action)
+                    if action == 'size':
+                        self.window.toggle_wide(True)
+                    else:
+                        self.click_narrow(action)
                     before = QRect(self.window.geometry())
                     self.drag(QPointF(self.window.width() / 2, 12), QPoint(23, 19))
                     self.assertEqual(self.window.geometry(), before.translated(23, 19))

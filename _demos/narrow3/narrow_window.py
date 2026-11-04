@@ -609,7 +609,8 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             return
         names = {"library": "返回音乐库", "favorite": "喜欢", "playlist_add": "收藏到歌单",
                  "personal_dj": "私人DJ", "audio_output": "音频设备", "content_layout": "内容布局",
-                 "playback_mode": "播放顺序", "translation": "中文翻译", "return": "窗口大小", "mode": "窗口大小",
+                 "playback_mode": "播放顺序", "translation": "中文翻译",
+                 "return": "返回岛模式" if self.live else "窗口大小", "mode": "窗口大小",
                  "media:previous": "上一首", "media:toggle_play_pause": "播放或暂停", "media:next": "下一首"}
         slots = {key: rect for group in self.glass_groups() for key, rect in group.items()}
         collection = slots.pop("collection", None)
@@ -2475,7 +2476,7 @@ class NarrowStudyWindow(MusicSurfaceWindow):
         elif action == "mode":
             self.toggle_presentation_mode()
         elif action == "return":
-            self.toggle_wide()
+            self.return_to_island()
         self.refresh_veil()
         self.refresh_controls(time.monotonic())
         self.update()

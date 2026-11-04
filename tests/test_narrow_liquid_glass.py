@@ -169,7 +169,7 @@ class NarrowLiquidGlassTests(unittest.TestCase):
         self.window._sync_chrome_accessibility()
         expected = {'library': '返回音乐库', 'favorite': '喜欢', 'playlist_add': '收藏到歌单',
                     'personal_dj': '私人DJ', 'audio_output': '音频设备', 'content_layout': '内容布局',
-                    'playback_mode': '播放顺序', 'translation': '中文翻译', 'return': '窗口大小', 'media:previous': '上一首',
+                    'playback_mode': '播放顺序', 'translation': '中文翻译', 'return': '返回岛模式', 'media:previous': '上一首',
                     'media:toggle_play_pause': '播放或暂停', 'media:next': '下一首'}
         visible = {key: button for key, button in self.window._chrome_focus_buttons.items()
                    if not button.isHidden()}

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from api.providers import EmptyIslandDataProvider
 from local.island_stack_visual import IslandStackVisual
+from local.music_surface_window import MusicSurfaceWindow
 from _demos.narrow3.layout import NarrowLayout
 from _demos.narrow3.narrow_window import NarrowStudyWindow
 
@@ -133,7 +134,7 @@ class NarrowBackPcRegressionTests(unittest.TestCase):
         self.owner._music_library_back_callback.assert_called_once()
         self.assertEqual((self.window.width(), self.window.height()), (483, 560))
 
-    def test_explicit_return_button_keeps_window_mode_action(self):
+    def test_explicit_return_button_uses_island_action_for_each_playback_gate(self):
         for owned in (False, True):
             with self.subTest(owned=owned):
                 self.window.toggle_wide(False)
@@ -143,11 +144,13 @@ class NarrowBackPcRegressionTests(unittest.TestCase):
                              for group in self.window.glass_groups() if "return" in group)
                 self.assertGreater(point.x(), self.window.width() / 2)
                 self.assertEqual(self.window._live_action_at(point), "return")
-                with patch.object(self.window, "toggle_wide", wraps=self.window.toggle_wide) as toggle:
+                with patch.object(self.window, "toggle_wide") as toggle, \
+                     patch.object(MusicSurfaceWindow, "return_to_island") as restore:
                     self.click(point)
-                    toggle.assert_called_once_with()
-                self.assertEqual((self.window.width(), self.window.height()), (960, 540))
-                self.assertFalse(self.window.narrow)
+                    restore.assert_called_once_with()
+                    toggle.assert_not_called()
+                self.assertEqual((self.window.width(), self.window.height()), (483, 560))
+                self.assertTrue(self.window.narrow)
         self.owner._music_library_back_callback.assert_not_called()
         self.owner._music_login_callback.assert_not_called()
 
