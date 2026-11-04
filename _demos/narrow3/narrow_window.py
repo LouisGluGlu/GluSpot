@@ -852,7 +852,9 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                 # Middle-of-page lyric/queue damage cannot dirty the chrome.
                 region = QRegion()
                 material = GLASS_CLEAR.at_level(self._surface_glass_level())
-                padding = math.ceil(material.lens * (1. + material.chroma) + material.blur * 3. + 2.)
+                # Shared faces extend 4px beyond their hit slots; include that
+                # envelope and sample/antialias rounding in the same footprint.
+                padding = math.ceil(material.lens * (1. + material.chroma) + material.blur * 3. + 8.)
                 for group in self.glass_groups():
                     for control in group.values():
                         region |= QRegion(control.adjusted(-padding, -padding, padding, padding).toAlignedRect())
@@ -1491,6 +1493,12 @@ class NarrowStudyWindow(MusicSurfaceWindow):
                        QImage.Format.Format_ARGB32_Premultiplied)
         image.setDevicePixelRatio(ratio)
         image.fill(Qt.GlobalColor.transparent)
+        # The shared content-only paint deliberately draws no chrome and
+        # ends its renderer frame before these cached bands are composed.
+        # Restore their visible membership so its empty frame cannot starve
+        # the next preparation's bounded material-refresh slots forever.
+        self._clear_control_renderer.seen_roles.update(
+            role for role, _pose, _state in getattr(self, '_controls_roles', ()))
         self._clear_control_renderer.begin_frame(now)
         self._clear_control_renderer.record_roles = []
         try:

@@ -112,6 +112,29 @@ class LiveGlassBackdropTests(unittest.TestCase):
             painter.fillRect(25, 20, 35, 35, QColor('green'))
         self.assertEqual(draw(100.4), 2)
 
+    def test_content_only_frames_cannot_starve_cached_control_material(self):
+        window = self.prepare()
+        renderer = window._clear_control_renderer
+        with patch.object(window, 'isVisible', return_value=True), \
+                patch.object(window, '_paint_wide_lyrics_mounted'), \
+                patch.object(window, 'paint_header'), \
+                patch.object(window, '_track_cover_animating', return_value=False), \
+                patch.object(window, '_scene_control_ink', return_value=QColor('white')), \
+                patch('time.monotonic', return_value=100.):
+            window._refresh_chrome_backdrop(100.)
+            window.refresh_controls(100.)
+            previous = renderer.versions['chrome-utilities']
+            window._background_cache = self.scene('#37a24a')
+            for now in (100.2, 100.4, 100.6):
+                # This is the actual shared content-only frame lifecycle:
+                # the cached narrow bands are composed after its end_frame.
+                renderer.begin_frame(now)
+                renderer.end_frame()
+                window._refresh_chrome_backdrop(now)
+                with patch('time.monotonic', return_value=now):
+                    window.refresh_controls(now)
+            self.assertGreater(renderer.versions['chrome-utilities'], previous)
+
 
 if __name__ == '__main__':
     unittest.main()
