@@ -85,7 +85,10 @@ class OwnedRecoveredCoverTests(unittest.TestCase):
         player._art_sizes[key] = 640
         before = len(player.tasks.jobs)
         player._apply_cached_artwork()
-        self.assertEqual(player.tasks.jobs[-1][0], ("lyrics", player._epoch, player._lyrics_generation))
+        request = player.tasks.jobs[-1][0]
+        self.assertEqual(request[:3], ("lyrics", player._epoch, player._lyrics_generation))
+        self.assertGreater(request[3], 0)  # The retry fence identifies this exact attempt.
+        self.assertEqual(player._lyrics_request_pending[0], request)
         self.assertEqual(len(player.tasks.jobs), before + 1)
         self.assertEqual(player.track.lyrics, ("暂无歌词",))
         player._apply_cached_artwork()
