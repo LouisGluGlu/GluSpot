@@ -1090,6 +1090,11 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         # windowed size when the surface is closed during a transition.
         if self._pending_fullscreen is None and not self._island_returning and not self._fullscreen and self.geometry().isValid():
             self._normal_geometry = QRect(self._compact_base_geometry if self._compact_base_geometry.isValid() else self.geometry())
+        if self.owner is not None and self._normal_geometry.isValid():
+            # Island entry reads the shared library/login/player rectangle.
+            # Publish the remembered normal size before hiding so a stale
+            # library rectangle cannot replace it on the next island entry.
+            self.owner._music_page_geometry = QRect(self._normal_geometry)
         start = QRect(self.geometry())
         start_corner = self._surface_corner_radius()
         start_glyph = self._mode_glyph_state()
