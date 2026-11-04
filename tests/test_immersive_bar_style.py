@@ -53,7 +53,7 @@ class ImmersiveBarStyleTests(unittest.TestCase):
                     visual.set_finder_bar_style(style, notify=False)
                     lyrics = []
                     rect = QRectF(0, 0, *before_size)
-                    reader = ("_paint_scrolling_text" if style == "capsule" and visual._effective_music_ambience_style() == "sea_level"
+                    reader = ("_paint_live_lyric_text" if style == "capsule" and visual._effective_music_ambience_style() == "sea_level"
                               else "_paint_compact_lyric_viewport")
                     with patch.object(visual, reader, wraps=getattr(visual, reader)) as reading:
                         image = self.render(rect, dpr)
@@ -78,7 +78,8 @@ class ImmersiveBarStyleTests(unittest.TestCase):
         visual.finder_bar_enabled = True
         visual.finder_material.mid_color = QColor(visual.taskbar_material_color)
         # Isolate background+cover from the two placements' reading policies.
-        with patch.object(visual, "_paint_compact_lyric_viewport"), patch.object(visual, "_paint_scrolling_text"):
+        with patch.object(visual, "_paint_compact_lyric_viewport"), \
+                patch.object(visual, "_paint_live_lyric_text"), patch.object(visual, "_paint_scrolling_text"):
             for style in ("transparent", "capsule"):
                 for dpr in (1., 2.):
                     with self.subTest(style=style, dpr=dpr):
