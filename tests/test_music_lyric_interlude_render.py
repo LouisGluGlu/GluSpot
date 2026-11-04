@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 import unittest
 from unittest.mock import patch
 
@@ -52,18 +53,42 @@ class MusicLyricInterludeRenderTests(unittest.TestCase):
         units = tuple(self.owner.timed_lyric_units)
         for translated in (False, True):
             self.owner.enable_dual_line_lyrics = translated
+            now = 100. + 10. * int(translated)
             for windowed in (False, True):
                 self.window._fullscreen = not windowed
                 for layout in ('lyrics', 'cover_lyrics'):
                     with self.subTest(translated=translated, windowed=windowed, layout=layout):
                         self.window.set_content_layout(layout, animate=False)
-                        _lines, timed = self.window._display_lyrics()
+                        with patch('local.music_surface_window.time.monotonic', return_value=now):
+                            _lines, timed = self.window._display_lyrics()
+                        # Hidden companions remain in the page's prepared
+                        # model so toggling cannot rebuild its primary rows.
                         self.assertEqual(timed[:4], [(0., INTRO_COUNTDOWN_TEXT),
-                            (8., 'Hold\n停留' if translated else 'Hold'),
+                            (8., 'Hold\n停留'),
                             (12., INTRO_COUNTDOWN_TEXT), (20., 'Next')])
                         self.assertEqual(self.window._display_timed_units[:4], ((), units[1], (), units[2]))
                         self.assertEqual(self.window._timing_quality_badge(_lines, timed), '真实逐字')
-                        self.render()
+                        translation_ink = []
+
+                        def observe(draw):
+                            def paint(painter, *args, **kwargs):
+                                if (painter.opacity() > .001
+                                        and any(isinstance(arg, str) and arg == '停留' for arg in args)):
+                                    translation_ink.append('停留')
+                                return draw(painter, *args, **kwargs)
+                            return paint
+
+                        with ExitStack() as stack:
+                            stack.enter_context(patch('local.music_surface_window.time.monotonic', return_value=now + .5))
+                            for name in ('_paint_wrapped_lifted_lyric', '_draw_sprung_cached_wrapped_layout',
+                                         '_draw_future_wrapped_layout'):
+                                stack.enter_context(patch.object(self.window, name, side_effect=observe(getattr(self.window, name))))
+                            self.render()
+                        expected = float(translated)
+                        self.assertEqual(self.window._translation_layer_pose(1, '停留', now + .5),
+                                         (expected, expected, expected))
+                        if not translated:
+                            self.assertFalse(translation_ink, 'Retained hidden translations must not paint')
         self.assertEqual(tuple(self.owner.timed_lyrics), source)
         self.assertEqual(tuple(self.owner.timed_lyric_units), units)
 
