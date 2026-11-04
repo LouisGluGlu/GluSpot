@@ -127,6 +127,8 @@ class CdpSession:
         self._pause_observation_generation = None
         self._pause_observation_requested_generation = None
         self._pause_requests = set()
+        # Reason code for the latest pause/observation attempt. Never page text.
+        self.pause_diagnostic = ''
 
     @property
     def ready(self):
@@ -197,12 +199,20 @@ class CdpSession:
         Older attached adapter revisions fail closed through optional methods.
         """
         if not isinstance(enabled, bool) or not self.ready or not guard():
+            if not isinstance(enabled, bool):
+                self.pause_diagnostic = 'bad-flag'
+            elif not self.ready:
+                self.pause_diagnostic = 'not-ready'
+            else:
+                self.pause_diagnostic = 'guard-rejected'
             return False
         generation = self.generation
         if enabled and self._pause_observation_generation == generation:
+            self.pause_diagnostic = 'already-armed'
             return True
         if (not enabled and self._pause_observation_generation is None
                 and self._pause_observation_requested_generation is None):
+            self.pause_diagnostic = 'already-clear'
             return True
         # Record dispatch before awaiting: OFF must remove a native observer
         # even if cancellation/timeout prevents the enable acknowledgement.
@@ -210,6 +220,7 @@ class CdpSession:
             self._pause_observation_requested_generation = generation
         observed = await self._evaluate(self.adapter.pause_observation_expression(enabled))
         if generation != self.generation:
+            self.pause_diagnostic = 'generation-changed'
             return False
         if observed is True:
             self._pause_observation_generation = generation if enabled else None
@@ -221,8 +232,11 @@ class CdpSession:
                 await self._evaluate(self.adapter.pause_observation_expression(False))
                 self._pause_observation_generation = None
                 self._pause_observation_requested_generation = None
+                self.pause_diagnostic = 'guard-revoked'
                 return False
+            self.pause_diagnostic = 'armed' if enabled else 'disarmed'
             return True
+        self.pause_diagnostic = 'evaluate-rejected'
         return False
 
     async def pause(self, track_id, request_id, *, expected_generation=None, guard=lambda: True):
@@ -234,17 +248,45 @@ class CdpSession:
         generation = self.generation
         request_key = (generation, str(request_id))
         latest = self.latest
-        if (not self.ready or not guard() or self._pause_observation_generation != generation
-                or expected_generation not in (None, generation) or not request_id
-                or request_key in self._pause_requests or not latest
-                or latest.get('trackId') != str(track_id) or latest.get('playing') is not True):
+        if not self.ready:
+            self.pause_diagnostic = 'not-ready'
+            return False
+        if not guard():
+            self.pause_diagnostic = 'guard-rejected'
+            return False
+        if self._pause_observation_generation != generation:
+            self.pause_diagnostic = 'observation-inactive'
+            return False
+        if expected_generation not in (None, generation):
+            self.pause_diagnostic = 'generation-mismatch'
+            return False
+        if not request_id:
+            self.pause_diagnostic = 'missing-request'
+            return False
+        if request_key in self._pause_requests:
+            self.pause_diagnostic = 'duplicate-request'
+            return False
+        if not latest:
+            self.pause_diagnostic = 'no-sample'
+            return False
+        if latest.get('trackId') != str(track_id):
+            self.pause_diagnostic = 'track-mismatch'
+            return False
+        if latest.get('playing') is not True:
+            self.pause_diagnostic = 'not-playing'
             return False
         capability = await self._evaluate(self.adapter.pause_capability_expression())
-        if (not isinstance(capability, dict) or capability.get('available') is not True
-                or capability.get('trackId') != str(track_id) or not self.ready
+        if not isinstance(capability, dict) or capability.get('available') is not True:
+            self.pause_diagnostic = 'contract-unavailable'
+            return False
+        if (capability.get('trackId') != str(track_id) or not self.ready
                 or self.generation != generation or not guard() or not self.latest
                 or self.latest.get('trackId') != str(track_id)
                 or self.latest.get('playing') is not True):
+            if capability.get('trackId') != str(track_id):
+                self.pause_diagnostic = 'contract-track-mismatch'
+            else:
+                self.pause_diagnostic = 'stale-before-send'
             return False
         self._pause_requests.add(request_key)
         if len(self._pause_requests) > 256:
@@ -252,11 +294,14 @@ class CdpSession:
         sent_at = self.clock()
         accepted = await self._evaluate(self.adapter.pause_expression(track_id, request_id))
         if accepted is not True or not self.ready or self.generation != generation or not guard():
+            self.pause_diagnostic = 'native-rejected' if accepted is not True else 'stale-after-send'
             return False
         sample = await self.readback()
-        return bool(self.ready and self.generation == generation and guard() and sample
-                    and sample.get('trackId') == str(track_id) and sample.get('playing') is False
-                    and max(sample.get('received_at', 0), sample.get('state_received_at', 0)) >= sent_at)
+        confirmed = bool(self.ready and self.generation == generation and guard() and sample
+                         and sample.get('trackId') == str(track_id) and sample.get('playing') is False
+                         and max(sample.get('received_at', 0), sample.get('state_received_at', 0)) >= sent_at)
+        self.pause_diagnostic = 'paused' if confirmed else 'readback-unconfirmed'
+        return confirmed
 
     async def readback(self):
         if not self.ready:
