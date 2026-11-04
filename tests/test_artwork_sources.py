@@ -661,6 +661,9 @@ class ArtworkPlayerUrlUpgradeTests(unittest.TestCase):
         self.thread_patch = patch("api.providers.threading.Thread", ManualThread)
         self.thread_patch.start()
         self.addCleanup(self.thread_patch.stop)
+        timer_patch = patch("api.providers.threading.Timer", ManualTimer)
+        timer_patch.start()
+        self.addCleanup(timer_patch.stop)
 
     def test_normalized_original_cache_wins_supplied_preview(self):
         self.provider._queue_art_cache[self.original_url] = self.original

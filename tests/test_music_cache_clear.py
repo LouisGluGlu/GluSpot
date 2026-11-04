@@ -208,7 +208,7 @@ class MusicCacheClearTests(unittest.TestCase):
                         raise TimeoutError("test download release missing")
                 return cover
 
-        with patch("api.providers.threading.Thread", ManualThread), patch(
+        with patch("api.providers.threading.Thread", ManualThread), patch("api.providers.threading.Timer", ManualTimer), patch(
             "api.providers.urlopen", side_effect=[Response(True), Response(False)]
         ):
             provider._schedule_queue_album_art_prefetch(url)

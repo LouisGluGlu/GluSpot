@@ -507,6 +507,8 @@ class WindowsMediaProvider:
         self._queue_art_attempts: dict[str, int] = {}
         self._queue_art_lock = threading.Lock()
         self._queue_art_slots = threading.BoundedSemaphore(3)
+        self._queue_art_worker_slots = threading.BoundedSemaphore(6)
+        self._queue_art_generations = {}
         self._artwork_cache_root = self._queue_art_disk_path("")
         if self._artwork_cache_root is not None:
             self._artwork_cache_root = self._artwork_cache_root.parent.absolute()
@@ -519,6 +521,7 @@ class WindowsMediaProvider:
         self._current_art_lookup_lock = threading.Lock()
         self._current_art_lookup_generations: dict[str, tuple[object, float]] = {}
         self._current_art_lookup_slots = threading.BoundedSemaphore(2)
+        self._current_art_worker_slots = threading.BoundedSemaphore(4)
         self._current_art_lookup_sources: dict[str, str] = {}
         self._current_art_rejected_urls: dict[str, tuple[float, str]] = {}
         self._musicbrainz_artwork_resolver = MusicBrainzArtworkResolver()
@@ -1033,7 +1036,7 @@ class WindowsMediaProvider:
                         "_current_art_lookup_failed_until", "_current_art_lookup_generations",
                         "_current_art_lookup_sources", "_current_art_rejected_urls",
                         "_queue_art_attempts", "_current_art_lookup_attempts", "_current_art_first_seen",
-                        "_current_art_queue_urls",
+                        "_current_art_queue_urls", "_queue_art_generations",
                     ):
                         values = getattr(self, name, None)
                         if isinstance(values, (dict, set)):
@@ -2194,6 +2197,9 @@ class WindowsMediaProvider:
         if slots is None:
             slots = threading.BoundedSemaphore(2)
             self._current_art_lookup_slots = slots
+        worker_slots = getattr(self, "_current_art_worker_slots", None)
+        if worker_slots is None:
+            worker_slots = self._current_art_worker_slots = threading.BoundedSemaphore(4)
         resolver = getattr(self, "_musicbrainz_artwork_resolver", None)
         if resolver is None:
             resolver = MusicBrainzArtworkResolver()
@@ -2238,12 +2244,24 @@ class WindowsMediaProvider:
                 return False
             if not slots.acquire(blocking=False):
                 return False
+            if not worker_slots.acquire(blocking=False):
+                slots.release()
+                return False
             inflight.add(track_id)
             generations[track_id] = (token, deadline)
             epoch = int(getattr(self, "_artwork_cache_epoch", 0))
 
+        # Expiry frees a delivery slot while the blocked socket retains one
+        # physical slot. At most two abandoned requests can use the reserve;
+        # repeated retries cannot grow daemon threads without a bound.
+        released = False
+
         def expire(error="TimeoutError"):
+            nonlocal released
             with lock:
+                if not released:
+                    slots.release()
+                    released = True
                 if generations.get(track_id, (None, 0.0))[0] is token:
                     generations.pop(track_id, None)
                     inflight.discard(track_id)
@@ -2259,10 +2277,12 @@ class WindowsMediaProvider:
         expiry.daemon = True
 
         def lookup():
+            nonlocal released
             url, source, error = "", "", "none"
             try:
                 with lock:
-                    if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
+                    if (epoch != int(getattr(self, "_artwork_cache_epoch", 0))
+                            or generations.get(track_id, (None, 0.0))[0] is not token):
                         return
                 # Artwork retrieval does not require an enabled progress-sync
                 # adapter. A NetEase GSMTC session still has the reference's
@@ -2292,7 +2312,11 @@ class WindowsMediaProvider:
                 error = type(exc).__name__
             finally:
                 expiry.cancel()
-                slots.release()
+                with lock:
+                    if not released:
+                        slots.release()
+                        released = True
+                worker_slots.release()
             with lock:
                 if generations.get(track_id, (None, 0.0))[0] is not token:
                     return
@@ -2326,7 +2350,7 @@ class WindowsMediaProvider:
             threading.Thread(target=lookup, name="GluSpotCurrentArt", daemon=True).start()
         except RuntimeError:
             expiry.cancel()
-            slots.release()
+            worker_slots.release()
             expire("RuntimeError")
             return False
         return True
@@ -2482,12 +2506,28 @@ class WindowsMediaProvider:
         if not isinstance(failed_until, dict):
             failed_until = {}
             self._queue_art_failed_until = failed_until
+        slots = getattr(self, "_queue_art_slots", None)
+        if slots is None:
+            slots = self._queue_art_slots = threading.BoundedSemaphore(3)
+        worker_slots = getattr(self, "_queue_art_worker_slots", None)
+        if worker_slots is None:
+            worker_slots = self._queue_art_worker_slots = threading.BoundedSemaphore(6)
+        generations = getattr(self, "_queue_art_generations", None)
+        if not isinstance(generations, dict):
+            generations = self._queue_art_generations = {}
+        token, deadline, released = object(), time.monotonic() + 8., False
         with lock:
             if self._is_valid_image_bytes(getattr(self, "_queue_art_cache", {}).get(url, b"")):
                 return False
             if url in inflight or float(failed_until.get(url, 0.0) or 0.0) > time.monotonic():
                 return False
+            if not slots.acquire(blocking=False):
+                return False
+            if not worker_slots.acquire(blocking=False):
+                slots.release()
+                return False
             inflight.add(url)
+            generations[url] = token
             epoch = int(getattr(self, "_artwork_cache_epoch", 0))
         track_id = next((key for key, value in getattr(self, "_current_art_url_by_track_id", {}).copy().items()
                          if normalize_artwork_url(value, self.CURRENT_ART_TARGET_SIDE) == normalize_artwork_url(url, self.CURRENT_ART_TARGET_SIDE)), url)
@@ -2497,17 +2537,33 @@ class WindowsMediaProvider:
             source = "unknown"
         log_artwork_event("download", track_id, source, 0, "pending")
 
+        def expire(error="TimeoutError"):
+            nonlocal released
+            with lock:
+                if not released:
+                    slots.release()
+                    released = True
+                if generations.get(url) is not token:
+                    return
+                generations.pop(url, None)
+                inflight.discard(url)
+                failed_until[url] = self._artwork_retry_after("download", url)
+                self._last_refresh_at = 0.0
+            log_artwork_event("download", track_id, source, 0, "failed", error)
+
+        expiry = threading.Timer(8., expire)
+        expiry.daemon = True
+
         def download():
+            nonlocal released
             content = b""
             error = "none"
-            slots = getattr(self, "_queue_art_slots", None)
-            if slots is None:
-                slots = threading.BoundedSemaphore(3)
-                self._queue_art_slots = slots
-            with slots:
+            try:
                 try:
-                    if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
-                        return
+                    with lock:
+                        if (epoch != int(getattr(self, "_artwork_cache_epoch", 0))
+                                or generations.get(url) is not token):
+                            return
                     request = Request(url, headers={"User-Agent": "GluSpot/1.0"})
                     with urlopen(request, timeout=3.0) as response:
                         header = getattr(response, "headers", {}).get("Content-Length")
@@ -2515,6 +2571,8 @@ class WindowsMediaProvider:
                         if expected is not None and not 0 < expected <= self.QUEUE_ART_MAX_BYTES:
                             raise ValueError("artwork size exceeds budget")
                         content = response.read(self.QUEUE_ART_MAX_BYTES + 1)
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("artwork delivery deadline expired")
                     if expected is not None and len(content) != expected:
                         raise IncompleteRead(content)
                     if not content or len(content) > self.QUEUE_ART_MAX_BYTES or not self._is_valid_image_bytes(content):
@@ -2522,9 +2580,18 @@ class WindowsMediaProvider:
                 except Exception as exc:
                     content = b""
                     error = type(exc).__name__
+            finally:
+                expiry.cancel()
+                with lock:
+                    if not released:
+                        slots.release()
+                        released = True
+                worker_slots.release()
             with lock:
-                if epoch != int(getattr(self, "_artwork_cache_epoch", 0)):
+                if (epoch != int(getattr(self, "_artwork_cache_epoch", 0))
+                        or generations.get(url) is not token):
                     return
+                generations.pop(url, None)
                 inflight.discard(url)
                 if content:
                     failed_until.pop(url, None)
@@ -2550,13 +2617,12 @@ class WindowsMediaProvider:
             self._last_refresh_at = 0.0
 
         try:
+            expiry.start()
             threading.Thread(target=download, name="GluSpotQueueArt", daemon=True).start()
         except RuntimeError as exc:
-            with lock:
-                if epoch == int(getattr(self, "_artwork_cache_epoch", 0)):
-                    inflight.discard(url)
-                    failed_until[url] = self._artwork_retry_after("download", url)
-            log_artwork_event("download", track_id, source, 0, "failed", type(exc).__name__)
+            expiry.cancel()
+            worker_slots.release()
+            expire(type(exc).__name__)
             return False
         return True
 

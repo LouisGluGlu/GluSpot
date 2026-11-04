@@ -223,6 +223,63 @@ class SystemCaptureArtworkTests(unittest.TestCase):
         self.assertNotIn("DO_NOT_LOG", output)
         self.assertNotIn("https://", output)
 
+    def test_expired_download_retries_and_old_completion_cannot_erase_new_same_url_job(self):
+        url = "https://fixture.invalid/cover.png"
+        self.assertTrue(self.provider._schedule_queue_album_art_prefetch(url))
+        old = ManualThread.jobs.pop(0)
+        ManualTimer.timers[-1].callback()
+        self.assertEqual(self.provider._queue_art_inflight, set())
+        self.clock.now = self.provider._queue_art_failed_until[url] + .01
+        self.assertTrue(self.provider._schedule_queue_album_art_prefetch(url))
+        new = ManualThread.jobs.pop(0)
+        with patch("api.providers.urlopen", return_value=io.BytesIO(self.original)):
+            old()
+        self.assertEqual(self.provider._queue_art_inflight, {url})
+        self.assertNotIn(url, self.provider._queue_art_cache)
+        with patch("api.providers.urlopen", return_value=io.BytesIO(self.original)):
+            new()
+        self.assertEqual(self.provider._queue_art_inflight, set())
+        self.assertEqual(self.provider._queue_art_cache[url], self.original)
+
+    def test_two_expired_metadata_jobs_release_logical_capacity_for_current_track(self):
+        for key in ("old1", "old2"):
+            self.assertTrue(self.provider._schedule_current_netease_art_lookup(key, key, "Artist"))
+        old = list(ManualThread.jobs)
+        for timer in list(ManualTimer.timers):
+            timer.callback()
+        self.assertEqual(self.provider._current_art_lookup_inflight, set())
+        self.assertTrue(self.provider._schedule_current_netease_art_lookup("new", "New", "Artist"))
+        self.provider._resolve_netease_art_url = Mock(return_value="https://fixture.invalid/current.png")
+        for action in old:
+            action()
+        self.assertNotIn("old1", self.provider._current_art_url_by_track_id)
+        self.assertNotIn("old2", self.provider._current_art_url_by_track_id)
+        self.assertEqual(self.provider._current_art_lookup_inflight, {"new"})
+
+    def test_expired_downloads_use_bounded_reserve_and_do_not_queue_unlimited_threads(self):
+        for batch in range(2):
+            for index in range(3):
+                self.assertTrue(self.provider._schedule_queue_album_art_prefetch(
+                    f"https://fixture.invalid/{batch}-{index}.png"))
+            for timer in list(ManualTimer.timers):
+                if not timer.cancelled:
+                    timer.callback()
+        jobs = len(ManualThread.jobs)
+        self.assertFalse(self.provider._schedule_queue_album_art_prefetch("https://fixture.invalid/overflow.png"))
+        self.assertEqual(len(ManualThread.jobs), jobs)
+        with patch("api.providers.urlopen", return_value=io.BytesIO(self.original)):
+            ManualThread.jobs.pop(0)()
+        self.assertTrue(self.provider._schedule_queue_album_art_prefetch("https://fixture.invalid/current.png"))
+
+    def test_late_download_without_timer_delivery_still_cannot_publish(self):
+        url = "https://fixture.invalid/late.png"
+        self.assertTrue(self.provider._schedule_queue_album_art_prefetch(url))
+        self.clock.now += 8.01
+        with patch("api.providers.urlopen", return_value=io.BytesIO(self.original)):
+            ManualThread.jobs.pop(0)()
+        self.assertNotIn(url, self.provider._queue_art_cache)
+        self.assertEqual(self.provider._queue_art_inflight, set())
+
 
 if __name__ == "__main__":
     unittest.main()
