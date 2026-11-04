@@ -25,7 +25,7 @@ from typing import Literal
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QImage
 
 from api.capture import capture_enabled
@@ -181,23 +181,89 @@ class NoMediaSessionProvider(EmptyIslandDataProvider):
         super().__init__(NO_SESSION_VISUAL_DATA)
 
 
+class _PlaybackSourceDispatch(QObject):
+    """Keep automatic source/Qt-player commits on the existing GUI thread."""
+    requested = Signal(object)
+    changed = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.requested.connect(self._apply, Qt.ConnectionType.QueuedConnection)
+
+    async def call(self, guard, action):
+        if QThread.currentThread() == self.thread():
+            return action() if guard() else False
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self.requested.emit((guard, action, time.monotonic() + 2.0, loop, future))
+        try:
+            return await asyncio.wait_for(future, 2.0)
+        except asyncio.TimeoutError:
+            return False
+
+    @Slot(object)
+    def _apply(self, request):
+        guard, action, deadline, loop, future = request
+        value = False
+        try:
+            if not future.done() and time.monotonic() < deadline and guard():
+                value = action()
+        except Exception:
+            # Never log third-party metadata, credentials or callback payloads.
+            value = False
+        def complete():
+            if not future.done():
+                future.set_result(value)
+        try:
+            loop.call_soon_threadsafe(complete)
+        except RuntimeError:
+            pass
+
+
 class PlaybackSourceProvider:
     """V2 provider boundary selecting owned playback or enabled system capture.
 
     Owned decoded PCM has its own authenticated input to the shared sender.
     External process capture retains its independent strict identity guards.
     """
-    def __init__(self, system_provider, owned_player, settings_getter):
+    def __init__(self, system_provider, owned_player, settings_getter, *, media_classifier=None, interruption_policy=None):
         self.system = system_provider
         self.owned = owned_player
         self.settings_getter = settings_getter
+        from api.capture.interruption import InterruptionPolicy
+        self._interruption_policy = interruption_policy or InterruptionPolicy()
+        self._interruption_classifier = media_classifier
         self._owned_capture_suspended = False
         self._owned_outputs = None
+        self._source_dispatch = _PlaybackSourceDispatch()
+        self.sourceChanged = self._source_dispatch.changed
+        self._interruption_enabled = False
+        self._interruption_generation = 0
+        self._interruption_intent = 0
+        self._interruption_observer = None
+        self._interruption_pin = None
+        self._interruption_capture_data = None
+        self._interruption_owned_playing = False
+        self._interruption_owned_at = 0.0
+        self._interruption_intent_at = 0.0
+        self._interruption_cooldown_until = 0.0
+        self._interruption_candidate = None
+        self._interruption_yield_task = None
+        self._interruption_tasks = set()
+        self._interruption_suspended = False
+        self._interruption_edge = 0
+        self._interruption_last_edge = None
+        self._interruption_result = "off"
         from local.owned_audio_bridge import OwnedAudioBridge
         self._owned_audio_bridge = OwnedAudioBridge(owned_player)
         self.owned.changed.connect(self._owned_state_changed)
 
     def _owned_state_changed(self):
+        if self._interruption_enabled:
+            playing = self.owned.interruption_playing()
+            if playing and not self._interruption_owned_playing:
+                self._interruption_owned_at = time.monotonic()
+            self._interruption_owned_playing = playing
         active = self._owned_active()
         if active and not self._owned_capture_suspended:
             self.system.suspend_live_audio()
@@ -208,6 +274,311 @@ class PlaybackSourceProvider:
             self._owned_outputs.stop_cast()
         self._owned_capture_suspended = active
 
+    def _interruption_submit(self, coroutine):
+        loop = getattr(self.system, "_loop", None)
+        if loop is None or not loop.is_running():
+            coroutine.close()
+            return None
+        return asyncio.run_coroutine_threadsafe(coroutine, loop)
+
+    def set_playback_interruption_enabled(self, enabled):
+        """Opt-in only: OFF allocates no observer and makes no native reads."""
+        if not isinstance(enabled, bool):
+            return False
+        enabled = enabled and not owned_playback_only()
+        if enabled == self._interruption_enabled:
+            return True
+        self._interruption_generation += 1
+        generation = self._interruption_generation
+        self._interruption_intent += 1
+        self._interruption_enabled = enabled
+        self.system._interruption_controller_enabled = enabled
+        self._interruption_suspended = False
+        self._interruption_candidate = None
+        self._interruption_last_edge = None
+        self._interruption_intent_at = time.monotonic()
+        self._interruption_result = "baseline" if enabled else "off"
+        self.owned.set_interruption_tracking_enabled(enabled)
+        if enabled:
+            self._interruption_owned_playing = self.owned.interruption_playing()
+            self._interruption_owned_at = self._interruption_intent_at
+            self.owned.playbackIntent.connect(self._owned_interruption_intent)
+            self.owned.playbackStarted.connect(self._owned_interruption_started)
+            self._interruption_submit(self._start_interruption(generation))
+        else:
+            self.owned.playbackIntent.disconnect(self._owned_interruption_intent)
+            self.owned.playbackStarted.disconnect(self._owned_interruption_started)
+            self._set_interruption_route(None)
+            self._interruption_capture_data = None
+            self._interruption_submit(self._close_interruption(generation))
+        return True
+
+    def playback_source_changed(self):
+        if not self._interruption_enabled:
+            return
+        # A manual source selection revokes old edges and pending handoffs.
+        self._interruption_intent += 1
+        self._interruption_intent_at = time.monotonic()
+        self._interruption_suspended = True
+        self._interruption_candidate = None
+        self._set_interruption_route(None)
+
+    def _interruption_valid(self, generation, intent):
+        return (self._interruption_enabled and generation == self._interruption_generation
+                and intent == self._interruption_intent and not self._interruption_suspended)
+
+    def _interruption_manager_current(self, observer):
+        return observer is not None and observer is self._interruption_observer and observer.manager is self.system._manager
+
+    def _interruption_task(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._interruption_tasks.add(task)
+        def finished(done):
+            self._interruption_tasks.discard(done)
+            if not done.cancelled():
+                try:
+                    done.result()
+                except Exception:
+                    self._interruption_result = "unavailable"
+        task.add_done_callback(finished)
+        return task
+
+    async def _interruption_run_action(self, coroutine):
+        await self._interruption_task(coroutine)
+
+    async def _start_interruption(self, generation):
+        if self._interruption_pin is not None:
+            await self._source_dispatch.call(
+                lambda: generation == self._interruption_generation,
+                lambda: self._set_interruption_route(None))
+        await self._close_interruption(generation, starting=True)
+        if not self._interruption_enabled or generation != self._interruption_generation:
+            return
+        self._interruption_cdp_key = None
+        from api.capture.interruption import SmtcInterruptionObserver
+        manager = getattr(self.system, "_manager", None)
+        if manager is None:
+            if not _ensure_winsdk_loaded():
+                self._interruption_result = "unsupported"
+                return
+            try:
+                manager = await asyncio.wait_for(MediaManager.request_async(), .8)
+            except Exception:
+                self._interruption_result = "unavailable"
+                return
+            if not self._interruption_enabled or generation != self._interruption_generation:
+                return
+            self.system._manager = manager
+        async def thumbnail(properties, media_key):
+            return await self.system._read_thumbnail(properties, "interruption:" + media_key)
+        observer = SmtcInterruptionObserver(manager, self._external_interruption_changed,
+            thumbnail_reader=thumbnail, classifier=self._interruption_classifier)
+        self._interruption_observer = observer
+        await observer.start()
+        if not self._interruption_enabled or generation != self._interruption_generation:
+            if self._interruption_observer is observer:
+                self._interruption_observer = None
+            await observer.close()
+
+    async def _close_interruption(self, generation, *, starting=False):
+        # An old OFF job must never close a newer ON generation.
+        if generation != self._interruption_generation:
+            return
+        observer, self._interruption_observer = self._interruption_observer, None
+        for task in tuple(self._interruption_tasks):
+            task.cancel()
+        if self._interruption_tasks:
+            await asyncio.gather(*tuple(self._interruption_tasks), return_exceptions=True)
+        self._interruption_yield_task = None
+        if observer is not None:
+            await observer.close()
+        if generation != self._interruption_generation:
+            return
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        if cdp is not None and getattr(cdp, "ready", False):
+            observe = getattr(cdp, "set_pause_observation_enabled", None)
+            if callable(observe):
+                for _ in range(2):
+                    if generation != self._interruption_generation:
+                        break
+                    try:
+                        await observe(False, guard=lambda: generation == self._interruption_generation)
+                        break
+                    except Exception:
+                        continue  # Bounded retry of idempotent observer removal only.
+
+    def _owned_interruption_intent(self, event):
+        if not self._interruption_enabled:
+            return
+        self._interruption_intent += 1
+        self._interruption_intent_at = event["at"]
+        self._interruption_candidate = None
+        self._interruption_last_edge = None
+        if event["will_play"]:
+            self._interruption_suspended = False
+
+    def _owned_interruption_started(self, event):
+        if not self._interruption_enabled or event["serial"] != self.owned._interruption_serial:
+            return
+        self._interruption_owned_playing = True
+        self._interruption_owned_at = event["at"]
+        self._interruption_cooldown_until = 0.0  # Explicit user Play takes precedence.
+        observer = self._interruption_observer
+        targets = () if observer is None else tuple(
+            item for item in observer.snapshots() if item.playing and item.observed_at <= event["at"]
+            and self._interruption_policy.allows(item.kind))
+        self._set_interruption_route(None)
+        self._interruption_submit(self._interruption_run_action(self._pause_external_music(
+            self._interruption_generation, self._interruption_intent, event, targets, self._interruption_edge)))
+
+    def _set_interruption_route(self, observation):
+        if self._interruption_pin is observation:
+            return True
+        if observation is None and self._interruption_pin is not None:
+            # Retain evidence only; the native/runtime identity is rechecked
+            # before it can authorize a CDP fallback after returning to owned.
+            self._interruption_capture_data = getattr(self.system, "_last_data", None)
+        self._interruption_pin = observation
+        self.system._set_interruption_session(None if observation is None else observation.session)
+        self._owned_state_changed()
+        self.sourceChanged.emit()
+        return True
+
+    def _external_interruption_changed(self, observation, edge):
+        if not self._interruption_enabled:
+            return
+        observer = self._interruption_observer
+        if not self._interruption_manager_current(observer):
+            restart = getattr(self, "_interruption_restart", None)
+            if restart is None or restart.done():
+                self._interruption_restart = asyncio.create_task(self._start_interruption(self._interruption_generation))
+            return
+        pin = self._interruption_pin
+        if pin is not None and observer is not None and observer.get_session(pin.binding_id) is not pin.session:
+            generation, intent = self._interruption_generation, self._interruption_intent
+            self._interruption_task(self._source_dispatch.call(
+                lambda: self._interruption_valid(generation, intent), lambda: self._set_interruption_route(None)))
+        # Prepare an existing ready CDP channel only; never ensure/start it.
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        if cdp is not None and getattr(cdp, "ready", False):
+            key = (id(cdp), getattr(cdp, "generation", None), self._interruption_generation)
+            if key != getattr(self, "_interruption_cdp_key", None):
+                self._interruption_cdp_key = key
+                self._interruption_task(self._observe_cdp_pause(cdp, self._interruption_generation))
+        if observation is None or not edge or not self._interruption_owned_playing or self._interruption_suspended:
+            return
+        boundary = max(self._interruption_owned_at, self._interruption_intent_at)
+        if (not self._interruption_policy.allows(observation.kind) or observation.started_at is None
+                or observation.started_at <= boundary or observation.nonplaying_at is None
+                or observation.nonplaying_at < boundary):
+            return
+        self._interruption_edge += 1
+        previous = self._interruption_last_edge
+        self._interruption_last_edge = observation
+        if (previous is not None and previous.binding_id != observation.binding_id
+                and observation.nonplaying_at <= previous.started_at
+                and previous.nonplaying_at <= observation.started_at):
+            self._interruption_candidate = None
+            return  # Overlapping observation intervals have no proven winner.
+        self._interruption_candidate = observation
+        if self._interruption_yield_task is None or self._interruption_yield_task.done():
+            self._interruption_yield_task = self._interruption_task(self._yield_to_external())
+
+    async def _observe_cdp_pause(self, cdp, generation):
+        if self._interruption_enabled and generation == self._interruption_generation:
+            observe = getattr(cdp, "set_pause_observation_enabled", None)
+            if callable(observe):
+                try:
+                    await observe(True, guard=lambda: self._interruption_enabled and generation == self._interruption_generation)
+                except Exception:
+                    pass
+
+    async def _yield_to_external(self):
+        while self._interruption_candidate is not None:
+            observation = self._interruption_candidate
+            generation, intent = self._interruption_generation, self._interruption_intent
+            serial = self.owned._interruption_serial
+            edge = self._interruption_edge
+            delay = self._interruption_cooldown_until - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+                continue  # Keep a genuine resume; revalidate after cooldown.
+            self._interruption_candidate = None
+            observer = self._interruption_observer
+            def guard():
+                return (self._interruption_valid(generation, intent) and serial == self.owned._interruption_serial
+                        and self._interruption_manager_current(observer) and edge == self._interruption_edge
+                        and observer.is_current(observation))
+            current = await observer.revalidate(observation) if observer is not None else None
+            if not guard() or current is None or not current.playing or not self._interruption_policy.allows(current.kind):
+                continue
+            paused = await self._source_dispatch.call(
+                lambda: guard() and self._interruption_owned_playing,
+                lambda: self.owned.pause_for_interruption(guard))
+            if not paused or not guard():
+                continue
+            current = await observer.revalidate(observation)
+            if current is None or not current.playing or not self._interruption_policy.allows(current.kind):
+                continue
+            committed = await self._source_dispatch.call(guard, lambda: self._set_interruption_route(current))
+            if committed:
+                self._interruption_result = "owned-paused"
+                self._interruption_cooldown_until = time.monotonic() + 1.0
+
+    async def _pause_external_music(self, generation, intent, event, targets, edge):
+        from api.capture.interruption import PauseResult
+        observer = self._interruption_observer
+        def guard():
+            return (self._interruption_valid(generation, intent) and event["serial"] == self.owned._interruption_serial
+                    and self._interruption_manager_current(observer) and self._interruption_edge == edge)
+        for observation in targets:
+            if not guard():
+                return
+            current = await observer.revalidate(observation)
+            if (not guard() or current is None or not current.playing
+                    or not self._interruption_policy.allows(current.kind)):
+                continue
+            result = await observer.pause(observation, current=guard, request_id=f"{generation}-{intent}")
+            self._interruption_result = result.value
+            if result == PauseResult.REJECTED and guard() and observation.app_id.casefold() == "cloudmusic.exe":
+                current = await observer.revalidate(observation)
+                if current is None or not guard():
+                    continue
+                cdp = getattr(self.system, "_netease_cdp_session", None)
+                native_id = self._netease_pause_binding(observation, cdp)
+                if native_id is not None:
+                    try:
+                        paused = await cdp.pause(native_id, f"gluspot-pause-{generation}-{intent}-{observation.binding_id}",
+                            expected_generation=cdp.generation,
+                            guard=lambda: guard() and observer.is_current(observation)
+                                and self._netease_pause_binding(observation, cdp) == native_id)
+                        self._interruption_result = "cdp-paused" if paused else "cdp-unverified"
+                    except Exception:
+                        self._interruption_result = "uncertain"
+        if guard() and targets:
+            self._interruption_cooldown_until = time.monotonic() + 1.0
+
+    def _netease_pause_binding(self, observation, cdp):
+        """Reuse the already-bound capture/native identity; never infer a new one."""
+        from api.capture.interruption import same_session
+        runtime = getattr(self.system, "_capture_runtime", None)
+        source = getattr(runtime, "source", None)
+        cef = getattr(runtime, "_cef_source", None)
+        latest = getattr(cdp, "latest", None)
+        data = getattr(self.system, "_last_data", None) or self._interruption_capture_data
+        if (cdp is None or cdp is not getattr(self.system, "_netease_cdp_session", None)
+                or not getattr(cdp, "ready", False) or not isinstance(latest, dict)
+                or not same_session(getattr(source, "session", None), observation.session)
+                or getattr(cef, "session", None) is not cdp
+                or getattr(cef, "native_track_id", None) != latest.get("trackId")
+                or getattr(cef, "generation", None) != cdp.generation
+                or not getattr(cef, "fresh", False) or data is None
+                or (data.track.source_app_id, data.track.title, data.track.artist)
+                    != (observation.app_id, *observation.media_key[:2])
+                or getattr(runtime, "identity", None) != (observation.app_id, data.track.track_id)):
+            return None
+        return latest.get("trackId")
+
     @property
     def settings_setter(self):
         return getattr(self.system, "settings_setter", None)
@@ -217,10 +588,10 @@ class PlaybackSourceProvider:
         self.system.settings_setter = value
 
     def _owned_active(self):
-        return bool(self.settings_getter("v2_owned_playback_enabled", True)) and self.owned.track is not None
+        return self.__dict__.get("_interruption_pin") is None and bool(self.settings_getter("v2_owned_playback_enabled", True)) and self.owned.track is not None
 
     def _system_enabled(self):
-        return not owned_playback_only() and bool(self.settings_getter("v2_system_capture_enabled", False))
+        return not owned_playback_only() and (self.__dict__.get("_interruption_pin") is not None or bool(self.settings_getter("v2_system_capture_enabled", False)))
 
     def _owned_output_mode(self):
         return self._owned_active() or (bool(self.settings_getter("v2_owned_playback_enabled", True)) and not self._system_enabled())
@@ -424,6 +795,7 @@ class PlaybackSourceProvider:
         return data
 
     def close_audio_outputs(self):
+        self.set_playback_interruption_enabled(False)
         if self._owned_outputs is not None:
             self._owned_outputs.close()
         self._owned_audio_bridge.close()
@@ -940,7 +1312,13 @@ class WindowsMediaProvider:
         cef_requested = False
         if capability.service == "netease":
             cef_requested = self._netease_cef_enabled()
-            cef_session = await self._ensure_netease_cdp()
+            if (getattr(self, "_interruption_controller_enabled", False)
+                    or getattr(asyncio.current_task(), "_gluspot_interruption_read", False)
+                    or getattr(self, "_interruption_session", None) is not None):
+                existing = getattr(self, "_netease_cdp_session", None)
+                cef_session = existing if existing is not None and existing.ready else None
+            else:
+                cef_session = await self._ensure_netease_cdp()
             # Installation discovery can fail on the first refresh and
             # succeed later (for example while CloudMusic is updating). A
             # runtime made before that discovery must be rebound so it can
@@ -2908,6 +3286,18 @@ class WindowsMediaProvider:
             return None
 
     async def _get_session(self):
+        pinned = getattr(self, "_interruption_session", None)
+        if pinned is not None:
+            # A pin names one retained native instance. Never rerun scoring or
+            # merge same-AUMID instances during a temporary handoff.
+            try:
+                from api.capture.interruption import same_session
+                sessions = list(self._manager.get_sessions() or [])
+                app_id = str(pinned.source_app_user_model_id)
+                matches = [s for s in sessions if str(s.source_app_user_model_id).casefold() == app_id.casefold()]
+                return pinned if len(matches) == 1 and same_session(matches[0], pinned) else None
+            except Exception:
+                return None
         if not _ensure_winsdk_loaded():
             self._provider_status = "missing_winsdk"
             self._reset_media_session_diagnostics("winsdk-missing")
@@ -2944,6 +3334,20 @@ class WindowsMediaProvider:
         if session is None:
             self._provider_status = "no_session"
         return session
+
+    def _set_interruption_session(self, session):
+        """Memory-only route pin; invalidate old in-flight media deliveries."""
+        if getattr(self, "_interruption_session", None) is session:
+            return
+        self._interruption_session = session
+        with self._music_cache_lock:
+            self._music_cache_epoch += 1
+            future, self._refresh_future = self._refresh_future, None
+            if future is not None:
+                future.cancel()
+            self._last_data = None
+            self._last_ready_at = 0.0
+            self._last_refresh_at = 0.0
 
     def _reset_media_session_diagnostics(self, error: str = ""):
         self._media_session_count = 0
@@ -3049,6 +3453,10 @@ class WindowsMediaProvider:
         return score, f"{label_source} / {status or '-'} / {label_title} / {label_artist} / {position_seconds:.1f}s/{max(0.0, duration_seconds):.1f}s"
 
     async def _read_visual_data(self) -> IslandVisualData | None:
+        task = asyncio.current_task()
+        if task is not None:
+            task._gluspot_interruption_read = bool(getattr(self, "_interruption_controller_enabled", False)
+                or getattr(self, "_interruption_session", None) is not None)
         cache_lock = getattr(self, "_music_cache_lock", None)
         if cache_lock is None:
             cache_lock = self._music_cache_lock = threading.RLock()

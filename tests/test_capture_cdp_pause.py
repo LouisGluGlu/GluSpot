@@ -111,6 +111,17 @@ class CdpPauseTests(CaptureAsyncTestCase):
         self.assertEqual(len(expressions), 2)
         self.assertIn('observePause?.(false)', expressions[-1])
 
+    async def test_uncertain_disable_retains_cleanup_authority_for_later_close(self):
+        session = self.session()
+        session._pause_observation_requested_generation = 7
+        session._evaluate.side_effect = [asyncio.TimeoutError(), True]
+        with self.assertRaises(asyncio.TimeoutError):
+            await session.set_pause_observation_enabled(False)
+        self.assertEqual(session._pause_observation_requested_generation, 7)
+        self.assertTrue(await session.set_pause_observation_enabled(False))
+        self.assertIsNone(session._pause_observation_requested_generation)
+        self.assertEqual(session._evaluate.await_count, 2)
+
 
 @unittest.skipUnless(shutil.which('node'), 'existing Node runtime unavailable')
 class PauseJavascriptTests(unittest.TestCase):

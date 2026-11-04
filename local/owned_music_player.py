@@ -361,8 +361,8 @@ class OwnedMusicPlayer(QObject):
         finally:
             self._interruption_action_running = False
         if not accepted:
-            self._interruption_pause_latched = latched
             if self._interruption_serial == serial:
+                self._interruption_pause_latched = latched
                 self._interruption_candidate = None
                 self._interruption_started = None
         elif self._interruption_started is not None:
@@ -430,6 +430,10 @@ class OwnedMusicPlayer(QObject):
         return not self.interruption_playing()
 
     def _set_status(self, value):
+        if value in {"busy", "catalog_unavailable", "stream_unavailable", "playback_failed"}:
+            # A failed selection cannot acquire a later automatic queue start.
+            self._interruption_candidate = None
+            self._interruption_started = None
         self.status = value
         self.statusChanged.emit(value)
 
@@ -905,7 +909,7 @@ class OwnedMusicPlayer(QObject):
             self.changed.emit()
 
     def _try_start_dj_overlay(self):
-        if self._output_preparing:
+        if self._output_preparing or self._interruption_pause_latched:
             return
         if self._dj_overlay_is_preview and self._dj_overlay_voices and self._dj_source_ready and not self._closed:
             if not self._dj_preview_authorized():
@@ -1934,6 +1938,14 @@ class OwnedMusicPlayer(QObject):
                 self.stop()
                 return True
             return False
+        self._interruption_candidate = None
+        self._interruption_started = None
+        if self._interruption_tracking:
+            self._interruption_serial += 1
+            serial, pending = self._interruption_serial, self._catalog_pending_epoch
+            self.playbackIntent.emit(dict(serial=serial, at=time.monotonic(), will_play=False))
+            if serial != self._interruption_serial or pending != self._catalog_pending_epoch:
+                return False
         self._catalog_epoch += 1
         self._catalog_pending_epoch = 0
         self._cancel_playlist_loading()
@@ -3685,6 +3697,9 @@ class OwnedMusicPlayer(QObject):
                 position_sampled_at=time.monotonic())
             self._set_status("trial" if self._stream_trial else "playing")
             self.changed.emit()
+            # PlayingState arrived while recovery still owned the decoder.
+            # Only a pending explicit user Resume may publish this commit.
+            self._publish_interruption_start()
 
     def _check_stream_fault(self):
         if self._stream_recovery is not None:

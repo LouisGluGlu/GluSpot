@@ -93,6 +93,96 @@ class OwnedInterruptionTests(unittest.TestCase):
         self.assertFalse(self.player.play_queue(()))
         self.assertEqual(len(self.starts), 1)
 
+    def test_failed_or_cancelled_catalog_cannot_claim_later_automatic_next(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                self.start()
+                baseline = len(self.starts)
+                self.player.play_daily()
+                token = next(t for t, _ in reversed(self.tasks.jobs) if t[0] == 'catalog')
+                if cancelled:
+                    self.assertTrue(self.player.cancel_pending_selection())
+                    self.tasks.completed.emit(token, self.songs[::-1], None)
+                else:
+                    self.tasks.completed.emit(token, None, 'network')
+                self.assertIsNone(self.player._interruption_candidate)
+                self.assertTrue(self.player.interruption_playing())
+                self.player._media_status(QMediaPlayer.MediaStatus.EndOfMedia)
+                self.authorize()
+                self.assertEqual(len(self.starts), baseline)
+                self.player.stop()
+                self.starts.clear()
+                self.intents.clear()
+
+    def test_newer_user_selection_during_cancel_intent_is_preserved(self):
+        self.start()
+        self.player.play_daily()
+        replacement = []
+        def select_new(event):
+            if not event['will_play'] and not replacement:
+                replacement.append(True)
+                self.player.play_queue(self.songs[::-1])
+        self.player.playbackIntent.connect(select_new)
+        self.assertFalse(self.player.cancel_pending_selection())
+        self.player.playbackIntent.disconnect(select_new)
+        self.authorize()
+        self.assertEqual(self.player.queue, self.songs[::-1])
+        self.assertTrue(self.player.interruption_playing())
+        self.assertEqual(len(self.starts), 2)
+
+    def test_failed_stream_cannot_claim_internal_retry_as_explicit_user_start(self):
+        self.player.set_interruption_tracking_enabled(True)
+        self.player.play_queue(self.songs)
+        token = next(t for t, _ in reversed(self.tasks.jobs) if t[0] == 'stream')
+        self.tasks.completed.emit(token, None, 'network')
+        self.assertIsNone(self.player._interruption_candidate)
+        self.player._load_song()
+        self.authorize()
+        self.assertEqual(self.starts, [])
+
+    def test_manual_recovery_resume_publishes_once_after_successful_commit(self):
+        self.start()
+        self.assertTrue(self.player.pause_for_interruption())
+        recovery = _StreamRecovery(self.player._epoch, 1200, time.monotonic() + 20,
+            'network', phase='progress', resume=False, progress_position_ms=1200)
+        self.player._stream_recovery = recovery
+        self.player._set_status('recovering_stream')
+        self.assertTrue(self.player.send_playback_command('toggle_play_pause'))
+        self.assertEqual(len(self.starts), 1)
+        self.player._position_changed(1300)
+        self.player._check_stream_recovery()
+        self.assertTrue(self.player.interruption_playing())
+        self.assertIsNone(self.player._stream_recovery)
+        self.assertEqual(len(self.starts), 2)
+        self.assertEqual(self.starts[-1]['serial'], self.intents[-1]['serial'])
+        self.player._check_stream_recovery()
+        self.assertEqual(len(self.starts), 2)
+
+    def test_output_preparation_publishes_user_start_only_after_real_release(self):
+        self.player.set_interruption_tracking_enabled(True)
+        self.player.set_output_preparing(True)
+        self.player.play_queue(self.songs)
+        self.authorize()
+        self.assertEqual(self.starts, [])
+        self.player.set_output_preparing(False)
+        self.assertEqual(len(self.starts), 1)
+        self.assertTrue(self.player.interruption_playing())
+
+    def test_late_authorized_preview_callback_cannot_bypass_pause_latch(self):
+        self.start()
+        sample = OnlineSong('netease', 'dj-preview:test', 'Sample', media_kind='dj_voice')
+        self.player._dj_overlay_voices = (sample,)
+        self.player._dj_overlay_is_preview = True
+        self.player._dj_source_ready = True
+        self.voice.play()
+        with patch.object(self.player, '_dj_preview_authorized', return_value=True):
+            self.assertTrue(self.player.pause_for_interruption())
+            self.player._try_start_dj_overlay()
+            self.player.set_output_preparing(False)
+        self.assertEqual(self.voice.state, QMediaPlayer.PlaybackState.PausedState)
+        self.assertFalse(self.player.interruption_playing())
+        self.assertEqual(len(self.starts), 1)
+
     def test_explicit_pause_preserves_queue_position_and_has_no_reverse_intent(self):
         self.start()
         self.decoder.positionChanged.emit(23456)

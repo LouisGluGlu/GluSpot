@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from api.capture.interruption import (
     InterruptionPolicy, MediaClassifier, MediaKind, PauseResult,
-    ReservedAudioDetector, SmtcInterruptionObserver,
+    ReservedAudioDetector, SmtcInterruptionObserver, same_session,
 )
 from tests.capture_async import CaptureAsyncTestCase
 from tests.test_capture_smtc import Session as TimelineSession
@@ -48,6 +48,18 @@ class Session(TimelineSession):
         if self.pause_changes_state:
             self.playing = False
         return self.pause_answer
+
+
+class SessionAlias:
+    """Distinct Python wrappers backed by one fake native session instance."""
+    def __init__(self, native):
+        self.native = native
+
+    def __eq__(self, other):
+        return isinstance(other, SessionAlias) and self.native is other.native
+
+    def __getattr__(self, name):
+        return getattr(self.native, name)
 
 
 class Manager:
@@ -108,6 +120,20 @@ class ClassificationTests(unittest.TestCase):
         self.assertIs(self.classify('GluSpot', 1, title='Song', artist='Artist'), MediaKind.UNKNOWN)
         self.assertIs(self.classify('python.exe', 1), MediaKind.MUSIC)
 
+    def test_native_identity_equality_is_explicit_symmetric_and_exact_bool(self):
+        native = Session()
+        self.assertTrue(same_session(SessionAlias(native), SessionAlias(native)))
+        self.assertFalse(same_session(SessionAlias(native), SessionAlias(Session())))
+        self.assertFalse(same_session(object(), object()))
+        class InvalidEquality:
+            def __eq__(self, other):
+                return 1
+        class RaisingEquality:
+            def __eq__(self, other):
+                raise RuntimeError('unsupported comparison')
+        self.assertFalse(same_session(InvalidEquality(), InvalidEquality()))
+        self.assertFalse(same_session(RaisingEquality(), RaisingEquality()))
+
     def test_reserved_policy_hooks_and_detector_are_noops(self):
         policy = InterruptionPolicy()
         self.assertTrue(policy.allows(MediaKind.MUSIC))
@@ -163,6 +189,54 @@ class ObserverTests(CaptureAsyncTestCase):
         self.now = 12
         await self.collect()
         self.assertFalse(self.changes[-1][1])
+
+    async def test_equal_wrappers_retain_native_binding_edge_and_control_target(self):
+        retained = SessionAlias(self.session)
+        self.manager.sessions = [retained]
+        baseline = await self.collect()
+        self.now = 11
+        self.session.playing = True
+        self.manager.sessions = [SessionAlias(self.session)]
+        edge = await self.collect()
+        self.assertTrue(self.changes[-1][1])
+        self.assertEqual(edge.binding_id, baseline.binding_id)
+        self.assertIs(edge.session, retained)
+        self.assertIsNotNone(await self.observer.revalidate(edge))
+        self.assertIs(await self.observer.pause(edge), PauseResult.PAUSED)
+        self.assertEqual(self.session.pauses, 1)
+
+    async def test_equal_wrappers_dedup_but_distinct_same_app_stay_ambiguous(self):
+        self.manager.sessions = [SessionAlias(self.session), SessionAlias(self.session)]
+        await self.collect()
+        self.assertEqual(len(self.observer.snapshots()), 1)
+        self.manager.sessions = [SessionAlias(self.session), SessionAlias(Session())]
+        await self.collect()
+        self.assertEqual(self.observer.snapshots(), ())
+        self.assertEqual(self.session.pauses, 0)
+
+    async def test_multi_session_edges_publish_after_entire_observation_batch(self):
+        second = Session('second.exe', playing=False)
+        self.manager.sessions = [self.session, second]
+        await self.collect()
+        self.changes.clear()
+        self.now = 11
+        self.session.playing = second.playing = True
+        reading, release = asyncio.Event(), asyncio.Event()
+        async def suspended_properties():
+            reading.set()
+            await release.wait()
+        second.properties_hook = suspended_properties
+        collection = asyncio.create_task(self.observer.collect_once())
+        try:
+            await reading.wait()
+            self.assertEqual(self.changes, [])
+            release.set()
+            await collection
+            self.assertEqual(len(self.changes), 2)
+            self.assertTrue(all(edge for _observation, edge in self.changes))
+        finally:
+            release.set()
+            await asyncio.gather(collection, return_exceptions=True)
 
     async def test_unknown_status_to_playing_is_not_proven_edge(self):
         self.session.status = 2
@@ -235,10 +309,55 @@ class ObserverTests(CaptureAsyncTestCase):
         snapshot = await self.collect()
         self.assertIs(await self.observer.pause(snapshot), PauseResult.PAUSED)
         self.assertEqual(self.session.pauses, 1)
-        # A native write does not invent a raw observed Paused snapshot.
-        self.assertTrue(self.observer.snapshots()[0].playing)
+        # Only the independent native Paused read updates raw observation.
+        self.assertFalse(self.observer.snapshots()[0].playing)
+        self.assertFalse(self.changes[-1][1])
         self.assertIs(await self.observer.pause(snapshot), PauseResult.STALE)
         self.assertEqual(self.session.pauses, 1)
+
+    async def test_accepted_pause_without_independent_paused_read_keeps_playing_truth(self):
+        self.session.playing = True
+        self.session.pause_changes_state = False
+        snapshot = await self.collect()
+        self.assertIs(await self.observer.pause(snapshot), PauseResult.UNCERTAIN)
+        self.assertTrue(self.observer.snapshots()[0].playing)
+        self.assertEqual(self.session.pauses, 1)
+
+    async def test_immediate_resume_after_pause_readback_needs_no_intervening_poll(self):
+        self.session.playing = True
+        snapshot = await self.collect()
+        self.assertIs(await self.observer.pause(snapshot), PauseResult.PAUSED)
+        self.now = 10.1
+        self.session.playing = True
+        resumed = await self.collect()
+        self.assertTrue(self.changes[-1][1])
+        self.assertEqual(resumed.interval, snapshot.interval + 1)
+        self.assertEqual(resumed.nonplaying_at, 10)
+
+    async def test_older_metadata_read_cannot_overwrite_confirmed_pause_before_resume(self):
+        self.session.playing = True
+        snapshot = await self.collect()
+        reading, release = asyncio.Event(), asyncio.Event()
+        async def suspended_properties():
+            self.session.properties_hook = None
+            reading.set()
+            await release.wait()
+        self.session.properties_hook = suspended_properties
+        collection = asyncio.create_task(self.observer.collect_once())
+        try:
+            await reading.wait()
+            self.assertIs(await self.observer.pause(snapshot), PauseResult.PAUSED)
+            self.now = 10.1
+            self.session.playing = True
+            release.set()
+            await collection
+            self.assertFalse(self.observer.snapshots()[0].playing)
+            resumed = await self.collect()
+            self.assertTrue(self.changes[-1][1])
+            self.assertEqual(resumed.interval, snapshot.interval + 1)
+        finally:
+            release.set()
+            await asyncio.gather(collection, return_exceptions=True)
 
     async def test_pause_false_and_exception_are_distinct(self):
         self.session.playing = True

@@ -206,13 +206,15 @@ class CdpSession:
             return True
         # Record dispatch before awaiting: OFF must remove a native observer
         # even if cancellation/timeout prevents the enable acknowledgement.
-        self._pause_observation_requested_generation = generation if enabled else None
+        if enabled:
+            self._pause_observation_requested_generation = generation
         observed = await self._evaluate(self.adapter.pause_observation_expression(enabled))
         if generation != self.generation:
             return False
         if observed is True:
             self._pause_observation_generation = generation if enabled else None
             if not enabled:
+                self._pause_observation_requested_generation = None
                 self._pause_requests.clear()
             # OFF/new intent can race the response after observation was armed.
             if enabled and not guard() and self.ready:

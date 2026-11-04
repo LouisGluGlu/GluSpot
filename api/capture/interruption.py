@@ -14,6 +14,25 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 
 
+def same_session(left, right) -> bool:
+    """Use native wrapper equality when supplied, never application IDs.
+
+    Standard object equality has no stronger identity than ``is``. Native
+    projections may implement equality for two wrappers of one underlying
+    session; require unambiguous, symmetric Python bool results and fail closed
+    on unsupported, exceptional or array-like comparisons.
+    """
+    if left is right:
+        return True
+    try:
+        if type(left).__eq__ is object.__eq__ and type(right).__eq__ is object.__eq__:
+            return False
+        forward, backward = left == right, right == left
+        return type(forward) is bool and type(backward) is bool and forward and backward
+    except Exception:
+        return False
+
+
 class MediaKind(Enum):
     MUSIC = 'music'
     VIDEO = 'video'
@@ -123,10 +142,10 @@ class _Binding:
 class SmtcInterruptionObserver:
     """All external SMTC sessions on the existing provider asyncio loop.
 
-    Membership is proven by the retained native wrapper, never by AUMID alone.
-    Wrapper replacement starts a new baseline. Ambiguous duplicate AUMIDs have
-    no automatic permission. This deliberately fails closed on projections that
-    cannot preserve or compare native identity.
+    Membership uses retained wrapper identity or native equality, never AUMID
+    alone. Unprovable wrapper replacement starts a new baseline. Ambiguous
+    duplicate AUMIDs have no automatic permission. This fails closed on
+    projections that cannot preserve or compare native identity.
     """
     EVENTS = ('playback_info_changed', 'media_properties_changed')
 
@@ -194,10 +213,14 @@ class SmtcInterruptionObserver:
 
     def _sessions(self):
         sessions = list(self.manager.get_sessions() or [])
-        # Some fake/native enumerations repeat the very same wrapper.
+        # Enumerations can repeat a native instance through equal wrappers.
         unique = []
         for session in sessions:
-            if all(session is not item for item in unique):
+            matches = [item for item in unique if same_session(session, item)]
+            if any(str(item.source_app_user_model_id) != str(session.source_app_user_model_id)
+                   for item in matches):
+                raise ValueError('Conflicting native session identity')
+            if not matches:
                 unique.append(session)
         return unique
 
@@ -217,23 +240,34 @@ class SmtcInterruptionObserver:
             if self._closed:
                 return
             sessions = self._membership()
+            publications = []
             for number, binding in tuple(self._bindings.items()):
-                if not any(binding.session is session for session in sessions):
+                if not any(same_session(binding.session, session) and
+                           str(session.source_app_user_model_id) == binding.app_id
+                           for session in sessions):
                     self._unsubscribe(binding.tokens)
                     self._bindings.pop(number, None)
                     if binding.observation is not None:
-                        self.on_change(None, False)
+                        publications.append((None, False))
             for session in sessions:
-                binding = next((b for b in self._bindings.values() if b.session is session), None)
+                binding = next((b for b in self._bindings.values()
+                                if same_session(b.session, session) and
+                                str(session.source_app_user_model_id) == b.app_id), None)
                 if binding is None:
                     self._next_binding += 1
                     binding = _Binding(self._next_binding, session,
                                        str(session.source_app_user_model_id))
                     self._bindings[binding.number] = binding
                     self._subscribe(session, self.EVENTS, binding.tokens, binding)
+                before_read = binding.observation
                 observation = await self._read(binding)
                 if self._closed or self._bindings.get(binding.number) is not binding:
                     return
+                if binding.observation is not before_read:
+                    # An independent Pause readback arrived during this older
+                    # metadata read. Preserve that observed state and read anew.
+                    self._wake.set()
+                    continue
                 previous = binding.observation
                 edge = (previous is not None and previous.playing is False
                         and observation.playing is True)
@@ -242,6 +276,11 @@ class SmtcInterruptionObserver:
                                           interval=previous.interval + 1,
                                           nonplaying_at=previous.nonplaying_at)
                 binding.observation = observation
+                publications.append((observation, edge))
+            # Publish synchronously only after the complete observation batch.
+            # An automatic action must see every newly observed candidate,
+            # including ambiguous edges from another slow metadata read.
+            for observation, edge in publications:
                 self.on_change(observation, edge)
 
     async def _read(self, binding):
@@ -300,7 +339,7 @@ class SmtcInterruptionObserver:
             return False
         binding = self._bindings.get(observation.binding_id)
         latest = binding.observation if binding else None
-        return bool(latest is not None and binding.session is observation.session
+        return bool(latest is not None and same_session(binding.session, observation.session)
                     and latest.playing is True and observation.playing is True
                     and latest.kind is MediaKind.MUSIC and observation.kind is MediaKind.MUSIC
                     and latest.interval == observation.interval
@@ -311,11 +350,13 @@ class SmtcInterruptionObserver:
         if not self.is_current(observation):
             return None
         binding = self._bindings[observation.binding_id]
-        if not any(binding.session is s for s in self._membership()):
+        if not any(same_session(binding.session, s) and
+                   str(s.source_app_user_model_id) == binding.app_id for s in self._membership()):
             return None
         fresh = await self._read(binding)
         if (not self.is_current(observation) or fresh.playing is not True
-                or not any(binding.session is s for s in self._membership())
+                or not any(same_session(binding.session, s) and
+                   str(s.source_app_user_model_id) == binding.app_id for s in self._membership())
                 or fresh.media_key != observation.media_key
                 or fresh.media_generation != observation.media_generation
                 or fresh.kind is not MediaKind.MUSIC):
@@ -345,7 +386,19 @@ class SmtcInterruptionObserver:
                 return PauseResult.UNCERTAIN
             status = _enum_value(getattr(observation.session.get_playback_info(),
                                          'playback_status', None))
-            if status == 5:  # Raw Paused read, never optimistic truth.
+            if status == 5:  # Independent raw Paused read, not command success.
+                if not current() or self._closed:
+                    return PauseResult.UNCERTAIN
+                binding = self._bindings.get(observation.binding_id)
+                latest = binding.observation if binding else None
+                if (latest is not None and same_session(binding.session, observation.session)
+                        and latest.interval == observation.interval):
+                    at = self.clock()
+                    confirmed = replace(latest, playing=False, observed_at=at,
+                                        nonplaying_at=at, started_at=None)
+                    binding.revision += 1
+                    binding.observation = confirmed
+                    self.on_change(confirmed, False)
                 return PauseResult.PAUSED
             if accepted is False and status == 4:
                 return PauseResult.REJECTED
