@@ -106,16 +106,18 @@ This README is the canonical product, implementation, release-readiness, and pen
 
 ## Current Status
 
+- 2026-11-04: t225 round 2 restores CLASSIC song-page translations for unset, empty and unknown selectors. Explicit `GLUSPOT_TRANSLATION_VARIANT=a|b|c` retains the alternatives. Focused bilingual typography/paint checks and before/after offscreen renders verify the default; PC 未验证.
+
 - 2026-11-04: t225 round 2 / t227 prepares each Finder transition's actual spring geometry before queuing paint, uses that same lyric/layout snapshot for its tight native mask, clears damaged translucent pixels and keeps expanded content inside its shell. Live Finder no longer paints the legacy material cradle behind the music pill. `GLUSPOT_MASK_DEBUG=1` logs window/mask/painted bounds per frame. Focused frame, width-cutoff, material and notch checks pass; native Windows compositor behavior remains 未验证. No version/build, push or PC operation.
 
 - 2026-11-04: t225 restores only the expanded sea's `ebe525e` peak/vocal amplitude (quiet 0.340 px, held bass 7.697 px, vocal 9.583 px), removes the extra low-band punch and restores its original damage strip. A translucent palette hairline stays visible along the crest; rising accents add at most 1.2 logical units to the 1.0-unit base, with smooth endpoint taper and a 160 ms audio-clock EMA. Existing palette glow, shared cover motion and all t205–t222 lyric/layout/library/settings fixes remain. [t225 evidence](docs/island-sea-t225.md) records cover comparisons, measurements, CPU and isolated-suite verification. PC 未验证; no version/build, push or PC operation.
 - 2026-11-04: t229 restores the playing window/fullscreen's animated album-color background by giving that renderer its own `classic` default. Library/login retain `frosted`; explicit backdrop selectors and the other t214–t222 features remain. Exact ec89693/395d6ed offscreen comparisons show that the static default originated in t200, and do not reproduce shared lyric/palette worker suspension or the reported stuck PC lyric skeleton. Production-entry delayed-result/library/preview regressions and the verification limits are recorded in [t229 evidence](docs/music-surface-t229.md). PC 未验证; no version/build, push or PC operation.
 
-- 2026-11-04: t214–t222 embeds the real expanded island across the sidebar library footer, sharing live provider state, glass transport, selected ambience and cover flip; adds shared DPR-aware native/Qt resize edges to player/library/login; migrates immersive `fade` to `capsule` and paints cached settings thumbnails with current artwork and production background painters. Translation A is the default (including unset/unknown selectors), composed with t205 full-height lyrics and cover compression. Collapsed pill growth reserves its native mask before paint, holds text until ready and shrinks the mask after the shell; exact-base frame proofs reproduce and remove the clipped background/rim/cover. [F–J evidence and limits](docs/music-surface-t214-t222.md) include library CPU overhead and inherited suite failures. PC 未验证; no version/build, push or PC operation.
+- 2026-11-04: t214–t222 embeds the real expanded island across the sidebar library footer, sharing live provider state, glass transport, selected ambience and cover flip; adds shared DPR-aware native/Qt resize edges to player/library/login; migrates immersive `fade` to `capsule` and paints cached settings thumbnails with current artwork and production background painters. Translation A was the default at that checkpoint (restored to CLASSIC in t225 round 2), composed with t205 full-height lyrics and cover compression. Collapsed pill growth reserves its native mask before paint, holds text until ready and shrinks the mask after the shell; exact-base frame proofs reproduce and remove the clipped background/rim/cover. [F–J evidence and limits](docs/music-surface-t214-t222.md) include library CPU overhead and inherited suite failures. PC 未验证; no version/build, push or PC operation.
 
 - 2026-11-04: t205–t211 removes the external lyric viewport's interior top/bottom cuts in both responsive window widths and fullscreen, with full-window ink and DestinationIn edge feathers through the existing glass/transport. Chrome retreats vertically along its own edge; wide cover, metadata and transport share the shrinking width budget with lyrics while retaining the previous breakpoint. Island sea adds low-band onset punches and larger absolute vocal swells, with a bounded one-second history drawing a saturated palette crest only on rising water. Window, fullscreen and island reuse the 640 ms cover projection/reflection; same-track artwork upgrades quietly crossfade. BOX renders, measurements, paired CPU proxies and baseline failure comparison are recorded in [t205–t211 evidence](docs/music-surface-t205-t211.md). PC verification 未验证; parent owns the single Desktop-launcher restart after commit. No version/build, provider, button style or glass grouping change.
 
-- 2026-11-04: `grok/translation-variants` adds `GLUSPOT_TRANSLATION_VARIANT=a|b|c|classic` for song-page bilingual typography and float. A is now the default for unset, empty and unknown values; `classic` explicitly selects the original rendering. A/B/C share existing translation layout, spring and cached paint components with distinct size, alpha, gap, blur and reveal timing; translation karaoke is disabled only in the variants. See [译文风格对比](#译文风格对比) for the offline comparison harness. No version/build or provider change.
+- 2026-11-04: `grok/translation-variants` adds `GLUSPOT_TRANSLATION_VARIANT=a|b|c|classic` for song-page bilingual typography and float. A was the default at that checkpoint; t225 round 2 restores CLASSIC for unset, empty and unknown values. A/B/C share existing translation layout, spring and cached paint components with distinct size, alpha, gap, blur and reveal timing; translation karaoke is disabled only in the variants. See [译文风格对比](#译文风格对比) for the offline comparison harness. No version/build or provider change.
 
 - 2026-11-04: t202 strengthens the island ripple with absolute centered 300–3400 Hz energy in every intensity mode, retaining 60/250 ms attack/release and near-calm quiet input. Compact and expanded sea now share the live Xiaomi primary, contrast lift and tinted crest. Track changes flip the visible cover in 640 ms using the existing perspective painter and island timer, with soft traveling crest/under-cover light. Same-track artwork upgrades retain the ongoing pose; hide/show clears it. Box amplitude, palette, transition, CPU and baseline test comparisons are recorded in [t202 evidence](docs/island-t202.md). PC verification 未验证; no version/build or PC operation.
 
@@ -272,11 +274,11 @@ The combined directory has its own Python environment and native HomePod helper 
 
 ### 译文风格对比
 
-启动前设置 `GLUSPOT_TRANSLATION_VARIANT=a`、`b` 或 `c`（不区分大小写）。未设置、空值或未知值使用 A；`classic` 显式使用原有样式；每个音乐窗口创建时读取一次，不写入设置。主歌词仍使用现有布局与弹簧；非焦点双语行按方案轻微缩小。
+启动前设置 `GLUSPOT_TRANSLATION_VARIANT=a`、`b` 或 `c`（不区分大小写）。未设置、空值或未知值使用 CLASSIC；`classic` 显式使用原有样式；每个音乐窗口创建时读取一次，不写入设置。主歌词仍使用现有布局与弹簧；非焦点双语行按方案轻微缩小。
 
 | 方案 | 译文字号 / 主字号基准 | 焦点 / 非焦点透明度 | 主行下方间距 | 译文模糊倍率 | 入场 / 透明度延迟 |
 | --- | --- | --- | --- | --- | --- |
-| A（默认）· Apple-Music-like | 0.50 | 0.30 / 0.18 | 0.30 × 主字号基准 | 1.00 | 0.40 s / 0.25 s |
+| A · Apple-Music-like | 0.50 | 0.30 / 0.18 | 0.30 × 主字号基准 | 1.00 | 0.40 s / 0.25 s |
 | B · NetEase-readable | 0.62 | 0.78 / 0.42 | 8 × 窗口缩放 | 0.50 | 0.32 s / 0 s |
 | C · Synthesis | 0.55 | 0.55 / 0.28 | max(4, 0.22 × 主字号基准) | 0.70 | 0.42 s / 0.08 s |
 
@@ -286,9 +288,9 @@ The combined directory has its own Python environment and native HomePod helper 
 /workspace/gluspot/qtvenv/bin/python tools/render_translation_variants.py
 ```
 
-工具通过正式解析器与 Qt 绘制路径生成自写中英双语样本，隔离 APPDATA/XDG，使用 offscreen，不启动播放器。默认输出在 `/workspace/gluspot/handoff/translation-variants/`：`baseline.png`、`variant-A.png`、`variant-B.png`、`variant-C.png`、`shots/` 与绘制报告。每张含 433×550 / 960×540 的焦点与非焦点场景，以及 0/80/160/280/480 ms 浮动序列。用户已选择 A 为默认；这些是离屏方案比较，实际桌面动画验收另行进行。
+工具通过正式解析器与 Qt 绘制路径生成自写中英双语样本，隔离 APPDATA/XDG，使用 offscreen，不启动播放器。默认输出在 `/workspace/gluspot/handoff/translation-variants/`：`baseline.png`、`variant-A.png`、`variant-B.png`、`variant-C.png`、`shots/` 与绘制报告。每张含 433×550 / 960×540 的焦点与非焦点场景，以及 0/80/160/280/480 ms 浮动序列。t225 round 2 按用户选择恢复 CLASSIC 默认；这些是离屏方案比较，实际桌面动画验收另行进行。
 
-当前整合保留 `classic` 参考，同时默认使用 A。与精确 `ec89693` 的窄／宽双语图、A 参数／入场／关闭译文卡拉 OK 检查、旧默认测试的修正与完整 discovery 基线比较，见 [t214–t222 证据](docs/music-surface-t214-t222.md)。整个项目仍有继承的测试失败；PC 未验证。
+当前默认使用 `classic`；A/B/C 保留为显式环境变量选项。与精确 `ec89693` 的窄／宽双语图、A 参数／入场／关闭译文卡拉 OK 检查、旧默认测试的修正与完整 discovery 基线比较，见 [t214–t222 证据](docs/music-surface-t214-t222.md)。整个项目仍有继承的测试失败；PC 未验证。
 
 ### 背景风格对比
 

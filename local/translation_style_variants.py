@@ -47,6 +47,6 @@ C = TranslationStyle(
 
 
 def resolve_translation_style() -> TranslationStyle:
-    """Resolve once per surface; unset, empty and unknown values use A."""
+    """Resolve once per surface; unset, empty and unknown values use CLASSIC."""
     name = os.environ.get("GLUSPOT_TRANSLATION_VARIANT", "").strip().lower()
-    return {"a": A, "b": B, "c": C, "classic": CLASSIC}.get(name, A)
+    return {"a": A, "b": B, "c": C, "classic": CLASSIC}.get(name, CLASSIC)

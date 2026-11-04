@@ -45,13 +45,13 @@ class TranslationStyleTests(unittest.TestCase):
                                  (1., 1., 1., True, 0., .48, .55, 1.))
 
 
-    def test_unset_empty_and_unknown_select_product_default_a(self):
+    def test_unset_empty_and_unknown_select_product_default_classic(self):
         for name in (None, "", "  ", "unknown"):
             with self.subTest(name=name), patch.dict(os.environ):
                 os.environ.pop("GLUSPOT_TRANSLATION_VARIANT", None)
                 if name is not None:
                     os.environ["GLUSPOT_TRANSLATION_VARIANT"] = name
-                self.assertEqual(resolve_translation_style().name, "a")
+                self.assertEqual(resolve_translation_style().name, "classic")
 
 
 class TranslationVariantPaintTests(unittest.TestCase):

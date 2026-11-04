@@ -215,7 +215,8 @@ class MusicLyricVisualLayerTests(unittest.TestCase):
         self.assertEqual(parenthetical_layout.font().pixelSize(), round((self.window.LYRIC_PIXEL_SIZE - 6) * scale))
         self.assertGreater(secondary_top, self.window._song_layouts[0][1])
         self.assertAlmostEqual(parenthetical_top, self.window._song_layouts[0][1])
-        gap = self.window._translation_style.gap_px_fn(self.window.LYRIC_PIXEL_SIZE * scale, scale)
+        gap = (0. if self.window._translation_style.name == "classic" else
+               self.window._translation_style.gap_px_fn(self.window.LYRIC_PIXEL_SIZE * scale, scale))
         self.assertAlmostEqual(bracket_translation_top, parenthetical_top + parenthetical_height + gap)
         self.assertGreater(secondary_top, bracket_translation_top + bracket_translation_height)
         self.assertGreaterEqual(
