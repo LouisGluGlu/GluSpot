@@ -124,6 +124,14 @@ class LyricsMatch:
     verified_identity: tuple[str, str, str, str, str, float] | None = None
 
 
+@dataclass
+class _LyricsLookupAttempt:
+    token: object | None
+    started_at: float
+    attempt_started_at: float
+    number: int
+
+
 class LocalLyricsStore:
     RESOLVED_CACHE_LIMIT = 128
     RECORDING_CONTEXT_LIMIT = 256
@@ -131,6 +139,8 @@ class LocalLyricsStore:
     LOCAL_MISS_CACHE_LIMIT = 256
     LOCAL_FUZZY_FILE_LIMIT = 256
     TRANSIENT_MISS_RETRY_SECONDS = 45.0
+    LOOKUP_RETRY_SECONDS = 15.0
+    LOOKUP_TIMEOUT_SECONDS = 30.0
     PERSISTED_CACHE_FILE_LIMIT = 96
     PERSISTED_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
     ENRICH_RETRY_SECONDS = 30 * 60.0
@@ -157,6 +167,7 @@ class LocalLyricsStore:
         self._indexed_local_lookup_enabled = root_provided
         self._resolved_cache: OrderedDict[str, LyricsMatch] = OrderedDict()
         self._pending_keys: set[str] = set()
+        self._lookup_attempts: dict[str, _LyricsLookupAttempt] = {}
         self._enrich_pending_keys: set[str] = set()
         self._enrich_attempted_at: OrderedDict[str, float] = OrderedDict()
         self._enrich_retry_seconds: dict[str, float] = {}
@@ -200,6 +211,7 @@ class LocalLyricsStore:
             self._missed_at.clear()
             self._local_miss_cache.clear()
             self._pending_keys.clear()
+            self._lookup_attempts.clear()
             self._enrich_pending_keys.clear()
             self._enrich_attempted_at.clear()
             self._enrich_retry_seconds.clear()
@@ -301,6 +313,8 @@ class LocalLyricsStore:
                               *, retry_missed: bool = False) -> bool:
         cache_key = self._cache_key(title, artist, album_title, duration_seconds)
         with self._cache_lock:
+            now = time.monotonic()
+            self._expire_lookup_locked(cache_key, now)
             if cache_key in self._resolved_cache or cache_key in self._pending_keys:
                 return False
             missed_at, retry_seconds = self._miss_record(cache_key)
@@ -310,11 +324,18 @@ class LocalLyricsStore:
                 return False
             if retry_missed:
                 self._missed_at.pop(cache_key, None)
+                self._lookup_attempts.pop(cache_key, None)
+            previous = self._lookup_attempts.get(cache_key)
+            token = object()
+            self._lookup_attempts[cache_key] = _LyricsLookupAttempt(
+                token, previous.started_at if previous is not None else now, now,
+                previous.number + 1 if previous is not None else 1,
+            )
             self._pending_keys.add(cache_key)
             generation = self._cache_generation
         thread = threading.Thread(
             target=self._resolve_background,
-            args=(cache_key, title, artist, album_title, duration_seconds, generation),
+            args=(cache_key, title, artist, album_title, duration_seconds, generation, token),
             name="LyricsResolver",
             daemon=True,
         )
@@ -381,7 +402,38 @@ class LocalLyricsStore:
     def is_lookup_pending(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0) -> bool:
         cache_key = self._cache_key(title, artist, album_title, duration_seconds)
         with self._cache_lock:
+            self._expire_lookup_locked(cache_key, time.monotonic())
             return cache_key in self._pending_keys
+
+    def _expire_lookup_locked(self, cache_key: str, now: float) -> None:
+        """Bound delivery even if a network/DNS call ignores its socket timeout.
+
+        The provider reads this state on its normal clock, including while its
+        windows are hidden. A first stalled attempt becomes eligible for one
+        retry; the shared 30-second budget then publishes a terminal miss.
+        Python cannot cancel a blocked thread, so its expired token must also
+        fence both its result and its eventual pending-state cleanup.
+        """
+        attempt = self._lookup_attempts.get(cache_key)
+        if attempt is None:
+            return
+        if now - attempt.started_at >= self.LOOKUP_TIMEOUT_SECONDS:
+            self._lookup_attempts.pop(cache_key, None)
+            self._pending_keys.discard(cache_key)
+            if cache_key not in self._resolved_cache:
+                self._store_miss(cache_key, now=now, retry_seconds=float("inf"))
+        elif attempt.number == 1 and now - attempt.attempt_started_at >= self.LOOKUP_RETRY_SECONDS:
+            attempt.token = None
+            self._pending_keys.discard(cache_key)
+
+    def _lookup_current_locked(self, cache_key: str, generation: int, token: object | None) -> bool:
+        if generation != self._cache_generation:
+            return False
+        if token is None:  # Synchronous/internal callers have no delivery lease.
+            return True
+        self._expire_lookup_locked(cache_key, time.monotonic())
+        attempt = self._lookup_attempts.get(cache_key)
+        return attempt is not None and attempt.token is token
 
     def resolve(self, title: str, artist: str, album_title: str = "", duration_seconds: float = 0.0) -> LyricsMatch:
         cache_key = self._cache_key(title, artist, album_title, duration_seconds)
@@ -829,12 +881,12 @@ class LocalLyricsStore:
 
     def _resolve_background(
         self, cache_key: str, title: str, artist: str, album_title: str, duration_seconds: float,
-        generation: int | None = None,
+        generation: int | None = None, token: object | None = None,
     ):
         with self._cache_lock:
             if generation is None:
                 generation = self._cache_generation
-            if generation != self._cache_generation:
+            if not self._lookup_current_locked(cache_key, generation, token):
                 return
         match = LyricsMatch((), (), "")
         fallback_published = False
@@ -847,43 +899,62 @@ class LocalLyricsStore:
             # The generated cache writes atomically, then the in-memory
             # cache makes the first usable line visible while the same online
             # lookup continues seeking genuinely timed units.
-            if self._store_cache(
-                cache_key, candidate, protect_manual=True, manual_names=self._candidate_names(title, artist),
-                generation=generation,
-            ):
-                self._persist_match(title, artist, album_title, candidate, generation=generation, duration_seconds=duration_seconds)
-                fallback_published = True
-                fallback_match = candidate
+            with self._cache_lock:
+                if not self._lookup_current_locked(cache_key, generation, token):
+                    return
+                if self._store_cache(
+                    cache_key, candidate, protect_manual=True, manual_names=self._candidate_names(title, artist),
+                    generation=generation,
+                ):
+                    self._persist_match(title, artist, album_title, candidate, generation=generation, duration_seconds=duration_seconds)
+                    fallback_published = True
+                    fallback_match = candidate
 
         try:
             try:
                 match = self._resolve_online(title, artist, album_title, duration_seconds, publish_fallback)
             except Exception:
-                match = fallback_match or LyricsMatch((), (), "")
-            if match.timed_lyrics or match.lyrics:
-                # Check for a manual file even if later sources only offered
-                # the same fallback. A file created during the lookup must
-                # replace its earlier in-memory provisional result.
-                if self._store_cache(
-                    cache_key, match, protect_manual=True, manual_names=self._candidate_names(title, artist),
-                    generation=generation,
-                ):
-                    if not fallback_published or match != fallback_match:
-                        self._persist_match(
-                            title, artist, album_title, match, overwrite=fallback_published, generation=generation,
-                            duration_seconds=duration_seconds,
-                        )
-            else:
-                # A completed lookup with no result is final for this cache key.
-                # Reopening the search after the old 45 s miss timeout made
-                # "暂无歌词" flip back to "查找歌词中" mid-song.
-                self._store_miss(cache_key, retry_seconds=float("inf"), generation=generation)
+                with self._cache_lock:
+                    current = self._lookup_current_locked(cache_key, generation, token)
+                    attempt = self._lookup_attempts.get(cache_key)
+                    retry = current and token is not None and attempt.number == 1 and not fallback_published
+                    if retry:
+                        attempt.number = 2
+                        attempt.attempt_started_at = time.monotonic()
+                if retry:
+                    try:
+                        match = self._resolve_online(title, artist, album_title, duration_seconds, publish_fallback)
+                    except Exception:
+                        match = fallback_match or LyricsMatch((), (), "")
+                else:
+                    match = fallback_match or LyricsMatch((), (), "")
+            with self._cache_lock:
+                if not self._lookup_current_locked(cache_key, generation, token):
+                    return
+                if match.timed_lyrics or match.lyrics:
+                    # Check for a manual file even if later sources only offered
+                    # the same fallback. A file created during the lookup must
+                    # replace its earlier in-memory provisional result.
+                    if self._store_cache(
+                        cache_key, match, protect_manual=True, manual_names=self._candidate_names(title, artist),
+                        generation=generation,
+                    ):
+                        if not fallback_published or match != fallback_match:
+                            self._persist_match(
+                                title, artist, album_title, match, overwrite=fallback_published, generation=generation,
+                                duration_seconds=duration_seconds,
+                            )
+                else:
+                    # A genuine completed miss remains terminal. Recovery stays
+                    # inside the pending budget, never reopening visible no-lyrics.
+                    self._store_miss(cache_key, retry_seconds=float("inf"), generation=generation)
         finally:
             # Publish the match/miss before clearing pending so readers can
             # never launch a duplicate lookup in the completion gap.
             with self._cache_lock:
-                if generation == self._cache_generation:
+                if self._lookup_current_locked(cache_key, generation, token):
                     self._pending_keys.discard(cache_key)
+                    self._lookup_attempts.pop(cache_key, None)
                     self._prune_recording_contexts()
 
     def _enrich_background(
