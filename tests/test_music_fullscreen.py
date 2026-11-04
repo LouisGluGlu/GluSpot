@@ -3079,6 +3079,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         with (
             patch.object(self.window, "screen", return_value=SimpleNamespace(refreshRate=lambda: 240.0)),
             patch("local.music_surface_window.time.monotonic", return_value=100.016),
+            # As in the ordinary-lyric case below, specify an affordable tick;
+            # cold isolated startup is not part of this paint-budget contract.
+            patch("local.music_surface_window.time.perf_counter", return_value=100.0),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()
@@ -3090,6 +3093,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         with (
             patch.object(self.window, "screen", return_value=SimpleNamespace(refreshRate=lambda: 240.0)),
             patch("local.music_surface_window.time.monotonic", return_value=100.15),
+            patch("local.music_surface_window.time.perf_counter", return_value=100.0),
             patch.object(self.window, "update") as update,
         ):
             self.window._on_animation_tick()

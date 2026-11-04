@@ -2549,7 +2549,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             return "no_lyrics"
         if raw_pending or self._lyrics_lookup_pending(lines, timed):
             instant = time.monotonic() if now is None else float(now)
-            if (self._visual_track_identity() == self._lyric_loading_track_key
+            if (self._visual_track_identity() == getattr(self, "_lyric_loading_track_key", None)
                     and instant - self._lyric_loading_started_at >= _LYRIC_LOADING_TIMEOUT_SECONDS):
                 self._lyric_loading_timed_out = True
                 return "no_lyrics"
