@@ -274,10 +274,20 @@ class PlaybackSourceProvider:
             self._owned_outputs.stop_cast()
         self._owned_capture_suspended = active
 
+    def _interruption_log(self, **fields):
+        """Decision log. No-op while the setting is off; no titles or page text."""
+        if not self._interruption_enabled:
+            return
+        from api.capture.interruption import log_interruption
+        log_interruption(True, **fields)
+
     def _interruption_submit(self, coroutine):
         loop = getattr(self.system, "_loop", None)
         if loop is None or not loop.is_running():
             coroutine.close()
+            if self._interruption_enabled:
+                self._interruption_log(phase="submit",
+                                       result="loop-missing" if loop is None else "loop-not-running")
             return None
         return asyncio.run_coroutine_threadsafe(coroutine, loop)
 
@@ -288,6 +298,10 @@ class PlaybackSourceProvider:
         enabled = enabled and not owned_playback_only()
         if enabled == self._interruption_enabled:
             return True
+        if not enabled:
+            # One transition line, then every later call is a no-op.
+            from api.capture.interruption import log_interruption
+            log_interruption(True, phase="disable")
         self._interruption_generation += 1
         generation = self._interruption_generation
         self._interruption_intent += 1
@@ -304,6 +318,12 @@ class PlaybackSourceProvider:
             self._interruption_owned_at = self._interruption_intent_at
             self.owned.playbackIntent.connect(self._owned_interruption_intent)
             self.owned.playbackStarted.connect(self._owned_interruption_started)
+            loop = getattr(self.system, "_loop", None)
+            loop_state = "missing" if loop is None else "running" if loop.is_running() else "not-running"
+            already = bool(self._interruption_owned_playing)
+            self._interruption_log(phase="enable", owned_playing=int(already), loop=loop_state,
+                                   decision="baseline" if already else "armed",
+                                   reason="owned-already-playing" if already else "waiting-for-start")
             self._interruption_submit(self._start_interruption(generation))
         else:
             self.owned.playbackIntent.disconnect(self._owned_interruption_intent)
@@ -355,16 +375,19 @@ class PlaybackSourceProvider:
         if not self._interruption_enabled or generation != self._interruption_generation:
             return
         self._interruption_cdp_key = None
+        self._interruption_cdp_log = None
         from api.capture.interruption import SmtcInterruptionObserver
         manager = getattr(self.system, "_manager", None)
         if manager is None:
             if not _ensure_winsdk_loaded():
                 self._interruption_result = "unsupported"
+                self._interruption_log(phase="observer", result="unsupported")
                 return
             try:
                 manager = await asyncio.wait_for(MediaManager.request_async(), .8)
             except Exception:
                 self._interruption_result = "unavailable"
+                self._interruption_log(phase="observer", result="unavailable")
                 return
             if not self._interruption_enabled or generation != self._interruption_generation:
                 return
@@ -372,13 +395,16 @@ class PlaybackSourceProvider:
         async def thumbnail(properties, media_key):
             return await self.system._read_thumbnail(properties, "interruption:" + media_key)
         observer = SmtcInterruptionObserver(manager, self._external_interruption_changed,
-            thumbnail_reader=thumbnail, classifier=self._interruption_classifier)
+            thumbnail_reader=thumbnail, classifier=self._interruption_classifier, diagnostics=True)
         self._interruption_observer = observer
         await observer.start()
         if not self._interruption_enabled or generation != self._interruption_generation:
+            self._interruption_log(phase="observer", result="superseded")
             if self._interruption_observer is observer:
                 self._interruption_observer = None
             await observer.close()
+        else:
+            self._interruption_log(phase="observer", result="started")
 
     async def _close_interruption(self, generation, *, starting=False):
         # An old OFF job must never close a newer ON generation.
@@ -424,9 +450,31 @@ class PlaybackSourceProvider:
         self._interruption_owned_at = event["at"]
         self._interruption_cooldown_until = 0.0  # Explicit user Play takes precedence.
         observer = self._interruption_observer
-        targets = () if observer is None else tuple(
-            item for item in observer.snapshots() if item.playing and item.observed_at <= event["at"]
-            and self._interruption_policy.allows(item.kind))
+        snapshots = () if observer is None else observer.snapshots()
+        targets = tuple(item for item in snapshots if item.playing and item.observed_at <= event["at"]
+                        and self._interruption_policy.allows(item.kind))
+        if observer is None:
+            self._interruption_log(phase="owned-start", decision="skip", reason="observer-missing",
+                                   targets=0, observer="missing")
+        else:
+            chosen = {id(item) for item in targets}
+            for item in snapshots:
+                if id(item) in chosen:
+                    continue
+                if not item.playing:
+                    skip = "not-playing"
+                elif not item.observed_at <= event["at"]:
+                    skip = "observed-after-start"
+                else:
+                    skip = "kind-blocked"
+                self._interruption_log(phase="owned-start", decision="skip", reason=skip,
+                                       app_id=item.app_id, kind=item.kind.value,
+                                       playing=1 if item.playing is True else 0 if item.playing is False else "unknown",
+                                       targets=len(targets), observer="present")
+            self._interruption_log(phase="owned-start",
+                                   decision="pause" if targets else "skip",
+                                   reason="eligible" if targets else "no-eligible-target",
+                                   targets=len(targets), observer="present")
         self._set_interruption_route(None)
         self._interruption_submit(self._interruption_run_action(self._pause_external_music(
             self._interruption_generation, self._interruption_intent, event, targets, self._interruption_edge)))
@@ -449,28 +497,51 @@ class PlaybackSourceProvider:
             return
         observer = self._interruption_observer
         if not self._interruption_manager_current(observer):
+            if not getattr(self, "_interruption_manager_logged", False):
+                self._interruption_manager_logged = True
+                self._interruption_log(phase="observer", result="manager-replaced")
             restart = getattr(self, "_interruption_restart", None)
             if restart is None or restart.done():
                 self._interruption_restart = asyncio.create_task(self._start_interruption(self._interruption_generation))
             return
+        self._interruption_manager_logged = False
         pin = self._interruption_pin
         if pin is not None and observer is not None and observer.get_session(pin.binding_id) is not pin.session:
             generation, intent = self._interruption_generation, self._interruption_intent
             self._interruption_task(self._source_dispatch.call(
                 lambda: self._interruption_valid(generation, intent), lambda: self._set_interruption_route(None)))
         # Prepare an existing ready CDP channel only; never ensure/start it.
+        # A failed arm must not stick for the rest of this connection: the
+        # next observation retries until observePause actually succeeds.
         cdp = getattr(self.system, "_netease_cdp_session", None)
         if cdp is not None and getattr(cdp, "ready", False):
             key = (id(cdp), getattr(cdp, "generation", None), self._interruption_generation)
             if key != getattr(self, "_interruption_cdp_key", None):
                 self._interruption_cdp_key = key
-                self._interruption_task(self._observe_cdp_pause(cdp, self._interruption_generation))
+                self._interruption_task(self._observe_cdp_pause(cdp, self._interruption_generation, key))
         if observation is None or not edge or not self._interruption_owned_playing or self._interruption_suspended:
+            if edge and observation is not None:
+                skip = "suspended" if self._interruption_suspended else "owned-not-playing"
+                self._interruption_log(phase="external-edge", decision="skip", reason=skip,
+                                       app_id=observation.app_id, kind=observation.kind.value,
+                                       playing=1 if observation.playing is True else 0 if observation.playing is False else "unknown")
             return
         boundary = max(self._interruption_owned_at, self._interruption_intent_at)
-        if (not self._interruption_policy.allows(observation.kind) or observation.started_at is None
-                or observation.started_at <= boundary or observation.nonplaying_at is None
-                or observation.nonplaying_at < boundary):
+        if not self._interruption_policy.allows(observation.kind):
+            edge_reason = "kind-blocked"
+        elif observation.started_at is None:
+            edge_reason = "missing-start"
+        elif observation.started_at <= boundary:
+            edge_reason = "not-after-boundary"
+        elif observation.nonplaying_at is None:
+            edge_reason = "missing-nonplaying"
+        elif observation.nonplaying_at < boundary:
+            edge_reason = "nonplaying-before-boundary"
+        else:
+            edge_reason = ""
+        if edge_reason:
+            self._interruption_log(phase="external-edge", decision="skip", reason=edge_reason,
+                                   app_id=observation.app_id, kind=observation.kind.value, playing=1)
             return
         self._interruption_edge += 1
         previous = self._interruption_last_edge
@@ -479,19 +550,46 @@ class PlaybackSourceProvider:
                 and observation.nonplaying_at <= previous.started_at
                 and previous.nonplaying_at <= observation.started_at):
             self._interruption_candidate = None
+            self._interruption_log(phase="external-edge", decision="skip", reason="overlap",
+                                   app_id=observation.app_id, kind=observation.kind.value, playing=1)
             return  # Overlapping observation intervals have no proven winner.
         self._interruption_candidate = observation
+        self._interruption_log(phase="external-edge", decision="yield", app_id=observation.app_id,
+                               kind=observation.kind.value, playing=1)
         if self._interruption_yield_task is None or self._interruption_yield_task.done():
             self._interruption_yield_task = self._interruption_task(self._yield_to_external())
 
-    async def _observe_cdp_pause(self, cdp, generation):
-        if self._interruption_enabled and generation == self._interruption_generation:
+    async def _observe_cdp_pause(self, cdp, generation, key):
+        armed = False
+        reason = "absent"
+        try:
+            if not (self._interruption_enabled and generation == self._interruption_generation):
+                reason = "guard-rejected"
+                return
             observe = getattr(cdp, "set_pause_observation_enabled", None)
-            if callable(observe):
-                try:
-                    await observe(True, guard=lambda: self._interruption_enabled and generation == self._interruption_generation)
-                except Exception:
-                    pass
+            if not callable(observe):
+                return
+            try:
+                armed = (await observe(
+                    True, guard=lambda: self._interruption_enabled and generation == self._interruption_generation,
+                )) is True
+            except Exception:
+                reason = "error"
+                return
+            reported = getattr(cdp, "pause_diagnostic", "")
+            reason = reported if isinstance(reported, str) and reported else ("armed" if armed else "rejected")
+        finally:
+            if (not armed and getattr(self, "_interruption_cdp_key", None) == key
+                    and self._interruption_enabled and generation == self._interruption_generation):
+                self._interruption_cdp_key = None
+            port = getattr(cdp, "port", None)
+            signature = (armed, reason, port if isinstance(port, int) else None)
+            if signature != getattr(self, "_interruption_cdp_log", None):
+                self._interruption_cdp_log = signature
+                fields = dict(phase="cdp-observe", result="armed" if armed else "failed", reason=reason)
+                if isinstance(port, int):
+                    fields["port"] = port
+                self._interruption_log(**fields)
 
     async def _yield_to_external(self):
         while self._interruption_candidate is not None:
@@ -501,8 +599,12 @@ class PlaybackSourceProvider:
             edge = self._interruption_edge
             delay = self._interruption_cooldown_until - time.monotonic()
             if delay > 0:
+                if not getattr(self, "_interruption_cooldown_logged", False):
+                    self._interruption_cooldown_logged = True
+                    self._interruption_log(phase="yield", decision="wait", reason="cooldown")
                 await asyncio.sleep(delay)
                 continue  # Keep a genuine resume; revalidate after cooldown.
+            self._interruption_cooldown_logged = False
             self._interruption_candidate = None
             observer = self._interruption_observer
             def guard():
@@ -510,20 +612,44 @@ class PlaybackSourceProvider:
                         and self._interruption_manager_current(observer) and edge == self._interruption_edge
                         and observer.is_current(observation))
             current = await observer.revalidate(observation) if observer is not None else None
-            if not guard() or current is None or not current.playing or not self._interruption_policy.allows(current.kind):
+            allowed = guard()
+            if not allowed or current is None or not current.playing or not self._interruption_policy.allows(current.kind):
+                if not allowed:
+                    yield_reason = "guard-revoked"
+                elif current is None:
+                    yield_reason = "revalidate-stale"
+                elif not current.playing:
+                    yield_reason = "not-playing"
+                else:
+                    yield_reason = "kind-blocked"
+                self._interruption_log(phase="yield", decision="skip", reason=yield_reason,
+                                       app_id=observation.app_id, kind=observation.kind.value)
                 continue
             paused = await self._source_dispatch.call(
                 lambda: guard() and self._interruption_owned_playing,
                 lambda: self.owned.pause_for_interruption(guard))
             if not paused or not guard():
+                self._interruption_log(phase="yield", decision="skip",
+                                       reason="owned-pause-failed" if not paused else "guard-revoked",
+                                       app_id=observation.app_id, kind=current.kind.value)
                 continue
             current = await observer.revalidate(observation)
             if current is None or not current.playing or not self._interruption_policy.allows(current.kind):
+                if current is None:
+                    yield_reason = "revalidate-stale"
+                elif not current.playing:
+                    yield_reason = "not-playing"
+                else:
+                    yield_reason = "kind-blocked"
+                self._interruption_log(phase="yield", decision="skip", reason=yield_reason,
+                                       app_id=observation.app_id)
                 continue
             committed = await self._source_dispatch.call(guard, lambda: self._set_interruption_route(current))
             if committed:
                 self._interruption_result = "owned-paused"
                 self._interruption_cooldown_until = time.monotonic() + 1.0
+                self._interruption_log(phase="yield", decision="owned-paused", app_id=current.app_id,
+                                       kind=current.kind.value, playing=1)
 
     async def _pause_external_music(self, generation, intent, event, targets, edge):
         from api.capture.interruption import PauseResult
@@ -533,16 +659,34 @@ class PlaybackSourceProvider:
                     and self._interruption_manager_current(observer) and self._interruption_edge == edge)
         for observation in targets:
             if not guard():
+                self._interruption_log(phase="pause-external", decision="skip", reason="guard-revoked",
+                                       app_id=observation.app_id, kind=observation.kind.value)
                 return
             current = await observer.revalidate(observation)
-            if (not guard() or current is None or not current.playing
+            allowed = guard()
+            if (not allowed or current is None or not current.playing
                     or not self._interruption_policy.allows(current.kind)):
+                if not allowed:
+                    skip = "guard-revoked"
+                elif current is None:
+                    skip = "revalidate-stale"
+                elif not current.playing:
+                    skip = "not-playing"
+                else:
+                    skip = "kind-blocked"
+                self._interruption_log(phase="pause-external", decision="skip", reason=skip,
+                                       app_id=observation.app_id, kind=observation.kind.value)
                 continue
             result = await observer.pause(observation, current=guard, request_id=f"{generation}-{intent}")
             self._interruption_result = result.value
+            self._interruption_log(phase="pause-external", app_id=observation.app_id,
+                                   kind=observation.kind.value, result=result.value)
             if result == PauseResult.REJECTED and guard() and observation.app_id.casefold() == "cloudmusic.exe":
                 current = await observer.revalidate(observation)
                 if current is None or not guard():
+                    self._interruption_log(phase="cdp-fallback", decision="skip",
+                                           reason="revalidate-stale" if current is None else "guard-revoked",
+                                           app_id=observation.app_id)
                     continue
                 cdp = getattr(self.system, "_netease_cdp_session", None)
                 native_id = self._netease_pause_binding(observation, cdp)
@@ -553,31 +697,71 @@ class PlaybackSourceProvider:
                             guard=lambda: guard() and observer.is_current(observation)
                                 and self._netease_pause_binding(observation, cdp) == native_id)
                         self._interruption_result = "cdp-paused" if paused else "cdp-unverified"
+                        reported = getattr(cdp, "pause_diagnostic", "")
+                        fields = dict(phase="cdp-pause",
+                                      result="cdp-paused" if paused else "cdp-unverified",
+                                      reason=reported if isinstance(reported, str) and reported else "rejected")
+                        port = getattr(cdp, "port", None)
+                        if isinstance(port, int):
+                            fields["port"] = port
+                        self._interruption_log(**fields)
                     except Exception:
                         self._interruption_result = "uncertain"
+                        self._interruption_log(phase="cdp-pause", result="error", reason="error")
+                else:
+                    self._interruption_log(phase="cdp-fallback", decision="skip",
+                                           reason=self._netease_pause_block_reason(observation, cdp) or "cdp-missing",
+                                           app_id=observation.app_id)
+            elif result == PauseResult.REJECTED:
+                self._interruption_log(phase="cdp-fallback", decision="skip", reason="app-id-mismatch",
+                                       app_id=observation.app_id)
+            elif result != PauseResult.PAUSED:
+                self._interruption_log(phase="cdp-fallback", decision="skip", reason="not-explicit-reject",
+                                       result=result.value, app_id=observation.app_id)
         if guard() and targets:
             self._interruption_cooldown_until = time.monotonic() + 1.0
 
-    def _netease_pause_binding(self, observation, cdp):
-        """Reuse the already-bound capture/native identity; never infer a new one."""
+    def _netease_pause_block_reason(self, observation, cdp):
+        """Why an already-ready CDP Pause cannot be bound. Empty means it can.
+
+        Titles are compared and never returned. This does not open a channel.
+        """
         from api.capture.interruption import same_session
         runtime = getattr(self.system, "_capture_runtime", None)
         source = getattr(runtime, "source", None)
         cef = getattr(runtime, "_cef_source", None)
         latest = getattr(cdp, "latest", None)
         data = getattr(self.system, "_last_data", None) or self._interruption_capture_data
-        if (cdp is None or cdp is not getattr(self.system, "_netease_cdp_session", None)
-                or not getattr(cdp, "ready", False) or not isinstance(latest, dict)
-                or not same_session(getattr(source, "session", None), observation.session)
-                or getattr(cef, "session", None) is not cdp
-                or getattr(cef, "native_track_id", None) != latest.get("trackId")
-                or getattr(cef, "generation", None) != cdp.generation
-                or not getattr(cef, "fresh", False) or data is None
-                or (data.track.source_app_id, data.track.title, data.track.artist)
-                    != (observation.app_id, *observation.media_key[:2])
-                or getattr(runtime, "identity", None) != (observation.app_id, data.track.track_id)):
+        if cdp is None or cdp is not getattr(self.system, "_netease_cdp_session", None):
+            return "cdp-missing"
+        if not getattr(cdp, "ready", False):
+            return "cdp-not-ready"
+        if not isinstance(latest, dict):
+            return "no-sample"
+        if not same_session(getattr(source, "session", None), observation.session):
+            return "session-unbound"
+        if getattr(cef, "session", None) is not cdp:
+            return "cef-unbound"
+        if getattr(cef, "native_track_id", None) != latest.get("trackId"):
+            return "native-track-mismatch"
+        if getattr(cef, "generation", None) != cdp.generation:
+            return "generation-mismatch"
+        if not getattr(cef, "fresh", False):
+            return "cef-stale"
+        if data is None:
+            return "no-capture-metadata"
+        if ((data.track.source_app_id, data.track.title, data.track.artist)
+                != (observation.app_id, *observation.media_key[:2])):
+            return "metadata-mismatch"
+        if getattr(runtime, "identity", None) != (observation.app_id, data.track.track_id):
+            return "identity-mismatch"
+        return ""
+
+    def _netease_pause_binding(self, observation, cdp):
+        """Reuse the already-bound capture/native identity; never infer a new one."""
+        if self._netease_pause_block_reason(observation, cdp):
             return None
-        return latest.get("trackId")
+        return cdp.latest.get("trackId")
 
     @property
     def settings_setter(self):

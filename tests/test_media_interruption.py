@@ -79,6 +79,35 @@ class Manager:
         self.removed.append(token)
 
 
+class LogContractTests(unittest.TestCase):
+    def test_inactive_and_free_text_never_reach_the_logger(self):
+        import logging
+        from api.capture.interruption import log_interruption
+        logger = logging.getLogger('GluSpot.capture.interruption')
+        lines = []
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+
+        handler = Collect()
+        logger.addHandler(handler)
+        try:
+            log_interruption(False, phase='session', app_id='SECRET_TITLE_XYZ')
+            log_interruption(True, phase='not-a-phase', app_id='cloudmusic.exe')
+            log_interruption(True, phase='session', app_id=r'C:\Users\secret\cloudmusic.exe',
+                             kind='music', playing=1, note='SECRET_TITLE_XYZ',
+                             reason='baseline')
+        finally:
+            logger.removeHandler(handler)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('phase=session app_id=cloudmusic.exe kind=music playing=1 reason=baseline', lines[0])
+        self.assertNotIn('SECRET', lines[0])
+        self.assertNotIn('secret', lines[0])
+        self.assertNotIn('Users', lines[0])
+        self.assertNotIn('note=', lines[0])
+
+
 class ClassificationTests(unittest.TestCase):
     def classify(self, app='chrome.exe', type_=None, property_type=None,
                  title='', artist='', art=False):

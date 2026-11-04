@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import replace
 import gc
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -412,3 +413,119 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertTrue(self.owned.interruption_playing())
         self.assertEqual((first.pauses, second.pauses), (0, 0))
         self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_off_emits_no_interruption_log_and_sends_no_command(self):
+        from api.capture.interruption import log_interruption
+        cdp = SimpleNamespace(ready=True, generation=1, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(side_effect=AssertionError('pause')),
+            set_pause_observation_enabled=AsyncMock(side_effect=AssertionError('observe')),
+            start=AsyncMock(side_effect=AssertionError('start')))
+        self.system._netease_cdp_session = cdp
+        self.system._manager.sessions = [Session('cloudmusic.exe', title='SECRET_TITLE_XYZ')]
+        with _capture_interruption_log() as lines:
+            log_interruption(False, phase='enable', app_id='SECRET_TITLE_XYZ')
+            self.assertTrue(self.provider.set_playback_interruption_enabled(False))
+            await self.start_owned()
+            self.owned.send_playback_command('toggle_play_pause')
+            await self.flush()
+        self.assertEqual(lines, [])
+        cdp.pause.assert_not_called()
+        cdp.set_pause_observation_enabled.assert_not_called()
+        cdp.start.assert_not_called()
+
+    async def test_both_already_playing_logs_baseline_without_titles_or_pause(self):
+        await self.start_owned()
+        music = Session(r'C:\Users\secret\cloudmusic.exe', title='SECRET_TITLE_XYZ',
+                        artist='SECRET_ARTIST_XYZ')
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+        text = '\n'.join(lines)
+        self.assertIn('phase=enable decision=baseline reason=owned-already-playing owned_playing=1', text)
+        self.assertIn('phase=session app_id=cloudmusic.exe kind=music playing=1', text)
+        self.assertIn('reason=baseline', text)
+        self.assertNotIn('phase=owned-start', text)
+        self.assertNotIn('phase=smtc-pause', text)
+        self.assertNotIn('SECRET', text)
+        self.assertNotIn('secret', text)
+        self.assertNotIn('Users', text)
+        self.assertEqual((music.pauses, self.owned_pauses()), (0, 0))
+
+    async def test_library_start_logs_pause_result_without_titles(self):
+        music = Session('cloudmusic.exe', title='SECRET_TITLE_XYZ', artist='SECRET_ARTIST_XYZ')
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+            await self.start_owned()
+        text = '\n'.join(lines)
+        self.assertIn('phase=enable decision=armed reason=waiting-for-start owned_playing=0', text)
+        self.assertIn('phase=observer result=started', text)
+        self.assertIn('phase=owned-start decision=pause reason=eligible targets=1 observer=present', text)
+        self.assertIn('phase=smtc-pause app_id=cloudmusic.exe result=paused', text)
+        self.assertIn('phase=pause-external app_id=cloudmusic.exe kind=music result=paused', text)
+        self.assertNotIn('SECRET', text)
+        self.assertEqual(music.pauses, 1)
+
+    async def test_failed_cdp_observation_is_retried_without_a_pause_command(self):
+        calls = {'n': 0}
+
+        async def observe(enabled, guard=lambda: True):
+            # Startup still clears observation. Only an enabled arm is under test.
+            if enabled is not True:
+                return True
+            calls['n'] += 1
+            return calls['n'] >= 2
+
+        cdp = SimpleNamespace(ready=True, generation=3, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(side_effect=AssertionError('observation must not pause')),
+            set_pause_observation_enabled=observe)
+        self.system._netease_cdp_session = cdp
+        music = Session('cloudmusic.exe', playing=False)
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+            await self.flush()
+        # The background poll retries a failed arm; success then sticks.
+        self.assertGreaterEqual(calls['n'], 2)
+        self.assertIsNotNone(self.provider._interruption_cdp_key)
+        text = '\n'.join(lines)
+        self.assertIn('phase=cdp-observe result=failed reason=rejected port=4588', text)
+        self.assertIn('phase=cdp-observe result=armed reason=armed port=4588', text)
+        self.assertNotIn('phase=cdp-pause', text)
+        cdp.pause.assert_not_called()
+
+    async def test_rejected_smtc_for_other_app_logs_mismatch_and_skips_cdp(self):
+        music = Session('chrome.exe')
+        music.pause_answer = False
+        music.pause_changes_state = False
+        cdp = SimpleNamespace(ready=True, generation=7, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(side_effect=AssertionError('not cloudmusic')),
+            set_pause_observation_enabled=AsyncMock(return_value=True))
+        self.system._netease_cdp_session = cdp
+        with _capture_interruption_log() as lines:
+            await self.enable([music])
+            await self.start_owned()
+        text = '\n'.join(lines)
+        self.assertIn('phase=smtc-pause app_id=chrome.exe result=rejected status=4 accepted=false', text)
+        self.assertIn('phase=cdp-fallback app_id=chrome.exe decision=skip reason=app-id-mismatch', text)
+        self.assertNotIn('phase=cdp-pause', text)
+        cdp.pause.assert_not_called()
+        self.assertEqual(music.pauses, 1)
+
+
+def _capture_interruption_log():
+    logger = logging.getLogger('GluSpot.capture.interruption')
+    lines = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    handler = _Collect()
+
+    class _Context:
+        def __enter__(self):
+            logger.addHandler(handler)
+            return lines
+
+        def __exit__(self, *args):
+            logger.removeHandler(handler)
+
+    return _Context()

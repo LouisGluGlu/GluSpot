@@ -23,6 +23,24 @@ class CdpPauseTests(CaptureAsyncTestCase):
         session._evaluate = AsyncMock()
         return session
 
+    async def test_unobserved_pause_names_the_block_without_evaluating(self):
+        session = self.session()
+        self.assertFalse(await session.pause('native-song', 'one'))
+        self.assertEqual(session.pause_diagnostic, 'observation-inactive')
+        session._evaluate.assert_not_called()
+        session.start = AsyncMock(side_effect=AssertionError('must not prepare CDP'))
+        session.start.assert_not_called()
+
+    async def test_missing_pause_contract_does_not_send_pause(self):
+        session = self.session()
+        session._pause_observation_generation = 7
+        session._evaluate.return_value = dict(available=False, trackId='native-song')
+        self.assertFalse(await session.pause('native-song', 'request'))
+        self.assertEqual(session.pause_diagnostic, 'contract-unavailable')
+        self.assertEqual(session._evaluate.await_count, 1)
+        self.assertIn('pauseCapability', session._evaluate.await_args.args[0])
+        self.assertNotIn('.pause?.(', session._evaluate.await_args.args[0])
+
     async def test_not_ready_or_not_observing_does_zero_writes_or_launches(self):
         session = self.session()
         session.start = AsyncMock(side_effect=AssertionError('must not prepare CDP'))

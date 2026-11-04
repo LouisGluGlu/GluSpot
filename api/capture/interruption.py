@@ -8,10 +8,144 @@ or GAME permission to interrupt music.
 from __future__ import annotations
 
 import asyncio
+import logging
+import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from enum import Enum
+
+# launch.bat redirects stderr into GluSpot-*.log. A dedicated handler keeps
+# these decisions visible without turning on library logs. Records are emitted
+# only while interruption is enabled; the OFF path never calls this.
+_log = logging.getLogger('GluSpot.capture.interruption')
+_log.setLevel(logging.INFO)
+if not _log.handlers and sys.stderr is not None:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter('%(asctime)s %(name)s %(message)s'))
+    _log.addHandler(_handler)
+    _log.propagate = False
+
+_LOG_PHASES = frozenset({
+    'enable', 'disable', 'submit', 'observer', 'membership', 'session',
+    'owned-start', 'pause-external', 'smtc-pause', 'cdp-fallback',
+    'cdp-observe', 'cdp-pause', 'external-edge', 'yield',
+})
+_LOG_DECISIONS = frozenset({
+    'baseline', 'armed', 'skip', 'pause', 'yield', 'wait', 'owned-paused',
+})
+_LOG_REASONS = frozenset({
+    'owned-already-playing', 'waiting-for-start', 'loop-not-running', 'loop-missing',
+    'unsupported', 'unavailable', 'superseded', 'started', 'manager-replaced',
+    'snapshot', 'ambiguous-aumid', 'identity-conflict',
+    'baseline', 'start-edge', 'update', 'read-failed', 'stale-read', 'removed',
+    'observer-missing', 'eligible', 'no-eligible-target', 'not-playing',
+    'observed-after-start', 'kind-blocked', 'guard-revoked', 'revalidate-stale',
+    'app-id-mismatch', 'not-explicit-reject', 'cdp-missing', 'cdp-not-ready',
+    'no-sample', 'session-unbound', 'cef-unbound', 'native-track-mismatch',
+    'generation-mismatch', 'cef-stale', 'no-capture-metadata', 'metadata-mismatch',
+    'identity-mismatch', 'not-ready', 'guard-rejected', 'bad-flag', 'already-armed',
+    'already-clear', 'armed', 'disarmed', 'evaluate-rejected', 'generation-changed',
+    'observation-inactive', 'missing-request', 'duplicate-request', 'track-mismatch',
+    'contract-unavailable', 'contract-track-mismatch', 'stale-before-send',
+    'native-rejected', 'stale-after-send', 'readback-unconfirmed', 'paused',
+    'error', 'absent', 'rejected', 'owned-not-playing', 'suspended', 'missing-start',
+    'not-after-boundary', 'missing-nonplaying', 'nonplaying-before-boundary',
+    'overlap', 'cooldown', 'owned-pause-failed',
+})
+_LOG_RESULTS = frozenset({
+    'paused', 'rejected', 'uncertain', 'stale', 'started', 'unsupported',
+    'unavailable', 'superseded', 'manager-replaced', 'armed', 'disarmed',
+    'failed', 'cdp-paused', 'cdp-unverified', 'error', 'loop-missing',
+    'loop-not-running', 'queued',
+})
+_LOG_KINDS = frozenset({'music', 'video', 'game', 'unknown'})
+_LOG_LOOPS = frozenset({'missing', 'running', 'not-running'})
+_LOG_OBSERVERS = frozenset({'present', 'missing'})
+_LOG_ACCEPTED = frozenset({'true', 'false', 'timeout', 'error', 'none'})
+_LOG_ORDER = (
+    'app_id', 'kind', 'playing', 'decision', 'result', 'reason', 'status',
+    'accepted', 'edge', 'targets', 'observer', 'owned_playing', 'loop',
+    'seen', 'kept', 'ambiguous', 'count', 'port',
+)
+
+
+def _log_app_id(value) -> str | None:
+    """AUMID or executable basename only. Never a path, title, or page string."""
+    text = value if isinstance(value, str) else ''
+    if not text:
+        return 'empty'
+    if text.casefold() == 'gluspot':
+        return 'gluspot'
+    if '\\' in text or '/' in text:
+        text = text.replace('\\', '/').rsplit('/', 1)[-1]
+    cleaned = []
+    for char in text:
+        if char.isascii() and (char.isalnum() or char in '._!-'):
+            cleaned.append(char)
+        else:
+            cleaned.append('_')
+        if len(cleaned) >= 80:
+            break
+    token = ''.join(cleaned).strip('_.')
+    return token or 'redacted'
+
+
+def _log_token(key, value):
+    if key == 'app_id':
+        return _log_app_id(value)
+    if key == 'kind':
+        return value if value in _LOG_KINDS else None
+    if key == 'decision':
+        return value if value in _LOG_DECISIONS else None
+    if key == 'reason':
+        return value if value in _LOG_REASONS else None
+    if key == 'result':
+        return value if value in _LOG_RESULTS else None
+    if key == 'loop':
+        return value if value in _LOG_LOOPS else None
+    if key == 'observer':
+        return value if value in _LOG_OBSERVERS else None
+    if key == 'accepted':
+        return value if value in _LOG_ACCEPTED else None
+    if key in {'playing', 'edge', 'owned_playing'}:
+        if value == 'unknown':
+            return 'unknown'
+        if value in (0, 1, True, False) and not isinstance(value, str):
+            return '1' if value else '0'
+        return None
+    if key == 'status' and value == 'none':
+        return 'none'
+    if key in {'status', 'seen', 'kept', 'ambiguous', 'count', 'targets', 'port'}:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        if key == 'port':
+            return str(value) if 1 <= value <= 65535 else None
+        if key == 'status':
+            return str(value) if -1 <= value <= 99 else None
+        return str(value) if 0 <= value <= 9999 else None
+    return None
+
+
+def log_interruption(active, **fields) -> None:
+    """One decision line. A no-op unless interruption is explicitly active.
+
+    Callers pass ``active=True`` only while the setting is on. Fields outside
+    the fixed token set are dropped, so titles and page text cannot leak.
+    """
+    if active is not True:
+        return
+    phase = fields.get('phase')
+    if phase not in _LOG_PHASES:
+        return
+    parts = ['phase=%s' % phase]
+    for key in _LOG_ORDER:
+        if key not in fields:
+            continue
+        rendered = _log_token(key, fields[key])
+        if rendered is not None:
+            parts.append('%s=%s' % (key, rendered))
+    _log.info(' '.join(parts))
 
 
 def same_session(left, right) -> bool:
@@ -137,6 +271,10 @@ class _Binding:
     tokens: list = field(default_factory=list)
     observation: Observation | None = None
     revision: int = 0
+    diag_state: object = None
+    diag_failed: bool = False
+    diag_stale: bool = False
+    diag_status: object = None
 
 
 class SmtcInterruptionObserver:
@@ -151,7 +289,7 @@ class SmtcInterruptionObserver:
 
     def __init__(self, manager, on_change, *, thumbnail_reader=None,
                  classifier=None, clock=time.monotonic, poll_seconds=0.5,
-                 read_timeout=0.8, pause_timeout=2.0):
+                 read_timeout=0.8, pause_timeout=2.0, diagnostics=False):
         self.manager = manager
         self.on_change = on_change
         self.thumbnail_reader = thumbnail_reader
@@ -160,6 +298,10 @@ class SmtcInterruptionObserver:
         self.poll_seconds = max(0.5, float(poll_seconds))
         self.read_timeout = read_timeout
         self.pause_timeout = pause_timeout
+        # The provider sets this only for an observer it created while the
+        # setting is on. Tests and the OFF path leave it false, so logging
+        # stays a no-op.
+        self._diagnostics = diagnostics is True
         self._bindings = {}
         self._next_binding = 0
         self._manager_tokens = []
@@ -169,6 +311,12 @@ class SmtcInterruptionObserver:
         self._task = None
         self._collect_lock = asyncio.Lock()
         self._pause_requests = set()
+        self._membership_signature = None
+
+    def _diag(self, **fields):
+        if not self._diagnostics or self._closed:
+            return
+        log_interruption(True, **fields)
 
     def snapshots(self) -> tuple[Observation, ...]:
         return tuple(binding.observation for binding in self._bindings.values()
@@ -227,13 +375,27 @@ class SmtcInterruptionObserver:
     def _membership(self):
         try:
             sessions = self._sessions()
-            counts = Counter(str(getattr(s, 'source_app_user_model_id', '') or '').casefold()
-                             for s in sessions)
-            return [s for s in sessions
-                    if (app_id := str(getattr(s, 'source_app_user_model_id', '') or ''))
-                    and app_id.casefold() != 'gluspot' and counts[app_id.casefold()] == 1]
         except Exception:
+            if self._membership_signature != ('conflict',):
+                self._membership_signature = ('conflict',)
+                self._diag(phase='membership', reason='identity-conflict', seen=0, kept=0, ambiguous=0)
             return []
+        counts = Counter(str(getattr(s, 'source_app_user_model_id', '') or '').casefold()
+                         for s in sessions)
+        ambiguous = tuple(sorted(app for app, count in counts.items()
+                                 if count > 1 and app and app != 'gluspot'))
+        kept = [s for s in sessions
+                if (app_id := str(getattr(s, 'source_app_user_model_id', '') or ''))
+                and app_id.casefold() != 'gluspot' and counts[app_id.casefold()] == 1]
+        signature = (len(sessions), len(kept), ambiguous)
+        if signature != self._membership_signature:
+            self._membership_signature = signature
+            self._diag(phase='membership', reason='snapshot', seen=len(sessions),
+                       kept=len(kept), ambiguous=len(ambiguous))
+            for app in ambiguous:
+                self._diag(phase='membership', reason='ambiguous-aumid', app_id=app,
+                           count=counts[app])
+        return kept
 
     async def collect_once(self):
         async with self._collect_lock:
@@ -249,6 +411,8 @@ class SmtcInterruptionObserver:
                     self._bindings.pop(number, None)
                     if binding.observation is not None:
                         publications.append((None, False))
+                        self._diag(phase='session', reason='removed', app_id=binding.app_id,
+                                   playing='unknown', edge=0)
             for session in sessions:
                 binding = next((b for b in self._bindings.values()
                                 if same_session(b.session, session) and
@@ -276,6 +440,7 @@ class SmtcInterruptionObserver:
                                           interval=previous.interval + 1,
                                           nonplaying_at=previous.nonplaying_at)
                 binding.observation = observation
+                self._log_observation(binding, observation, edge, previous)
                 publications.append((observation, edge))
             # Publish synchronously only after the complete observation batch.
             # An automatic action must see every newly observed candidate,
@@ -283,15 +448,47 @@ class SmtcInterruptionObserver:
             for observation, edge in publications:
                 self.on_change(observation, edge)
 
+    def _log_observation(self, binding, observation, edge, previous):
+        if binding.diag_failed:
+            reason = 'read-failed'
+        elif binding.diag_stale:
+            reason = 'stale-read'
+        elif edge:
+            reason = 'start-edge'
+        elif previous is None:
+            reason = 'baseline'
+        else:
+            reason = 'update'
+        playing = observation.playing
+        status = binding.diag_status
+        state = (observation.app_id, observation.kind.value, playing, edge, reason, status)
+        previous_state = binding.diag_state
+        if state == previous_state:
+            return
+        # A second poll of the same playback bit is not a new decision.
+        if (reason == 'update' and previous_state is not None
+                and previous_state[:4] == state[:4] and previous_state[5] == state[5]):
+            binding.diag_state = state
+            return
+        binding.diag_state = state
+        self._diag(phase='session', app_id=observation.app_id, kind=observation.kind.value,
+                   playing='unknown' if playing is None else int(bool(playing)),
+                   status='none' if not isinstance(status, int) or isinstance(status, bool) else status,
+                   edge=int(bool(edge)), reason=reason)
+
     async def _read(self, binding):
         at = self.clock()  # State observation precedes metadata I/O.
         old = binding.observation
         revision = binding.revision
+        binding.diag_failed = False
+        binding.diag_stale = False
+        binding.diag_status = None
         try:
             if str(getattr(binding.session, 'source_app_user_model_id', '') or '') != binding.app_id:
                 raise ValueError('Session identity changed')
             playback = binding.session.get_playback_info()
             status = _enum_value(getattr(playback, 'playback_status', None))
+            binding.diag_status = status if isinstance(status, int) and not isinstance(status, bool) else None
             playing = True if status == 4 else False if status in (0, 1, 3, 5) else None
             properties = await asyncio.wait_for(
                 binding.session.try_get_media_properties_async(), self.read_timeout)
@@ -314,12 +511,14 @@ class SmtcInterruptionObserver:
                     _enum_value(getattr(after, 'playback_status', None)) != status):
                 self._wake.set()
                 playing, kind = None, MediaKind.UNKNOWN
+                binding.diag_stale = True
             else:
                 kind = self.classifier.classify(binding.app_id, after, properties,
                                                 artwork_readable=artwork_readable)
         except Exception:
             playing, kind = None, MediaKind.UNKNOWN
             key = old.media_key if old else ()
+            binding.diag_failed = True
         generation = (old.media_generation + (old.media_key != key)) if old else 0
         return Observation(binding.number, binding.session, binding.app_id, key, kind,
                            playing, at,
@@ -363,14 +562,22 @@ class SmtcInterruptionObserver:
             return None
         return fresh
 
+    def _pause_diag(self, observation, result, *, status=None, accepted='none'):
+        self._diag(phase='smtc-pause', app_id=getattr(observation, 'app_id', ''),
+                   result=result.value,
+                   status='none' if not isinstance(status, int) or isinstance(status, bool) else status,
+                   accepted=accepted)
+
     async def pause(self, observation, current=lambda: True, *, request_id: str | None = None):
         # A later explicit owned intent may retry a rejected native Pause. A
         # repeated delivery of the same interval/intent never sends twice.
         key = (observation.binding_id, observation.interval, request_id)
         if key in self._pause_requests or not current():
+            self._pause_diag(observation, PauseResult.STALE)
             return PauseResult.STALE
         fresh = await self.revalidate(observation)
         if fresh is None or not current():
+            self._pause_diag(observation, PauseResult.STALE)
             return PauseResult.STALE
         self._pause_requests.add(key)
         self._pause_requests = {k for k in self._pause_requests
@@ -379,15 +586,21 @@ class SmtcInterruptionObserver:
         if len(self._pause_requests) > 512:
             # Callers revoke prior intent guards before accepting a newer one.
             self._pause_requests = {key}
+        accepted = None
+        status = None
         try:
             accepted = await asyncio.wait_for(observation.session.try_pause_async(),
                                               self.pause_timeout)
+            accepted_token = 'true' if accepted is True else 'false' if accepted is False else 'none'
             if not current() or self._closed:
+                self._pause_diag(observation, PauseResult.UNCERTAIN, accepted=accepted_token)
                 return PauseResult.UNCERTAIN
             status = _enum_value(getattr(observation.session.get_playback_info(),
                                          'playback_status', None))
             if status == 5:  # Independent raw Paused read, not command success.
                 if not current() or self._closed:
+                    self._pause_diag(observation, PauseResult.UNCERTAIN, status=status,
+                                     accepted=accepted_token)
                     return PauseResult.UNCERTAIN
                 binding = self._bindings.get(observation.binding_id)
                 latest = binding.observation if binding else None
@@ -399,11 +612,20 @@ class SmtcInterruptionObserver:
                     binding.revision += 1
                     binding.observation = confirmed
                     self.on_change(confirmed, False)
+                self._pause_diag(observation, PauseResult.PAUSED, status=status,
+                                 accepted=accepted_token)
                 return PauseResult.PAUSED
             if accepted is False and status == 4:
+                self._pause_diag(observation, PauseResult.REJECTED, status=status, accepted='false')
                 return PauseResult.REJECTED
+        except asyncio.TimeoutError:
+            self._pause_diag(observation, PauseResult.UNCERTAIN, accepted='timeout')
+            return PauseResult.UNCERTAIN
         except Exception:
-            pass
+            self._pause_diag(observation, PauseResult.UNCERTAIN, accepted='error')
+            return PauseResult.UNCERTAIN
+        accepted_token = 'true' if accepted is True else 'false' if accepted is False else 'none'
+        self._pause_diag(observation, PauseResult.UNCERTAIN, status=status, accepted=accepted_token)
         return PauseResult.UNCERTAIN
 
     async def _run(self):
