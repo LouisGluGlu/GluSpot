@@ -100,6 +100,9 @@ class OwnedMusicPlayer(QObject):
     changed = Signal()
     queueArtworkChanged = Signal()
     statusChanged = Signal(str)
+    # Emitted only while the opt-in provider arbitration is enabled.
+    playbackIntent = Signal(object)
+    playbackStarted = Signal(object)
     _control_requested = Signal(object)
 
     def __init__(self, service, lyrics_store, parent=None, *, player=None, audio=None, dj_player=None, dj_audio=None, tasks=None, artwork_tasks=None, prefetch_tasks=None,
@@ -300,6 +303,131 @@ class OwnedMusicPlayer(QObject):
         self._dj_next_lyrics = None
         self._ready_song_lyrics = None
         self._closed = False
+        self._interruption_tracking = False
+        self._interruption_serial = 0
+        self._interruption_candidate = None
+        self._interruption_action_running = False
+        self._interruption_started = None
+        self._interruption_pause_latched = False
+
+    def set_interruption_tracking_enabled(self, enabled):
+        """Enable intent notifications on the player's owning Qt thread."""
+        if not isinstance(enabled, bool):
+            return False
+        if enabled == self._interruption_tracking:
+            return True
+        self._interruption_tracking = enabled
+        self._interruption_serial += 1
+        self._interruption_candidate = None
+        self._interruption_started = None
+        return True
+
+    def interruption_playing(self):
+        """Actual decoder playback, including genuine associated narration."""
+        return bool(not self._closed and self.track is not None
+            and (self._stream_epoch == self._epoch or self._catalog_stream_is_current())
+            and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+
+    def _user_playback_action(self, action, *, will_play=True, new_stream=True):
+        # Install the intent before an action: cached audio can synchronously
+        # emit PlayingState. Failed actions never publish playbackStarted.
+        latched = self._interruption_pause_latched
+        if will_play:
+            self._interruption_pause_latched = False
+        if not self._interruption_tracking:
+            accepted = action()
+            if not accepted:
+                self._interruption_pause_latched = latched
+            return accepted
+        self._interruption_serial += 1
+        serial = self._interruption_serial
+        intent = dict(serial=serial, at=time.monotonic(), will_play=will_play)
+        self._interruption_candidate = (dict(intent, epoch=self._epoch + int(new_stream))
+            if will_play else None)
+        self._interruption_started = None
+        self._interruption_action_running = True
+        self.playbackIntent.emit(intent)
+        if self._interruption_serial != serial or not self._interruption_tracking:
+            self._interruption_action_running = False
+            return False
+        try:
+            accepted = action()
+        except Exception:
+            if self._interruption_serial == serial:
+                self._interruption_candidate = None
+                self._interruption_started = None
+                self._interruption_pause_latched = latched
+            raise
+        finally:
+            self._interruption_action_running = False
+        if not accepted:
+            self._interruption_pause_latched = latched
+            if self._interruption_serial == serial:
+                self._interruption_candidate = None
+                self._interruption_started = None
+        elif self._interruption_started is not None:
+            started, self._interruption_started = self._interruption_started, None
+            if self._interruption_tracking and started['serial'] == self._interruption_serial:
+                self.playbackStarted.emit(started)
+        return accepted
+
+    def _publish_interruption_start(self):
+        candidate = self._interruption_candidate
+        if (not self._interruption_tracking or candidate is None
+                or not self.interruption_playing() or self._catalog_pending_epoch
+                or self._stream_epoch != self._epoch or self._epoch < candidate['epoch']
+                or self._stream_recovery is not None or self._output_preparing):
+            return
+        self._interruption_candidate = None
+        started = dict(serial=candidate['serial'], at=time.monotonic(),
+            origin=self.playback_origin_token())
+        if self._interruption_action_running:
+            self._interruption_started = started
+        else:
+            self.playbackStarted.emit(started)
+
+    def pause_for_interruption(self, guard=None):
+        """Idempotent Pause through the existing guarded GUI control queue.
+
+        A pending replacement is cancelled without clearing the retained queue
+        or seeking. The latch also blocks stale preparation/recovery callbacks;
+        only a later explicit user Play may release it.
+        """
+        if self._closed or self.track is None:
+            return False
+        if QThread.currentThread() != self.thread():
+            return self._request_control('interruption_pause', guard, self.track.track_id)
+        if not self._interruption_tracking or callable(guard) and not guard():
+            return False
+        serial = self._interruption_serial
+        generation = (self._epoch, self._catalog_epoch, self._queue_epoch, self._mode_epoch)
+        def valid():
+            return (self._interruption_tracking and serial == self._interruption_serial
+                and generation == (self._epoch, self._catalog_epoch, self._queue_epoch, self._mode_epoch)
+                and (not callable(guard) or guard()))
+        self._interruption_candidate = None
+        self._interruption_started = None
+        self._interruption_pause_latched = True
+        self._autoplay_after_load = False
+        self._output_prepare_resume = False
+        self._fm_resume = self._playlist_resume = False
+        if self._stream_recovery is not None:
+            self._stream_recovery.resume = False
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        if not valid():
+            return False
+        if self.dj_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.dj_player.pause()
+        if not valid():
+            return False
+        if self._catalog_pending_epoch:
+            self._catalog_epoch += 1
+            self._catalog_pending_epoch = 0
+            self._cancel_playlist_loading()
+            self._restore_catalog_stream()
+        self.changed.emit()
+        return not self.interruption_playing()
 
     def _set_status(self, value):
         self.status = value
@@ -337,13 +465,15 @@ class OwnedMusicPlayer(QObject):
         self._try_start_dj_overlay()
 
     def _play_music(self):
+        if self._interruption_pause_latched:
+            return
         if self._output_preparing:
             self._output_prepare_resume = True
             return
         self.player.play()
 
     def play_queue(self, songs, index=0):
-        return self._replace_queue(songs, index)
+        return self._user_playback_action(lambda: self._replace_queue(songs, index))
 
     def _refresh_queue_view(self):
         # Queue storage is immutable. Cache the ordinary-song view by object
@@ -468,7 +598,7 @@ class OwnedMusicPlayer(QObject):
             self._shuffle_bag = deque(i for i in self._shuffle_bag if i != target)
             self._trim_shuffle_history()
         self.index = self._intro_start_for_song(target)
-        return self._load_song()
+        return self._user_playback_action(self._load_song)
 
     def enqueue_next(self, song: OnlineSong) -> bool:
         """Retain the sounding song and queue, playing this addition next once.
@@ -1494,11 +1624,13 @@ class OwnedMusicPlayer(QObject):
             self._shuffle_cursor -= 1
 
     def play_daily(self, source_id="netease"):
-        return self._catalog("daily", source_id, lambda: self.service.daily_recommendations(source_id))
+        return self._user_playback_action(lambda: self._catalog("daily", source_id,
+            lambda: self.service.daily_recommendations(source_id)))
 
     def play_personal_fm(self, source_id="netease"):
         kind = "dj" if source_id == "netease" and self.personal_dj_enabled else "fm"
-        return self._catalog(kind, source_id, self._fm_fetch_action(kind, source_id))
+        return self._user_playback_action(lambda: self._catalog(kind, source_id,
+            self._fm_fetch_action(kind, source_id)))
 
     def play_personal_fm_selection(self, source_id, songs, index=0):
         """Play an already browsed FM song, retaining genuine FM continuation.
@@ -1518,8 +1650,8 @@ class OwnedMusicPlayer(QObject):
                     and song.song_id.strip() and isinstance(song.title, str) and song.title.strip()
                     for song in songs)):
             return False
-        return self._replace_queue(songs, index, fm_source=source_id,
-            fm_kind="dj" if self.personal_dj_enabled else "fm")
+        return self._user_playback_action(lambda: self._replace_queue(songs, index, fm_source=source_id,
+            fm_kind="dj" if self.personal_dj_enabled else "fm"))
 
     def play_personal_dj(self, source_id="netease"):
         # Compatibility entry point: this is FM with introductions enabled,
@@ -1543,7 +1675,7 @@ class OwnedMusicPlayer(QObject):
                     return _PlaylistStart(source_id, playlist_id, page, offset, pages)
                 offset = page.next_offset
             return ()
-        return self._catalog("playlist", source_id, fetch)
+        return self._user_playback_action(lambda: self._catalog("playlist", source_id, fetch))
 
     @staticmethod
     def _playlist_page_songs(page, source_id):
@@ -1828,6 +1960,7 @@ class OwnedMusicPlayer(QObject):
         return True
 
     def _load_song(self, *, autoplay=True, introduction=(), introduction_audio=None):
+        autoplay = autoplay and not self._interruption_pause_latched
         if self._closed:
             return False
         self._playlist_waiting_next = False
@@ -3350,6 +3483,8 @@ class OwnedMusicPlayer(QObject):
                     and not self._closed and self._stream_recovery is None):
                 self._set_status("trial" if self._stream_trial else "playing")
             self.changed.emit()
+            if state == QMediaPlayer.PlaybackState.PlayingState:
+                self._publish_interruption_start()
         if self._dj_overlay_voices:
             if state == QMediaPlayer.PlaybackState.PlayingState:
                 self._try_start_dj_overlay()
@@ -3382,6 +3517,8 @@ class OwnedMusicPlayer(QObject):
                 self._finish_stream_failure(self._stream_fault[1])
 
     def _end_current_stream(self):
+        if self._interruption_pause_latched:
+            return
         self._stop_dj_overlay()
         self._clear_stream_fault()
         self._stream_epoch = 0
@@ -3599,7 +3736,36 @@ class OwnedMusicPlayer(QObject):
             return False
         if QThread.currentThread() != self.thread():
             return self._request_control("command", command, self.track.track_id)
+        if not self._interruption_tracking and not self._interruption_pause_latched:
+            return self._send_playback_command(command)
         if command == "toggle_play_pause":
+            if self._output_preparing:
+                playing_intent = self._output_prepare_resume
+            elif self._stream_recovery is not None:
+                playing_intent = self._stream_recovery.resume
+            elif self.status in {"loading_stream", "loading_catalog", "recovering_stream"}:
+                playing_intent = self._autoplay_after_load
+            else:
+                playing_intent = self.interruption_playing()
+            will_play = not playing_intent
+        else:
+            will_play = True
+        return self._user_playback_action(lambda: self._send_playback_command(command),
+            will_play=will_play, new_stream=(command != "toggle_play_pause"
+                or self.status in {"playback_failed", "stream_unavailable"} and self._stream_epoch == 0))
+
+    def _send_playback_command(self, command):
+        if command == "toggle_play_pause":
+            if (self._interruption_tracking and self._stream_epoch == 0
+                    and self.status == "loading_stream" and not self._output_preparing
+                    and self._stream_recovery is None):
+                self._autoplay_after_load = not self._autoplay_after_load
+                self._fm_resume = self._playlist_resume = self._autoplay_after_load
+                if not self._autoplay_after_load:
+                    self.player.pause()
+                    self.dj_player.pause()
+                self.changed.emit()
+                return True
             if self._output_preparing:
                 self._output_prepare_resume = not self._output_prepare_resume
                 self._autoplay_after_load = self._output_prepare_resume
@@ -3737,7 +3903,9 @@ class OwnedMusicPlayer(QObject):
             elif kind == "cancel_selection":
                 result["succeeded"] = self.cancel_pending_selection()
             elif self.track is not None and self.track.track_id == track_id:
-                if kind == "lyrics_refresh":
+                if kind == "interruption_pause":
+                    result["succeeded"] = self.pause_for_interruption(value)
+                elif kind == "lyrics_refresh":
                     result["succeeded"] = self.refresh_lyrics()
                 elif kind == "enqueue_next":
                     result["succeeded"] = self.enqueue_next(value)
@@ -3771,6 +3939,12 @@ class OwnedMusicPlayer(QObject):
 
     def stop(self):
         """Invalidate queued I/O before disabling or changing playback modes."""
+        if self._interruption_tracking and not self._closed:
+            self._interruption_serial += 1
+            self.playbackIntent.emit(dict(serial=self._interruption_serial,
+                at=time.monotonic(), will_play=False))
+        self._interruption_candidate = None
+        self._interruption_started = None
         self._epoch += 1
         self._stop_dj_overlay()
         self._reset_lyrics_payload()
