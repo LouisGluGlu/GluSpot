@@ -99,6 +99,21 @@ green suite. Three native-crashed modules were completed through the supplied
 runner's ordinary per-test subprocess supplements, including fullscreen; t234
 had needed supplements for the two owned-audio/artwork modules.
 
+An additional external unittest covers six combinations (960/610 starting
+widths × automatic/manual-cover/manual-list) and 12 track-result arrivals while
+real Qt edge-drag events still hold the gesture. It passes in 1.425 seconds,
+including icons, automatic settings zero writes and snapshot cancellation.
+Its script, 12 images and measured arrival widths are in `t238/transition-drag/`;
+the exact 960/610 raster proofs remain in the main render matrix.
+
+The fullscreen module's additional native crash occurs in a lifecycle test's
+`QApplication.processEvents()`. The same final module completed in a separate
+focused run; one ordinary baseline `bb060b7` run also completed without crashing
+and retained the same seven failures/one error. These samples do not establish
+that the current crash is inherited or resolved. Individual supplements all
+completed, but Qt native lifecycle stability remains an explicit uncertainty.
+The baseline check and current crash stacks are retained in the handoff.
+
 The first full run exposed a cold `__new__` provider fixture reading the new
 state before constructor fields existed; the classifier now safely probes that
 initial key. It also exposed a cadence-budget test depending on real cold-start
