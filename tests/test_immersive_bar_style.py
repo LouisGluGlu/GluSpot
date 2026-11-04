@@ -194,8 +194,14 @@ class ImmersiveBarStyleTests(unittest.TestCase):
                 self.render()
             dj.assert_called_once()
             lyrics.assert_not_called()
-            self.assertTrue(visual.music_cover_rect.isEmpty())
+            # Narration rings now reuse the artwork entry to the player in
+            # every placement, including the taskbar's bounded compact row.
+            content = visual._immersive_bar_content_rect(QRectF(0, 0, 420, 40))
+            self.assertFalse(visual.music_cover_rect.isEmpty())
+            self.assertTrue(content.contains(visual.music_cover_rect))
+            self.assertEqual(visual._hit_test(visual.music_cover_rect.center()), "music:open_surface")
             self.assertEqual(visual.music_button_rects, {})
+            self.assertEqual(visual._finder_dj_reveal_target, 0.)
         visual.finder_bar_style = "transparent"
         self.assertEqual(visual._personal_dj_island_backdrop(), visual.taskbar_material_color)
         visual.finder_bar_style = "fade"

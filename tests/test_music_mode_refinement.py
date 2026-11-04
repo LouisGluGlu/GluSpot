@@ -176,11 +176,17 @@ class MusicModeRefinementTests(unittest.TestCase):
             return path
         fixture._rounded_path = rounded
         fixture._paint_cover = lambda painter, rect, radius, image, key: painter.fillPath(rounded(rect, radius), QColor(240, 170, 110))
+        # The ordinary cover and narration rings share the production hover
+        # overlay; keep that extracted helper active in this clip fixture.
+        fixture._paint_music_cover_presentation_overlay = IslandStackVisual._paint_music_cover_presentation_overlay.__get__(fixture)
         frame = QImage(100, 100, QImage.Format.Format_ARGB32_Premultiplied)
         frame.fill(Qt.GlobalColor.transparent)
         with QPainter(frame) as painter:
             painter.setClipRect(QRectF(0, 0, 45, 100))
+            clip, transform = painter.clipBoundingRect(), painter.transform()
             IslandStackVisual._paint_interactive_music_cover(fixture, painter, QRectF(20, 20, 60, 60), 9)
+            self.assertEqual(painter.clipBoundingRect(), clip)
+            self.assertEqual(painter.transform(), transform)
         self.assertEqual(motion.value, 1.0)
         self.assertEqual(frame.pixelColor(60, 40).alpha(), 0)
         self.assertGreater(frame.pixelColor(35, 40).alpha(), 0)
