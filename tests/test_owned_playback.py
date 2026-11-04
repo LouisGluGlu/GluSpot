@@ -529,12 +529,14 @@ class OwnedPlaybackTests(unittest.TestCase):
         self.assertEqual((self.player.status, self.player.track.lyrics, self.player.track.album_art_bytes), before)
         self.assertEqual(sum(job[0][2] == neighbor[2] for job in self.artwork_tasks.jobs), 1)
 
-    def test_source_replacement_waits_for_old_workers_then_rejects_their_cache_results(self):
+    def test_source_replacement_releases_old_slots_and_rejects_their_cache_results(self):
         self.player.play_queue(self.covered_songs(6))
         old = list(self.artwork_tasks.jobs)
         songs = (OnlineSong("qq", "0", "new source", artwork_url="https://example.test/new.png"),)
         self.player.play_queue(songs)
-        self.assertEqual(len(self.artwork_tasks.jobs), 2)
+        self.assertEqual(len(self.artwork_tasks.jobs), 3)
+        current = self.artwork_tasks.jobs[-1][0]
+        self.assertEqual(self.player._art_running, {current[3]: (current[1], current[2])})
         for token, action in old:
             with patch("local.owned_music_player.fetch_online_artwork") as fetch:
                 self.assertIsNone(action())
