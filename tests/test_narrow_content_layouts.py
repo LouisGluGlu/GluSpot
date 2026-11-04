@@ -153,7 +153,7 @@ class NarrowContentLayoutTests(unittest.TestCase):
                 self.assertEqual(self.window.diagnostic_snapshot()["commits"], before + 1)
                 self.window.study_timer.stop()
 
-    def test_narrow_temporary_cover_uses_effective_mode_and_stays_cover_through_next_lookup(self):
+    def test_narrow_temporary_cover_releases_previous_miss_for_next_pending_track(self):
         self.window.set_content_layout("cover_lyrics", animate=False)
         original_settings = dict(self.saved)
         empty = lyric_track(timed_lyrics=(), lyrics=("暂无歌词",))
@@ -175,7 +175,11 @@ class NarrowContentLayoutTests(unittest.TestCase):
         self.owner.lyrics, self.owner.timed_lyrics = ["查找歌词中"], []
         with patch.object(self.window, "_lyrics_lookup_pending", return_value=True):
             self.window._sync_no_lyrics_content_layout(101.)
-        self.assertEqual(self.window.mode, "cover")
+        self.assertEqual(self.window._lyric_content_state(101.), "loading")
+        self.assertEqual(self.window.mode, "cover_lyrics")
+        self.assertEqual(self.window._effective_content_layout(), "cover_lyrics")
+        self.assertFalse(self.window._no_lyrics_layout_active)
+        self.assertEqual(self.window._content_layout, "cover_lyrics")
         self.assertEqual(self.saved, original_settings)
 
     def test_narrow_lyric_header_is_the_cover_transition_source(self):

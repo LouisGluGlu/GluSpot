@@ -210,7 +210,7 @@ class CenteredAlbumLayoutTests(unittest.TestCase):
             self.assertTrue(self.window._no_lyrics_cover_target())
         self.assertEqual(self.window._cover_layout_to, 1.0)
 
-    def test_next_track_holds_center_while_loading_then_enters_lyrics(self):
+    def test_next_loading_track_releases_previous_center_and_paints_skeleton(self):
         self.owner.timed_lyrics = []
         self.owner.lyrics = ["暂无歌词"]
         self._render(100.0)
@@ -223,13 +223,21 @@ class CenteredAlbumLayoutTests(unittest.TestCase):
         self.owner.lyrics = ["查找歌词中"]
         self._render(100.8)
         with patch("local.music_surface_window.time.monotonic", return_value=100.8):
-            self.assertTrue(self.window._no_lyrics_cover_target())
-        self.assertEqual(self.window._cover_layout_to, 1.0)
+            self.assertFalse(self.window._no_lyrics_cover_target())
+            self.assertEqual(self.window._lyric_content_state(100.8), "loading")
+        self.assertEqual(self.window._effective_content_layout(), "lyrics")
+        self.assertEqual(self.window._cover_layout_to, 0.0)
         self.assertFalse(self.window._has_timed_lyrics)
-        with patch.object(self.window, "_paint_lyric_loading") as loading:
+        self._render(101.05)
+        fraction = self.window._cover_layout_fraction_at(101.05)
+        self.assertGreater(fraction, 0.0)
+        self.assertLess(fraction, 1.0)
+        self.assertGreater(self.window._lyric_horizontal_slide(fraction, 1190.0, 564.0), 0.0)
+        with patch.object(self.window, "_paint_lyric_loading", wraps=self.window._paint_lyric_loading) as loading:
             self._render(104.0)
-        loading.assert_not_called()
-        self.assertEqual(self.window._cover_layout_to, 1.0)
+        loading.assert_called()
+        self.assertTrue(self.window._lyric_loading_visible(104.0))
+        self.assertAlmostEqual(self.window._cover_layout_fraction_at(104.0), 0.0)
 
         self.owner.timed_lyrics = [
             (0.0, "first"), (4.0, "second"),
@@ -239,16 +247,12 @@ class CenteredAlbumLayoutTests(unittest.TestCase):
         self._render(104.1)
         self.assertEqual(self.window._cover_layout_to, 0.0)
         self.assertEqual(self.window._lyric_hit_rects, {})
-        with patch.object(self.window, "_paint_scrolling_metadata", wraps=self.window._paint_scrolling_metadata) as normal_metadata:
-            self._render(104.3)
-        # The cover only leaves the center after real lyrics arrive.
-        fraction = self.window._cover_layout_fraction_at(104.3)
-        self.assertGreater(fraction, 0.0)
-        self.assertLess(fraction, 1.0)
-        self.assertGreater(self.window._lyric_horizontal_slide(fraction, 1190.0, 564.0), 0.0)
-        self._render(104.8)
-        self.assertAlmostEqual(self.window._cover_layout_fraction_at(104.8), 0.0)
+        self.assertTrue(self.window._lyric_loading_holds_result(104.3))
+        self._render(104.81)
+        self.assertAlmostEqual(self.window._cover_layout_fraction_at(104.81), 0.0)
+        self.assertFalse(self.window._lyric_loading_visible(104.81))
         self.assertTrue(self.window._lyric_hit_rects)
+
 
     def test_lyric_column_slide_runs_only_rightward_for_hiding(self):
         slide = self.window._lyric_horizontal_slide

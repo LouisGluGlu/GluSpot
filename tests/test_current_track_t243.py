@@ -128,23 +128,31 @@ class SharedCurrentTrackTests(unittest.TestCase):
         self.assertTrue(window._geometry_transition_snapshot.isNull())
         self.assertEqual(window._track_visual[:3], ("first", "Changed title", "Changed artist"))
 
-    def test_same_track_artwork_updates_do_not_extend_lyric_deadline(self):
+    def test_same_track_artwork_updates_preserve_loading_clock_until_lyric_result(self):
         window = self.window()
         self.publish(track("slow"))
         started = window._lyric_loading_started_at
         self.publish(replace(self.data.track, album_art_lookup_state="failed"), now=115.)
         self.assertEqual(window._lyric_loading_started_at, started)
-        window._update_lyric_loading_state(started + 30.)
-        window._sync_no_lyrics_content_layout(started + 30.)
-        self.assertFalse(window._lyric_loading_visible(started + 30.))
+        for now in (started + 30., started + 60.):
+            window._update_lyric_loading_state(now)
+            window._sync_no_lyrics_content_layout(now)
+            self.assertEqual(window._lyric_loading_started_at, started)
+            self.assertEqual(window._lyric_content_state(now), "loading")
+            self.assertTrue(window._lyric_loading_visible(now))
+            self.assertEqual(window._effective_content_layout(), "lyrics")
+        self.publish(replace(self.data.track, lyrics=("暂无歌词",)), now=161.)
+        self.assertEqual(window._lyric_content_state(161.), "no_lyrics")
+        self.assertFalse(window._lyric_loading_visible(161.))
         self.assertEqual(window._effective_content_layout(), "cover")
-        self.publish(replace(self.data.track, lyrics=tuple(f"Sung verse {i}" for i in range(5))), now=132.)
+        self.publish(replace(self.data.track, lyrics=tuple(f"Sung verse {i}" for i in range(5))), now=162.)
         while self.tasks.actions:
             self.tasks.finish()
-        window._update_lyric_loading_state(132.)
-        window._sync_no_lyrics_content_layout(132.)
-        self.assertEqual(window._lyric_content_state(132.), "loaded")
+        window._update_lyric_loading_state(162.)
+        window._sync_no_lyrics_content_layout(162.)
+        self.assertEqual(window._lyric_content_state(162.), "loaded")
         self.assertEqual(window._effective_content_layout(), "lyrics")
+
 
     def test_artwork_visual_deadline_keeps_thumbnail_sharp_and_accepts_late_original(self):
         window = self.window()
