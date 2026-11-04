@@ -289,14 +289,19 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self.assertFalse(any(p.text == "夜色依然温柔" for p in self._render(100.0, 4.0)))
         self._toggle(100.01)
         self._render(100.01, 4.0)
-        began, position, _ = self._wait_for_companion(100.01, 4.01, "夜色依然温柔")
-        early = self._paint(self._animate_for(began, position, 0.08), "夜色依然温柔")
-        peak = self._paint(self._animate_for(began + 0.08, position + 0.08, 0.20), "夜色依然温柔")
-        settled = self._paint(self._animate_for(began + 0.28, position + 0.28, 0.32), "夜色依然温柔")
+        # t256 replaces the historical elastic overshoot with a bounded
+        # 320 ms height/opacity reveal, preserving this regression identity.
+        early = self._paint(self._animate_for(100.01, 4.01, 0.08), "夜色依然温柔")
+        middle = self._paint(self._animate_for(100.09, 4.09, 0.08), "夜色依然温柔")
+        settled = self._paint(self._animate_for(100.17, 4.17, 0.16), "夜色依然温柔")
+        held = self._paint(self._animate_for(100.33, 4.33, 0.16), "夜色依然温柔")
         self.assertGreater(early.opacity, 0.0)
-        self.assertLess(early.opacity, settled.opacity)
-        self.assertLess(early.top, settled.top)
-        self.assertGreater(peak.top, settled.top)
+        self.assertLess(early.opacity, middle.opacity)
+        self.assertLess(middle.opacity, settled.opacity)
+        self.assertAlmostEqual(settled.opacity, 1.0)
+        self.assertLess(early.top, middle.top)
+        self.assertLess(middle.top, settled.top)
+        self.assertAlmostEqual(settled.top, held.top, delta=.05)
 
     def test_delayed_translation_starts_its_entrance_when_content_arrives(self):
         self.owner.enable_dual_line_lyrics = False
@@ -309,11 +314,17 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self.owner.timed_lyrics[0] = (0.0, main + "\n翻译：夜色依然温柔")
         arrival = self._render(100.9, 4.9)
         self.assertFalse(any(p.text == "夜色依然温柔" and p.opacity > 0.001 for p in arrival))
-        began, position, _ = self._wait_for_companion(100.9, 4.9, "夜色依然温柔")
-        entering = self._paint(self._animate_for(began, position, 0.08), "夜色依然温柔")
-        settled = self._paint(self._animate_for(began + 0.08, position + 0.08, 0.52), "夜色依然温柔")
+        self.assertEqual(self.window._translation_layer_pose(0, "夜色依然温柔", 100.9), (0., 0., 0.))
+        entering = self._paint(self._animate_for(100.9, 4.9, 0.08), "夜色依然温柔")
+        height, opacity, _ = self.window._translation_layer_pose(0, "夜色依然温柔", 100.98)
+        self.assertGreater(height, 0.)
+        self.assertLess(height, 1.)
+        self.assertAlmostEqual(height, opacity)
+        settled = self._paint(self._animate_for(100.98, 4.98, 0.24), "夜色依然温柔")
         self.assertLess(entering.opacity, settled.opacity)
         self.assertLess(entering.top, settled.top)
+        for value in self.window._translation_layer_pose(0, "夜色依然温柔", 101.22):
+            self.assertAlmostEqual(value, 1.)
 
     def test_close_keeps_provider_removed_translation_until_collapse_finishes(self):
         main = "月光照耀着我今晚仍会继续轻轻歌唱"
@@ -424,6 +435,7 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
         self._render(100.0, 4.0)
         before = self._render(100.6, 4.6)
         next_before = self._paint(before, next_main).top
+        current_before = self._paint(before, main).top
         self._toggle(100.61)
         frames = []
         for step in range(61):
@@ -438,8 +450,9 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
             next_primary = self._paint(frame, next_main)
             self.assertLessEqual(translated.bottom, next_primary.top + 0.5,
                                  "Visible companion ink must not overlap the following primary row")
+            self.assertAlmostEqual(self._paint(frame, main).top, current_before, delta=.5)
         earliest = visible_frames[0]
-        self.assertGreater(self._paint(earliest, next_main).top, next_before + 1.0)
+        self.assertGreater(self._paint(earliest, next_main).top, next_before)
         settled = visible_frames[-1]
         settled_offset = self._paint(settled, "月光继续歌唱").top - self._paint(settled, main).bottom
         relative_tops = [
@@ -447,8 +460,9 @@ class MusicCompanionTransitionV2Tests(unittest.TestCase):
             for frame in visible_frames
         ]
         self.assertLess(min(relative_tops), settled_offset - 1.0)
-        self.assertGreater(max(relative_tops), settled_offset + 0.4,
-                           "Reserving space must preserve the visible spring overshoot")
+        self.assertLessEqual(max(relative_tops), settled_offset + .05)
+        self.assertTrue(all(first <= second + .05 for first, second in zip(relative_tops, relative_tops[1:])),
+                        "Translation height and position must settle without an overshoot")
 
     def test_initial_enabled_translation_is_visible_without_an_unrequested_toggle(self):
         self._rows("月光照耀着我今晚仍会继续轻轻歌唱\n翻译：夜色依然温柔")

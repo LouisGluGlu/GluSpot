@@ -62,7 +62,7 @@ class CoverLyricContinuityTests(unittest.TestCase):
         self.window.resize(960, 540)
         for translated in (False, True):
             self.owner.enable_dual_line_lyrics = translated
-            expected = [(10., "Hello world\n你好世界" if translated else "Hello world"), (20., "Next line")]
+            expected = [(10., "Hello world\n你好世界"), (20., "Next line")]
             for layout in ("cover_lyrics", "lyrics"):
                 with self.subTest(layout=layout, translated=translated), patch(
                     "local.music_surface_window.time.monotonic", return_value=100.,
@@ -77,6 +77,8 @@ class CoverLyricContinuityTests(unittest.TestCase):
                     self.assertEqual(self.window._display_raw_source_texts[0], INTRO_COUNTDOWN_TEXT)
                     self.assertTrue(all(credit not in row for row in self.window._display_raw_source_texts))
                     self.assertEqual(self.owner.timed_lyrics, source)
+                    if not translated:
+                        self.assertEqual(self.window._translation_layer_pose(1, "你好世界", 100.), (0., 0., 0.))
 
     def test_metadata_only_cached_song_never_paints_json_in_either_layout(self):
         credits = ['{"t":-1,"c":[{"tx":"作词: "},{"tx":"Jerry Murad, Al Fiore"}]}',
@@ -153,8 +155,17 @@ class CoverLyricContinuityTests(unittest.TestCase):
             self.window.on_translation_visibility_changed(False)
             self.render()
         with patch("local.music_surface_window.time.monotonic", return_value=102.0):
-            self.render()
-            self.assertTrue(all(layer is None for layer in self.window._song_secondary_layouts))
+            with patch.object(self.window, "_draw_sprung_cached_wrapped_layout",
+                              wraps=self.window._draw_sprung_cached_wrapped_layout) as draw, \
+                    patch.object(self.window, "_paint_wrapped_lifted_lyric",
+                                 wraps=self.window._paint_wrapped_lifted_lyric) as current:
+                self.render()
+            # Hidden companions stay shaped; their pose suppresses all ink.
+            self.assertTrue(all(layer is not None for layer in self.window._song_secondary_layouts))
+            self.assertEqual(self.window._translation_layer_pose(1, "把你的骄傲放在这里，紧靠着我。", 102.), (0., 0., 0.))
+            drawn = [call.args[3] for call in draw.call_args_list]
+            drawn += [call.args[2] for call in current.call_args_list]
+            self.assertNotIn("把你的骄傲放在这里，紧靠着我。", drawn)
 
     def test_external_lyric_blur_crosses_horizontal_insets_but_clears_bottom_controls(self):
         self.window.resize(1190, 666)

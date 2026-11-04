@@ -3961,13 +3961,19 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         ]
         self.owner.enable_dual_line_lyrics = False
         lines, hidden = self.window._display_lyrics()
-        self.assertEqual(hidden, [(2.0, "I love you"), (6.0, "Deep in the shallow end")])
-        self.assertEqual(lines, ["I love you", "Deep in the shallow end"])
+        self.assertEqual(hidden, [(2.0, "I love you\n我爱你"), (6.0, "Deep in the shallow end\n沉沦于浅滩")])
+        self.assertEqual(lines, ["I love you\u2028我爱你", "Deep in the shallow end\u2028沉沦于浅滩"])
+        now = 100.0
+        self.assertEqual(self.window._translation_layer_pose(0, "我爱你", now), (0., 0., 0.))
+        self.assertEqual(self.window._translation_layer_pose(1, "沉沦于浅滩", now), (0., 0., 0.))
         self.owner.enable_dual_line_lyrics = True
-        lines, shown = self.window._display_lyrics()
+        with patch("local.music_surface_window.time.monotonic", return_value=now):
+            lines, shown = self.window._display_lyrics()
         self.assertEqual(shown[0], (2.0, "I love you\n我爱你"))
         self.assertEqual(shown[1], (6.0, "Deep in the shallow end\n沉沦于浅滩"))
         self.assertEqual(lines[1], "Deep in the shallow end\u2028沉沦于浅滩")
+        self.assertEqual(self.window._translation_layer_pose(0, "我爱你", now + .321), (1., 1., 1.))
+        self.assertEqual(self.window._translation_layer_pose(1, "沉沦于浅滩", now + .321), (1., 1., 1.))
         self.assertEqual(len(self.owner.timed_lyrics), 3)
 
     def test_same_timestamp_original_and_translation_are_one_logical_sentence(self):
@@ -4004,10 +4010,13 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(timed, [(0.0, "· · ·"), (5.0, "Shine\n闪耀"), (10.0, "Next\n下一句")])
         self.assertEqual(lines[1], "Shine\u2028闪耀")
         self.owner.enable_dual_line_lyrics = False
-        self.window._display_lyrics()  # Start the companion's elastic exit.
-        with patch("local.music_surface_window.time.monotonic", return_value=self.window._translation_exit_at + 0.5):
+        self.window._display_lyrics()  # Start the companion's 320 ms collapse.
+        finished = self.window._translation_exit_at + 0.5
+        with patch("local.music_surface_window.time.monotonic", return_value=finished):
             _lines, hidden = self.window._display_lyrics()
-        self.assertEqual(hidden, [(0.0, "· · ·"), (5.0, "Shine"), (10.0, "Next")])
+        self.assertEqual(hidden, timed)
+        self.assertEqual(self.window._translation_layer_pose(1, "闪耀", finished), (0., 0., 0.))
+        self.assertEqual(self.window._translation_layer_pose(2, "下一句", finished), (0., 0., 0.))
 
     def test_same_timestamp_unlabeled_intro_credit_does_not_displace_translation(self):
         self.owner.music_intro_cleanup_enabled = True
