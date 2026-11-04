@@ -29,7 +29,8 @@ class MusicLibraryController(QObject):
         embedded = getattr(self.window, "now_playing_island", None)
         if embedded is not None:
             embedded.set_context(settings.get, island)
-            send_command = getattr(self.player, "send_playback_command", None)
+            send_command = (getattr(self.island, "_send_playback_command_async", None)
+                            or getattr(self.player, "send_playback_command", None))
             if callable(send_command):
                 embedded.commandRequested.connect(send_command)
         entry_palette = getattr(entry_window, "set_background_palette", None)
@@ -115,7 +116,14 @@ class MusicLibraryController(QObject):
         self._navigation = getattr(entry, "_navigation", None) or MusicNavigationTransition()
         entry._navigation = self._navigation
         self.window.set_library_expanded(bool(settings.get("v2_library_expanded", False)), animate=False)
-        self.window.set_now_playing(self.player.track)
+        # The floating island applies the selected provider's snapshot once.
+        # Catalog/player notifications can arrive before that application or
+        # belong to an inactive owned source. They must not publish a second
+        # current track to the library's independent presentation widgets.
+        self._visual_data_signal = getattr(island, "visualDataChanged", None)
+        if self._visual_data_signal is not None:
+            self._visual_data_signal.connect(self._sync_now_playing)
+        self._sync_now_playing()
         self._minimum_surface_sync_pending = False
         self._navigation_windows = tuple(window for window in (self.window, getattr(self.entry, "window", None))
                                          if window is not None)
@@ -386,17 +394,20 @@ class MusicLibraryController(QObject):
 
     def open_now_playing(self):
         """The rotating library album always opens this track in a window."""
-        if (self._closed or self._logout_pending or self._opening is not None
-                or not self.settings.get("v2_owned_playback_enabled", True)):
+        if self._closed or self._logout_pending or self._opening is not None:
             return False
-        track = self.player.track
-        if track is None or not track.track_id.startswith("owned:"):
+        shared = self._visual_data_signal is not None
+        track = self.window._now_playing if shared else self.player.track
+        if (track is None or not shared and (
+                not self.settings.get("v2_owned_playback_enabled", True)
+                or not track.track_id.startswith("owned:"))):
             return False
         self._set_surface_loading()
         frame = self._navigation.origin_frame(self.window, separate_cover=True, freeze_cover=True)
-        visual = self.player.visual_data()
-        if visual is not None:
-            self.island._apply_visual_data(visual)
+        if not shared:
+            visual = self.player.visual_data()
+            if visual is not None:
+                self.island._apply_visual_data(visual)
         self.settings.set("v2_library_last_playback_surface", "window")
         self.settings.save_now()
         return self._present_music_surface("window", frame)
@@ -1250,8 +1261,21 @@ class MusicLibraryController(QObject):
                 self.window.raise_()
                 self.window.activateWindow()
 
+    def _sync_now_playing(self, visual=None):
+        if self._closed:
+            return
+        if self._visual_data_signal is None:
+            # Lightweight legacy/offline owners without the shared publisher.
+            track = self.player.track
+        else:
+            visual = getattr(self.island, "current_visual_data", None) if visual is None else visual
+            track = (visual.track if visual is not None
+                     and not bool(getattr(self.island, "media_no_audio", False)) else None)
+        self.window.set_now_playing(track)
+
     def _player_changed(self):
-        self.window.set_now_playing(self.player.track)
+        if self._visual_data_signal is None:
+            self._sync_now_playing()
         if self._opening is None or self.player.track is None:
             return
         # Old playback can emit position signals while a catalog request runs.
@@ -1275,6 +1299,9 @@ class MusicLibraryController(QObject):
 
     def close(self):
         self._closed = True
+        if self._visual_data_signal is not None:
+            self._visual_data_signal.disconnect(self._sync_now_playing)
+            self._visual_data_signal = None
         self._navigation.cancel()
         self._navigation.close()
         self._invalidate()
