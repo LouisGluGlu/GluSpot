@@ -1,4 +1,4 @@
-"""Restrained sea displacement and a thin, smoothed palette crest."""
+"""Moderate absolute sea response and a thin, smoothed palette crest."""
 from __future__ import annotations
 
 import unittest
@@ -25,31 +25,42 @@ class RisingSeaStateTests(unittest.TestCase):
     def peak(state):
         return max(abs(state.ripple_displacement(index / 1000.)) for index in range(1001))
 
-    def test_quiet_bass_and_vocal_displacement_match_ebe525e(self):
-        # Fixed phase/input measurements from the immutable ebe525e proof.
-        for peak, vocal, low, baseline in ((.64, 0., .64, 7.696877106187348),
-                                          (.64, .25, .03, 9.583366592997972),
-                                          (.0004, 0., 0., .3395681076259124)):
-            with self.subTest(peak=peak, vocal=vocal):
-                state = self.warm(peak=peak, vocal=vocal, low=low)
-                self.assertAlmostEqual(self.peak(state), baseline, places=8)
+    def test_quiet_floor_is_retained_and_vocal_swell_is_about_seventeen_pixels(self):
+        quiet = self.warm(peak=.0004)
+        self.assertAlmostEqual(self.peak(quiet), .3395681076259124, places=8)
         self.assertLess(self.peak(self.warm(peak=0.)), .25)
+        vocal = self.warm(vocal=.25, low=.03)
+        self.assertGreater(self.peak(vocal), 16.5)
+        self.assertLess(self.peak(vocal), 17.5)
+        self.assertGreater(self.peak(vocal), self.peak(self.warm(low=.64)))
 
-    def test_low_onset_preserves_peak_response_and_vocal_swell_stays_smooth(self):
-        beat, vocal = self.warm(), self.warm()
-        before = self.peak(beat)
-        beat_peaks, vocal_peaks = [], []
+    def test_six_frame_low_onset_is_about_nineteen_pixels_and_releases(self):
+        beat = self.warm(peak=.0004, low=.0004)
+        peaks = []
+        for tick in range(30):
+            level = .64 if tick < 6 else .0004
+            beat.update_ripple(level, 6. + tick / 30., low=level)
+            peaks.append(self.peak(beat))
+        self.assertGreater(max(peaks), 18.5)
+        self.assertLess(max(peaks), 19.5)
+        self.assertTrue(all(a < b for a, b in zip(peaks[:5], peaks[1:6])))
+        self.assertLess(peaks[-1], 1.)
+        self.assertLess(beat.ripple_beat, .001)
+
+    def test_vocal_envelope_retains_smooth_attack_and_pause_clears_low_punch(self):
+        state = self.warm()
+        peaks = []
         for tick in range(1, 7):
-            now = (179 + tick) / 30.
-            beat.update_ripple(.64, now, low=.64 if tick == 1 else 0.)
-            vocal.update_ripple(.64, now, vocal=.25)
-            beat_peaks.append(self.peak(beat))
-            vocal_peaks.append(self.peak(vocal))
-        # Low input adds no new punch beyond the original peak envelope.
-        self.assertLess(abs(beat_peaks[0] - before), .1)
-        self.assertGreater(vocal_peaks[0], beat_peaks[0])
-        self.assertTrue(all(a < b for a, b in zip(vocal_peaks, vocal_peaks[1:])))
-        self.assertLess(max(vocal_peaks), 10.)
+            state.update_ripple(.64, (179 + tick) / 30., vocal=.25)
+            peaks.append(self.peak(state))
+        self.assertTrue(all(a < b for a, b in zip(peaks, peaks[1:])))
+        self.assertLess(max(peaks), 18.)
+        state.update_ripple(.64, 6.2, low=.64)
+        self.assertGreater(state.ripple_beat, .5)
+        for tick in range(120):
+            state.update_ripple(.64, 6.3 + tick / 30., low=.64, is_playing=False)
+        self.assertLess(state.ripple_beat, 1e-12)
+        self.assertLess(self.peak(state), .25)
 
     @staticmethod
     def controlled_history(height):
@@ -147,7 +158,7 @@ class RisingSeaRenderTests(unittest.TestCase):
         host._xiaomi_duotone_palette = lambda: (tint, tint, tint)
         return NativeMusicBackgroundRenderer(host)
 
-    def test_vocal_surface_uses_original_unclamped_amplitude_and_damage_strip(self):
+    def test_moderate_vocal_surface_is_unclamped_and_inside_damage_strip(self):
         state = RisingSeaStateTests.warm(vocal=.25, low=.03)
         renderer = self.renderer(state)
         for rect in (QRectF(0., 0., 520., 136.), QRectF(20., 13., 520., 136.)):
@@ -156,13 +167,54 @@ class RisingSeaRenderTests(unittest.TestCase):
                 points = renderer._sea_level_surface(context, rect, True)
                 waterline = rect.top() + rect.height() * .495
                 measured = max(abs(point.y() - waterline) for point in points)
-                self.assertGreater(measured, 9.5)
-                self.assertLess(measured, 9.6)
-                self.assertTrue(all(point.y() >= rect.top() + max(56., rect.height() * .42) for point in points))
+                self.assertGreater(measured, 16.5)
+                self.assertLess(measured, 17.5)
+                self.assertTrue(all(renderer.sea_level_wave_strip(rect).contains(point) for point in points))
                 self.assertTrue(all(point.y() <= rect.bottom() - 3. for point in points))
                 self.assertTrue(all(rect.left() <= point.x() <= rect.right() for point in points))
                 self.assertEqual(renderer.sea_level_wave_strip(rect),
-                                 QRectF(rect.left(), waterline - 18., rect.width(), 58.).intersected(rect))
+                                 QRectF(rect.left(), waterline - 44., rect.width(), 104.).intersected(rect))
+
+    def test_every_legal_drive_keeps_crest_glow_and_flip_reflection_inside_damage(self):
+        state = SeaWaveState()
+        renderer = self.renderer(state)
+        rect = QRectF(0., 0., 520., 136.)
+        strip = renderer.sea_level_wave_strip(rect)
+        for tick in range(360):
+            peak = 1. if tick % 18 < 6 else .0004
+            state.update_ripple(peak, tick / 30., vocal=1., low=peak)
+            points = renderer._sea_level_surface(renderer.render_context("sea_level", expanded=True), rect, True)
+            self.assertGreaterEqual(min(point.y() for point in points) - 11., strip.top())
+            self.assertLessEqual(max(point.y() for point in points) + 26., strip.bottom())
+
+    def test_tight_dpr_raster_retains_the_full_strip_pixels(self):
+        rect = QRectF(0., 0., 520., 136.)
+        for moment in ("quiet", "vocal", "beat"):
+            state = RisingSeaStateTests.warm(peak=.0004 if moment != "vocal" else .64,
+                                             vocal=.25 if moment == "vocal" else 0.)
+            if moment == "beat":
+                for tick in range(6):
+                    state.update_ripple(.64, 6. + tick / 30., low=.64)
+            for progress in (1., .25, .75):
+                renderer = self.renderer(state)
+                renderer.host._island_track_transition_progress = lambda _now: progress
+                images = []
+                history = state._ripple_history.copy()
+                for tight in (True, False):
+                    if not tight:
+                        state._ripple_history.clear()
+                    image = QImage(1040, 272, QImage.Format.Format_ARGB32_Premultiplied)
+                    image.setDevicePixelRatio(2.)
+                    image.fill(Qt.GlobalColor.transparent)
+                    # Discard the per-renderer raster to compare independent
+                    # tight and complete allocations of the same water pose.
+                    renderer._sea_ripple_raster = None
+                    with QPainter(image) as painter:
+                        renderer.paint_sea_level_wave(painter, rect, 24., True)
+                    images.append(image)
+                state._ripple_history = history
+                with self.subTest(moment=moment, progress=progress):
+                    self.assertEqual(images[0], images[1])
 
     def test_repeated_paint_preserves_water_history_and_returns_identical_rasters(self):
         state = RisingSeaStateTests.warm(vocal=.25, low=.03)

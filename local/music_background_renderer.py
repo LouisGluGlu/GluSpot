@@ -1066,7 +1066,7 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
     def sea_level_wave_strip(self, rect: QRectF) -> QRectF:
         """Fixed damage envelope: all ripple, reflection and glow pixels."""
         center = rect.top() + rect.height() * .495
-        return QRectF(rect.left(), center - self._u(18), rect.width(), self._u(58)).intersected(rect)
+        return QRectF(rect.left(), center - self._u(44), rect.width(), self._u(104)).intersected(rect)
 
     def _sea_level_surface(self, context: MusicBackgroundRenderContext, rect: QRectF, expanded: bool) -> list[QPointF]:
         """The moving water line shared by the sea body and its highlight.
@@ -1280,9 +1280,29 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
                 # This soft light needs only a logical-pixel raster. Bound
                 # high-DPI tessellation and allocation to the wave strip,
                 # then let Qt scale its tinted falloff with the shell clip.
-                strip = self.sea_level_wave_strip(rect).toAlignedRect()
                 state = getattr(self.host, "_sea_wave_state", None)
                 preview_mode = getattr(self.host, "sea_shape_mode", None)
+                raster_bounds = self.sea_level_wave_strip(rect)
+                if state is not None and not preview_mode and state._ripple_history:
+                    # Damage stays fixed so old water is cleared. The DPR raster
+                    # only needs this pose's crest, glow and moving reflection.
+                    # Reuse the audio tick's numeric samples, avoiding another
+                    # round of trigonometry or per-point Qt geometry calls.
+                    samples = state._ripple_history[-1][1]
+                    center = rect.top() + rect.height() * .495
+                    unit = self._u(1.)
+                    top = center - unit * max(samples) - 2. * unit
+                    bottom = center - unit * min(samples) + unit * (.3 + 24.7 * state.ripple_level + 2.)
+                    if 0. < progress < 1.:
+                        index = (.04 + .92 * progress) * 48
+                        left = int(index)
+                        fraction = index - left
+                        reflection_y = center - unit * (samples[left] * (1. - fraction)
+                                        + samples[min(left + 1, 48)] * fraction)
+                        top = min(top, reflection_y - unit * 11.)
+                        bottom = max(bottom, reflection_y + unit * 15.)
+                    raster_bounds = QRectF(rect.left(), top, rect.width(), bottom - top).intersected(raster_bounds)
+                strip = raster_bounds.toAlignedRect()
                 key = (id(state), getattr(state, "ripple_updated_at", None), getattr(state, "updated_at", None),
                        preview_mode, float(getattr(self.host, "ambient_phase", 0.)) if preview_mode else None,
                        rect.getRect(), radius, self._u(1.0), sea.rgba(), line.rgba(), progress)
@@ -1362,11 +1382,12 @@ class NativeMusicBackgroundRenderer(_HostBackedRenderer):
         unit = self._u(1.)
         ribbon = QPainterPath()
         for index in range(len(points) - 1):
-            a, b = points[index:index + 2]
-            wa, wb = (unit * min(max_width, widths[i]) for i in (index, index + 1))
+            a, b = points[index], points[index + 1]
+            wa = unit * min(max_width, widths[index])
+            wb = unit * min(max_width, widths[index + 1])
             if wa <= 0. and wb <= 0.:
                 continue
-            ra, rb = rises[index:index + 2]
+            ra, rb = rises[index], rises[index + 1]
             # Surface segments interpolate linearly. Stop exactly at their
             # zero-rise crossing, before ink could enter a falling interval.
             if ra > 0. >= rb:

@@ -52,6 +52,10 @@ class SeaWaveState:
         self.onset_strength = 0.0
         self._vibration_at = -10.0
         self.ripple_level = 0.0
+        self.ripple_beat = 0.0
+        self._ripple_low_average = 0.0
+        self._ripple_amplitude = .20
+        self._ripple_drift = 0.0
         self.ripple_updated_at = None
         self.ripple_time = 0.0
         self._ripple_history = deque(maxlen=34)
@@ -82,6 +86,21 @@ class SeaWaveState:
                 target = min(1.0, target + 1.4 * max(0.0, min(1.0, vocal) - .02))
         tau = .060 if target > self.ripple_level else .250
         self.ripple_level += (target - self.ripple_level) * -math.expm1(-dt / tau)
+        # The low-band envelope follows absolute energy, without the preview
+        # AGC. Keep the earlier onset timing, with a restrained displacement.
+        low = float(low)
+        low = max(0., min(1., low)) if is_playing and math.isfinite(low) else 0.
+        onset = max(0., low - self._ripple_low_average * 1.15 - .02)
+        self._ripple_low_average = _follow(self._ripple_low_average, low, dt, .45)
+        beat_target = min(1., onset * 2.5)
+        beat_tau = .020 if beat_target > self.ripple_beat else .110
+        self.ripple_beat += (beat_target - self.ripple_beat) * -math.expm1(-dt / beat_tau)
+        # Preserve the quiet floor and add a moderate absolute swell. Derive
+        # scalars once on the audio clock; every paint reuses this same pose.
+        self._ripple_amplitude = (.20 + 12.5 * self.ripple_level
+                                  + 10. * max(0., self.ripple_level - .02) ** 1.5
+                                  + 9.5 * self.ripple_beat)
+        self._ripple_drift = .22 * math.sin(self.ripple_time * .17)
         sample = (float(now), tuple(self.ripple_displacement(i / 48) for i in range(49)))
         if self._ripple_history and now <= self._ripple_history[-1][0]:
             if now < self._ripple_history[-1][0]:
@@ -97,13 +116,11 @@ class SeaWaveState:
     def ripple_displacement(self, pos):
         """Three long ripples with independent, slowly drifting phases."""
         t = self.ripple_time
-        drift = .22 * math.sin(t * .17)
+        drift = self._ripple_drift
         shape = (.58 * math.sin(pos * math.tau * 1.10 - t * .72 + drift)
                  + .29 * math.sin(pos * math.tau * 2.25 + t * .49 - drift)
                  + .13 * math.sin(pos * math.tau * 3.65 - t * .31 + .8))
-        # Keep the restrained absolute peak/vocal response used by ebe525e.
-        # The accepted low-band input no longer adds a separate onset punch.
-        return (.20 + 12.5 * self.ripple_level) * shape
+        return self._ripple_amplitude * shape
 
     def _update_ripple_edge(self, dt):
         """Smooth extra crest thickness on the audio clock, never in paint."""

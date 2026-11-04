@@ -1,5 +1,7 @@
 # Restrained sea amplitude and refined crest — t225
 
+Amplitude superseded by [t225 round 2](island-sea-t225-round2.md); this page records the original rollback evidence.
+
 Base: `395d6ed0` on `grok/capture-narrow-v4`. Codex wrote all product
 changes. Version and packaging remain 6.417. This task changes only sea
 amplitude, its crest rendering, related tests and this documentation.

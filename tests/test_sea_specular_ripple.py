@@ -205,7 +205,7 @@ class PeakInputTests(unittest.TestCase):
                 self.assertFalse(snapshot.live_audio_available)
                 self.assertEqual(host._sea_peak_sample, peak)
 
-    def test_sea_absolute_peak_ignores_playing_fallback_bands_and_low_onsets(self):
+    def test_sea_ignores_playing_fallback_bands_but_reads_absolute_low_onsets(self):
         from local.audio_reactive_engine import AudioReactiveRuntime
         runtime = AudioReactiveRuntime()
         frame = [AudioFrame(0., 0., 0., peak=0.)]
@@ -236,8 +236,9 @@ class PeakInputTests(unittest.TestCase):
         for tick in range(90):
             peak_only.update_ripple(0., tick / 30.)
         peak_only.update_ripple(.64, 3.)
-        self.assertEqual([host._sea_wave_state.ripple_displacement(i / 48.) for i in range(49)],
-                         [peak_only.ripple_displacement(i / 48.) for i in range(49)])
+        self.assertGreater(host._sea_wave_state.ripple_beat, .8)
+        self.assertGreater(max(abs(host._sea_wave_state.ripple_displacement(i / 48.)) for i in range(49)),
+                           max(abs(peak_only.ripple_displacement(i / 48.)) for i in range(49)))
         frame[0] = None
         with patch("local.island_stack_visual.time.monotonic", return_value=3.033):
             IslandStackVisual._update_wave_values(host)
@@ -313,8 +314,8 @@ class ExpandedRippleRenderTests(unittest.TestCase):
                 images.append(self._rgb(image))
                 body_pixel = image.pixelColor(260, 77)
                 self.assertLess(abs(body_pixel.hslHueF() - color.hslHueF()), .025)
-                # The restored small wave and its graded light stay inside
-                # the original bounded damage strip.
+                # The moderate wave and its graded light stay inside
+                # the bounded damage strip.
                 strip = renderer.sea_level_wave_strip(rect).toAlignedRect()
                 crest = images[-1][strip.top():strip.bottom()+1, 20:500]
                 brightest = crest.reshape(-1, 3)[np.argmax(crest.sum(axis=2))].astype(int)
@@ -423,10 +424,10 @@ class ExpandedRippleRenderTests(unittest.TestCase):
                                _build_visuals=lambda: [SimpleNamespace(kind=IslandKind.MUSIC, key="music", rect=rect)],
                                _native_music_background_renderer=lambda: NativeMusicBackgroundRenderer(PaintHost({})))
         damage = IslandStackVisual._sea_wave_only_damage(host, 10.)
-        # The original 58-unit wave strip avoids a full-shell repaint and
-        # leaves the header above the water undamaged.
-        self.assertLess(damage.height(), rect.height() * .7)
-        self.assertGreaterEqual(damage.top(), rect.top() + 40.)
+        # The 104-unit wave strip includes the larger crest and glow while
+        # avoiding a full-shell repaint and preserving the top header.
+        self.assertLess(damage.height(), rect.height() * .8)
+        self.assertGreaterEqual(damage.top(), rect.top() + 22.)
         motion.vw = 1.
         self.assertIsNone(IslandStackVisual._sea_wave_only_damage(host, 10.))
         motion.vw = 0.
