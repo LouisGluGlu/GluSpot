@@ -120,13 +120,14 @@ class MusicRippleQualityTests(unittest.TestCase):
         self._queued_palette_owner()
         first = self._change_cover(0)
         self._change_cover(90)
-        self._change_cover(180)
+        current = self._change_cover(180)
+        self.assertNotEqual(current, first)
         self.assertEqual(len(self.jobs), 1)
         self.jobs[0]()
         self.assertEqual(len(self.jobs), 2)
         # The old job may populate the shared value cache but cannot replace
-        # the displayed palette for a different current cover.
-        self.assertEqual(self.window._art_palette_cache, first)
+        # the current provider-tone fallback for a different current cover.
+        self.assertEqual(self.window._art_palette_cache, current)
         self.jobs[1]()
         expected = artwork_surface_palette(self.owner.album_art, self.owner.album_color, self.owner.secondary_color)
         self.assertEqual(self.window._art_palette_cache, expected)
@@ -155,10 +156,11 @@ class MusicRippleQualityTests(unittest.TestCase):
         with (patch.object(self.window, "showFullScreen"), patch.object(self.window, "raise_"),
               patch.object(self.window, "activateWindow")):
             self.window.show_from_island(fullscreen=True)
-        self._change_cover(200)
+        current = self._change_cover(200)
+        self.assertNotEqual(current, first)
         self.assertEqual(len(self.jobs), 1)
         self.jobs[0]()
-        self.assertEqual(self.window._art_palette_cache, first)
+        self.assertEqual(self.window._art_palette_cache, current)
         self.assertEqual(len(self.jobs), 2)
         self.jobs[1]()
         expected = artwork_surface_palette(self.owner.album_art, self.owner.album_color, self.owner.secondary_color)
@@ -202,11 +204,16 @@ class MusicRippleQualityTests(unittest.TestCase):
     def test_failed_palette_job_holds_display_and_does_not_retry_every_paint(self):
         first = self._change_cover(65)
         self._queued_palette_owner()
-        with patch("local.music_surface_window.artwork_surface_palette", side_effect=RuntimeError("fixture extraction failure")):
-            self._change_cover(245)
+        def failed_extraction(image, *colors):
+            if not image.isNull():
+                raise RuntimeError("fixture extraction failure")
+            return artwork_surface_palette(image, *colors)
+        with patch("local.music_surface_window.artwork_surface_palette", side_effect=failed_extraction):
+            current = self._change_cover(245)
+            self.assertNotEqual(current, first)
             self.jobs[0]()
             for _ in range(5):
-                self.assertEqual(self.window._art_palette(), first)
+                self.assertEqual(self.window._art_palette(), current)
         self.assertEqual(len(self.jobs), 1)
         self.assertIsNone(self.window._art_palette_worker_key)
         self.assertEqual(self.window._art_palette_failed_key[0], self.owner.album_art.cacheKey())
