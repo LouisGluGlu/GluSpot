@@ -1661,14 +1661,29 @@ class IslandStackVisual(QWidget):
             fps = max(fps, self._normalize_animation_fps(getattr(self, "lyric_animation_fps", fps)))
         return fps
 
+    def _island_presentation_hidden(self) -> bool:
+        if self._navigation_surface_blocks_island():
+            return True
+        try:
+            return not self.isVisible() or self.isMinimized()
+        except RuntimeError:
+            # Geometry-only callers can use a visual without a native widget.
+            return False
+
     def _timer_interval_ms(self, active_animation: bool = True, now: float | None = None) -> int:
+        if self._island_presentation_hidden():
+            # The owner still supplies media/lyric/DJ state to the other pages.
+            # Their own timers present frames; keep only a low-rate owner clock.
+            current = time.monotonic() if now is None else float(now)
+            refresh_interval = float(getattr(self, "media_refresh_interval", 0.65))
+            if current < float(getattr(self, "_media_strong_tracking_until", 0.0)):
+                refresh_interval = min(refresh_interval, 0.12)
+            remaining = refresh_interval - (current - float(getattr(self, "last_media_refresh_at", 0.0)))
+            # Wake at an intervening provider deadline, preserving its existing
+            # 120/180/650 ms cadence instead of rounding it to 100 ms ticks.
+            return min(100, max(1, int(math.ceil(remaining * 1000)))) if remaining > 0.0 else 100
         fps = self._effective_animation_fps(active_animation, now=now)
-        interval = max(1, int(round(1000 / fps)))
-        if self._navigation_window_visible(getattr(self, "music_fullscreen_overlay", None)):
-            # Keep provider/owner clocks live while its island is hidden;
-            # the music surface owns presentation, including lyric motion.
-            interval = max(33, interval)
-        return interval
+        return max(1, int(round(1000 / fps)))
 
     def _stable_render_interval_ms(self) -> int:
         return self._timer_interval_ms(active_animation=False)
@@ -3771,6 +3786,10 @@ class IslandStackVisual(QWidget):
         self._center_on_screen()
         self._refresh_top_notch_position()
         self._force_super_topmost()
+        timer = getattr(self, "timer", None)
+        if timer is not None:
+            self.last_tick_at = time.monotonic()
+            timer.start(self._timer_interval_ms())
 
     def hideEvent(self, event):
         self._clear_island_track_transition()
@@ -3785,6 +3804,9 @@ class IslandStackVisual(QWidget):
         if motion is not None:
             motion.clear(time.monotonic())
         super().hideEvent(event)
+        timer = getattr(self, "timer", None)
+        if timer is not None and timer.isActive():
+            self._retune_frame_timer(False, now=time.monotonic())
 
     def on_audio_device_event(self, route, device) -> None:
         if bool(getattr(self, "_runtime_extras_retired", False)):
@@ -3818,6 +3840,20 @@ class IslandStackVisual(QWidget):
 
     def _tick(self):
         now = time.monotonic()
+        if self._island_presentation_hidden():
+            self.last_tick_at = now
+            self._clear_island_track_transition()
+            self._handle_tick_runtime_refresh(now)
+            self._handle_music_lyric_tick(now, self._animation_speed_factor())
+            if (bool(getattr(self, "taskbar_hidden_by_follow", False))
+                    and not self._navigation_surface_blocks_island()
+                    and not bool(getattr(self, "_tray_hidden", False))
+                    and not bool(getattr(self, "_application_quitting", False))):
+                # A native taskbar hide can only recover through its follow
+                # probe. Do not run this while another page owns the surface.
+                self._handle_tick_follow_refresh(now)
+            self._retune_frame_timer(False, now=now)
+            return
         if (bool(getattr(self, "scene_suppressed", False))
                 or self._navigation_surface_blocks_island()):
             self._clear_island_track_transition()
@@ -3840,13 +3876,6 @@ class IslandStackVisual(QWidget):
                 notice_motion.clear(now)
             else:
                 notice_changed = notice_motion.advance(now)
-        music_surface = getattr(self, "music_fullscreen_overlay", None)
-        if self._navigation_window_visible(music_surface):
-            self._retune_frame_timer(False, now=now)
-            self._refresh_media_data(now)
-            self._update_scene_state(now)
-            self._handle_music_lyric_tick(now, speed)
-            return
         visual_data_changed = self._handle_tick_runtime_refresh(now)
         self._handle_tick_follow_refresh(now)
         self._handle_tick_overlay_clock_and_topmost(now, anim_dt)

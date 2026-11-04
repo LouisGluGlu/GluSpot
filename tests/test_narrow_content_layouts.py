@@ -200,7 +200,7 @@ class NarrowContentLayoutTests(unittest.TestCase):
         self.owner.music_fullscreen_overlay = self.window
         self.owner.animation_fps = self.owner.lyric_animation_fps = 165
         with patch.object(self.owner, "_display_refresh_rate_fps_cap", return_value=165):
-            self.assertEqual(self.owner._timer_interval_ms(), 33)
+            self.assertEqual(self.owner._timer_interval_ms(), 100)
             self.window.hide()
             self.window.show()
             self.assertTrue(self.window._timer.isActive())
@@ -209,6 +209,7 @@ class NarrowContentLayoutTests(unittest.TestCase):
                 self.window._on_animation_tick()
                 tick.assert_called_once_with()
             self.window.hide()
+            self.owner.show()
             self.assertEqual(self.owner._timer_interval_ms(), 6)
         self.assertEqual(self.owner.animation_fps, 165)
 
