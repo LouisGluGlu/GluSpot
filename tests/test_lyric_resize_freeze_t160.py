@@ -374,6 +374,36 @@ class LyricResizeFreezeTests(unittest.TestCase):
         self.wait_settle()
         self.assertIsNotNone(window._lyric_resize_crossfade_at)
 
+    def test_instrumental_playlist_keeps_visible_snapshot_when_resize_settles(self):
+        window = self.window
+        self.owner.timed_lyrics = []
+        self.owner.lyrics = ['纯音乐，请欣赏']
+        self.render()
+        # Follow the actual no-lyrics layout button; this records the manual
+        # playlist choice instead of allowing automatic cover-only fallback.
+        window._cycle_content_layout()
+        window._layout_animation.stop()
+        window._finish_content_layout()
+        self.render()
+        self.assertEqual(window._effective_content_layout(), 'playlist')
+        window.resize(1099, 640)
+        self.render()
+        self.assertTrue(window._lyric_resize_frozen)
+        self.assertFalse(window._lyric_resize_snapshot.isNull())
+        at = window._lyric_resize_started_at + .25
+        with patch('local.music_lyric_resize.time.monotonic', return_value=at), \
+                patch.object(window, '_paint_lyric_loading', wraps=window._paint_lyric_loading) as loading:
+            window._settle_lyric_resize()
+            self.assertFalse(window._lyric_resize_frozen)
+            self.assertEqual(window._lyric_resize_ink_weights(), (1., 0., 0.))
+            image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(Qt.GlobalColor.transparent)
+            with QPainter(image) as painter:
+                window._paint_playback_queue(painter, QRectF(window._queue_view_rect))
+            loading.assert_not_called()
+        rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        self.assertGreater(sum(alpha > 0 for alpha in bytes(rgba.constBits())[3::4]), 100)
+
     def test_new_width_during_reveal_starts_from_visible_composite(self):
         window = self.window
         column = QRectF(window._lyric_resize_last_geometry['column'])

@@ -310,7 +310,8 @@ class MusicLyricResizeMixin:
         finally:
             self._lyric_resize_committing = False
         # Wrap reuse skips shaping, but follows the same visual handoff.
-        if self._effective_content_layout() != 'cover_lyrics':
+        if (self._effective_content_layout() != 'cover_lyrics'
+                and self._lyric_content_state() not in {'idle', 'no_lyrics'}):
             self._lyric_resize_snapshot = QImage()
         self._lyric_resize_crossfade_at = time.monotonic()
         self._lyric_resize_fade_timer.start()
