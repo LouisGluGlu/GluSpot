@@ -344,6 +344,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._future_tone_backdrop = QColor(12, 15, 22)
         self._art_palette_cache_key = None
         self._art_palette_cache: MusicSurfacePalette | None = None
+        self._art_palette_fallback_key = None
         self._art_palette_worker_token = 0
         self._art_palette_active_token = None
         self._art_palette_worker_key = None
@@ -586,7 +587,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                 int(getattr(self.owner, "_lyric_presentation_revision", 0)),
                 getattr(self.owner, "album_art", QImage()).cacheKey(),
                 str(getattr(self.owner, "album_art_source", "")),
-                str(getattr(self.owner, "album_art_lookup_state", "")))
+                str(getattr(self.owner, "album_art_lookup_state", "")),
+                self._owner_color("album_color", QColor(27, 36, 60)).rgba(),
+                self._owner_color("secondary_color", QColor(9, 12, 22)).rgba())
 
     def _on_owner_visual_data_changed(self, _data=None):
         """Consume the shared owner even while this window has no paint clock."""
@@ -610,13 +613,18 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._last_visible_lyric_snapshot_track = None
             self._hidden_lyric_pose_size = QSize()
             self._hidden_lyric_pose_track = None
-            palette = self._art_palette()
-            self._track_transition(time.monotonic(), QColor(palette.primary), QColor(palette.secondary))
         self._frame_lyric_cache = None
         now = time.monotonic()
+        if key[:3] != previous[:3] or key[5:] != previous[5:]:
+            self._on_artwork_visual_changed(now)
         self._update_lyric_loading_state(now)
         self._sync_no_lyrics_content_layout(now)
         self.update()
+
+    def _on_artwork_visual_changed(self, now):
+        """Publish cover and palette together, including same-track upgrades."""
+        palette = self._art_palette()
+        self._track_transition(now, QColor(palette.primary), QColor(palette.secondary))
 
     @property
     def presentation_mode(self) -> str:
@@ -1952,6 +1960,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._art_palette_pending = None
         self._art_palette_failed_key = None
         self._art_palette_cache_key = None
+        self._art_palette_fallback_key = None
         image = QImage(getattr(self.owner, "album_art", QImage()))
         self._art_loading_track_key = self._track_visual[0] if self._track_visual else (
             str(getattr(self.owner, "media_track_id", "") or "") or (
@@ -2402,19 +2411,24 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             runner = getattr(self.owner, "_run_background", None)
             if cached is not None:
                 self._art_palette_cache, self._art_palette_cache_key = cached, key
+                self._art_palette_fallback_key = None
             elif image.isNull() or not callable(runner):
                 self._art_palette_cache = artwork_surface_palette(image, album, secondary)
                 self._art_palette_cache_key = key
+                self._art_palette_fallback_key = None
             elif self._art_palette_failed_key != key and not self._closing_for_shutdown:
                 if (self._art_palette_worker_key != key
                         or self._art_palette_active_token != self._art_palette_worker_token):
                     self._art_palette_pending = (key, image, album, secondary)
                 self._start_artwork_palette_worker()
-            if self._art_palette_cache is None:
-                # Hold a real provider tone on first open; subsequent misses
-                # retain the last complete displayed palette until ready.
-                # The existing 1.2 s field retarget keeps the handoff smooth.
+            if (self._art_palette_cache is None or key != self._art_palette_cache_key
+                    and self._art_palette_fallback_key != key):
+                # The applied owner already has this artwork's provider
+                # tones. Start its existing field transition immediately;
+                # extraction enriches the same scene when ready, without
+                # displaying the previous track's palette in the meantime.
                 self._art_palette_cache = artwork_surface_palette(QImage(), album, secondary)
+                self._art_palette_fallback_key = key
         return self._art_palette_cache
 
     def _start_artwork_palette_worker(self):
@@ -2468,7 +2482,9 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         if token == self._art_palette_worker_token and key == current:
             if result is not None:
                 self._art_palette_cache, self._art_palette_cache_key = result, key
+                self._art_palette_fallback_key = None
                 self._art_palette_failed_key = None
+                self._on_artwork_visual_changed(time.monotonic())
                 self.update()
             else:
                 self._art_palette_failed_key = key

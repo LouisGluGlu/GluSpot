@@ -605,6 +605,20 @@ class NarrowStudyWindow(MusicSurfaceWindow):
             if veil_drift:
                 self._background_veil_key = None
 
+    def _on_artwork_visual_changed(self, now):
+        # The shared owner/palette publication is the cover's authority. The
+        # chrome snapshot must consume that same scene before the next paint,
+        # even when no playback-position or play-state change follows it.
+        super()._on_artwork_visual_changed(now)
+        if not hasattr(self, "visibility") or not hasattr(self, "_controls_key"):
+            return
+        self._sync_artwork_palette(now)
+        self._commit_key = None
+        self._wide_lyrics_dirty = True
+        self._refresh_chrome_backdrop(now, force=True)
+        if self.narrow or self._width_chrome_active:
+            self.refresh_controls(now)
+
     def _sync_chrome_accessibility(self):
         if not hasattr(self, "visibility"):
             return

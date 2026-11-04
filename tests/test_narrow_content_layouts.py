@@ -277,6 +277,9 @@ class NarrowContentLayoutTests(unittest.TestCase):
 
     def test_hidden_palette_safety_check_recovers_drift_at_ten_seconds(self):
         self.hide_chrome()
+        # Publication may already have synchronized the palette during setup.
+        # Establish this test's synthetic epoch before measuring ten seconds.
+        self.window._palette_resync_at = -float("inf")
         self.window._sync_artwork_palette(100.)
         self.window.refresh_background_veil(100.)
         self.window.refresh_controls(100.)
