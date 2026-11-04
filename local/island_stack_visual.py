@@ -474,6 +474,9 @@ class TaskbarDropOverlay(QWidget):
 
 
 class IslandStackVisual(QWidget):
+    # All mounted/windowed presentations observe this fully applied provider
+    # snapshot. Presentation children never select a playback source themselves.
+    visualDataChanged = Signal(object)
     VISUAL_SCALE = 0.75
     STACK_WIDTH = 560
     DEFAULT_FONT_FAMILY = "Alibaba PuHuiTi"
@@ -1076,6 +1079,10 @@ class IslandStackVisual(QWidget):
             if surface is not None:
                 surface.update()
         self._sync_timed_lyrics(now, allow_backward=timed_lyrics_appeared or timing_changed)
+        previous_visual_data = getattr(self, "current_visual_data", None)
+        self.current_visual_data = visual_data
+        if visual_data != previous_visual_data:
+            self.visualDataChanged.emit(visual_data)
         return bool(
             track_changed
             or self.media_is_playing != previous_is_playing

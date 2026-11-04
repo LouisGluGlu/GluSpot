@@ -267,6 +267,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._art_loading_preview_key = None
         self._art_loading_preview_at = None
         self._art_loading_observed_at = 0.0
+        self._art_loading_started_at = None
+        self._art_loading_timed_out = False
         self._art_loading_metadata_key = None
         self._artwork_display_log_state = None
         self._hovered_window_button = ""
@@ -567,6 +569,50 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._init_content_layout()
         self._init_song_collection()
         self._init_window_compact()
+        self._owner_visual_key = self._owner_content_key()
+        changed = getattr(owner, "visualDataChanged", None)
+        if changed is not None:
+            changed.connect(self._on_owner_visual_data_changed)
+
+    def _owner_content_key(self):
+        return (self._visual_track_identity(),
+                str(getattr(self.owner, "track_title", "")),
+                str(getattr(self.owner, "artist", "")),
+                tuple(getattr(self.owner, "lyrics", ())),
+                int(getattr(self.owner, "_lyric_presentation_revision", 0)),
+                getattr(self.owner, "album_art", QImage()).cacheKey(),
+                str(getattr(self.owner, "album_art_source", "")),
+                str(getattr(self.owner, "album_art_lookup_state", "")))
+
+    def _on_owner_visual_data_changed(self, _data=None):
+        """Consume the shared owner even while this window has no paint clock."""
+        if self._closing_for_shutdown:
+            return
+        key = self._owner_content_key()
+        previous = self._owner_visual_key
+        if key == previous:
+            return
+        self._owner_visual_key = key
+        if key[:3] != previous[:3]:
+            # A frozen geometry/layout bitmap includes title, cover and loader.
+            # Retire it at publication, before another timer/paint can display
+            # a different song from the island (including hidden windows).
+            self._finish_stale_track_transition()
+            self._reset_window_compact()
+            self._cancel_lyric_resize()
+            self._layout_animation.stop()
+            self._finish_content_layout()
+            self._last_visible_lyric_snapshot = None
+            self._last_visible_lyric_snapshot_track = None
+            self._hidden_lyric_pose_size = QSize()
+            self._hidden_lyric_pose_track = None
+            palette = self._art_palette()
+            self._track_transition(time.monotonic(), QColor(palette.primary), QColor(palette.secondary))
+        self._frame_lyric_cache = None
+        now = time.monotonic()
+        self._update_lyric_loading_state(now)
+        self._sync_no_lyrics_content_layout(now)
+        self.update()
 
     @property
     def presentation_mode(self) -> str:
@@ -1283,6 +1329,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         painter.restore()
 
     def showEvent(self, event):
+        self._on_owner_visual_data_changed()
         self._sync_queue_artwork_connection()
         self._resize_content_layout()
         self._sync_surface_shape()
@@ -1813,6 +1860,20 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             # no longer an in-flight download, and must not hold lyric feedback
             # behind a permanently repeating artwork ring.
             return False
+        if (self._art_loading_started_at is not None
+                and self._art_loading_observed_at - self._art_loading_started_at >= 30.):
+            # Acquisition retries belong to the provider. The visual wait is
+            # bounded even if native/network work fails to return; keep its
+            # best thumbnail or the ordinary empty-cover placeholder usable.
+            if not self._art_loading_timed_out:
+                self._art_loading_timed_out = True
+                identity = "|".join(artwork_text_key(getattr(self.owner, name, ""))
+                                    for name in ("track_title", "artist"))
+                image = getattr(self.owner, "album_art", QImage())
+                log_artwork_event("display", identity,
+                    str(getattr(self.owner, "album_art_source", "")),
+                    min(image.width(), image.height()), "fallback", "timeout")
+            return False
         image = QImage(getattr(self.owner, "album_art", QImage()))
         source = str(getattr(self.owner, "album_art_source", "") or "")
         # Acquisition provenance belongs to the provider. Resizing the
@@ -1842,6 +1903,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
                if self._art_loading_preview_at is not None else 0.0)
         blur = bool(
             state == "pending" and self._art_loading_waiting and side > 0
+            and not self._art_loading_timed_out
             and (side < 96 or age < 2.5)
             and self._track_visual is not None and self._art_loading_track_key == self._track_visual[0]
             and (source == "thumbnail" or self._artwork_display_key(image) == self._art_loading_preview_key)
@@ -1892,6 +1954,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         )
         self._art_loading_preview_key = None if image.isNull() else self._artwork_display_key(image)
         self._art_loading_preview_at = time.monotonic() if not image.isNull() else None
+        self._art_loading_started_at = time.monotonic()
+        self._art_loading_timed_out = False
         self._art_loading_waiting = True
         self._begin_art_loading_ring(time.monotonic())
         self.update()
@@ -1910,6 +1974,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         metadata_key = tuple(artwork_text_key(getattr(self.owner, name, "")) for name in ("track_title", "artist"))
         if metadata_key != self._art_loading_metadata_key:
             self._art_loading_preview_at = now if self._art_loading_preview_key is not None else None
+            self._art_loading_started_at = now
+            self._art_loading_timed_out = False
         elif self._art_loading_preview_key is not None and self._art_loading_preview_at is None:
             self._art_loading_preview_at = now
         self._art_loading_metadata_key = metadata_key
@@ -3044,8 +3110,18 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     def _track_transition(self, now: float, primary: QColor, secondary: QColor) -> float:
         self._art_loading_observed_at = now
         metadata_key = tuple(artwork_text_key(getattr(self.owner, name, "")) for name in ("track_title", "artist"))
+        lookup_state = str(getattr(self.owner, "album_art_lookup_state", "") or "").casefold()
+        if (lookup_state == "pending"
+                and getattr(self, "_last_art_loading_state", "") in {"failed", "miss"}):
+            # A provider explicitly starting another attempt can reopen its
+            # ring; ordinary pending polls never renew the deadline/blur age.
+            self._art_loading_started_at = now
+            self._art_loading_timed_out = False
+        self._last_art_loading_state = lookup_state
         if metadata_key != self._art_loading_metadata_key:
             self._art_loading_metadata_key = metadata_key
+            self._art_loading_started_at = now
+            self._art_loading_timed_out = False
             image = QImage(getattr(self.owner, "album_art", QImage()))
             source = str(getattr(self.owner, "album_art_source", "") or "")
             self._art_loading_preview_at = now if source == "thumbnail" and not image.isNull() else None
