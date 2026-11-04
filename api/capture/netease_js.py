@@ -566,18 +566,20 @@ _INSTALL = r"""(() => {
     },
     read() { return latest; },
     observePause,
-    pauseCapability() { return {available:pauseAvailable(),trackId:latest ? latest.trackId : null}; },
+    pauseCapability() {
+      return {available: !!(active && canSeek && intact() && latest && playing === true),
+              trackId: latest ? latest.trackId : null};
+    },
     pause(trackId, requestId) {
-      if (!pauseAvailable() || latest.trackId !== String(trackId) || playing !== true ||
-          typeof requestId !== 'string' || !requestId || pauseRequests.has(requestId)) return false;
+      // Same channel.call as seek, aimed at the track that is current now.
+      // A later song is a new call with that song's native id, not a stored contract.
+      if (!active || !canSeek || !intact() || !latest || playing !== true ||
+          latest.trackId !== String(trackId) || typeof requestId !== 'string' ||
+          !requestId || pauseRequests.has(requestId)) return false;
       pauseRequests.add(requestId);
       if (pauseRequests.size > 256) { pauseRequests.clear(); pauseRequests.add(requestId); }
-      replayingPause = true;
-      try {
-        Reflect.apply(pauseHook.original, seekChannel,
-          [pauseContract.method,()=>{},pauseContract.args.slice()]);
-        return true;
-      } finally { replayingPause = false; }
+      seekChannel.call('audioplayer.pause', ()=>{}, [latest.nativeTrackId]);
+      return true;
     },
     seek(trackId, requestId, seconds) {
       if (!active || !canSeek || !latest || latest.trackId !== String(trackId) ||

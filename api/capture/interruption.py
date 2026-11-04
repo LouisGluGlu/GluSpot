@@ -29,11 +29,13 @@ if not _log.handlers and sys.stderr is not None:
 _LOG_PHASES = frozenset({
     'enable', 'disable', 'submit', 'observer', 'membership', 'session',
     'owned-start', 'pause-external', 'smtc-pause', 'cdp-fallback',
-    'cdp-observe', 'cdp-pause', 'external-edge', 'yield',
+    'cdp-observe', 'cdp-pause', 'external-edge', 'yield', 'focus',
 })
 _LOG_DECISIONS = frozenset({
     'baseline', 'armed', 'skip', 'pause', 'yield', 'wait', 'owned-paused',
+    'pause-external', 'pause-library',
 })
+_LOG_MATCHES = frozenset({'cloudmusic', 'orpheus'})
 _LOG_REASONS = frozenset({
     'owned-already-playing', 'waiting-for-start', 'loop-not-running', 'loop-missing',
     'unsupported', 'unavailable', 'superseded', 'started', 'manager-replaced',
@@ -52,6 +54,8 @@ _LOG_REASONS = frozenset({
     'error', 'absent', 'rejected', 'owned-not-playing', 'suspended', 'missing-start',
     'not-after-boundary', 'missing-nonplaying', 'nonplaying-before-boundary',
     'overlap', 'cooldown', 'owned-pause-failed',
+    'uncertain-wait', 'settled', 'already-sent', 'library-earlier',
+    'external-earlier', 'unknown-order',
 })
 _LOG_RESULTS = frozenset({
     'paused', 'rejected', 'uncertain', 'stale', 'started', 'unsupported',
@@ -64,7 +68,7 @@ _LOG_LOOPS = frozenset({'missing', 'running', 'not-running'})
 _LOG_OBSERVERS = frozenset({'present', 'missing'})
 _LOG_ACCEPTED = frozenset({'true', 'false', 'timeout', 'error', 'none'})
 _LOG_ORDER = (
-    'app_id', 'kind', 'playing', 'decision', 'result', 'reason', 'status',
+    'app_id', 'match', 'kind', 'playing', 'decision', 'result', 'reason', 'status',
     'accepted', 'edge', 'targets', 'observer', 'owned_playing', 'loop',
     'seen', 'kept', 'ambiguous', 'count', 'port',
 )
@@ -108,6 +112,8 @@ def _log_token(key, value):
         return value if value in _LOG_OBSERVERS else None
     if key == 'accepted':
         return value if value in _LOG_ACCEPTED else None
+    if key == 'match':
+        return value if value in _LOG_MATCHES else None
     if key in {'playing', 'edge', 'owned_playing'}:
         if value == 'unknown':
             return 'unknown'
@@ -146,6 +152,64 @@ def log_interruption(active, **fields) -> None:
         if rendered is not None:
             parts.append('%s=%s' % (key, rendered))
     _log.info(' '.join(parts))
+
+
+def netease_match(app_id):
+    """Exact NetEase process name or app-id prefix: cloudmusic or orpheus.
+
+    A name that merely contains those words does not match. ``netease`` is not
+    a match. Paths contribute only their final segment.
+    """
+    if not isinstance(app_id, str) or not app_id:
+        return None
+    text = app_id.replace('\\', '/').rsplit('/', 1)[-1] if ('\\' in app_id or '/' in app_id) else app_id
+    folded = text.casefold()
+    for token in ('cloudmusic', 'orpheus'):
+        exe = token + '.exe'
+        if folded == token or folded == exe:
+            return token
+        if folded.startswith(exe + '!') or folded.startswith(exe + '.'):
+            return token
+        if folded.startswith(token + '!') or folded.startswith(token + '.'):
+            # cloudmusic.exe with any extra character is a different name.
+            if folded.startswith(exe):
+                return None
+            return token
+    return None
+
+
+def focus_decision(owned_started_at, external_starts):
+    """Who keeps playing when both sides are already playing.
+
+    ``external_starts`` is ``(key, started_at)``. The library is paused only
+    when one external start is strictly later than the library and strictly
+    later than every other known external start. Missing or tied times keep
+    the library; the caller pauses external music.
+    Returns ``(action, key, reason)`` where action is ``pause-library`` or
+    ``pause-external``.
+    """
+    def finite(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value == value and value not in (float('inf'), float('-inf'))
+
+    owned_known = finite(owned_started_at)
+    best_key = None
+    best_time = None
+    tie = False
+    earlier_external = False
+    for key, started in external_starts:
+        if not finite(started):
+            continue
+        if owned_known and started < owned_started_at:
+            earlier_external = True
+        if best_time is None or started > best_time:
+            best_key, best_time, tie = key, started, False
+        elif started == best_time:
+            tie = True
+    if (owned_known and best_key is not None and not tie and best_time > owned_started_at):
+        return ('pause-library', best_key, 'library-earlier')
+    if earlier_external:
+        return ('pause-external', None, 'external-earlier')
+    return ('pause-external', None, 'unknown-order')
 
 
 def same_session(left, right) -> bool:
@@ -216,7 +280,7 @@ class MediaClassifier:
     image evidence vetoes positive metadata and allowlist evidence. Art means
     decoded *raw SMTC* thumbnail bytes, never a downloaded or cached old cover.
     """
-    MUSIC_APPS = frozenset(('cloudmusic.exe', 'qqmusic.exe', 'spotify.exe'))
+    MUSIC_APPS = frozenset(('cloudmusic.exe', 'orpheus.exe', 'qqmusic.exe', 'spotify.exe'))
 
     def classify(self, app_id, playback, properties, *, artwork_readable=False):
         if not isinstance(app_id, str) or not app_id or app_id.casefold() == 'gluspot':
@@ -230,7 +294,7 @@ class MediaClassifier:
                 return MediaKind.UNKNOWN
             if 1 in types:
                 return MediaKind.MUSIC
-            if app_id.casefold() in self.MUSIC_APPS:
+            if app_id.casefold() in self.MUSIC_APPS or netease_match(app_id):
                 return MediaKind.MUSIC
             title = _text(getattr(properties, 'title', ''))
             artist = _text(getattr(properties, 'artist', ''))
@@ -471,10 +535,14 @@ class SmtcInterruptionObserver:
             binding.diag_state = state
             return
         binding.diag_state = state
-        self._diag(phase='session', app_id=observation.app_id, kind=observation.kind.value,
-                   playing='unknown' if playing is None else int(bool(playing)),
-                   status='none' if not isinstance(status, int) or isinstance(status, bool) else status,
-                   edge=int(bool(edge)), reason=reason)
+        fields = dict(phase='session', app_id=observation.app_id, kind=observation.kind.value,
+                      playing='unknown' if playing is None else int(bool(playing)),
+                      status='none' if not isinstance(status, int) or isinstance(status, bool) else status,
+                      edge=int(bool(edge)), reason=reason)
+        matched = netease_match(observation.app_id)
+        if matched:
+            fields['match'] = matched
+        self._diag(**fields)
 
     async def _read(self, binding):
         at = self.clock()  # State observation precedes metadata I/O.

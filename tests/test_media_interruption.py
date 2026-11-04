@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 from api.capture.interruption import (
     InterruptionPolicy, MediaClassifier, MediaKind, PauseResult,
-    ReservedAudioDetector, SmtcInterruptionObserver, same_session,
+    ReservedAudioDetector, SmtcInterruptionObserver, focus_decision, netease_match,
+    same_session,
 )
 from tests.capture_async import CaptureAsyncTestCase
 from tests.test_capture_smtc import Session as TimelineSession
@@ -137,10 +138,33 @@ class ClassificationTests(unittest.TestCase):
                           MediaKind.UNKNOWN)
 
     def test_exact_allowlist_not_keywords_or_whitespace(self):
-        for app in ('cloudmusic.exe', 'QQMUSIC.EXE', 'spotify.exe'):
+        for app in ('cloudmusic.exe', 'QQMUSIC.EXE', 'spotify.exe', 'orpheus.exe',
+                    'cloudmusic.exe!App', r'C:\Program\orpheus.exe'):
             self.assertIs(self.classify(app), MediaKind.MUSIC)
-        for app in ('foo.spotify.bar', 'cloudmusic.exe ', 'spotify-player.exe', 'python.exe'):
+        for app in ('foo.spotify.bar', 'cloudmusic.exe ', 'spotify-player.exe', 'python.exe',
+                    'notcloudmusic.exe', 'cloudmusic-player.exe', 'myorpheus.exe', 'netease'):
             self.assertIs(self.classify(app), MediaKind.UNKNOWN)
+
+    def test_netease_match_is_exact_cloudmusic_or_orpheus_only(self):
+        self.assertEqual(netease_match('cloudmusic.exe'), 'cloudmusic')
+        self.assertEqual(netease_match('ORPHEUS.EXE'), 'orpheus')
+        self.assertEqual(netease_match('cloudmusic'), 'cloudmusic')
+        self.assertEqual(netease_match('orpheus!App'), 'orpheus')
+        self.assertEqual(netease_match(r'C:\Users\secret\cloudmusic.exe'), 'cloudmusic')
+        for app in ('notcloudmusic.exe', 'cloudmusic-player.exe', 'foo.cloudmusic.bar',
+                    'netease', 'neteasecloudmusic', 'spotify.exe', 'cloudmusic.exe '):
+            self.assertIsNone(netease_match(app), app)
+
+    def test_focus_keeps_library_unless_one_external_start_is_strictly_later(self):
+        self.assertEqual(focus_decision(10, [(1, None)]), ('pause-external', None, 'unknown-order'))
+        self.assertEqual(focus_decision(None, [(1, 5)]), ('pause-external', None, 'unknown-order'))
+        self.assertEqual(focus_decision(10, [(1, 10)]), ('pause-external', None, 'unknown-order'))
+        self.assertEqual(focus_decision(20, [(1, 10)]), ('pause-external', None, 'external-earlier'))
+        self.assertEqual(focus_decision(10, [(1, 20)]), ('pause-library', 1, 'library-earlier'))
+        self.assertEqual(focus_decision(10, [(1, 20), (2, 20)]),
+                         ('pause-external', None, 'unknown-order'))
+        self.assertEqual(focus_decision(10, [(1, 15), (2, 30)]),
+                         ('pause-library', 2, 'library-earlier'))
 
     def test_native_enum_shape_and_self_exclusion(self):
         class NativeType(IntEnum):

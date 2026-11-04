@@ -23,12 +23,16 @@ class CdpPauseTests(CaptureAsyncTestCase):
         session._evaluate = AsyncMock()
         return session
 
-    async def test_unobserved_pause_names_the_block_without_evaluating(self):
+    async def test_pause_does_not_require_a_previously_observed_manual_pause(self):
         session = self.session()
-        self.assertFalse(await session.pause('native-song', 'one'))
-        self.assertEqual(session.pause_diagnostic, 'observation-inactive')
-        session._evaluate.assert_not_called()
         session.start = AsyncMock(side_effect=AssertionError('must not prepare CDP'))
+        session._evaluate.side_effect = [dict(available=True, trackId='native-song'), True,
+            dict(trackId='native-song', position=12, duration=100, playing=False, sequence=2)]
+        self.assertTrue(await session.pause('native-song', 'direct'))
+        expressions = [call.args[0] for call in session._evaluate.await_args_list]
+        self.assertTrue(all('observePause' not in value for value in expressions))
+        self.assertIn('.pause?.(', expressions[1])
+        self.assertEqual(session.pause_diagnostic, 'paused')
         session.start.assert_not_called()
 
     async def test_missing_pause_contract_does_not_send_pause(self):
@@ -41,13 +45,13 @@ class CdpPauseTests(CaptureAsyncTestCase):
         self.assertIn('pauseCapability', session._evaluate.await_args.args[0])
         self.assertNotIn('.pause?.(', session._evaluate.await_args.args[0])
 
-    async def test_not_ready_or_not_observing_does_zero_writes_or_launches(self):
+    async def test_not_ready_pause_does_zero_writes_or_launches(self):
         session = self.session()
         session.start = AsyncMock(side_effect=AssertionError('must not prepare CDP'))
-        self.assertFalse(await session.pause('native-song', 'one'))
         session._ready.clear()
+        self.assertFalse(await session.pause('native-song', 'one'))
+        self.assertEqual(session.pause_diagnostic, 'not-ready')
         self.assertFalse(await session.set_pause_observation_enabled(True))
-        self.assertFalse(await session.pause('native-song', 'two'))
         session._evaluate.assert_not_called()
         session.start.assert_not_called()
 
@@ -56,7 +60,8 @@ class CdpPauseTests(CaptureAsyncTestCase):
         session._evaluate.return_value = None
         self.assertFalse(await session.set_pause_observation_enabled(True))
         self.assertFalse(await session.pause('native-song', 'one'))
-        self.assertEqual(session._evaluate.await_count, 1)
+        self.assertEqual(session.pause_diagnostic, 'contract-unavailable')
+        self.assertEqual(session._evaluate.await_count, 2)
 
     async def test_observed_contract_pause_has_independent_readback_and_no_reload(self):
         session = self.session()
@@ -154,7 +159,7 @@ class PauseJavascriptTests(unittest.TestCase):
             return json.loads(subprocess.run([shutil.which('node'), str(path)], check=True,
                                              capture_output=True, text=True).stdout)
 
-    def test_page_pause_contract_required_and_receiver_results_restore_preserved(self):
+    def test_pause_uses_seek_channel_and_stays_valid_after_track_change(self):
         result = self.run_js(r'''
 globalThis.performance = {now:()=>100};
 globalThis.setInterval = ()=>1; globalThis.clearInterval = ()=>{};
@@ -167,61 +172,43 @@ const calls = [], token = {}, channel = {call(method, callback, args) {
 const original = channel.call;
 eval(SCRIPT); const adapter = globalThis.__gluspotNeteaseV1;
 registered.PlayState(true); registered.PlayProgress('native-song',12,.12);
-const dormantUntouched = channel.call === original;
-const noContract = adapter.pause('native-song','before');
-adapter.observePause(true);
-const stillNoContract = adapter.pause('native-song','unobserved');
-const nativeResult = channel.call('audioplayer.pause',()=>{},[]);
-const learned = adapter.pauseCapability();
-registered.PlayState(true);
+const ready = adapter.pauseCapability().available;
 const paused = adapter.pause('native-song','one');
 const rawPaused = adapter.read().playing === false;
 const duplicate = adapter.pause('native-song','one');
 registered.PlayState(true); registered.PlayProgress('replacement',1,.01);
 const replacement = adapter.pause('replacement','two');
-adapter.observePause(false);
 const restored = channel.call === original;
 adapter.close();
-console.log(JSON.stringify({dormantUntouched,noContract,stillNoContract,nativeResult:nativeResult===token,
-  learned,paused,rawPaused,duplicate,replacement,restored,calls}));
+console.log(JSON.stringify({ready,paused,rawPaused,duplicate,replacement,restored,calls}));
 ''')
-        self.assertTrue(result['dormantUntouched'] and result['nativeResult'] and result['restored'])
-        self.assertFalse(result['noContract'] or result['stillNoContract'])
-        self.assertTrue(result['learned']['available'])
-        self.assertTrue(result['paused'] and result['rawPaused'])
-        self.assertFalse(result['duplicate'] or result['replacement'])
-        self.assertEqual(result['calls'], [dict(method='audioplayer.pause',args=[],receiver=True)]*2)
+        self.assertTrue(result['ready'] and result['paused'] and result['rawPaused'] and result['replacement'])
+        self.assertFalse(result['duplicate'])
+        self.assertTrue(result['restored'])
+        self.assertEqual(result['calls'], [
+            dict(method='audioplayer.pause', args=['native-song'], receiver=True),
+            dict(method='audioplayer.pause', args=['replacement'], receiver=True),
+        ])
 
-    def test_opaque_arguments_or_missing_raw_pause_cannot_authorize_native_command(self):
+    def test_pause_is_refused_until_the_current_track_is_playing(self):
         result = self.run_js(r'''
 globalThis.performance = {now:()=>100};
 globalThis.setInterval = ()=>1; globalThis.clearInterval = ()=>{};
 globalThis.__gluspotNeteaseSample = ()=>{};
-let confirm = false, failing = false; const nativeError = Error('native');
-const channel = {call(method,callback,args) {
-  if (confirm) registered.PlayState(false);
-  if (failing) throw nativeError;
+const calls = [];
+const channel = {call(method, callback, args) {
+  calls.push(method);
+  if (method === 'audioplayer.pause') registered.PlayState(false);
   callback();
 }};
 eval(SCRIPT); const adapter = globalThis.__gluspotNeteaseV1;
-registered.PlayState(true); registered.PlayProgress('native-song',12,.12);
-adapter.observePause(true);
-channel.call('audioplayer.pause',()=>{},[]);
-const noReadback = adapter.pauseCapability().available;
-confirm = true;
-channel.call('audioplayer.pause',()=>{},['opaque-request','native-song']);
-const opaque = adapter.pauseCapability().available;
+registered.PlayProgress('native-song',12,.12);
+const beforeState = adapter.pause('native-song','early');
 registered.PlayState(true);
-channel.call('audioplayer.pause',()=>{},['native-song']);
-const exactTrack = adapter.pauseCapability().available;
-adapter.observePause(false); adapter.observePause(true);
-registered.PlayState(true); failing = true;
-let originalError = false;
-try { channel.call('audioplayer.pause',()=>{},[]); } catch (error) { originalError = error === nativeError; }
-const thrownUnavailable = !adapter.pauseCapability().available;
+const sent = adapter.pause('native-song','one');
 adapter.close();
-console.log(JSON.stringify({noReadback,opaque,exactTrack,originalError,thrownUnavailable}));
+console.log(JSON.stringify({beforeState,sent,calls}));
 ''')
-        self.assertFalse(result['noReadback'] or result['opaque'])
-        self.assertTrue(result['exactTrack'])
-        self.assertTrue(result['originalError'] and result['thrownUnavailable'])
+        self.assertFalse(result['beforeState'])
+        self.assertTrue(result['sent'])
+        self.assertEqual(result['calls'], ['audioplayer.pause'])

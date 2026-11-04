@@ -226,6 +226,7 @@ class PlaybackSourceProvider:
     Owned decoded PCM has its own authenticated input to the shared sender.
     External process capture retains its independent strict identity guards.
     """
+    _NETEASE_SUPPLEMENT_DELAY = 0.3
     def __init__(self, system_provider, owned_player, settings_getter, *, media_classifier=None, interruption_policy=None):
         self.system = system_provider
         self.owned = owned_player
@@ -254,6 +255,7 @@ class PlaybackSourceProvider:
         self._interruption_edge = 0
         self._interruption_last_edge = None
         self._interruption_result = "off"
+        self._interruption_cdp_once = set()
         from local.owned_audio_bridge import OwnedAudioBridge
         self._owned_audio_bridge = OwnedAudioBridge(owned_player)
         self.owned.changed.connect(self._owned_state_changed)
@@ -322,7 +324,7 @@ class PlaybackSourceProvider:
             loop_state = "missing" if loop is None else "running" if loop.is_running() else "not-running"
             already = bool(self._interruption_owned_playing)
             self._interruption_log(phase="enable", owned_playing=int(already), loop=loop_state,
-                                   decision="baseline" if already else "armed",
+                                   decision="armed",
                                    reason="owned-already-playing" if already else "waiting-for-start")
             self._interruption_submit(self._start_interruption(generation))
         else:
@@ -405,6 +407,7 @@ class PlaybackSourceProvider:
             await observer.close()
         else:
             self._interruption_log(phase="observer", result="started")
+            await self._arbitrate_enabled_focus(generation)
 
     async def _close_interruption(self, generation, *, starting=False):
         # An old OFF job must never close a newer ON generation.
@@ -651,6 +654,79 @@ class PlaybackSourceProvider:
                 self._interruption_log(phase="yield", decision="owned-paused", app_id=current.app_id,
                                        kind=current.kind.value, playing=1)
 
+    def _netease_match(self, app_id):
+        from api.capture.interruption import netease_match
+        return netease_match(app_id)
+
+    async def _arbitrate_enabled_focus(self, generation):
+        """When the switch turns on and both sides are playing, keep the later one."""
+        from api.capture.interruption import focus_decision
+        if not self._interruption_enabled or generation != self._interruption_generation:
+            return
+        if not self._interruption_owned_playing:
+            return
+        observer = self._interruption_observer
+        if not self._interruption_manager_current(observer):
+            return
+        music = tuple(item for item in observer.snapshots()
+                      if item.playing and self._interruption_policy.allows(item.kind))
+        if not music:
+            return
+        action, key, reason = focus_decision(
+            self.owned.playback_running_since(),
+            tuple((item.binding_id, item.started_at) for item in music))
+        self._interruption_log(phase="focus", decision=action, reason=reason, targets=len(music))
+        event = {"serial": self.owned._interruption_serial, "at": time.monotonic()}
+        if action == "pause-library":
+            keeper = next(item for item in music if item.binding_id == key)
+            others = tuple(item for item in music if item.binding_id != key)
+            self._interruption_cooldown_until = 0.0
+            self._interruption_candidate = keeper
+            await self._yield_to_external()
+            if others and self._interruption_enabled and generation == self._interruption_generation:
+                await self._pause_external_music(
+                    generation, self._interruption_intent, event, others, self._interruption_edge)
+            return
+        await self._pause_external_music(
+            generation, self._interruption_intent, event, music, self._interruption_edge)
+
+    async def _send_netease_cdp_pause(self, observation, generation, intent, guard, observer, match, *, supplement=False):
+        once = (generation, intent, observation.binding_id, observation.interval, supplement)
+        if once in self._interruption_cdp_once:
+            self._interruption_log(phase="cdp-fallback", decision="skip", reason="already-sent",
+                                   app_id=observation.app_id, match=match)
+            return False
+        self._interruption_cdp_once.add(once)
+        cdp = getattr(self.system, "_netease_cdp_session", None)
+        native_id = self._netease_pause_binding(observation, cdp)
+        if native_id is None:
+            self._interruption_log(phase="cdp-fallback", decision="skip",
+                                   reason=self._netease_pause_block_reason(observation, cdp) or "cdp-missing",
+                                   app_id=observation.app_id, match=match)
+            return False
+        try:
+            paused = await cdp.pause(
+                native_id, f"gluspot-pause-{generation}-{intent}-{observation.binding_id}-{int(supplement)}",
+                expected_generation=cdp.generation,
+                guard=lambda: guard() and observer.is_current(observation)
+                    and self._netease_pause_binding(observation, cdp) == native_id)
+            self._interruption_result = "cdp-paused" if paused else "cdp-unverified"
+            reported = getattr(cdp, "pause_diagnostic", "")
+            fields = dict(phase="cdp-pause", result="cdp-paused" if paused else "cdp-unverified",
+                          reason=reported if isinstance(reported, str) and reported else (
+                              "paused" if paused else "rejected"),
+                          app_id=observation.app_id, match=match)
+            port = getattr(cdp, "port", None)
+            if isinstance(port, int):
+                fields["port"] = port
+            self._interruption_log(**fields)
+            return paused is True
+        except Exception:
+            self._interruption_result = "uncertain"
+            self._interruption_log(phase="cdp-pause", result="error", reason="error",
+                                   app_id=observation.app_id, match=match)
+            return False
+
     async def _pause_external_music(self, generation, intent, event, targets, edge):
         from api.capture.interruption import PauseResult
         observer = self._interruption_observer
@@ -681,37 +757,31 @@ class PlaybackSourceProvider:
             self._interruption_result = result.value
             self._interruption_log(phase="pause-external", app_id=observation.app_id,
                                    kind=observation.kind.value, result=result.value)
-            if result == PauseResult.REJECTED and guard() and observation.app_id.casefold() == "cloudmusic.exe":
+            match = self._netease_match(observation.app_id)
+            if result == PauseResult.REJECTED and guard() and match:
                 current = await observer.revalidate(observation)
                 if current is None or not guard():
                     self._interruption_log(phase="cdp-fallback", decision="skip",
                                            reason="revalidate-stale" if current is None else "guard-revoked",
-                                           app_id=observation.app_id)
+                                           app_id=observation.app_id, match=match)
                     continue
-                cdp = getattr(self.system, "_netease_cdp_session", None)
-                native_id = self._netease_pause_binding(observation, cdp)
-                if native_id is not None:
-                    try:
-                        paused = await cdp.pause(native_id, f"gluspot-pause-{generation}-{intent}-{observation.binding_id}",
-                            expected_generation=cdp.generation,
-                            guard=lambda: guard() and observer.is_current(observation)
-                                and self._netease_pause_binding(observation, cdp) == native_id)
-                        self._interruption_result = "cdp-paused" if paused else "cdp-unverified"
-                        reported = getattr(cdp, "pause_diagnostic", "")
-                        fields = dict(phase="cdp-pause",
-                                      result="cdp-paused" if paused else "cdp-unverified",
-                                      reason=reported if isinstance(reported, str) and reported else "rejected")
-                        port = getattr(cdp, "port", None)
-                        if isinstance(port, int):
-                            fields["port"] = port
-                        self._interruption_log(**fields)
-                    except Exception:
-                        self._interruption_result = "uncertain"
-                        self._interruption_log(phase="cdp-pause", result="error", reason="error")
-                else:
-                    self._interruption_log(phase="cdp-fallback", decision="skip",
-                                           reason=self._netease_pause_block_reason(observation, cdp) or "cdp-missing",
-                                           app_id=observation.app_id)
+                await self._send_netease_cdp_pause(observation, generation, intent, guard, observer, match)
+            elif result == PauseResult.UNCERTAIN and guard() and match:
+                # One CDP Pause if NetEase is still playing after a short readback.
+                # The cooldown blocks that pause from being treated as a new start.
+                self._interruption_cooldown_until = max(
+                    self._interruption_cooldown_until, time.monotonic() + 1.0)
+                self._interruption_log(phase="cdp-fallback", decision="wait", reason="uncertain-wait",
+                                       app_id=observation.app_id, match=match)
+                await asyncio.sleep(self._NETEASE_SUPPLEMENT_DELAY)
+                current = await observer.revalidate(observation) if guard() else None
+                if (not guard() or current is None or not current.playing
+                        or not self._interruption_policy.allows(current.kind)):
+                    self._interruption_log(phase="cdp-fallback", decision="skip", reason="settled",
+                                           app_id=observation.app_id, match=match)
+                    continue
+                await self._send_netease_cdp_pause(
+                    observation, generation, intent, guard, observer, match, supplement=True)
             elif result == PauseResult.REJECTED:
                 self._interruption_log(phase="cdp-fallback", decision="skip", reason="app-id-mismatch",
                                        app_id=observation.app_id)

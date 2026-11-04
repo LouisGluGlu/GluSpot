@@ -5,11 +5,11 @@
 ## 已批准规则
 
 - 分类是两个方向的共同门槛，应用类别不作为门槛。SMTC 明确 Music、精确已知音乐 app id，或可读标题加歌手/有效原始专辑图可确认为 MUSIC；包括浏览器和网页音乐。任一明确 Video/Image 类型优先否决音乐证据。坏值、读取失败、身份不明或证据不足不授权干预。
-- 开启时、重新连接时及新发现即 Playing 仅建立基线。只有开启后观察到的非播放→播放转换才是外部新开始；换曲、seek、补图和重复 Playing 均不算。外部观察区间须严格在 owned 的实际开始和适用用户意图之后；跨界、重叠或时间相同不能猜先后。
+- 打开开关时，若库内与外部音乐都在播放，暂停更早开始的一方，保留后开始的一方。库内开播时间取播放器进入播放的时刻；外部开播时间只取观察器记下的非播放→播放边沿。缺时间或时间相同算分不清，暂停外部、保留库内。新发现且已经在播、但开关打开时另一边没在播，仍只建基线。只有之后观察到的非播放→播放转换才是外部新开始；换曲、seek、补图和重复 Playing 均不算。
 - 明确库内用户请求须成功并真正开始才暂停当时已观察为 Playing 的 MUSIC 会话。目标集合与当时音乐资格一并冻结；失败请求、旧 retained stream、自动下一曲、缓冲恢复和迟到 metadata 不产生新授权。
 - 更晚外部 MUSIC 开始时，通过 GUI 队列幂等 Pause owned，取消待加载 autoplay、恢复和关联 DJ 续播，保留队列与位置。确认后临时 pin 同一个外部会话；展示、音频、seek、传输、owned 能力和系统媒体桥共享来源决定。来源偏好和两方播放模式均不写入。pin 换曲继续跟随，退出安全释放，不自动恢复播放器。
 - 所有自动控制都是 Pause；不使用外部 toggle、Play、Stop、Seek、静音或全局媒体键。确认的原始 Paused ACK 不产生反向意图；真正恢复属于新边沿。自动事务有一秒冷却，真实恢复保留至到期复核，明确用户操作优先。
-- 设置代次、用户 serial、会话实例、媒体代次、播放区间和 manager 身份在最终 dispatch 复核。OFF、手动来源选择、新用户意图或连接替换撤销旧动作。一个目标/播放区间/用户意图只尝试一次；不确定 native 写入不触发另一种写入。
+- 设置代次、用户 serial、会话实例、媒体代次、播放区间和 manager 身份在最终 dispatch 复核。OFF、手动来源选择、新用户意图或连接替换撤销旧动作。一个目标/播放区间/用户意图只尝试一次。网易云（仅 cloudmusic 与 orpheus 这两类精确进程名或 app id 前缀）若 SMTC 暂停结果不确定，约 300 毫秒后仍在播，可以补发一次 CDP Pause；其它应用的不确定写入不触发第二种写入。补发计入 1 秒冷却，不把这次暂停当成新的开播。
 
 ## 分类和检测扩展
 
@@ -21,9 +21,9 @@
 
 ## NetEase 的保守 CDP 路径
 
-首选目标绑定的 `try_pause_async()`。只有明确返回 False 且独立确认仍 Playing，才考虑现有 ready CDP；超时、异常或接受后无 Paused 均视为不确定，不 fallback。
+首选目标绑定的 `try_pause_async()`。明确返回 False 且仍在 Playing 时，网易云可立即走现有 ready CDP。结果不确定时，约 300 毫秒后再看一次，仍在播才补发一次 CDP Pause。
 
-仓库此前只有已核实的 seek 协议，没有可直接使用的 Pause 契约。新增观察仅在开关开启且已有 ready 通道时启用：保留原 `channel.call` 的接收者、参数、结果和异常，观察播放器自身的明确 `audioplayer.pause` 调用（实际观察到的空参数或当前 native track 参数），再由独立 PlayState=false 确认。只在同通道、同 native 曲目和同连接代次复用这个契约；其他参数形状、旧 adapter 或未观察到已确认 Pause 时保持不可用。自动调用不会乐观改写状态，必须由独立 readback 确认。
+CDP Pause 与已核实的 seek 使用同一个 `channel.call`：对当前曲目调用 `audioplayer.pause`，再用 PlayState 读回确认。不要求事先看到用户手动暂停，换曲后下一次暂停使用当时的曲目。自动调用不会乐观改写状态。识别只接受精确的 `cloudmusic` / `orpheus` 进程名或 app id 前缀，名字里碰巧包含这些词不算。
 
 provider 还要求既存 capture runtime 对应同一个 SMTC 会话、当前 metadata、native track 与新鲜 CEF 代次。临时 pin 返回 owned 时只保留可复核的内存证据。临时读取保留来源标记，即使 OFF/unpin 发生在异步读取中途，也不能从该读取进入 CDP ensure/start/reload/relaunch。
 

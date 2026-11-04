@@ -132,13 +132,30 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         self.assertEqual((video.pauses, unknown.pauses), (0, 0))
         self.assertIsNone(self.provider._interruption_pin)
 
-    async def test_toggle_on_with_both_playing_is_only_baseline(self):
+    async def test_toggle_on_with_both_playing_pauses_external_when_order_is_unknown(self):
+        await self.start_owned()
+        music = Session()
+        video = Session('video.exe', media_type=2)
+        await self.enable([music, video])
+        self.assertEqual((music.pauses, video.pauses, self.owned_pauses()), (1, 0, 0))
+        self.assertTrue(self.owned.interruption_playing())
+        self.assertIsNone(self.provider._interruption_pin)
+
+    async def test_enabled_focus_pauses_library_only_when_external_start_is_later(self):
         await self.start_owned()
         music = Session()
         await self.enable([music])
-        await self.collect()
-        self.assertEqual((music.pauses, self.owned_pauses()), (0, 0))
-        self.assertIsNone(self.provider._interruption_pin)
+        self.assertEqual(music.pauses, 1)
+        music.playing = True
+        music.pauses = 0
+        self.owned._playback_running_since = 10.0
+        observer = self.provider._interruption_observer
+        snap = observer.snapshots()[0]
+        observer._bindings[snap.binding_id].observation = replace(snap, playing=True, started_at=30.0)
+        self.provider._interruption_cooldown_until = 0
+        await self.provider._arbitrate_enabled_focus(self.provider._interruption_generation)
+        self.assertEqual((music.pauses, self.owned_pauses()), (0, 1))
+        self.assertIs(self.provider._interruption_pin.session, music)
 
     async def test_off_does_no_monitor_reads_native_calls_or_new_owned_reads(self):
         music = Session()
@@ -282,17 +299,42 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         runtime.bind.assert_awaited_once()
         self.system._ensure_netease_cdp.assert_not_called()
 
-    async def test_uncertain_smtc_never_falls_back_to_cdp(self):
-        music = Session('cloudmusic.exe')
+    async def test_uncertain_netease_smtc_sends_one_cdp_pause_if_still_playing(self):
+        music = Session('orpheus.exe')
+        music.pause_answer = RuntimeError('uncertain write')
+        music.pause_changes_state = False
+        cdp = SimpleNamespace(ready=True, generation=7, port=4588, latest={'trackId': 'native'},
+            pause=AsyncMock(return_value=True), set_pause_observation_enabled=AsyncMock(return_value=True),
+            start=AsyncMock(side_effect=AssertionError('no start/relaunch')))
+        self.system._netease_cdp_session = cdp
+        data = EmptyIslandDataProvider().get_visual_data()
+        self.system._last_data = replace(data, track=replace(data.track, title=music.title,
+            artist=music.artist, source_app_id='orpheus.exe', track_id='captured'))
+        self.system._capture_runtime = SimpleNamespace(source=SimpleNamespace(session=music),
+            _cef_source=SimpleNamespace(session=cdp, native_track_id='native', generation=7, fresh=True),
+            identity=('orpheus.exe', 'captured'))
+        self.provider._NETEASE_SUPPLEMENT_DELAY = 0
+        await self.enable([music])
+        await self.start_owned()
+        self.assertEqual(music.pauses, 1)
+        cdp.pause.assert_awaited_once()
+        self.assertEqual(self.owned_pauses(), 0)
+        self.assertTrue(self.owned.interruption_playing())
+        cdp.start.assert_not_called()
+
+    async def test_uncertain_other_app_does_not_send_cdp(self):
+        music = Session('chrome.exe')
         music.pause_answer = RuntimeError('uncertain write')
         music.pause_changes_state = False
         cdp = SimpleNamespace(ready=True, generation=7, latest={'trackId': 'native'},
-            pause=AsyncMock(), set_pause_observation_enabled=AsyncMock(return_value=True))
+            pause=AsyncMock(side_effect=AssertionError('not netease')),
+            set_pause_observation_enabled=AsyncMock(return_value=True))
         self.system._netease_cdp_session = cdp
         await self.enable([music])
         await self.start_owned()
         self.assertEqual(music.pauses, 1)
         cdp.pause.assert_not_called()
+        self.assertEqual(self.owned_pauses(), 0)
 
     async def test_new_user_resume_revokes_old_queued_external_handoff(self):
         music = Session(playing=False)
@@ -440,15 +482,15 @@ class InterruptionProviderTests(CaptureAsyncTestCase):
         with _capture_interruption_log() as lines:
             await self.enable([music])
         text = '\n'.join(lines)
-        self.assertIn('phase=enable decision=baseline reason=owned-already-playing owned_playing=1', text)
-        self.assertIn('phase=session app_id=cloudmusic.exe kind=music playing=1', text)
-        self.assertIn('reason=baseline', text)
-        self.assertNotIn('phase=owned-start', text)
-        self.assertNotIn('phase=smtc-pause', text)
+        self.assertIn('phase=enable decision=armed reason=owned-already-playing owned_playing=1', text)
+        self.assertIn('phase=focus decision=pause-external reason=unknown-order', text)
+        self.assertIn('phase=smtc-pause app_id=cloudmusic.exe result=paused', text)
+        self.assertIn('match=cloudmusic', text)
         self.assertNotIn('SECRET', text)
         self.assertNotIn('secret', text)
         self.assertNotIn('Users', text)
-        self.assertEqual((music.pauses, self.owned_pauses()), (0, 0))
+        self.assertEqual((music.pauses, self.owned_pauses()), (1, 0))
+        self.assertTrue(self.owned.interruption_playing())
 
     async def test_library_start_logs_pause_result_without_titles(self):
         music = Session('cloudmusic.exe', title='SECRET_TITLE_XYZ', artist='SECRET_ARTIST_XYZ')

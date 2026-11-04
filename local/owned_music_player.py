@@ -309,6 +309,23 @@ class OwnedMusicPlayer(QObject):
         self._interruption_action_running = False
         self._interruption_started = None
         self._interruption_pause_latched = False
+        self._playback_running_since = None
+
+    def playback_running_since(self):
+        """When the current music playback interval began, if it is still running."""
+        if not self.interruption_playing():
+            return None
+        return self._playback_running_since
+
+    def _note_playback_running_clock(self):
+        running = bool(not self._closed and self.track is not None
+            and (self._stream_epoch == self._epoch or self._catalog_stream_is_current())
+            and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+        if running:
+            if self._playback_running_since is None:
+                self._playback_running_since = time.monotonic()
+        else:
+            self._playback_running_since = None
 
     def set_interruption_tracking_enabled(self, enabled):
         """Enable intent notifications on the player's owning Qt thread."""
@@ -3497,6 +3514,7 @@ class OwnedMusicPlayer(QObject):
             self.changed.emit()
             if state == QMediaPlayer.PlaybackState.PlayingState:
                 self._publish_interruption_start()
+        self._note_playback_running_clock()
         if self._dj_overlay_voices:
             if state == QMediaPlayer.PlaybackState.PlayingState:
                 self._try_start_dj_overlay()
