@@ -1,6 +1,6 @@
 # 内外播放打断 · t260
 
-设置位于“播放与采集 → 播放来源”，复用现有 IosSwitch、提示、搜索及持久化路径。`v2_playback_interruption_enabled` 缺失或非法时为 `False`；运行时 setter 仅接受 bool。OFF 不创建 t260 监视器、不额外读取会话、不发送暂停或 CDP 调用。原有手动播放和独立启用的采集按原路径运行。
+设置位于“播放与采集 → 播放来源”，复用现有 IosSwitch、提示、搜索及持久化路径。`v2_playback_interruption_enabled` 缺失或非法时为 `False`；运行时 setter 仅接受 bool。稳定 OFF 状态不创建 t260 监视器、不额外读取会话、不发送暂停或 CDP 调用；ON→OFF 仅解绑和移除既有观察器，已 dispatch 原生命令的边界见下文。原有手动播放和独立启用的采集按原路径运行。
 
 ## 已批准规则
 
@@ -31,7 +31,9 @@ provider 还要求既存 capture runtime 对应同一个 SMTC 会话、当前 me
 
 ## 验证与边界
 
-Box，`QT_QPA_PLATFORM=offscreen`，`/workspace/gluspot/qtvenv/bin/python`。新增 fake 测试覆盖浏览器音乐/视频/未知源、默认 OFF 零调用、开启基线、后开始交接、临时设置不变、保留队列位置、ACK/冷却/真实恢复、用户优先、冻结资格、manager 重连、负类型最终校验、时间歧义、owned 请求失败/取消/恢复/DJ、CDP 契约观察及清理竞态。全部证据在 `/workspace/gluspot/handoff/t260/`；最终测试数量和 t258 逐身份比较见 `FINAL.md`。
+Box，`QT_QPA_PLATFORM=offscreen`，`/workspace/gluspot/qtvenv/bin/python`。新增五个模块的 82 项 fake 测试全部通过，覆盖浏览器音乐/视频/未知源、默认 OFF 零调用、开启基线、后开始交接、临时设置不变、保留队列位置、ACK/冷却/真实恢复、用户优先、冻结资格、manager 重连、负类型最终校验、时间歧义、owned 请求失败/取消/恢复/DJ、CDP 契约观察及清理竞态。
+
+完整隔离套件覆盖 361 模块 / 6,374 tests，191.439 s，`complete=true`；359 模块正常结束，继承的 `test_owned_audio_bridge_handoff`、`test_owned_queue_artwork` 原生崩溃模块由 runner 分别逐例补齐。52 failure / 48 error / 32 skip 与 t258 逐身份及 skip 原因的 multiset 完全一致，新增、移除均为 0；这不是全绿套件。运行前后 Python source SHA256 一致。全部证据在 `/workspace/gluspot/handoff/t260/`，包括 `focused-final.log`、`focused-results.json`、`suite/summary.json`、`suite-comparison.json` 与 `FINAL.md`。
 
 完整验证使用用户指定命令：
 
