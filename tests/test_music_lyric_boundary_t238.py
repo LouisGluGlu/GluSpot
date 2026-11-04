@@ -103,8 +103,10 @@ class LyricBoundaryTests(unittest.TestCase):
                             self.assertTrue(self.window._lyric_clip_rect.isEmpty())
                 self.finish()
                 self.render()
-                if state != 'loading':
+                if state == 'instrumental':
                     loader.assert_not_called()
+                else:
+                    loader.assert_called()
                 shade.assert_not_called()
                 if state == 'instrumental':
                     ink.assert_not_called()
@@ -144,6 +146,33 @@ class LyricBoundaryTests(unittest.TestCase):
                         self.assertGreater(int(alpha.max()), 0, 'The test must actually draw lyric ink outside artwork')
                         self.window._cancel_lyric_resize()
 
+    def test_pending_skeleton_advances_during_resize_without_painting_cover(self):
+        self.publish('loading')
+        for width in (883, 690, 610):
+            with self.subTest(width=width):
+                with patch.object(self.window, '_available_geometry', return_value=QRect(0, 0, 2400, 1600)):
+                    self.window._begin_width_resize()
+                self.window.resize(width, 540)
+                self.render()
+                self.assertTrue(self.window._lyric_resize_frozen)
+                started = self.window._lyric_resize_started_at
+                images = []
+                for at in (started + .3, started + 3.1):
+                    image = QImage(self.window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                    image.fill(Qt.GlobalColor.transparent)
+                    with patch('local.music_lyric_resize.time.monotonic', return_value=at), QPainter(image) as painter:
+                        cover = self.window._current_cover_rect(at)
+                        self.window._paint_lyric_column(painter, QRectF(self.window.rect()), painted_cover=cover)
+                    rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+                    alpha = np.frombuffer(rgba.constBits(), np.uint8).reshape(rgba.height(), rgba.width(), 4)[:, :, 3]
+                    interior = cover.adjusted(2., 2., -2., -2.).toAlignedRect().intersected(image.rect())
+                    self.assertEqual(int(alpha[interior.top():interior.bottom(), interior.left():interior.right()].max()), 0)
+                    self.assertGreater(int(np.count_nonzero(alpha)), 500)
+                    images.append(image)
+                self.assertNotEqual(images[0], images[1], 'The resize loader must keep animating')
+                self.window._end_width_resize()
+                self.finish()
+
     def test_terminal_result_cancels_inflight_snapshot_before_next_resize_paint(self):
         self.publish('loaded')
         self.render()
@@ -164,16 +193,18 @@ class LyricBoundaryTests(unittest.TestCase):
         loader.assert_not_called()
         ink.assert_not_called()
 
-    def test_inside_cover_lyrics_and_shade_are_suppressed_during_width_motion(self):
+    def test_loaded_inside_cover_lyrics_keep_ink_and_shade_during_width_motion(self):
         self.publish('loaded')
         self.window.set_content_layout('cover_lyrics', animate=False)
         self.render()
         self.window.resize(883, 540)
-        with patch.object(self.window, '_paint_live_lyric_column') as ink, \
-             patch.object(self.window, '_paint_lyric_cover_shade') as shade:
+        with patch.object(self.window, '_paint_lyric_cover_shade', wraps=self.window._paint_lyric_cover_shade) as shade, \
+             patch.object(self.window, '_paint_lyric_loading', wraps=self.window._paint_lyric_loading) as loader, \
+             patch.object(self.window, '_draw_lyric_resize_snapshot', wraps=self.window._draw_lyric_resize_snapshot) as snapshot:
             self.render()
-            ink.assert_not_called()
-            shade.assert_not_called()
+            shade.assert_called()
+            snapshot.assert_called()
+            loader.assert_not_called()
 
 
 if __name__ == '__main__':

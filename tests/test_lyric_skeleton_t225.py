@@ -45,8 +45,9 @@ class LyricSkeletonFailureTests(unittest.TestCase):
 
     def fail_next_preparation(self):
         self.window._resolve_display_lyrics()
-        token, _action = self.tasks.actions.pop(0)
-        self.tasks.completed.emit(token, None, "request_failed")
+        for _attempt in range(2):
+            token, _action = self.tasks.actions.pop(0)
+            self.tasks.completed.emit(token, None, "request_failed")
 
     def test_failed_real_result_releases_cached_loading_marker_and_skeleton(self):
         self.assertEqual(self.prepare_current(), (["加载歌词中"], []))
@@ -61,6 +62,33 @@ class LyricSkeletonFailureTests(unittest.TestCase):
         self.assertFalse(self.window._lyrics_lookup_pending(*rows))
         self.window._update_lyric_loading_state(101.2, *rows)
         self.assertFalse(self.window._lyric_loading_visible(105.))
+
+    def test_preparation_retry_keeps_loader_until_success_or_exhaustion(self):
+        self.prepare_current()
+        self.window._update_lyric_loading_state(100.)
+        self.window._update_lyric_loading_state(102.)
+        self.owner.timed_lyrics = [(float(i * 4), f"Resolved row {i}") for i in range(5)]
+        self.owner.lyrics = [text for _start, text in self.owner.timed_lyrics]
+        self.window._resolve_display_lyrics()
+        token, _action = self.tasks.actions.pop(0)
+        self.tasks.completed.emit(token, None, "timeout")
+        self.assertIsNotNone(self.store.failed)
+        self.assertIsNotNone(self.store.active)
+        rows = self.window._resolve_display_lyrics()
+        self.assertEqual(rows, (["加载歌词中"], []))
+        self.window._update_lyric_loading_state(102.1, *rows)
+        self.assertEqual(self.window._lyric_content_state(102.1, *rows), "loading")
+        self.assertTrue(self.window._lyric_loading_visible(102.1))
+        token, _action = self.tasks.actions.pop(0)
+        self.tasks.completed.emit(token, None, "timeout")
+        rows = self.window._resolve_display_lyrics()
+        self.window._update_lyric_loading_state(102.2, *rows)
+        self.window._sync_no_lyrics_content_layout(102.2)
+        self.assertIsNone(self.store.active)
+        self.assertIsNone(self.store.pending)
+        self.assertEqual(self.window._lyric_content_state(102.2, *rows), "no_lyrics")
+        self.assertFalse(self.window._lyric_loading_visible(102.2))
+        self.assertEqual(self.window._effective_content_layout(), "cover")
 
     def test_failed_same_track_refresh_keeps_established_lyric_ink(self):
         self.owner.timed_lyrics = [(float(i * 4), f"Established row {i}") for i in range(5)]

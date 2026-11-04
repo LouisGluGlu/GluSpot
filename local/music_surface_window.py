@@ -108,7 +108,6 @@ from local.translation_style_variants import resolve_translation_style
 
 MUSIC_WINDOW_ASPECT_RATIO = 16.0 / 9.0
 _LYRIC_LOADING_MARKERS = frozenset({"查找歌词中", "寻找歌词中", "加载歌词中"})
-_LYRIC_LOADING_TIMEOUT_SECONDS = 30.0
 
 
 def constrained_window_size(
@@ -359,7 +358,6 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._visual_lyric_cache_key = None
         self._visual_lyric_layers = ()
         self._lyric_loading_track_key = None
-        self._lyric_loading_timed_out = False
         self._lyric_loading_started_at = 0.0
         self._lyric_loading_last_stage = None
         self._lyric_loading_waiting = False
@@ -2548,10 +2546,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         state = self._lyric_content_state(now, lines, timed)
         if state == "no_lyrics":
             return True
-        # Preserve the preceding pose only while this lookup is unresolved.
-        # A centered song has no lyric skeleton.
-        if state == "loading":
-            return self._lyric_loading_hold_centered
+        # A new pending song owns its lyric column even when the preceding
+        # track was instrumental. Retain the ordinary loaded-result exit cycle.
+        if state == "loading" or self._lyric_loading_holds_result(now):
+            return False
         placeholder = str(getattr(self.owner, "no_lyrics_text", "暂无歌词") or "暂无歌词").strip()
         # Count semantic lyric rows only after display filtering. Translations
         # at the same timestamp remain one row; the synthetic intro countdown
@@ -2577,7 +2575,8 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         Providers publish a loading sentinel while their bounded fetch/retry
         work is pending, and ``暂无歌词`` after a miss/failure. Pure-music
         sentinels use the island's existing instrumental classification. The
-        visual deadline only ends the loader; a late result is still accepted.
+        provider/preparation budget owns terminal failure; elapsed paint time
+        cannot turn an unresolved lookup into a no-lyrics result.
         """
         title = str(getattr(self.owner, "track_title", "") or "").strip()
         idle = title in {"", "暂无媒体", "暂无播放", "媒体初始化中"}
@@ -2610,13 +2609,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             return "idle"
         store = getattr(self.owner, "_lyric_presentation_store", None)
         if store is not None and store.failed is not None:
-            return "no_lyrics"
-        if raw_pending or self._lyrics_lookup_pending(lines, timed):
-            instant = time.monotonic() if now is None else float(now)
-            if (self._visual_track_identity() == getattr(self, "_lyric_loading_track_key", None)
-                    and instant - self._lyric_loading_started_at >= _LYRIC_LOADING_TIMEOUT_SECONDS):
-                self._lyric_loading_timed_out = True
+            if store.active is None and store.pending is None:
                 return "no_lyrics"
+            return "loading"
+        if raw_pending or self._lyrics_lookup_pending(lines, timed) or not raw_rows:
             return "loading"
         return "no_lyrics"
 
@@ -2627,9 +2623,6 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         title = str(getattr(self.owner, "track_title", "") or "").strip()
         if title in {"", "暂无媒体", "暂无播放", "媒体初始化中"}:
             return False
-        if (getattr(self, "_lyric_loading_timed_out", False)
-                and self._visual_track_identity() == self._lyric_loading_track_key):
-            return False
         if lines is None or timed is None:
             lines, timed = self._display_lyrics()
         if timed:
@@ -2637,7 +2630,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         waiting = getattr(self.owner, "_music_surface_waiting_for_loaded_lyrics", None)
         if callable(waiting) and waiting():
             return True
-        return len(lines) == 1 and str(lines[0]).strip() in _LYRIC_LOADING_MARKERS
+        return not lines or len(lines) == 1 and str(lines[0]).strip() in _LYRIC_LOADING_MARKERS
 
     def _update_lyric_loading_state(
         self, now: float, lines: list[str] | None = None,
@@ -2645,15 +2638,13 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     ) -> None:
         """Keep visual loading local to a track; never hold its provider clock."""
         key = self._visual_track_identity()
-        if key != getattr(self, "_lyric_loading_track_key", None):
-            self._lyric_loading_timed_out = False
         state = self._lyric_content_state(now, lines, timed)
         pending = state == "loading"
         if key != getattr(self, "_lyric_loading_track_key", None):
             self._lyric_loading_track_key = key
             self._lyric_loading_started_at = float(now)
             self._lyric_loading_last_stage = None
-            self._lyric_loading_hold_centered = float(getattr(self, "_cover_layout_to", 0.0)) >= 0.5
+            self._lyric_loading_hold_centered = False
             self._lyric_loading_has_shown = False
             self._lyric_loading_release_at = 0.0
             self._lyric_loading_exit_started_at = 0.0
@@ -2661,9 +2652,7 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._lyric_loading_waiting = pending
         elif pending and not self._lyric_loading_waiting:
             self._lyric_loading_started_at = float(now)
-            self._lyric_loading_hold_centered = (
-                self._temporary_content_layout == "cover" or self._cover_layout_to >= 0.5
-            )
+            self._lyric_loading_hold_centered = False
             self._lyric_loading_has_shown = False
             self._lyric_loading_release_at = 0.0
             self._lyric_loading_exit_started_at = 0.0
@@ -2671,10 +2660,20 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             self._lyric_loading_waiting = True
         elif not pending and self._lyric_loading_waiting:
             self._lyric_loading_waiting = False
-            self._lyric_loading_has_shown = False
-            self._lyric_loading_release_at = 0.0
-            self._lyric_loading_exit_started_at = 0.0
-            self._lyric_loading_cycle_end_at = 0.0
+            if state == "loaded" and self._lyric_loading_has_shown:
+                visible_at = self._lyric_loading_started_at + 1.0
+                cycle = max(1, math.ceil((float(now) - visible_at) / 3.0))
+                self._lyric_loading_cycle_end_at = visible_at + cycle * 3.0
+                self._lyric_loading_exit_started_at = max(
+                    float(now), self._lyric_loading_cycle_end_at - 0.5,
+                )
+                self._lyric_loading_release_at = self._lyric_loading_exit_started_at + 0.5
+            else:
+                # Confirmed no-lyrics/terminal failure stops every loader now.
+                self._lyric_loading_has_shown = False
+                self._lyric_loading_release_at = 0.0
+                self._lyric_loading_exit_started_at = 0.0
+                self._lyric_loading_cycle_end_at = 0.0
         if (
             pending and not self._lyric_loading_hold_centered
             and float(now) >= self._lyric_loading_started_at + 1.0
@@ -2731,11 +2730,10 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
 
     def _lyric_loading_visible(self, now: float) -> bool:
         return bool(
-            self._lyric_content_state(now) == "loading"
-            and self._effective_content_layout() not in {"cover", "playlist"}
-            and not self._lyric_loading_hold_centered
+            self._lyric_content_state(now) in {"loading", "loaded"}
+            and self._effective_content_layout() == "lyrics"
             and self._lyric_loading_has_shown
-            and self._lyric_loading_waiting
+            and (self._lyric_loading_waiting or self._lyric_loading_holds_result(now))
         )
 
     def _lyric_loading_reveal(self, now: float) -> tuple[float, float]:
@@ -2766,16 +2764,17 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
     def _paint_lyric_loading(self, painter: QPainter, column: QRectF, now: float, opacity: float, *, force: bool = False) -> None:
         """Seven album-tinted rows move up once every three seconds.
 
-        The legacy force argument cannot turn resizing into a lyric lookup.
+        Resize handoffs force the baseline sweep for loaded/pending lyrics;
+        confirmed no-lyrics tracks and artwork never receive a skeleton.
         """
         if (opacity <= 0.001 or column.isEmpty()
-                or self._effective_content_layout() != 'lyrics'
-                or self._lyric_content_state(now) != 'loading'):
+                or self._effective_content_layout() not in ({'lyrics', 'playlist'} if force else {'lyrics'})
+                or self._lyric_content_state(now) in {'idle', 'no_lyrics'}):
             return
         cycle, phase = self._lyric_loading_phase(now)
-        if not self._lyric_loading_visible(now):
+        if not force and not self._lyric_loading_visible(now):
             return
-        entrance, exit_phase = self._lyric_loading_reveal(now)
+        entrance, exit_phase = (1.0, 0.0) if force else self._lyric_loading_reveal(now)
         scale = self._surface_scale()
         height = min(42.0 * scale, max(17.0 * scale, column.height() * 0.067))
         step = min(height * 1.75, column.height() / 7.45)
@@ -3426,19 +3425,21 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
             prepared = store.get(translated=translated,
                                  source=source if self._translation_exit_source is not None else None)
             if prepared is None:
+                terminal_failure = (store.failed is not None
+                                    and store.active is None and store.pending is None)
                 cached = self._display_lyrics_cache
                 cached_loading = (cached is not None and not cached[1] and len(cached[0]) == 1
                                   and str(cached[0][0]).strip() in _LYRIC_LOADING_MARKERS)
                 if (self._display_lyrics_cache is not None
                         and getattr(self, "_prepared_lyric_identity", None) == self._visual_track_identity()
-                        and not (store.failed is not None and cached_loading)):
-                    # Preserve established lyric ink through same-track work,
-                    # but a failed result must terminate a cached loader.
+                        and not (terminal_failure and cached_loading)):
+                    # Preserve established ink and a pending retry's loader.
+                    # Only exhausted preparation may terminate the skeleton.
                     return self._display_lyrics_cache
                 self._display_timed_units = self._display_timed_kinds = self._display_row_timings = ()
                 self._display_timed_read_ends = self._display_raw_source_texts = ()
                 self._display_duet_presentation = None
-                return (["暂无歌词" if store.failed is not None else "加载歌词中"], [])
+                return (["暂无歌词" if terminal_failure else "加载歌词中"], [])
             key = (prepared.source.identity, id(prepared))
         else:
             # Standalone/offline callers retain a synchronous pure accessor.

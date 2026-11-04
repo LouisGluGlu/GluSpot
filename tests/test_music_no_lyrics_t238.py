@@ -56,11 +56,12 @@ class NoLyricsLayoutStateTests(unittest.TestCase):
                     self.assertEqual(self.window._effective_content_layout(), "lyrics")
                     self.assertEqual(self.saved, baseline)
 
-    def test_no_lyrics_run_survives_next_pending_and_next_instrumental_track(self):
+    def test_new_pending_track_does_not_inherit_previous_terminal_miss(self):
         self.publish("暂无歌词", identity="miss-one")
         self.publish("查找歌词中", identity="pending-two", now=101.)
-        self.assertEqual(self.window._effective_content_layout(), "cover")
-        self.assertFalse(self.window._lyric_loading_visible(103.))
+        self.window._update_lyric_loading_state(103.)
+        self.assertEqual(self.window._effective_content_layout(), "lyrics")
+        self.assertTrue(self.window._lyric_loading_visible(103.))
         self.publish("纯音乐，请欣赏", identity="instrumental-two", now=104.)
         self.assertEqual(self.window._effective_content_layout(), "cover")
         self.publish(identity="sung-three", now=105.)
@@ -108,21 +109,25 @@ class NoLyricsLayoutStateTests(unittest.TestCase):
                     self.assertEqual(self.window._effective_content_layout(), "cover")
                     self.assertFalse(self.window._lyric_loading_visible(101.5))
 
-    def test_loading_deadline_degrades_once_and_late_lyrics_restore(self):
+    def test_unresolved_lookup_has_no_visual_deadline_and_terminal_result_stops_loader(self):
         self.publish("查找歌词中", identity="slow", now=100.)
         self.window._update_lyric_loading_state(101.5)
         self.assertTrue(self.window._lyric_loading_visible(101.5))
-        self.assertEqual(self.window._lyric_content_state(129.9), "loading")
-        self.window._update_lyric_loading_state(130.)
-        self.window._sync_no_lyrics_content_layout(130.)
-        self.assertEqual(self.window._lyric_content_state(130.), "no_lyrics")
-        self.assertFalse(self.window._lyric_loading_visible(130.))
-        self.assertEqual(self.window._effective_content_layout(), "cover")
-        self.window._update_lyric_loading_state(131.)
+        for now in (129.9, 130., 160.):
+            self.window._update_lyric_loading_state(now)
+            self.window._sync_no_lyrics_content_layout(now)
+            self.assertEqual(self.window._lyric_content_state(now), "loading")
+            self.assertTrue(self.window._lyric_loading_visible(now))
+            self.assertEqual(self.window._effective_content_layout(), "lyrics")
         self.assertEqual(self.window._lyric_loading_started_at, 100.)
-        self.publish(now=132.)
-        self.assertEqual(self.window._lyric_content_state(132.), "loaded")
+        self.publish("暂无歌词", now=161.)
+        self.assertEqual(self.window._lyric_content_state(161.), "no_lyrics")
+        self.assertFalse(self.window._lyric_loading_visible(161.))
+        self.assertEqual(self.window._effective_content_layout(), "cover")
+        self.publish(now=162.)
+        self.assertEqual(self.window._lyric_content_state(162.), "loaded")
         self.assertEqual(self.window._effective_content_layout(), "lyrics")
+
 
     def test_raw_pending_overrides_retained_display_rows_without_resetting_deadline(self):
         self.owner.lyrics, self.owner.timed_lyrics = ["查找歌词中"], []
@@ -134,6 +139,21 @@ class NoLyricsLayoutStateTests(unittest.TestCase):
         self.assertEqual(self.window._lyric_loading_started_at, 100.)
         self.window._update_lyric_loading_state(102.)
         self.assertEqual(self.window._lyric_loading_started_at, 100.)
+
+    def test_empty_unknown_payload_is_pending_until_provider_confirms_no_lyrics(self):
+        self.owner.media_track_id = "unknown-payload"
+        self.owner.lyrics, self.owner.timed_lyrics = [], []
+        with patch.object(self.window, "_display_lyrics", return_value=([], [])):
+            self.window._update_lyric_loading_state(100.)
+            self.window._update_lyric_loading_state(140.)
+            self.window._sync_no_lyrics_content_layout(140.)
+            self.assertEqual(self.window._lyric_content_state(140.), "loading")
+            self.assertTrue(self.window._lyrics_lookup_pending([], []))
+            self.assertTrue(self.window._lyric_loading_visible(140.))
+            self.assertEqual(self.window._effective_content_layout(), "lyrics")
+        self.publish("纯音乐，请欣赏", now=141.)
+        self.assertFalse(self.window._lyric_loading_visible(141.))
+        self.assertEqual(self.window._effective_content_layout(), "cover")
 
     def test_instrumental_markers_do_not_misclassify_a_song_with_other_sung_rows(self):
         self.owner.lyrics = ["Instrumental", "A real sung verse"]

@@ -2091,7 +2091,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._fullscreen = True
         self.owner.track_title = "Instrumental"
         self.owner.artist = "A musician"
-        self.owner.lyrics = []
+        self.owner.lyrics = ["暂无歌词"]
         self.owner.timed_lyrics = []
         original, centered = self.window._cover_layout_endpoints()
         first = self.window._current_cover_rect(100.0)
@@ -2133,6 +2133,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.owner.album_art.fill(QColor(160, 80, 35))
         self.assertFalse(self.window._no_lyrics_cover_target())
         self.owner.track_title = "Instrumental"
+        self.owner.lyrics = ["暂无歌词"]
         self.assertTrue(self.window._no_lyrics_cover_target())
         self.owner.no_lyrics_text = "纯音乐"
         self.owner.lyrics = ["纯音乐"]
@@ -2188,9 +2189,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertFalse(self.window._no_lyrics_cover_target())
         self.owner.timed_lyrics = []
         self.owner.lyrics = ["查找歌词中"]
-        # A renewed lookup keeps the previously painted centered layout;
-        # pending text must not force it back into the lyric columns.
-        self.assertTrue(self.window._no_lyrics_cover_target())
+        # Unknown/loading releases the previous centered pose; only a
+        # confirmed no-lyrics result suppresses the lyric column.
+        self.assertFalse(self.window._no_lyrics_cover_target())
         self.owner.lyrics = ["one", "two", "three"]
         self.assertTrue(self.window._no_lyrics_cover_target())
         self.owner.lyrics.append("four")

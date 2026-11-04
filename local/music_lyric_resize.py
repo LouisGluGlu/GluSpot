@@ -1,4 +1,4 @@
-"""Bounded lyric/list ink snapshots during width motion; loaders stay pending."""
+"""Cheap skeleton handoff for lyric/list width motion; terminal misses stay cover-only."""
 from __future__ import annotations
 
 import time
@@ -84,8 +84,8 @@ class MusicLyricResizeMixin:
         if layout == 'cover' or (layout != 'playlist' and self._lyric_content_state() in {'idle', 'no_lyrics'}):
             return
         self._lyric_resize_fade_timer.stop()
-        # Preserve resolved ink at its original pixel size. Only a genuinely
-        # pending lookup may substitute current-width loading bars.
+        # Fade old ink into the baseline animated resize skeleton without
+        # reshaping during a width gesture.
         geometry = self._lyric_resize_last_geometry
         source = (QRectF(self._lyric_resize_last_queue_rect)
                   if self._effective_content_layout() == 'playlist'
@@ -153,8 +153,10 @@ class MusicLyricResizeMixin:
         elif self._lyric_resize_was_moving:
             self._lyric_resize_settle_timer.start(self.LYRIC_RESIZE_SETTLE_MS)
         self._lyric_resize_was_moving = moving
-        # Resolved rows and queue entries keep their bounded snapshot during
-        # width motion. A resize is not a new lyric lookup.
+        if ((time.monotonic() - self._lyric_resize_started_at) * 1000 >= self.LYRIC_RESIZE_CROSSFADE_MS
+                and self._effective_content_layout() != 'cover_lyrics'
+                and self._lyric_content_state() not in {'idle', 'no_lyrics'}):
+            self._lyric_resize_snapshot = QImage()
 
     def _advance_lyric_resize_motion(self):
         self._sync_lyric_resize_motion()
@@ -308,6 +310,8 @@ class MusicLyricResizeMixin:
         finally:
             self._lyric_resize_committing = False
         # Wrap reuse skips shaping, but follows the same visual handoff.
+        if self._effective_content_layout() != 'cover_lyrics':
+            self._lyric_resize_snapshot = QImage()
         self._lyric_resize_crossfade_at = time.monotonic()
         self._lyric_resize_fade_timer.start()
         self.update()
@@ -330,10 +334,8 @@ class MusicLyricResizeMixin:
         painter.restore()
 
     def _paint_lyric_resize_skeleton(self, painter, target):
-        """A resize may show the loader only for an actual pending lookup."""
-        if self._effective_content_layout() != 'lyrics' or self._lyric_content_state() != 'loading':
-            return
-        self._paint_lyric_loading(painter, QRectF(target), time.monotonic(), 1.0)
+        """Reuse the baseline sweep except for confirmed lyricless tracks."""
+        self._paint_lyric_loading(painter, QRectF(target), time.monotonic(), 1.0, force=True)
 
     def _lyric_resize_ink_weights(self, now=None):
         now = time.monotonic() if now is None else now
@@ -342,7 +344,8 @@ class MusicLyricResizeMixin:
             return 0., 0., 1.
         progress = max(0., min(1., (now - started) * 1000 / self.LYRIC_RESIZE_CROSSFADE_MS))
         progress = QEasingCurve(QEasingCurve.Type.InOutCubic).valueForProgress(progress)
-        if self._effective_content_layout() != 'lyrics' or self._lyric_content_state(now) != 'loading':
+        if (self._effective_content_layout() == 'cover_lyrics'
+                or self._lyric_content_state(now) in {'idle', 'no_lyrics'}):
             return (1., 0., 0.) if self._lyric_resize_frozen else (1. - progress, 0., progress)
         return ((1. - progress, progress, 0.) if self._lyric_resize_frozen
                 else (0., 1. - progress, progress))
@@ -365,8 +368,8 @@ class MusicLyricResizeMixin:
         if old_weight >= 1.:
             self._draw_lyric_resize_snapshot(painter, target)
             return
-        # Crossfade premultiplied endpoints once over the background. Steady
-        # loaded/list drags reuse their image without allocating another one.
+        # Only the short handoffs allocate blend images; a steady lyric drag
+        # paints the shared animated rows without reshaping text.
         ratio = self.devicePixelRatioF()
         blend = QImage(max(1, round(target.width() * ratio)), max(1, round(target.height() * ratio)),
                        QImage.Format.Format_ARGB32_Premultiplied)
@@ -447,9 +450,7 @@ class MusicLyricResizeMixin:
             artwork = QPainterPath()
             artwork.addRect(cover.adjusted(-1., -1., 1., 1.))
             painter.setClipPath(space.subtracted(artwork), Qt.ClipOperation.IntersectClip)
-        elif (self._lyric_content_state() != 'loaded' or self._lyric_resize_frozen
-              or self._lyric_resize_crossfade_at is not None or self._lyric_width_in_motion()
-              or self._layout_transition_fraction < 1.):
+        elif self._lyric_content_state() != 'loaded':
             painter.restore()
             return
         if layout == 'cover_lyrics' and not kwargs.get('navigation_capture', False):
