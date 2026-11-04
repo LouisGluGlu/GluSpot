@@ -55,8 +55,9 @@ class AlbumFlowBackgroundRenderer:
     # the reference's light gray while all moving pigments satisfy this cap.
     MAX_LUMINANCE = 0.265
 
-    def __init__(self, backdrop_variant: str | None = None):
+    def __init__(self, backdrop_variant: str | None = None, *, default_backdrop_variant: str = "frosted"):
         self._backdrop_variant_override = backdrop_variant
+        self._default_backdrop_variant = default_backdrop_variant
         self._variant_frame = QImage()
         self._variant_key = None
         self._clock = MotionSimulationClock()
@@ -79,7 +80,7 @@ class AlbumFlowBackgroundRenderer:
 
     @property
     def backdrop_variant(self) -> str:
-        return resolve_backdrop_variant(self._backdrop_variant_override)
+        return resolve_backdrop_variant(self._backdrop_variant_override, default=self._default_backdrop_variant)
 
     def set_backdrop_variant(self, name: str | None):
         """Select a style; None resumes environment selection. Fence old jobs."""

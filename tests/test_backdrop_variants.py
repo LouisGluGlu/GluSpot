@@ -232,7 +232,7 @@ class BackdropWindowTests(unittest.TestCase):
         owner.album_color, owner.secondary_color = QColor(174, 116, 62), QColor(59, 36, 25)
         surface = MusicSurfaceWindow(owner)
         self.addCleanup(surface.shutdown)
-        self.assertEqual(surface._album_flow_background.backdrop_variant, "frosted")
+        self.assertEqual(surface._album_flow_background.backdrop_variant, "classic")
         self.assertEqual(surface._art_palette(), login._background_palette)
         library.set_now_playing(None)
         self.assertEqual(login._background_palette, idle_surface_palette())

@@ -17,10 +17,10 @@ BACKDROP_VARIANTS = ("classic", "flow", "frosted", "noir")
 BACKDROP_MAX_LUMINANCE = .12
 
 
-def resolve_backdrop_variant(value: str | None = None) -> str:
+def resolve_backdrop_variant(value: str | None = None, *, default: str = "frosted") -> str:
     """Normalize an explicit value or the environment; unknowns use frosted."""
     if value is None:
-        value = os.environ.get("GLUSPOT_BACKDROP_VARIANT", "frosted")
+        value = os.environ.get("GLUSPOT_BACKDROP_VARIANT", default)
     name = str(value).strip().lower()
     return name if name in BACKDROP_VARIANTS else "frosted"
 

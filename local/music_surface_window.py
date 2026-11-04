@@ -458,7 +458,12 @@ class MusicSurfaceWindow(NativeMusicResizeMixin, MusicLyricResizeMixin, MusicWin
         self._scene_control_ink_cache = QColor("white")
         self._control_color_transitions: dict[str, tuple[QColor, QColor, float]] = {}
         self._frame_control_color_at: float | None = None
-        self._album_flow_background = AlbumFlowBackgroundRenderer()
+        # The playing surface retains its animated album field. Library/login
+        # defaults select their static material independently; explicit preview
+        # selectors still apply to this surface.
+        self._album_flow_background = AlbumFlowBackgroundRenderer(
+            default_backdrop_variant="classic",
+        )
         self._browse_index: float | None = None
         self._browse_until = 0.0
         self._browse_return_from: float | None = None

@@ -107,6 +107,7 @@ This README is the canonical product, implementation, release-readiness, and pen
 ## Current Status
 
 - 2026-11-04: t225 restores only the expanded sea's `ebe525e` peak/vocal amplitude (quiet 0.340 px, held bass 7.697 px, vocal 9.583 px), removes the extra low-band punch and restores its original damage strip. A translucent palette hairline stays visible along the crest; rising accents add at most 1.2 logical units to the 1.0-unit base, with smooth endpoint taper and a 160 ms audio-clock EMA. Existing palette glow, shared cover motion and all t205–t222 lyric/layout/library/settings fixes remain. [t225 evidence](docs/island-sea-t225.md) records cover comparisons, measurements, CPU and isolated-suite verification. PC 未验证; no version/build, push or PC operation.
+- 2026-11-04: t229 restores the playing window/fullscreen's animated album-color background by giving that renderer its own `classic` default. Library/login retain `frosted`; explicit backdrop selectors and the other t214–t222 features remain. Exact ec89693/395d6ed offscreen comparisons show that the static default originated in t200, and do not reproduce shared lyric/palette worker suspension or the reported stuck PC lyric skeleton. Production-entry delayed-result/library/preview regressions and the verification limits are recorded in [t229 evidence](docs/music-surface-t229.md). PC 未验证; no version/build, push or PC operation.
 
 - 2026-11-04: t214–t222 embeds the real expanded island across the sidebar library footer, sharing live provider state, glass transport, selected ambience and cover flip; adds shared DPR-aware native/Qt resize edges to player/library/login; migrates immersive `fade` to `capsule` and paints cached settings thumbnails with current artwork and production background painters. Translation A is the default (including unset/unknown selectors), composed with t205 full-height lyrics and cover compression. Collapsed pill growth reserves its native mask before paint, holds text until ready and shrinks the mask after the shell; exact-base frame proofs reproduce and remove the clipped background/rim/cover. [F–J evidence and limits](docs/music-surface-t214-t222.md) include library CPU overhead and inherited suite failures. PC 未验证; no version/build, push or PC operation.
 
@@ -289,13 +290,13 @@ The combined directory has its own Python environment and native HomePod helper 
 
 ### 背景风格对比
 
-启动前设置 `GLUSPOT_BACKDROP_VARIANT=classic|flow|frosted|noir`。未设置、空值或未知环境值均使用默认 `frosted`，与布局选择互相独立。
+启动前设置 `GLUSPOT_BACKDROP_VARIANT=classic|flow|frosted|noir`。未设置时，播放窗口/全屏使用动态 `classic`，音乐库与登录页使用静态 `frosted`；空值或未知环境值仍回退到 `frosted`。显式选择对所有页面生效，与布局选择互相独立。
 
 | 风格 | 效果 | 对比图 |
 | --- | --- | --- |
 | `classic` | 原 AlbumFlow 与原有深色遮罩，保持既有像素与动画 | `backdrop-baseline.png` |
 | `flow` | 专辑取色的柔软多团流体渐变，明亮色团之间保留深色空间 | `backdrop-1.png` |
-| `frosted`（默认） | 近黑磨砂场，左上方一团柔和取色光晕与细微颗粒 | `backdrop-2.png` |
+| `frosted`（音乐库/登录页默认） | 近黑磨砂场，左上方一团柔和取色光晕与细微颗粒 | `backdrop-2.png` |
 | `noir` | 近乎纯黑，仅保留极淡取色暗角，优先文字对比 | `backdrop-3.png` |
 
 音乐库与登录窗口支持 `window.set_backdrop_variant("flow")`，`window.backdrop_variant` 可读取当前风格；renderer 也支持相同 setter，或 `AlbumFlowBackgroundRenderer("flow")`。setter 规范化空白与大小写，无效名称抛出 `ValueError`，`None` 恢复环境变量选择。共享解析函数为 `local.backdrop_variants.resolve_backdrop_variant()`。切换不替换账号、二维码、歌单或播放状态。
