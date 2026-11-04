@@ -344,10 +344,9 @@ class _Binding:
 class SmtcInterruptionObserver:
     """All external SMTC sessions on the existing provider asyncio loop.
 
-    Membership uses retained wrapper identity or native equality, never AUMID
-    alone. Unprovable wrapper replacement starts a new baseline. Ambiguous
-    duplicate AUMIDs have no automatic permission. This fails closed on
-    projections that cannot preserve or compare native identity.
+    One app id keeps its binding when each poll returns a new wrapper that
+    cannot prove native equality. Two live sessions with the same app id are
+    still ambiguous and are not controlled.
     """
     EVENTS = ('playback_info_changed', 'media_properties_changed')
 
@@ -461,16 +460,22 @@ class SmtcInterruptionObserver:
                            count=counts[app])
         return kept
 
+    def _app_id(self, session):
+        return str(getattr(session, 'source_app_user_model_id', '') or '')
+
+    def _still_listed(self, binding):
+        """The app id is still the only listed session, even with a new wrapper."""
+        return any(self._app_id(session) == binding.app_id for session in self._membership())
+
     async def collect_once(self):
         async with self._collect_lock:
             if self._closed:
                 return
             sessions = self._membership()
             publications = []
+            listed = {self._app_id(session) for session in sessions}
             for number, binding in tuple(self._bindings.items()):
-                if not any(same_session(binding.session, session) and
-                           str(session.source_app_user_model_id) == binding.app_id
-                           for session in sessions):
+                if binding.app_id not in listed:
                     self._unsubscribe(binding.tokens)
                     self._bindings.pop(number, None)
                     if binding.observation is not None:
@@ -478,9 +483,13 @@ class SmtcInterruptionObserver:
                         self._diag(phase='session', reason='removed', app_id=binding.app_id,
                                    playing='unknown', edge=0)
             for session in sessions:
-                binding = next((b for b in self._bindings.values()
-                                if same_session(b.session, session) and
-                                str(session.source_app_user_model_id) == b.app_id), None)
+                app_id = self._app_id(session)
+                binding = next((b for b in self._bindings.values() if b.app_id == app_id), None)
+                if binding is not None and binding.diag_failed and not same_session(binding.session, session):
+                    # The retained wrapper stopped answering. Follow the new one once.
+                    self._unsubscribe(binding.tokens)
+                    binding.session = session
+                    self._subscribe(session, self.EVENTS, binding.tokens, binding)
                 if binding is None:
                     self._next_binding += 1
                     binding = _Binding(self._next_binding, session,
@@ -617,13 +626,11 @@ class SmtcInterruptionObserver:
         if not self.is_current(observation):
             return None
         binding = self._bindings[observation.binding_id]
-        if not any(same_session(binding.session, s) and
-                   str(s.source_app_user_model_id) == binding.app_id for s in self._membership()):
+        if not self._still_listed(binding):
             return None
         fresh = await self._read(binding)
         if (not self.is_current(observation) or fresh.playing is not True
-                or not any(same_session(binding.session, s) and
-                   str(s.source_app_user_model_id) == binding.app_id for s in self._membership())
+                or not self._still_listed(binding)
                 or fresh.media_key != observation.media_key
                 or fresh.media_generation != observation.media_generation
                 or fresh.kind is not MediaKind.MUSIC):

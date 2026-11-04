@@ -258,6 +258,59 @@ class ObserverTests(CaptureAsyncTestCase):
         self.assertIs(await self.observer.pause(edge), PauseResult.PAUSED)
         self.assertEqual(self.session.pauses, 1)
 
+    async def test_new_wrapper_for_the_same_app_keeps_the_binding_and_pause(self):
+        native = self.session
+        native.source_app_user_model_id = 'cloudmusic.exe'
+        native.playing = True
+
+        class Wrap:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        class Refreshing:
+            def __init__(self):
+                self.events = {}
+                self.removed = []
+
+            def get_sessions(self):
+                return [Wrap(native)]
+
+            def add_sessions_changed(self, callback):
+                self.events['sessions_changed'] = callback
+                return 'sessions_changed'
+
+            def remove_sessions_changed(self, token):
+                self.removed.append(token)
+
+        self.observer.manager = Refreshing()
+        self.observer._diagnostics = True
+        import logging
+        lines = []
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                lines.append(record.getMessage())
+
+        handler = Collect()
+        logging.getLogger('GluSpot.capture.interruption').addHandler(handler)
+        try:
+            first = await self.collect()
+            for _ in range(3):
+                await self.collect()
+            current = self.observer.snapshots()[0]
+            self.assertEqual(current.binding_id, first.binding_id)
+            self.assertEqual(len(self.observer._bindings), 1)
+            self.assertIsNotNone(await self.observer.revalidate(first))
+            self.assertIs(await self.observer.pause(first), PauseResult.PAUSED)
+        finally:
+            logging.getLogger('GluSpot.capture.interruption').removeHandler(handler)
+        self.assertEqual(native.pauses, 1)
+        self.assertEqual(sum('reason=removed' in line for line in lines), 0)
+        self.assertEqual(sum('reason=baseline' in line for line in lines), 1)
+
     async def test_equal_wrappers_dedup_but_distinct_same_app_stay_ambiguous(self):
         self.manager.sessions = [SessionAlias(self.session), SessionAlias(self.session)]
         await self.collect()
@@ -345,7 +398,7 @@ class ObserverTests(CaptureAsyncTestCase):
         self.session.playing = True
         snapshot = await self.collect()
         async def replace_while_reading():
-            self.manager.sessions = [Session(playing=True)]
+            self.manager.sessions = [Session('other.exe', playing=True)]
         self.session.properties_hook = replace_while_reading
         self.assertIs(await self.observer.pause(snapshot), PauseResult.STALE)
         self.assertEqual(self.session.pauses, 0)
