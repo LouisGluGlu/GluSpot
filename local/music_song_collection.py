@@ -376,13 +376,16 @@ class MusicSongCollectionMixin:
         if not self._song_collection_state().track_id:
             return QRectF()
         now = time.monotonic() if now is None else now
-        scale = self._surface_scale(rect)
-        side = max(36., 44. * scale)
-        margin = max(10., 18. * scale)
+        unit = self._control_unit(rect)
+        side = max(34., 5.4 * unit)
+        margin = 2.4 * unit
+        columns = 1. if rect.width() < 440. else 2.
         lane = self._footer_dj_lane_width(rect, now)
-        gap = max(8., 10. * scale) if lane > 0 else 0.
-        face = QRectF(rect.right() - margin - lane - gap - side * 2.5,
-                      rect.bottom() - margin - side, side * 2.5, side)
+        gap = max(8., 1.2 * unit) if lane > 0 else 0.
+        right = float(rect.x()) + float(rect.width())
+        bottom = float(rect.y()) + float(rect.height())
+        face = QRectF(right - margin - lane - gap - side * columns,
+                      bottom - margin - side, side * columns, side)
         if shifted:
             reveal = self._control_reveal_at(now)
             # DJ can remain independently visible during speech/status. This
@@ -403,6 +406,8 @@ class MusicSongCollectionMixin:
         face = self._song_collection_geometry(rect, now)
         if not face.isValid():
             return {}
+        if rect.width() < 440.:
+            return {"favorite": QRectF(face)}
         return {"favorite": QRectF(face.left(), face.top(), face.width() / 2., face.height()),
                 "playlist_add": QRectF(face.center().x(), face.top(), face.width() / 2., face.height())}
 

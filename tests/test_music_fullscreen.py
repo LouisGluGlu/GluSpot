@@ -4095,7 +4095,7 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             self.window.render(output)
             cache = self.window._cover_cache
             self.assertEqual(cache.devicePixelRatio(), 2.0)
-            self.assertGreater(cache.width(), 600)
+            self.assertGreater(cache.width(), self.window._current_cover_rect().width() * 1.5)
             with patch.object(self.window, "isActiveWindow", return_value=False):
                 self.window.render(output)
             self.assertEqual(self.window._cover_cache.cacheKey(), cache.cacheKey())
@@ -4775,8 +4775,9 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         # An unchanged transport face can reuse its visible layer.
         self.assertIn(animated_scales, ([], baseline_scales))
         origin = self.window._transport_light_origin()
-        self.assertAlmostEqual(origin.x(), 262.0)
-        self.assertAlmostEqual(origin.y(), 262.0)
+        cover_center = self.window._current_cover_rect().center()
+        self.assertAlmostEqual(origin.x(), cover_center.x())
+        self.assertAlmostEqual(origin.y(), cover_center.y())
         max_radius = self.window._transport_light_max_radius(origin)
         duration = self.window._transport_feedback["previous"][3]
         self.assertAlmostEqual(duration, 1.72)
@@ -5074,8 +5075,10 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._transport_feedback["previous"] = feedback
         cached_background = QImage(self.window._background_cache)
         lit = render(at)
-        self.assertEqual(lit.pixelColor(262, 262), QColor(161, 36, 68))
-        self.assertEqual(lit.pixelColor(262, 262), baseline.pixelColor(262, 262))
+        cover_center = self.window._current_cover_rect(at).center()
+        cover_x, cover_y = round(cover_center.x()), round(cover_center.y())
+        self.assertEqual(lit.pixelColor(cover_x, cover_y), QColor(161, 36, 68))
+        self.assertEqual(lit.pixelColor(cover_x, cover_y), baseline.pixelColor(cover_x, cover_y))
         origin = self.window._transport_light_origin()
         frame = self.window._transport_feedback_frame(at - 50.0, feedback[3])
         ring_x = round(origin.x() + self.window._transport_light_max_radius(origin) * frame[1] * 0.79)
@@ -5084,8 +5087,13 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.assertEqual(self.window._background_cache, cached_background)
 
         def title_ink(image):
+            content, cover, _lyric = self.window._wide_content_column_geometry()
+            _font, title, _artist_font, _artist = self.window._metadata_layout(
+                cover, content, self.window._surface_scale(), 1.0)
             return {
-                (x, y) for y in range(470, 515) for x in range(62, 300)
+                (x, y)
+                for y in range(max(0, round(title.top())), min(image.height(), round(title.bottom())))
+                for x in range(max(0, round(title.left())), min(image.width(), round(title.right())))
                 if image.pixelColor(x, y).value() > 235
                 and image.pixelColor(x, y).saturation() < 35
             }
@@ -5355,13 +5363,17 @@ class MusicSurfaceWindowTests(unittest.TestCase):
         self.window._sync_window_control_rects()
         self.assertEqual(set(self.window._button_rects), {"return", "translation", "content_layout"})
         windowed_rect = self.window._button_rects["return"]
-        self.assertEqual((windowed_rect.width(), windowed_rect.height()), (44.0, 44.0))
+        full_unit = min(1190 / 100.0, 666 / 75.8)
+        full_side = round(max(34.0, 5.6 * full_unit))
+        self.assertEqual((windowed_rect.width(), windowed_rect.height()), (full_side, full_side))
 
         self.window.resize(595, 333)
         self.window._sync_window_control_rects()
         half_rect = self.window._button_rects["return"]
-        self.assertAlmostEqual(half_rect.width(), 22.0)
-        self.assertAlmostEqual(half_rect.height(), 22.0)
+        half_unit = min(595 / 100.0, 333 / 75.8)
+        half_side = round(max(34.0, 5.6 * half_unit))
+        self.assertAlmostEqual(half_rect.width(), half_side)
+        self.assertAlmostEqual(half_rect.height(), half_side)
 
         self.window._fullscreen = True
         self.window._sync_window_control_rects()

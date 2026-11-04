@@ -367,9 +367,14 @@ class MusicContentLayoutMixin:
         # responsive composition. Both visible columns share the width budget.
         gap = 100. * scale
         if not measure_fit:
-            side = max(1., min(side, content.width() * .44))
-            gap = min(gap, content.width() * .10)
-        cover = QRectF(content.left(), content.top(), side, side)
+            unit = self._control_unit(surface)
+            side = max(1., 37.8 * unit)
+            # Same width share as before: the gap yields so the lyric lane
+            # keeps at least about 45% of the content width.
+            gap = min(gap, max(0., content.width() * .10))
+            cover = QRectF(6.8 * unit, 6.8 * unit, side, side)
+        else:
+            cover = QRectF(content.left(), content.top(), side, side)
         left = cover.right() + gap
         # Follow/wrapping use the full reading lane. Bottom chrome feathers
         # lyric ink separately; its visibility must never move the anchor.

@@ -168,12 +168,12 @@ class ResponsiveLyricEdgeTests(unittest.TestCase):
                 self.assertAlmostEqual(legacy[2].left(), legacy[1].right() + 100. * self.window._surface_scale())
             widths.append((cover.width(), lyric.width(), title_font.pixelSize(),
                            artist_font.pixelSize(), self.window._media_control_panel_rect.width()))
-        self.assertGreater(widths[0][0], widths[1][0])
+        self.assertAlmostEqual(widths[0][0], widths[1][0], delta=1.)
         self.assertGreater(widths[1][0], widths[2][0])
         self.assertGreater(widths[0][1], widths[1][1])
         self.assertGreater(widths[1][1], widths[2][1])
         for slot in (2, 3, 4):
-            self.assertGreater(widths[0][slot], widths[1][slot])
+            self.assertAlmostEqual(widths[0][slot], widths[1][slot], delta=1.)
             self.assertGreater(widths[1][slot], widths[2][slot])
 
 

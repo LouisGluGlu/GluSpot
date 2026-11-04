@@ -519,7 +519,8 @@ class PersonalDjControlTests(unittest.TestCase):
             self.window._update_personal_dj_control(100.1)
         update.assert_called_once()
         self.assertLess(update.call_args.args[0].width(), self.window.width() * .35)
-        self.assertLess(update.call_args.args[0].height(), self.window.height() * .35)
+        # The unit-sized wave button rounds onto the old 35% line.
+        self.assertLessEqual(update.call_args.args[0].height(), self.window.height() * .35)
 
     def test_ripple_excludes_both_speech_ring_and_title_background(self):
         self.enabled = self.speaking = True
@@ -685,7 +686,7 @@ class PersonalDjControlTests(unittest.TestCase):
         region = QRectF(self.window.rect())
         with patch("local.music_surface_window.time.monotonic", return_value=100.4):
             idle = self.window._personal_dj_damage_rect(region)
-        self.assertLess(idle.height(), region.height() * .35)
+        self.assertLessEqual(idle.height(), region.height() * .35)
         self.speaking = True
         self.presentation = {"state": "speaking", "next_title": "下一首真实歌曲", "token": 2}
         with patch("local.music_surface_window.time.monotonic", return_value=101):
@@ -703,7 +704,7 @@ class PersonalDjControlTests(unittest.TestCase):
             self.window._update_personal_dj_control(101.8)
         self.assertTrue(any(args.args[0].contains(speech) for args in update.call_args_list))
         with patch("local.music_surface_window.time.monotonic", return_value=101.8):
-            self.assertLess(self.window._personal_dj_damage_rect(region).height(), region.height() * .35)
+            self.assertLessEqual(self.window._personal_dj_damage_rect(region).height(), region.height() * .35)
 
     def test_real_frequency_glow_changes_glyph_without_raster_blur_or_cache_growth(self):
         self.enabled = self.speaking = True

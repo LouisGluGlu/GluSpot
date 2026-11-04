@@ -120,7 +120,12 @@ class MusicSurfaceLayoutTests(unittest.TestCase):
                 controls = self.window._media_control_panel_rect
                 collection = self.window._song_collection_geometry(QRectF(self.window.rect()), shifted=False)
                 self.assertAlmostEqual(fade_bottom, self.window.height())
-                self.assertLess(fade_top, min(controls.top(), collection.top()))
+                # Wide transport now sits under the cover, so the fade clears
+                # the bottom collection instead of that left-hand group.
+                chrome_top = collection.top() if collection.isValid() else controls.top()
+                if self.window._content_layout_is_narrow():
+                    chrome_top = min(controls.top(), chrome_top)
+                self.assertLess(fade_top, chrome_top)
                 ratio = self.window.devicePixelRatioF()
                 start, end = int(fade_top * ratio), int(np.ceil(fade_bottom * ratio))
                 self.assertTrue(np.any((alpha_faded[start:end] > 0) & (alpha_faded[start:end] < alpha_plain[start:end])))
