@@ -137,17 +137,13 @@ class LyricRecoveryTests(unittest.TestCase):
             texts += [call.args[2] for call in read.call_args_list]
             return image, texts
 
-        # Initial A focus reserves its translation immediately, then reveals
-        # ink after the selected style's opacity stagger and entry duration.
-        render(100.)
-        settled_at = 100. + surface._translation_style.entry_duration_s + .05
-        enabled, painted = render(settled_at)
+        enabled, painted = render(100.)
         self.assertIn("晚风依然温柔", painted)
         self.assertIn("translation", surface._button_rects)
-        with patch("local.music_surface_window.time.monotonic", return_value=settled_at + .01):
+        with patch("local.music_surface_window.time.monotonic", return_value=100.01):
             surface._toggle_translation()
         self.assertFalse(owner.enable_dual_line_lyrics)
-        disabled, painted = render(settled_at + .4)
+        disabled, painted = render(100.4)
         self.assertNotIn("晚风依然温柔", painted)
         self.assertIn("A sentence continues through the evening", painted)
         self.assertNotEqual(bytes(enabled.constBits()), bytes(disabled.constBits()))

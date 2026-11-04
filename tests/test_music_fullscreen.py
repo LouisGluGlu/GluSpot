@@ -1417,9 +1417,10 @@ class MusicSurfaceWindowTests(unittest.TestCase):
             with patch.object(self.window, "_song_lyric_layouts", wraps=original) as layouts:
                 self.window.render(image)
             secondary = layouts.call_args.kwargs["secondary_font"]
-            expected = (self.window.LYRIC_PIXEL_SIZE * self.window._surface_scale()
-                        * self.window._translation_style.size_ratio)
-            self.assertEqual(secondary.pixelSize(), round(expected))
+            prior = self.window._surface_font(
+                (self.window.LYRIC_PIXEL_SIZE - 6.0) * self.window._surface_scale(), QFont.Weight.Normal,
+            )
+            self.assertAlmostEqual(secondary.pixelSize(), prior.pixelSize() / 2, delta=1)
 
     def test_reentering_metadata_during_return_preserves_displayed_position(self):
         window = self.window

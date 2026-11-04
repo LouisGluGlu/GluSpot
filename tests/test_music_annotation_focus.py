@@ -4,12 +4,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QRect, QRectF, Qt
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QImage, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
 from local.music_surface_window import MusicSurfaceWindow
-from local.translation_style_variants import CLASSIC
 
 
 class _Owner(QWidget):
@@ -67,23 +66,15 @@ class MusicAnnotationFocusTests(unittest.TestCase):
         image = image if image is not None else self._image()
         captured = {}
         original = self.window._paint_parenthetical_highlight
-        original_solid = self.window._draw_sprung_cached_wrapped_layout
 
         def record(painter, row, text, font, layout, progress, *, line_offsets=()):
             if text in {"echo", "回声"}:
                 captured[text] = (progress, painter.opacity(), QRect(row.toAlignedRect()))
             return original(painter, row, text, font, layout, progress, line_offsets=line_offsets)
 
-        def record_solid(painter, layout, origin, text, font, width, height, color, offsets=(), **kwargs):
-            if text == "回声":
-                rect = painter.transform().mapRect(QRectF(origin.x(), origin.y(), width, height)).toAlignedRect()
-                captured[text] = (None, painter.opacity(), rect)
-            return original_solid(painter, layout, origin, text, font, width, height, color, offsets, **kwargs)
-
         with (
             patch("local.music_surface_window.time.monotonic", return_value=now),
             patch.object(self.window, "_paint_parenthetical_highlight", side_effect=record),
-            patch.object(self.window, "_draw_sprung_cached_wrapped_layout", side_effect=record_solid),
         ):
             if region is None:
                 self.window.render(image)
@@ -92,8 +83,6 @@ class MusicAnnotationFocusTests(unittest.TestCase):
         return image, captured
 
     def test_early_focused_annotations_enter_unread_and_do_not_restart_at_source_time(self):
-        # Only classic gives the translated aside a shared karaoke front.
-        self.window._translation_style = CLASSIC
         for fullscreen in (False, True):
             for next_kind in ("line", "unit", "synthetic"):
                 with self.subTest(fullscreen=fullscreen, next_kind=next_kind):
@@ -144,15 +133,15 @@ class MusicAnnotationFocusTests(unittest.TestCase):
         partial, _ = self._render(1.2, 101.0)
         # Settle the row spring before the annotation entrance completes:
         # the active dirty region must include the focused future row.
-        partial, captured = self._render(1.5, 101.3, image=partial)
+        partial, captured = self._render(1.3, 101.1, image=partial)
         self.assertEqual(set(captured), {"echo", "回声"})
         active = self.window._active_lyric_animation_rect
         self.assertTrue(active.isValid())
         for _progress, _opacity, row in captured.values():
             self.assertTrue(active.intersects(row))
 
-        partial, captured_partial = self._render(1.55, 101.35, image=partial, region=active)
-        full, captured_full = self._render(1.55, 101.35)
+        partial, captured_partial = self._render(1.4, 101.2, image=partial, region=active)
+        full, captured_full = self._render(1.4, 101.2)
         self.assertEqual(set(captured_partial), {"echo", "回声"})
         self.assertEqual(set(captured_full), {"echo", "回声"})
         logical = active.intersected(self.window.rect())

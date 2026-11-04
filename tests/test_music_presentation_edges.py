@@ -95,29 +95,20 @@ class MusicPresentationEdgeTests(unittest.TestCase):
         # The second voice starts before the first voice finishes. Both sung
         # brackets and their translations must stay coupled to their voices.
         self._render_at(100.6, 11.5)
-        captured = {}
-        native_solid = self.window._draw_sprung_cached_wrapped_layout
+        captured: dict[str, tuple[float, float]] = {}
 
         def capture(_painter, row, text, _font, _layout, progress, **_kwargs):
             if text in {"echo", "回声", "reply", "回应"}:
                 captured[text] = (row.top(), progress)
 
-        def capture_solid(painter, layout, origin, text, *args, **kwargs):
-            if text in {"回声", "回应"}:
-                captured.setdefault(text, (origin.y(), None))
-            return native_solid(painter, layout, origin, text, *args, **kwargs)
-
-        with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture), \
-                patch.object(self.window, "_draw_sprung_cached_wrapped_layout", side_effect=capture_solid):
+        with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
             self._render_at(101.0, 12.0)
         self.assertEqual(self.window._lyric_motion.active_index, 3)
         self.assertEqual(set(captured), {"echo", "回声", "reply", "回应"})
         self.assertGreater(captured["回声"][0], captured["echo"][0])
         self.assertGreater(captured["回应"][0], captured["reply"][0])
-        self.assertGreaterEqual(captured["echo"][1], 0.)
-        self.assertGreaterEqual(captured["reply"][1], 0.)
-        self.assertIsNone(captured["回声"][1])
-        self.assertIsNone(captured["回应"][1])
+        self.assertAlmostEqual(captured["echo"][1], captured["回声"][1])
+        self.assertAlmostEqual(captured["reply"][1], captured["回应"][1])
 
     def test_bracket_translation_shares_entrance_and_remains_after_reading(self):
         self.owner.artist = "Solo"
@@ -138,10 +129,7 @@ class MusicPresentationEdgeTests(unittest.TestCase):
         translated = self.window._song_parenthetical_translation_layouts[1]
         self.assertIsNotNone(bracket)
         self.assertIsNotNone(translated)
-        style = self.window._translation_style
-        gap = style.gap_px_fn(self.window.LYRIC_PIXEL_SIZE * self.window._surface_scale(),
-                              self.window._surface_scale())
-        self.assertAlmostEqual(translated[2], bracket[2] + bracket[1] + gap)
+        self.assertAlmostEqual(translated[2], bracket[2] + bracket[1])
         self.assertGreaterEqual(
             self.window._song_parenthetical_extra_heights[1],
             translated[2] + translated[1] - self.window._song_row_heights[1],
@@ -149,42 +137,32 @@ class MusicPresentationEdgeTests(unittest.TestCase):
 
         def captured_at(now: float, position: float):
             layers = {}
-            native_solid = self.window._draw_sprung_cached_wrapped_layout
 
-            def capture(painter, row, text, _font, _layout, progress, **_kwargs):
+            def capture(_painter, row, text, _font, _layout, progress, **_kwargs):
                 if text in {"echo", "回声"}:
-                    layers[text] = (row.top(), progress, painter.opacity())
+                    layers[text] = (row.top(), progress)
 
-            def capture_solid(painter, layout, origin, text, *args, **kwargs):
-                if text == "回声":
-                    layers.setdefault(text, (origin.y(), None, painter.opacity()))
-                return native_solid(painter, layout, origin, text, *args, **kwargs)
-
-            with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture), \
-                    patch.object(self.window, "_draw_sprung_cached_wrapped_layout", side_effect=capture_solid):
+            with patch.object(self.window, "_paint_parenthetical_highlight", side_effect=capture):
                 self._render_at(now, position)
             return layers
 
         # Start the entrance, then sample its moving phase and settled phase.
         self._render_at(100.5, 10.5)
-        staggered = captured_at(100.62, 10.62)
-        self.assertEqual(set(staggered), {"echo"})
-        entering_at = 100.5 + style.opacity_stagger_s + .05
-        entering = captured_at(entering_at, 10.8)
+        entering = captured_at(100.62, 10.62)
         settled = captured_at(101.1, 11.1)
         self.assertEqual(set(entering), {"echo", "回声"})
         self.assertEqual(set(settled), {"echo", "回声"})
-        self.assertIsNone(entering["回声"][1])
-        self.assertIsNone(settled["回声"][1])
-        self.assertGreater(entering["回声"][2], 0.)
-        self.assertLess(entering["回声"][2], settled["回声"][2])
-        self.assertAlmostEqual(settled["回声"][2], settled["echo"][2] * style.alpha_active)
+        self.assertAlmostEqual(
+            entering["回声"][0] - entering["echo"][0],
+            settled["回声"][0] - settled["echo"][0], delta=0.01,
+        )
+        self.assertAlmostEqual(entering["echo"][1], entering["回声"][1])
 
         # A reads until 19.0. Its aside begins at 17.2 and stays clear until
         # 22.25: C starts at 20.0 and its estimated read ends at 29.0.
         held = captured_at(101.5, 20.5)
         self.assertAlmostEqual(held["echo"][1], (20.5 - 17.2) / (22.25 - 17.2))
-        self.assertIsNone(held["回声"][1])
+        self.assertAlmostEqual(held["回声"][1], held["echo"][1])
         completed = {}
         parent_opacity = []
         native = self.window._draw_sprung_cached_wrapped_layout
@@ -206,7 +184,7 @@ class MusicPresentationEdgeTests(unittest.TestCase):
             completed["回声"][0] - completed["echo"][0],
             settled["回声"][0] - settled["echo"][0], delta=0.01,
         )
-        self.assertAlmostEqual(completed["回声"][1], completed["echo"][1] * style.alpha_inactive)
+        self.assertAlmostEqual(completed["echo"][1], completed["回声"][1])
         self.assertEqual(len(parent_opacity), 1)
         self.assertAlmostEqual(completed["echo"][1], parent_opacity[0])
         self.assertGreater(completed["echo"][1], 0.0)
