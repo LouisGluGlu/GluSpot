@@ -9131,8 +9131,9 @@ class IslandStackVisualMessageTests(unittest.TestCase):
 
     def test_edge_notch_clip_wraps_all_main_island_kinds_before_music_branch(self):
         source = inspect.getsource(IslandStackVisual._paint_island_frame)
-        plan_start = source.index("paint_plan = stack_frame_paint_plan(visuals, self.motions")
-        loop_start = source.index("for paint_item in paint_plan.paint_items", plan_start)
+        geometry = inspect.getsource(IslandStackVisual._prepare_island_frame_geometry)
+        self.assertIn("paint_plan = stack_frame_paint_plan(visuals, self.motions", geometry)
+        loop_start = source.index("for paint_item in paint_plan.paint_items")
         music_branch = source.index("if visual.kind == IslandKind.MUSIC", loop_start)
         segment = source[loop_start:music_branch]
 

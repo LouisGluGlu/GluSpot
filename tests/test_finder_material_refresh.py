@@ -102,6 +102,8 @@ class FinderMaterialRefreshTests(unittest.TestCase):
     def test_expanded_shell_has_no_stretched_texture_ridge_or_inferred_border(self):
         visual = self.visual
         visual.expanded = True
+        # Legacy multi-item frame; the live Finder music pill has its own shell.
+        visual._finder_bar_active = lambda: False
         visual._group_frame_should_snap_to_target = lambda *_args: True
         texture = QImage(128, 24, QImage.Format.Format_ARGB32)
         with QPainter(texture) as painter:

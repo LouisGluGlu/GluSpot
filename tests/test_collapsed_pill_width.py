@@ -44,11 +44,12 @@ class CollapsedPillMaskTests(unittest.TestCase):
         self.assertTrue(plan.mask_rect.contains(old_mask))
         self.assertGreater(plan.mask_rect.width(), old_mask.width())
 
-    def test_shrink_keeps_previous_extent_until_motion_has_settled(self):
+    def test_shrink_tracks_current_shell_even_while_motion_and_pointer_are_busy(self):
         target = QRectF(200, 10, 140, 32)
         old_mask = self.plan([QRectF(120, 10, 300, 32)]).mask_rect
         moving = self.plan([target], old_mask, defer_shrink=True)
-        self.assertEqual(moving.action, "skip")
+        self.assertEqual(moving.action, "apply")
+        self.assertEqual(moving.mask_rect, target.adjusted(-2., -2., 2., 2.))
         settled = self.plan([target], old_mask, defer_shrink=False)
         self.assertEqual(settled.action, "apply")
         self.assertTrue(settled.mask_rect.contains(target))
@@ -56,17 +57,17 @@ class CollapsedPillMaskTests(unittest.TestCase):
 
     def test_short_long_short_frame_sequence_always_contains_the_painted_shell(self):
         mask = QRectF()
-        # The target is reserved immediately; overshoot is reserved too.
+        # Every actual spring pose, including overshoot, defines its own region.
         for widths, target_width in (((140, 150, 190, 250, 295, 302, 300), 300),
                                      ((300, 300, 280, 220, 160, 138, 140), 140)):
             for index, width in enumerate(widths):
                 shell = QRectF(270-width/2, 10, width, 32)
                 target = QRectF(270-target_width/2, 10, target_width, 32)
-                plan = self.plan([shell, target], mask, defer_shrink=index < len(widths)-1)
+                plan = self.plan([shell], mask, defer_shrink=index < len(widths)-1)
                 if plan.action == "apply":
                     mask = plan.mask_rect
                 self.assertTrue(mask.contains(shell), (width, target_width, mask))
-                self.assertTrue(mask.contains(target))
+                self.assertTrue(shell.adjusted(-2., -2., 2., 2.).contains(mask))
 
 
 class _CompactFixture:

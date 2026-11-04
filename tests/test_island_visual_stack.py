@@ -298,7 +298,7 @@ class IslandVisualStackTests(unittest.TestCase):
         self.assertEqual(plan.action, "clear")
         self.assertFalse(plan.record_update_at)
 
-    def test_interaction_mask_plan_respects_deferred_pointer_and_interval_gates(self):
+    def test_interaction_mask_plan_never_defers_a_visible_frame_for_busy_gates(self):
         base = dict(
             rects=[QRectF(100.0, 40.0, 80.0, 30.0)],
             platform_win32=True,
@@ -331,14 +331,14 @@ class IslandVisualStackTests(unittest.TestCase):
             last_mask_update_at=9.9,
         )
 
-        self.assertEqual(deferred.action, "skip")
-        self.assertFalse(deferred.record_update_at)
-        self.assertEqual(pointer_busy.action, "skip")
-        self.assertFalse(pointer_busy.record_update_at)
-        self.assertEqual(interval_busy.action, "skip")
-        self.assertFalse(interval_busy.record_update_at)
+        self.assertEqual(deferred.action, "apply")
+        self.assertTrue(deferred.record_update_at)
+        self.assertEqual(pointer_busy.action, "apply")
+        self.assertTrue(pointer_busy.record_update_at)
+        self.assertEqual(interval_busy.action, "apply")
+        self.assertTrue(interval_busy.record_update_at)
 
-    def test_interaction_mask_plan_applies_united_finder_hover_and_visual_rects(self):
+    def test_interaction_mask_plan_excludes_unpainted_finder_hover_bounds(self):
         plan = interaction_mask_update_plan(
             [QRectF(100.0, 50.0, 20.0, 10.0)],
             platform_win32=True,
@@ -356,9 +356,9 @@ class IslandVisualStackTests(unittest.TestCase):
 
         self.assertEqual(plan.action, "apply")
         self.assertTrue(plan.record_update_at)
-        self.assertEqual(plan.mask_rect, QRectF(6.0, 8.0, 126.0, 62.0))
+        self.assertEqual(plan.mask_rect, QRectF(98.0, 48.0, 24.0, 14.0))
 
-    def test_interaction_mask_plan_skips_tiny_delta_but_records_update_gate(self):
+    def test_interaction_mask_plan_updates_even_tiny_frame_geometry_changes(self):
         plan = interaction_mask_update_plan(
             [QRectF(100.0, 50.0, 20.0, 10.0)],
             platform_win32=True,
@@ -374,7 +374,7 @@ class IslandVisualStackTests(unittest.TestCase):
             unit=1.0,
         )
 
-        self.assertEqual(plan.action, "skip")
+        self.assertEqual(plan.action, "apply")
         self.assertTrue(plan.record_update_at)
 
     def test_barrage_background_style_plan_skips_sampling_during_drag_or_recent_press(self):

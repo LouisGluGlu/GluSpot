@@ -397,59 +397,22 @@ def interaction_mask_update_plan(
         return InteractionMaskUpdatePlan()
     if not finder_mode and not scene_suppressed:
         return InteractionMaskUpdatePlan(action="clear") if interaction_mask_active else InteractionMaskUpdatePlan()
-    u = max(0.0, float(unit))
+    # rects describe the frame that will actually paint, not its animation
+    # targets. Pointer/resize throttles and union reservations cannot postpone
+    # either growth or shrinkage of a visible native region.
+    margin = max(1.0, 2.0 * float(unit))
     mask_rect = QRectF()
-    hover_rect = QRectF(finder_hover_rect)
-    if finder_mode and not hover_rect.isNull():
-        mask_rect = hover_rect
     for rect in rects:
-        grown = QRectF(rect).adjusted(-8.0 * u, -6.0 * u, 8.0 * u, 6.0 * u)
+        if rect.isEmpty():
+            continue
+        grown = QRectF(rect).adjusted(-margin, -margin, margin, margin)
         mask_rect = grown if mask_rect.isNull() else mask_rect.united(grown)
-    if finder_mode and not mask_rect.isNull():
-        mask_rect = mask_rect.adjusted(-4.0 * u, -2.0 * u, 4.0 * u, 4.0 * u)
-    if mask_rect.isNull() or mask_rect.width() <= 0 or mask_rect.height() <= 0:
-        return InteractionMaskUpdatePlan(action="clear", record_update_at=True) if interaction_mask_active else InteractionMaskUpdatePlan(record_update_at=True)
-
-    previous = QRectF(last_mask_rect)
-    if interaction_mask_active and not previous.isNull():
-        # A native region clips painting, including the cover and rounded rim.
-        # Grow before a QPainter is opened, even while pointer/resize gates are
-        # busy. Keep the old extent until the painted spring has settled.
-        if not previous.contains(mask_rect):
-            return InteractionMaskUpdatePlan(
-                action="apply", mask_rect=previous.united(mask_rect), record_update_at=True,
-            )
-        if defer_shrink:
-            return InteractionMaskUpdatePlan()
-
-    if float(now) < float(mask_deferred_until or 0.0):
+    if mask_rect.isEmpty():
+        # An empty QRegion clears a QWidget mask, exposing the whole window.
+        mask_rect = QRectF(-1.0, -1.0, 1.0, 1.0)
+    if interaction_mask_active and mask_rect == last_mask_rect:
         return InteractionMaskUpdatePlan()
-
-    pointer_quiet_seconds = 0.06 if finder_mode else 0.12
-    if float(now) - float(last_pointer_move_at or 0.0) < pointer_quiet_seconds:
-        return InteractionMaskUpdatePlan()
-
-    mask_interval = 0.24 if finder_mode else 0.18
-    if float(now) - float(last_mask_update_at or 0.0) < mask_interval:
-        return InteractionMaskUpdatePlan()
-
-    previous = QRectF(last_mask_rect)
-    if interaction_mask_active and not previous.isNull():
-        delta = max(
-            abs(previous.left() - mask_rect.left()),
-            abs(previous.top() - mask_rect.top()),
-            abs(previous.right() - mask_rect.right()),
-            abs(previous.bottom() - mask_rect.bottom()),
-        )
-        threshold = 6.0 if finder_mode else 1.5
-        if delta < threshold:
-            return InteractionMaskUpdatePlan(record_update_at=True)
-
-    return InteractionMaskUpdatePlan(
-        action="apply",
-        mask_rect=QRectF(mask_rect),
-        record_update_at=True,
-    )
+    return InteractionMaskUpdatePlan(action="apply", mask_rect=mask_rect, record_update_at=True)
 
 
 def barrage_background_style_plan(

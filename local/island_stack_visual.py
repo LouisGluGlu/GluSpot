@@ -12,6 +12,8 @@ Controls:
 from __future__ import annotations
 
 import math
+import os
+import json
 import random
 import re
 import sys
@@ -4508,10 +4510,10 @@ class IslandStackVisual(QWidget):
             self.taskbar_follow_last_at = 0.0
             self.taskbar_follow_last_key = ""
         if self.finder_mode:
-            self.clearMask()
-            self.interaction_mask_active = False
-            self.last_mask_rect = QRectF()
-            self.mask_deferred_until = time.monotonic() + (0.34 if expanded else 0.18)
+            # Keep a valid native region throughout the handoff. The next
+            # queued frame atomically publishes its own current spring pose.
+            self._queued_island_frame = None
+            self._reserve_interaction_mask_bounds()
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -11063,16 +11065,24 @@ class IslandStackVisual(QWidget):
             motion.vy = 0.0
 
     def _reserve_interaction_mask_bounds(self):
-        # Qt may restrict a dispatched paint region to the native mask it had
-        # when update() was queued. Reserve growth before queuing that paint;
-        # the paint path checks the same bounds again for unsolicited exposes.
+        # Prepare the actual next spring pose before update() is queued: Qt's
+        # native paint region can otherwise retain the previous, smaller mask.
+        # Paint consumes this same pose and lyric snapshot, never target bounds.
         if (sys.platform != "win32"
                 or not (getattr(self, "finder_mode", False) or getattr(self, "scene_suppressed", False))):
             return
-        visuals = self._build_visuals()
-        rects = [QRectF(v.rect) for v in visuals]
-        rects += [QRectF(m.rect) for m in self.motions.values() if m.opacity > .06]
-        self._update_interaction_mask(rects, defer_shrink=True)
+        old_at = getattr(self, "_island_lyric_frame_at", None)
+        old_phase = getattr(self, "_island_lyric_frame_phase", None)
+        now = time.monotonic()
+        self._island_lyric_frame_at = now
+        self._island_lyric_frame_phase = None
+        try:
+            frame = self._prepare_island_frame_geometry(now)
+            self._queued_island_frame = (now, self._island_lyric_frame_phase, frame)
+            self._update_interaction_mask(self._island_frame_mask_rects(frame))
+        finally:
+            self._island_lyric_frame_at = old_at
+            self._island_lyric_frame_phase = old_phase
 
     def _prepare_compact_width_transition(self, visuals, now):
         music = next((v for v in visuals if v.kind == IslandKind.MUSIC), None)
@@ -11123,19 +11133,14 @@ class IslandStackVisual(QWidget):
             self._island_lyric_frame_at = None
             self._island_lyric_frame_phase = None
 
-    def _paint_island_frame(self, event):
-        now = self._island_lyric_frame_at
+    def _prepare_island_frame_geometry(self, now):
         dt = (now - self.last_frame_at) * self._animation_speed_factor()
         self.last_frame_at = now
 
         visuals = self._build_visuals()
         transition_scale, transition_opacity, scene_hidden, transition_edge_progress = self._scene_transition_params(now)
         if scene_hidden:
-            self.group_frame_mask_path = None
-            self.clearMask()
-            self.interaction_mask_active = False
-            self.last_mask_rect = QRectF()
-            return
+            return visuals, (transition_scale, transition_opacity, scene_hidden, transition_edge_progress), dt, stack_frame_paint_plan([], {})
 
         targets = {visual.key for visual in visuals}
         self._prepare_compact_width_transition(visuals, now)
@@ -11199,26 +11204,61 @@ class IslandStackVisual(QWidget):
 
         paint_plan = stack_frame_paint_plan(visuals, self.motions, minimum_opacity=0.06)
         items = list(paint_plan.visible_items)
-        # Publish one frame's native bounds before constructing its painter.
-        # Targets reserve growth immediately; current springs keep shrinkage
-        # inside the previous region until all visible geometry has settled.
-        mask_rects = list(paint_plan.mask_rects) + [v.rect for v in visuals]
-        moving = any(
-            max(abs(a - b) for a, b in zip(
-                (m.rect.x(), m.rect.y(), m.rect.width(), m.rect.height()),
-                (v.rect.x(), v.rect.y(), v.rect.width(), v.rect.height()),
-            )) > .1
-            for v in visuals if (m := self.motions.get(v.key)) is not None
-        )
-        mask_rects += [self._hover_rect(m.rect, now) for v, m in items
-                       if v.key == self.hovered_key and now < self.hover_bounce_until]
         self._compact_shell_waiting = any(
             v.kind == IslandKind.MUSIC and not self.expanded
             and m.rect.width() < v.rect.width() - .5
             for v, m in items
         )
-        self._update_interaction_mask(mask_rects, defer_shrink=moving)
+        return visuals, (transition_scale, transition_opacity, scene_hidden, transition_edge_progress), dt, paint_plan
+
+    def _island_frame_mask_rects(self, frame):
+        visuals, (scale, opacity, hidden, edge_progress), dt, paint_plan = frame
+        if hidden:
+            return []
+        rects = []
+        anchor = self._scene_transition_anchor(visuals)
+        offset = self._scene_transition_offset(visuals, edge_progress)
+        now = self._island_lyric_frame_at
+        for visual, motion in paint_plan.visible_items:
+            rect = QRectF(motion.rect)
+            if visual.key == self.hovered_key and now < self.hover_bounce_until:
+                rect = self._hover_rect(rect, now)
+            if visual.z_index == 10 and self._top_notch_anchor_locked():
+                rect.moveTop(visual.rect.top())
+            if scale != 1.0 or opacity != 1.0:
+                rect = QRectF(anchor.x() + (rect.x() - anchor.x()) * scale + offset.x(),
+                              anchor.y() + (rect.y() - anchor.y()) * scale + offset.y(),
+                              rect.width() * scale, rect.height() * scale)
+            rects.append(rect)
+        return rects
+
+    def _paint_island_frame(self, event):
+        frame = getattr(self, "_queued_island_frame", None)
+        self._queued_island_frame = None
+        if frame is not None and any(
+                self.motions.get(visual.key) is not motion
+                for visual, motion in frame[2][3].visible_items):
+            # A drag/placement handoff may replace motions after preparation.
+            frame = None
+        if frame is None:
+            frame = self._prepare_island_frame_geometry(self._island_lyric_frame_at)
+        else:
+            self._island_lyric_frame_at, self._island_lyric_frame_phase, frame = frame
+        now = self._island_lyric_frame_at
+        visuals, (transition_scale, transition_opacity, scene_hidden, transition_edge_progress), dt, paint_plan = frame
+        items = list(paint_plan.visible_items)
+        mask_rects = self._island_frame_mask_rects(frame)
+        self._update_interaction_mask(mask_rects)
         painter = QPainter(self)
+        # Replace damaged backing-store pixels, including transparent gaps.
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        if scene_hidden:
+            self.group_frame_mask_path = None
+            painter.end()
+            self._log_mask_frame(mask_rects)
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         if getattr(self, "high_quality_font_rendering", False):
@@ -11272,6 +11312,11 @@ class IslandStackVisual(QWidget):
                 if context_plan.clip_edge_notch:
                     painter.setClipPath(self._edge_notch_path(rect, self._edge_notch_edge()))
                 if visual.kind == IslandKind.MUSIC:
+                    # Expanded controls have fixed insets while the shell is
+                    # still small; keep their ink inside this frame's shell.
+                    painter.setClipPath(self._music_reactive_overlay_clip_path(
+                        rect, self._music_shell_radius(rect, self.expanded), self.expanded,
+                        self._effective_music_ambience_style()), Qt.ClipOperation.IntersectClip)
                     self._paint_music(painter, rect, self.expanded)
                 elif (self._audio_device_pose() is not None and not visual.folded
                       and visual.kind in {IslandKind.EMPTY_TEXT, IslandKind.TIME, IslandKind.THIN_BAR}):
@@ -11293,6 +11338,20 @@ class IslandStackVisual(QWidget):
         if self.show_debug_overlay:
             self._paint_help(painter)
         painter.end()
+        self._log_mask_frame(mask_rects)
+
+    def _log_mask_frame(self, painted_rects):
+        if os.environ.get("GLUSPOT_MASK_DEBUG") != "1":
+            return
+        def coordinates(rect):
+            return [round(value, 3) for value in (rect.x(), rect.y(), rect.width(), rect.height())]
+        print("[GluSpot mask] " + json.dumps({
+            "time": self._island_lyric_frame_at, "expanded": self.expanded,
+            "window": coordinates(self.geometry()),
+            "mask": coordinates(getattr(self, "last_mask_rect", QRectF())),
+            "painted": [coordinates(rect) for rect in painted_rects],
+            "active": self.interaction_mask_active,
+        }), file=sys.stderr, flush=True)
 
     def _hover_rect(self, rect: QRectF, now: float) -> QRectF:
         if self.expanded or not self.hover_started_at:
@@ -11610,7 +11669,9 @@ class IslandStackVisual(QWidget):
         self._paint_taskbar_material_frame(painter, frame)
 
     def _paint_myfinder_group_frame(self, painter: QPainter, items: list[tuple[StackVisual, SpringRect]], dt: float):
-        if self._finder_bar_active() and not self.expanded:
+        if self._finder_bar_active():
+            # The live music pill owns its rounded ambience in both states.
+            # The legacy multi-item cradle leaves a gray halo around it.
             self.group_frame_motion = None
             self.group_frame_mode_key = ""
             self.group_frame_target_rect = QRectF()
