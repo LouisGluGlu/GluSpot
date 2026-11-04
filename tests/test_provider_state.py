@@ -2558,7 +2558,8 @@ class ProviderStateTests(unittest.TestCase):
                 read_limits.append(limit)
                 return self.content[:limit]
 
-        with patch("api.providers.threading.Thread", ManualThread), patch(
+        from tests.test_artwork_sources import ManualTimer
+        with patch("api.providers.threading.Thread", ManualThread), patch("api.providers.threading.Timer", ManualTimer), patch(
             "api.providers.urlopen", side_effect=[Response(complete_image), Response(oversize_image)]
         ):
             self.assertTrue(provider._schedule_queue_album_art_prefetch("https://example.test/large.png"))
@@ -3809,7 +3810,9 @@ class ProviderArtworkUpgradeRecoveryTests(unittest.TestCase):
 
         track = SimpleNamespace(album_art_url=self.upgraded_url, album_art_bytes=tiny)
         provider._queue_art_cache[self.upgraded_url] = tiny
-        with tempfile.TemporaryDirectory() as root, patch("api.providers.threading.Thread", ManualThread):
+        from tests.test_artwork_sources import ManualTimer
+        with tempfile.TemporaryDirectory() as root, patch("api.providers.threading.Thread", ManualThread), \
+                patch("api.providers.threading.Timer", ManualTimer):
             disk_path = Path(root) / "cover.img"
             disk_path.write_bytes(tiny)
             provider._queue_art_disk_path = lambda _url: disk_path
