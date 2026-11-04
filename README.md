@@ -74,6 +74,8 @@
 
 继续使用你习惯的播放器，由 GluSpot 跟随系统音频与播放信息，展示封面、歌词和播放状态。该模式依赖外部播放器的系统媒体支持，整体体验略逊于程序内播放。
 
+“播放与采集 → 播放来源”中的 **内外播放打断** 默认关闭。开启后，库内播放真正开始时会暂停已确认的外部音乐（包括网页音乐）；外部音乐出现可确认的更晚播放开始时，GluSpot 暂停库内播放并临时跟随该会话。临时切换不保存来源偏好或播放模式。视频、游戏和未识别音频当前不干预；开启时已在播放的会话只建立基线。识别、暂停能力与真实 Windows 验证限制见 [t260 规则和证据](docs/playback-interruption-t260.md)。
+
 <!-- GIF 05：播放来源。建议展示平台选择、登录及音乐库。 -->
 
 ## 私人漫游，也有私人 DJ
@@ -105,6 +107,8 @@
 This README is the canonical product, implementation, release-readiness, and pending-work document for the current branch.
 
 ## Current Status
+
+- 2026-11-04: t260 adds the default-OFF 内外播放打断 setting through the existing provider, capture, owned-player and settings paths. MUSIC classification gates both directions, including browser music; VIDEO/GAME/UNKNOWN stay inert. Automatic Pause uses observed start edges, guarded user intents and a temporary exact-session route without saving source settings or playback modes. NetEase fallback only reuses an already-ready CDP channel and a same-track Pause contract actually observed from the player and independently confirmed. [Rules, extension points and verification](docs/playback-interruption-t260.md). Real Windows SMTC/NetEase pausing 未验证; no version/build, push, main-branch or PC operation, plugin requirement or button/glass restyle.
 
 - 2026-11-04: t258/t259 synchronizes control color with the shared artwork/provider-color publication, including prefetched handoffs and same-track originals, and repairs live glass starvation after content-only paints. Current provider tones replace the previous artwork's pending palette; composite tint/refraction refresh only changed sampling regions under the existing 10 Hz budget and stop raster work when static. Button styles/grouping and t254/t256/t257 remain: all 168 island and 430 translation rasters match t257. The final Box isolated run covers 356 modules / 6,292 tests in 178.024 s with t250's identical 52 failure / 48 error / 32 skip identities, zero new identities and unchanged source hashes. [Root causes, timing, CPU and verification](docs/control-color-backdrop-t258.md); per-frame before/after strips and full evidence are `/workspace/gluspot/handoff/t258/compare.png`, `/workspace/gluspot/handoff/t258/backdrop-strip.png` and `/workspace/gluspot/handoff/t258/FINAL.md`. No push, main-branch or PC operation, version/build change or button/glass restyle. PC 未验证.
 
