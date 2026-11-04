@@ -10482,7 +10482,7 @@ class IslandStackVisual(QWidget):
                       if show_translation is None else bool(show_translation))
         preparation = getattr(self, "_lyric_presentation_store", None)
         if preparation is not None:
-            prepared = preparation.get(translated=translated) or preparation.previous_compatible()
+            prepared = preparation.get(translated=translated) or preparation.previous_compatible(translated=translated)
             placeholder = str(getattr(self, "no_lyrics_text", "暂无歌词")) if preparation.failed is not None else "加载歌词中"
             result = prepared.island_rows if prepared is not None else tuple(placeholder for _ in raw_rows)
             self._island_cleaned_lyrics_by_source = dict(zip(raw_rows, result))

@@ -16,6 +16,7 @@ from local.music_lyric_preparation import prepare_lyric_presentation, snapshot_l
 from local.music_lyric_preparation import _row_plans
 from local.music_lyric_preparation_store import LyricPresentationStore
 from local.music_surface_window import MusicSurfaceWindow
+from local.island_stack_visual import IslandStackVisual
 from tests.test_music_surface_transition import _TransitionOwner
 
 
@@ -206,6 +207,41 @@ class LyricPreparationTests(unittest.TestCase):
                 self.assertIs(window._display_lyrics(), first)
                 self.owner.media_track_id = "other-song"
                 self.assertEqual(window._display_lyrics(), (["加载歌词中"], []))
+        finally:
+            window.shutdown()
+
+    def test_surface_companions_do_not_leak_into_hidden_island_while_preparation_is_pending(self):
+        self.owner.enable_dual_line_lyrics = False
+        store = self.store()
+        self.owner._lyric_presentation_store = store
+        window = MusicSurfaceWindow(self.owner)
+        try:
+            # Song pages keep companions prepared for their visibility pose,
+            # independently of the island's selected companion state.
+            window._display_lyrics()
+            store.tasks.finish()
+            window._display_lyrics()
+            self.assertTrue(store.last_valid.source.translated)
+            pending_rows = IslandStackVisual._island_cleaned_lyric_rows(self.owner)
+            self.assertEqual(pending_rows, ("加载歌词中",) * len(self.owner.lyrics))
+            self.assertNotIn("继续闪耀", "\n".join(pending_rows))
+            store.tasks.finish()
+            hidden_rows = IslandStackVisual._island_cleaned_lyric_rows(self.owner)
+            self.assertIn("Shine on", hidden_rows)
+            self.assertNotIn("继续闪耀", "\n".join(hidden_rows))
+
+            # A settings/timing revision leaves the same indexed source.
+            # Reuse its cached hidden state while the newest job is pending.
+            self.owner._lyric_presentation_revision = 1
+            window._display_lyrics()
+            store.tasks.finish()
+            self.assertTrue(store.last_valid.source.translated)
+            self.assertIs(store.previous_compatible(), store.last_valid)
+            self.assertFalse(store.previous_compatible(translated=False).source.translated)
+            self.assertEqual(IslandStackVisual._island_cleaned_lyric_rows(self.owner), hidden_rows)
+            self.assertIsNotNone(store.active)
+            self.owner.timed_lyrics[1] = (8.0, "Different source text")
+            self.assertIsNone(store.previous_compatible(translated=False))
         finally:
             window.shutdown()
 

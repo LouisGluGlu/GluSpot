@@ -86,23 +86,34 @@ class LyricPresentationStore(QObject):
         self._start()
         return None
 
-    def previous_compatible(self):
+    def previous_compatible(self, *, translated=None):
         """Retain a valid island image during a settings/timing-only update.
 
         Island playback indexes belong to the owner's raw rows. Never reuse
         old indexed plans if text/timestamps/order changed, even on one song.
+        A surface can retain both companion states; island callers selecting
+        one state must not inherit the other while their worker is pending.
         """
-        result = self.last_valid
-        if result is None:
-            return None
-        source = result.source
         title = str(getattr(self.owner, "track_title", "") or "")
         artist = str(getattr(self.owner, "artist", "") or "")
         identity = str(getattr(self.owner, "media_track_id", "") or "") or f"{title}\x1f{artist}"
-        if ((source.identity, source.title, source.artist) == (identity, title, artist)
-                and source.timed == tuple(getattr(self.owner, "timed_lyrics", ()) or ())
-                and source.lines == tuple(getattr(self.owner, "lyrics", ()) or ())):
-            return result
+        timed = tuple(getattr(self.owner, "timed_lyrics", ()) or ())
+        lines = tuple(getattr(self.owner, "lyrics", ()) or ())
+        candidates = [self.last_valid]
+        if translated is not None:
+            # This cache is bounded to four entries. A previous matching
+            # selection can survive a source revision without reshaping or
+            # briefly showing a different companion state on the island.
+            candidates.extend(entry[0] for entry in reversed(self.cache.values()))
+        for result in candidates:
+            if result is None:
+                continue
+            source = result.source
+            if translated is not None and source.translated != bool(translated):
+                continue
+            if ((source.identity, source.title, source.artist) == (identity, title, artist)
+                    and source.timed == timed and source.lines == lines):
+                return result
         return None
 
     def _start(self):
