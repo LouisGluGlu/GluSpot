@@ -1,4 +1,4 @@
-"""The visible island artwork follows one shell-relative inset in every pose."""
+"""Equal artwork insets belong only to the collapsed shell (t254)."""
 import unittest
 from unittest.mock import patch
 
@@ -87,13 +87,11 @@ class IslandCoverInsetTests(unittest.TestCase):
         self.assertAlmostEqual(cover.width(), cover.height())
         return cover
 
-    def test_all_backgrounds_and_expanded_layouts_use_outer_shell_insets(self):
+    def test_all_backgrounds_use_outer_shell_insets_only_when_collapsed(self):
         for style in ("sea_level", "solid_album", "system"):
-            for expanded, layout, height in ((False, "standard", 48.), (False, "standard", 64.),
-                                               (True, "standard", 136.), (True, "dual_panel", 136.)):
-                with self.subTest(style=style, expanded=expanded, layout=layout, height=height):
-                    self.visual.music_expanded_layout_style = layout
-                    shell = self.paint(QRectF(13., 11., 520., height), expanded=expanded, style=style)
+            for height in (48., 64.):
+                with self.subTest(style=style, height=height):
+                    shell = self.paint(QRectF(13., 11., 520., height), style=style)
                     cover = self.assert_equal_insets(shell)
                     if height == 48.:
                         self.assertEqual(cover.size().width(), 32.)
@@ -103,13 +101,12 @@ class IslandCoverInsetTests(unittest.TestCase):
     def test_native_bars_and_radio_use_the_visible_capsule_insets(self):
         for style in ("sea_level", "solid_album", "system"):
             for mode in ("free", "finder", "tasker"):
-                for expanded in (False, True):
-                    for dj in (False, True):
-                        with self.subTest(style=style, mode=mode, expanded=expanded, dj=dj):
-                            height = 136. if expanded else 32. if mode != "free" else 84.
-                            shell = self.paint(QRectF(13., 11., 520., height), expanded=expanded,
-                                               style=style, mode=mode, dj=dj)
-                            self.assert_equal_insets(shell)
+                for dj in (False, True):
+                    with self.subTest(style=style, mode=mode, dj=dj):
+                        height = 32. if mode != "free" else 84.
+                        shell = self.paint(QRectF(13., 11., 520., height),
+                                           style=style, mode=mode, dj=dj)
+                        self.assert_equal_insets(shell)
 
     def test_transparent_finder_and_fade_keep_equal_insets(self):
         for face in ("transparent", "fade"):
@@ -121,12 +118,11 @@ class IslandCoverInsetTests(unittest.TestCase):
 
     def test_width_and_height_animation_frames_keep_equal_insets_at_both_dprs(self):
         for dpr in (1, 2):
-            for expanded in (False, True):
-                for width, height in ((520., 48.), (380.5, 56.25), (280., 72.),
-                                      (380.5, 100.25), (520., 136.)):
-                    with self.subTest(dpr=dpr, expanded=expanded, width=width, height=height):
-                        shell = self.paint(QRectF(13.25, 11.5, width, height), expanded=expanded, dpr=dpr)
-                        self.assert_equal_insets(shell)
+            for width, height in ((520., 48.), (380.5, 56.25), (280., 72.),
+                                  (380.5, 100.25), (520., 136.)):
+                with self.subTest(dpr=dpr, width=width, height=height):
+                    shell = self.paint(QRectF(13.25, 11.5, width, height), dpr=dpr)
+                    self.assert_equal_insets(shell)
 
     def test_resolved_no_lyrics_keeps_current_cover_in_the_shared_slot(self):
         self.visual.lyric_flow_style = "album_island"
@@ -136,40 +132,102 @@ class IslandCoverInsetTests(unittest.TestCase):
         next_art = self.visual.album_art.copy()
         next_art.fill(QColor("#ce2040"))
         self.visual.album_queue = [{"track_id": "next", "album_art": next_art}]
-        for expanded in (False, True):
-            for style in ("sea_level", "solid_album", "system"):
-                with self.subTest(expanded=expanded, style=style), \
-                        patch.object(self.visual, "_paint_album_island_slot",
-                                     wraps=self.visual._paint_album_island_slot) as slots:
-                    shell = self.paint(QRectF(13., 11., 520., 136. if expanded else 56.),
-                                       expanded=expanded, style=style)
-                    cover = self.assert_equal_insets(shell)
-                    side_slots = [call.args[1] for call in slots.call_args_list if not call.args[1]["center"]]
-                    expected = set() if style == "sea_level" and not expanded else {-1, 1}
-                    self.assertEqual({slot["side"] for slot in side_slots}, expected)
-                    for slot in side_slots:
-                        self.assertGreater(QRectF(slot["rect"]).left(), cover.right())
-                        self.assertTrue(shell.contains(QRectF(slot["rect"])))
-
-    def test_expanded_text_and_lyrics_reserve_the_full_cover(self):
-        for layout in ("standard", "dual_panel"):
-            self.visual.music_expanded_layout_style = layout
-            with self.subTest(layout=layout), patch.object(self.visual, "_paint_scrolling_text") as text, \
-                    patch.object(self.visual, "_paint_lyric_viewport") as lyrics:
-                shell = self.paint(QRectF(13., 11., 520., 136.), expanded=True)
+        for style in ("sea_level", "solid_album", "system"):
+            with self.subTest(style=style), \
+                    patch.object(self.visual, "_paint_album_island_slot",
+                                 wraps=self.visual._paint_album_island_slot) as slots:
+                shell = self.paint(QRectF(13., 11., 520., 56.), style=style)
                 cover = self.assert_equal_insets(shell)
-                for call in text.call_args_list + lyrics.call_args_list:
-                    self.assertGreaterEqual(call.args[1].left(), cover.right())
+                side_slots = [call.args[1] for call in slots.call_args_list if not call.args[1]["center"]]
+                expected = set() if style == "sea_level" else {-1, 1}
+                self.assertEqual({slot["side"] for slot in side_slots}, expected)
+                for slot in side_slots:
+                    self.assertGreater(QRectF(slot["rect"]).left(), cover.right())
+                    self.assertTrue(shell.contains(QRectF(slot["rect"])))
 
-    def test_expanded_dual_panel_still_paints_lyric_ink_beside_the_cover(self):
+    def test_expanded_standard_matches_b4601bd_geometry_in_every_background_and_mode(self):
+        visual = self.visual
+        u = visual._u
+        for style in ("sea_level", "solid_album", "system"):
+            for mode in ("free", "finder", "tasker"):
+                for dj in (False, True):
+                    for width, height in ((520., 136.), (380.5, 100.25)):
+                        rect = QRectF(13.25, 11.5, width, height)
+                        with self.subTest(style=style, mode=mode, dj=dj, rect=rect), \
+                                patch.object(visual, "_paint_scrolling_text") as text, \
+                                patch.object(visual, "_paint_lyric_viewport") as lyrics:
+                            self.paint(rect, expanded=True, style=style, mode=mode, dj=dj)
+                            cover = QRectF(rect.left() + u(16), rect.top() + u(14), u(58), u(58))
+                            self.assertEqual(visual.music_cover_rect, cover)
+                            info_left = cover.right() + u(15)
+                            info_width = rect.right() - cover.right() - u(132) - u(48)
+                            self.assertEqual(text.call_args_list[0].args[1],
+                                QRectF(info_left, cover.top() + u(2), info_width, u(34)))
+                            self.assertEqual(text.call_args_list[1].args[1],
+                                QRectF(info_left, cover.top() + u(37), info_width, u(24)))
+                            for index, command in enumerate(("music:previous", "music:toggle_play_pause", "music:next")):
+                                expected = QRectF(rect.right() - u(148) + index * u(45),
+                                    cover.center().y() - u(18), u(36), u(36))
+                                self.assertEqual(visual.music_button_rects[command], expected)
+                            if dj:
+                                lyrics.assert_not_called()
+                            else:
+                                self.assertEqual(lyrics.call_args.args[1],
+                                    QRectF(rect.left() + u(22), cover.bottom() + u(10),
+                                           rect.width() - u(44), rect.bottom() - cover.bottom() - u(28)))
+
+    def test_expanded_dual_panel_matches_b4601bd_cover_and_lyric_viewport(self):
+        visual = self.visual
+        u = visual._u
+        visual.music_expanded_layout_style = "dual_panel"
+        for style in ("sea_level", "solid_album", "system"):
+            for mode in ("free", "finder", "tasker"):
+                rect = QRectF(13., 11., 520., 136.)
+                lyric_panel, info_panel = visual._dual_panel_music_rects(rect)
+                cover_size = max(u(48), min(u(66), info_panel.height() - u(26)))
+                with self.subTest(style=style, mode=mode), \
+                        patch.object(visual, "_paint_lyric_viewport") as lyrics:
+                    self.paint(rect, expanded=True, style=style, mode=mode)
+                    self.assertEqual(visual.music_cover_rect,
+                        QRectF(info_panel.left() + u(22), info_panel.center().y() - cover_size / 2,
+                               cover_size, cover_size))
+                    self.assertEqual(lyrics.call_args.args[1],
+                        lyric_panel.adjusted(u(30), u(16), -u(30), -u(14)))
+
+    def test_expanded_album_stage_does_not_move_slots_to_the_compact_lane(self):
+        visual = self.visual
+        u = visual._u
+        visual.lyric_flow_style = "album_island"
+        visual.expanded = True
+        visual._album_island_transition_progress = lambda: 1.
+        previous_art, next_art = visual.album_art.copy(), visual.album_art.copy()
+        previous_art.fill(QColor("#c0ab30"))
+        next_art.fill(QColor("#ce2040"))
+        visual.album_history = [{"track_id": "prior", "album_art": previous_art}]
+        visual.album_queue = [{"track_id": "next", "album_art": next_art}]
+        rect = QRectF(13., 11., 520., 136.)
+        stage = QRectF(rect.left() + u(18), rect.top() + u(58), rect.width() - u(36), rect.height() - u(76))
+        for style in ("sea_level", "solid_album", "system"):
+            for mode in ("free", "finder", "tasker"):
+                expected = {int(slot["side"]): QRectF(slot["rect"])
+                            for slot in visual._album_island_slots(stage, reserve_text=True)}
+                with self.subTest(style=style, mode=mode), \
+                        patch.object(visual, "_paint_album_island_slot") as slots, \
+                        patch.object(visual, "_paint_scrolling_text") as text:
+                    self.paint(rect, expanded=True, style=style, mode=mode)
+                    actual = {int(call.args[1]["side"]): QRectF(call.args[1]["rect"])
+                              for call in slots.call_args_list}
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(text.call_args_list[0].args[1],
+                        QRectF(rect.left() + u(18), rect.top() + u(13), rect.width() - u(186), u(24)))
+
+    def test_expanded_dual_panel_still_paints_lyric_ink_in_the_baseline_panel(self):
         self.visual.music_expanded_layout_style = "dual_panel"
         rect = QRectF(13., 11., 520., 136.)
         self.paint(rect, expanded=True)
         with_lyrics = self.last_image.copy()
-        cover = QRectF(self.visual.music_cover_rect)
         lyric_panel, _info_panel = self.visual._dual_panel_music_rects(rect)
-        crop = QRectF(cover.right() + 1., lyric_panel.top(),
-                      lyric_panel.right() - cover.right() - 1., lyric_panel.height()).toAlignedRect()
+        crop = lyric_panel.toAlignedRect()
         with patch.object(self.visual, "_paint_lyric_viewport"):
             self.paint(rect, expanded=True)
         self.assertNotEqual(with_lyrics.copy(crop), self.last_image.copy(crop))

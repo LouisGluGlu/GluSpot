@@ -264,11 +264,10 @@ class IslandDjOutroTests(unittest.TestCase):
                 visual._paint_music_expanded(painter, shell)
                 poses.append(QRectF(cover.call_args.args[1]))
         self.assertTrue(all(a.width() >= b.width() for a, b in zip(poses, poses[1:])))
-        self.assertEqual(poses[-1], QRectF(8., 8., 224., 224.))
-        for pose in poses:
-            inset = pose.left() - shell.left()
-            self.assertAlmostEqual(pose.top() - shell.top(), inset)
-            self.assertAlmostEqual(shell.bottom() - pose.bottom(), inset)
+        u = visual._u
+        side = min(shell.height() * .90, u(100))
+        self.assertEqual(poses[0], QRectF(shell.left() + u(13), shell.center().y() - side / 2, side, side))
+        self.assertEqual(poses[-1], QRectF(shell.left() + u(16), shell.top() + u(14), u(58), u(58)))
         self.assertEqual(cover_opacity[0], 0.)
         self.assertAlmostEqual(cover_opacity[-1], 1.)
         self.assertTrue(all(a <= b for a, b in zip(cover_opacity, cover_opacity[1:])))
